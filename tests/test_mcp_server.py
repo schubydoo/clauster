@@ -288,6 +288,12 @@ class _FakeEngine:
     params the tool threaded through; ``result``/``raise_with`` shape the outcome.
     """
 
+    def bridge_id_candidates(self, identity: str) -> list[str]:
+        """Ambiguous-prefix candidates (#1099); empty unless a test sets ``candidates``."""
+        return list(self.candidates)
+
+    candidates: list[str] = []
+
     calls: dict = {}
     hydrated_before_op = None
     start_result = None
@@ -433,6 +439,30 @@ def test_stop_session_unknown_id_reports_not_stopped(server, fake_engine):
     fake_engine.stop_result = None
     body = _payload(_call(server, "stop_session", {"id": "ghost"}))
     assert body == {"stopped": False, "id": "ghost"}
+
+
+def test_stop_session_reports_an_ambiguous_prefix_instead_of_not_stopped(server, fake_engine):
+    # A tool description IS the contract an agent acts on. A bare {"stopped": false} for
+    # an ambiguous prefix reads as "already stopped", so the agent reports the bridge as
+    # down while it is still running and never retries with a longer id (#1099).
+    fake_engine.stop_result = None
+    fake_engine.candidates = ["f2c456fd-aaaa", "f2c456fd-bbbb"]
+    body = _payload(_call(server, "stop_session", {"id": "f2c456fd"}))
+    assert body == {
+        "stopped": False,
+        "id": "f2c456fd",
+        "ambiguous": ["f2c456fd-aaaa", "f2c456fd-bbbb"],
+    }
+    fake_engine.candidates = []
+
+
+def test_resume_session_reports_an_ambiguous_prefix(server, fake_engine):
+    fake_engine.resume_result = None
+    fake_engine.candidates = ["f2c456fd-aaaa", "f2c456fd-bbbb"]
+    body = _payload(_call(server, "resume_session", {"id": "f2c456fd"}))
+    assert body["resumed"] is False
+    assert body["ambiguous"] == ["f2c456fd-aaaa", "f2c456fd-bbbb"]
+    fake_engine.candidates = []
 
 
 def test_resume_session_reports_resumed(server, fake_engine):

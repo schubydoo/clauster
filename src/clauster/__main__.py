@@ -270,13 +270,13 @@ def main(argv: list[str] | None = None) -> int:
     sessions_p.add_argument("--json", action="store_true", help="emit JSON instead of a table")
     logs_p = sub.add_parser("logs", help="tail a bridge's redacted log")
     logs_p.add_argument("-c", "--config", help="path to clauster.yml")
-    logs_p.add_argument("instance", help="instance id (or a prefix / bridge identity)")
+    logs_p.add_argument("instance", help="instance id (or a unique prefix / bridge identity)")
     logs_p.add_argument(
         "-f", "--follow", action="store_true", help="stream new lines until Ctrl-C"
     )
     open_p = sub.add_parser("open", help="print a bridge's connect URL")
     open_p.add_argument("-c", "--config", help="path to clauster.yml")
-    open_p.add_argument("instance", help="instance id (or a prefix / bridge identity)")
+    open_p.add_argument("instance", help="instance id (or a unique prefix / bridge identity)")
     open_p.add_argument("--launch", action="store_true", help="also open the URL in a browser")
     start_p = sub.add_parser("start", help="start a bridge for a project (no server)")
     start_p.add_argument("-c", "--config", help="path to clauster.yml")
@@ -311,7 +311,7 @@ def main(argv: list[str] | None = None) -> int:
     start_p.add_argument("--json", action="store_true", help="emit JSON instead of a status line")
     stop_p = sub.add_parser("stop", help="stop a bridge by instance id / identity")
     stop_p.add_argument("-c", "--config", help="path to clauster.yml")
-    stop_p.add_argument("instance", help="instance id (or a prefix / bridge identity)")
+    stop_p.add_argument("instance", help="instance id (or a unique prefix / bridge identity)")
     stop_p.add_argument("--json", action="store_true", help="emit JSON instead of a status line")
 
     # Treat bare `clauster` / `clauster -c x` as `run` for backward compatibility.

@@ -383,13 +383,23 @@ _WRITE_TOOLS: list[dict[str, Any]] = [
         "name": "stop_session",
         "title": "Stop a Clauster bridge",
         "description": (
-            "Stop the bridge named by an id (a project name / id / prefix, as returned "
-            "by list_sessions). Returns stopped: false when no managed bridge matches."
+            "Stop the bridge named by an id (a project name, a full instance id, or a "
+            "UNIQUE prefix of one, as returned by list_sessions). Returns stopped: false "
+            "when no managed bridge matches. A prefix matching several bridges is "
+            "REFUSED, not guessed: the reply is stopped: false with an 'ambiguous' list "
+            "of the full ids — retry with a longer prefix rather than treating the "
+            "bridge as already stopped."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "id": {"type": "string", "description": "The bridge id to stop."},
+                "id": {
+                    "type": "string",
+                    "description": (
+                        "The bridge to stop: project name, full instance id, or a unique "
+                        "prefix of one."
+                    ),
+                },
             },
             "required": ["id"],
             "additionalProperties": False,
@@ -400,8 +410,10 @@ _WRITE_TOOLS: list[dict[str, Any]] = [
         "title": "Resume a Clauster bridge",
         "description": (
             "Resume a stopped/crashed bridge into its prior conversation, reusing its "
-            "stored spawn/permission/resume modes. id is a project name / id / prefix "
-            "(as returned by list_sessions). Returns resumed: false when none matches. "
+            "stored spawn/permission/resume modes. id is a project name, a full instance "
+            "id, or a UNIQUE prefix of one (as returned by list_sessions). Returns "
+            "resumed: false when none matches; a prefix matching several bridges is "
+            "REFUSED with an 'ambiguous' list of the full ids rather than guessing. "
             "Bridge channel only — hosted-session resume is not exposed here."
         ),
         "inputSchema": {
@@ -519,8 +531,13 @@ async def _tool_stop_session(config: ClausterConfig, args: dict[str, Any]) -> di
     with ClausterEngine(config) as engine:
         await engine.hydrate()
         inst = await engine.stop(wanted)
+        # An ambiguous id prefix resolves to nothing rather than guessing (#1099).
+        # Reported as `ambiguous`, matching `session_status`, because a bare
+        # `{"stopped": false}` reads to an agent as "already stopped" — it would report
+        # the bridge as down while it is still running, and never retry with a longer id.
+        ambiguous = engine.bridge_id_candidates(wanted) if inst is None else []
     if inst is None:
-        return {"stopped": False, "id": wanted}
+        return {"stopped": False, "id": wanted, **({"ambiguous": ambiguous} if ambiguous else {})}
     return {"stopped": True, "session": _summarize_instance(inst, kind="bridge")}
 
 
@@ -532,8 +549,9 @@ async def _tool_resume_session(config: ClausterConfig, args: dict[str, Any]) -> 
     with ClausterEngine(config) as engine:
         await engine.hydrate()
         inst = await engine.resume(wanted)
+        ambiguous = engine.bridge_id_candidates(wanted) if inst is None else []  # see stop (#1099)
     if inst is None:
-        return {"resumed": False, "id": wanted}
+        return {"resumed": False, "id": wanted, **({"ambiguous": ambiguous} if ambiguous else {})}
     return {"resumed": True, "session": _summarize_instance(inst, kind="bridge")}
 
 

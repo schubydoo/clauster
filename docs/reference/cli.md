@@ -213,6 +213,17 @@ clauster logs <instance> [-f]      # tail a bridge's redacted log (--follow to s
 clauster open <instance>           # print a bridge's connect URL (--launch opens a browser)
 ```
 
+`<instance>` accepts a full instance id, a **unique prefix** of one, or a project name.
+The prefix form is why `clauster status` truncates the INSTANCE column to 8 characters —
+what it prints is directly usable. A prefix matching **several** bridges is refused and
+the candidates are listed, rather than one being picked
+([#1099](https://github.com/schubydoo/clauster/issues/1099)):
+
+```console
+$ clauster stop f2c456fd
+clauster: ambiguous instance id 'f2c456fd' — matches f2c456fd-aaaa-…, f2c456fd-bbbb-…; use more characters
+```
+
 `logs` emits only **complete** lines. A line the bridge has half-flushed is held until
 its newline arrives, so redaction always sees the whole line — a secret split across two
 reads used to match no pattern in either half and print verbatim
@@ -240,8 +251,11 @@ fully serialized.)
 ```text
 clauster start <project> [--mode standard|pty] [--spawn-mode …] [--permission-mode …] \
                [--name NAME] [--sandbox default|on|off] [--trust] [--json]
-clauster stop  <instance> [--json]        # stop a bridge by id / prefix / identity
+clauster stop  <instance> [--json]        # stop a bridge by id / unique prefix / identity
 ```
+
+`<instance>` resolves the same way as for the read commands above — full id, unique
+prefix, or project name — and an ambiguous prefix is refused with the candidates listed.
 
 `--mode` picks the bridge mode with no hidden coercion (the two modes are not
 interchangeable); `--trust` accepts the workspace-trust dialog before starting

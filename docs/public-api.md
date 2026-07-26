@@ -41,6 +41,22 @@ changed.
 A request to a route not on this list (e.g. `GET /api/v1/widget`) 404s — the
 internal surface was never aliased, by design.
 
+### `{instance_id}` accepts a unique prefix
+
+Every `{instance_id}` path segment resolves a full instance id, a **unique prefix** of
+one, or a project name ([#1099](https://github.com/schubydoo/clauster/issues/1099)).
+
+A prefix matching **several** instances is refused with **409** rather than resolved to
+an arbitrary one — acting on the wrong live session is unrecoverable — and the `detail`
+names the candidates:
+
+```json
+{"detail": "ambiguous instance id 'f2c456fd' — matches f2c456fd-aaaa-…, f2c456fd-bbbb-…; use more characters"}
+```
+
+An id matching nothing is still **404**. Only input that previously 404'd can reach the
+409, since prefixes did not resolve before #1099.
+
 ## Authenticating
 
 Every `/api/v1` request needs the same credential any other `/api/*` route

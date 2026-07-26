@@ -108,11 +108,21 @@ class ClausterEngine(AbstractContextManager["ClausterEngine"]):
         return inspector.list_working_sessions(self._config.claude.binary)
 
     def resolve_instance(self, identity: str) -> RemoteControlInstance | None:
-        """Resolve an instance id / bridge identity to its instance, or ``None``."""
+        """Resolve an instance id / unique id prefix / bridge identity, or ``None``."""
         resolved = self._runner.resolve_bridge_id(identity)
         if resolved is None:
             return None
         return self._runner.get_instance(resolved)
+
+    def bridge_id_candidates(self, identity: str) -> list[str]:
+        """Return the instance_ids an AMBIGUOUS ``identity`` could mean, else empty (#1099).
+
+        Every resolve on this facade returns ``None`` for an ambiguous prefix as well as
+        for an unknown one — failing closed, because acting on the wrong live session is
+        unrecoverable. This is how a caller tells the two apart and reports the ids to
+        retry with instead of a bare "not found".
+        """
+        return self._runner.bridge_id_candidates(identity)
 
     # -- write: spawn / stop --------------------------------------------------
 
@@ -165,10 +175,14 @@ class ClausterEngine(AbstractContextManager["ClausterEngine"]):
     async def stop(self, identity: str) -> RemoteControlInstance | None:
         """Stop the bridge resolved from ``identity``; ``None`` when none matches.
 
-        Resolves an id / prefix / bridge identity the same way the ``DELETE`` route
-        does (:meth:`~clauster.runner.SessionRunner.resolve_bridge_id`), so a headless
-        stop targets exactly the instance the operator named. A headless caller must
-        :meth:`hydrate` first so the registry is populated for the resolve.
+        Resolves an id / unique id prefix / bridge identity the same way the ``DELETE``
+        route does (:meth:`~clauster.runner.SessionRunner.resolve_bridge_id`), so a
+        headless stop targets exactly the instance the operator named. A headless caller
+        must :meth:`hydrate` first so the registry is populated for the resolve.
+
+        ``None`` covers both "nothing matched" and "the prefix was ambiguous" — the
+        second never picks a bridge. Call :meth:`bridge_id_candidates` to tell them
+        apart and name the ids to retry with.
         """
         resolved = self._runner.resolve_bridge_id(identity)
         if resolved is None:
@@ -179,8 +193,9 @@ class ClausterEngine(AbstractContextManager["ClausterEngine"]):
         """Resume the stopped/crashed bridge resolved from ``identity``; ``None`` if none.
 
         The headless mirror of ``POST /api/instances/{id}/resume`` for the bridge
-        channel: resolves the id / prefix / bridge identity exactly like :meth:`stop`
-        (so a resume targets the instance the operator named), then re-spawns it into
+        channel: resolves the id / unique id prefix / bridge identity exactly like
+        :meth:`stop` — including returning ``None`` rather than guessing when a prefix
+        is ambiguous — then re-spawns it into
         its prior conversation via :meth:`~clauster.runner.SessionRunner.resume`, which
         reuses the instance's stored spawn/permission/resume modes. A headless caller
         must :meth:`hydrate` first so the registry is populated for the resolve.

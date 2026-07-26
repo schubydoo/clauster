@@ -3293,3 +3293,61 @@ async def test_poll_once_observing_does_not_write_the_redacted_mirror(runner_con
 
     await runner.poll_once()
     assert flushed == ["iid-a"], "the poll loop must still flush the mirror"
+
+
+# --------------------------------------------------------------------------- #
+# resolve_bridge_id: unique-prefix matching, fail-closed on ambiguity (#1099)
+# --------------------------------------------------------------------------- #
+def _runner_with_ids(runner_config, *ids: str) -> SessionRunner:
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    for iid in ids:
+        runner._instances[iid] = RemoteControlInstance(
+            instance_id=iid, project="alpha", label="alpha", status=InstanceStatus.RUNNING
+        )
+    return runner
+
+
+def test_resolve_bridge_id_accepts_a_unique_prefix(runner_config):
+    # The bug: `clauster status` prints instance_id[:8] and every action command then
+    # rejected it, while --help, both MCP tool descriptions and the CLI reference all
+    # advertised prefixes. The tool handed you an identifier it would not accept.
+    runner = _runner_with_ids(runner_config, "f2c456fd-1111-2222-3333-444444444444")
+    assert runner.resolve_bridge_id("f2c456fd") == "f2c456fd-1111-2222-3333-444444444444"
+    assert runner.resolve_bridge_id("f") == "f2c456fd-1111-2222-3333-444444444444"
+    assert runner.bridge_id_candidates("f2c456fd") == []
+
+
+def test_resolve_bridge_id_refuses_an_ambiguous_prefix(runner_config):
+    # Fail closed. Stopping a live session the operator did not mean to touch is
+    # unrecoverable, so a prefix naming several bridges must resolve to NOTHING —
+    # never to whichever the dict happened to yield first.
+    a, b = "f2c456fd-aaaa-0000-0000-000000000000", "f2c456fd-bbbb-0000-0000-000000000000"
+    runner = _runner_with_ids(runner_config, a, b)
+    assert runner.resolve_bridge_id("f2c456fd") is None
+    assert runner.bridge_id_candidates("f2c456fd") == sorted([a, b])
+
+
+def test_resolve_bridge_id_prefers_an_exact_id_over_a_longer_one(runner_config):
+    # An exact id must win outright, so adding a bridge whose id extends an existing
+    # one can never make an id the operator already had stop resolving.
+    short, long = "f2c456fd", "f2c456fd-extra-0000-0000-000000000000"
+    runner = _runner_with_ids(runner_config, short, long)
+    assert runner.resolve_bridge_id(short) == short
+    assert runner.bridge_id_candidates(short) == []
+
+
+def test_resolve_bridge_id_treats_the_empty_string_as_unknown_not_ambiguous(runner_config):
+    # "" prefixes every id. Without the guard it would read as ambiguous-across-all and
+    # report every bridge as a candidate, which is noise rather than an answer.
+    runner = _runner_with_ids(runner_config, "aaaa-1", "bbbb-2")
+    assert runner.resolve_bridge_id("") is None
+    assert runner.bridge_id_candidates("") == []
+
+
+def test_resolve_bridge_id_still_falls_back_to_the_project_name(runner_config):
+    # The #777/#778 compatibility path the dashboard still uses must be untouched: it
+    # runs only when no id prefix matched at all.
+    runner = _runner_with_ids(runner_config, "f2c456fd-1111-2222-3333-444444444444")
+    assert runner.resolve_bridge_id("alpha") == "f2c456fd-1111-2222-3333-444444444444"
+    assert runner.bridge_id_candidates("alpha") == []
