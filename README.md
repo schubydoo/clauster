@@ -36,7 +36,7 @@ a project, start a bridge, and attach to it from `claude.ai/code` or the mobile 
 > **Status: pre-1.0, in active development.** Loopback-only by default; password and
 > reverse-proxy auth are available for networked deployments (see
 > [Auth & networking](#auth--networking)). **No telemetry, ever** — see
-> [Privacy & data at rest](docs/privacy.md) for what Clauster keeps locally.
+> [Privacy & data at rest](https://schubydoo.github.io/clauster/privacy/) for what Clauster keeps locally.
 
 **Install now:** `curl -fsSL https://raw.githubusercontent.com/schubydoo/clauster/main/install.sh | bash`
 
@@ -123,7 +123,7 @@ Or pick another path — `uv tool install clauster` (recommended for a Python ho
 https://github.com/schubydoo/clauster && scoop install clauster`), or
 [Docker](#docker). Full recipes — including supply-chain verification — are in the
 [Installation guide](https://schubydoo.github.io/clauster/installation/). To hack
-on Clauster itself, see [CONTRIBUTING.md](CONTRIBUTING.md) for the from-source path.
+on Clauster itself, see [CONTRIBUTING.md](https://github.com/schubydoo/clauster/blob/main/CONTRIBUTING.md) for the from-source path.
 
 ### Uninstall
 
@@ -139,7 +139,7 @@ on Clauster itself, see [CONTRIBUTING.md](CONTRIBUTING.md) for the from-source p
   longer need it. Docker Compose users: run `docker compose down` from the directory
   containing `compose.yaml` (add `-v` to also delete named volumes).
 - Full purge: stop Clauster first, then remove your `state_dir` if you want local
-  state/config gone too. See [Privacy & data at rest](docs/privacy.md#how-to-purge)
+  state/config gone too. See [Privacy & data at rest](https://schubydoo.github.io/clauster/privacy/#how-to-purge)
   and the [Installation guide](https://schubydoo.github.io/clauster/installation/).
 
 ## First bridge in 60 seconds
@@ -150,7 +150,7 @@ of clicks — no terminal needed once it's started. Clauster *spawns* `claude` �
 inherits the host user's `claude` authentication, so `claude` must be logged in
 (interactive `claude` login **or** `ANTHROPIC_API_KEY` in the environment — either
 satisfies the check) before any bridge can connect. `clauster doctor` (step 2)
-confirms it; see the [Quickstart prerequisites](docs/quickstart.md) for the full
+confirms it; see the [Quickstart prerequisites](https://schubydoo.github.io/clauster/quickstart/) for the full
 list.
 
 1. **Point Clauster at your code.** Set `projects_root` in `clauster.yml` to a
@@ -224,7 +224,7 @@ docker run -d --name clauster \
 
 Prefer a browser to the `hash-password` + env-var recipe above? Start the container with an
 **empty `/config`** and **without** the `CLAUSTER_AUTH_*` vars — Clauster serves the first-run
-[setup wizard](docs/guides/configuration.md) instead. In a container the wizard binds all interfaces
+[setup wizard](https://schubydoo.github.io/clauster/guides/configuration/) instead. In a container the wizard binds all interfaces
 (so a published port can reach it) and is gated by a **one-time token** printed to the log:
 
 ```sh
@@ -272,7 +272,7 @@ origin and must set `auth.allowed_origins`.
 
 All settings live in `clauster.yml` —
 [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/clauster.yml.example) is a lean starter, and
-[`docs/reference/config.md`](docs/reference/config.md) is the exhaustive per-key reference. Any
+[`docs/reference/config.md`](https://schubydoo.github.io/clauster/reference/config/) is the exhaustive per-key reference. Any
 scalar or list key is overridable by an environment variable of the form
 `CLAUSTER_<UPPER_SNAKE_PATH>` (lists take a comma-separated value). The schema is
 additive-only — old configs always validate against newer versions.
@@ -313,7 +313,7 @@ clauster start <project> | stop <instance>    # headless spawn/stop through the 
 ```
 
 Full per-command reference:
-[docs/reference/cli.md](docs/reference/cli.md).
+[docs/reference/cli.md](https://schubydoo.github.io/clauster/reference/cli/).
 
 ## Roadmap
 
@@ -331,11 +331,11 @@ translation contributor appears).
 
 *Shipped:*
 
-- **Public API** — a documented, versioned [`/api/v1`](docs/public-api.md) surface with
+- **Public API** — a documented, versioned [`/api/v1`](https://schubydoo.github.io/clauster/public-api/) surface with
   named Bearer tokens (distinct from the session cookie), managed via
   `clauster api-token issue|list|rotate|revoke`; an opt-in OpenAPI schema
   (`api.openapi_enabled`) is available for third-party dashboards.
-- The in-repo [`docs/`](docs/index.md) pages (setup, networking, config reference,
+- The in-repo [`docs/`](https://schubydoo.github.io/clauster/) pages (setup, networking, config reference,
   security model) are published as a live docs site at
   [schubydoo.github.io/clauster](https://schubydoo.github.io/clauster/).
 
@@ -348,8 +348,8 @@ and CI-gated on Linux; macOS / Windows are in the test matrix. Apache-2.0 licens
 
 Questions, bugs, and feature requests all go through
 [GitHub Issues](https://github.com/schubydoo/clauster/issues) — Discussions are
-intentionally not enabled. See [`SUPPORT.md`](SUPPORT.md) for how to get help, and
-[`SECURITY.md`](SECURITY.md) to report a vulnerability privately.
+intentionally not enabled. See [`SUPPORT.md`](https://github.com/schubydoo/clauster/blob/main/SUPPORT.md) for how to get help, and
+[`SECURITY.md`](https://github.com/schubydoo/clauster/blob/main/SECURITY.md) to report a vulnerability privately.
 
 ## License
 
