@@ -159,7 +159,8 @@ list.
 2. **Sanity-check the host (optional).** `clauster doctor` confirms `claude` is found,
    new enough, and **logged in** (the bridge inherits this login), and that
    `projects_root` / the state dir are usable — fix any ✗ before spawning.
-3. **Open the dashboard** at <http://127.0.0.1:7621>. You'll see one card per project.
+3. **Open the dashboard** at <http://127.0.0.1:7621>. You'll see one card per project
+   to start — a project running several sessions later shows a card for each.
 4. **Launch a bridge.** On a project's card, click **Run Claude here ▾**, choose
    **In claude.ai / Desktop**, pick a permission mode, then **Run**. Clauster
    launches `claude remote-control` in that directory and the card flips to
