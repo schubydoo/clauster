@@ -725,6 +725,39 @@ def test_gather_sessions_empty_when_nothing_running(cfg):
     assert sessions == []
 
 
+def test_gather_sessions_reads_without_writing(cfg, monkeypatch):
+    # #1104. `list_sessions` is documented and gated as read-only, but it ran
+    # `rediscover()` (persist defaults True) + a full `poll_once`, so every session list
+    # rewrote the shared state.json and could fire a crash webhook + notification for a
+    # bridge the live service was already tracking.
+    from clauster.runner import SessionRunner
+
+    persisted: list[str] = []
+
+    async def _spy_persist(self, *a, **k):
+        persisted.append("persist")
+
+    monkeypatch.setattr(SessionRunner, "_persist", _spy_persist)
+
+    polls: list[bool] = []
+    real_poll = SessionRunner.poll_once
+
+    async def _spy_poll(self, *, side_effects: bool = True):
+        polls.append(side_effects)
+        await real_poll(self, side_effects=side_effects)
+
+    monkeypatch.setattr(SessionRunner, "poll_once", _spy_poll)
+
+    asyncio.run(mcp_server.gather_sessions(cfg))
+
+    assert persisted == [], "a read-only tool rewrote the shared state store"
+    # Deliberately NOT "poll_once is never called". `tracked_sessions_by_instance` reads
+    # the `agents --json` cross-check that only poll_once computes, so dropping the call
+    # — the obvious reading of the fix — would silently report every bridge as having
+    # zero sessions. It must still run, and run observation-only.
+    assert polls == [False], "poll_once must still run, and must run with side_effects=False"
+
+
 def test_spawn_then_stop_over_real_engine(cfg, server, monkeypatch):
     """End-to-end wiring: spawn_session really starts a bridge (fake claude), then
     stop_session ends it — proving the tools drive the actual ClausterEngine, not

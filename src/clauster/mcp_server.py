@@ -131,14 +131,18 @@ _MAX_LINE_BYTES = 8 * 1024 * 1024
 async def gather_sessions(config: ClausterConfig) -> list[dict[str, Any]]:
     """Collect every observable session into a flat list of plain dicts.
 
-    Reuses the dashboard's read path verbatim: a :class:`SessionRunner` is built
-    and reconciled once (``rediscover`` + ``poll_once``, the same liveness +
-    ``agents --json`` cross-check the poll loop runs), then its managed bridges,
+    Reuses the dashboard's read path: a :class:`SessionRunner` is built and reconciled
+    once — ``rediscover(persist=False)`` + ``poll_once(side_effects=False)``, the same
+    liveness + ``agents --json`` cross-check the poll loop runs, minus its writes and
+    lifecycle events (#1104) — then its managed bridges,
     tracked/external working sessions, the supervisor's background jobs, and the
     persisted hosted-session records are each mapped into a uniform summary. No
     session-listing logic is duplicated here — only assembled.
 
-    Read-only: nothing is spawned, stopped, or mutated. Hosted sessions are read
+    Read-only, and enforced rather than asserted: no bridge is spawned or stopped, the
+    shared ``state.json`` is not written, and no lifecycle event, webhook, or
+    notification fires. Instance status IS reconciled in memory, so a bridge that died
+    is reported as crashed — observed, not announced. Hosted sessions are read
     from the runner's persistence container (the same DB-backed store the app
     uses; no live daemon connection is opened by this short-lived process), so
     they appear with their last-known status.
@@ -154,10 +158,19 @@ async def gather_sessions(config: ClausterConfig) -> list[dict[str, Any]]:
 
     runner = SessionRunner(config)
     # Reconcile persisted bridges into live instances and refresh liveness +
-    # the agents --json cross-check exactly as the FastAPI poll loop does, so a
-    # one-shot process reports the same picture the dashboard would.
-    await runner.rediscover()
-    await runner.poll_once()
+    # the agents --json cross-check, so a one-shot process reports the same picture
+    # the dashboard would — but WITHOUT the poll loop's writes. This is a read tool,
+    # and it commonly runs against a host where the live service owns that state
+    # (#1104): `persist=True` would rewrite the shared `state.json` on every session
+    # list, and the crash arm would fire a duplicate webhook + notification for a
+    # bridge the service is already tracking.
+    #
+    # `poll_once` is still called rather than dropped: `tracked_sessions_by_instance`
+    # below reads the cross-check it computes, so skipping it would silently report
+    # every bridge with zero sessions. `side_effects=False` keeps the observation and
+    # drops the announcements.
+    await runner.rediscover(persist=False)
+    await runner.poll_once(side_effects=False)
 
     tracked = runner.tracked_sessions_by_instance()
     for inst in runner.list_instances():

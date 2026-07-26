@@ -3816,10 +3816,22 @@ class SessionRunner:
                 adoptable.add(name)
         return adoptable
 
-    async def poll_once(self) -> None:
+    async def poll_once(self, *, side_effects: bool = True) -> None:
         """Reconcile bridge liveness and cross-check `claude agents --json`.
 
         Off-loop work, applied on-loop.
+
+        ``side_effects=False`` makes this observation-only: it still reconciles every
+        instance's status in memory (a reader must be able to SEE a crashed bridge) and
+        still computes the session cross-check, but emits no lifecycle event and writes
+        no file. Reserved for read paths that need the cross-check
+        :meth:`tracked_sessions_by_instance` depends on — the headless MCP server (#1104)
+        — where the alternative was either mutating the live deployment on every session
+        list or reporting no sessions at all. Pair it with ``rediscover(persist=False)``;
+        on its own it still leaves the shared ``state.json`` written.
+
+        The default stays ``True`` so the server's own poll loop is unaffected and a new
+        caller cannot silently lose crash detection by forgetting the flag.
         """
         # Take over anything another process started before reconciling (#1091). Without
         # this the registry stays frozen at whatever `rediscover` found at startup, so a
@@ -3857,9 +3869,15 @@ class SessionRunner:
             prev_status = instance.status
             self._reconcile_status(instance, alive)
             if (
-                prev_status is not InstanceStatus.CRASHED
+                side_effects
+                and prev_status is not InstanceStatus.CRASHED
                 and instance.status is InstanceStatus.CRASHED
             ):
+                # `_reconcile_status` above already marked the instance CRASHED, so an
+                # observation-only caller still REPORTS the crash — it just doesn't
+                # announce it. A one-shot reader has no standing to tell the operator a
+                # bridge died: the live service owns that, and both firing would
+                # double-notify for one death (#1104).
                 self._crash_counts[instance.project] = (
                     self._crash_counts.get(instance.project, 0) + 1
                 )
@@ -3868,9 +3886,12 @@ class SessionRunner:
                 self._emit_lifecycle("crash", instance)
             if alive:
                 live_projects.add(instance.project)
-                # Keep the public bridge log redacted-current as the bridge writes.
-                # No-op unless on-disk redaction split the raw/public paths.
-                await asyncio.to_thread(self._flush_redacted_mirror, instance)
+                if side_effects:
+                    # Keep the public bridge log redacted-current as the bridge writes.
+                    # No-op unless on-disk redaction split the raw/public paths.
+                    # Skipped when observing: the live service flushes this on its own
+                    # loop, and a read must not write into the instance's log set.
+                    await asyncio.to_thread(self._flush_redacted_mirror, instance)
 
         try:
             sessions = await asyncio.to_thread(inspector.list_working_sessions, self._binary)
