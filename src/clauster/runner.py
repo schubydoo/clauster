@@ -2394,9 +2394,24 @@ class SessionRunner:
         #
         # The create-time pair is what makes this "the same discipline as
         # `procutil.kill_if_match`" true rather than merely claimed: that helper gates on
-        # live + cmdline + an exact create-time match, and a cmdline check alone passes for
-        # any keeper at all. Both values come from `proc_create_time`, so an exact compare
-        # is right here (no cross-derivation rounding, unlike the pointer's `procStart`).
+        # live + cmdline + a create-time match, and a cmdline check alone passes for any
+        # keeper at all.
+        #
+        # Exact `!=`, and deliberately NOT the tolerance its siblings use. Both values come
+        # from `proc_create_time`, but that is psutil's `starttime/CLK_TCK + boot_time()`,
+        # and `boot_time()` re-reads `/proc/stat` btime on every call (verified uncached in
+        # psutil 7.2.2). btime tracks the live realtime-vs-uptime offset, so an NTP step
+        # between the two samples — ~2s apart, across the grace loop — shifts it by about a
+        # second and this reads as a mismatch. That is the direction we want: the outcome
+        # is a keeper that is spared and leaks (the orphan-keeper sweep still reaps it),
+        # not a `force_kill_tree` aimed at an unrelated process. Widening to absorb the
+        # step is what would be unsafe here — `_EXACT_PROC_START_TOLERANCE` (0.05s) is far
+        # too tight to absorb it anyway, and `_KEEPER_START_TOLERANCE` (2.0s) is wide
+        # enough to admit a pid recycled during this very grace loop.
+        #
+        # psutil exposes a clock-step-immune `create_time(monotonic=True)` only on the
+        # private Linux implementation, not on `psutil.Process`, so there is no supported
+        # way to compare boot-relative values here today.
         if not procutil.is_keeper_process(pid) or procutil.proc_create_time(pid) != expected_start:
             _log.warning("keeper pid %s is no longer that keeper — not force-killing", pid)
             return
