@@ -220,15 +220,40 @@ class ClausterEngine(AbstractContextManager["ClausterEngine"]):
 
     @staticmethod
     def read_log_lines(path: Path, offset: int) -> tuple[int, list[str]]:
-        """Read new log lines past ``offset``, redacted; return ``(new_offset, lines)``.
+        """Read new COMPLETE log lines past ``offset``, redacted; return ``(new_offset, lines)``.
 
         Redaction is owned here (via :func:`~clauster.redact.sanitize_line`) so no
         caller re-implements it — the same guarantee the WebSocket log stream gives.
+
+        A trailing *unterminated* line is withheld and the offset rewound past it, so it
+        is emitted once its newline arrives. ``sanitize_line`` matches whole tokens, so a
+        secret flushed across two reads matched neither half and printed verbatim: a
+        follower showed ``token=ghp_ABC``, then the remainder on the next poll,
+        reassembling the secret on the operator's terminal from a stream documented as
+        redacted (#1105).
+
+        This is the same hold-and-rewind :func:`~clauster.logstream.read_new` already
+        applies to a trailing incomplete UTF-8 *character*, and the same reason
+        :func:`~clauster.logstream.initial_offset` starts on a line boundary — a
+        fragment splits a secret from its redaction context. Those covered the first
+        line and the character level; this covers the last line.
         """
         new_offset, text = logstream.read_new(path, offset)
         if not text:
             return new_offset, []
-        lines = [sanitize_line(line) for line in text.splitlines()]
+        complete, newline, partial = text.rpartition("\n")
+        # Rewind by the withheld bytes (not characters — the offset is a byte offset).
+        # Computed off `new_offset` rather than the caller's `offset` so a rotation reset
+        # inside `read_new` is preserved.
+        new_offset -= len(partial.encode("utf-8"))
+        if not newline:
+            return new_offset, []  # nothing terminated yet; consume nothing
+        # `.split("\n")` matches the WebSocket route, whose carry this mirrors: line
+        # completeness can only be judged on "\n", so `str.splitlines()`'s extra
+        # boundaries (\r, \v, \f,  ) would emit as "complete" a line this offset
+        # arithmetic still counts as withheld. The lone \r of a CRLF log is stripped
+        # per line so the visible output is unchanged.
+        lines = [sanitize_line(line.rstrip("\r")) for line in complete.split("\n")]
         return new_offset, lines
 
     # -- lifecycle ------------------------------------------------------------
