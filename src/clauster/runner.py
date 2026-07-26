@@ -2886,17 +2886,29 @@ class SessionRunner:
 
     # ----- background poll (source #2 + liveness reconcile) ---------------
 
-    def _persisted_for_project(self, project_name: str) -> tuple[str, dict] | None:
+    def _persisted_for_project(
+        self, project_name: str, *, unclaimed_only: bool = False
+    ) -> tuple[str, dict] | None:
         """Return ``(instance_id, fields)`` for the first persisted record for ``project_name``.
 
         Since issue 777 ``_persisted`` is keyed by ``instance_id``; the project name lives
         in the ``"project_name"`` field of each value dict.  Returns ``None`` when no match.
         Used by :meth:`_stopped_from_persisted` and :meth:`_reattach_pty_from_sidecar` to
         look up a persisted record by project without assuming a project-keyed dict.
+
+        ``unclaimed_only`` skips records already materialized in ``self._instances``. The
+        pointer walk needs that: it resolves by PROJECT and adopts the id it finds, but
+        since #1088 the row pass may already have inserted cards for several of that
+        project's rows. First-match would then hand the walk an id that is somebody else's
+        card, and the live bridge's fields would be written over a different session's
+        record — losing it, because the next ``_persist`` rewrites that row too.
         """
         for iid, fields in self._persisted.items():
-            if fields.get("project_name") == project_name:
-                return iid, fields
+            if fields.get("project_name") != project_name:
+                continue
+            if unclaimed_only and iid in self._instances:
+                continue
+            return iid, fields
         return None
 
     def _saved_modes(self, saved: dict) -> tuple[SpawnMode, PermissionMode, ResumeMode]:
@@ -3485,7 +3497,11 @@ class SessionRunner:
                 # sidecar so a live keeper is re-managed (Stop/observe restored)
                 # rather than leaking behind a STOPPED card; fall through to the
                 # STOPPED resurrection when no live keeper remains.
-                persisted_hit = self._persisted_for_project(proj.name)
+                # `unclaimed_only`: the row pass may already hold cards for several of this
+                # project's rows, and this leg ADOPTS the id it is handed. Taking a claimed
+                # one would write the live keeper's fields over another session's record
+                # (#1088 SF-4). None here means "all taken" -> mint a fresh id.
+                persisted_hit = self._persisted_for_project(proj.name, unclaimed_only=True)
                 persisted_saved = persisted_hit[1] if persisted_hit is not None else {}
                 persisted_iid = persisted_hit[0] if persisted_hit is not None else None
                 reattached = await asyncio.to_thread(
@@ -3506,7 +3522,10 @@ class SessionRunner:
                 continue
             # Overlay the few fields the pointer-walk can't recover; a bridge
             # found alive is by definition NOT intentionally stopped.
-            persisted_hit = self._persisted_for_project(proj.name)
+            # `unclaimed_only` for the same reason as the pty leg above: this attaches the
+            # LIVE bridge under the id it is handed, so a claimed one would overwrite a
+            # different session's record irrecoverably (#1088 SF-4).
+            persisted_hit = self._persisted_for_project(proj.name, unclaimed_only=True)
             saved = persisted_hit[1] if persisted_hit is not None else {}
             persisted_iid = persisted_hit[0] if persisted_hit is not None else None
             spawn_mode, permission_mode, resume_mode = self._saved_modes(saved)

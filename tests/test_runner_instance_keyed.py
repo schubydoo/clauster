@@ -138,12 +138,58 @@ async def test_stopped_row_does_not_hide_a_live_external_bridge(runner_config, m
     await runner.rediscover(persist=False)
 
     assert consulted, "pointer walk skipped: the STOPPED card suppressed external discovery"
-    alpha = [i for i in runner.list_instances() if i.project == "alpha"]
-    assert len(alpha) == 1, f"the walk must reuse the row's id, not add a card: {alpha}"
-    assert alpha[0].instance_id == "iid-dead"
-    assert alpha[0].status is InstanceStatus.RUNNING
-    assert alpha[0].bridge_pid == 9001
-    assert alpha[0].environment_id == "env_EXTERNAL"
+    alpha = {i.instance_id: i for i in runner.list_instances() if i.project == "alpha"}
+    # The live external bridge is materialized — the whole point of MF-1.
+    running = [i for i in alpha.values() if i.status is InstanceStatus.RUNNING]
+    assert len(running) == 1, f"the external bridge was not discovered: {list(alpha)}"
+    assert running[0].bridge_pid == 9001
+    assert running[0].environment_id == "env_EXTERNAL"
+    # ...under an id of its OWN. An earlier revision had the walk adopt the dead row's id;
+    # that is unsafe once a project has several rows (SF-4), because nothing proves the
+    # external bridge is that row's session resumed rather than an unrelated one, and
+    # guessing wrong overwrites a resumable record irrecoverably. Keeping them apart costs
+    # a second card in the ambiguous case and loses nothing.
+    assert running[0].instance_id != "iid-dead"
+    assert alpha["iid-dead"].status is InstanceStatus.STOPPED, "the dead row lost its card"
+
+
+async def test_walk_does_not_consume_another_cards_instance_id(runner_config, monkeypatch):
+    # SF-4. TWO dead rows on one project plus a live externally-started bridge. The row
+    # pass inserts a STOPPED card for each; the walk then resolves by PROJECT and adopts
+    # the id it is handed. First-match handed it session-A's id, so the live bridge's
+    # fields were written over session-A's record — and the next _persist rewrote that row
+    # too, losing a resumable session. The walk must take an UNCLAIMED id instead.
+    runner = _make_runner(runner_config)
+    _stub_connect(monkeypatch)
+    runner.persistence.state_store().save(
+        {
+            "iid-a": _row("alpha", pid=5001, resume_mode="standard", label="session-A"),
+            "iid-b": _row("alpha", pid=5002, resume_mode="standard", label="session-B"),
+        }
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+
+    class _ExternalPtr:
+        pid = 9001
+        proc_start = "1000"
+        environment_id = "env_EXTERNAL"
+        session_id = "session_EXTERNAL"
+
+    monkeypatch.setattr("clauster.runner.pointers.pointer_for_project", lambda p: _ExternalPtr())
+    monkeypatch.setattr("clauster.runner.pointers.is_live", lambda ptr: True)
+
+    await runner.rediscover(persist=False)
+
+    by_id = {i.instance_id: i for i in runner.list_instances() if i.project == "alpha"}
+    # Both persisted sessions survive as their own STOPPED cards...
+    assert by_id["iid-a"].status is InstanceStatus.STOPPED, "session-A was overwritten"
+    assert by_id["iid-a"].label == "session-A"
+    assert by_id["iid-b"].status is InstanceStatus.STOPPED
+    # ...and the live external bridge is materialized under an id of its own.
+    running = [i for i in by_id.values() if i.status is InstanceStatus.RUNNING]
+    assert len(running) == 1, f"expected one RUNNING external bridge, got {running}"
+    assert running[0].instance_id not in ("iid-a", "iid-b")
+    assert running[0].bridge_pid == 9001
 
 
 async def test_stopped_row_does_not_hide_a_live_detached_keeper(runner_config, monkeypatch):
