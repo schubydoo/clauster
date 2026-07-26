@@ -182,6 +182,7 @@ component_management:
         - src/clauster/db/migrations/versions/0004_api_tokens.py # #302 — named public-API bearer tokens
         - src/clauster/db/migrations/versions/0003_instance_id.py # #789 — instance-identity column
         - src/clauster/db/migrations/versions/0005_hosted_instance_id.py # hosted-session instance id
+        - src/clauster/db/migrations/versions/0006_instance_liveness_pids.py # #1088 — per-instance pids
     - component_id: config_write
       name: config-write (settings.json / .mcp.json)
       # The config_write feature cluster (#687 / #690 / #732 / #738) — capability-gated

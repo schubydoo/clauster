@@ -110,6 +110,20 @@ class Instance(Base, TimestampMixin):
     spawn_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
     permission_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
     resume_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Liveness identity (#1088/#1091). Before these, "which instances are live and what are
+    # their pids" existed ONLY in the creating process's memory, so a fresh process could not
+    # tell a live row from a dead one — and the pointer-walk that stood in for it could only
+    # ever resolve ONE instance per project. Mirrors the HostedSession.agent_pid /
+    # agent_proc_start pair below.
+    #
+    # ``bridge_proc_start`` is not optional decoration: a bare pid is reusable, so every
+    # liveness check pairs the two (``procutil.is_live_bridge``). Persisting the pid without
+    # the start time would let a recycled pid resurrect an unrelated process as a live bridge.
+    # All nullable — a row written by an older build simply has none, and the reattach path
+    # falls back to the pointer/sidecar lookup rather than declaring the bridge dead.
+    bridge_pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    bridge_proc_start: Mapped[float | None] = mapped_column(Float, nullable=True)
+    keeper_pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     project: Mapped[Project] = relationship(back_populates="instances")
 
