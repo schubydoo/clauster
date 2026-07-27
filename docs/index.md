@@ -38,7 +38,8 @@ Interactive Session mode, this *recaps* the prior conversation rather than truly
 
 ### Projects & bridges
 
-- One card per child directory of your `projects_root`.
+- One card per child directory of your `projects_root`, plus a card for each
+  additional bridge or session a project is running or has stopped.
 - **Run Claude here** (launch) / Stop / Resume a bridge from the card. For a
   deliberate fresh start, **Forget** a stopped session (drops it from Recent),
   then relaunch.

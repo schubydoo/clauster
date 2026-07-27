@@ -100,13 +100,14 @@ Everything Clauster persists sits under `state_dir` (default `~/.clauster`):
 | `claustrum/` | The claustrum daemon's socket and auth token. |
 | `backups/` | Automatic pre-migration snapshots of `clauster.db`. |
 
-For bridges, live facts — PIDs, environment ids, session URLs,
-running/stopped status — are deliberately *not* persisted: Clauster re-derives
-them from the processes and from `claude agents --json` every time it starts.
-(Direct Session records are the exception: they persist the agent's PID and
-process start time in `clauster.db`, which is how Clauster reattaches to a
-still-running daemon session after a restart.) The full inventory is in
-[Privacy & data at rest](../privacy.md#at-rest-inventory).
+For bridges, environment ids, session URLs and running/stopped status are
+deliberately *not* persisted: Clauster re-derives them from the processes and
+from `claude agents --json` every time it starts. A bridge record *does* keep the
+`(pid, process-start-time)` pair its process last ran under — kept even after the
+bridge stops, because that pair is what lets a fresh process tell one project's
+records apart on restart. Direct Session records keep the same pair for the
+agent, which is how Clauster reattaches to a still-running daemon session. The
+full inventory is in [Privacy & data at rest](../privacy.md#at-rest-inventory).
 
 ## What survives a restart
 

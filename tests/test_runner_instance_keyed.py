@@ -11,6 +11,7 @@ showed a single, often stale, row to ``clauster status`` / ``clauster mcp`` — 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 
 import pytest
@@ -428,11 +429,393 @@ async def test_persist_round_trips_the_liveness_triple(runner_config, monkeypatc
     assert saved["bridge_proc_start"] == 222.5
 
 
-async def test_stopped_rows_do_not_leak_pids_into_the_store(runner_config, monkeypatch):
-    # A STOPPED card writes its pids back as absent, so the next process cannot mistake a
-    # recycled pid for this bridge coming back to life.
+async def test_stopped_rows_survive_repeated_cold_starts(runner_config, monkeypatch):
+    # THE #1115 regression test, and the reason it escaped #1088: one cold start always
+    # looked right. The fold needed TWO. Cold start #1 materialized every row correctly and
+    # then persisted each dead card's None back over the row's pids; cold start #2 read
+    # those rows as pid-less (i.e. pre-#1088), sent them to the project-keyed pointer walk,
+    # and rebuilt exactly ONE. A one-way ratchet — on the dogfood host it left 8 of 17 rows
+    # visible, one per project, each the EARLIEST of its project's rows.
+    rows = {f"iid-{n}": _row("alpha", pid=4000 + n, intentional_stop=True) for n in range(5)}
+    _make_runner(runner_config).persistence.state_store().save(rows)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda *a, **k: False)
+
+    # Three fresh processes in a row: each must see all five, not just the first.
+    for cold_start in range(3):
+        runner = _make_runner(runner_config)
+        await runner.rediscover(persist=True)
+        got = {i.instance_id for i in runner.list_instances() if i.project == "alpha"}
+        assert got == set(rows), f"cold start {cold_start + 1} folded to {sorted(got)}"
+        assert all(
+            i.status is InstanceStatus.STOPPED
+            for i in runner.list_instances()
+            if i.project == "alpha"
+        )
+
+
+async def test_pid_less_rows_left_by_the_old_ratchet_are_recovered(runner_config, monkeypatch):
+    # The dogfood shape for #1115, measured on the live DB: 17 rows, 16 of them already
+    # pid-less because the pre-fix ratchet had erased the pair, across 8 projects -> 8 cards,
+    # one per project. Preserving the pair only stops FUTURE damage; nothing can backfill a
+    # dead process's create-time, so these rows only come back if the reattach cards a
+    # pid-less row per ROW instead of leaving them to the project-keyed walk.
+    rows = {f"iid-{n}": _row("alpha", pid=None, intentional_stop=True) for n in range(6)}
+    _make_runner(runner_config).persistence.state_store().save(rows)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda *a, **k: False)
+
     runner = _make_runner(runner_config)
-    runner.persistence.state_store().save({"iid-a": _row("alpha", pid=8001)})
+    await runner.rediscover(persist=True)
+
+    got = {i.instance_id for i in runner.list_instances() if i.project == "alpha"}
+    assert got == set(rows), f"expected all six damaged rows, got {sorted(got)}"
+    # Each is resumable under its OWN id — that is what makes `clauster stop/resume <id>` work.
+    for iid in rows:
+        assert runner.resolve_bridge_id(iid) == iid
+
+
+def _write_sidecar(runner, name: str, stamp: str, **fields) -> None:
+    log_dir = runner._log_dir
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / f"{name}-{stamp}.keeper.json").write_text(json.dumps(fields))
+
+
+async def test_has_unclaimed_live_keeper_detects_only_a_live_unheld_keeper(
+    runner_config, monkeypatch
+):
+    # Drives the real sweep the pid-less pass gates on. Each sidecar below is rejected for a
+    # different reason, so a regression in any one arm shows up as a wrong verdict.
+    runner = _make_runner(runner_config)
+    _write_sidecar(runner, "alpha", "1700000000001", state="starting", keeper_pid=1, bridge_pid=2)
+    _write_sidecar(runner, "alpha", "1700000000002", state="ready", keeper_pid=True, bridge_pid=2)
+    _write_sidecar(runner, "alpha", "1700000000003", state="ready", keeper_pid=3)  # no bridge pid
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda *a, **k: True)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+
+    # A non-dict sidecar is valid JSON but has no `.get` — it must be skipped, not raise
+    # out of the sweep and take down startup.
+    (runner._log_dir / "alpha-1700000000009.keeper.json").write_text("[]")
+
+    assert runner._has_unclaimed_live_keeper("alpha", set()) is False, "no usable sidecar yet"
+
+    # A ready sidecar naming a live keeper + live bridge is the one shape that counts.
+    _write_sidecar(
+        runner,
+        "alpha",
+        "1700000000004",
+        state="ready",
+        keeper_pid=9999,
+        bridge_pid=4242,
+        bridge_proc_start=12345.0,
+    )
+    assert runner._has_unclaimed_live_keeper("alpha", set()) is True
+
+    # ...unless a LIVE tracked instance already holds that keeper — then it is accounted
+    # for. Held pids come from live instances only: `stop()` leaves keeper_pid on a dead
+    # card, and honouring that would let a stale pid mark a live keeper "claimed".
+    assert runner._has_unclaimed_live_keeper("alpha", {9999}) is False
+
+    # A dead bridge behind a live keeper does not count either.
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    assert runner._has_unclaimed_live_keeper("alpha", set()) is False
+
+
+async def test_pid_less_standard_row_is_not_carded_while_the_pointer_bridge_lives(
+    runner_config, monkeypatch
+):
+    # The standard-mode half of the same trap, and the subtler one: `_reattach_rows_with_pids`
+    # claims a project when ANY row proves live — before it reads that row's mode — so one
+    # live PTY row makes the walk skip the project entirely, and a pid-less STANDARD row
+    # there still owns the pointer bridge nobody looked for. Carding it STOPPED offers a
+    # Resume that overwrites the live bridge's pointer and orphans it.
+    rows = {
+        "iid-live-pty": _row("alpha", pid=5001),  # live pty row -> project is `row_claimed`
+        "iid-pidless-std": _row("alpha", pid=None, resume_mode="standard"),
+    }
+    _make_runner(runner_config).persistence.state_store().save(rows)
+    _stub_connect(monkeypatch)
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None, **k: pid == 5001
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda *a, **k: True)
+
+    class _Ptr:
+        pid, proc_start, environment_id, session_id = 7777, "1000", "env_x", "session_x"
+
+    monkeypatch.setattr(
+        "clauster.pointers.pointer_for_project",
+        lambda path: _Ptr() if path.name == "alpha" else None,
+    )
+    monkeypatch.setattr("clauster.pointers.is_live", lambda ptr: True)
+
+    runner = _make_runner(runner_config)
+    await runner.rediscover(persist=False)
+
+    assert runner.get_instance("iid-live-pty") is not None
+    assert runner.get_instance("iid-pidless-std") is None, (
+        "a pid-less standard row must stay uncarded while its pointer bridge is live"
+    )
+
+    # With the pointer bridge gone, the same row cards normally.
+    monkeypatch.setattr("clauster.pointers.is_live", lambda ptr: False)
+    runner2 = _make_runner(runner_config)
+    await runner2.rediscover(persist=False)
+    assert runner2.get_instance("iid-pidless-std") is not None
+
+
+async def test_pid_less_pty_row_is_not_carded_while_a_live_keeper_is_unclaimed(
+    runner_config, monkeypatch
+):
+    # The trap the pid-less pass must not fall into. `rediscover`'s pointer walk SKIPS a
+    # project that already has a live row, before it ever reads the pointer or the keeper
+    # sidecar — so on that project nothing has looked for a pid-less row's process. A pty
+    # row whose detached keeper is still alive must NOT get a resumable STOPPED card: the
+    # Resume would spawn a SECOND keeper on the same `--continue` conversation.
+    rows = {
+        "iid-live": _row("alpha", pid=5001),  # keeps the project in `row_claimed`
+        "iid-pidless": _row("alpha", pid=None),
+    }
+    _make_runner(runner_config).persistence.state_store().save(rows)
+    _stub_connect(monkeypatch)
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None, **k: pid == 5001
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda *a, **k: True)
+
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr(SessionRunner, "_has_unclaimed_live_keeper", lambda self, name, held: True)
+    await runner.rediscover(persist=False)
+
+    assert runner.get_instance("iid-live") is not None
+    assert runner.get_instance("iid-pidless") is None, (
+        "a pid-less pty row must stay uncarded while a live keeper is unaccounted for"
+    )
+
+    # With the keeper gone, the same row cards normally.
+    runner2 = _make_runner(runner_config)
+    monkeypatch.setattr(
+        SessionRunner, "_has_unclaimed_live_keeper", lambda self, name, held: False
+    )
+    await runner2.rediscover(persist=False)
+    assert runner2.get_instance("iid-pidless") is not None
+
+
+async def test_pid_less_pass_leaves_a_pid_bearing_row_to_the_row_pass(runner_config, monkeypatch):
+    # The pid-less pass must never card a row that HAS a pair — that row's verdict belongs to
+    # `_reattach_rows_with_pids`, which judges it on liveness. Reachable when the row pass
+    # skipped its insert across one of its own awaits (its `iid in _instances` re-check), or
+    # when a concurrent refresh introduced the row mid-`rediscover`.
+    rows = {"iid-paired": _row("alpha", pid=6001)}
+    _make_runner(runner_config).persistence.state_store().save(rows)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda *a, **k: False)
+
+    # Neuter BOTH earlier card sources, so the pid-less pass is the only thing that could
+    # card this row — otherwise the walk's `_stopped_from_persisted` fallback cards it and
+    # the assertion proves nothing about the pass under test.
+    async def _no_rows(self, *a, **k):
+        return set(), set()
+
+    monkeypatch.setattr(SessionRunner, "_reattach_rows_with_pids", _no_rows)
+    monkeypatch.setattr(SessionRunner, "_stopped_from_persisted", lambda self, name: None)
+
+    runner = _make_runner(runner_config)
+    await runner.rediscover(persist=False)
+
+    assert runner.get_instance("iid-paired") is None, (
+        "a row carrying a pid must be left to the row pass, not carded here"
+    )
+
+
+async def test_mode_less_legacy_row_is_swept_by_both_mechanisms_on_a_pty_host(
+    runner_config, monkeypatch
+):
+    # `_saved_modes` coerces a row with NO recorded resume_mode to the host's configured
+    # `claude.launch_mode` — a fact about the deployment, not the row. Routing the liveness
+    # sweep on that guess meant a pre-#1088 row on a `launch_mode: pty` host coerced to
+    # "pty", never had its pointer read, and got carded STOPPED while its STANDARD bridge
+    # was live (such a row predates pty, so it can only have been standard). The default
+    # fixture host is `standard`, where the coercion happens to land on the right check —
+    # which is exactly why this needs a pty-configured host to show up.
+    config, claude_json = runner_config
+    monkeypatch.setattr(config.claude, "launch_mode", "pty")
+    rows = {
+        "iid-live-pty": _row("alpha", pid=5001),  # live row -> project is `row_claimed`
+        "iid-legacy": {"project_name": "alpha", "label": "alpha"},  # no resume_mode at all
+    }
+    _make_runner(runner_config).persistence.state_store().save(rows)
+    _stub_connect(monkeypatch)
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None, **k: pid == 5001
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda *a, **k: True)
+
+    class _Ptr:
+        pid, proc_start, environment_id, session_id = 7777, "1000", "env_x", "session_x"
+
+    monkeypatch.setattr(
+        "clauster.pointers.pointer_for_project",
+        lambda path: _Ptr() if path.name == "alpha" else None,
+    )
+    monkeypatch.setattr("clauster.pointers.is_live", lambda ptr: True)
+
+    runner = _make_runner(runner_config)
+    await runner.rediscover(persist=False)
+
+    assert runner.get_instance("iid-legacy") is None, (
+        "a mode-less row must be swept by the pointer check too, not just the keeper one"
+    )
+
+
+async def test_a_mode_with_no_sweep_blocks_rather_than_going_unswept(runner_config):
+    # Fail-CLOSED for an unknown resume_mode. The allowlist dispatch sweeps "pty" via keeper
+    # sidecars and "standard" via the pointer; a third mode matches neither, and without an
+    # explicit raise it would get NO sweep yet still be carded — `_sweep_modes` puts it in
+    # `pending`, so the `unswept` guard clears, and nothing puts it in `blocked`. That is the
+    # duplicate-Resume hazard this pass exists to prevent, so it must block instead.
+    runner = _make_runner(runner_config)
+    config, _ = runner_config
+
+    blocked = runner._modes_with_an_unclaimed_live_bridge(
+        {"alpha": (frozenset({"quantum"}), config.projects_root / "alpha")}, set(), set()
+    )
+
+    assert ("alpha", "quantum") in blocked, "a mode with no sweep must block, not pass"
+
+
+async def test_a_sidecar_with_a_nonpositive_pid_is_skipped_not_fatal(runner_config, monkeypatch):
+    # `psutil.Process(-1)` raises ValueError, which `is_keeper_process`'s except-tuple does
+    # NOT catch — and a sidecar is an on-disk file that can hold one. Skipping it must be
+    # local to that sidecar: a live keeper named by a LATER sidecar still has to be found.
+    runner = _make_runner(runner_config)
+    _write_sidecar(runner, "alpha", "1700000000001", state="ready", keeper_pid=-1, bridge_pid=-2)
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda *a, **k: True)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+
+    assert runner._has_unclaimed_live_keeper("alpha", set()) is False
+
+    _write_sidecar(
+        runner,
+        "alpha",
+        "1700000000002",
+        state="ready",
+        keeper_pid=9999,
+        bridge_pid=4242,
+        bridge_proc_start=12345.0,
+    )
+    assert runner._has_unclaimed_live_keeper("alpha", set()) is True, (
+        "a bad sidecar must not mask a good one"
+    )
+
+
+async def test_a_sweep_that_raises_blocks_that_project_instead_of_killing_startup(
+    runner_config, monkeypatch
+):
+    # The sweep runs inside a to_thread on `rediscover`, which the web app awaits during
+    # lifespan STARTUP with no handler of its own — so an escaping exception takes the whole
+    # service down rather than losing one project's sweep. It must degrade to BLOCKED, which
+    # also keeps the fail-closed posture (rows hidden, not carded unswept).
+    rows = {"iid-a": _row("alpha", pid=None), "iid-b": _row("alpha", pid=None)}
+    _make_runner(runner_config).persistence.state_store().save(rows)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda *a, **k: False)
+
+    def _boom(self, name, held):
+        raise RuntimeError("psutil blew up")
+
+    monkeypatch.setattr(SessionRunner, "_has_unclaimed_live_keeper", _boom)
+
+    runner = _make_runner(runner_config)
+    await runner.rediscover(persist=False)  # must not raise
+
+    # The walk still cards one row per project; the pid-less pass blocks the rest.
+    carded = [i for i in runner.list_instances() if i.project == "alpha"]
+    assert len(carded) == 1, f"a failed sweep must block, not card: {carded}"
+
+
+async def test_row_arriving_during_the_sweep_is_deferred_not_carded(runner_config, monkeypatch):
+    # The fail-closed arm. A row that appears while the sweep is awaiting was never swept,
+    # so carding it would bypass the liveness gate entirely. It must be deferred to the next
+    # start. Mode-exact on purpose: a project swept only for "pty" never had its pointer
+    # read, so a standard row arriving late must not pass on the project's name alone.
+    # TWO pid-less pty rows on purpose: the project-keyed walk cards exactly one of them, so
+    # the other reaches the pid-less pass and `pending` is non-empty. With a single row the
+    # walk cards it, `pending` is empty, and the `if pending else set()` short-circuit means
+    # the sweep never runs at all — the test would pass without exercising anything.
+    rows = {"iid-pty-a": _row("alpha", pid=None), "iid-pty-b": _row("alpha", pid=None)}
+    _make_runner(runner_config).persistence.state_store().save(rows)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda *a, **k: False)
+
+    runner = _make_runner(runner_config)
+
+    def _inject(self, pending, held_keepers, held_pids):
+        # Land a standard row for the SAME project mid-sweep: `alpha` is in `pending`, but
+        # only for "pty", so its pointer was never consulted.
+        self._persisted = {
+            **self._persisted,
+            "iid-late-std": {
+                "project_name": "alpha",
+                "label": "alpha",
+                "resume_mode": "standard",
+            },
+        }
+        return set()
+
+    monkeypatch.setattr(SessionRunner, "_modes_with_an_unclaimed_live_bridge", _inject)
+    await runner.rediscover(persist=False)
+
+    assert runner.get_instance("iid-pty-a") is not None, "the swept rows still card"
+    assert runner.get_instance("iid-pty-b") is not None
+    assert runner.get_instance("iid-late-std") is None, (
+        "a row whose mode was never swept must be deferred, not carded"
+    )
+
+
+async def test_stopped_rows_keep_their_pair_but_are_never_read_as_live(runner_config, monkeypatch):
+    # #1115. A dead card carries no pids, but its ROW must keep the (pid, proc_start) PAIR:
+    # that pair is what marks the row instance-keyed. Writing the card's None back made the
+    # row look pre-#1088 on the NEXT cold start, so it fell to the project-keyed pointer
+    # walk — one card per project — and every stopped session but the earliest vanished.
+    # Safety is unchanged because liveness is judged on the PAIR: the recycled pid this
+    # once guarded against is rejected by the start-time compare, asserted below.
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save({"iid-a": _row("alpha", pid=8001, proc_start=222.5)})
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    await runner.rediscover(persist=True)
+
+    saved = runner.persistence.state_store().load()["iid-a"]
+    assert saved.get("bridge_pid") == 8001
+    assert saved.get("bridge_proc_start") == 222.5
+    # The CARD still carries none, so nothing in-process can act on a stale pid.
+    card = runner.get_instance("iid-a")
+    assert card is not None
+    assert card.bridge_pid is None and card.bridge_proc_start is None
+    # And the pair is only ever consulted through the real start-time compare: pid 8001
+    # reused by an unrelated bridge has a different create_time, so it stays dead.
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge",
+        lambda pid, start=None, **k: pid == 8001 and start == 222.5,
+    )
+    monkeypatch.setattr("clauster.procutil.is_live_process", lambda *a, **k: False)
+    recycled = _make_runner(runner_config)
+    recycled.persistence.state_store().save(
+        {"iid-a": {**saved, "bridge_proc_start": 999.9}}  # same pid, new process generation
+    )
+    await recycled.rediscover(persist=False)
+    reread = recycled.get_instance("iid-a")
+    assert reread is not None
+    assert reread.status is InstanceStatus.STOPPED, "a recycled pid must not resurrect the row"
+
+
+async def test_stopped_row_without_a_proc_start_still_drops_its_pid(runner_config, monkeypatch):
+    # The other half of #1115's trade. A bare pid has no start-time to compare, so
+    # `is_live_bridge` degrades to "alive + bridge cmdline" and a reused pid running any
+    # bridge would read as this one. That row cannot be made reuse-proof, so it is still
+    # cleared — it keeps folding, which is the safe direction.
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save({"iid-a": _row("alpha", pid=8001, proc_start=None)})
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
     await runner.rediscover(persist=True)
 
@@ -517,7 +900,7 @@ async def test_prune_does_not_wipe_unrelated_stopped_siblings(runner_config, mon
         runner._instances[iid] = runner._stopped_from_row(
             iid, {"project_name": "alpha", "label": label, "resume_mode": "pty"}
         )
-    monkeypatch.setattr("clauster.runner.procutil.is_bridge_process", lambda pid: True)
+    monkeypatch.setattr("clauster.runner.procutil.bridge_ancestor", lambda pid, **k: 990001)
     monkeypatch.setattr(
         "clauster.inspector.list_working_sessions",
         lambda *a, **k: [_external_session(config.projects_root / "alpha")],
@@ -539,7 +922,7 @@ async def test_prune_still_removes_a_lone_phantom(runner_config, monkeypatch):
     runner._instances["iid-a"] = runner._stopped_from_row(
         "iid-a", {"project_name": "alpha", "label": "alpha", "resume_mode": "pty"}
     )
-    monkeypatch.setattr("clauster.runner.procutil.is_bridge_process", lambda pid: True)
+    monkeypatch.setattr("clauster.runner.procutil.bridge_ancestor", lambda pid, **k: 990001)
     monkeypatch.setattr(
         "clauster.inspector.list_working_sessions",
         lambda *a, **k: [_external_session(config.projects_root / "alpha")],
@@ -573,7 +956,7 @@ async def test_prune_removes_a_phantom_even_when_a_sibling_is_live(runner_config
     # The external session's pid is NOT a descendant of the live bridge, so reconcile
     # correctly classes it EXTERNAL rather than folding it into the live instance.
     monkeypatch.setattr("clauster.runner.procutil.owned_pids", lambda roots: set(roots))
-    monkeypatch.setattr("clauster.runner.procutil.is_bridge_process", lambda pid: True)
+    monkeypatch.setattr("clauster.runner.procutil.bridge_ancestor", lambda pid, **k: 990001)
     monkeypatch.setattr(
         "clauster.inspector.list_working_sessions",
         lambda *a, **k: [_external_session(config.projects_root / "alpha", pid=999)],
@@ -825,7 +1208,7 @@ async def test_prune_ignores_a_hand_run_claude_that_is_not_a_bridge(runner_confi
     runner._instances["iid-a"] = runner._stopped_from_row(
         "iid-a", {"project_name": "alpha", "label": "alpha", "resume_mode": "pty"}
     )
-    monkeypatch.setattr("clauster.runner.procutil.is_bridge_process", lambda pid: False)
+    monkeypatch.setattr("clauster.runner.procutil.bridge_ancestor", lambda pid, **k: None)
     monkeypatch.setattr(
         "clauster.inspector.list_working_sessions",
         lambda *a, **k: [_external_session(config.projects_root / "alpha")],
