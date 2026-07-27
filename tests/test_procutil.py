@@ -192,9 +192,11 @@ def test_force_kill_tree_wait_timeout_confirms_death():
             psutil.STATUS_DEAD,
         ), "wait_timeout must not return while the target is still running"
     finally:
+        # NB on POSIX psutil's wait() already reaped this child, so Popen.poll() reports 0
+        # (not -SIGKILL) and this guard never fires — it is a Windows/edge-case net only.
         if proc.poll() is None:
             proc.kill()
-        proc.wait(timeout=5)
+            proc.wait(timeout=5)
 
 
 def test_force_kill_tree_wait_survivor_is_logged_not_raised(monkeypatch, caplog):

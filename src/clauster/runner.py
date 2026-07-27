@@ -248,6 +248,14 @@ _READY_POLL_INTERVAL = 0.25
 # cold start skips it. And bound how long we wait for the poisoned idle bridge to stop.
 _POISON_GRACE = 4.0
 _POISON_STOP_TIMEOUT = 5.0
+
+# How long to wait for a force-killed process TREE to actually die. Distinct from
+# `_POISON_STOP_TIMEOUT` on purpose: that one is a GRACEFUL-stop grace period (how long
+# to let a bridge shut itself down), whereas this bounds a post-SIGKILL/TerminateProcess
+# death, which is sub-100ms unless the target is stuck in an uninterruptible kernel wait
+# — and 5s would not save that either. Kept separate so retuning the grace period can't
+# silently retune the reap.
+_TREE_REAP_WAIT = 2.0
 # #867 L4: nothing else prunes bridge-pointer.json, so a project accumulates a pointer that
 # outlives its (server-reaped) environment. At startup, clear clauster's OWN pointers that
 # are both non-live AND older than this — a live or recently-stopped-resumable session is
@@ -2684,7 +2692,7 @@ class SessionRunner:
                 if procutil.is_windows():
                     try:
                         await asyncio.to_thread(
-                            procutil.force_kill_tree, proc.pid, wait_timeout=_POISON_STOP_TIMEOUT
+                            procutil.force_kill_tree, proc.pid, wait_timeout=_TREE_REAP_WAIT
                         )
                     except Exception as exc:  # noqa: BLE001 — must not skip kill/clear_pointer
                         _log.debug("tree kill of poisoned bridge %s failed: %s", proc.pid, exc)

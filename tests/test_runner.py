@@ -471,7 +471,9 @@ async def test_heal_reaps_the_whole_bridge_tree_on_windows(runner_config, monkey
     await runner._heal_poisoned_reattach(inst, proc, config.projects_root / "alpha", "deleted")
     assert killed == [4242], "the bridge's tree must be reaped on Windows"
     assert killed_before_kill == [False], "the reap must run BEFORE kill(), not after"
-    assert waited == [0.05], (  # the _POISON_STOP_TIMEOUT patched at the top of this test
+    from clauster import runner as runner_mod
+
+    assert waited == [runner_mod._TREE_REAP_WAIT], (
         "the reap must WAIT for death: clear_pointer below is gated on the descendant "
         "actually being gone, and kill() is asynchronous"
     )

@@ -443,6 +443,17 @@ def force_kill_tree(pid: int, *, wait_timeout: float | None = None) -> None:
     an await there would let the subprocess transport tear down before its ``kill()``),
     and must not gain a wait. Callers that can afford to block (a thread, or
     ``asyncio.to_thread``) pass a timeout; everyone else keeps fire-and-forget.
+
+    ⚠️ **Never pass ``wait_timeout`` for a pid you hold a ``Popen`` / asyncio subprocess
+    transport for.** On POSIX ``psutil.Process.wait()`` goes through ``os.waitpid``, so it
+    REAPS a process that is our own child — and ``subprocess.Popen._try_wait`` then
+    swallows the ``ChildProcessError`` and records ``returncode = 0``. A bridge we just
+    SIGKILLed would be observed as a **clean exit 0** instead of ``-SIGKILL``, i.e.
+    STOPPED instead of CRASHED (with an asyncio transport the child watcher logs "Unknown
+    child process" and reports 255 instead). The current caller is safe because it reaps
+    a *descendant* tree on Windows; ``runner._await_exit``'s force-kill fallback and
+    ``pty_keeper``'s post-kill poll are the two places that look like they want this
+    parameter and must NOT get it.
     """
     try:
         proc = psutil.Process(pid)
@@ -457,10 +468,13 @@ def force_kill_tree(pid: int, *, wait_timeout: float | None = None) -> None:
             pass
     if wait_timeout is None:
         return
-    # Bounded and best-effort: `wait_procs` returns (gone, alive) rather than raising,
-    # and a survivor (an unkillable/AccessDenied process) simply means the caller's
-    # liveness re-check may still see it — the same position it was in before. Never
-    # let a psutil failure here undo the kills we already delivered.
+    # Bounded and best-effort. The guard is LOAD-BEARING, not belt-and-braces: `wait_procs`
+    # returns (gone, alive) for a plain timeout, but its per-process `proc.wait()` is
+    # `@wrap_exceptions`-decorated on Windows, so an OSError from the cext surfaces as
+    # `AccessDenied`/`NoSuchProcess` and propagates out. One protected process would then
+    # abort the wait for every remaining target — degrading to the old fire-and-forget
+    # behaviour, which is exactly what the caller had before, so swallowing is right.
+    # Never let a psutil failure here undo the kills we already delivered.
     try:
         _, alive = psutil.wait_procs(targets, timeout=wait_timeout)
     except Exception as exc:  # noqa: BLE001 — the kills already landed; the wait is a bonus
