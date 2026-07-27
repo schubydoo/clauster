@@ -51,7 +51,7 @@ import contextvars
 import hashlib
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, Literal
 
@@ -99,7 +99,65 @@ _SECRET_KEY_RE = re.compile(
     r"auth(?!ors?\b)|credential|bearer)",
     re.IGNORECASE,
 )
-_INTERP_RE = re.compile(r"\$\{[^}]+\}")
+
+
+def _interp_spans(value: str) -> Iterator[tuple[int, int]]:
+    r"""Yield the ``(start, end)`` of each ``${…}`` interpolation with a non-empty body.
+
+    The linear replacement for a ``\\$\\{[^}]+\\}`` regex, which is **quadratic** on hostile
+    input (CodeQL ``py/polynomial-redos``). ``[^}]+`` stops only at ``}`` or end-of-string,
+    so on a value made of many ``${`` and no ``}`` the engine consumes to the end at EVERY
+    starting position: measured 0.03s at 16 KB rising to 2.1s at 128 KB, i.e. ~2 minutes at
+    1 MB. Values reach here unbounded from a project's ``.claude/settings.json``, which
+    arrives with a cloned repository, so the length is not ours to trust.
+
+    A possessive ``[^}]++`` is NOT the fix — it removes the backtracking but the scan still
+    restarts at every ``${``, so it stays quadratic (measured: 0.82s at 128 KB, only a ~2.5x
+    smaller constant). Narrowing the class to ``[^{}]`` or ``[^}$]`` would make it linear,
+    but both stop matching bodies the old pattern matched (``${a{b}``, ``${A$B}``) — and
+    under-masking is the one direction a redaction helper must never fail in.
+
+    So the scan is done by hand instead, matching the regex exactly: each match runs from a
+    ``${`` to the FIRST following ``}``, and requires at least one character between them
+    (``${}`` is not a match, which is what ``[^}]+`` means). Each index only moves forward,
+    so the whole walk is O(n).
+    """
+    i, n = 0, len(value)
+    while i < n:
+        start = value.find("${", i)
+        if start == -1:
+            return
+        close = value.find("}", start + 2)
+        if close == -1:
+            return
+        if close > start + 2:
+            yield start, close + 1
+            i = close + 1
+        else:
+            # `${}` — no body, so the regex would not match here either. Resume after the
+            # opener: a match cannot start at the `{` or the `}` in between.
+            i = start + 2
+
+
+def _has_interp(value: str) -> bool:
+    """Whether ``value`` contains a ``${…}`` interpolation (see :func:`_interp_spans`)."""
+    return next(_interp_spans(value), None) is not None
+
+
+def _mask_interps(body: str, sentinel: str) -> str:
+    """Replace every ``${…}`` in ``body`` with ``sentinel`` (see :func:`_interp_spans`)."""
+    out: list[str] = []
+    prev = 0
+    for start, end in _interp_spans(body):
+        out.append(body[prev:start])
+        out.append(sentinel)
+        prev = end
+    if not out:
+        return body
+    out.append(body[prev:])
+    return "".join(out)
+
+
 _SECRETISH_URL_RE = re.compile(r"^[a-z][a-z0-9+.\-]*://[^/@\s]+@", re.IGNORECASE)
 # The line-scanning (non-anchored) twin of _SECRETISH_URL_RE, for masking a
 # credential-bearing URL that appears *anywhere* in a line of free text (see
@@ -108,7 +166,91 @@ _SECRETISH_URL_INLINE_RE = re.compile(r"[a-z][a-z0-9+.\-]*://[^/@\s]+@", re.IGNO
 # A `key: value` / `key = value` line (the shape of a settings.json-adjacent config
 # line, a frontmatter field, or a shell-style env assignment) — used to mask the value
 # side of a secret-shaped key in free text that has no JSON/dict structure to recurse.
-_KV_LINE_RE = re.compile(r"^(?P<prefix>\s*[\w.\-]+\s*[:=]\s*)(?P<value>\S.*?)(?P<trail>\s*)$")
+# Greedy `.*` with the trailing whitespace split off in Python, NOT the natural-looking
+# `(?P<value>\S.*?)(?P<trail>\s*)$`. That form is quadratic: the lazy `.*?` grows one
+# character at a time while the greedy `\s*` re-scans the run behind it, so a line like
+# `token: a` + 32 KB of spaces + `b` took 2.1s, and 64 KB took 8.6s (x4 per doubling).
+# `redact_secret_lines` strips the line ending before matching, so the body holds no
+# newline and greedy `.*` + `$` is unambiguous — one pass, no backtracking.
+_KV_LINE_RE = re.compile(r"^(?P<prefix>\s*[\w.\-]+\s*[:=]\s*)(?P<rest>\S.*)$")
+
+
+def _split_kv_line(body: str) -> tuple[str, str] | None:
+    r"""Return ``(prefix, trail)`` for a ``key: value`` line, or ``None``.
+
+    The linear replacement for the old three-group regex (see :data:`_KV_LINE_RE`).
+    ``trail`` is the run of trailing whitespace the old ``(?P<trail>\\s*)$`` captured,
+    recovered here with ``rstrip`` so the caller can rebuild the line byte-for-byte.
+    """
+    kv = _KV_LINE_RE.match(body)
+    if kv is None:
+        return None
+    rest = kv.group("rest")
+    value = rest.rstrip()
+    return kv.group("prefix"), rest[len(value) :]
+
+
+def _url_cred_spans(text: str) -> Iterator[tuple[int, int]]:
+    r"""Yield ``(start, end)`` of each ``scheme://user@`` credential-bearing URL prefix.
+
+    The linear replacement for ``[a-z][a-z0-9+.\\-]*://[^/@\\s]+@`` used **non-anchored**
+    over a whole line. That pattern is quadratic for the same reason the ``${…}`` one was:
+    ``[a-z0-9+.\\-]*`` consumes to the end of a run and then backtracks hunting ``://`` at
+    EVERY starting position, so an ordinary long alphanumeric run — a minified blob, a long
+    base64 value, a one-line JSON file — costs 0.18s at 8 KB and 11s at 64 KB. Unlike the
+    ``${`` flood it needs no crafted payload at all.
+
+    A ``(?<![a-z0-9+.\\-])`` lookbehind is the obvious fix and is WRONG: it under-masks.
+    ``-https://u@h`` stops matching entirely, because the ``-`` blocks the lookbehind and
+    no match may begin at the ``-`` itself. Under-masking is the direction that leaks.
+
+    So the scan anchors on the ``://`` literal and expands outward, which reproduces the
+    regex exactly: the scheme is the maximal ``[A-Za-z0-9+.-]`` run ending at ``://``,
+    starting from the first ASCII letter in it (the pattern's first atom is ``[a-z]``);
+    the userinfo is the run after ``://`` up to the first ``/``, ``@`` or whitespace, which
+    must be a non-empty run terminated by ``@`` (``@`` is outside ``[^/@\\s]``, so greedy
+    matching cannot cross it and backtracking cannot rescue a different terminator).
+    Matches are non-overlapping and left-to-right, exactly as ``re.sub`` applies them.
+    """
+    _SCHEME = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+.-"
+    i = 0
+    while True:
+        sep = text.find("://", i)
+        if sep == -1:
+            return
+        run = sep
+        while run > i and text[run - 1] in _SCHEME:
+            run -= 1
+        start = -1
+        for j in range(run, sep):
+            if text[j].isascii() and text[j].isalpha():
+                start = j
+                break
+        if start == -1:
+            i = sep + 3  # no scheme letter before `://` — no match can start here
+            continue
+        end = sep + 3
+        while end < len(text) and text[end] not in "/@" and not text[end].isspace():
+            end += 1
+        if end > sep + 3 and end < len(text) and text[end] == "@":
+            yield start, end + 1
+            i = end + 1
+        else:
+            i = sep + 3
+
+
+def _mask_url_creds(body: str, replacement: str) -> str:
+    """Replace each ``scheme://user@`` with ``replacement`` (see :func:`_url_cred_spans`)."""
+    out: list[str] = []
+    prev = 0
+    for start, end in _url_cred_spans(body):
+        out.append(body[prev:start])
+        out.append(replacement)
+        prev = end
+    if not out:
+        return body
+    out.append(body[prev:])
+    return "".join(out)
 
 
 class ConfigWriteError(Exception):
@@ -246,7 +388,7 @@ def _is_secretish(key: str, value: Any) -> bool:
         return False
     if _SECRET_KEY_RE.search(key):
         return True
-    if _INTERP_RE.search(value):
+    if _has_interp(value):
         return True
     if _SECRETISH_URL_RE.match(value):
         return True
@@ -305,11 +447,11 @@ def redact_secret_lines(text: str) -> str:
             body, eol = body[:-2], "\r\n"
         elif body.endswith("\n"):
             body, eol = body[:-1], "\n"
-        masked = _INTERP_RE.sub(REDACTION_SENTINEL, body)
-        masked = _SECRETISH_URL_INLINE_RE.sub(f"{REDACTION_SENTINEL}@", masked)
-        kv = _KV_LINE_RE.match(masked)
-        if kv and _SECRET_KEY_RE.search(kv.group("prefix")):
-            masked = f"{kv.group('prefix')}{REDACTION_SENTINEL}{kv.group('trail')}"
+        masked = _mask_interps(body, REDACTION_SENTINEL)
+        masked = _mask_url_creds(masked, f"{REDACTION_SENTINEL}@")
+        kv = _split_kv_line(masked)
+        if kv and _SECRET_KEY_RE.search(kv[0]):
+            masked = f"{kv[0]}{REDACTION_SENTINEL}{kv[1]}"
         out.append(masked + eol)
     return "".join(out)
 
