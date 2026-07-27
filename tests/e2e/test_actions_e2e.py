@@ -153,3 +153,33 @@ def test_background_launch_requires_prompt_unless_cloud(
     browser.fill('[id="lprompt-alpha"]', "count to three")
     browser.expect_hidden(hint)
     browser.expect_enabled(run)
+
+    # #1114: the field is a <textarea>, not an <input>, so a password manager never scans
+    # it as a login field. Pin the element type and the two behaviours the swap could
+    # regress — typing still binds, and a pasted newline is flattened the way an <input>
+    # did for free (the server rejects control characters in a display name).
+    assert browser.eval_json("document.getElementById('lprompt-alpha').tagName") == "TEXTAREA"
+    assert browser.get_value('[id="lprompt-alpha"]') == "count to three"
+    browser.eval_js(
+        "(() => { const e = document.getElementById('lprompt-alpha');"
+        " e.value = 'a\\nb'; e.dispatchEvent(new Event('input', {bubbles:true})); })()"
+    )
+    assert "\n" not in browser.get_value('[id="lprompt-alpha"]'), (
+        "a pasted newline must be flattened, or the server rejects the value"
+    )
+
+    # Same for Session name, pinned separately rather than assumed to follow: it is the
+    # field whose autofill was actually observed, and its sanitiser writes the PARENT
+    # dashboard() scope (`customName[name]`) rather than the row's own, which is the
+    # fragile half of the merged-data-stack behaviour. Driven through JS because this
+    # field renders under standard mode behind More options; the element is in the DOM
+    # either way, which is all these assertions need.
+    assert browser.eval_json("document.getElementById('name-alpha').tagName") == "TEXTAREA"
+    browser.eval_json(
+        "(() => { const e = document.getElementById('name-alpha');"
+        " e.value = 'x\\ny'; e.dispatchEvent(new Event('input', {bubbles:true}));"
+        " return document.getElementById('name-alpha').value; })()"
+    )
+    assert "\n" not in browser.get_value('[id="name-alpha"]'), (
+        "Session name must flatten newlines — the server rejects control characters"
+    )
