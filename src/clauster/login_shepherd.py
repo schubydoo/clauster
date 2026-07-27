@@ -918,6 +918,39 @@ class LoginShepherd:
         # EOF/EIO on every POSIX platform. (A plain-pipe reader watches the child's stdout,
         # which the child's exit likewise EOFs — it was never affected.)
         if flow.proc.poll() is None:
+            # On Windows, reap the process TREE first. `terminate()` there kills only the
+            # process it is handed, never its descendants, so a surviving grandchild keeps
+            # our stdout pipe open and the reader below never sees EOF — it burns the full
+            # 5s join and then LEAKS the thread, because the join times out rather than
+            # succeeding. Measured on a Windows VM: 5026ms teardown with the reader still
+            # alive, versus 20ms and a clean exit with the tree killed.
+            #
+            # PREPENDED to the existing sequence rather than replacing it: `terminate()`
+            # still runs below (it is a no-op on an already-dead process — CPython handles
+            # the ERROR_ACCESS_DENIED-means-already-exited case), so the terminate-then-
+            # escalate ordering and everything that depends on it are untouched.
+            #
+            # Costs no gracefulness, because on Windows `Popen.kill is Popen.terminate`
+            # (both TerminateProcess — verified True there, False on POSIX). POSIX is
+            # excluded because there `terminate()` is a real SIGTERM and the stop-child-
+            # first ordering documented above is load-bearing.
+            #
+            # Guarded on a real `pid`: the ConPTY transport's `proc` is a `_ConPtyPopen`,
+            # a deliberate `Popen` SUBSET (poll/wait/terminate/kill) with no `pid`, and
+            # pywinpty owns that process. It also never had this problem — its reader polls
+            # `isalive()` instead of blocking on a read, so it exits on its own.
+            #
+            # Broadly guarded for the same reason the second `wait` below is: this is a
+            # best-effort reap, and an unguarded raise would skip the terminate, the reader
+            # join, the control-end close AND the `self._flow = None` clear — stranding the
+            # flow `active` forever, which is strictly worse than the leaked thread it fixes.
+            # Failing here just degrades to the old behaviour, so debug-log and carry on.
+            tree_pid = getattr(flow.proc, "pid", None)
+            if _is_win32() and tree_pid is not None:
+                try:
+                    procutil.force_kill_tree(tree_pid)
+                except Exception as exc:  # noqa: BLE001 — a best-effort reap must never strand
+                    _log.debug("login_shepherd: %s tree kill failed: %s", flow.mode, exc)
             flow.proc.terminate()
             try:
                 flow.proc.wait(timeout=5)
