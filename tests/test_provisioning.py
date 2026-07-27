@@ -406,7 +406,7 @@ def test_clone_timeout_reaps_the_tree_on_windows(tmp_path, monkeypatch):
     Linux honoured the 1s timeout (1.01s), Windows paid the stub's full 3s sleep (3.12s).
     """
     monkeypatch.setenv("FAKE_GIT_MODE", "slow")
-    monkeypatch.setenv("FAKE_GIT_SLEEP", "3")
+    monkeypatch.setenv("FAKE_GIT_SLEEP", "2")  # just over the 1s timeout: these stub the reap
     monkeypatch.setattr(provisioning.procutil, "is_windows", lambda: True)
     killed: list[int] = []
     monkeypatch.setattr(provisioning.procutil, "force_kill_tree", lambda pid: killed.append(pid))
@@ -428,7 +428,7 @@ def test_clone_timeout_does_not_tree_kill_on_posix(tmp_path, monkeypatch):
     problem POSIX does not have — `terminate()` already signals the process we spawned.
     """
     monkeypatch.setenv("FAKE_GIT_MODE", "slow")
-    monkeypatch.setenv("FAKE_GIT_SLEEP", "3")
+    monkeypatch.setenv("FAKE_GIT_SLEEP", "2")  # just over the 1s timeout: these stub the reap
     monkeypatch.setattr(provisioning.procutil, "is_windows", lambda: False)
     killed: list[int] = []
     monkeypatch.setattr(provisioning.procutil, "force_kill_tree", lambda pid: killed.append(pid))
@@ -451,7 +451,7 @@ def test_clone_timeout_survives_a_tree_kill_that_raises(tmp_path, monkeypatch):
     which is the exact hang the watchdog exists to prevent.
     """
     monkeypatch.setenv("FAKE_GIT_MODE", "slow")
-    monkeypatch.setenv("FAKE_GIT_SLEEP", "3")
+    monkeypatch.setenv("FAKE_GIT_SLEEP", "2")  # just over the 1s timeout: these stub the reap
     monkeypatch.setattr(provisioning.procutil, "is_windows", lambda: True)
 
     def _boom(pid: int) -> None:

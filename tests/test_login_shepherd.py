@@ -30,7 +30,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from clauster import login_shepherd as ls
-from clauster import pty_keeper
+from clauster import procutil, pty_keeper
 from clauster.app import create_app
 from clauster.config import ClausterConfig
 
@@ -1623,8 +1623,19 @@ def test_status_route_still_running_then_terminal(tmp_path: Path, monkeypatch) -
 
         # Let the still-running login finish, then /status returns the terminal result and
         # reaps the flow — a subsequent /status is 409 (flow gone → stop polling).
-        app.state.login_shepherd._flow.proc.terminate()  # noqa: SLF001 - provider "finished"
-        app.state.login_shepherd._flow.proc.wait(timeout=5)  # noqa: SLF001
+        #
+        # Reap the TREE, not just the process we hold: on Windows the configured binary is
+        # the `claude.cmd` shim (`python "%~dp0claude"`), so a bare `terminate()` kills
+        # cmd.exe and leaves its python child holding our stdout pipe. `_teardown`'s reap is
+        # (correctly) gated on the child still being alive, and once the shim has exited that
+        # orphan is unreachable — `psutil.Process(dead_pid)` raises `NoSuchProcess` even while
+        # Popen holds the handle (verified on a Windows VM). So the reader never sees EOF, the
+        # join burns its full 5s and leaks the thread: 8.03s here on Windows vs 1.41s on Linux
+        # (CI test-analytics at dc69e21). Killing the tree is also the more faithful simulation
+        # of the provider "finishing" — the whole process group ends, not just the wrapper.
+        proc = app.state.login_shepherd._flow.proc  # noqa: SLF001 - provider "finished"
+        procutil.force_kill_tree(proc.pid)
+        proc.wait(timeout=5)
         terminal = c.post("/api/login-shepherd/status")
         assert terminal.status_code == 200
         assert "pending" not in terminal.json()
