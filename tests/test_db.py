@@ -478,6 +478,8 @@ def test_persistence_snapshots_on_first_boot_by_default(tmp_path):
         p.dispose()
 
 
+@pytest.mark.real_migration  # negative twin of the marked test above: without a REAL
+# migration the assertion is vacuous — no snapshot is written because nothing migrated
 def test_persistence_backup_before_migrate_false_skips_snapshot(tmp_path):
     p = Persistence(tmp_path, backup_before_migrate=False)
     try:

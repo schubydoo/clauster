@@ -5,14 +5,17 @@ import atexit
 import json
 import os
 import shutil
+import sqlite3
 import sys
 import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
 import pytest
 from hypothesis import settings
+from sqlalchemy import Engine
 
 from clauster.db import bootstrap as db_bootstrap
 from clauster.db import engine as db_engine
@@ -397,10 +400,37 @@ _TEMPLATE_DB: Path | None = None
 _REAL_UPGRADE = db_bootstrap.upgrade_to_head
 
 
-def _db_path_for(engine: object) -> Path | None:
+def _db_path_for(engine: Engine) -> Path | None:
     """The SQLite file an engine points at, or None if it isn't a plain file URL."""
     database = getattr(getattr(engine, "url", None), "database", None)
     return Path(database) if database else None
+
+
+def _assert_template_is_migrated(path: Path) -> None:
+    """Fail LOUDLY, at build time, if the template isn't a real migrated database.
+
+    Without this the failure mode is silent and badly delayed: an un-checkpointed copy is
+    a perfectly valid, *empty*, WAL-header database, and `import_legacy_json` returns early
+    on a fresh `state_dir` — so `Persistence()` constructs fine and the blow-up surfaces
+    hundreds of tests later as an unrelated `no such table`.
+    """
+    # `closing`, not a bare `with`: sqlite3.Connection's context manager commits the
+    # transaction but does NOT close the connection, which leaks it (one ResourceWarning
+    # per xdist worker) — and the engine-disposal fixture can't reach a raw connection.
+    with closing(sqlite3.connect(path)) as conn:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        # An un-checkpointed copy has NO tables at all, so read the revision defensively —
+        # a bare OperationalError here would obscure what actually went wrong.
+        revision = (
+            conn.execute("SELECT version_num FROM alembic_version").fetchone()
+            if "alembic_version" in tables
+            else None
+        )
+    if not revision or "instances" not in tables:
+        raise RuntimeError(  # noqa: TRY003 — a fixture-build failure wants the detail inline
+            f"template database at {path} is not migrated "
+            f"(alembic_version={revision!r}, tables={sorted(tables)})"
+        )
 
 
 def _template_db_path() -> Path:
@@ -408,16 +438,30 @@ def _template_db_path() -> Path:
     global _TEMPLATE_DB
     if _TEMPLATE_DB is None:
         root = Path(tempfile.mkdtemp(prefix="clauster-db-template-"))
-        engine = db_engine.create_db_engine(root)
+        target = root / "template.db"
+        engine = db_engine.create_db_engine(root / "build")
         try:
-            _REAL_UPGRADE(engine, root, backup_before_migrate=False)
+            _REAL_UPGRADE(engine, root / "build", backup_before_migrate=False)
+            # `VACUUM INTO` — the same primitive `_snapshot_before_migrate` uses — writes a
+            # consistent, sidecar-free file BY CONSTRUCTION. Copying the live DB file instead
+            # would depend on `dispose()` having checkpointed the WAL: the engine runs in WAL
+            # mode, and before a checkpoint the whole schema lives in `clauster.db-wal` while
+            # the main file is a 4096-byte header. That happens to hold today, but it is a
+            # coupling to production-code internals this fixture doesn't own — and its failure
+            # is invisible (see `_assert_template_is_migrated`).
+            with engine.connect() as conn:
+                conn.exec_driver_sql(f"VACUUM INTO '{str(target).replace(chr(39), chr(39) * 2)}'")
         finally:
             db_engine.dispose_engine(engine)
-        _TEMPLATE_DB = root / db_engine.DB_FILENAME
+        _assert_template_is_migrated(target)
+        atexit.register(shutil.rmtree, root, ignore_errors=True)
+        _TEMPLATE_DB = target
     return _TEMPLATE_DB
 
 
-def _templated_upgrade(engine, state_dir, *, backup_before_migrate: bool = True) -> None:
+def _templated_upgrade(
+    engine: Engine, state_dir: Path, *, backup_before_migrate: bool = True
+) -> None:
     """Seed a brand-new database from the template; otherwise run the real migration."""
     path = _db_path_for(engine)
     if path is None or (path.exists() and path.stat().st_size > 0):
