@@ -168,6 +168,10 @@ jobs:
           #   codecov[bot] — steers the review toward coverage gaps, which the
           #     instructions already delegate to the 96% gate.
           exclude_comments_by_actor: "greptile-apps[bot],codecov[bot]"
+          # No "Fix this →" links on findings. They open a cloud agent on claude.ai,
+          # which is a dead end here — the maintainer drives Claude Code through
+          # clauster's own bridges, so the link leads somewhere they don't work.
+          include_fix_links: false
           claude_args: |
             --max-turns 60
             --model claude-opus-5

@@ -85,6 +85,10 @@ jobs:
         uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # No "Fix this →" links when this posts review feedback — they open a cloud
+          # agent on claude.ai, and the maintainer drives Claude Code through clauster's
+          # own bridges. Same setting as claude-review.yml; keep the two in step.
+          include_fix_links: false
           additional_permissions: |
             actions: read
           # Stop Claude writing "#1"/"#2" to enumerate points — GitHub auto-links
