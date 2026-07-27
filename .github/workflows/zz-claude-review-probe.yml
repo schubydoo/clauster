@@ -1,0 +1,110 @@
+name: Claude review probe (TEMPORARY)
+
+# TEMPORARY EXPERIMENT — delete this file with the branch. Do not merge.
+#
+# Question under test: Greptile is rate-limited until 2026-08-01, so we are
+# re-adding a Claude reviewer. There are TWO different `/code-review` commands
+# and it is not documented which of them resolves inside claude-code-action:
+#
+#   job `builtin`  — `/code-review`, the command that ships with the Claude Code
+#                    CLI the action installs. Takes a PR number as target,
+#                    supports effort levels, versioned with the CLI.
+#   job `plugin`   — `/code-review:code-review`, the marketplace plugin that the
+#                    generated setup branch wires up. Tracks marketplace HEAD,
+#                    unpinned, and its own instructions tell it to skip draft PRs
+#                    and PRs Claude has already commented on.
+#
+# Each job is told to tag its PR comment with a marker so the two are
+# distinguishable. Whichever posts is the one we build the real workflow on.
+#
+# Scoped to this branch by the `if:` below so it cannot fire on any other PR.
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: claude-review-probe-${{ github.event.pull_request.number }}
+  # MUST stay false: claude-code-action posts its own comments mid-run, and a
+  # cancelled probe tells us nothing about whether the command resolved.
+  cancel-in-progress: false
+
+jobs:
+  builtin:
+    name: "probe: built-in /code-review"
+    if: github.head_ref == 'probe/claude-review-mechanism'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - name: Check out the PR head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Run the built-in /code-review
+        uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Run `/code-review --comment ${{ github.event.pull_request.number }}`.
+
+            Prefix every comment you post to the pull request with the literal
+            marker `[probe:builtin]` so this run can be told apart from a second
+            reviewer running on the same pull request.
+
+            If the `/code-review` command is not available in this environment,
+            do not review anything by hand. Post one comment saying exactly
+            `[probe:builtin] command unavailable` and stop. A clean negative is
+            the useful result here; an improvised review is not.
+          claude_args: |
+            --max-turns 40
+
+  plugin:
+    name: "probe: code-review plugin"
+    if: github.head_ref == 'probe/claude-review-mechanism'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - name: Check out the PR head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Run the marketplace code-review plugin
+        uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          plugin_marketplaces: "https://github.com/anthropics/claude-code.git"
+          plugins: "code-review@claude-code-plugins"
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Run `/code-review:code-review --comment`.
+
+            Prefix every comment you post to the pull request with the literal
+            marker `[probe:plugin]` so this run can be told apart from a second
+            reviewer running on the same pull request.
+
+            This pull request is deliberately small. Do NOT skip it as trivial,
+            and do not skip it because another reviewer has already commented —
+            both of those are expected here. If you find nothing, post
+            `[probe:plugin] no issues found` rather than posting nothing, so the
+            difference between "ran and found nothing" and "never ran" is
+            visible.
+          claude_args: |
+            --max-turns 40
