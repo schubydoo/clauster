@@ -56,38 +56,43 @@ CI gate; `scripts/e2e.sh` clears the addopts and runs it.
 
 ## Architecture
 
-App factory in `app.py`; entry point is `clauster.__main__:main` — which owns argument
-parsing for every subcommand, plus the hidden `__pty-keeper__` / `__recap-hook__` forms a
-frozen build re-invokes itself with. Key modules under `src/clauster/`:
+`app.py` is both the FastAPI app factory and where every route lives. The entry point is
+`clauster.__main__:main`, which owns argument parsing for all subcommands plus the hidden
+`__pty-keeper__` / `__recap-hook__` forms a frozen build re-invokes itself with.
 
-- **`runner.py`** — `SessionRunner`: spawn / stop / observe standard bridges.
-- **`pty_keeper.py`** — sidecar owning a true-resume (pty) bridge's PTY.
-- **`discovery.py` · `provisioning.py` · `trust.py`** — project discovery, create +
-  clone, workspace-trust writer.
-- **`bridge_log.py` · `logstream.py` · `redact.py`** — parse, tail, and redact the
-  bridge debug log for the WebSocket stream.
-- **`inspector.py`** — `claude agents --json` cross-check (liveness source).
-- **`supervisor.py`** — read/dispatch/stop for agent-view background sessions
-  (`claude --bg`); backs the background-agents panel and `/api/agents`.
-- **`claustrum_client.py` · `claustrum_daemon.py`** — async unix-socket NDJSON
-  JSON-RPC client, and connect-or-spawn lifecycle for the claustrum daemon.
-- **`hosted.py` · `hosted_state.py`** — hosted-channel engine (stream-json spawn,
-  control-plane routing, redact→ring→fan-out, fail-closed permission parking) and
-  its separate persistence keyed by `claustrum_process_id`.
-- **`auth.py`** — auth foundation; fails closed.
-- **`config.py` · `state.py` · `models.py`** — config load, `state.json`
-  persistence, domain models.
-- **`login_shepherd.py`** — dashboard-driven `claude` account login, over a PTY.
-- **`ops.py`** — the operational CLIs: `doctor`, `backup`, `restore`, `migrate`,
-  `install-service`.
-- **`usage.py`** — cost / token accounting read from a session transcript JSONL.
-- **`deps.py`** — optional-extras detection for the frozen binary, `doctor`, and the UI.
-- **`config_editor.py`** — safe-allowlist editing for the in-app config editor (Tier A).
-- **`config_write.py` · `config_write_mcp.py`** — the code-executing config-write trust
-  tier and its MCP surface. Security-sensitive: read the invariants below first.
-- **`mcp_server.py`** — the `clauster mcp` stdio MCP server.
+**A standard spawn, end to end:** route in `app.py` → `runner.SessionRunner.spawn` →
+`trust.trust_directory` + `ensure_remote_control_enabled` (both must pass — fail closed) →
+subprocess → `bridge_log` parses the debug log → `logstream` tails it → `redact` →
+WebSocket. Read that path before changing any part of it.
 
-`templates/` (Jinja + jinja2-fragments) and `static/` render the Alpine/Tabler UI.
+Modules under `src/clauster/`, by subsystem:
+
+- **Bridge lifecycle** — `runner.py` (`SessionRunner`: spawn/stop/observe standard bridges) ·
+  `pty_keeper.py` (sidecar owning a true-resume bridge's PTY) · `inspector.py`
+  (`claude agents --json` liveness cross-check) · `supervisor.py` (`claude --bg` background
+  sessions, behind `/api/agents`) · `login_shepherd.py` (dashboard-driven `claude` login).
+- **Log → browser** — `bridge_log.py` · `logstream.py` · `redact.py`. Everything that
+  reaches the WebSocket passes through `redact`.
+- **Hosted channel** — `claustrum_client.py` (async unix-socket NDJSON JSON-RPC) ·
+  `claustrum_daemon.py` (connect-or-spawn daemon lifecycle) · `hosted.py` (stream-json
+  spawn, control-plane routing, redact→ring→fan-out, fail-closed permission parking) ·
+  `hosted_state.py`.
+- **Config · trust · auth** — `config.py` · `models.py` · `auth.py` (fails closed) ·
+  `trust.py` · `discovery.py` · `provisioning.py` (create + clone) · `config_editor.py`
+  (Tier-A allowlist editing) · ⚠️ `config_write.py` + `config_write_mcp.py` — the
+  **code-executing** write tier; read the invariants below before touching either.
+- **Ops & surfaces** — `ops.py` (`doctor`/`backup`/`restore`/`migrate`/`install-service`) ·
+  `usage.py` (cost + token accounting from a transcript JSONL) · `deps.py` (optional-extras
+  detection for the frozen binary) · `mcp_server.py` (`clauster mcp` stdio server) ·
+  `state.py`.
+
+**Two persistence stores, deliberately not one.** `state.json` (`state.py`) holds instances
+and their bridges; hosted sessions live in `hosted_state.py` keyed by
+`claustrum_process_id` so they can reattach across a clauster restart. Don't merge them.
+
+**The UI is served as HTML, not JSON.** `templates/` renders through `jinja2_fragments`
+(`Jinja2Blocks`, wired in `app.py`), so routes return Jinja *fragments* that Alpine swaps
+into the page; `static/` carries the vendored Tabler + Alpine assets.
 
 ---
 
