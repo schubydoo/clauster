@@ -411,6 +411,17 @@ def _expected_epoch(proc_start: str | float | None) -> float | None:
     return jiffies_to_epoch(jiffies)
 
 
+def is_windows() -> bool:
+    """Whether we're on Windows — the seam for the "reap the tree, not just the child" guards.
+
+    Isolated behind a function (like ``login_shepherd._is_win32``) so a POSIX test can drive a
+    win32-only branch by patching THIS, instead of ``monkeypatch.setattr(sys, "platform", …)``
+    — which mutates the interpreter-wide singleton for every module and every live thread in
+    the xdist worker, and incidentally flips ``shutil.which``/``os.path`` behaviour too.
+    """
+    return sys.platform == "win32"
+
+
 def force_kill_tree(pid: int) -> None:
     """Best-effort hard kill of ``pid`` and all its descendants.
 

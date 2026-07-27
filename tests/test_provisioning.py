@@ -15,6 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+from clauster import provisioning
 from clauster.app import create_app
 from clauster.config import CloneConfig, load_config
 from clauster.provisioning import (
@@ -385,6 +386,79 @@ def test_clone_timeout(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_GIT_MODE", "slow")
     monkeypatch.setenv("FAKE_GIT_SLEEP", "3")
     with pytest.raises(CloneFailed):
+        clone_project(
+            tmp_path,
+            "proj",
+            "https://10.0.0.1/r.git",
+            cfg=_cfg(allow_private_hosts=True, timeout_seconds=1),
+            git_binary=_gitbin(),
+        )
+    assert not (tmp_path / "proj").exists()
+
+
+def test_clone_timeout_reaps_the_tree_on_windows(tmp_path, monkeypatch):
+    """The clone watchdog reaps git's DESCENDANTS on Windows, not just the pid we hold.
+
+    `terminate()` there kills only its argument, and a `git clone` helper (or, in this
+    suite, the fake-git `.cmd` shim's python child) inherits our stderr pipe — so a
+    surviving helper keeps that pipe open and the read loop runs for as long as the CHILD
+    wants rather than the timeout we configured. Measured on the CI matrix at dc69e21:
+    Linux honoured the 1s timeout (1.01s), Windows paid the stub's full 3s sleep (3.12s).
+    """
+    monkeypatch.setenv("FAKE_GIT_MODE", "slow")
+    monkeypatch.setenv("FAKE_GIT_SLEEP", "3")
+    monkeypatch.setattr(provisioning.procutil, "is_windows", lambda: True)
+    killed: list[int] = []
+    monkeypatch.setattr(provisioning.procutil, "force_kill_tree", lambda pid: killed.append(pid))
+    with pytest.raises(CloneFailed):
+        clone_project(
+            tmp_path,
+            "proj",
+            "https://10.0.0.1/r.git",
+            cfg=_cfg(allow_private_hosts=True, timeout_seconds=1),
+            git_binary=_gitbin(),
+        )
+    assert killed, "the watchdog must reap the clone's process tree on Windows"
+
+
+def test_clone_timeout_does_not_tree_kill_on_posix(tmp_path, monkeypatch):
+    """POSIX keeps the plain `terminate()`: the pid we hold IS git, and SIGTERM is graceful.
+
+    A tree kill here would trade a clean shutdown for SIGKILL against descendants to fix a
+    problem POSIX does not have — `terminate()` already signals the process we spawned.
+    """
+    monkeypatch.setenv("FAKE_GIT_MODE", "slow")
+    monkeypatch.setenv("FAKE_GIT_SLEEP", "3")
+    monkeypatch.setattr(provisioning.procutil, "is_windows", lambda: False)
+    killed: list[int] = []
+    monkeypatch.setattr(provisioning.procutil, "force_kill_tree", lambda pid: killed.append(pid))
+    with pytest.raises(CloneFailed):
+        clone_project(
+            tmp_path,
+            "proj",
+            "https://10.0.0.1/r.git",
+            cfg=_cfg(allow_private_hosts=True, timeout_seconds=1),
+            git_binary=_gitbin(),
+        )
+    assert killed == [], "POSIX teardown must not force-kill the tree"
+
+
+def test_clone_timeout_survives_a_tree_kill_that_raises(tmp_path, monkeypatch):
+    """A failing reap still leaves the plain `terminate()` to run.
+
+    `_terminate` is a `threading.Timer` callback — nobody observes a raise from it, so an
+    unguarded failure would silently skip the terminate and let the clone run unbounded,
+    which is the exact hang the watchdog exists to prevent.
+    """
+    monkeypatch.setenv("FAKE_GIT_MODE", "slow")
+    monkeypatch.setenv("FAKE_GIT_SLEEP", "3")
+    monkeypatch.setattr(provisioning.procutil, "is_windows", lambda: True)
+
+    def _boom(pid: int) -> None:
+        raise OSError("psutil could not walk the tree")
+
+    monkeypatch.setattr(provisioning.procutil, "force_kill_tree", _boom)
+    with pytest.raises(CloneFailed):  # still terminated, still bounded
         clone_project(
             tmp_path,
             "proj",

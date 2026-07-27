@@ -438,6 +438,46 @@ async def test_heal_force_kills_stuck_bridge(runner_config, monkeypatch):
     assert proc.killed  # force-killed so no idle orphan is left
 
 
+async def test_heal_reaps_the_whole_bridge_tree_on_windows(runner_config, monkeypatch):
+    """The poison force-kill reaps DESCENDANTS on Windows, not just the pid we hold.
+
+    On Windows `kill()` IS `terminate()` (both TerminateProcess) and neither touches
+    descendants, so when `claude` resolves to a `.cmd`/npm shim — the normal Windows
+    install — killing our pid leaves the real bridge running. "Never leave an idle orphan
+    bridge behind" was doing exactly that there.
+    """
+    monkeypatch.setattr("clauster.runner._POISON_STOP_TIMEOUT", 0.05)
+    monkeypatch.setattr("clauster.runner.procutil.is_windows", lambda: True)
+    killed: list[int] = []
+    monkeypatch.setattr("clauster.runner.procutil.force_kill_tree", lambda pid: killed.append(pid))
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    inst = RemoteControlInstance(project="alpha", label="alpha", status=InstanceStatus.ERROR)
+    _write_nonlive_pointer(runner, "alpha")
+    monkeypatch.setattr(runner, "_signal_stop", lambda *a, **k: None)  # SIGINT ignored
+    proc = _FakeProc(alive=True, pid=4242)
+    await runner._heal_poisoned_reattach(inst, proc, config.projects_root / "alpha", "deleted")
+    assert killed == [4242], "the bridge's tree must be reaped on Windows"
+    assert proc.killed, "the tree kill is prepended to kill(), not a replacement"
+
+
+async def test_heal_does_not_tree_kill_on_posix(runner_config, monkeypatch):
+    """POSIX keeps the plain `kill()` — there the pid we hold IS the bridge."""
+    monkeypatch.setattr("clauster.runner._POISON_STOP_TIMEOUT", 0.05)
+    monkeypatch.setattr("clauster.runner.procutil.is_windows", lambda: False)
+    killed: list[int] = []
+    monkeypatch.setattr("clauster.runner.procutil.force_kill_tree", lambda pid: killed.append(pid))
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    inst = RemoteControlInstance(project="alpha", label="alpha", status=InstanceStatus.ERROR)
+    _write_nonlive_pointer(runner, "alpha")
+    monkeypatch.setattr(runner, "_signal_stop", lambda *a, **k: None)
+    proc = _FakeProc(alive=True)
+    await runner._heal_poisoned_reattach(inst, proc, config.projects_root / "alpha", "deleted")
+    assert killed == [], "POSIX must not force-kill the tree"
+    assert proc.killed
+
+
 def test_await_ready_returns_poison_immediately(runner_config, tmp_path):
     config, claude_json = runner_config
     runner = SessionRunner(config, claude_json=claude_json)

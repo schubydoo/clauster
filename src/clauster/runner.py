@@ -2657,6 +2657,15 @@ class SessionRunner:
             await asyncio.sleep(_READY_POLL_INTERVAL)
         else:
             try:
+                # On Windows `kill()` IS `terminate()` (both TerminateProcess) and neither
+                # touches descendants, so killing the pid we hold leaves the real bridge
+                # running whenever `claude` resolves to a `.cmd`/npm shim — the npm case is
+                # the NORMAL Windows install, so "never leave an idle orphan bridge behind"
+                # was exactly what this did there. Reap the tree first; the plain `kill()`
+                # still runs below and stays the only path on POSIX, where the pid we hold
+                # IS the bridge.
+                if procutil.is_windows():
+                    await asyncio.to_thread(procutil.force_kill_tree, proc.pid)
                 proc.kill()  # never leave an idle orphan bridge behind
                 # Reap + confirm death BEFORE clearing: otherwise clear_pointer's liveness
                 # guard can still see the just-killed pid as alive and refuse (a poison loop).

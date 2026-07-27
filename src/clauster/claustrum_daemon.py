@@ -512,6 +512,17 @@ class ClaustrumDaemon:
         try:
             returncode = await asyncio.wait_for(proc.wait(), timeout=remaining)
         except TimeoutError as exc:
+            # The launcher is a `.cmd`/shim → python → detached-child chain on Windows, where
+            # `kill()` reaps only the process we hold. A launcher that timed out mid-detach
+            # would otherwise leave that chain running with our log file open. Best-effort:
+            # a failed reap must not mask the DaemonSpawnError this path exists to raise.
+            if procutil.is_windows():
+                try:
+                    procutil.force_kill_tree(proc.pid)
+                except Exception as tree_exc:  # noqa: BLE001 — never mask the spawn failure
+                    logger.debug(
+                        "claustrum: tree kill of launcher %s failed: %s", proc.pid, tree_exc
+                    )
             proc.kill()
             self._unlink_token_handoff(token_file)
             self._error = "claustrum -serve did not detach within the spawn timeout"

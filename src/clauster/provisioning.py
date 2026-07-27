@@ -337,6 +337,19 @@ def _run_clone_streaming(
 
     def _terminate() -> None:
         timed_out.set()
+        # Reap the TREE on Windows, not just the process we hold. `terminate()` there kills
+        # only its argument, and `git clone` spawns helpers (`git-remote-https`) that inherit
+        # our stderr pipe — a surviving helper keeps that pipe open, so the read loop below
+        # blocks past the watchdog and the clone runs for as long as the CHILD wants rather
+        # than the timeout we configured. Measured against the fake-git stub (a `.cmd` shim →
+        # python): Linux honours the 1s timeout (1.01s), Windows paid the stub's full 3s sleep
+        # (3.12s). Best-effort and broadly guarded — a failed reap must still leave the plain
+        # `terminate()` to run, since this is a watchdog thread whose raise nobody observes.
+        if procutil.is_windows():
+            try:
+                procutil.force_kill_tree(proc.pid)
+            except Exception as exc:  # noqa: BLE001 — watchdog thread; never let this escape
+                _log.debug("clone watchdog: tree kill of %s failed: %s", proc.pid, exc)
         proc.terminate()
 
     watchdog = threading.Timer(timeout_seconds, _terminate)
