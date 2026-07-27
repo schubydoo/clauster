@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from typing import cast
 
+import psutil
 import pytest
 
 from clauster import bridge_log, code_sessions, inspector, pointers, procutil
@@ -436,6 +437,93 @@ async def test_heal_force_kills_stuck_bridge(runner_config, monkeypatch):
     proc = _FakeProc(alive=True)  # never exits gracefully
     await runner._heal_poisoned_reattach(inst, proc, config.projects_root / "alpha", "deleted")
     assert proc.killed  # force-killed so no idle orphan is left
+
+
+async def test_heal_reaps_the_whole_bridge_tree_on_windows(runner_config, monkeypatch):
+    """The poison force-kill reaps DESCENDANTS on Windows, not just the pid we hold.
+
+    On Windows `kill()` IS `terminate()` (both TerminateProcess) and neither touches
+    descendants, so when `claude` resolves to a `.cmd`/npm shim — the normal Windows
+    install — killing our pid leaves the real bridge running. "Never leave an idle orphan
+    bridge behind" was doing exactly that there.
+    """
+    monkeypatch.setattr("clauster.runner._POISON_STOP_TIMEOUT", 0.05)
+    monkeypatch.setattr("clauster.runner.procutil.is_windows", lambda: True)
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    inst = RemoteControlInstance(project="alpha", label="alpha", status=InstanceStatus.ERROR)
+    _write_nonlive_pointer(runner, "alpha")
+    monkeypatch.setattr(runner, "_signal_stop", lambda *a, **k: None)  # SIGINT ignored
+    proc = _FakeProc(alive=True, pid=4242)
+    killed: list[int] = []
+    killed_before_kill: list[bool] = []
+    waited: list[object] = []
+
+    def _record(pid: int, **kw: object) -> None:
+        # Capture kill() state AT REAP TIME: asserting that both happened cannot tell the
+        # order apart, and the order is load-bearing — killing the shim first can leave the
+        # descendants reparented so `children()` no longer finds them.
+        killed.append(pid)
+        killed_before_kill.append(proc.killed)
+        waited.append(kw.get("wait_timeout"))
+
+    monkeypatch.setattr("clauster.runner.procutil.force_kill_tree", _record)
+    await runner._heal_poisoned_reattach(inst, proc, config.projects_root / "alpha", "deleted")
+    assert killed == [4242], "the bridge's tree must be reaped on Windows"
+    assert killed_before_kill == [False], "the reap must run BEFORE kill(), not after"
+    from clauster import runner as runner_mod
+
+    assert waited == [runner_mod._TREE_REAP_WAIT], (
+        "the reap must WAIT for death: clear_pointer below is gated on the descendant "
+        "actually being gone, and kill() is asynchronous"
+    )
+    assert proc.killed, "the tree kill is prepended to kill(), not a replacement"
+
+
+async def test_heal_does_not_tree_kill_on_posix(runner_config, monkeypatch):
+    """POSIX keeps the plain `kill()` — there the pid we hold IS the bridge."""
+    monkeypatch.setattr("clauster.runner._POISON_STOP_TIMEOUT", 0.05)
+    monkeypatch.setattr("clauster.runner.procutil.is_windows", lambda: False)
+    killed: list[int] = []
+    monkeypatch.setattr(
+        "clauster.runner.procutil.force_kill_tree", lambda pid, **kw: killed.append(pid)
+    )
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    inst = RemoteControlInstance(project="alpha", label="alpha", status=InstanceStatus.ERROR)
+    _write_nonlive_pointer(runner, "alpha")
+    monkeypatch.setattr(runner, "_signal_stop", lambda *a, **k: None)
+    proc = _FakeProc(alive=True)
+    await runner._heal_poisoned_reattach(inst, proc, config.projects_root / "alpha", "deleted")
+    assert killed == [], "POSIX must not force-kill the tree"
+    assert proc.killed
+
+
+async def test_heal_survives_a_tree_kill_that_raises(runner_config, monkeypatch):
+    """A failing reap must not skip kill(), the wait, or the pointer clear.
+
+    psutil's error family descends from Exception, NOT OSError, so the surrounding
+    `except (ProcessLookupError, OSError)` cannot catch it — the reap carries its own
+    guard. An escape here would be the worst of the three reap sites: it would leave the
+    idle orphan bridge alive AND leave the poisoned pointer in place, which is the exact
+    reattach loop `_heal_poisoned_reattach` exists to break.
+    """
+    monkeypatch.setattr("clauster.runner._POISON_STOP_TIMEOUT", 0.05)
+    monkeypatch.setattr("clauster.runner.procutil.is_windows", lambda: True)
+
+    def _boom(pid: int, **kw: object) -> None:
+        raise psutil.AccessDenied(pid)
+
+    monkeypatch.setattr("clauster.runner.procutil.force_kill_tree", _boom)
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    inst = RemoteControlInstance(project="alpha", label="alpha", status=InstanceStatus.ERROR)
+    pointer = _write_nonlive_pointer(runner, "alpha")
+    monkeypatch.setattr(runner, "_signal_stop", lambda *a, **k: None)
+    proc = _FakeProc(alive=True, pid=4242)
+    await runner._heal_poisoned_reattach(inst, proc, config.projects_root / "alpha", "deleted")
+    assert proc.killed, "a failed reap must still fall through to kill()"
+    assert not pointer.exists(), "a failed reap must still clear the poisoned pointer"
 
 
 def test_await_ready_returns_poison_immediately(runner_config, tmp_path):
