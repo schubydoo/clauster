@@ -113,6 +113,14 @@ fix cannot reach round seven on style.
 
 ## Output
 
+- Post every line-specific finding as an **inline comment**, and group them all into
+  **exactly one submitted review**. Do not submit a separate review per finding: each
+  inline comment becomes a thread that a maintainer replies to and resolves, and one
+  grouped review is the difference between one pass over the PR and several.
+- Also give a **summary table** of every finding with its file and line, so the review
+  can be read and acted on without opening the diff. Inline anchors go stale once the PR
+  moves — GitHub marks them outdated and drops the line number — and the table is what
+  survives that.
 - Submit as a **COMMENT** review. Never `REQUEST_CHANGES` and never `APPROVE` — this
   reviewer is advisory and must not gate a merge.
 - Do not number findings as `#1`, `#2`. GitHub turns a hash followed by digits into a
