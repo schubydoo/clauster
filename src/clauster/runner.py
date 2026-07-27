@@ -4429,15 +4429,26 @@ class SessionRunner:
         #
         # `attribution is EXTERNAL` stays the FIRST conjunct on purpose: it is what bounds
         # the psutil walk to external sessions instead of every session, every tick.
+        # ALL owners per cwd, as a set — never one owner per cwd. Several EXTERNAL sessions
+        # can share a resolved cwd with DIFFERENT bridge ancestors (a managed bridge whose
+        # session read EXTERNAL because the #820 pid gate could not enumerate its tree, beside
+        # a genuinely unmanaged one). A `{cwd: owner}` dict keeps only the last, so whichever
+        # `agents --json` happened to list last would decide: a managed owner landing last hid
+        # the live unmanaged bridge and left its phantom card up with a Resume that spawns a
+        # duplicate. Order of an external list is not a fact about ownership.
         reconciled = list(self._sessions)
-        owners_by_cwd = await asyncio.to_thread(
-            lambda: {
-                s.cwd.resolve(): owner
-                for s in reconciled
-                if s.attribution is Attribution.EXTERNAL
-                and (owner := procutil.bridge_ancestor(s.pid)) is not None
-            }
-        )
+
+        def _owners_by_cwd() -> dict[Path, set[int]]:
+            out: dict[Path, set[int]] = {}
+            for s in reconciled:
+                if s.attribution is not Attribution.EXTERNAL:
+                    continue  # first: bounds the psutil walk to external sessions
+                owner = procutil.bridge_ancestor(s.pid)
+                if owner is not None:
+                    out.setdefault(s.cwd.resolve(), set()).add(owner)
+            return out
+
+        owners_by_cwd = await asyncio.to_thread(_owners_by_cwd)
         # Keeper pids unioned in as well: a keeper's cmdline is never a bridge cmdline, so
         # `bridge_ancestor` cannot return one today — but if the pty spawn shape ever
         # changes, an unexcluded keeper fails in the DESTRUCTIVE direction, and excluding it
@@ -4448,7 +4459,9 @@ class SessionRunner:
             for pid in (inst.bridge_pid, inst.keeper_pid)
             if pid is not None
         }
-        external_cwds = {cwd for cwd, owner in owners_by_cwd.items() if owner not in managed_pids}
+        # ANY unmanaged owner makes the cwd evidence — `owners - managed_pids` non-empty.
+        # A managed owner sharing the cwd neither creates evidence nor cancels it.
+        external_cwds = {cwd for cwd, owners in owners_by_cwd.items() if owners - managed_pids}
         # No _persist() after this delete, by design: the ROW survives, so the deletion is
         # recoverable. Persisting would be a no-op anyway: _persist_subset overlays `live`
         # onto the retained `_persisted` map, which keeps the record (intentionally — it
@@ -4521,7 +4534,13 @@ class SessionRunner:
                 "pruning stopped card %s for %r: live unmanaged bridge pid %s at its cwd",
                 n,
                 project,
-                owners_by_cwd.get(Path(discovered[project].path).resolve(), "?"),
+                # Only the UNMANAGED owners: those are the evidence this delete rests on.
+                # A managed owner sharing the cwd is not why the card is going.
+                sorted(
+                    owners_by_cwd.get(Path(discovered[project].path).resolve(), set())
+                    - managed_pids
+                )
+                or "?",
             )
             del self._instances[n]
             self._procs.pop(n, None)  # don't leak the phantom's dead Popen handle

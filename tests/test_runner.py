@@ -1718,6 +1718,12 @@ async def test_poll_does_not_prune_on_our_own_bridges_session(runner_config, mon
         local_uuid="u-ours",
     )
     monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
+    # The live bridge must stay RUNNING or its fake pid reconciles to CRASHED, becoming a
+    # SECOND candidate and tripping ">1 candidate -> prune none" — which would make the
+    # assertion below pass for a reason that has nothing to do with the managed exclusion.
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None, **k: pid == 990001
+    )
     # Ancestry resolves to our OWN managed bridge pid.
     monkeypatch.setattr("clauster.runner.procutil.bridge_ancestor", lambda pid, **k: 990001)
 
@@ -1737,6 +1743,55 @@ async def test_poll_does_not_prune_on_our_own_bridges_session(runner_config, mon
     monkeypatch.setattr("clauster.runner.procutil.bridge_ancestor", lambda pid, **k: 777777)
     await runner2.poll_once()
     assert runner2.get_instance(lone.instance_id) is None, "an unmanaged bridge does prune"
+
+
+async def test_poll_prune_keeps_every_owner_at_a_shared_cwd(runner_config, monkeypatch):
+    # Several EXTERNAL sessions can share one resolved cwd with DIFFERENT bridge ancestors:
+    # a managed bridge whose session reads EXTERNAL because the #820 pid gate could not
+    # enumerate its tree, beside a genuinely unmanaged one. Keeping ONE owner per cwd made
+    # the verdict depend on which `agents --json` happened to list last — a managed owner
+    # landing last hid the live unmanaged bridge and left its phantom card up with a Resume
+    # that spawns a duplicate. Ordered managed-LAST here, which is the losing order.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    live = RemoteControlInstance(
+        project="alpha",
+        label="alpha-live",
+        status=InstanceStatus.RUNNING,
+        resume_mode="standard",
+        bridge_pid=990001,
+    )
+    phantom = RemoteControlInstance(
+        project="alpha", label="phantom", status=InstanceStatus.STOPPED, resume_mode="pty"
+    )
+    runner._instances[live.instance_id] = live
+    runner._instances[phantom.instance_id] = phantom
+    cwd = config.projects_root / "alpha"
+    sessions = [
+        WorkingSession(pid=700, cwd=cwd, kind="interactive", started_at=1, local_uuid="u-ext"),
+        WorkingSession(pid=701, cwd=cwd, kind="interactive", started_at=2, local_uuid="u-ours"),
+    ]
+    monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: sessions)
+    # The live bridge must stay RUNNING. Without this its fake pid reconciles to CRASHED,
+    # which makes it a SECOND prune candidate and trips the ">1 candidate -> prune none"
+    # guard — the phantom would then survive for a reason unrelated to what this pins.
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None, **k: pid == 990001
+    )
+    # 700 -> an UNMANAGED bridge (real evidence); 701 -> our own managed bridge, listed last.
+    owners = {700: 777777, 701: 990001}
+    monkeypatch.setattr(
+        "clauster.runner.procutil.bridge_ancestor", lambda pid, **k: owners.get(pid)
+    )
+
+    await runner.poll_once()
+    assert runner.get_instance(live.instance_id).status is InstanceStatus.RUNNING, (
+        "control: the live bridge must not become a second candidate"
+    )
+
+    assert runner.get_instance(phantom.instance_id) is None, (
+        "a managed owner listed last must not erase the unmanaged owner's evidence"
+    )
 
 
 async def test_poll_prune_reads_managed_pids_after_the_ancestry_walk(runner_config, monkeypatch):
