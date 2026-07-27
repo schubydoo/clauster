@@ -43,6 +43,13 @@ def list_working_sessions(binary: str, *, timeout: float = 10.0) -> list[Working
     """Invoke ``claude agents --json`` and parse the working-session list.
 
     Blocking — callers run it via ``asyncio.to_thread``.
+
+    **Never ``--all``.** That flag also returns *completed* background sessions, and since
+    #1116 this list feeds the phantom-prune, which DELETES a resumable card when a session
+    looks like a live unmanaged bridge. A finished session is not evidence of a live one.
+    :func:`parse_agents_json` drops terminal states as a second guard, but that guard is a
+    no-op against a pre-2.1.139 CLI (no ``state`` field, so it defaults to ``""``) — on
+    those, omitting ``--all`` is the only thing keeping completed sessions out.
     """
     resolved = resolve_binary(binary)
     proc = subprocess.run(

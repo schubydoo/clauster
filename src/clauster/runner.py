@@ -4217,6 +4217,11 @@ class SessionRunner:
         # NOT the instance's status field, which can lag or be wrong (a fresh pty bridge
         # stuck pre-ready, a crash misdetection). See the `managed` set.
         live_projects: set[str] = set()
+        # Per-instance "this pid is still OUR process", captured from the PAIR check this
+        # loop already performs (pid + proc_start), so the phantom-prune below can reuse it
+        # without a second psutil pass — and without blocking the event loop, where it has
+        # to resolve its managed-pid exclusion post-await.
+        pid_is_ours: dict[str, bool] = {}
         for instance in list(self._instances.values()):
             pid = instance.bridge_pid
             # A pty keeper is Clauster's direct child and self-exits with its bridge;
@@ -4229,6 +4234,7 @@ class SessionRunner:
             alive = await asyncio.to_thread(
                 procutil.is_live_bridge, pid, instance.bridge_proc_start
             )
+            pid_is_ours[instance.instance_id] = alive
             prev_status = instance.status
             self._reconcile_status(instance, alive)
             if (
@@ -4400,19 +4406,96 @@ class SessionRunner:
         # design (#820) but is NOT a bridge, and deleting a resumable card because someone
         # opened a terminal there is wrong. `live_projects` used to mask this by accident;
         # testing the thing the premise actually claims is the honest replacement.
-        external_cwds = await asyncio.to_thread(
-            lambda: {
-                s.cwd.resolve()
-                for s in self._sessions
-                if s.attribution is Attribution.EXTERNAL and procutil.is_bridge_process(s.pid)
-            }
-        )
-        # No _persist() after this delete, by design: this is continuous reconciliation
-        # (every poll, and the first poll runs immediately on startup), not a one-time
-        # edit — so it self-heals after any restart. Persisting would be a no-op anyway:
-        # _persist_subset overlays `live` onto the retained `_persisted` map, which keeps
-        # the record (intentionally — it preserves the project's modes for a later managed
-        # spawn). Re-materialization by `_stopped_from_persisted` is cleaned by the next poll.
+        #
+        # Walked up the ANCESTRY rather than tested on the session pid itself (#1116).
+        #
+        # Precisely: this was inert for SERVER MODE only, not for the prune as a whole. A
+        # Server Mode session's pid is the SDK worker (`…/versions/<ver> --print --sdk-url
+        # …`), whose cmdline is never a bridge cmdline, so `is_bridge_process(s.pid)`
+        # answered False and an unmanaged standard bridge could never be seen — measured on
+        # a live host, where the one reported session pid is the worker and the bridge is
+        # its parent. A flag-form pty session, by contrast, reports the BRIDGE's own pid,
+        # which does match, so that shape already worked and still does — the walk matches at
+        # depth 0. So this widens a half-working gate rather than turning on a dead one,
+        # which is the accurate risk framing: the Server Mode arm is newly live.
+        #
+        # Then excluded by MANAGED pid, which is what keeps this honest: finding a bridge
+        # ancestor proves a bridge is responsible for the session, NOT that it is unmanaged.
+        # A session of OUR bridge that reads EXTERNAL because the #820 pid gate could not
+        # enumerate the tree would otherwise become evidence for deleting that same
+        # project's stopped cards.
+        #
+        # The exclusion is applied AFTER the await, against a freshly-read `_instances` —
+        # never against a set snapshotted before it. `poll_once` runs lock-free, so a
+        # lock-holding adopt()/spawn() can publish a `bridge_pid` while this walk is
+        # suspended; a pre-await snapshot would miss it, that bridge's own session would
+        # read unmanaged, and a sibling STOPPED card would be deleted on the strength of a
+        # bridge Clauster had adopted meanwhile. The thread therefore returns raw OWNERS and
+        # the loop decides, so the read and the `del` sit in one synchronous block.
+        #
+        # `attribution is EXTERNAL` stays the FIRST conjunct on purpose: it is what bounds
+        # the psutil walk to external sessions instead of every session, every tick.
+        # ALL owners per cwd, as a set — never one owner per cwd. Several EXTERNAL sessions
+        # can share a resolved cwd with DIFFERENT bridge ancestors (a managed bridge whose
+        # session read EXTERNAL because the #820 pid gate could not enumerate its tree, beside
+        # a genuinely unmanaged one). A `{cwd: owner}` dict keeps only the last, so whichever
+        # `agents --json` happened to list last would decide: a managed owner landing last hid
+        # the live unmanaged bridge and left its phantom card up with a Resume that spawns a
+        # duplicate. Order of an external list is not a fact about ownership.
+        reconciled = list(self._sessions)
+
+        def _owners_by_cwd() -> dict[Path, set[int]]:
+            out: dict[Path, set[int]] = {}
+            for s in reconciled:
+                if s.attribution is not Attribution.EXTERNAL:
+                    continue  # first: bounds the psutil walk to external sessions
+                owner = procutil.bridge_ancestor(s.pid)
+                if owner is not None:
+                    out.setdefault(s.cwd.resolve(), set()).add(owner)
+            return out
+
+        owners_by_cwd = await asyncio.to_thread(_owners_by_cwd)
+        # Keeper pids unioned in as well: a keeper's cmdline is never a bridge cmdline, so
+        # `bridge_ancestor` cannot return one today — but if the pty spawn shape ever
+        # changes, an unexcluded keeper fails in the DESTRUCTIVE direction, and excluding it
+        # only ever under-prunes.
+        # Only pids that are still OUR process. `stop()` leaves `bridge_pid` on a dead card,
+        # so an unfiltered set treats every historical pid as current ownership — and once
+        # the OS recycles one onto a genuinely unmanaged bridge, that bridge reads "managed",
+        # its evidence is discarded, and the phantom card stays up offering a Resume that
+        # spawns a duplicate beside it. That is the exact hazard this prune exists to remove,
+        # so "it only under-prunes" is not a defence here.
+        #
+        # Judged on the PAIR (pid + proc_start) captured above, never the bare pid — the rule
+        # this file states for liveness everywhere else. That keeps the stop() grace window
+        # safe too: a card already marked STOPPED whose process is still alive still matches
+        # its pair, so it stays excluded and cannot prune its own project. Default True for an
+        # instance the loop above never saw — one adopted DURING the walk — which is the
+        # post-await TOCTOU case; assuming ours there is the non-destructive direction.
+        managed_pids = {
+            pid
+            for inst in self._instances.values()
+            if pid_is_ours.get(inst.instance_id, True)
+            for pid in (inst.bridge_pid, inst.keeper_pid)
+            if pid is not None
+        }
+        # ANY unmanaged owner makes the cwd evidence — `owners - managed_pids` non-empty.
+        # A managed owner sharing the cwd neither creates evidence nor cancels it.
+        external_cwds = {cwd for cwd, owners in owners_by_cwd.items() if owners - managed_pids}
+        # No _persist() after this delete, by design: the ROW survives, so the deletion is
+        # recoverable. Persisting would be a no-op anyway: _persist_subset overlays `live`
+        # onto the retained `_persisted` map, which keeps the record (intentionally — it
+        # preserves the project's modes for a later managed spawn).
+        #
+        # ⚠️ Recoverable by RESTART, not by the next poll. An earlier version of this
+        # comment claimed the latter; it is false in the long-running service.
+        # `_stopped_from_persisted` is reachable only from `rediscover`, which the server
+        # runs ONCE (`start_poll_loop`), and the per-tick `_adopt_rows_from_store` is
+        # live-rows-only by explicit design — so a card pruned here stays gone from the
+        # dashboard until Clauster restarts. That asymmetry is why the gate above resolves
+        # its exclusion post-await instead of trusting a stale snapshot: until #1116 this
+        # whole path was inert (`is_bridge_process` on a session pid never answered True),
+        # so every latent false positive in it goes from unreachable to live at once.
         # Gathered per PROJECT first, then decided per INSTANCE (#1096). The old form asked
         # `inst.project not in live_projects` — a project-level question standing in for an
         # instance-level one, which since #778 (N instances per project) is wrong in BOTH
@@ -4461,6 +4544,24 @@ class SessionRunner:
                 )
                 continue
             n = ids[0]
+            # INFO, not debug: this DELETES a resumable card, and the row it leaves behind
+            # is only re-materialized by `rediscover` — i.e. on restart, not next tick. The
+            # skip above was logged while the destructive branch was silent, which is
+            # backwards. Names the owning bridge pid so an operator can tell a genuine
+            # unmanaged bridge from a mis-attributed one (#1116 turned this path on for
+            # Server Mode, where it had never fired).
+            _log.info(
+                "pruning stopped card %s for %r: live unmanaged bridge pid %s at its cwd",
+                n,
+                project,
+                # Only the UNMANAGED owners: those are the evidence this delete rests on.
+                # A managed owner sharing the cwd is not why the card is going.
+                sorted(
+                    owners_by_cwd.get(Path(discovered[project].path).resolve(), set())
+                    - managed_pids
+                )
+                or "?",
+            )
             del self._instances[n]
             self._procs.pop(n, None)  # don't leak the phantom's dead Popen handle
 
