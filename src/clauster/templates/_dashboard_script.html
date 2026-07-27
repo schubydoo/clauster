@@ -5097,6 +5097,22 @@
       // (Identifier case: `value2.bind(scope2)`, verified in @alpinejs/csp@3.15.12
       // dist), so parent dashboard() state/methods (confirmTrust, coerceSpawnMode,
       // toggleClaudeMd) are reachable through `this` here.
+      // #1114: First prompt and Session name are <textarea>, not <input>, so a password
+      // manager never treats them as login fields. That swap costs one thing an <input>
+      // gave for free — it silently flattens pasted newlines — so restore it here.
+      // Typed Enter is suppressed at the element with `.prevent`; this covers PASTE and
+      // drag-drop, which no key handler sees. Without it a pasted multi-line value would
+      // reach the server, which rejects control characters in a bridge display name — a
+      // paste that used to work would start failing.
+      // Collapsed to spaces rather than stripped, so "a\nb" stays two words.
+      sanitizePrompt() {
+        this.lprompt = String(this.lprompt || "").replace(/[\r\n]+/g, " ");
+      },
+      // Same for the parent-scope, project-keyed Session name (see the `this` note above:
+      // dashboard() state is reachable from here through the merged data stack).
+      sanitizeName() {
+        this.customName[name] = String(this.customName[name] || "").replace(/[\r\n]+/g, " ");
+      },
       // Receive the "launch-pop-close" window event and close the popover for this row.
       // (The old inline handler was an if-statement, which the CSP parser rejects.)
       onLaunchPopClose(event) {

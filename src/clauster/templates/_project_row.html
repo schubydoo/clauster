@@ -108,7 +108,24 @@
                            composer, so launched blank it idles forever. -->
                       <div class="mt-2" x-show="lmode === 'detached'" x-cloak>
                         <label class="form-label small mb-1" for="lprompt-{{ p.name }}">First prompt <span class="text-secondary" x-text="lcloud ? '(optional)' : '(required)'">(required)</span></label>
-                        <input id="lprompt-{{ p.name }}" type="text" class="form-control form-control-sm" x-model="lprompt" placeholder="Initial instruction…" {{ NO_AUTOFILL }}>
+                        {# A <textarea>, not an <input type="text"> — deliberately (#1114).
+                           LastPass claimed this field and autofilled a saved USERNAME into it
+                           despite the complete opt-out recipe below, which it ignores. Proven
+                           in situ with an A/B/A on the real dashboard: the fill stops as a
+                           textarea and returns on rollback to an input. A textarea is not in
+                           the population a password manager scans for login fields, so this
+                           holds even if the extension changes HOW it picks them — unlike a
+                           fix that games its field-count heuristic.
+                           `rows="1"` + `wrap="off"` + `.field-1line` keep it a single-line
+                           control. Enter is suppressed because the <input> this replaced sat
+                           in no <form> and did nothing on Enter; `@input` flattens pasted
+                           newlines, which an <input> did for free.
+                           Do NOT "simplify" this back to an <input>. #}
+                        <textarea id="lprompt-{{ p.name }}" rows="1" wrap="off" enterkeyhint="done"
+                                  class="form-control form-control-sm field-1line"
+                                  x-model="lprompt" placeholder="Initial instruction…"
+                                  @keydown.enter.prevent="" @input="sanitizePrompt()"
+                                  {{ NO_AUTOFILL }}></textarea>
                         <p class="form-hint text-secondary small mt-1 mb-0" data-test="launch-bg-prompt-required"
                            id="bg-prompt-req-{{ p.name }}"
                            x-show="bgPromptMissing(lmode, lcloud, lprompt)" x-cloak>
@@ -180,9 +197,20 @@
                           <div class="col-12"
                                {% if pty_supported %}x-show="(resumeMode['{{ p.name }}'] || defaultResumeMode) === 'standard'"{% endif %} x-cloak>
                             <label class="form-label small mb-1" for="name-{{ p.name }}">Session name <span class="text-secondary">(optional)</span></label>
-                            <input id="name-{{ p.name }}" type="text" class="form-control form-control-sm" x-model="customName['{{ p.name }}']"
-                                   maxlength="128" placeholder="{{ p.name }}" aria-describedby="name-hint-{{ p.name }}"
-                                   title="Custom display name for this bridge, shown in claude.ai/code in place of the project name. Leave blank to use the project name." {{ NO_AUTOFILL }}>
+                            {# <textarea> for the same reason as First prompt above (#1114) —
+                               this is the field whose fill was actually observed, and the one
+                               whose value becomes a bridge display name in claude.ai/code, so
+                               an unnoticed fill leaks an identifier. `maxlength` applies to a
+                               textarea too; `@input` matters more here than above because the
+                               server rejects control characters in a display name, so a
+                               pasted newline would turn a working paste into a 422. #}
+                            <textarea id="name-{{ p.name }}" rows="1" wrap="off" enterkeyhint="done"
+                                      class="form-control form-control-sm field-1line"
+                                      x-model="customName['{{ p.name }}']"
+                                      maxlength="128" placeholder="{{ p.name }}"
+                                      aria-describedby="name-hint-{{ p.name }}"
+                                      @keydown.enter.prevent="" @input="sanitizeName()"
+                                      title="Custom display name for this bridge, shown in claude.ai/code in place of the project name. Leave blank to use the project name." {{ NO_AUTOFILL }}></textarea>
                             <p id="name-hint-{{ p.name }}" class="form-hint text-secondary small mt-1 mb-0">Leave blank to use the project name (<code>{{ p.name }}</code>).</p>
                           </div>
                           {# Sandbox toggle (#780) removed for 1.0 (#1037): `--sandbox` never

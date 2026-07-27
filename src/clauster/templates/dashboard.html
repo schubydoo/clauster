@@ -97,6 +97,25 @@
     .launch-anchor { position: relative; display: inline-block; }
     .launch-pop { position: absolute; z-index: 40; right: 0; left: auto; margin-top: .35rem;
                   width: min(360px, 92vw); box-shadow: 0 .5rem 1.25rem rgba(0,0,0,.3); }
+    /* #1114: the launch popover's two free-text fields are <textarea> so a password
+       manager never scans them as login inputs. They must still LOOK and behave like the
+       single-line inputs they replaced: no drag-resize, no vertical scrollbar, and
+       horizontal overflow (paired with wrap="off") exactly as an <input> scrolls. Kept in
+       this nonce'd block rather than a style="" attribute, which the CSP guard rejects. */
+    .field-1line { resize: none; overflow-x: auto; overflow-y: hidden;
+                   /* `white-space: pre` is what actually makes this scroll horizontally
+                      rather than wrap; the `wrap="off"` attribute computes to the same
+                      thing but is legacy (the spec enumerates soft/hard only), so the
+                      behaviour is pinned here and the attribute is belt-and-braces. */
+                   white-space: pre; overflow-wrap: normal;
+                   /* Hide the horizontal scrollbar. On a platform where scrollbars take
+                      layout (desktop Linux/Windows Chrome) a ~15px gutter inside a 20px
+                      content box would clip the single line of text. Headless Chromium
+                      suppresses scrollbars, so no CI check can catch that — hence
+                      immunizing rather than waiting to observe it. Scrolling still
+                      follows the caret, exactly as an <input> does. */
+                   scrollbar-width: none; }
+    .field-1line::-webkit-scrollbar { display: none; }
     /* In-popover consent gates (#747, widened in #1097). Each gate is a Tabler .alert
        nested inside the popover card's p-2, which doubled padding and squeezed body text
        to 1-2 words per line on a security-consent surface.

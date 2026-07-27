@@ -638,7 +638,15 @@ def test_dashboard_friendly_labels_and_label_associations(write_config):
     assert 'x-text="permLabel(lperm)"' in page  # Run button shows a friendly permission label
     assert 'x-text="filterLabel(f)"' in page  # Active-zone filter chips use friendly names
     assert "permLabel(" in page  # the helper is wired (also used by the hosted row when enabled)
-    assert 'for="lprompt-' in page  # the "First prompt" input is label-associated
+    assert 'for="lprompt-' in page  # the "First prompt" field is label-associated
+    # #1114: both launch free-text fields must be <textarea>, never <input>. LastPass
+    # claimed them as login fields and autofilled a saved username; a textarea is not in
+    # the population it scans. Asserted on the rendered markup because this is exactly the
+    # change a later "tidy-up" would revert without knowing why it exists.
+    assert '<textarea id="lprompt-' in page
+    assert '<textarea id="name-' in page
+    assert '<input id="lprompt-' not in page
+    assert '<input id="name-' not in page
     assert 'aria-labelledby="np-type-label"' in page  # New-project "Type" radio group is labelled
 
 
