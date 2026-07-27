@@ -190,6 +190,34 @@ def _split_kv_line(body: str) -> tuple[str, str] | None:
     return kv.group("prefix"), rest[len(value) :]
 
 
+# Character classification for the URL scheme, delegated to the regex ENGINE rather than
+# reimplemented, because `[a-z]` under `re.IGNORECASE` is Unicode-aware and matches more
+# than ASCII: U+212A KELVIN SIGN case-folds to `k`, U+017F LONG S to `s`, and U+0130/U+0131
+# likewise fold into the range. An ASCII-only classification silently stops matching
+# `\u212a://user@host` — which the old regex DID mask — leaking the userinfo. That is the
+# under-masking direction, and it is exactly the failure the docstring below warns about;
+# an earlier revision of this fix shipped it. The ASCII fast path keeps the common case a
+# set lookup and only pays for a regex call on a non-ASCII character.
+_SCHEME_START_RE = re.compile(r"[a-z]", re.IGNORECASE)
+_SCHEME_CHAR_RE = re.compile(r"[a-z0-9+.\-]", re.IGNORECASE)
+_SCHEME_ASCII = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+.-")
+_SCHEME_START_ASCII = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+
+def _is_scheme_char(ch: str) -> bool:
+    r"""Whether ``ch`` matches ``[a-z0-9+.\\-]`` under ``re.IGNORECASE`` (Unicode-aware)."""
+    if ch.isascii():
+        return ch in _SCHEME_ASCII
+    return _SCHEME_CHAR_RE.match(ch) is not None
+
+
+def _is_scheme_start(ch: str) -> bool:
+    """Whether ``ch`` matches ``[a-z]`` under ``re.IGNORECASE`` (Unicode-aware)."""
+    if ch.isascii():
+        return ch in _SCHEME_START_ASCII
+    return _SCHEME_START_RE.match(ch) is not None
+
+
 def _url_cred_spans(text: str) -> Iterator[tuple[int, int]]:
     r"""Yield ``(start, end)`` of each ``scheme://user@`` credential-bearing URL prefix.
 
@@ -212,18 +240,17 @@ def _url_cred_spans(text: str) -> Iterator[tuple[int, int]]:
     matching cannot cross it and backtracking cannot rescue a different terminator).
     Matches are non-overlapping and left-to-right, exactly as ``re.sub`` applies them.
     """
-    _SCHEME = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+.-"
     i = 0
     while True:
         sep = text.find("://", i)
         if sep == -1:
             return
         run = sep
-        while run > i and text[run - 1] in _SCHEME:
+        while run > i and _is_scheme_char(text[run - 1]):
             run -= 1
         start = -1
         for j in range(run, sep):
-            if text[j].isascii() and text[j].isalpha():
+            if _is_scheme_start(text[j]):
                 start = j
                 break
         if start == -1:

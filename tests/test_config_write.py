@@ -694,7 +694,12 @@ def test_url_and_kv_scans_match_the_regexes_they_replaced():
         m = old_kv.match(body)
         return None if m is None else (m.group("prefix"), m.group("trail"))
 
-    for alphabet, maxlen in (("a:/@.-", 7), ("k = v", 6)):
+    # The Unicode alphabet is NOT decorative. `[a-z]` under re.IGNORECASE is Unicode-aware:
+    # U+212A KELVIN SIGN folds to `k`, U+017F LONG S to `s`, U+0130/U+0131 likewise. An
+    # ASCII-only scan silently stopped masking `\u212a://user@host`, leaking the userinfo —
+    # an earlier revision of this fix shipped exactly that, and an ASCII-only test alphabet
+    # is what let it through.
+    for alphabet, maxlen in (("a:/@.-", 7), ("k = v", 6), ("a\u212a:/@-", 6)):
         for length in range(maxlen):
             for combo in itertools.product(alphabet, repeat=length):
                 s = "".join(combo)
@@ -703,6 +708,17 @@ def test_url_and_kv_scans_match_the_regexes_they_replaced():
 
     # The lookbehind trap, pinned explicitly so a future "simplification" cannot reintroduce it.
     assert cw._mask_url_creds("-https://u@h", repl) == f"-{cw.REDACTION_SENTINEL}@h"
+
+    # EVERY codepoint the old pattern's `[a-z]` accepts under IGNORECASE, as a single-char
+    # scheme — the shape that leaked. Enumerated rather than sampled: the class is small
+    # (52 ASCII letters plus 4 case-folding characters) and this is the whole of it.
+    for code in range(0x11000):
+        ch = chr(code)
+        if re.match(r"[a-z]", ch, re.IGNORECASE):
+            probe = f"{ch}://u@h"
+            assert old_url.sub(repl, probe) == cw._mask_url_creds(probe, repl), (
+                f"scheme char U+{code:04X} diverges — under-masking leaks the userinfo"
+            )
 
 
 def test_redact_secret_lines_is_linear_on_every_hostile_shape():
