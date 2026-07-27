@@ -22,6 +22,7 @@ import tempfile
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
+import psutil
 import pytest
 
 from clauster.claustrum_client import AuthRejected, DaemonUnreachable
@@ -299,7 +300,10 @@ async def test_spawn_launcher_hang_tree_kill_failure_still_raises(make_daemon, m
     monkeypatch.setattr("clauster.claustrum_daemon.procutil.is_windows", lambda: True)
 
     def _boom(pid: int) -> None:
-        raise OSError("psutil could not walk the tree")
+        # psutil's error family descends from Exception, NOT OSError — which is exactly why
+        # the production guard is `except Exception`. An OSError here would pass even
+        # against a too-narrow guard.
+        raise psutil.AccessDenied(pid)
 
     monkeypatch.setattr("clauster.claustrum_daemon.procutil.force_kill_tree", _boom)
     daemon = make_daemon(spawn_timeout_seconds=0.5)

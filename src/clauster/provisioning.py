@@ -345,7 +345,17 @@ def _run_clone_streaming(
         # python): Linux honours the 1s timeout (1.01s), Windows paid the stub's full 3s sleep
         # (3.12s). Best-effort and broadly guarded — a failed reap must still leave the plain
         # `terminate()` to run, since this is a watchdog thread whose raise nobody observes.
-        if procutil.is_windows():
+        #
+        # `poll() is None` is a PID-REUSE guard, not an optimisation. `Timer.cancel()` in the
+        # `finally` below genuinely loses its race sometimes, so this callback can fire after
+        # the clone finished and `proc.wait()` reaped the child. `proc.terminate()` is safe
+        # then (CPython short-circuits on `returncode is not None`), but `force_kill_tree`
+        # takes a BARE PID with no identity check and would bypass that — on POSIX, where
+        # `wait()` really does free the pid, that is a hard kill aimed at whatever recycled
+        # it. Windows happens to be safe anyway (the open handle blocks reuse, and a reap
+        # after the child exits can't reach the orphan regardless — verified on a VM), but
+        # relying on that would leave a trap for anyone who later drops the platform gate.
+        if procutil.is_windows() and proc.poll() is None:
             try:
                 procutil.force_kill_tree(proc.pid)
             except Exception as exc:  # noqa: BLE001 — watchdog thread; never let this escape

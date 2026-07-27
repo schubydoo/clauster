@@ -1624,15 +1624,11 @@ def test_status_route_still_running_then_terminal(tmp_path: Path, monkeypatch) -
         # Let the still-running login finish, then /status returns the terminal result and
         # reaps the flow — a subsequent /status is 409 (flow gone → stop polling).
         #
-        # Reap the TREE, not just the process we hold: on Windows the configured binary is
-        # the `claude.cmd` shim (`python "%~dp0claude"`), so a bare `terminate()` kills
-        # cmd.exe and leaves its python child holding our stdout pipe. `_teardown`'s reap is
-        # (correctly) gated on the child still being alive, and once the shim has exited that
-        # orphan is unreachable — `psutil.Process(dead_pid)` raises `NoSuchProcess` even while
-        # Popen holds the handle (verified on a Windows VM). So the reader never sees EOF, the
-        # join burns its full 5s and leaks the thread: 8.03s here on Windows vs 1.41s on Linux
-        # (CI test-analytics at dc69e21). Killing the tree is also the more faithful simulation
-        # of the provider "finishing" — the whole process group ends, not just the wrapper.
+        # Reap the TREE, not just the process we hold — "the provider finished" means the
+        # whole process group ended, not only the wrapper. A bare `terminate()` kills just
+        # the Windows `claude.cmd` shim and orphans its python child onto our stdout pipe,
+        # costing a flat 5s reader-join here (8.03s Windows vs 1.41s Linux). See
+        # `project_clauster_windows_support` for why `_teardown` can't clean that up itself.
         proc = app.state.login_shepherd._flow.proc  # noqa: SLF001 - provider "finished"
         procutil.force_kill_tree(proc.pid)
         proc.wait(timeout=5)

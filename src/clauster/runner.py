@@ -2664,8 +2664,19 @@ class SessionRunner:
                 # was exactly what this did there. Reap the tree first; the plain `kill()`
                 # still runs below and stays the only path on POSIX, where the pid we hold
                 # IS the bridge.
+                #
+                # Guarded on its own, NOT by the `except (ProcessLookupError, OSError)`
+                # below: psutil's error family (`NoSuchProcess`/`AccessDenied`/
+                # `ZombieProcess`) descends from `Exception`, not `OSError`, so that tuple
+                # cannot catch it. An escape here is the worst of the three reap sites — it
+                # would skip `kill()`, the `wait()`, AND `clear_pointer()`, leaving the
+                # poisoned pointer in place (the exact loop this method exists to break)
+                # and propagating out before `_persist()` writes the ERROR status.
                 if procutil.is_windows():
-                    await asyncio.to_thread(procutil.force_kill_tree, proc.pid)
+                    try:
+                        await asyncio.to_thread(procutil.force_kill_tree, proc.pid)
+                    except Exception as exc:  # noqa: BLE001 — must not skip kill/clear_pointer
+                        _log.debug("tree kill of poisoned bridge %s failed: %s", proc.pid, exc)
                 proc.kill()  # never leave an idle orphan bridge behind
                 # Reap + confirm death BEFORE clearing: otherwise clear_pointer's liveness
                 # guard can still see the just-killed pid as alive and refuse (a poison loop).

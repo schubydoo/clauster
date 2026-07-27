@@ -516,6 +516,20 @@ class ClaustrumDaemon:
             # `kill()` reaps only the process we hold. A launcher that timed out mid-detach
             # would otherwise leave that chain running with our log file open. Best-effort:
             # a failed reap must not mask the DaemonSpawnError this path exists to raise.
+            #
+            # ⚠️ Deliberately SYNCHRONOUS — do NOT "harmonise" this to `asyncio.to_thread`
+            # to match runner.py. `proc` here is an `asyncio.subprocess.Process`, and an
+            # await between the reap and `proc.kill()` lets the loop run the child watcher,
+            # which nulls the transport's `_proc`; the unguarded `kill()` below would then
+            # raise `ProcessLookupError` and skip `_unlink_token_handoff`, leaving the auth
+            # token on disk. With no await point that interleaving cannot happen. The psutil
+            # walk is one bulk snapshot (single-digit ms) on a path that only runs when a
+            # spawn already timed out, and this handler does synchronous FS work regardless.
+            #
+            # Semantic note: this also reaps a daemon the launcher DID detach before hanging
+            # (DETACHED_PROCESS doesn't erase the ppid link psutil walks), where previously it
+            # survived for a later `ensure()` to find. That is intended — we declared this
+            # launch failed, so we don't leave an unowned daemon serving from it.
             if procutil.is_windows():
                 try:
                     procutil.force_kill_tree(proc.pid)
