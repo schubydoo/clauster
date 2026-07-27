@@ -457,18 +457,24 @@ async def test_heal_reaps_the_whole_bridge_tree_on_windows(runner_config, monkey
     proc = _FakeProc(alive=True, pid=4242)
     killed: list[int] = []
     killed_before_kill: list[bool] = []
+    waited: list[object] = []
 
-    def _record(pid: int) -> None:
+    def _record(pid: int, **kw: object) -> None:
         # Capture kill() state AT REAP TIME: asserting that both happened cannot tell the
         # order apart, and the order is load-bearing — killing the shim first can leave the
         # descendants reparented so `children()` no longer finds them.
         killed.append(pid)
         killed_before_kill.append(proc.killed)
+        waited.append(kw.get("wait_timeout"))
 
     monkeypatch.setattr("clauster.runner.procutil.force_kill_tree", _record)
     await runner._heal_poisoned_reattach(inst, proc, config.projects_root / "alpha", "deleted")
     assert killed == [4242], "the bridge's tree must be reaped on Windows"
     assert killed_before_kill == [False], "the reap must run BEFORE kill(), not after"
+    assert waited == [0.05], (  # the _POISON_STOP_TIMEOUT patched at the top of this test
+        "the reap must WAIT for death: clear_pointer below is gated on the descendant "
+        "actually being gone, and kill() is asynchronous"
+    )
     assert proc.killed, "the tree kill is prepended to kill(), not a replacement"
 
 
@@ -477,7 +483,9 @@ async def test_heal_does_not_tree_kill_on_posix(runner_config, monkeypatch):
     monkeypatch.setattr("clauster.runner._POISON_STOP_TIMEOUT", 0.05)
     monkeypatch.setattr("clauster.runner.procutil.is_windows", lambda: False)
     killed: list[int] = []
-    monkeypatch.setattr("clauster.runner.procutil.force_kill_tree", lambda pid: killed.append(pid))
+    monkeypatch.setattr(
+        "clauster.runner.procutil.force_kill_tree", lambda pid, **kw: killed.append(pid)
+    )
     config, claude_json = runner_config
     runner = SessionRunner(config, claude_json=claude_json)
     inst = RemoteControlInstance(project="alpha", label="alpha", status=InstanceStatus.ERROR)
@@ -501,7 +509,7 @@ async def test_heal_survives_a_tree_kill_that_raises(runner_config, monkeypatch)
     monkeypatch.setattr("clauster.runner._POISON_STOP_TIMEOUT", 0.05)
     monkeypatch.setattr("clauster.runner.procutil.is_windows", lambda: True)
 
-    def _boom(pid: int) -> None:
+    def _boom(pid: int, **kw: object) -> None:
         raise psutil.AccessDenied(pid)
 
     monkeypatch.setattr("clauster.runner.procutil.force_kill_tree", _boom)

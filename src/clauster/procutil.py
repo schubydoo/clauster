@@ -422,12 +422,27 @@ def is_windows() -> bool:
     return sys.platform == "win32"
 
 
-def force_kill_tree(pid: int) -> None:
+def force_kill_tree(pid: int, *, wait_timeout: float | None = None) -> None:
     """Best-effort hard kill of ``pid`` and all its descendants.
 
     The graceful-stop fallback: used when a bridge ignores SIGINT/CTRL_BREAK, or
     to reap a wrapper process (e.g. a Windows ``.cmd`` shim) that outlives the
     bridge it launched. Safe on a dead/reused/absent PID.
+
+    ``wait_timeout`` opts into waiting (bounded) for the reaped processes to actually
+    die. Killing is ASYNCHRONOUS — SIGKILL is delivered, not awaited, and Windows
+    ``TerminateProcess`` likewise returns before the process is gone — so without this
+    a caller that immediately re-checks liveness can still see a target alive. That
+    matters when the next step is gated on death: ``runner``'s poison heal clears a
+    ``bridge-pointer.json`` whose recorded pid is the DESCENDANT, and
+    ``pointers.is_live`` refusing sends it back into the reattach loop the heal exists
+    to break.
+
+    **Opt-in, not the default**, because waiting blocks the calling thread: the
+    ``claustrum_daemon`` call site runs synchronously on the event loop (deliberately —
+    an await there would let the subprocess transport tear down before its ``kill()``),
+    and must not gain a wait. Callers that can afford to block (a thread, or
+    ``asyncio.to_thread``) pass a timeout; everyone else keeps fire-and-forget.
     """
     try:
         proc = psutil.Process(pid)
@@ -440,6 +455,25 @@ def force_kill_tree(pid: int) -> None:
             p.kill()
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             pass
+    if wait_timeout is None:
+        return
+    # Bounded and best-effort: `wait_procs` returns (gone, alive) rather than raising,
+    # and a survivor (an unkillable/AccessDenied process) simply means the caller's
+    # liveness re-check may still see it — the same position it was in before. Never
+    # let a psutil failure here undo the kills we already delivered.
+    try:
+        _, alive = psutil.wait_procs(targets, timeout=wait_timeout)
+    except Exception as exc:  # noqa: BLE001 — the kills already landed; the wait is a bonus
+        _log.debug("force_kill_tree: waiting for %s's tree failed: %s", pid, exc)
+        return
+    if alive:
+        _log.debug(
+            "force_kill_tree: %d of %d processes under %s outlived the %ss wait",
+            len(alive),
+            len(targets),
+            pid,
+            wait_timeout,
+        )
 
 
 def owned_pids(root_pids: Iterable[int]) -> set[int]:

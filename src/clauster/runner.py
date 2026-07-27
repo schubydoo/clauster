@@ -2672,9 +2672,20 @@ class SessionRunner:
                 # would skip `kill()`, the `wait()`, AND `clear_pointer()`, leaving the
                 # poisoned pointer in place (the exact loop this method exists to break)
                 # and propagating out before `_persist()` writes the ERROR status.
+                #
+                # `wait_timeout` because the NEXT steps are gated on death: `proc.wait()`
+                # below only confirms the pid WE hold (the `.cmd` shim), while the pointer
+                # records the real bridge — a descendant. `kill()` is asynchronous, so
+                # without the wait `clear_pointer`'s liveness guard can still see that
+                # descendant alive, refuse, and leave the poisoned pointer for the next
+                # launch to reattach to — the exact loop this method exists to break.
+                # Affordable here (already off the loop in a thread), unlike the
+                # claustrum call site.
                 if procutil.is_windows():
                     try:
-                        await asyncio.to_thread(procutil.force_kill_tree, proc.pid)
+                        await asyncio.to_thread(
+                            procutil.force_kill_tree, proc.pid, wait_timeout=_POISON_STOP_TIMEOUT
+                        )
                     except Exception as exc:  # noqa: BLE001 — must not skip kill/clear_pointer
                         _log.debug("tree kill of poisoned bridge %s failed: %s", proc.pid, exc)
                 proc.kill()  # never leave an idle orphan bridge behind
