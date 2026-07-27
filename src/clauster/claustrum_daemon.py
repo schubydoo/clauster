@@ -530,6 +530,15 @@ class ClaustrumDaemon:
             # (DETACHED_PROCESS doesn't erase the ppid link psutil walks), where previously it
             # survived for a later `ensure()` to find. That is intended — we declared this
             # launch failed, so we don't leave an unowned daemon serving from it.
+            #
+            # Read the blast radius literally: `force_kill_tree` walks `children(recursive=True)`,
+            # so this is "the daemon AND its hosted subtree", not just the daemon. A detached
+            # daemon has already spawned hosted agents (see `_spawn`'s env comment), it binds the
+            # SHARED socket as soon as it is up, `aclose()` treats it as designed to outlive our
+            # connection, and `self._lock` serialises `ensure()` in-process only — so another
+            # Clauster process could have connected in this window and loses its sessions too.
+            # Bounded by `spawn_timeout_seconds` and still the right call for a launch we have
+            # declared failed, but it is a wider reap than "we kill the daemon" suggests.
             if procutil.is_windows():
                 try:
                     procutil.force_kill_tree(proc.pid)

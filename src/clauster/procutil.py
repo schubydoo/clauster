@@ -450,10 +450,16 @@ def force_kill_tree(pid: int, *, wait_timeout: float | None = None) -> None:
     swallows the ``ChildProcessError`` and records ``returncode = 0``. A bridge we just
     SIGKILLed would be observed as a **clean exit 0** instead of ``-SIGKILL``, i.e.
     STOPPED instead of CRASHED (with an asyncio transport the child watcher logs "Unknown
-    child process" and reports 255 instead). The current caller is safe because it reaps
-    a *descendant* tree on Windows; ``runner._await_exit``'s force-kill fallback and
-    ``pty_keeper``'s post-kill poll are the two places that look like they want this
-    parameter and must NOT get it.
+    child process" and reports 255 instead).
+
+    The only caller passing it (``runner``'s poison heal) is safe **solely because it is
+    gated on Windows**, where ``psutil.Process.wait()`` does not go through ``os.waitpid``
+    and so cannot reap our own child. It is NOT safe by virtue of reaping descendants:
+    ``targets`` includes the root (see below), and that call site passes the very pid it
+    holds a ``Popen`` for. Dropping the platform gate is therefore what makes it unsafe —
+    which is precisely the scenario the reader of this paragraph is likely to be in.
+    ``runner._await_exit``'s force-kill fallback and ``pty_keeper``'s post-kill poll are
+    the two places that look like they want this parameter and must NOT get it.
     """
     try:
         proc = psutil.Process(pid)

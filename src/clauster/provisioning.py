@@ -355,6 +355,14 @@ def _run_clone_streaming(
         # it. Windows happens to be safe anyway (the open handle blocks reuse, and a reap
         # after the child exits can't reach the orphan regardless — verified on a VM), but
         # relying on that would leave a trap for anyone who later drops the platform gate.
+        #
+        # ⚠️ For that reader: `poll()` NARROWS the window, it does not close it. `poll()`
+        # and `force_kill_tree(proc.pid)` are separate steps, and the main thread's
+        # `proc.wait()` can reap the child in between — freeing the pid before psutil
+        # looks it up. Closing it needs identity rather than a bare pid: pass an expected
+        # `create_time()` and bail on mismatch, the shape `_expected_epoch` /
+        # `jiffies_to_epoch` already use elsewhere in this module. Do that BEFORE dropping
+        # the `is_windows()` gate, not after.
         if procutil.is_windows() and proc.poll() is None:
             try:
                 procutil.force_kill_tree(proc.pid)
