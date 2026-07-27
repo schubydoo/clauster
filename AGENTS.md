@@ -56,8 +56,9 @@ CI gate; `scripts/e2e.sh` clears the addopts and runs it.
 
 ## Architecture
 
-App factory in `app.py`; entry point is `clauster.__main__:main` (`clauster run`).
-Key modules under `src/clauster/`:
+App factory in `app.py`; entry point is `clauster.__main__:main` — which owns argument
+parsing for every subcommand, plus the hidden `__pty-keeper__` / `__recap-hook__` forms a
+frozen build re-invokes itself with. Key modules under `src/clauster/`:
 
 - **`runner.py`** — `SessionRunner`: spawn / stop / observe standard bridges.
 - **`pty_keeper.py`** — sidecar owning a true-resume (pty) bridge's PTY.
@@ -76,6 +77,15 @@ Key modules under `src/clauster/`:
 - **`auth.py`** — auth foundation; fails closed.
 - **`config.py` · `state.py` · `models.py`** — config load, `state.json`
   persistence, domain models.
+- **`login_shepherd.py`** — dashboard-driven `claude` account login, over a PTY.
+- **`ops.py`** — the operational CLIs: `doctor`, `backup`, `restore`, `migrate`,
+  `install-service`.
+- **`usage.py`** — cost / token accounting read from a session transcript JSONL.
+- **`deps.py`** — optional-extras detection for the frozen binary, `doctor`, and the UI.
+- **`config_editor.py`** — safe-allowlist editing for the in-app config editor (Tier A).
+- **`config_write.py` · `config_write_mcp.py`** — the code-executing config-write trust
+  tier and its MCP surface. Security-sensitive: read the invariants below first.
+- **`mcp_server.py`** — the `clauster mcp` stdio MCP server.
 
 `templates/` (Jinja + jinja2-fragments) and `static/` render the Alpine/Tabler UI.
 
@@ -156,7 +166,7 @@ The branch ruleset enforces this; CI and review are the merge gate.
 | `ruff check` + `ruff format` | 99 cols, docstrings required |
 | Type check + docs lint | `just check` runs everything locally |
 | **Changeset** | Add one under `.changeset/`, or apply the `no-changelog` label if the PR genuinely has no user-facing effect (CI, refactor). Keep the body to **one tight line**. Use `major` for anything breaking — including a removed or renamed config key. |
-| **Code review** | [Greptile](https://www.greptile.com/) reviews every PR automatically. Its threads must be resolved before merge; unresolved threads block. Reply *and* resolve on the thread itself. |
+| **Code review** | [Greptile](https://www.greptile.com/) reviews every PR automatically. Its threads must be resolved before merge; unresolved threads block. Reply *and* resolve on the thread itself. ⚠️ Its free OSS tier caps at **100 reviews per billing period**, and when exhausted it posts a notice *in place of* a review — a `COMMENTED` review carrying **zero inline comments**. Check for inline comments, not for "Greptile reviewed". The maintainer can request a second opinion with `@claude review` (maintainer-only, advisory, never blocks). |
 | Docs | If the change alters behavior, update `README.md`, `docs/`, and `clauster.yml.example` **in the same PR**. The published site gates on `uv run --extra docs mkdocs build --strict`, which `just check` now runs (also available alone as `just docs-build`). It catches what `lint-docs.sh` cannot: markdownlint checks Markdown *style*, not whether a link target resolves, so a link leaving the `docs/` tree (e.g. `../UPGRADING.md` — link the rendered `upgrading.md` instead) lints clean and still fails CI. |
 
 `Closes #N` goes in the PR **description**, never in a squash-merge commit body.
