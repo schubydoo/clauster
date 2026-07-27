@@ -173,6 +173,74 @@ def test_force_kill_tree_safe_on_dead_pid():
     procutil.force_kill_tree(2_000_000_000)  # absent PID -> no raise
 
 
+def test_force_kill_tree_wait_timeout_confirms_death():
+    """`wait_timeout` makes the process observably gone by the time the call returns.
+
+    Killing is asynchronous, so a caller that re-checks liveness immediately can otherwise
+    still see the target alive — which sends `runner`'s poison heal back into the reattach
+    loop, because `clear_pointer` is gated on the (descendant) pid being dead.
+    """
+    import subprocess
+    import sys
+
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        procutil.force_kill_tree(proc.pid, wait_timeout=5)
+        # No proc.wait() first: the point is that force_kill_tree already waited.
+        assert not psutil.pid_exists(proc.pid) or psutil.Process(proc.pid).status() in (
+            psutil.STATUS_ZOMBIE,
+            psutil.STATUS_DEAD,
+        ), "wait_timeout must not return while the target is still running"
+    finally:
+        # NB on POSIX psutil's wait() already reaped this child, so Popen.poll() reports 0
+        # (not -SIGKILL) and this guard never fires — it is a Windows/edge-case net only.
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+def test_force_kill_tree_wait_survivor_is_logged_not_raised(monkeypatch, caplog):
+    """A process that outlives the wait degrades to the old behaviour, never a raise."""
+    survivor = object()
+
+    class FakeProc:
+        def __init__(self, pid):
+            pass
+
+        def children(self, recursive=False):
+            return []
+
+        def kill(self):
+            return None
+
+    monkeypatch.setattr(procutil.psutil, "Process", FakeProc)
+    monkeypatch.setattr(procutil.psutil, "wait_procs", lambda targets, timeout: ([], [survivor]))
+    with caplog.at_level("DEBUG", logger="clauster.procutil"):
+        procutil.force_kill_tree(4242, wait_timeout=0.01)
+    assert "outlived" in caplog.text
+
+
+def test_force_kill_tree_wait_failure_is_swallowed(monkeypatch):
+    """A psutil failure in the WAIT must not undo or mask the kills already delivered."""
+
+    class FakeProc:
+        def __init__(self, pid):
+            pass
+
+        def children(self, recursive=False):
+            return []
+
+        def kill(self):
+            return None
+
+    def _boom(targets, timeout):
+        raise psutil.Error("wait blew up")
+
+    monkeypatch.setattr(procutil.psutil, "Process", FakeProc)
+    monkeypatch.setattr(procutil.psutil, "wait_procs", _boom)
+    procutil.force_kill_tree(4242, wait_timeout=0.01)  # no raise
+
+
 def test_force_kill_tree_swallows_kill_race(monkeypatch):
     # A target that dies between enumeration and kill (NoSuchProcess on .kill())
     # must be swallowed per-process, not abort the whole tree-kill.

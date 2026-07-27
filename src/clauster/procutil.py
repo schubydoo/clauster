@@ -411,12 +411,55 @@ def _expected_epoch(proc_start: str | float | None) -> float | None:
     return jiffies_to_epoch(jiffies)
 
 
-def force_kill_tree(pid: int) -> None:
+def is_windows() -> bool:
+    """Whether we're on Windows — the seam for the "reap the tree, not just the child" guards.
+
+    Isolated behind a function (like ``login_shepherd._is_win32``) so a POSIX test can drive a
+    win32-only branch by patching THIS, instead of ``monkeypatch.setattr(sys, "platform", …)``
+    — which mutates the interpreter-wide singleton for every module and every live thread in
+    the xdist worker, and incidentally flips ``shutil.which``/``os.path`` behaviour too.
+    """
+    return sys.platform == "win32"
+
+
+def force_kill_tree(pid: int, *, wait_timeout: float | None = None) -> None:
     """Best-effort hard kill of ``pid`` and all its descendants.
 
     The graceful-stop fallback: used when a bridge ignores SIGINT/CTRL_BREAK, or
     to reap a wrapper process (e.g. a Windows ``.cmd`` shim) that outlives the
     bridge it launched. Safe on a dead/reused/absent PID.
+
+    ``wait_timeout`` opts into waiting (bounded) for the reaped processes to actually
+    die. Killing is ASYNCHRONOUS — SIGKILL is delivered, not awaited, and Windows
+    ``TerminateProcess`` likewise returns before the process is gone — so without this
+    a caller that immediately re-checks liveness can still see a target alive. That
+    matters when the next step is gated on death: ``runner``'s poison heal clears a
+    ``bridge-pointer.json`` whose recorded pid is the DESCENDANT, and
+    ``pointers.is_live`` refusing sends it back into the reattach loop the heal exists
+    to break.
+
+    **Opt-in, not the default**, because waiting blocks the calling thread: the
+    ``claustrum_daemon`` call site runs synchronously on the event loop (deliberately —
+    an await there would let the subprocess transport tear down before its ``kill()``),
+    and must not gain a wait. Callers that can afford to block (a thread, or
+    ``asyncio.to_thread``) pass a timeout; everyone else keeps fire-and-forget.
+
+    ⚠️ **Never pass ``wait_timeout`` for a pid you hold a ``Popen`` / asyncio subprocess
+    transport for.** On POSIX ``psutil.Process.wait()`` goes through ``os.waitpid``, so it
+    REAPS a process that is our own child — and ``subprocess.Popen._try_wait`` then
+    swallows the ``ChildProcessError`` and records ``returncode = 0``. A bridge we just
+    SIGKILLed would be observed as a **clean exit 0** instead of ``-SIGKILL``, i.e.
+    STOPPED instead of CRASHED (with an asyncio transport the child watcher logs "Unknown
+    child process" and reports 255 instead).
+
+    The only caller passing it (``runner``'s poison heal) is safe **solely because it is
+    gated on Windows**, where ``psutil.Process.wait()`` does not go through ``os.waitpid``
+    and so cannot reap our own child. It is NOT safe by virtue of reaping descendants:
+    ``targets`` includes the root (see below), and that call site passes the very pid it
+    holds a ``Popen`` for. Dropping the platform gate is therefore what makes it unsafe —
+    which is precisely the scenario the reader of this paragraph is likely to be in.
+    ``runner._await_exit``'s force-kill fallback and ``pty_keeper``'s post-kill poll are
+    the two places that look like they want this parameter and must NOT get it.
     """
     try:
         proc = psutil.Process(pid)
@@ -429,6 +472,28 @@ def force_kill_tree(pid: int) -> None:
             p.kill()
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             pass
+    if wait_timeout is None:
+        return
+    # Bounded and best-effort. The guard is LOAD-BEARING, not belt-and-braces: `wait_procs`
+    # returns (gone, alive) for a plain timeout, but its per-process `proc.wait()` is
+    # `@wrap_exceptions`-decorated on Windows, so an OSError from the cext surfaces as
+    # `AccessDenied`/`NoSuchProcess` and propagates out. One protected process would then
+    # abort the wait for every remaining target — degrading to the old fire-and-forget
+    # behaviour, which is exactly what the caller had before, so swallowing is right.
+    # Never let a psutil failure here undo the kills we already delivered.
+    try:
+        _, alive = psutil.wait_procs(targets, timeout=wait_timeout)
+    except Exception as exc:  # noqa: BLE001 — the kills already landed; the wait is a bonus
+        _log.debug("force_kill_tree: waiting for %s's tree failed: %s", pid, exc)
+        return
+    if alive:
+        _log.debug(
+            "force_kill_tree: %d of %d processes under %s outlived the %ss wait",
+            len(alive),
+            len(targets),
+            pid,
+            wait_timeout,
+        )
 
 
 def owned_pids(root_pids: Iterable[int]) -> set[int]:
