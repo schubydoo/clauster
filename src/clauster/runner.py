@@ -4217,6 +4217,11 @@ class SessionRunner:
         # NOT the instance's status field, which can lag or be wrong (a fresh pty bridge
         # stuck pre-ready, a crash misdetection). See the `managed` set.
         live_projects: set[str] = set()
+        # Per-instance "this pid is still OUR process", captured from the PAIR check this
+        # loop already performs (pid + proc_start), so the phantom-prune below can reuse it
+        # without a second psutil pass — and without blocking the event loop, where it has
+        # to resolve its managed-pid exclusion post-await.
+        pid_is_ours: dict[str, bool] = {}
         for instance in list(self._instances.values()):
             pid = instance.bridge_pid
             # A pty keeper is Clauster's direct child and self-exits with its bridge;
@@ -4229,6 +4234,7 @@ class SessionRunner:
             alive = await asyncio.to_thread(
                 procutil.is_live_bridge, pid, instance.bridge_proc_start
             )
+            pid_is_ours[instance.instance_id] = alive
             prev_status = instance.status
             self._reconcile_status(instance, alive)
             if (
@@ -4453,9 +4459,23 @@ class SessionRunner:
         # `bridge_ancestor` cannot return one today — but if the pty spawn shape ever
         # changes, an unexcluded keeper fails in the DESTRUCTIVE direction, and excluding it
         # only ever under-prunes.
+        # Only pids that are still OUR process. `stop()` leaves `bridge_pid` on a dead card,
+        # so an unfiltered set treats every historical pid as current ownership — and once
+        # the OS recycles one onto a genuinely unmanaged bridge, that bridge reads "managed",
+        # its evidence is discarded, and the phantom card stays up offering a Resume that
+        # spawns a duplicate beside it. That is the exact hazard this prune exists to remove,
+        # so "it only under-prunes" is not a defence here.
+        #
+        # Judged on the PAIR (pid + proc_start) captured above, never the bare pid — the rule
+        # this file states for liveness everywhere else. That keeps the stop() grace window
+        # safe too: a card already marked STOPPED whose process is still alive still matches
+        # its pair, so it stays excluded and cannot prune its own project. Default True for an
+        # instance the loop above never saw — one adopted DURING the walk — which is the
+        # post-await TOCTOU case; assuming ours there is the non-destructive direction.
         managed_pids = {
             pid
             for inst in self._instances.values()
+            if pid_is_ours.get(inst.instance_id, True)
             for pid in (inst.bridge_pid, inst.keeper_pid)
             if pid is not None
         }

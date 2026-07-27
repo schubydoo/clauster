@@ -1745,6 +1745,53 @@ async def test_poll_does_not_prune_on_our_own_bridges_session(runner_config, mon
     assert runner2.get_instance(lone.instance_id) is None, "an unmanaged bridge does prune"
 
 
+async def test_poll_prune_ignores_a_recycled_pid_from_a_stopped_instance(
+    runner_config, monkeypatch
+):
+    # `stop()` leaves `bridge_pid` on a dead card. If every historical pid counted as current
+    # ownership, an OS-recycled pid landing on a genuinely unmanaged bridge would read
+    # "managed", its evidence would be discarded, and the phantom card would stay up offering
+    # a Resume that spawns a duplicate beside it — the exact hazard this prune exists to
+    # remove. Ownership is judged on the PAIR, so a recycled pid is not ours.
+    #
+    # The stale-pid holder lives in a DIFFERENT project on purpose: it contributes its pid to
+    # the global managed set without becoming a second candidate at alpha, which would let
+    # the ">1 candidate -> prune none" guard decide this instead of the pid set.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    ghost = RemoteControlInstance(
+        project="gamma",
+        label="ghost",
+        status=InstanceStatus.STOPPED,
+        resume_mode="standard",
+        bridge_pid=555000,
+        bridge_proc_start=111.0,
+    )
+    phantom = RemoteControlInstance(
+        project="alpha", label="phantom", status=InstanceStatus.STOPPED, resume_mode="pty"
+    )
+    runner._instances[ghost.instance_id] = ghost
+    runner._instances[phantom.instance_id] = phantom
+    sess = WorkingSession(
+        pid=800,
+        cwd=config.projects_root / "alpha",
+        kind="interactive",
+        started_at=1,
+        local_uuid="u-ext",
+    )
+    monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
+    # The pair check fails: 555000 is alive again, but as somebody else's process.
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    # ...and that recycled pid is what the session's ancestry now resolves to.
+    monkeypatch.setattr("clauster.runner.procutil.bridge_ancestor", lambda pid, **k: 555000)
+
+    await runner.poll_once()
+
+    assert runner.get_instance(phantom.instance_id) is None, (
+        "a recycled pid from a stopped instance must not mask the unmanaged bridge"
+    )
+
+
 async def test_poll_prune_keeps_every_owner_at_a_shared_cwd(runner_config, monkeypatch):
     # Several EXTERNAL sessions can share one resolved cwd with DIFFERENT bridge ancestors:
     # a managed bridge whose session reads EXTERNAL because the #820 pid gate could not
