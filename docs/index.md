@@ -38,7 +38,8 @@ Interactive Session mode, this *recaps* the prior conversation rather than truly
 
 ### Projects & bridges
 
-- One card per child directory of your `projects_root`.
+- One card per child directory of your `projects_root`, plus a card for each
+  additional bridge or session a project is running or has stopped.
 - **Run Claude here** (launch) / Stop / Resume a bridge from the card. For a
   deliberate fresh start, **Forget** a stopped session (drops it from Recent),
   then relaunch.
@@ -52,11 +53,13 @@ Interactive Session mode, this *recaps* the prior conversation rather than truly
 
 - Live bridge debug-log tail over a WebSocket — ANSI-stripped and ID-redacted.
 - In-dashboard editor for a project's Claude Code config surfaces — `CLAUDE.md`,
-  `settings.json` (env as friendly key/value rows or raw JSON), permissions, hooks,
+  `settings.json` (env as friendly key/value rows or raw JSON), permissions (allow /
+  deny / ask rules and default mode as rows, or raw JSON), hooks (one command hook
+  per row — event / matcher / command / timeout — or raw JSON),
   MCP servers, subagents, skills, and plugins — at user / project scope (plus local
   for all but subagents and skills), with secret-shaped values masked on the surfaces
   that carry them (settings `env`, MCP). Every write is lost-update-guarded and
-  trust-gated; `CLAUDE.md` writes are additionally audit-logged.
+  trust-gated; every write is audit-logged to `config_audit.log`.
 - Approximate per-project cost / token badge rolled up from session transcripts.
 - Live per-bridge resource metrics (CPU / memory / disk) while a bridge runs.
 
@@ -77,6 +80,11 @@ Interactive Session mode, this *recaps* the prior conversation rather than truly
 - Native Interactive Session mode (`claude.launch_mode: pty`).
 - Ghost-environment reaper (CLI always available; dashboard gated by
   `reaper.ui_enabled`).
+- Dashboard **login shepherd** (`login_shepherd.enabled`, default off) — when
+  the runtime `claude` account logs out or its token expires, sign it back in
+  from the browser (subscription OAuth, plus a separately-gated long-lived
+  `setup-token` mode) instead of SSHing in. See the
+  [`login_shepherd` reference](reference/config.md#login_shepherd-dashboard-driven-claude-account-login-loginshepherdconfig).
 - Background agents (**experimental**) — list / dispatch / stop `claude --bg`
   sessions from a dashboard panel (`/api/agents`); rides Claude Code's agent-view
   research preview, so it may change with the upstream CLI.
@@ -84,20 +92,24 @@ Interactive Session mode, this *recaps* the prior conversation rather than truly
   channel is enabled (`claustrum.enabled`, default off), the launch popover gains
   a third option whose sessions are local live-view only: streamed in the
   dashboard but, unlike bridges, never attachable from `claude.ai/code`. See
-  [Architecture](architecture.md) and [Configuration](configuration.md).
+  [Architecture](architecture.md) and [Configuration](reference/config.md).
 
 ## Where to next
 
 - [Quickstart](quickstart.md) — your first bridge in a few minutes.
-- [Installation](installation.md) — pip / uv, Docker / Compose, running.
-- [Configuration](configuration.md) — the complete `clauster.yml` reference.
+- [Installation](installation.md) — ten install methods with a
+  [decision table](installation.md#which-install-method), plus running and
+  service setup.
+- [Configuration](reference/config.md) — the complete `clauster.yml` reference.
 - [Public API](public-api.md) — the versioned `/api/v1` surface and `clauster api-token` CLI.
 - [Security](security.md) — trust model, auth, redaction.
 - [Privacy](privacy.md) — what Clauster keeps on disk, and how to purge it.
 - [Networking](networking.md) — the loopback / non-loopback auth matrix.
 - [MCP server](mcp.md) — the read-only `clauster mcp` stdio server.
 - [Architecture](architecture.md) — module map and bridge lifecycle.
-- [Operations](operations.md) — monitoring + troubleshooting runbook.
+- [Operations](operations.md) — monitoring and the operational runbook.
+- [Troubleshooting](troubleshooting.md) — symptom-first fixes, with the exact
+  error strings you can search for.
 
 ## Stack
 

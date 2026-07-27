@@ -32,6 +32,7 @@ from . import (
     auth,
     claude_cli,
     claude_md,
+    config_audit,
     config_editor,
     config_write,
     config_write_hooks,
@@ -51,6 +52,7 @@ from . import (
     ops,
     prometheus,
     pty_screen,
+    setup_wizard,
     supervisor,
     usage,
 )
@@ -119,6 +121,11 @@ def _pty_supported() -> bool:
 
 
 _SESSION_COOKIE = "clauster_session"
+# Step-up re-auth cookie for the privileged Tier-B "Advanced" config surface (#978):
+# short-lived, distinct from the session cookie, and only ever consulted by the
+# Tier-B config-write routes — never a general access credential.
+_ELEVATION_COOKIE = "clauster_elevation"
+_ELEVATION_MAX_AGE_SECONDS = 600  # 10-minute unlock window; re-prove the password after
 _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _SESSION_USER = "admin"  # single-user in v0.2; multi-user is v0.3
 
@@ -518,6 +525,34 @@ def _reap_ws_task(task: asyncio.Task) -> None:
         logger.debug("ws stream helper task ended with %r", task.exception())
 
 
+def _unresolved_bridge(
+    runner: SessionRunner, instance_id: str, not_found_detail: str
+) -> HTTPException:
+    """Build the error for a bridge reference that didn't resolve (#1099).
+
+    ``409`` when an id **prefix** was ambiguous, ``404`` when nothing matched at all.
+    They are genuinely different answers: "no such bridge" versus "several, say which" —
+    and the operator can act on the second only if told the candidates. Mirrors the
+    ``ambiguous`` reply ``session_status`` already returns on the MCP side.
+
+    Introducing a 409 here regresses nothing: prefixes did not resolve before this
+    change, so every request that can reach it used to 404. The caller passes the whole
+    ``not_found_detail`` rather than a fragment so each route keeps its existing 404
+    wording byte-for-byte — the sites were never consistent about quoting the id, and
+    normalizing that here would be an unrelated visible change riding along.
+    """
+    candidates = runner.bridge_id_candidates(instance_id)
+    if candidates:
+        return HTTPException(
+            status_code=409,
+            detail=(
+                f"ambiguous instance id {instance_id!r} — matches "
+                f"{', '.join(candidates)}; use more characters"
+            ),
+        )
+    return HTTPException(status_code=404, detail=not_found_detail)
+
+
 # How often the /ws/pty-screen reader re-reads the keeper's screen sidecar. Matched to the
 # keeper's _SCREEN_FLUSH_INTERVAL (0.25s) so the poll roughly tracks the publish cadence
 # without busy-spinning; frames already seen are skipped by their monotonic ``seq``.
@@ -698,6 +733,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     # Version-bust the vendored asset URLs so the immutable cache below is safe across
     # upgrades (templates link them as `...?v={{ asset_version }}`).
     templates.env.globals["asset_version"] = __version__
+    # Per-vendor "don't autofill" attributes for NON-credential inputs (#1036) — shared with the
+    # setup wizard's separate template env (see setup_wizard.NO_AUTOFILL). Baked into the markup so
+    # Alpine `x-for` row clones inherit it; password fields deliberately omit it (login autofill).
+    templates.env.globals["NO_AUTOFILL"] = setup_wizard.NO_AUTOFILL
 
     def _render(
         request: Request,
@@ -750,7 +789,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     # ----- auth context (v0.2 foundation, D12/D13) ------------------------
     _root = config.root_path
-    _serializer = auth.make_serializer(auth.load_or_create_secret(config.state_dir))
+    _signing_secret = auth.load_or_create_secret(config.state_dir)
+    _serializer = auth.make_serializer(_signing_secret)
+    # Step-up elevation (#978): same secret, distinct salt — an elevation token can
+    # never be presented as a session cookie or vice versa (see make_elevation_serializer).
+    _elevation_serializer = auth.make_elevation_serializer(_signing_secret)
     _hasher = auth.make_hasher()
     _allowed_origins = auth.build_allowed_origins(config)
     _throttle = LoginThrottle()
@@ -895,6 +938,23 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     @app.middleware("http")
     async def guard(request: Request, call_next):
         if not config.auth.enabled:
+            # Auth off (the shipped loopback default) still enforces the CSRF Origin gate
+            # on unsafe methods, so a cross-site page the operator visits can't drive the
+            # tokenless loopback API — a confused-deputy attack on a loopback-only service.
+            # There are NO credentials on this path, so a legitimate non-browser client
+            # (CLI/curl/script) sends no Origin and MUST still be allowed: reject ONLY a
+            # *present* Origin that isn't allowlisted, never an absent one. Browsers always
+            # attach Origin to a cross-origin state-changing fetch/XHR/form-POST and JS can't
+            # suppress it, so "Origin absent" is a same-origin or non-browser request, never
+            # the cross-site attack, while "Origin present, not allowlisted" is exactly it.
+            # (DNS-rebinding hardening via TrustedHostMiddleware is a follow-up: it can't be
+            # pinned here without risking legitimate LAN host/IP access to the dashboard.)
+            if (
+                request.method in _UNSAFE_METHODS
+                and request.headers.get("origin") is not None
+                and not _origin_allowed(request)
+            ):
+                return JSONResponse({"detail": "origin check failed"}, status_code=403)
             return await call_next(request)
         user, via_proxy, via_token = await _authenticate(request)
         # CSRF: an unsafe method needs a trusted Origin — unless the credential is
@@ -1056,7 +1116,69 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         )
         resp = RedirectResponse(f"{_root}/login", status_code=303)
         resp.delete_cookie(_SESSION_COOKIE, path=_root or "/")
+        # The epoch bump above already revokes any outstanding elevation token (#978);
+        # clear its cookie too so a stale value doesn't linger in the browser.
+        resp.delete_cookie(_ELEVATION_COOKIE, path=_root or "/")
         return resp
+
+    def require_elevated(request: Request) -> None:
+        """Fail-closed step-up gate for the privileged Tier-B config surface (#978).
+
+        Raises ``403 {"detail": "reauth_required"}`` unless the request carries a
+        valid, unexpired, non-revoked elevation cookie — the caller must have
+        re-proved the operator password via ``POST /api/reauth`` within the unlock
+        window. Consulted only by Tier-B config-write routes, and always *after*
+        the capability/scope gate, so a disabled surface stays a 404 (invisible)
+        rather than advertising itself with a 403.
+        """
+        elevated = auth.read_elevation(
+            _elevation_serializer,
+            request.cookies.get(_ELEVATION_COOKIE),
+            _ELEVATION_MAX_AGE_SECONDS,
+            current_epoch=app.state.session_epoch,
+        )
+        if elevated is None:
+            raise HTTPException(status_code=403, detail="reauth_required")
+
+    @app.post("/api/reauth")
+    async def reauth(request: Request) -> Response:
+        """Re-prove the operator password to unlock the Tier-B "Advanced" surface (#978).
+
+        Step-up authentication: the caller is already logged in, but privileged
+        config writes require a fresh password proof. On success, set a short-lived
+        elevation cookie (``_ELEVATION_MAX_AGE_SECONDS``). Shares the login throttle
+        so it can't be brute-forced, and — like login — verifies against a dummy
+        hash when no password is set, so "no password configured" isn't a timing
+        oracle and reauth simply never succeeds (Tier-B stays locked).
+        """
+        throttle_key, throttle_shared = _throttle_key(request)
+        allowed, retry_after = _throttle.allowed(throttle_key, shared=throttle_shared)
+        if not allowed:
+            resp = JSONResponse({"detail": "too many attempts"}, status_code=429)
+            resp.headers["Retry-After"] = str(max(1, int(retry_after) + 1))
+            return resp
+        try:
+            body = await request.json()
+        except (ValueError, TypeError):
+            body = {}
+        password = str(body.get("password", "")) if isinstance(body, dict) else ""
+        if auth.verify_password(_hasher, config.auth.password_hash, password):
+            _throttle.reset(throttle_key)
+            resp = JSONResponse({"elevated": True, "expires_in": _ELEVATION_MAX_AGE_SECONDS})
+            resp.set_cookie(
+                _ELEVATION_COOKIE,
+                auth.issue_elevation(
+                    _elevation_serializer, _SESSION_USER, app.state.session_epoch
+                ),
+                max_age=_ELEVATION_MAX_AGE_SECONDS,
+                httponly=True,
+                samesite="lax",
+                secure=_cookie_secure(request),
+                path=_root or "/",
+            )
+            return resp
+        _throttle.record_failure(throttle_key, shared=throttle_shared)
+        return JSONResponse({"detail": "incorrect password"}, status_code=401)
 
     async def list_projects() -> list[Project]:
         # Shared facade (#775): the CLI and this route go through the same
@@ -1426,30 +1548,25 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             for path in usage.transcript_paths_for(project_path):
                 try:
                     mtime = path.stat().st_mtime
-                    # One per-line scan serves turn_count AND the resume-picker fields
-                    # (#303); the reader streams the file (never loaded whole) and every
-                    # turn is already redaction-safe (sanitize_line in _line_to_turn).
-                    turns = usage.read_transcript_turns(path)
+                    # turn_count AND the resume-picker fields (#303) come from a cached
+                    # per-file summary (#1035): an unchanged transcript skips the full
+                    # re-parse, so reopening the selector is near-instant. Every derived
+                    # turn is redaction-safe (sanitize_line in _line_to_turn).
+                    summary = usage.read_transcript_summary(path)
                 except FileNotFoundError:
                     # A session removed mid-walk (racing cleanup) is skipped, not fatal.
                     continue
-                # First USER turn labels the conversation in the resume picker —
-                # truncated server-side so a pasted wall of text can't bloat the
-                # listing payload. Timestamps bound the conversation for the
-                # picker's "when · duration" display ("" when the record has none).
-                first_prompt = next(
-                    (t["content"] for t in turns if t.get("role") == "user" and t.get("content")),
-                    "",
-                )[:120]
+                # Timestamps bound the conversation for the picker's "when · duration"
+                # display ("" when the record has none); first_prompt labels it.
                 out.append(
                     {
                         "session": path.stem,
                         "mtime": mtime,
-                        "turn_count": len(turns),
+                        "turn_count": summary.turn_count,
                         "live": path.stem in live_uuids,
-                        "first_prompt": first_prompt,
-                        "first_ts": (turns[0].get("timestamp") or "") if turns else "",
-                        "last_ts": (turns[-1].get("timestamp") or "") if turns else "",
+                        "first_prompt": summary.first_prompt,
+                        "first_ts": summary.first_ts,
+                        "last_ts": summary.last_ts,
                     }
                 )
             # Live sessions first (a glance at what's running now), then newest-first
@@ -1667,7 +1784,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 status_code=503,
                 detail=f"refusing to reap — could not determine live bridges: {exc}",
             ) from exc
-        return client, envs, live, environments.find_ghosts(envs, live)
+        # projects_root scopes the classification: this instance may only reap
+        # environments inside its own tree (#1100).
+        ghosts = environments.find_ghosts(envs, live, projects_root=config.projects_root)
+        return client, envs, live, ghosts
 
     @app.get("/api/environments/ghosts")
     async def api_environment_ghosts() -> dict:
@@ -1792,6 +1912,22 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         except login_shepherd.NotActiveError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    @app.get("/api/login-shepherd/state")
+    async def api_login_shepherd_state() -> dict:
+        # Rehydration read (#1078): the dashboard's login state is per-page-load, so after a
+        # reload the client no longer knows a flow is open and never renders Cancel — while
+        # the server still refuses /start with 409. This lets the component recover that view
+        # on init. Unlike /status it is a GET and never reaps: it cannot race the polling
+        # client for a one-time setup-token result. `{"active": false}` when idle — a 200,
+        # not a 409, because "no flow" is the expected answer here rather than an error.
+        # Behind the same fail-closed gate as every other route in this group.
+        #
+        # Off-loaded like its siblings even though it only reads a dict: `state()` takes
+        # `_flow_lock`, which `start()` holds across a subprocess spawn, so an inline call
+        # could park the event loop behind that spawn.
+        _require_login_shepherd()
+        return await asyncio.to_thread(app.state.login_shepherd.state)
+
     @app.post("/api/login-shepherd/cancel")
     async def api_login_shepherd_cancel() -> dict:
         _require_login_shepherd()
@@ -1856,6 +1992,55 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             return HTTPException(status_code=404, detail=str(exc))
         return HTTPException(status_code=400, detail=str(exc))
 
+    def _config_write_watch(project_dir: Path) -> list[Path]:
+        """Return the config files a `claude mcp`/`claude plugin` write could touch.
+
+        A comprehensive candidate set across scopes for the #958 P6 before/after audit
+        fingerprint — an unchanged file simply never appears in the diff, so watching a
+        superset is harmless and avoids per-scope path guesswork.
+        """
+        home = runner.claude_json.parent
+        return [
+            runner.claude_json,
+            home / ".claude" / "settings.json",
+            home / ".claude" / "plugins" / "known_marketplaces.json",
+            project_dir / ".claude" / "settings.json",
+            project_dir / ".claude" / "settings.local.json",
+            project_dir / ".mcp.json",
+        ]
+
+    async def _audit_config_write(
+        *, work: Callable[[], None], watch: list[Path], **fields: Any
+    ) -> None:
+        """Record a committed config-write's audit line + its file/argv side effects (#958 P6).
+
+        Runs ``work`` off-thread, then records the base audit line enriched with (a) which
+        watched files it changed — path + sha256 + size, never contents — and (b) the redacted
+        ``claude …`` argv any spawned CLI ran.
+        Lets :class:`~config_write.ConfigWriteError` propagate (the caller maps it) and records
+        ONLY on success. The argv is captured via :data:`config_write.cli_argv_sink`, which
+        propagates into the worker thread; the audit append itself is best-effort and never
+        fails the already-committed write.
+
+        Best-effort fingerprint, not a transactional attribution: the snapshots bracket the
+        write but are not inside its file lock, and ``watch`` is a cross-scope superset, so
+        under (rare, single-operator) concurrent writes the diff can attribute another
+        request's change. It's a forensic hint of where a change landed — the base line's
+        surface/scope/target/action names the operation exactly.
+        """
+        before = await asyncio.to_thread(config_audit.file_fingerprints, watch)
+        sink: list[list[str]] = []
+        token = config_write.cli_argv_sink.set(sink)
+        try:
+            await asyncio.to_thread(work)
+        finally:
+            config_write.cli_argv_sink.reset(token)
+        after = await asyncio.to_thread(config_audit.file_fingerprints, watch)
+        extra: dict[str, Any] = {"files": config_audit.diff_fingerprints(before, after)}
+        if sink:
+            extra["argv"] = sink
+        await config_audit.arecord(config.state_dir, extra=extra, **fields)
+
     @app.get("/api/config-write/mcp")
     async def api_config_write_mcp_read(scope: str = "project", project: str = "") -> dict:
         # Read the (structurally redacted) MCP server map for a surface. Gated exactly
@@ -1909,6 +2094,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         write_project_fn: Callable[[Path, dict, str | None], None],
         write_local_fn: Callable[..., None],
         *,
+        surface: str,
         get_user_path: Callable[[], Path],
         user_fn_has_hash: bool = True,
         local_fn_has_hash: bool = True,
@@ -1965,6 +2151,15 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                     await asyncio.to_thread(write_user_fn, user_path, payload)
                 except config_write.ConfigWriteError as exc:
                     raise _map_config_write_error(exc) from exc
+            await config_audit.arecord(
+                config.state_dir,
+                surface=surface,
+                scope="user",
+                target=str(user_path),
+                action="update",
+                actor=_SESSION_USER,
+                keys=sorted(payload),
+            )
             return {"scope": "user", "ok": True}
         if scope == "local":
             project = body.get("project")
@@ -1995,6 +2190,17 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                     await asyncio.to_thread(write_local_fn, local_target, project_dir, payload)
                 except config_write.ConfigWriteError as exc:
                     raise _map_config_write_error(exc) from exc
+            # The written file is the project dir's settings file (hash-guarded surfaces) or
+            # the ~/.claude.json the MCP local writer nests into; `surface` disambiguates.
+            await config_audit.arecord(
+                config.state_dir,
+                surface=surface,
+                scope="local",
+                target=str(project_dir if local_fn_has_hash else local_target),
+                action="update",
+                actor=_SESSION_USER,
+                keys=sorted(payload),
+            )
             return {"scope": "local", "project": project, "ok": True}
         project = body.get("project")
         config_write.require_confirm("project", project, body.get("confirm"))
@@ -2011,6 +2217,15 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             await asyncio.to_thread(write_project_fn, project_dir, payload, expected)
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
+        await config_audit.arecord(
+            config.state_dir,
+            surface=surface,
+            scope="project",
+            target=str(project_dir),
+            action="update",
+            actor=_SESSION_USER,
+            keys=sorted(payload),
+        )
         return {"scope": "project", "project": project, "ok": True}
 
     @app.put("/api/config-write/mcp")
@@ -2018,6 +2233,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         return await _put_config_write(
             body,
             "servers",
+            surface="mcp",
             write_user_fn=config_write_mcp.write_user_servers,
             write_project_fn=config_write_mcp.write_project_servers,
             write_local_fn=config_write_mcp.write_project_local_servers,
@@ -2079,6 +2295,25 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             raise HTTPException(
                 status_code=422, detail="'client_secret' must be a string when present"
             )
+        # An OAuth client-secret is only deliverable through the CLI (which passes it via
+        # MCP_CLIENT_SECRET in the child env). An entry that must bypass the CLI — inline
+        # env/headers, or a url carrying a query/userinfo/fragment — takes the direct
+        # writer, which has nowhere to put it. Refuse rather than write the entry and
+        # silently drop the secret: the operator would believe it was stored and only
+        # discover otherwise when the server fails to authenticate.
+        if client_secret is not None and entry is not None:
+            if config_write_mcp_cli.entry_needs_direct_write(entry):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "'client_secret' cannot be stored for this entry: it carries a "
+                        "value that must be kept off the CLI's argv (inline env/headers, "
+                        "or a url with a query string, userinfo, or fragment), so it is "
+                        "written directly to the config file, which has no way to deliver "
+                        "the secret. Put the credential in the entry's 'env' or 'headers' "
+                        "instead."
+                    ),
+                )
 
         if scope == "user":
             cli_cwd = runner.claude_json.parent
@@ -2159,11 +2394,20 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                     restore=_restore,
                 )
 
+        # Run the mutation (direct OR CLI-driven) and record the base audit line enriched
+        # with which files it changed + the redacted `claude mcp` argv it ran (#958 P6).
         try:
-            await asyncio.to_thread(_work)
+            await _audit_config_write(
+                work=_work,
+                watch=_config_write_watch(cli_cwd),
+                surface="mcp",
+                scope=scope,  # type: ignore[arg-type]
+                target=name,
+                action=op,
+                actor=_SESSION_USER,
+            )
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
-
         result = {"scope": scope, "name": name, "op": op, "ok": True}
         if scope != "user":
             result["project"] = project
@@ -2195,12 +2439,17 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             )
         project_dir = _resolve_cw_project(project, require_exists=True)
         try:
-            await asyncio.to_thread(
-                config_write_mcp.write_project_approvals,
-                runner.claude_json,
-                project_dir,
-                enabled,
-                disabled,
+            await _audit_config_write(
+                work=lambda: config_write_mcp.write_project_approvals(
+                    runner.claude_json, project_dir, enabled, disabled
+                ),
+                watch=_config_write_watch(project_dir),
+                surface="mcp-approvals",
+                scope="project",
+                target=str(runner.claude_json),
+                action="update",
+                actor=_SESSION_USER,
+                keys=sorted(set(enabled) | set(disabled)),
             )
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
@@ -2216,8 +2465,16 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         config_write.require_confirm("project", project, body.get("confirm"))
         project_dir = _resolve_cw_project(project, require_exists=True)
         try:
-            await asyncio.to_thread(
-                config_write_mcp_cli.cli_reset_project_choices, config.claude.binary, project_dir
+            await _audit_config_write(
+                work=lambda: config_write_mcp_cli.cli_reset_project_choices(
+                    config.claude.binary, project_dir
+                ),
+                watch=_config_write_watch(project_dir),
+                surface="mcp-approvals",
+                scope="project",
+                target=str(runner.claude_json),
+                action="reset",
+                actor=_SESSION_USER,
             )
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
@@ -2295,6 +2552,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         return await _put_config_write(
             body,
             "permissions",
+            surface="permissions",
             write_user_fn=config_write_permissions.write_user_permissions,
             write_project_fn=config_write_permissions.write_project_permissions,
             write_local_fn=config_write_permissions.write_project_local_permissions,
@@ -2352,6 +2610,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         return await _put_config_write(
             body,
             "hooks",
+            surface="hooks",
             write_user_fn=config_write_hooks.write_user_hooks,
             write_project_fn=config_write_hooks.write_project_hooks,
             write_local_fn=config_write_hooks.write_project_local_hooks,
@@ -2450,6 +2709,14 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 )
             except config_write.ConfigWriteError as exc:
                 raise _map_config_write_error(exc) from exc
+            await config_audit.arecord(
+                config.state_dir,
+                surface="claude-md",
+                scope="user",
+                target=str(runner.claude_json.parent / ".claude" / claude_md.FILENAME),
+                action="update",
+                actor=_SESSION_USER,
+            )
             return {"scope": "user", "ok": True}
         project_dir = _resolve_cw_project(project, require_exists=True)
         write_fn = (
@@ -2461,6 +2728,14 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             await asyncio.to_thread(write_fn, project_dir, content, expected)
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
+        await config_audit.arecord(
+            config.state_dir,
+            surface="claude-md",
+            scope=scope,
+            target=str(project_dir),
+            action="update",
+            actor=_SESSION_USER,
+        )
         return {"scope": scope, "project": project, "ok": True}
 
     @app.get("/api/config-write/subagents")
@@ -2546,6 +2821,14 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 )
             except config_write.ConfigWriteError as exc:
                 raise _map_config_write_error(exc) from exc
+            await config_audit.arecord(
+                config.state_dir,
+                surface="subagents",
+                scope="user",
+                target=name,
+                action="update",
+                actor=_SESSION_USER,
+            )
             return {"scope": "user", "name": name, "ok": True}
         project_dir = _resolve_cw_project(project, require_exists=True)
         try:
@@ -2554,6 +2837,14 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             )
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
+        await config_audit.arecord(
+            config.state_dir,
+            surface="subagents",
+            scope="project",
+            target=name,
+            action="update",
+            actor=_SESSION_USER,
+        )
         return {"scope": "project", "project": project, "name": name, "ok": True}
 
     @app.delete("/api/config-write/subagents/{name}")
@@ -2576,6 +2867,15 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 )
             except config_write.ConfigWriteError as exc:
                 raise _map_config_write_error(exc) from exc
+            await config_audit.arecord(
+                config.state_dir,
+                surface="subagents",
+                scope="user",
+                target=name,
+                action="delete",
+                actor=_SESSION_USER,
+                extra={"removed": existed},
+            )
             return {"scope": "user", "name": name, "deleted": existed}
         project_dir = _resolve_cw_project(proj, require_exists=True)
         try:
@@ -2584,6 +2884,15 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             )
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
+        await config_audit.arecord(
+            config.state_dir,
+            surface="subagents",
+            scope="project",
+            target=name,
+            action="delete",
+            actor=_SESSION_USER,
+            extra={"removed": existed},
+        )
         return {"scope": "project", "project": proj, "name": name, "deleted": existed}
 
     def _user_claude_json_guarded() -> Path:
@@ -2713,6 +3022,15 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 )
             except config_write.ConfigWriteError as exc:
                 raise _map_config_write_error(exc) from exc
+            await config_audit.arecord(
+                config.state_dir,
+                surface="skills",
+                scope="user",
+                target=name,
+                action="update",
+                actor=_SESSION_USER,
+                keys=sorted(files),
+            )
             return {"scope": "user", "name": name, "ok": True}
         project_dir = _resolve_cw_project(project, require_exists=True)
         try:
@@ -2726,6 +3044,15 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             )
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
+        await config_audit.arecord(
+            config.state_dir,
+            surface="skills",
+            scope="project",
+            target=name,
+            action="update",
+            actor=_SESSION_USER,
+            keys=sorted(files),
+        )
         return {"scope": "project", "project": project, "name": name, "ok": True}
 
     @app.post("/api/config-write/skills/delete")
@@ -2750,6 +3077,15 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 )
             except config_write.ConfigWriteError as exc:
                 raise _map_config_write_error(exc) from exc
+            await config_audit.arecord(
+                config.state_dir,
+                surface="skills",
+                scope="user",
+                target=name,
+                action="delete",
+                actor=_SESSION_USER,
+                extra={"removed": existed},
+            )
             return {"scope": "user", "name": name, "existed": existed}
         project_dir = _resolve_cw_project(project, require_exists=True)
         try:
@@ -2758,6 +3094,15 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             )
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
+        await config_audit.arecord(
+            config.state_dir,
+            surface="skills",
+            scope="project",
+            target=name,
+            action="delete",
+            actor=_SESSION_USER,
+            extra={"removed": existed},
+        )
         return {"scope": "project", "project": project, "name": name, "existed": existed}
 
     @app.get("/api/config-write/skills/overrides")
@@ -2835,6 +3180,15 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 )
             except config_write.ConfigWriteError as exc:
                 raise _map_config_write_error(exc) from exc
+            await config_audit.arecord(
+                config.state_dir,
+                surface="skill-overrides",
+                scope="user",
+                target=str(_user_settings_json()),
+                action="update",
+                actor=_SESSION_USER,
+                keys=sorted(payload),
+            )
             return {"scope": "user", "ok": True}
         if scope == "local":
             project_dir = _resolve_cw_project(project, require_exists=True)
@@ -2847,6 +3201,15 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 )
             except config_write.ConfigWriteError as exc:
                 raise _map_config_write_error(exc) from exc
+            await config_audit.arecord(
+                config.state_dir,
+                surface="skill-overrides",
+                scope="local",
+                target=str(project_dir),
+                action="update",
+                actor=_SESSION_USER,
+                keys=sorted(payload),
+            )
             return {"scope": "local", "project": project, "ok": True}
         project_dir = _resolve_cw_project(project, require_exists=True)
         try:
@@ -2855,6 +3218,15 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             )
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
+        await config_audit.arecord(
+            config.state_dir,
+            surface="skill-overrides",
+            scope="project",
+            target=str(project_dir),
+            action="update",
+            actor=_SESSION_USER,
+            keys=sorted(payload),
+        )
         return {"scope": "project", "project": project, "ok": True}
 
     @app.get("/api/config-write/settings")
@@ -2944,6 +3316,15 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 )
             except config_write.ConfigWriteError as exc:
                 raise _map_config_write_error(exc) from exc
+            await config_audit.arecord(
+                config.state_dir,
+                surface="settings",
+                scope="user",
+                target=str(_user_settings_json()),
+                action="update",
+                actor=_SESSION_USER,
+                keys=sorted(payload),
+            )
             return {"scope": "user", "ok": True}
         project_dir = _resolve_cw_project(project, require_exists=True)
         write_fn = (
@@ -2955,6 +3336,15 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             await asyncio.to_thread(write_fn, project_dir, payload, expected)
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
+        await config_audit.arecord(
+            config.state_dir,
+            surface="settings",
+            scope=scope,
+            target=str(project_dir),
+            action="update",
+            actor=_SESSION_USER,
+            keys=sorted(payload),
+        )
         return {"scope": scope, "project": project, "ok": True}
 
     @app.get("/api/config-write/settings/effective")
@@ -3149,8 +3539,19 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             else:
                 config_write_plugins.cli_update_plugin(binary, cwd, plugin_id, scope)  # type: ignore[arg-type]
 
+        # Audit right after the mutation commits, BEFORE the gitignore housekeeping — a
+        # failure of that step must not drop the committed change from the trail (#958 P6).
+        # Records the changed files + the redacted `claude plugin` argv it ran.
         try:
-            await asyncio.to_thread(_work)
+            await _audit_config_write(
+                work=_work,
+                watch=_config_write_watch(cwd),
+                surface="plugins",
+                scope=scope,  # type: ignore[arg-type]
+                target=plugin_id,
+                action=op,  # type: ignore[arg-type]
+                actor=_SESSION_USER,
+            )
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
         if scope == "local":
@@ -3159,9 +3560,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             # gitignore-on-create hard requirement (#766) still applies even when
             # the file is CLI-written rather than clauster-written.
             await asyncio.to_thread(
-                config_write.ensure_gitignored, cwd, ".claude/settings.local.json"
+                config_write.ensure_gitignored,
+                cwd,
+                ".claude/settings.local.json",
+                ignore_backup_sibling=True,
             )
-
         result = {"scope": scope, "plugin": plugin_id, "op": op, "ok": True}
         if scope != "user":
             result["project"] = project
@@ -3291,8 +3694,19 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             else:
                 config_write_plugins.cli_marketplace_update(binary, cwd, name)
 
+        # Audit right after the mutation commits, BEFORE the gitignore housekeeping — a
+        # failure of that step must not drop the committed change from the trail (#958 P6).
+        # Records the changed files + the redacted `claude plugin marketplace` argv it ran.
         try:
-            await asyncio.to_thread(_work)
+            await _audit_config_write(
+                work=_work,
+                watch=_config_write_watch(cwd),
+                surface="marketplaces",
+                scope=scope,  # type: ignore[arg-type]
+                target=(name or source or ""),
+                action=op,  # type: ignore[arg-type]
+                actor=_SESSION_USER,
+            )
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
         if scope == "local" and op in ("add", "remove"):
@@ -3302,9 +3716,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             # all: the CLI writes settings.local.json directly, bypassing
             # clauster's own gitignore-on-create writer path.
             await asyncio.to_thread(
-                config_write.ensure_gitignored, cwd, ".claude/settings.local.json"
+                config_write.ensure_gitignored,
+                cwd,
+                ".claude/settings.local.json",
+                ignore_backup_sibling=True,
             )
-
         result: dict[str, Any] = {"scope": scope, "op": op, "ok": True}
         if name is not None:
             result["name"] = name
@@ -3584,7 +4000,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             content_hash, present = config_editor.disk_state(path)
         if fields is None:
             fields = config_editor.editable_values(cfg)
-        specs = config_editor.field_specs(present)
+        specs = config_editor.field_specs(present, config=cfg)
         # The front-end builds its rendered rows from `editable`, so a hidden deprecated
         # field is removed by dropping it here — editing `specs` alone would not hide the row.
         editable = [p for p in config_editor.EDITABLE_FIELDS if not specs[p]["hidden"]]
@@ -3627,6 +4043,103 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except config_editor.ConfigValidationError as exc:
             raise HTTPException(status_code=422, detail=f"invalid config: {exc}") from exc
+        return {"hash": new_hash, "restart_required": True}
+
+    def _require_advanced(request: Request) -> None:
+        """Fail-closed gate for the Tier-B "Advanced" config surface (#978).
+
+        404 when config-write is disabled (invisible surface, like the reaper), then
+        403 ``reauth_required`` until the caller has re-proved the password via
+        ``POST /api/reauth``. Ordered so a disabled surface never advertises itself
+        with a 403.
+        """
+        if not config.config_write.enabled:
+            raise HTTPException(status_code=404, detail="config-write is disabled")
+        require_elevated(request)
+
+    @app.get("/api/config/advanced")
+    async def api_config_advanced_get(request: Request) -> dict:
+        """Tier-B config values + a content hash, behind config-write + step-up (#978).
+
+        Mirrors ``GET /api/config`` but over :data:`~clauster.config_editor.TIER_B_FIELDS`
+        only — the operational-but-sensitive ``clone.*`` / ``webhooks.*`` scalars. No
+        Tier-C secret/bind/auth value is ever surfaced (structural redaction, same as
+        Tier-A). Values are read from disk so they stay consistent with the hash and
+        reflect what the next restart will load.
+        """
+        _require_advanced(request)
+        cfg = app.state.config
+        path = cfg.source_path
+        fields = None
+        content_hash = None
+        present = None
+        if path is not None:
+            fields = config_editor.editable_values_on_disk(
+                path, fields=config_editor.TIER_B_FIELDS
+            )
+            content_hash, present = config_editor.disk_state(
+                path, fields=config_editor.TIER_B_FIELDS
+            )
+        if fields is None:
+            fields = config_editor.editable_values(cfg, fields=config_editor.TIER_B_FIELDS)
+        specs = config_editor.field_specs(present, fields=config_editor.TIER_B_FIELDS, config=cfg)
+        editable = [p for p in config_editor.TIER_B_FIELDS if not specs[p]["hidden"]]
+        return {
+            "fields": fields,
+            "editable": editable,
+            "specs": specs,
+            "hash": content_hash,
+        }
+
+    @app.put("/api/config/advanced")
+    async def api_config_advanced_put(request: Request, body: dict) -> dict:
+        """Apply Tier-B config edits: capability + step-up gated, backup + atomic write (#978).
+
+        Fail-closed order: capability (404 when off) → step-up (403 ``reauth_required``)
+        → external-edit hash guard (409) → re-validate against TIER_B **only** (a Tier-A
+        or Tier-C key is a 400, never a silent drop) → backup + atomic write. Does not
+        live-reload; the response flags a restart is needed. Records an audit line with
+        the touched key NAMES only (never values).
+        """
+        _require_advanced(request)
+        cfg = app.state.config
+        path = cfg.source_path
+        if path is None:
+            raise HTTPException(status_code=409, detail="config has no on-disk source to edit")
+        edits = body.get("edits")
+        if not isinstance(edits, dict) or not edits:
+            raise HTTPException(
+                status_code=422, detail="body must include a non-empty 'edits' map"
+            )
+        expected = body.get("hash")
+        if not isinstance(expected, str) or not expected:
+            raise HTTPException(
+                status_code=422,
+                detail="body must include the 'hash' from GET /api/config/advanced",
+            )
+        try:
+            new_hash = await asyncio.to_thread(
+                config_writer.write_edits,
+                path,
+                edits,
+                expected_hash=expected,
+                allowed=frozenset(config_editor.TIER_B_FIELDS),
+            )
+        except config_editor.DisallowedFieldError as exc:
+            raise HTTPException(status_code=400, detail=f"not editable: {exc}") from exc
+        except config_editor.StaleConfigError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except config_editor.ConfigValidationError as exc:
+            raise HTTPException(status_code=422, detail=f"invalid config: {exc}") from exc
+        await config_audit.arecord(
+            cfg.state_dir,
+            surface="config-advanced",
+            scope="global",
+            target=str(path),
+            action="edit",
+            actor=_SESSION_USER,
+            keys=sorted(edits),
+        )
         return {"hash": new_hash, "restart_required": True}
 
     @app.post("/api/restart", status_code=202)
@@ -3714,6 +4227,13 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             return value
 
         prompt = _opt_text("prompt")
+        if prompt is not None and not prompt.replace("\ufeff", "").strip():
+            # Whitespace-only == no prompt (#1033): the dashboard trims before its
+            # gate, so the API must normalize identically or a direct request
+            # dispatches a nominally-promptless session around the 422 below.
+            # JS trim() also strips U+FEFF (ECMA WhiteSpace) while Python's
+            # strip() does not — drop it from the emptiness test for parity.
+            prompt = None
         rc_name = _opt_text("rc_name", empty_ok=False)
         model = _opt_text("model", empty_ok=False)
         permission_mode = _opt_text("permission_mode", empty_ok=False)
@@ -3727,6 +4247,22 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # bypassPermissions. (Also makes bg honor instance_defaults, like the other channels.)
         pm = permission_mode or config.instance_defaults.permission_mode
         _enforce_bypass_ceiling(name, pm)
+        if prompt is None and rc_name is None:
+            # #1033: an un-registered background session has no composer and no
+            # cloud surface — dispatched without a prompt it parks at "send a
+            # prompt to start" forever, with no way to ever receive one (the bg
+            # card offers only Stop/Forget). ``rc_name`` opens the claude.ai door,
+            # where the session is conversational, so a blank prompt is legitimate
+            # there. Gated after the 404/403 checks so existence and the bypass
+            # ceiling keep their precedence (same ordering rationale as
+            # _enforce_bypass_ceiling above).
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "prompt is required for a background session unless rc_name "
+                    "registers it on claude.ai"
+                ),
+            )
         try:
             job_id = await asyncio.to_thread(
                 supervisor.dispatch_background_job,
@@ -3900,9 +4436,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # side effect, surfaced here as a 422 via _spawn_or_http's InvalidSpawnOption
         # mapping.
         name = body.get("name")
-        # Optional per-launch sandbox toggle (#780) — tri-state "default"/"on"/"off"
-        # for a standard bridge (--sandbox / --no-sandbox / neither). Enum-validated by
-        # runner.spawn_detailed before any spawn side effect → 422 on a bad value.
+        # Optional per-launch sandbox toggle (#780) — tri-state "default"/"on"/"off" for a
+        # standard bridge. DISABLED for 1.0 (#1037): still accepted + enum-validated by
+        # runner.spawn_detailed (422 on a bad value), but inert — the runner emits no
+        # --sandbox flag and coerces persisted values to "default" until #1046 re-enables it.
         sandbox = body.get("sandbox")
         # Optional past-conversation fork for a pty launch (#303) — the transcripts
         # API's session uuid, spawned as `--resume <uuid> --fork-session`. Format,
@@ -4030,7 +4567,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             runner.get_instance(resolved) if resolved is not None else None
         ) or app.state.hosted.get_instance(instance_id)
         if instance is None:
-            raise HTTPException(status_code=404, detail=f"no such instance: {instance_id}")
+            raise _unresolved_bridge(runner, instance_id, f"no such instance: {instance_id}")
         return instance
 
     @app.post("/api/instances/{instance_id}/message", status_code=202)
@@ -4096,7 +4633,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
         resolved = runner.resolve_bridge_id(instance_id)
         if resolved is None:
-            raise HTTPException(status_code=404, detail=f"no managed instance: {instance_id!r}")
+            raise _unresolved_bridge(runner, instance_id, f"no managed instance: {instance_id!r}")
         try:
             return await runner.stop(resolved)
         except UnknownProject as exc:
@@ -4114,8 +4651,8 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             return await _resume_hosted(instance_id, hosted)
         resolved = runner.resolve_bridge_id(instance_id)
         if resolved is None:
-            raise HTTPException(
-                status_code=404, detail=f"no managed instance to resume: {instance_id!r}"
+            raise _unresolved_bridge(
+                runner, instance_id, f"no managed instance to resume: {instance_id!r}"
             )
         try:
             return await _spawn_or_http(runner.resume(resolved))
@@ -4149,6 +4686,14 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 # hosted ids are None above and fall through to the bridge runner).
                 await app.state.hosted.forget(instance_id)
             else:
+                # Refuse an ambiguous prefix BEFORE the verbatim fallback below: `or
+                # instance_id` would otherwise hand `forget` the raw prefix, and the
+                # operator would get a bare 404 for an id that names several real
+                # bridges rather than being told which (#1099).
+                if runner.bridge_id_candidates(instance_id):
+                    raise _unresolved_bridge(
+                        runner, instance_id, f"no such instance: {instance_id}"
+                    )
                 # Accept the project name the current client sends as well as a raw
                 # instance_id (#777); fall back to the id verbatim so a purely-persisted
                 # (not-yet-materialized) record still reaches runner.forget's own lookup.
@@ -4250,7 +4795,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         resolved = runner.resolve_bridge_id(instance_id)
         instance = runner.get_instance(resolved) if resolved is not None else None
         if instance is None:
-            raise HTTPException(status_code=404, detail=f"no such instance: {instance_id}")
+            raise _unresolved_bridge(runner, instance_id, f"no such instance: {instance_id}")
         target = instance.session_url or instance.url
         if not target:
             raise HTTPException(status_code=409, detail="no session URL available yet")
@@ -4273,10 +4818,30 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         origin = websocket.headers.get("origin")
         return bool(origin) and auth.normalize_origin(origin) in _allowed_origins
 
+    async def _ws_gate(websocket: WebSocket) -> bool:
+        """Whether the WS handshake may proceed, BEFORE accept() (D12).
+
+        The Origin allowlist is a cross-site WS-hijack defence, NOT an
+        authentication method, so it must run even when ``config.auth.enabled``
+        is false (the shipped default). Tying it to the auth master switch let
+        ``config.auth.enabled and ...`` short-circuit, so ``_ws_authorized``
+        never ran and any page the operator visited could open a socket to the
+        loopback service and read-stream live output (CWE-1385). A browser
+        WebSocket ALWAYS sends Origin, so an absent Origin means a non-browser
+        client (never the cross-site attack) and passes; a present,
+        non-allowlisted Origin is rejected. When auth is enabled the full
+        session/proxy/token gate applies unchanged (it also rejects an absent
+        Origin for ambient cookie credentials, and exempts the Bearer path).
+        """
+        if config.auth.enabled:
+            return await _ws_authorized(websocket)
+        origin = websocket.headers.get("origin")
+        return origin is None or auth.normalize_origin(origin) in _allowed_origins
+
     @app.websocket("/ws/bridge-log/{instance_id}")
     async def ws_bridge_log(websocket: WebSocket, instance_id: str) -> None:
         """Tail the bridge debug log — ANSI-stripped and ID-redacted (feature 6, D11)."""
-        if config.auth.enabled and not await _ws_authorized(websocket):
+        if not await _ws_gate(websocket):
             await websocket.close(
                 code=1008
             )  # validate before accept — never open an unauthed socket
@@ -4319,7 +4884,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     @app.websocket("/ws/hosted/{instance_id}")
     async def ws_hosted(websocket: WebSocket, instance_id: str) -> None:
         """Stream a hosted session's live events, replaying the ring past ``?after=``."""
-        if config.auth.enabled and not await _ws_authorized(websocket):
+        if not await _ws_gate(websocket):
             await websocket.close(code=1008)  # validate before accept
             return
         await websocket.accept()
@@ -4347,7 +4912,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     @app.websocket("/ws/clone-progress/{job_id}")
     async def ws_clone_progress(websocket: WebSocket, job_id: str) -> None:
         """Stream a clone job's ``{phase, percent}`` progress, then a terminal frame."""
-        if config.auth.enabled and not await _ws_authorized(websocket):
+        if not await _ws_gate(websocket):
             await websocket.close(code=1008)  # validate before accept
             return
         await websocket.accept()
@@ -4387,7 +4952,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         The wire carries only pyte-rendered cells + cursor + state, never raw ANSI, so the
         at-rest redaction invariant holds end to end.
         """
-        if config.auth.enabled and not await _ws_authorized(websocket):
+        if not await _ws_gate(websocket):
             await websocket.close(code=1008)  # validate before accept
             return
         await websocket.accept()
@@ -4430,6 +4995,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             "version": __version__,
             "projects_root": str(config.projects_root),
             "auth_enabled": config.auth.enabled,
+            # Whether a PASSWORD is configured — the real prerequisite for the Advanced
+            # step-up (#978). auth.enabled can be true with no password (reverse-proxy /
+            # API-token-only auth), where /api/reauth can never accept a password; gate the
+            # unlock form on this, not on auth_enabled.
+            "auth_password_set": config.auth.password_hash is not None,
             "reaper_ui_enabled": config.reaper.ui_enabled,
             "default_spawn_mode": config.instance_defaults.spawn_mode,
             "default_permission_mode": config.instance_defaults.permission_mode,
@@ -4439,6 +5009,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             # JS permLabel()/permissionEffect() helpers, and the config editor.
             "permission_labels": PERMISSION_LABELS,
             "bypass_desktop_hint": BYPASS_DESKTOP_HINT,
+            # Recognized hook lifecycle events (#958 Part 5): the single server-injected
+            # source of truth for the config editor's Hooks rows <select>, sorted for a
+            # stable order and derived from the backend validator so the two never drift.
+            "hook_events": sorted(config_write_hooks.RECOGNIZED_EVENTS),
             # Interactive Session (true-resume pty) works on POSIX always and on Windows
             # via the ConPTY keeper when the `pty` extra (pywinpty) is installed (#914).
             "pty_supported": _pty_supported(),

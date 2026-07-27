@@ -6,6 +6,7 @@ of these touch the network or spawn bridges; they inspect config + manage state_
 
 from __future__ import annotations
 
+import contextlib
 import json
 import ntpath
 import os
@@ -15,13 +16,14 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Literal, TypedDict
 from xml.sax.saxutils import escape as _xml_escape
 
-from . import claude_cli, config_write_mcp, deps, environments, procutil
+from . import atomicio, claude_cli, config_write_mcp, deps, environments, procutil
 from .config import ClausterConfig, _missing_enforced_auth, load_config
 from .discovery import Project, _load_trusted_paths, trust_state_for
 from .state import CURRENT_SCHEMA, StateStore
@@ -166,13 +168,26 @@ def run_doctor(
     # probes reflect what the server will actually import — otherwise doctor reports a managed-dir
     # install as "unavailable" even though the frozen binary loads it on the next start (#933).
     deps.add_deps_dir_to_sys_path(config.state_dir)
-    checks.extend(_check_extras())
-    checks.extend(_check_binary_deps(config.state_dir))
+    checks.extend(_check_extras(config))
+    checks.extend(_check_binary_deps(config))
 
     return checks, all(c.status != FAIL for c in checks)
 
 
-def _check_extras() -> list[Check]:
+#: Optional extras whose warning is only relevant when their feature is actually going to run —
+#: skip the doctor/preflight line otherwise, so the operator isn't nagged about a dep they don't
+#: need (#1016; mirrors _BINARY_DEP_GATES for binaries). Only ``apprise`` is here: runtime imports
+#: it ONLY when notifications are enabled AND a url is configured (``notify.py`` — no url means
+#: nothing is ever sent, so nothing to install for). ``pyte``/``pywinpty`` are deliberately NOT
+#: gated: pyte also reassembles the bridge connect-URL (``pty_keeper``) and pywinpty IS the Windows
+#: ConPTY interactive backend, so both matter beyond the opt-in live view and a missing one is
+#: worth surfacing regardless of ``claude.pty_screen_enabled``.
+_EXTRA_DEP_GATES: dict[str, Callable[[ClausterConfig], bool]] = {
+    "apprise": lambda config: config.notifications.enabled and bool(config.notifications.urls),
+}
+
+
+def _check_extras(config: ClausterConfig) -> list[Check]:
     """Report each optional extra's presence (#904): OK if importable, else WARN.
 
     Extras are optional capabilities the default install / signed binary may not
@@ -180,13 +195,20 @@ def _check_extras() -> list[Check]:
     ``apprise`` for notifications). Detection is a side-effect-free
     :func:`clauster.deps.probe` (never imports the module). Off-platform entries
     (a win32-only extra on a POSIX host) are skipped — the capability can't run
-    there, so its absence isn't worth reporting. WARN, never FAIL: a missing extra
-    only leaves its feature dormant, and a FAIL would wrongly flip doctor's exit
-    code. The detail names the capability and the environment-correct install hint.
+    there, so its absence isn't worth reporting. An extra whose feature won't run is
+    skipped too via ``_EXTRA_DEP_GATES`` (#1016) — today just ``apprise`` when
+    notifications aren't enabled-with-a-url — so the panel isn't cluttered with a nag
+    for a dep that would never be imported. WARN, never FAIL: a missing extra only
+    leaves its feature dormant,
+    and a FAIL would wrongly flip doctor's exit code. The detail names the capability
+    and the environment-correct install hint.
     """
     checks: list[Check] = []
     for entry in deps.EXTRAS:
         if not deps.applies(entry):
+            continue
+        gate = _EXTRA_DEP_GATES.get(entry.key)
+        if gate is not None and not gate(config):
             continue
         if deps.probe(entry):
             checks.append(Check(f"extra:{entry.key}", OK, f"{entry.capability_label} available"))
@@ -201,25 +223,147 @@ def _check_extras() -> list[Check]:
     return checks
 
 
-def _check_binary_deps(state_dir: Path) -> list[Check]:
+#: Managed binaries only relevant when a capability is switched on — skip their doctor line
+#: unless the gate is true, so an operator not using that feature isn't nagged to install it.
+#: (Shawl has no gate: it's needed for the Windows service install, which is always a valid path.)
+_BINARY_DEP_GATES: dict[str, Callable[[ClausterConfig], bool]] = {
+    "claustrum": lambda config: config.claustrum.enabled,
+}
+
+#: Binary deps whose resolution honors an operator-configured path, mapped to
+#: ``config -> (configured_value, default_value)``. Deps absent here have no configurable
+#: path and fall back to the managed dir / bare-key ``PATH`` lookup (#1013).
+_BINARY_DEP_CONFIGURED: dict[str, Callable[[ClausterConfig], tuple[str, str]]] = {
+    "claustrum": lambda config: (
+        config.claustrum.binary,
+        type(config.claustrum).model_fields["binary"].default,
+    ),
+}
+
+
+def resolve_configured_binary(key: str, config: ClausterConfig) -> str | None:
+    """Resolve the path binary dep ``key`` will actually be spawned from, or ``None`` (#1013).
+
+    Honors an operator-configured path (e.g. ``claustrum.binary``, the documented
+    minimal-PATH workaround) via the shared :func:`deps.resolve_effective_binary`
+    precedence, so ``doctor``, the session-start preflight, and ``deps list`` all agree
+    with the daemon instead of disagreeing by construction. A dep with no configurable
+    path falls back to the managed ``<state_dir>/deps/bin`` install, then a bare-key
+    ``PATH`` lookup. Read-only.
+    """
+    wiring = _BINARY_DEP_CONFIGURED.get(key)
+    if wiring is not None:
+        configured, default = wiring(config)
+        return deps.resolve_effective_binary(key, configured, default, config.state_dir)
+    managed = deps.installed_binary_path(key, config.state_dir)
+    if managed is not None:
+        return str(managed)
+    return shutil.which(key)
+
+
+def _claustrum_version(binary: str) -> str:
+    """Return the version token from ``<binary> --version`` (e.g. ``v1.7.1`` / ``claustrum-dev``).
+
+    Output is ``claustrum <version> (built <date>)``; an unstamped local build reports
+    ``claustrum claustrum-dev (built unknown)``, so a non-semver value is tolerated. A bare
+    ``<version> …`` form is handled too. Raised subprocess/OS errors are the caller's to turn
+    into an advisory WARN (doctor must not crash on a daemon that mis-speaks ``--version``).
+    """
+    proc = subprocess.run(
+        [binary, "--version"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=procutil.child_env(),
+        check=True,
+    )
+    parts = proc.stdout.strip().split()
+    if not parts:
+        return ""
+    # "claustrum <version> (built <date>)" -> the version is the second token; tolerate a
+    # bare "<version> ..." (no leading program name) too.
+    return parts[1] if parts[0] == "claustrum" and len(parts) >= 2 else parts[0]
+
+
+def _check_claustrum_version(resolved: str) -> Check:
+    """Advisory version check for a resolved claustrum binary (#1013 Bug 3-4).
+
+    Reports the detected version and WARNs — never FAILs — when it can't be confirmed at or
+    above the pinned floor (an unstamped/dev build parses below any floor; an older release is
+    under it). A ``--version`` probe that errors is itself a WARN, not a doctor failure. This is
+    deliberately advisory: an older or unstamped daemon may work fine, and a hard floor would
+    flag the common ``go install …@latest`` / local dev build.
+    """
+    floor = deps.claustrum_pinned_version()
+    try:
+        version = _claustrum_version(resolved)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return Check(
+            "binary:claustrum", WARN, f"claustrum available but `--version` failed: {exc}"
+        )
+    if version and _version_ge(version, floor):
+        return Check("binary:claustrum", OK, f"claustrum {version} available (>= {floor})")
+    return Check(
+        "binary:claustrum",
+        WARN,
+        f"claustrum {version or 'unknown'} available — could not confirm >= {floor} "
+        f"(unstamped/dev or older build; Direct Sessions may be incompatible)",
+    )
+
+
+def _managed_shadow_check(
+    key: str, label: str, config: ClausterConfig, resolved: str
+) -> Check | None:
+    """WARN when a managed ``deps/bin`` install is shadowed by a different resolved binary (#1013).
+
+    If ``key`` was installed via ``clauster deps install`` but a PATH/configured binary wins
+    resolution, the managed copy never runs — surface that (Bug 5) rather than silently running
+    an unexpected version. ``None`` when there's no managed install or it IS the resolved one.
+
+    Compares file *identity* (``Path.samefile`` — inode/device), not path spelling, so a symlink
+    or an alternate spelling of the same executable doesn't raise a false shadow warning. If a
+    path can't be stat'd (a racing removal), we can't confirm a shadow, so we stay silent rather
+    than nag about a possibly-valid install.
+    """
+    managed = deps.installed_binary_path(key, config.state_dir)
+    if managed is None:
+        return None
+    try:
+        if managed.samefile(resolved):
+            return None
+    except OSError:
+        return None
+    return Check(
+        f"binary:{key}:shadow",
+        WARN,
+        f"managed {label} at {managed} is shadowed by {resolved} — remove one so the "
+        f"expected version runs",
+    )
+
+
+def _check_binary_deps(config: ClausterConfig) -> list[Check]:
     """Report each managed binary dependency (#904 slice 2b): OK if present, else WARN.
 
-    Currently just Shawl, the Windows service wrapper the ``install-service`` path uses.
-    Off-platform entries (e.g. Shawl on a POSIX host) are skipped. "Present" means installed
-    in the managed ``<state_dir>/deps/bin`` dir OR already discoverable on ``PATH``. WARN, never
-    FAIL — like the extras, a missing binary only leaves a dormant feature (Windows service
-    install) and must not flip doctor's exit code.
+    Shawl (the Windows service wrapper ``install-service`` uses) and claustrum (the Direct
+    Session daemon). Off-platform/arch entries are skipped via :func:`deps.applies`, and a
+    gated binary (claustrum, only when ``claustrum.enabled``) is skipped when its feature is
+    off so a non-user isn't nagged. "Present" is resolved by :func:`resolve_configured_binary`
+    — the same precedence the daemon spawns with, so a configured ``claustrum.binary`` (the
+    documented minimal-PATH workaround) counts as present instead of a false "unavailable"
+    (#1013) — covering the managed ``<state_dir>/deps/bin`` dir, ``PATH``, and an operator
+    override. For claustrum the check also reports the detected version against an advisory
+    floor (Bug 3-4), and any managed-vs-resolved shadowing is surfaced (Bug 5). WARN, never FAIL
+    — a missing/old binary only leaves a dormant feature and must not flip doctor's exit code.
     """
     checks: list[Check] = []
     for dep in deps.BINARY_DEPS:
         if not deps.applies(dep):
             continue
-        present = deps.installed_binary_path(dep.key, state_dir) is not None or shutil.which(
-            dep.key
-        )
-        if present:
-            checks.append(Check(f"binary:{dep.key}", OK, f"{dep.label} available"))
-        else:
+        gate = _BINARY_DEP_GATES.get(dep.key)
+        if gate is not None and not gate(config):
+            continue
+        resolved = resolve_configured_binary(dep.key, config)
+        if resolved is None:
             checks.append(
                 Check(
                     f"binary:{dep.key}",
@@ -227,6 +371,14 @@ def _check_binary_deps(state_dir: Path) -> list[Check]:
                     f"{dep.label} unavailable — clauster deps install {dep.key}",
                 )
             )
+            continue
+        if dep.key == "claustrum":
+            checks.append(_check_claustrum_version(resolved))
+        else:
+            checks.append(Check(f"binary:{dep.key}", OK, f"{dep.label} available"))
+        shadow = _managed_shadow_check(dep.key, dep.label, config, resolved)
+        if shadow is not None:
+            checks.append(shadow)
     return checks
 
 
@@ -620,6 +772,61 @@ def _atomic_replace_state(src_state: Path, state_dir: Path) -> int:
     return count
 
 
+def _write_restored_config(src: Path, config_out: Path) -> None:
+    """Write the restored ``clauster.yml`` to ``config_out``, owner-only and atomically.
+
+    The restored config carries the argon2 ``password_hash`` (and ``api_token_hash``), so
+    it must never exist at a permissive mode, even briefly. A ``shutil.copy2`` + ``chmod``
+    pair fails that three ways: ``copy2`` propagates the *source* mode (the tar member
+    ``_safe_extract_tar`` wrote via a bare ``open()``, i.e. the umask default 0644), so the
+    hash is world-readable for the window between the two calls; a ``chmod`` that raises
+    leaves that permissive file behind on a restore reported as failed; and both follow a
+    symlink AT ``config_out``, writing through to — and then tightening — an unrelated file.
+
+    Writing a ``mkstemp`` temp (created 0600) and ``os.replace``-ing it onto the target
+    closes all three: the bytes are never readable by anyone else, a failure leaves the
+    destination untouched, and ``os.replace`` replaces a symlink sitting at ``config_out``
+    rather than writing through it.
+
+    The parent directory is deliberately **not** tightened (unlike
+    :func:`clauster.atomicio.atomic_write_text`, which calls ``ensure_private_dir``):
+    ``--config-out`` is an operator-chosen path — often a shared ``/etc`` or project dir —
+    and forcing it 0700 would lock out other users and services, the same reasoning
+    :func:`clauster.setup_wizard._atomic_write_config` records for #978. On Windows the
+    mode is advisory, exactly as the previous ``chmod`` was.
+    """
+    fd, tmp_name = tempfile.mkstemp(
+        dir=config_out.parent, prefix=config_out.name + ".", suffix=".tmp"
+    )
+    tmp = Path(tmp_name)
+    try:
+        # If fdopen raises at the open(2)/FileIO level (EMFILE/ENFILE under fd-table
+        # pressure) the fd was NOT adopted, so the raw mkstemp fd would leak — close it.
+        # Guarded, because if FileIO *did* adopt it before a later stage raised, the fd is
+        # already closed and an unguarded os.close would raise EBADF over the real error.
+        # (Same shape as atomicio.atomic_write_text, which this deliberately mirrors — it
+        # cannot be reused directly because it tightens the parent directory.)
+        try:
+            fh = os.fdopen(fd, "wb")
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            raise
+        with fh:
+            fh.write(src.read_bytes())
+            fh.flush()
+            os.fsync(fh.fileno())
+        atomicio.replace_with_retry(tmp, config_out)
+    except BaseException:
+        # BaseException (not just Exception) so a KeyboardInterrupt mid-write still removes
+        # a temp holding the argon2 hash. Re-raised immediately — never a swallow.
+        tmp.unlink(missing_ok=True)
+        raise
+    # fsync the file's data, then the directory entry: restore is the disaster-recovery
+    # path, so a crash right after the rename must not lose the config we just reported.
+    atomicio.fsync_dir(config_out.parent)
+
+
 class RestoreResult(TypedDict):
     """The outcome of :func:`restore_backup`: how many state files, and the config path."""
 
@@ -669,7 +876,7 @@ def restore_backup(
             cfgs = [p for p in src_cfg_dir.iterdir() if p.is_file()]
             if cfgs:
                 config_out.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(cfgs[0], config_out)
+                _write_restored_config(cfgs[0], config_out)
                 restored["config"] = str(config_out)
     return restored
 

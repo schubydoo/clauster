@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Clauster — First-run setup</title>
+  <!-- Set the theme before first paint to avoid a flash. Defaults to dark. -->
+  <script nonce="{{ csp_nonce }}">
+    (function () {
+      var t = localStorage.getItem("clauster-theme") || "dark";
+      document.documentElement.setAttribute("data-bs-theme", t);
+    })();
+  </script>
+  <link rel="icon" href="/static/favicon.svg?v={{ asset_version }}" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/vendor/tabler/css/tabler.min.css?v={{ asset_version }}">
+</head>
+<body class="d-flex flex-column">
+  <div class="page page-center">
+    <div class="container container-tight py-4">
+      <div class="text-center mb-4">
+        <img src="/static/logo-white-accent.svg?v={{ asset_version }}" height="52" alt="Clauster">
+      </div>
+      <div class="card card-md">
+        <div class="card-body">
+          <h2 class="h2 text-center mb-1">Welcome to Clauster</h2>
+          <p class="text-secondary text-center mb-4">
+            No configuration found. Set up the essentials to get started — you can change
+            everything else later from the config file or the dashboard.
+          </p>
+
+          <div class="alert alert-danger" role="alert" id="setup-error" hidden></div>
+
+          <form id="setup-form" autocomplete="off"{% if setup_token %} data-setup-token="{{ setup_token }}"{% endif %}>
+            <div class="mb-3">
+              <label class="form-label required" for="projects_root">Projects folder</label>
+              <input class="form-control" type="text" id="projects_root" name="projects_root"
+                     placeholder="~/code" autofocus required aria-describedby="err-projects_root" {{ NO_AUTOFILL }}>
+              <div class="form-hint">An existing folder whose subdirectories are your projects.</div>
+              <div class="invalid-feedback" id="err-projects_root" data-error="projects_root"></div>
+            </div>
+
+            <div class="row g-2 mb-3">
+              <div class="col-8">
+                <label class="form-label" for="host">Bind address</label>
+                {% if env_host %}
+                <input class="form-control" type="text" id="host" name="host" value="{{ env_host }}"
+                       readonly aria-describedby="err-host" {{ NO_AUTOFILL }}>
+                <div class="form-hint">Fixed by the <code>CLAUSTER_HOST</code> environment variable — the container controls the bind.</div>
+                {% else %}
+                <input class="form-control" type="text" id="host" name="host" value="127.0.0.1"
+                       aria-describedby="err-host" {{ NO_AUTOFILL }}>
+                <div class="form-hint">127.0.0.1 = this machine only. Use 0.0.0.0 to allow your LAN.</div>
+                {% endif %}
+                <div class="invalid-feedback" id="err-host" data-error="host"></div>
+              </div>
+              <div class="col-4">
+                <label class="form-label" for="port">Port</label>
+                {% if env_port %}
+                <input class="form-control" type="number" id="port" name="port"
+                       value="{{ env_port }}" min="1" max="65535" readonly aria-describedby="err-port" {{ NO_AUTOFILL }}>
+                <div class="form-hint">Fixed by <code>CLAUSTER_PORT</code>.</div>
+                {% else %}
+                <input class="form-control" type="number" id="port" name="port"
+                       value="{{ default_port }}" min="1" max="65535" aria-describedby="err-port" {{ NO_AUTOFILL }}>
+                {% endif %}
+                <div class="invalid-feedback" id="err-port" data-error="port"></div>
+              </div>
+            </div>
+
+            <div class="mb-3">
+              <label class="form-label required" for="password">Dashboard password</label>
+              <input class="form-control" type="password" id="password" name="password"
+                     autocomplete="new-password" required aria-describedby="err-password">
+              <div class="form-hint">At least {{ min_password_len }} characters. Enables authentication.</div>
+              <div class="invalid-feedback" id="err-password" data-error="password"></div>
+            </div>
+
+            <div class="mb-3">
+              <label class="form-label required" for="confirm">Confirm password</label>
+              <input class="form-control" type="password" id="confirm" name="confirm"
+                     autocomplete="new-password" required aria-describedby="err-confirm">
+              <div class="invalid-feedback" id="err-confirm" data-error="confirm"></div>
+            </div>
+
+            <div class="form-footer">
+              <button class="btn btn-primary w-100" type="submit" id="setup-submit"
+                      data-test="setup-submit">Save &amp; start Clauster</button>
+            </div>
+          </form>
+
+          <div id="setup-done" hidden>
+            <div class="alert alert-success" role="alert" data-test="setup-done">
+              <h3 class="mb-1">Setup complete</h3>
+              <div>Clauster is starting. Open it at
+                <a id="setup-url" href="#" class="alert-link"></a>.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="text-center text-secondary small mt-3">
+        {% if setup_token %}
+        Token-gated setup — reachable on this host; complete it with the one-time token from the server log.
+        {% else %}
+        Loopback-only setup — served on this machine until a password is set.
+        {% endif %}
+      </div>
+    </div>
+  </div>
+  <script src="/static/setup.js?v={{ asset_version }}" nonce="{{ csp_nonce }}"></script>
+</body>
+</html>

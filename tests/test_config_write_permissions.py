@@ -32,6 +32,12 @@ def test_validate_accepts_allow_deny_lists() -> None:
     perms.validate_permissions({"allow": ["Bash(ls:*)"], "deny": ["Bash(rm:*)"]})  # no raise
 
 
+def test_validate_accepts_ask_list() -> None:
+    # `ask` is the third canonical decision bucket — same opaque-string shape as
+    # allow/deny; the config editor's Permissions rows write it.
+    perms.validate_permissions({"ask": ["Bash(git push:*)"]})  # no raise
+
+
 def test_validate_accepts_default_mode() -> None:
     perms.validate_permissions({"defaultMode": "plan"})
     perms.validate_permissions({"defaultMode": "acceptEdits"})
@@ -43,7 +49,12 @@ def test_validate_accepts_empty_block() -> None:
 
 def test_validate_accepts_full_block() -> None:
     perms.validate_permissions(
-        {"allow": ["Read(*)"], "deny": ["Bash(curl:*)"], "defaultMode": "default"}
+        {
+            "allow": ["Read(*)"],
+            "deny": ["Bash(curl:*)"],
+            "ask": ["Bash(git push:*)"],
+            "defaultMode": "default",
+        }
     )
 
 
@@ -64,6 +75,9 @@ def test_validate_accepts_every_recognized_mode(mode: str) -> None:
         {"allow": [1, 2]},  # rule not a string
         {"allow": [""]},  # empty rule string
         {"deny": [None]},  # rule not a string
+        {"ask": "not-a-list"},  # ask must be a list
+        {"ask": [1]},  # ask rule not a string
+        {"ask": [""]},  # empty ask rule string
         {"defaultMode": 5},  # mode not a string
         {"defaultMode": "nonsense"},  # unknown mode
         {"bogus": 1},  # unknown key
@@ -114,6 +128,15 @@ def test_write_stores_rule_verbatim_never_parsed(tmp_path: Path) -> None:
     stored = json.loads(cw.project_settings_path(tmp_path).read_text(encoding="utf-8"))
     assert stored["permissions"]["deny"] == ["Bash(rm -rf /:*)"]
     assert stored["permissions"]["allow"] == ["Read(/etc/passwd)"]
+
+
+def test_write_stores_ask_rules_verbatim(tmp_path: Path) -> None:
+    """An `ask` bucket round-trips like allow/deny — stored verbatim, never parsed."""
+    candidate = {"ask": ["Bash(git push:*)", "Write(/etc/*)"]}
+    perms.validate_permissions(candidate)
+    perms.write_project_permissions(tmp_path, candidate, expected_hash=cw.hash_bytes(b""))
+    stored = json.loads(cw.project_settings_path(tmp_path).read_text(encoding="utf-8"))
+    assert stored["permissions"]["ask"] == ["Bash(git push:*)", "Write(/etc/*)"]
 
 
 # --- project read/write round-trip + stale-hash ------------------------------------
@@ -244,7 +267,10 @@ def test_local_write_gitignore_idempotent_across_writes(tmp_path: Path) -> None:
     _b1, h1 = perms.read_project_local_permissions(tmp_path)
     perms.write_project_local_permissions(tmp_path, {"defaultMode": "default"}, expected_hash=h1)
     gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
-    assert gitignore.count(".claude/settings.local.json") == 1
+    # Count exact lines, not substrings: the ``.bak`` sibling entry (#F6) contains
+    # ``.claude/settings.local.json`` as a substring, so the base entry is asserted
+    # unduplicated by line, not by substring occurrence.
+    assert gitignore.splitlines().count(".claude/settings.local.json") == 1
 
 
 def test_local_write_bad_shape_writes_nothing_and_no_gitignore(tmp_path: Path) -> None:

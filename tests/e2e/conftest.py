@@ -326,6 +326,97 @@ def config_mgmt_server(
     )
 
 
+class SetupServer(NamedTuple):
+    """A running first-run setup wizard under test (#978).
+
+    ``url`` is the loopback wizard URL; ``projects_root`` is a valid folder to type into
+    the form; ``write_path`` is where a successful submit writes ``clauster.yml``.
+    """
+
+    url: str
+    projects_root: Path
+    write_path: Path
+    proc: subprocess.Popen
+
+
+@pytest.fixture
+def setup_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[SetupServer]:
+    """A ``clauster run`` with NO config — serves the first-run setup wizard (#978).
+
+    Runs in an isolated empty cwd (so no ``./clauster.yml`` is found) with
+    ``CLAUSTER_SETUP_PORT`` pinned to a free port; the wizard writes ``<cwd>/clauster.yml``.
+    """
+    tmp = tmp_path_factory.mktemp("e2e-setup")
+    empty = tmp / "run"
+    empty.mkdir()  # empty cwd -> load_config finds nothing -> first-run wizard
+    projects = tmp / "code"
+    projects.mkdir()  # a valid projects_root to type into the form
+    home = tmp / "home"
+    home.mkdir()
+    port = _free_port()
+    env = {k: v for k, v in os.environ.items() if k not in ("CLAUSTER_CONFIG", "CLAUSTER_HOME")}
+    env.update({"HOME": str(home), "CLAUSTER_SETUP_PORT": str(port)})
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "clauster", "run"],
+        cwd=str(empty),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
+        env=env,
+    )
+    try:
+        _wait_ready(port, proc)
+        yield SetupServer(f"http://127.0.0.1:{port}", projects, empty / "clauster.yml", proc)
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+@pytest.fixture
+def advanced_config_server(
+    tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
+) -> Iterator[Server]:
+    """A loopback clauster with password auth + config-write on, for the Advanced E2E (#978).
+
+    Auth is required so the step-up re-auth is exercisable, config-write is on so the
+    Tier-B surface is reachable, and ``clone.timeout_seconds`` is seeded so a Tier-B save
+    has a known before-value. Function-scoped so the on-disk config write never leaks.
+    """
+    tmp = tmp_path_factory.mktemp("e2e-advanced")
+    password_hash = hash_password(make_hasher(), E2E_PASSWORD)
+    extra = (
+        f'auth:\n  enabled: true\n  password_required: true\n  password_hash: "{password_hash}"\n'
+        "config_write:\n  enabled: true\n"
+        "clone:\n  timeout_seconds: 300\n"
+    )
+    yield from _start_server(tmp, mutable_projects_tree, extra)
+
+
+@pytest.fixture
+def advanced_untrimmed_config_server(
+    tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
+) -> Iterator[Server]:
+    """Advanced E2E server whose `clone.allowed_schemes` holds a whitespace-padded entry (#982).
+
+    `allowed_schemes` has no validator, so a hand-edited config can carry `" https "`. The
+    Advanced list editor must NOT read such a stored value as dirty the instant it opens
+    (else an untouched save would silently trim it). Seeds one padded entry to guard that.
+    """
+    tmp = tmp_path_factory.mktemp("e2e-advanced-untrimmed")
+    password_hash = hash_password(make_hasher(), E2E_PASSWORD)
+    extra = (
+        f'auth:\n  enabled: true\n  password_required: true\n  password_hash: "{password_hash}"\n'
+        "config_write:\n  enabled: true\n"
+        'clone:\n  allowed_schemes: [" https ", "ssh"]\n'
+    )
+    yield from _start_server(tmp, mutable_projects_tree, extra)
+
+
 @pytest.fixture
 def config_mgmt_plugins_server(
     tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path

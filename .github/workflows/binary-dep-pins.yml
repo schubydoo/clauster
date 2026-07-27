@@ -1,0 +1,51 @@
+name: Binary dep pins
+
+# Verify each managed-binary pin in deps.py (BINARY_DEPS, e.g. Shawl) still matches
+# GitHub's published release-asset sha256 digest (#934). Renovate bumps the version +
+# derived URL but CANNOT rewrite the source-pinned checksum (its github-releases digest
+# is the git-tag commit, not the asset file hash), so this catches a bumped-but-stale hash.
+#
+# Path-filtered on purpose: it runs ONLY when deps.py (or the check script) changes, so it
+# never touches an unrelated PR — which also lets it be STRICT (a fetch error or a mismatch
+# fails) without a GitHub API hiccup ever blocking someone else's merge. It is deliberately
+# NOT a required status check: a required + path-filtered check leaves every PR that doesn't
+# touch these paths stuck "waiting" for a status that never posts.
+on:
+  pull_request:
+    paths:
+      - "src/clauster/deps.py"
+      - "scripts/check_binary_dep_pins.py"
+  push:
+    branches: [main]
+    paths:
+      - "src/clauster/deps.py"
+      - "scripts/check_binary_dep_pins.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: binary-dep-pins-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pins:
+    name: binary-dep pin checksums
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up uv + Python
+        uses: ./.github/actions/setup
+        with:
+          python-version: "3.13"
+      # `--no-sync`: the setup action already `uv sync --extra dev`'d the pinned interpreter
+      # (see lint.yml for why a bare `uv run` can rebuild the venv without the dev extra).
+      # GITHUB_TOKEN only raises the anonymous->authenticated API rate limit for reading a
+      # public third-party repo's release metadata; the job's `contents: read` caps it.
+      - name: Verify BINARY_DEPS pins vs GitHub's published asset digests
+        run: uv run --no-sync python scripts/check_binary_dep_pins.py
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

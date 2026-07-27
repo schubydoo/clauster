@@ -42,6 +42,40 @@ needs_symlink = pytest.mark.skipif(
     reason="symlink creation unavailable (needs privilege / Developer Mode on Windows)",
 )
 
+
+def audit_autofill(html: str) -> tuple[list[dict], list[dict]]:
+    """Audit #1036 per field: return (non-password inputs LACKING the opt-out, password inputs
+    that WRONGLY carry it).
+
+    Every non-credential ``input``/``textarea`` must opt out of password-manager autofill
+    (``data-lpignore``); credential fields must not (login autofill). Parses via ``HTMLParser`` so
+    a ``>`` inside an Alpine attribute value (e.g. ``x-show="a > b"``) can't fool a naive regex.
+    Both lists empty == correct.
+    """
+    from html.parser import HTMLParser
+
+    class _Audit(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.missing: list[dict] = []
+            self.pw_optout: list[dict] = []
+
+        def handle_starttag(self, tag: str, attrs: list) -> None:
+            if tag not in ("input", "textarea"):
+                return
+            d = {k: v for k, v in attrs}
+            is_pw = d.get("type") == "password"
+            has_optout = "data-lpignore" in d
+            if is_pw and has_optout:
+                self.pw_optout.append(d)
+            elif not is_pw and not has_optout:
+                self.missing.append(d)
+
+    a = _Audit()
+    a.feed(html)
+    return a.missing, a.pw_optout
+
+
 # --- Live-account safety: pin HOME BEFORE any clauster import -------------------------
 #
 # The ``_isolate_clauster_home`` fixture below is function-scoped, so it cannot protect

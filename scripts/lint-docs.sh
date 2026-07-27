@@ -9,10 +9,18 @@
 #                       fetch, no unverified download).
 #   yamllint          — Python tool, installed as a dev dependency (uv run).
 #   config reference  — gen_config_reference.py --check fails if the tables in
-#                       docs/configuration.md drifted from the config models. The
+#                       docs/reference/config.md or docs/guides/config-editor.md
+#                       drifted from the config models. The
 #                       tests job covers config.py changes; running it here also
 #                       catches a hand-edit of the generated tables on a docs-only
 #                       PR (where the tests job is skipped).
+#
+# NOT covered here: link/nav resolution. markdownlint checks Markdown *style*, not
+# whether a link target exists, so a link that leaves the docs/ tree (e.g.
+# `../UPGRADING.md`) passes this script and still fails CI's docs job. That gate is
+# `mkdocs build --strict`, which needs the `docs` extra while this script runs in
+# CI's lint job under `dev` — so it lives in `just docs-build`, and `just check`
+# runs it alongside this script. Adding a docs link? Run `just check`, not just this.
 #
 # Prereqs: `npm ci` and `uv sync --extra dev` (see CONTRIBUTING). CI installs both.
 # Usage:   bash scripts/lint-docs.sh

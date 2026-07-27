@@ -1,0 +1,5 @@
+---
+default: patch
+---
+
+Completing the first-run setup wizard on a non-loopback bind now records the origin you reached it at in `auth.allowed_origins`, so the login that follows succeeds. The wizard wrote no origins at all, and `build_allowed_origins` auto-allows loopback only when the bind host is itself loopback — so on the `0.0.0.0` bind the Docker image forces, setup completed onto an empty allowlist and the very next request, the login POST, was refused with `403 origin check failed` with no way back into the dashboard short of hand-editing the generated `clauster.yml`. The origin is recorded only for a bind that auto-allows nothing, only from a submit that already cleared the wizard's own gate (the setup token, or the loopback Origin check), and only when it parses as an `http(s)` origin; a loopback install's generated config is unchanged. The bundled `compose.yaml` and the installation guide now set `CLAUSTER_AUTH_ALLOWED_ORIGINS` too, which covers the same failure on the environment-configured path that never runs the wizard.

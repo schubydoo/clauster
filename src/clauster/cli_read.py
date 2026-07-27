@@ -26,6 +26,26 @@ if TYPE_CHECKING:
 _FOLLOW_INTERVAL = 0.5
 
 
+def ambiguous_id_message(engine: ClausterEngine, identity: str) -> str | None:
+    """Build the "several bridges match" diagnostic, or ``None`` when unambiguous.
+
+    Every engine resolve returns ``None`` for an ambiguous id prefix exactly as it does
+    for an unknown one (#1099) — failing closed, since acting on the wrong live session
+    is unrecoverable. Without this the operator would read "unknown instance" for an id
+    that names several *real* bridges, and have no idea to type more characters.
+
+    Lives here rather than in each command because ``cli_write``'s ``stop`` needs the
+    identical wording; a second copy would drift the moment either is reworded.
+    """
+    candidates = engine.bridge_id_candidates(identity)
+    if not candidates:
+        return None
+    return (
+        f"clauster: ambiguous instance id {identity!r} — matches "
+        f"{', '.join(candidates)}; use more characters"
+    )
+
+
 def _print_json(obj: Any) -> None:
     """Dump ``obj`` as indented JSON to stdout (``Path``/enum coerced via ``str``)."""
     print(json.dumps(obj, indent=2, default=str))
@@ -124,7 +144,8 @@ def cmd_logs(config: ClausterConfig, identity: str, *, follow: bool) -> int:
         path = engine.bridge_log_path(identity)
         if path is None:
             print(
-                f"clauster: no bridge log for {identity!r} (unknown instance or no log yet)",
+                ambiguous_id_message(engine, identity)
+                or f"clauster: no bridge log for {identity!r} (unknown instance or no log yet)",
                 file=sys.stderr,
             )
             return 2
@@ -165,9 +186,13 @@ def cmd_open(config: ClausterConfig, identity: str, *, launch: bool) -> int:
     with ClausterEngine(config) as engine:
         asyncio.run(engine.hydrate())
         url = engine.connect_url(identity)
+        # Resolved inside the block: the engine (and its registry) is disposed on exit,
+        # so the ambiguity lookup has to happen while it is still live.
+        ambiguous = ambiguous_id_message(engine, identity) if url is None else None
     if url is None:
         print(
-            f"clauster: no connect URL for {identity!r} (unknown instance or not ready yet)",
+            ambiguous
+            or f"clauster: no connect URL for {identity!r} (unknown instance or not ready yet)",
             file=sys.stderr,
         )
         return 2

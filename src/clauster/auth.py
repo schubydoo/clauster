@@ -34,6 +34,10 @@ from .atomicio import atomic_write_text, ensure_private_dir, fsync_dir
 from .config import _LOOPBACK_HOSTS, ClausterConfig, _read_secret_file
 
 _SESSION_SALT = "clauster-session"
+# Distinct salt for step-up elevation tokens (#978): the same signing secret with
+# a different salt makes an elevation token and a session cookie cryptographically
+# non-interchangeable — neither verifies in the other's slot.
+_ELEVATION_SALT = "clauster-elevation"
 # A real argon2id hash used to keep verify timing constant when no password is
 # configured / the attempt is empty — defends against a "no password set" oracle.
 _DUMMY_HASH = PasswordHasher().hash("clauster-dummy-do-not-use")
@@ -168,7 +172,11 @@ def verify_password(hasher: PasswordHasher, stored_hash: str | None, attempt: st
         hasher.verify(target, attempt)
     except (VerificationError, InvalidHashError):
         return False
-    return stored_hash is not None
+    # Only a REAL configured hash may authenticate. A falsy stored_hash — None OR the
+    # empty string — means no password is set: the verify above still ran against the
+    # dummy to keep timing constant, but a match against that source-visible dummy must
+    # never grant access (else its literal plaintext would be a working credential).
+    return bool(stored_hash)
 
 
 # ----- API tokens (inbound Bearer credential, #360) ------------------------
@@ -248,6 +256,18 @@ def make_serializer(secret: bytes) -> URLSafeTimedSerializer:
     return URLSafeTimedSerializer(secret, salt=_SESSION_SALT)
 
 
+def make_elevation_serializer(secret: bytes) -> URLSafeTimedSerializer:
+    """Build the timed serializer for step-up elevation tokens (#978).
+
+    Uses the same signing ``secret`` as the session serializer but a **distinct
+    salt** (:data:`_ELEVATION_SALT`), so a session cookie and an elevation token
+    are cryptographically non-interchangeable: one presented in the other's slot
+    fails signature verification and reads as absent. Elevation gates only the
+    privileged Tier-B config-write surface, never general access.
+    """
+    return URLSafeTimedSerializer(secret, salt=_ELEVATION_SALT)
+
+
 def issue_session(serializer: URLSafeTimedSerializer, user: str, epoch: int = 0) -> str:
     """Sign a session cookie carrying the user and the issuing ``epoch``.
 
@@ -258,18 +278,31 @@ def issue_session(serializer: URLSafeTimedSerializer, user: str, epoch: int = 0)
     return serializer.dumps({"u": user, "e": epoch})
 
 
-def read_session(
+def issue_elevation(serializer: URLSafeTimedSerializer, user: str, epoch: int = 0) -> str:
+    """Sign a short-lived step-up elevation token (#978).
+
+    Same payload shape and epoch-revocation semantics as :func:`issue_session`,
+    but signed with the elevation serializer's distinct salt so it can never be
+    read as a session cookie (and vice versa). A logout bump invalidates
+    outstanding elevation tokens too, since they embed the same epoch.
+    """
+    return serializer.dumps({"u": user, "e": epoch})
+
+
+def _load_signed_user(
     serializer: URLSafeTimedSerializer,
     token: str | None,
     max_age: int,
-    *,
-    current_epoch: int = 0,
+    current_epoch: int,
 ) -> str | None:
-    """Return the session user, or None if absent/expired/tampered/wrong-key/revoked.
+    """Verify a timed, epoch-stamped user token; return the user or None.
 
-    A cookie whose embedded epoch is below ``current_epoch`` was issued before a
-    revocation bump and is rejected. Cookies predating the epoch feature (no
-    ``e`` field) read as epoch 0, so they stay valid until the first bump.
+    Shared core of :func:`read_session` / :func:`read_elevation`: rejects an
+    absent / expired / tampered / wrong-key / pre-revocation token. The caller's
+    serializer salt selects which token family is accepted — the two salts make
+    session cookies and elevation tokens non-interchangeable. A token whose
+    embedded epoch is below ``current_epoch`` was issued before a revocation bump
+    and is rejected; a token predating the epoch field reads as epoch 0.
     """
     if not token:
         return None
@@ -286,6 +319,39 @@ def read_session(
     if token_epoch < current_epoch:
         return None  # issued before the last revocation
     return data.get("u")
+
+
+def read_session(
+    serializer: URLSafeTimedSerializer,
+    token: str | None,
+    max_age: int,
+    *,
+    current_epoch: int = 0,
+) -> str | None:
+    """Return the session user, or None if absent/expired/tampered/wrong-key/revoked.
+
+    A cookie whose embedded epoch is below ``current_epoch`` was issued before a
+    revocation bump and is rejected. Cookies predating the epoch feature (no
+    ``e`` field) read as epoch 0, so they stay valid until the first bump.
+    """
+    return _load_signed_user(serializer, token, max_age, current_epoch)
+
+
+def read_elevation(
+    serializer: URLSafeTimedSerializer,
+    token: str | None,
+    max_age: int,
+    *,
+    current_epoch: int = 0,
+) -> str | None:
+    """Return the elevated user, or None if absent/expired/tampered/revoked (#978).
+
+    Same shape and epoch-revocation semantics as :func:`read_session`, but the
+    serializer carries the distinct :data:`_ELEVATION_SALT`, so a session cookie
+    presented here (or an elevation token presented as a session) fails signature
+    verification and reads as ``None``.
+    """
+    return _load_signed_user(serializer, token, max_age, current_epoch)
 
 
 # ----- session epoch (logout revocation) -----------------------------------

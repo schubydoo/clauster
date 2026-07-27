@@ -1,4 +1,4 @@
-name: Release
+name: "Release: distribute (PyPI + GHCR)"
 
 # Fires when knope publishes a release tag (e.g. `v0.2.0`). knope itself creates
 # the GitHub Release + signed assets (the CHANGELOG was written earlier by the
@@ -45,7 +45,7 @@ jobs:
       # exactly the commit validated here — no tag-repoint TOCTOU window.
       sha: ${{ steps.resolve.outputs.sha }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0 # full history so the on-main ancestry check is reliable
@@ -99,14 +99,14 @@ jobs:
       contents: read
       id-token: write # OIDC for PyPI Trusted Publishing — no API token stored
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ needs.validate.outputs.sha }} # the exact commit validate froze
       - name: Set up uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
-          version: "0.11.29" # pinned uv (Renovate-tracked); skip the flaky "latest" fetch
+          version: "0.11.32" # pinned uv (Renovate-tracked); skip the flaky "latest" fetch
           # Caching is intentionally OFF in the publish job (zizmor
           # cache-poisoning): a cache restored from a lower-privilege context
           # could taint the artifact this OIDC-signed step ships to PyPI. A
@@ -121,7 +121,7 @@ jobs:
       #   owner=schubydoo, repo=clauster, workflow=release.yml, environment=pypi
       # Until that's set up, this step 403s — there is no token to add.
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # v1.14.1
         with:
           packages-dir: dist/
 
@@ -143,7 +143,7 @@ jobs:
       id-token: write # cosign keyless signing (OIDC)
       attestations: write # build provenance / SBOM attestations
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ needs.validate.outputs.sha }} # the exact commit validate froze
@@ -152,7 +152,7 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
       - name: Log in to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
         with:
           registry: ghcr.io
           username: ${{ github.actor }}

@@ -1,7 +1,8 @@
 """Configuration loading for Clauster.
 
 Search order:  $CLAUSTER_CONFIG  ->  ./clauster.yml  ->  $CLAUSTER_HOME/clauster.yml
-Any scalar key is overridable via env: CLAUSTER_<UPPER_SNAKE_CASE_PATH>=value.
+Any scalar or list key is overridable via env: CLAUSTER_<UPPER_SNAKE_CASE_PATH>=value
+(lists comma-separated); dict keys (projects, claude.env, webhooks.events) are file-only.
 Every such var also has a CLAUSTER_<...>_FILE form that reads the value from a file
 (file wins; trailing whitespace stripped) — for secrets rendered to /run/secrets by
 Docker/K8s/Vault, keeping them out of the process environment.
@@ -61,6 +62,15 @@ RESUME_MODES: tuple[str, ...] = ("standard", "pty")
 # claude removes them.
 SandboxMode = Literal["default", "on", "off"]
 SANDBOX_MODES: tuple[str, ...] = ("default", "on", "off")
+# The per-launch sandbox toggle (#780) is DISABLED for the 1.0 release (#1037). Evidence from
+# the pre-RC dogfood: `--sandbox` reaches the remote-control bridge but is NOT passed to the
+# server-mode session worker that actually runs Bash, so the security-labeled control silently
+# did nothing (fully unsandboxed, no warning) — a "fail closed visibly" violation. Rather than
+# ship a toggle that lies, clauster stops emitting the flag and coerces every requested/persisted
+# value to "default". The plumbing (this enum, the API/CLI/MCP params, the runner threading) is
+# kept intact so re-enabling behind dependency preflight + platform gating in #1046 is a one-line
+# flip of this flag. Left as a plain bool (not Final/Literal) so it stays runtime-togglable.
+SANDBOX_TOGGLE_ENABLED = False
 PERMISSION_MODES: tuple[str, ...] = (
     "default",
     "plan",
@@ -173,9 +183,9 @@ class ClaudeConfig(BaseModel):
         description="(pty mode) Publish a redacted, read-only render of the bridge's live "
         "terminal screen for the dashboard's live-terminal view (#534). Off by default; "
         "needs the optional `pyte` dependency (`pip install 'clauster[pty]'`) — without it the "
-        "feature stays dormant. The standalone binary does not bundle `pyte` (LGPL): either run "
-        "clauster from a `pip`/`uv` install with the `[pty]` extra, or keep the binary and "
-        "side-load `pyte` by setting `CLAUSTER_PYTE_PATH` to a directory holding an installed "
+        "feature stays dormant. The standalone binary does not bundle `pyte` (LGPL): install "
+        "it there with `clauster deps install pty` (#904), or manually side-load `pyte` by "
+        "setting `CLAUSTER_PYTE_PATH` to a directory holding an installed "
         "`pyte` (#702) — the binary appends it to `sys.path` only when set. The "
         "render is best-effort secret-redacted, so treat the live view as auth-gated, not "
         "secret-proof.",
@@ -372,7 +382,10 @@ class AuthConfig(BaseModel):
     enabled: bool = Field(
         default=False,
         description="**Master auth switch.** Must be `true` for password / "
-        "reverse-proxy auth to actually gate requests.",
+        "reverse-proxy auth to actually gate requests. The `false` default is safe "
+        "only on loopback: a non-loopback bind **refuses to start** without enforced "
+        "auth (fail-closed) unless `allow_unauthenticated_network` explicitly opts "
+        "out.",
     )
     password_required: bool = Field(
         default=False, description="Require password login. Needs `password_hash`."
@@ -393,7 +406,12 @@ class AuthConfig(BaseModel):
     allow_unauthenticated_network: bool = Field(
         default=False,
         description="Explicit opt-out: permit a non-loopback bind **without** enforced "
-        "auth (e.g. a trusted LAN). `ops._check_auth` downgrades this to a warning.",
+        "auth (e.g. a trusted LAN). `ops._check_auth` downgrades this to a warning. "
+        "When `auth.enabled` is `false`, **anyone who can reach the port has full "
+        "operator control of this host** — the dashboard drives a shell; treat it "
+        "accordingly. A non-loopback bind auto-allows no `Origin`, so pair this with "
+        "`allowed_origins` (the cross-site gate runs even with auth off) or the "
+        "dashboard's own writes and live views are rejected.",
     )
     cookie_secure: Literal["auto", "always", "never"] = Field(
         default="auto",
@@ -405,7 +423,13 @@ class AuthConfig(BaseModel):
     )
     allowed_origins: list[str] = Field(
         default_factory=list,
-        description="Extra WebSocket / CSRF origins (e.g. the proxy domain).",
+        description="Extra WebSocket / CSRF origins (e.g. the proxy domain). The `Origin` "
+        "allowlist is enforced on unsafe methods and WebSocket handshakes **even when "
+        "`enabled` is `false`** — it is a cross-site defence, not an authentication "
+        "method. A loopback bind auto-allows only `127.0.0.1`/`localhost`/`[::1]` **at "
+        "the configured port**, so list your real browser-facing origin here whenever it "
+        "differs: a non-loopback bind, a reverse proxy or tunnel, or an SSH port-forward "
+        "onto a different local port.",
     )
 
     @field_validator("api_token_hash", mode="before")
@@ -430,6 +454,22 @@ class AuthConfig(BaseModel):
                 "api_token_hash must be a 64-character lowercase hex string "
                 "(the SHA-256 output from `clauster hash-token`)"
             )
+        return v
+
+    @field_validator("password_hash", mode="before")
+    @classmethod
+    def _blank_password_hash_is_none(cls, v: object) -> object:
+        # A blank / whitespace-only password hash can never verify a password, but an
+        # empty string is falsy-yet-not-None: it slips past the `password_hash is None`
+        # unset checks and, paired with auth.verify_password's dummy-hash timing guard,
+        # would make the source-visible dummy password a working login credential
+        # (CWE-798). Normalize it to None so only a REAL hash counts — mirroring
+        # _blank_token_hash_is_none, and closing the `password_hash: ""` yaml path and
+        # the present-but-empty CLAUSTER_AUTH_PASSWORD_HASH env-var path at load time.
+        # No hex-format check here: an argon2id hash is a structured `$argon2id$...`
+        # string, not a fixed-width hex digest.
+        if isinstance(v, str) and not v.strip():
+            return None
         return v
 
 
@@ -612,6 +652,36 @@ class LoginShepherdConfig(BaseModel):
         "`login_shepherd.enabled` too; with this off, only the `login` mode is offered "
         "(a `setup-token` request 404s, the same invisible-surface shape as the whole "
         "disabled surface). Off by default; **not** web-editable.",
+    )
+
+
+class McpConfig(BaseModel):
+    """Capability gate for the ``clauster mcp`` stdio server (#527/#950/#1010).
+
+    The stdio MCP surface is **local-privileged and unauthenticated by design** —
+    reachable only by a process the operator already launched on the host, so it
+    carries no token auth. Its read tools (``list_sessions`` / ``session_status``)
+    are always exposed; the write tools (``spawn_session`` / ``stop_session`` /
+    ``resume_session``, added in #950) mutate bridge state and are gated behind this
+    switch.
+
+    ``allow_writes`` defaults **off** — the surface is read-only until the operator
+    opts in — so attaching the server to an agent cannot start, stop, or resume a
+    bridge unless writes are explicitly enabled. A missing/garbled flag means *off*
+    (fail closed). **Not** in the config-editor Tier-A allowlist: a privileged-
+    capability switch is file/CLI-managed only, never web-editable (mirrors the
+    auth / config_write / login_shepherd exclusions).
+    """
+
+    allow_writes: bool = Field(
+        default=False,
+        description="Expose the `clauster mcp` **write** tools (`spawn_session` / "
+        "`stop_session` / `resume_session`) that start, stop, and resume bridges. Off "
+        "by default: the stdio MCP surface is read-only (`list_sessions` / "
+        "`session_status` only) until you opt in. The surface is local-privileged and "
+        "unauthenticated, so turning this on lets any agent the server is attached to "
+        "drive the bridge lifecycle. **Not** web-editable — file/CLI-managed only, like "
+        "the auth / config_write / login_shepherd gates.",
     )
 
 
@@ -1303,6 +1373,7 @@ class ClausterConfig(BaseModel):
     reaper: ReaperConfig = Field(default_factory=ReaperConfig)
     config_write: ConfigWriteConfig = Field(default_factory=ConfigWriteConfig)
     login_shepherd: LoginShepherdConfig = Field(default_factory=LoginShepherdConfig)
+    mcp: McpConfig = Field(default_factory=McpConfig)
     usage: UsageConfig = Field(default_factory=UsageConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
@@ -1413,6 +1484,17 @@ def _candidate_paths(explicit: Path | None) -> list[Path]:
     return paths
 
 
+def first_config_path(path: str | os.PathLike | None = None) -> Path:
+    """Return the path :func:`load_config` reads (and writes) first (#978).
+
+    The first-run setup wizard writes here so the re-exec'd ``load_config`` finds it: an
+    explicit ``-c`` path when given, else the highest-priority default in the search order
+    (``$CLAUSTER_CONFIG`` → ``./clauster.yml`` → ``$CLAUSTER_HOME/clauster.yml``).
+    """
+    explicit = Path(path).expanduser() if path is not None else None
+    return _candidate_paths(explicit)[0]
+
+
 def _nested_model(ann: object) -> type[BaseModel] | None:
     """Return the nested ``BaseModel`` an annotation wraps for env-var recursion, or ``None``.
 
@@ -1437,25 +1519,92 @@ def _nested_model(ann: object) -> type[BaseModel] | None:
     return None
 
 
-def _scalar_env_map(
-    model: type[BaseModel], prefix: tuple[str, ...] = ()
-) -> dict[str, tuple[str, ...]]:
-    """Map CLAUSTER_<UPPER_SNAKE_PATH> -> dotted path for every scalar leaf.
+def _env_leaf_kind(ann: object) -> str | None:
+    """Classify a leaf annotation for env-override purposes.
 
-    Nested models recurse (including ``Optional`` ones); dict/list leaves (e.g.
-    projects, trusted_ips) are skipped because a single env var can't express them
-    unambiguously.
+    Returns ``"scalar"`` when one env var carries the value verbatim, ``"list"`` when
+    a comma-separated value can express it, and ``None`` for a leaf no single env var
+    can address unambiguously (``dict`` maps such as ``projects``), which is therefore
+    left unmapped rather than advertised-but-broken.
+
+    ``Optional`` wrappers are unwrapped, so ``list[str] | None`` still classifies as a
+    list.
     """
-    out: dict[str, tuple[str, ...]] = {}
+    for candidate in (ann, *(a for a in get_args(ann) if a is not type(None))):
+        origin = get_origin(candidate) or candidate
+        if origin is dict:
+            return None
+        if origin in (list, set, tuple, frozenset):
+            # Only a list of SCALARS can be carried by a delimited string. A list of
+            # models or nested containers has no such spelling, so it is left unmapped
+            # rather than advertised — mapping it would assign `list[str]` into it and
+            # crash config load, which is precisely the #1072 class this map removes.
+            # No such field exists today; this keeps one from being added silently.
+            items = [a for a in get_args(candidate) if a is not Ellipsis]
+            if items and all(_is_scalar_item(a) for a in items):
+                return "list"
+            return None
+    return "scalar"
+
+
+def _is_scalar_item(ann: object) -> bool:
+    """Whether a list's item type is a plain scalar a delimited string can carry."""
+    origin = get_origin(ann)
+    if origin is Literal:
+        return True
+    if origin is not None:  # a nested container (list/dict/union) inside the list
+        return False
+    return isinstance(ann, type) and not issubclass(ann, BaseModel)
+
+
+def _env_leaf_map(
+    model: type[BaseModel], prefix: tuple[str, ...] = ()
+) -> dict[str, tuple[tuple[str, ...], str]]:
+    """Map CLAUSTER_<UPPER_SNAKE_PATH> -> (dotted path, leaf kind) for env-addressable leaves.
+
+    Nested models recurse (including ``Optional`` ones). ``dict`` leaves (``projects``,
+    ``claude.env``, ``webhooks.events``) are omitted: a single env var cannot address one
+    entry of a map, so they stay file-only. Before #1072 they were mapped anyway and the
+    raw string was assigned straight into the field, so *setting* one crashed config load
+    at startup — the var was discoverable but unusable.
+    """
+    out: dict[str, tuple[tuple[str, ...], str]] = {}
     for name, field in model.model_fields.items():
         path = (*prefix, name)
         nested = _nested_model(field.annotation)
         if nested is not None:
-            out.update(_scalar_env_map(nested, path))
-        else:
-            env_name = "CLAUSTER_" + "_".join(path).upper()
-            out[env_name] = path
+            out.update(_env_leaf_map(nested, path))
+            continue
+        kind = _env_leaf_kind(field.annotation)
+        if kind is None:
+            continue
+        out["CLAUSTER_" + "_".join(path).upper()] = (path, kind)
     return out
+
+
+def _split_env_list(value: str) -> list[str]:
+    """Split a comma- or newline-separated env value into a list, dropping blank entries.
+
+    Container tooling passes lists as comma-separated strings, so a comma is the primary
+    separator. A **newline** separates too, because the same value can arrive through the
+    ``_FILE`` secret-file form, where one-entry-per-line is the natural thing to write —
+    splitting on commas alone turned such a file into a single bogus entry holding the
+    raw newline. That entry then matches nothing, which for an allowlist
+    means a silent misconfiguration surfacing only as ``origin check failed``. Origins,
+    URLs, CIDRs, schemes and hostnames cannot contain a newline, so treating it as a
+    separator cannot split a legitimate value. A filesystem path legally can (as it can
+    contain a comma), so a ``claude.path_append`` entry holding either must be set in the
+    YAML file — see below.
+
+    Blanks are dropped so a trailing separator yields ``[]`` rather than ``[""]``, which
+    would fail validation in a way that hides the operator's intent. An empty value is
+    therefore an empty list — it does NOT fall through to the YAML value.
+
+    An entry containing a literal comma or newline cannot be expressed this way and must
+    be set in the YAML file — a filesystem path in ``claude.path_append``, or an Apprise
+    URL in ``notifications.urls`` whose query carries comma-separated targets.
+    """
+    return [item.strip() for item in value.replace("\n", ",").split(",") if item.strip()]
 
 
 def _set_nested(d: dict, path: tuple[str, ...], value: object) -> None:
@@ -1499,16 +1648,26 @@ _LEGACY_ENV_ALIASES: dict[str, tuple[str, ...]] = {
 
 
 def _apply_env_overrides(data: dict) -> dict:
-    for env_name, path in _scalar_env_map(ClausterConfig).items():
+    leaves = _env_leaf_map(ClausterConfig)
+    kinds = {path: kind for path, kind in leaves.values()}
+    for env_name, (path, kind) in leaves.items():
         # Secret indirection: for any CLAUSTER_<X>, a CLAUSTER_<X>_FILE wins and reads
         # the value from a file, keeping the argon2 hash / session secret out of the
         # process environment. A blank _FILE is treated as unset (falls through).
         file_path = os.environ.get(f"{env_name}_FILE", "").strip()
         if file_path:
-            _set_nested(data, path, _read_secret_file(f"{env_name}_FILE", file_path))
+            raw_value = _read_secret_file(f"{env_name}_FILE", file_path)
         elif env_name in os.environ:
-            _set_nested(data, path, os.environ[env_name])
+            raw_value = os.environ[env_name]
+        else:
+            continue
+        _set_nested(data, path, _split_env_list(raw_value) if kind == "list" else raw_value)
     for env_name, path in _LEGACY_ENV_ALIASES.items():
+        if path not in kinds:
+            # The alias points at a leaf no env var can address (a dict, or a field since
+            # removed). Honoring it would assign a raw string into a non-scalar and crash
+            # config load — the same #1072 class — so it is skipped, not resurrected.
+            continue
         new_env = "CLAUSTER_" + "_".join(path).upper()
         legacy_set = bool(env_name in os.environ or os.environ.get(f"{env_name}_FILE", "").strip())
         # The new name wins: skip the legacy var when the new one is set — but if the operator
@@ -1536,7 +1695,9 @@ def _apply_env_overrides(data: dict) -> dict:
             env_name,
             new_env,
         )
-        _set_nested(data, path, value)
+        # Coerce by the same rule as the new name: an alias pointing at a list leaf must
+        # comma-split too, or the deprecated spelling would crash where the new one works.
+        _set_nested(data, path, _split_env_list(value) if kinds.get(path) == "list" else value)
     return data
 
 
@@ -1564,7 +1725,7 @@ def load_config(path: str | os.PathLike | None = None) -> ClausterConfig:
     # operator who set a Postgres DSN would otherwise believe their data lives there while
     # every write goes to local SQLite ("fail closed, never silently"). Catch BOTH sources:
     # the YAML key AND the CLAUSTER_DATABASE_URL[_FILE] env override — removing the model
-    # field also drops the env var from `_scalar_env_map`, so it never reaches `raw` and the
+    # field also drops the env var from `_env_leaf_map`, so it never reaches `raw` and the
     # `in raw` check alone would miss the env path (Greptile #801 R2).
     env_dsn_set = "CLAUSTER_DATABASE_URL" in os.environ or bool(
         os.environ.get("CLAUSTER_DATABASE_URL_FILE", "").strip()

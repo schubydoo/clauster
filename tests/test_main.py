@@ -223,9 +223,58 @@ def test_bare_args_default_to_run(write_config, tmp_path, monkeypatch):
     assert ran == {"yes": True}
 
 
-def test_run_missing_config_exits_2(monkeypatch):
-    _stub_server(monkeypatch)
+def test_run_missing_config_launches_setup_wizard(monkeypatch):
+    # #978: a missing config is no longer a fatal error — it's first-run, so `run` serves the
+    # loopback setup wizard (which writes a config) instead of exiting 2.
+    captured = _stub_server(monkeypatch)
+    assert cli.main(["run", "-c", "/no/such/clauster.yml"]) == 0
+    # The served app is the setup wizard (its state carries the setup-completion flag), bound
+    # to loopback — not the main dashboard app.
+    assert hasattr(captured["app"].state, "setup_complete")
+    assert captured["host"] == "127.0.0.1"
+
+
+def test_run_missing_config_wizard_non_loopback_binds_and_mints_token(monkeypatch, capsys):
+    # #1017: with CLAUSTER_SETUP_HOST set (the Docker case), the wizard binds that non-loopback
+    # host so a published port can reach it, and mints a one-time token printed to the log —
+    # the token is what keeps the reachable, auth-less wizard from being an open config-writer.
+    monkeypatch.setenv("CLAUSTER_SETUP_HOST", "0.0.0.0")
+    captured = _stub_server(monkeypatch)
+    assert cli.main(["run", "-c", "/no/such/clauster.yml"]) == 0
+    assert captured["host"] == "0.0.0.0"  # bound to the opt-in interface, not loopback
+    err = capsys.readouterr().err
+    assert "?token=" in err  # the operator gets the gated URL from the container log
+
+
+@pytest.mark.parametrize("bad", ["abc", "", "0", "99999"])
+def test_run_missing_config_invalid_env_port_fails_closed(monkeypatch, capsys, bad):
+    # #1017 review: CLAUSTER_PORT is reapplied verbatim over the written config on re-exec, so a
+    # set-but-invalid value must fail the wizard UP FRONT — not "complete" setup into a config the
+    # restart then refuses to load. An empty captured dict proves no server was ever constructed.
+    monkeypatch.setenv("CLAUSTER_PORT", bad)
+    captured = _stub_server(monkeypatch)
     assert cli.main(["run", "-c", "/no/such/clauster.yml"]) == 2
+    assert "CLAUSTER_PORT" in capsys.readouterr().err
+    assert captured == {}  # never served a wizard whose result couldn't boot
+
+
+def test_run_missing_config_unbindable_env_host_fails_closed(monkeypatch, capsys):
+    # #1017 review: an unbindable CLAUSTER_HOST loads fine (any string validates) but fails at the
+    # re-exec's bind, so refuse it up front instead of completing setup into an unbindable config.
+    monkeypatch.setenv("CLAUSTER_HOST", "clauster.invalid")
+    captured = _stub_server(monkeypatch)
+    assert cli.main(["run", "-c", "/no/such/clauster.yml"]) == 2
+    assert "CLAUSTER_HOST" in capsys.readouterr().err
+    assert captured == {}
+
+
+def test_run_invalid_existing_config_exits_2(write_config, monkeypatch):
+    # #978: only a MISSING config triggers first-run. A config file that EXISTS but is invalid
+    # must ERROR (exit 2), never wizard-over-and-overwrite it. A nonexistent projects_root
+    # fails ClausterConfig validation (a ValueError) — the branch distinct from FileNotFoundError.
+    _stub_server(monkeypatch)
+    bad = str(write_config("projects_root: /no/such/clauster-projects-dir\n"))
+    assert cli.main(["run", "-c", bad]) == 2
 
 
 def test_run_claude_not_found_exits_2(write_config, tmp_path, monkeypatch):
@@ -364,6 +413,49 @@ def test_api_token_revoke_unknown_label_exits_2(write_config, tmp_path, capsys):
     cfg = _cfg(write_config, tmp_path)
     assert cli.main(["api-token", "revoke", "ghost", "-c", cfg]) == 2
     assert "no token labeled 'ghost'" in capsys.readouterr().err
+
+
+def test_api_token_issue_accepts_positional_label(write_config, tmp_path, capsys):
+    # #958 P7: the label works as a positional too, matching rotate/revoke.
+    cfg = _cfg(write_config, tmp_path)
+    assert cli.main(["api-token", "issue", "ci", "-c", cfg]) == 0
+    assert "issued 'ci'" in capsys.readouterr().err
+
+
+def test_api_token_revoke_accepts_label_flag(write_config, tmp_path, capsys):
+    # #958 P7 / DF-14: `revoke --label X` used to error; now it works, matching issue.
+    cfg = _cfg(write_config, tmp_path)
+    cli.main(["api-token", "issue", "ci", "-c", cfg])
+    capsys.readouterr()
+    assert cli.main(["api-token", "revoke", "--label", "ci", "-c", cfg]) == 0
+    assert "revoked 'ci'" in capsys.readouterr().err
+
+
+def test_api_token_rotate_accepts_label_flag(write_config, tmp_path, capsys):
+    cfg = _cfg(write_config, tmp_path)
+    cli.main(["api-token", "issue", "ci", "-c", cfg])
+    capsys.readouterr()
+    assert cli.main(["api-token", "rotate", "--label", "ci", "-c", cfg]) == 0
+    assert "rotated 'ci'" in capsys.readouterr().err
+
+
+def test_api_token_issue_missing_label_exits_2(write_config, tmp_path, capsys):
+    cfg = _cfg(write_config, tmp_path)
+    assert cli.main(["api-token", "issue", "-c", cfg]) == 2
+    assert "a label is required" in capsys.readouterr().err
+
+
+def test_api_token_conflicting_label_forms_exits_2(write_config, tmp_path, capsys):
+    cfg = _cfg(write_config, tmp_path)
+    assert cli.main(["api-token", "issue", "foo", "--label", "bar", "-c", cfg]) == 2
+    assert "not both" in capsys.readouterr().err
+
+
+def test_api_token_matching_label_forms_ok(write_config, tmp_path, capsys):
+    # Giving both forms with the SAME value is harmless (not a conflict).
+    cfg = _cfg(write_config, tmp_path)
+    assert cli.main(["api-token", "issue", "ci", "--label", "ci", "-c", cfg]) == 0
+    assert "issued 'ci'" in capsys.readouterr().err
 
 
 def test_api_token_no_verb_prints_help_exits_2(capsys):
@@ -547,6 +639,31 @@ def test_key_perms_warning_silent_when_stat_raises_oserror(capsys):
 
     cli._warn_if_key_world_readable(_RaceyKey())
     assert capsys.readouterr().err == ""
+
+
+def test_reexec_argv_frozen_drops_duplicate_binary_path(monkeypatch):
+    # #1014: a PyInstaller one-file build has sys.executable == sys.argv[0] == the
+    # binary path, so re-execing with both ([BIN, BIN, "run", ...]) hands argparse a
+    # stray positional and aborts the restart. When frozen, argv[0] is dropped.
+    monkeypatch.setattr(cli.deps, "is_frozen", lambda: True)
+    monkeypatch.setattr(cli.sys, "executable", "/opt/clauster/clauster")
+    monkeypatch.setattr(cli.sys, "argv", ["/opt/clauster/clauster", "run", "-c", "cfg.yml"])
+    assert cli._reexec_argv() == ["/opt/clauster/clauster", "run", "-c", "cfg.yml"]
+
+
+def test_reexec_argv_source_keeps_interpreter_and_script(monkeypatch):
+    # A source/venv run has a distinct interpreter and script path; both are kept so
+    # os.execv re-invokes `python <script> run …` correctly.
+    monkeypatch.setattr(cli.deps, "is_frozen", lambda: False)
+    monkeypatch.setattr(cli.sys, "executable", "/usr/bin/python3")
+    monkeypatch.setattr(cli.sys, "argv", ["/venv/bin/clauster", "run", "-c", "cfg.yml"])
+    assert cli._reexec_argv() == [
+        "/usr/bin/python3",
+        "/venv/bin/clauster",
+        "run",
+        "-c",
+        "cfg.yml",
+    ]
 
 
 def test_run_reexecs_when_restart_requested(write_config, tmp_path, monkeypatch):
@@ -1037,6 +1154,10 @@ def test_deps_list_includes_shawl_binary(write_config, tmp_path, capsys):
 def test_deps_list_shawl_status_on_win32(write_config, tmp_path, monkeypatch, capsys):
     # On Windows the shawl binary row flips missing → installed once it's in the managed bin dir.
     monkeypatch.setattr(cli.deps.sys, "platform", "win32")
+    # deps list now resolves the same way doctor does (#1013), which includes a PATH lookup;
+    # stub it to a miss so the managed-dir transition is what this test exercises (and so the
+    # simulated-win32 platform doesn't drive real shutil.which into a Windows-only _winapi call).
+    monkeypatch.setattr("shutil.which", lambda name: None)
     cfg = _cfg(write_config, tmp_path)
     cli.main(["deps", "list", "-c", cfg])
     line = next(x for x in capsys.readouterr().out.splitlines() if x.startswith("shawl"))
@@ -1049,7 +1170,20 @@ def test_deps_list_shawl_status_on_win32(write_config, tmp_path, monkeypatch, ca
     assert "installed" in line2
 
 
-def test_shawl_available_true_via_managed_dir(tmp_path):
+def test_deps_list_claustrum_on_path_shows_installed(write_config, tmp_path, monkeypatch, capsys):
+    # #1013 Bug 2: deps list must agree with doctor — a claustrum resolvable on PATH (or via a
+    # configured binary) reads as "installed" with its resolved path, not a false "missing".
+    monkeypatch.setattr(
+        "shutil.which", lambda name: "/usr/local/bin/claustrum" if "claustrum" in name else None
+    )
+    cli.main(["deps", "list", "-c", _cfg(write_config, tmp_path)])
+    line = next(x for x in capsys.readouterr().out.splitlines() if x.startswith("claustrum"))
+    assert "installed" in line
+    assert "/usr/local/bin/claustrum" in line
+
+
+def test_shawl_available_true_via_managed_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli.deps.sys, "platform", "win32")  # shawl only resolves on win32
     exe = cli.deps.managed_bin_dir(tmp_path) / "shawl.exe"
     exe.parent.mkdir(parents=True)
     exe.write_bytes(b"x")

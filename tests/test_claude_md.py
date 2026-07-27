@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -74,10 +75,11 @@ def test_write_creates_file_and_audit(tmp_path):
     assert doc.exists and doc.content == "# new\n" and doc.sha256 == _sha("# new\n")
     assert (proj / "CLAUDE.md").read_text() == "# new\n"
 
-    line = (state / "claude_md_audit.log").read_text().strip()
+    line = (state / "config_audit.log").read_text().strip()
     entry = json.loads(line)
-    assert entry["project"] == "proj" and entry["action"] == "create"
-    assert entry["user"] == "admin" and entry["sha256"] == doc.sha256
+    assert entry["surface"] == "claude-md" and entry["scope"] == "project"
+    assert entry["action"] == "create" and entry["actor"] == "admin"
+    assert entry["target"].endswith("CLAUDE.md") and entry["sha256"] == doc.sha256
 
 
 def test_write_update_audits_as_update(tmp_path):
@@ -88,7 +90,7 @@ def test_write_update_audits_as_update(tmp_path):
     write_claude_md(proj, "new\n", base_sha256=_sha("old\n"), state_dir=state)
     actions = [
         json.loads(line)["action"]
-        for line in (state / "claude_md_audit.log").read_text().splitlines()
+        for line in (state / "config_audit.log").read_text().splitlines()
     ]
     assert actions == ["update"]
 
@@ -305,16 +307,19 @@ def test_write_claude_md_uses_unique_temp_name(tmp_path, monkeypatch):
     assert all(n.startswith("CLAUDE.md.") and n.endswith(".tmp") for n in seen)
 
 
-def test_write_audit_failure_does_not_fail_write(tmp_path, monkeypatch):
+def test_write_audit_failure_does_not_fail_write(tmp_path, caplog):
     proj = tmp_path / "proj"
     proj.mkdir()
-    # Audit append raises, but the content write already committed -> save succeeds.
-    monkeypatch.setattr(
-        "clauster.claude_md._append_audit",
-        lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
-    )
-    doc = write_claude_md(proj, "kept\n", state_dir=tmp_path / "state")
+    state = tmp_path / "state"
+    state.mkdir()
+    # Force the audit append to fail: a DIRECTORY where the log file should be -> OSError on
+    # open. The content write already committed, so the save must still succeed (best-effort),
+    # and the failure must be logged loudly rather than swallowed silently.
+    (state / "config_audit.log").mkdir()
+    with caplog.at_level(logging.ERROR, logger="clauster.config_audit"):
+        doc = write_claude_md(proj, "kept\n", state_dir=state)
     assert doc.exists and (proj / "CLAUDE.md").read_text() == "kept\n"
+    assert any("audit append failed" in r.message for r in caplog.records)
 
 
 def test_write_symlink_escape_rejected(tmp_path):

@@ -29,6 +29,102 @@ run a database migration by hand. (The separate `clauster migrate` command is a
 *legacy* helper that only upgrades an older flat-file `state.json`; on a 0.12+
 deployment it has nothing to do.)
 
+## 0.12 → 1.0: a bridge's `id` in `clauster mcp` is now its instance id
+
+`list_sessions` reported each bridge's **project name** as its `id`. A project can
+run several bridges at once — one standard (Server Mode) bridge plus any number of
+Interactive Sessions — so that id was not unique: every bridge on a project came
+back with the same one. As of 1.0 a bridge's `id` is its stable **instance id**, and
+the project name stays available as the separate `project` field.
+
+This matters if you consume `list_sessions` output. A working session's
+`parent_instance` now joins to exactly one bridge `id`, which it could not do
+before. If you keyed bridges by `id` and assumed it was the project name, read
+`project` instead.
+
+`session_status` still accepts a **project name** for a bridge when that project
+runs exactly one. When it runs several, the name no longer identifies a single
+session, so instead of returning whichever bridge was registered first you get:
+
+```json
+{"found": false, "id": "myproject", "ambiguous": ["<bridge id>", "<bridge id>"]}
+```
+
+Retry with one of the returned ids. `stop_session` / `resume_session` accept either
+form, so they keep working — but note a project name that matches several bridges
+still resolves to the one the dashboard displays rather than reporting the
+ambiguity, so pass an **instance id** when you mean a specific bridge.
+
+## 0.12 → 1.0: `clauster mcp` write tools default off
+
+The [`clauster mcp`](docs/mcp.md) stdio server's **write** tools —
+`spawn_session`, `stop_session`, `resume_session` — shipped always-on in #950. As
+of 1.0 they are gated behind a new **`mcp.allow_writes`** config key that
+**defaults off**, so the stdio MCP surface is **read-only by default**
+(`list_sessions` / `session_status` only). The stdio transport is local-privileged
+and unauthenticated, so understating its capability — a banner/help that said
+"read-only" while the surface could start and stop bridges — was the security-
+relevant misstatement this closes (#1010).
+
+If an MCP client relied on driving the bridge lifecycle through `clauster mcp`,
+re-enable it explicitly:
+
+```yaml
+mcp:
+  allow_writes: true
+```
+
+Like the `config_write` / `login_shepherd` gates, `mcp.allow_writes` is
+file/CLI-managed only (**not** web-editable). The read tools are unchanged.
+
+## 0.12 → 1.0: the dashboard now blocks cross-site requests even with no password
+
+**What changed, in plain terms.** A website you open in your browser can quietly send
+requests to programs running on your own computer — clauster included. Before 1.0, when
+clauster had no password set (the default), it didn't check *where* a request came from.
+So a malicious page you happened to visit could drive your dashboard (start/stop sessions,
+trust a folder, restart the service) or read your live session output, without you ever
+seeing it. As of 1.0 clauster checks the origin of every state-changing request and every
+live-view (WebSocket) connection and rejects any that came from somewhere else. (Requests
+with no origin at all — command-line tools, scripts, `curl` — are unaffected: only a
+browser attaches an origin, so there is nothing to spoof.)
+
+**Do you need to do anything?** Check your config's `host:` setting first — that, not the
+address you browse, is what decides:
+
+- **`host:` is `127.0.0.1` or `localhost` (the default), and you browse it at that same
+  address and port.** Nothing to do. You're simply safer.
+- **`host:` is loopback, but you reach it some *other* way** — you need to list that
+  address (one line, below):
+  - a **tunnel or reverse proxy** in front of clauster (Cloudflare Tunnel, Tailscale
+    Serve, nginx/Caddy) — the address is the public hostname, not `localhost`;
+  - an **SSH port-forward onto a different local port**, e.g.
+    `ssh -L 9000:localhost:7621` → you browse `http://localhost:9000`, and the *port*
+    no longer matches. (Forwarding to the *same* port keeps working.)
+- **`host:` is anything else — `0.0.0.0`, a LAN IP, or Docker (the image binds `0.0.0.0`).**
+  Then clauster trusts **nothing** automatically, and you must list the address you browse
+  to **even if that address is `http://localhost:7621`**. This is the case most likely to
+  surprise you: the container is on `0.0.0.0` internally, so browsing it at `localhost`
+  still needs the entry.
+
+In the second and third cases your own buttons and live views are refused until you
+list the address you actually browse to:
+
+```yaml
+auth:
+  allowed_origins: ["http://localhost:9000"]   # the address you type into the browser
+```
+
+Use the address **as it appears in your browser's URL bar** — scheme, host, and port — not
+clauster's internal bind address. It fails loudly, never silently: a refused action, or a
+live view that won't connect, with `origin check failed` in the response.
+
+If clauster **already has a password**, nothing changes for you here — a
+non-loopback or proxied deployment has always needed `auth.allowed_origins`. This change
+only extends that same requirement to deployments running *without* a password, which
+previously skipped the check entirely. (And if you're reachable beyond your own machine,
+setting a password is worth doing regardless.)
+
 ## 0.12 → 0.13: SQLite-only; `database_url` removed
 
 0.13 commits to SQLite as the only persistence substrate (#796) — the

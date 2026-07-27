@@ -76,7 +76,28 @@ def jiffies_to_epoch(jiffies: int) -> float | None:
 
 
 def is_bridge_cmdline(cmdline: list[str]) -> bool:
-    """Whether a process command line is a ``claude … remote-control`` bridge."""
+    """Whether a process command line is a ``claude … remote-control`` bridge.
+
+    Matches the two spellings that carry the literal ``remote-control`` token: the
+    subcommand (standard) and the ``--remote-control`` flag. The bare ``--rc`` alias is
+    deliberately NOT matched (#1107).
+
+    The reason is the direction this gate fails in. :func:`bridge_ancestor` feeds the
+    phantom-prune (it replaced ``is_bridge_process`` there in #1116, which had been asking
+    whether the *session* pid was a bridge — it never is), and a match there DELETES a
+    resumable card — so a false positive costs an operator their session, while a false
+    negative only leaves a phantom card lingering. Widening the match is now strictly worse
+    than it was: the walk tests up to four processes per session rather than one, so an
+    alias that matched here would have four chances to find a false owner. Clauster's own
+    use of ``--rc`` is
+    :func:`~clauster.supervisor.build_dispatch_argv`'s ``claude --bg --rc <name>``: a
+    BACKGROUND AGENT that opens a cloud door, not a bridge. Matching the alias would let
+    a background agent stand as proof that "the bridge is alive, just unmanaged" and
+    prune the card out from under it. Whether a ``--bg --rc`` job should count as bridge
+    liveness is a real question, but it is one to answer deliberately, not by widening a
+    delete gate.
+    Use :func:`is_standard_bridge_cmdline` when the subcommand form must be told apart.
+    """
     if not cmdline:
         return False
     joined = " ".join(cmdline)
@@ -90,9 +111,10 @@ def is_standard_bridge_cmdline(cmdline: list[str]) -> bool:
 
     The standard (multi-session) form carries ``remote-control`` as a standalone
     argv token (``claude remote-control …``); the pty true-resume form is the
-    ``--remote-control`` / ``--rc`` **flag** instead. :func:`is_bridge_cmdline`
-    matches both (it substring-tests the joined cmdline), so it can't tell them
-    apart — this exact-token check can, and only the subcommand form passes.
+    ``--remote-control`` **flag** instead. :func:`is_bridge_cmdline` matches both
+    of those (it substring-tests the joined cmdline for ``remote-control``), so it
+    can't tell them apart — this exact-token check can, and only the subcommand
+    form passes. Neither matches the bare ``--rc`` alias (#1107).
 
     External-session adoption (#330) is gated on this: a standard external bridge is
     safely adoptable (its pid is its own process group, Stop is a clean single
@@ -294,6 +316,84 @@ def is_keeper_process(pid: int) -> bool:
         return is_keeper_cmdline(proc.cmdline())
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
         return False
+
+
+def is_bridge_process(pid: int) -> bool:
+    """Whether ``pid`` is a live, non-zombie ``claude`` **bridge** process (#1096).
+
+    The cmdline counterpart to :func:`is_keeper_process`, for deciding whether an EXTERNAL
+    working session is an unmanaged *bridge* or merely a hand-run ``claude`` sharing a
+    project directory. The phantom-prune needs that distinction: its premise is "the bridge
+    IS alive, just unmanaged", and deleting a resumable card because an operator opened a
+    terminal in the project would be wrong. Fails closed on any psutil error.
+    """
+    try:
+        proc = psutil.Process(pid)
+        if proc.status() == psutil.STATUS_ZOMBIE:
+            return False
+        return is_bridge_cmdline(proc.cmdline())
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        return False
+
+
+# How far above a working session its bridge can sit. MEASURED distance, with no slack:
+# 1 hop for Server Mode (session pid is the SDK worker, its parent is the bridge —
+# confirmed on a live host) and 0 for an in-process flag-form pty (the session pid IS the
+# bridge). Slack is a liability here, not safety margin: this gate feeds a prune that
+# DELETES a resumable card, `is_bridge_cmdline` is a substring test over the joined
+# cmdline, and a host can easily carry unrelated processes that satisfy it (a leaked test
+# stub, `vim claude-remote-control.md`). Every extra hop is another chance for one of those
+# to be mistaken for a session's owner. If a real wrapper ever appears, the prune goes
+# INERT — a stale card lingers, visibly and recoverably — which is the safe way to be
+# wrong; raise this deliberately then, rather than pre-paying for it now.
+_MAX_BRIDGE_ANCESTRY = 1
+
+
+def bridge_ancestor(pid: int, *, max_depth: int = _MAX_BRIDGE_ANCESTRY) -> int | None:
+    """Return the nearest live bridge at or above ``pid`` in its ancestry, else ``None``.
+
+    :func:`is_bridge_process` asks whether ``pid`` **is** a bridge, which is the wrong
+    question for a working session (#1116): ``agents --json`` reports a Server Mode
+    session's pid as the *SDK worker* — ``…/versions/<ver> --print --sdk-url …`` — whose
+    own cmdline is never a bridge cmdline, so testing it always answered False and the
+    phantom-prune could never fire. The bridge is that worker's PARENT.
+
+    Ancestry is the right relation here and not the ``ancestry != ownership`` trap of
+    #1020: this does not attribute a session to a *managed instance* (that stays with
+    :func:`owned_pids` and the #820 pid gate) — it only answers "is a live bridge process
+    responsible for this session", which is a parent/child fact. The distinction still
+    matters at the call site, which must exclude bridges Clauster manages before treating
+    the answer as evidence of an *unmanaged* one.
+
+    Bounded by ``max_depth`` and stopped at pid 1 so a session whose bridge already exited
+    can never charge an unrelated ancestor. Fails closed (``None``) on any psutil error, so
+    an unreadable process tree never manufactures prune evidence.
+    """
+    try:
+        proc = psutil.Process(pid)
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, ValueError):
+        return None
+    for _ in range(max_depth + 1):
+        try:
+            cmdline = proc.cmdline()
+            # A PTY keeper matches `is_bridge_cmdline` — it carries the bridge argv after
+            # `--`, and that test is a substring match over the joined cmdline. The keeper
+            # is the bridge's PARENT, so without this a pty bridge that died with its
+            # keeper not yet reaped hands the walk to the keeper, which is a different pid
+            # from the one the caller excludes as managed: our own keeper would become
+            # evidence for deleting our own card. Checked FIRST because a keeper satisfies
+            # both predicates.
+            if is_keeper_cmdline(cmdline):
+                return None
+            if proc.status() != psutil.STATUS_ZOMBIE and is_bridge_cmdline(cmdline):
+                return proc.pid
+            parent = proc.parent()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            return None
+        if parent is None or parent.pid <= 1:
+            return None
+        proc = parent
+    return None
 
 
 def _expected_epoch(proc_start: str | float | None) -> float | None:

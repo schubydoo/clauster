@@ -31,6 +31,12 @@ from clauster.runner import (
 class _FakeEngine:
     """Stand-in for ClausterEngine — canned outcome/behaviour set per test."""
 
+    def bridge_id_candidates(self, identity: str) -> list[str]:
+        """Ambiguous-prefix candidates (#1099); empty unless a test sets ``candidates``."""
+        return list(self.candidates)
+
+    candidates: list[str] = []
+
     outcome: SpawnOutcome | None = None
     stop_result: RemoteControlInstance | None = None
     raise_on_start: Exception | None = None
@@ -195,6 +201,21 @@ def test_stop_json(cfg, capsys):
     _FakeEngine.stop_result = _inst(status=InstanceStatus.STOPPED)
     assert main(["stop", "-c", cfg, "abc1234567", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["instance_id"] == "abc1234567"
+
+
+def test_stop_names_the_candidates_for_an_ambiguous_prefix(cfg, capsys):
+    # Without this the operator reads "no managed instance" for an id that names several
+    # REAL bridges, with no hint to type more characters (#1099).
+    _FakeEngine.stop_result = None
+    _FakeEngine.candidates = ["f2c456fd-aaaa", "f2c456fd-bbbb"]
+    try:
+        assert main(["stop", "-c", cfg, "f2c456fd"]) == 2
+        err = capsys.readouterr().err
+        assert "ambiguous" in err
+        assert "f2c456fd-aaaa" in err and "f2c456fd-bbbb" in err
+        assert "no managed instance" not in err, "the misleading not-found wording remained"
+    finally:
+        _FakeEngine.candidates = []
 
 
 def test_stop_unknown_identity_exit_2(cfg, capsys):

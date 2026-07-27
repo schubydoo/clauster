@@ -36,14 +36,13 @@ import contextlib
 import logging
 import os
 import secrets
-import shutil
 import stat
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
-from . import procutil
+from . import deps, procutil
 from .claustrum_client import (
     AuthRejected,
     ClaustrumClient,
@@ -361,10 +360,30 @@ class ClaustrumDaemon:
         return token or None
 
     def _resolve_binary(self) -> str:
-        resolved = shutil.which(self._cfg.binary)
-        if resolved is None:
-            raise DaemonSpawnError(f"claustrum binary not found: {self._cfg.binary!r}")
-        return resolved
+        """Locate the claustrum binary: an explicit config/PATH hit first, else the managed one.
+
+        ``config.claustrum.binary`` wins when it resolves on PATH — an operator who set an absolute
+        path or installed claustrum system-wide keeps control. The managed
+        ``<state_dir>/deps/bin/claustrum`` (from ``clauster deps install claustrum``) is a fallback
+        ONLY for the DEFAULT ``binary`` value: if the operator explicitly configured a *different*
+        binary and it doesn't resolve, that's their misconfiguration to see — we must NOT silently
+        run a different version than they asked for, so it raises rather than substituting.
+        """
+        default_binary = type(self._cfg).model_fields["binary"].default
+        resolved = deps.resolve_effective_binary(
+            "claustrum", self._cfg.binary, default_binary, self._config.state_dir
+        )
+        if resolved is not None:
+            return resolved
+        raise DaemonSpawnError(
+            f"claustrum binary not found: {self._cfg.binary!r} is not on PATH"
+            + (
+                " and no managed binary is installed — run `clauster deps install claustrum`"
+                if self._cfg.binary == default_binary
+                else " (an explicit claustrum.binary must resolve; the managed install is only a "
+                "fallback for the default)"
+            )
+        )
 
     @staticmethod
     def _unlink_token_handoff(token_file: Path | None) -> None:

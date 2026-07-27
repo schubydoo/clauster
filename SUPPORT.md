@@ -12,19 +12,44 @@ often turns up an answer or an existing thread to add to.
 
 - **A question or something not working?**
   [Open an issue](https://github.com/schubydoo/clauster/issues/new/choose). Include
-  your Clauster version, OS, and the relevant config / log lines (Clauster redacts
-  session IDs and secrets in its logs by default). `clauster doctor` output is handy
-  for environment problems.
+  your Clauster version, OS, and the relevant config / log lines. `clauster doctor`
+  output is handy for environment problems and safe to share. **Before copying
+  bridge log lines, note that the on-disk log is _not_ redacted by default** — the
+  redaction you see in the dashboard applies to the live stream only. Set
+  `logs.redact_session_url: true` and reproduce if possible, then review the log
+  and scrub any remaining session URLs or secrets before sharing it.
 - **An idea or enhancement?** Open an issue describing the use case — feature
   requests live in the same tracker.
+
+## When fixes ship
+
+Clauster releases are **event-driven — there is no calendar**. A release is cut
+when there is meaningful user-visible work to ship, not on a schedule, so quiet
+months simply have no release rather than a ceremonial one.
+
+Two things are not left to wait for that:
+
+- **Security fixes ship immediately** and are never batched behind other work.
+  See [`SECURITY.md`](https://github.com/schubydoo/clauster/blob/main/SECURITY.md).
+- **Regressions and data-loss bugs** get a patch release within days.
+
+Everything else rides the next ordinary release. If a merged fix matters to you
+and hasn't shipped, say so on the issue — that is a perfectly good reason to cut
+one.
+
+Because there is no fixed cadence, `main` can sit ahead of the newest release for a
+while — and the [documentation site](https://schubydoo.github.io/clauster/) is built
+from `main`, so it can describe behaviour you don't have yet. For what is in the
+version you installed, check the
+[release notes](https://github.com/schubydoo/clauster/releases) for that tag.
 
 ## Other channels
 
 - **Found a security vulnerability?** Please **don't** open a public issue —
-  follow [`SECURITY.md`](SECURITY.md) to report it privately through GitHub's
+  follow [`SECURITY.md`](https://github.com/schubydoo/clauster/blob/main/SECURITY.md) to report it privately through GitHub's
   security advisories.
 - **Want to contribute a fix or feature?** See
-  [`CONTRIBUTING.md`](CONTRIBUTING.md) for dev setup and the PR checklist.
+  [`CONTRIBUTING.md`](https://github.com/schubydoo/clauster/blob/main/CONTRIBUTING.md) for dev setup and the PR checklist.
 
 Clauster is pre-1.0 and maintained by [@schubydoo](https://github.com/schubydoo)
 in spare time, so please be patient — but every report helps. Thanks!

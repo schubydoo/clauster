@@ -37,6 +37,14 @@ def _login(client: TestClient) -> None:
     assert resp.status_code == 303, resp.text
 
 
+def test_login_form_stays_autofillable(runner_config):
+    # #1036: credential fields must NOT carry the no-autofill opt-outs, so a password manager still
+    # offers to fill the login form (bug-bash item 38 must keep passing).
+    html = _password_client(runner_config).get("/login").text
+    assert 'type="password"' in html  # it IS the login form
+    assert "data-lpignore" not in html and "data-1p-ignore" not in html
+
+
 def _healthz_after_probe(client: TestClient) -> dict:
     """Return /healthz once the #838 login-status cache has run its first probe.
 
@@ -264,6 +272,88 @@ def test_csrf_missing_origin_and_referer_blocked(runner_config):
     _login(client)
     resp = client.request("POST", "/api/instances", json={}, headers={"referer": ""})
     assert resp.status_code == 403
+
+
+# ----- CSRF Origin gate holds even when auth is DISABLED (F2/F5) ------------
+# Regression: `guard` used to early-return the instant `auth.enabled` was False,
+# so the shipped loopback default (auth off) had NO CSRF protection — any web page
+# the operator visited could drive every unsafe /api route (a confused-deputy
+# attack on a loopback-only service). The Origin gate now runs on the auth-off path
+# too, but because there are NO credentials there it must reject ONLY a *present*,
+# non-allowlisted Origin: a tokenless non-browser client (CLI/curl, no Origin
+# header) still has to work.
+
+
+def _open_client(runner_config) -> TestClient:
+    config, claude_json = runner_config
+    config.auth.enabled = False  # the shipped default (loopback, no auth)
+    config.auth.allowed_origins = [ORIGIN]  # same-origin entry for the allowed case
+    return TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
+
+
+def test_authoff_bodyless_post_cross_site_origin_blocked(runner_config):
+    # F2: a body-less state-changing POST (/api/restart) carrying a cross-site Origin
+    # is rejected by the CSRF gate even with auth off — and no restart is flagged.
+    client = _open_client(runner_config)
+    resp = client.post("/api/restart", headers={"origin": "http://evil.test"})
+    assert resp.status_code == 403
+    assert resp.json() == {"detail": "origin check failed"}
+    assert client.app.state.restart_requested is False
+
+
+def test_authoff_json_body_post_cross_site_origin_blocked(runner_config):
+    # F5: the JSON-body companion (/api/projects/clone) is blocked identically.
+    client = _open_client(runner_config)
+    resp = client.post(
+        "/api/projects/clone",
+        json={"url": "https://example.com/repo.git"},
+        headers={"origin": "http://evil.test"},
+    )
+    assert resp.status_code == 403
+    assert resp.json() == {"detail": "origin check failed"}
+
+
+def test_authoff_post_without_origin_reaches_handler(runner_config):
+    # A legitimate non-browser client (CLI/curl) sends no Origin and MUST still be
+    # served: the request reaches /api/restart's handler (202), not the CSRF 403.
+    client = _open_client(runner_config)
+
+    class _FakeServer:
+        should_exit = False
+
+    client.app.state.uvicorn_server = _FakeServer()
+    resp = client.post("/api/restart")
+    assert resp.status_code == 202
+    assert client.app.state.restart_requested is True
+
+
+def test_authoff_post_allowlisted_origin_reaches_handler(runner_config):
+    # A same-origin / allowlisted Origin passes the gate and reaches the handler.
+    client = _open_client(runner_config)
+
+    class _FakeServer:
+        should_exit = False
+
+    client.app.state.uvicorn_server = _FakeServer()
+    resp = client.post("/api/restart", headers={"origin": ORIGIN})
+    assert resp.status_code == 202
+
+
+def test_authoff_safe_get_not_gated_by_origin(runner_config):
+    # Safe methods are never CSRF-gated: a cross-site Origin on a GET is irrelevant.
+    client = _open_client(runner_config)
+    resp = client.get("/api/instances", headers={"origin": "http://evil.test"})
+    assert resp.status_code == 200
+
+
+def test_authon_missing_origin_still_blocked_unchanged(runner_config):
+    # The auth-ENABLED path is untouched: it still rejects an unsafe request with NO
+    # Origin (the CSRF gate fires before the 401), unlike the auth-off path above.
+    client = _password_client(runner_config)
+    resp = client.post("/api/restart")
+    assert resp.status_code == 403
+    assert resp.json() == {"detail": "origin check failed"}
+    assert client.app.state.restart_requested is False
 
 
 # ----- reverse-proxy trust (peer_ip seam monkeypatched) --------------------
@@ -576,6 +666,73 @@ def test_ws_streams_sanitized_lines(runner_config, tmp_path):
             line = ws.receive_text()
     assert "RED" in line and "\x1b[" not in line  # ANSI stripped
     assert "env_01TESTENVAAAAAAAAAAAAAAAA" not in line  # id redacted (D11)
+
+
+# ----- WebSocket cross-site Origin gate with auth OFF (CWE-1385) ------------
+# The Origin allowlist is a cross-site WS-hijack defence, not an authentication
+# method, so it must run on the handshake even when auth.enabled is false (the
+# shipped default). Before the fix the `config.auth.enabled and ...` guard
+# short-circuited with auth off, so any web page the operator visited could open
+# ws://127.0.0.1/ws/... and read-stream live output.
+
+_EVIL_ORIGIN = "http://evil.test"  # a cross-site page, not in the allowlist
+_GOOD_ORIGIN = "http://good.test"  # stands in for the operator's real origin
+
+
+def _authoff_bridge_log_instance(runner_config, tmp_path, allowed):
+    """A runner with one running instance + log file, and an explicit Origin allowlist.
+
+    Auth stays OFF (the shipped default this regression pins); ``allowed`` is the
+    Origin allowlist the WS gate checks against regardless of ``auth.enabled``.
+    """
+    config, claude_json = runner_config
+    assert config.auth.enabled is False  # pin the default this test depends on
+    config.auth.allowed_origins = allowed
+    runner = SessionRunner(config, claude_json=claude_json)
+    logf = tmp_path / "bridge.log"
+    logf.write_text("ready line\n")
+    runner._instances["demo"] = RemoteControlInstance(
+        project="demo",
+        label="demo",
+        status=InstanceStatus.RUNNING,
+        bridge_debug_log_path=logf,
+    )
+    return config, runner
+
+
+@pytest.mark.parametrize(
+    "path",
+    # ALL FOUR ws routes — the gate lives in the shared _ws_gate, so line coverage alone
+    # would stay green if one route were reverted to `config.auth.enabled and ...`.
+    # Pinning each path is what actually catches that.
+    [
+        "/ws/bridge-log/demo",
+        "/ws/clone-progress/demo",
+        "/ws/hosted/demo",
+        "/ws/pty-screen/demo",
+    ],
+)
+def test_ws_cross_site_origin_rejected_when_auth_off(runner_config, tmp_path, path):
+    # With auth off, a cross-site (non-allowlisted) Origin must be rejected BEFORE
+    # accept — the socket closes 1008 and never streams. `with` runs the lifespan.
+    config, runner = _authoff_bridge_log_instance(runner_config, tmp_path, [_GOOD_ORIGIN])
+    with TestClient(create_app(config, runner=runner)) as client:
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect(path, headers={"origin": _EVIL_ORIGIN}):
+                pass
+
+
+def test_ws_allowlisted_origin_streams_when_auth_off(runner_config, tmp_path):
+    # The allow side of the same gate: an allowlisted Origin (auth still off) is
+    # accepted and streams — the fix must not break the legitimate browser client.
+    config, runner = _authoff_bridge_log_instance(runner_config, tmp_path, [_GOOD_ORIGIN])
+    with TestClient(create_app(config, runner=runner)) as client:
+        with client.websocket_connect(
+            "/ws/bridge-log/demo", headers={"origin": _GOOD_ORIGIN}
+        ) as ws:
+            assert "ready line" in ws.receive_text()
+    # (An ABSENT Origin — a non-browser client — is covered by
+    # test_ws_streams_sanitized_lines, which connects with no Origin and streams.)
 
 
 # ----- API token (Bearer) auth (#360) --------------------------------------

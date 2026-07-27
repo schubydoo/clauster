@@ -85,9 +85,13 @@ def test_validate_frontmatter_requires_description() -> None:
         sk.validate_frontmatter({})
 
 
-def test_validate_frontmatter_rejects_unknown_key() -> None:
-    with pytest.raises(cw.InvalidCandidateError, match="unknown"):
-        sk.validate_frontmatter({"description": "x", "bogus": 1})
+def test_validate_frontmatter_passes_unknown_keys_through() -> None:
+    # #958/DF-3: Claude Code tolerates forward-compatible SKILL.md frontmatter keys, so
+    # a valid skill carrying keys clauster has no opinion about (effort/license/metadata)
+    # must NOT be rejected as "unknown" — only the recognized keys are type-checked.
+    sk.validate_frontmatter(
+        {"description": "x", "effort": "high", "license": "MIT", "metadata": {"a": 1}}
+    )  # no raise
 
 
 def test_validate_frontmatter_accepts_all_documented_fields() -> None:

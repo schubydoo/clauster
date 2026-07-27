@@ -79,6 +79,7 @@ def write_edits(
     *,
     removals: list[str] | None = None,
     expected_hash: str | None = None,
+    allowed: frozenset[str] | None = None,
 ) -> str:
     """Apply allowlisted ``edits`` (and optional ``removals``) to the config file.
 
@@ -87,6 +88,10 @@ def write_edits(
     replacement in the same atomic pass. Removed keys are NOT allowlist-checked (a
     deletion can never widen access; a legacy alias like ``claude.resume_mode`` is not
     in the editable set), but the post-removal candidate is fully re-validated.
+
+    ``allowed`` overrides which edit keys are permitted — defaults to the Tier-A
+    allowlist; the Tier-B "Advanced" write path (#978) passes ``config_editor._TIER_B``
+    so a Tier-A save can never smuggle in a Tier-B key or vice versa.
 
     Order is fail-closed: validate (disallowed edit key / bad value raises before any
     I/O), then the external-edit guard, then backup + atomic write. Raises
@@ -106,7 +111,10 @@ def write_edits(
         candidate_raw = copy.deepcopy(raw)
         for dotted in removals:
             _del_dotted(candidate_raw, dotted)
-        validate_edits(candidate_raw, edits)
+        if allowed is None:
+            validate_edits(candidate_raw, edits)
+        else:
+            validate_edits(candidate_raw, edits, allowed=allowed)
 
         # 2. External-edit guard: compare the bytes we actually read — re-reading the file
         #    for the hash would open a TOCTOU window where an intervening edit slips through.

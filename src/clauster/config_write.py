@@ -47,10 +47,11 @@ The gate ordering the children must follow (each step aborts before the write)::
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, Literal
 
@@ -86,11 +87,77 @@ REDACTION_SENTINEL = "********"
 # ``config_write_mcp_cli.entry_needs_direct_write``, which errs on any env/headers value
 # instead). This is deliberately conservative — over-masking a non-secret only forces the
 # caller to resend it; under-masking would leak. Keys are matched case-insensitively.
+# The ``auth`` alternative excludes ONLY the benign ``author``/``authors`` field via a
+# negative lookahead (``(?!ors?\b)``) rather than an enumerated suffix list: every other
+# credential-shaped ``auth`` key still masks — ``auth``, ``authn``, ``authorization``,
+# ``auth_key``/``authHeader``/``auth_cookie`` (``_``/camelCase joins), ``AUTH_TOKEN`` — while a
+# bare ``auth`` substring no longer over-matches ``author`` and redacts a real name/email
+# (#958/DF-4). An enumerated ``auth(?:...)?\b`` list looked tighter but silently under-masked
+# every compound ``auth`` key (``\b`` does not fire before ``_`` or a camelCase boundary).
 _SECRET_KEY_RE = re.compile(
-    r"(?:token|secret|password|passwd|api[-_]?key|apikey|auth|credential|bearer)",
+    r"(?:token|secret|password|passwd|api[-_]?key|apikey|"
+    r"auth(?!ors?\b)|credential|bearer)",
     re.IGNORECASE,
 )
-_INTERP_RE = re.compile(r"\$\{[^}]+\}")
+
+
+def _interp_spans(value: str) -> Iterator[tuple[int, int]]:
+    r"""Yield the ``(start, end)`` of each ``${…}`` interpolation with a non-empty body.
+
+    The linear replacement for a ``\\$\\{[^}]+\\}`` regex, which is **quadratic** on hostile
+    input (CodeQL ``py/polynomial-redos``). ``[^}]+`` stops only at ``}`` or end-of-string,
+    so on a value made of many ``${`` and no ``}`` the engine consumes to the end at EVERY
+    starting position: measured 0.03s at 16 KB rising to 2.1s at 128 KB, i.e. ~2 minutes at
+    1 MB. Values reach here unbounded from a project's ``.claude/settings.json``, which
+    arrives with a cloned repository, so the length is not ours to trust.
+
+    A possessive ``[^}]++`` is NOT the fix — it removes the backtracking but the scan still
+    restarts at every ``${``, so it stays quadratic (measured: 0.82s at 128 KB, only a ~2.5x
+    smaller constant). Narrowing the class to ``[^{}]`` or ``[^}$]`` would make it linear,
+    but both stop matching bodies the old pattern matched (``${a{b}``, ``${A$B}``) — and
+    under-masking is the one direction a redaction helper must never fail in.
+
+    So the scan is done by hand instead, matching the regex exactly: each match runs from a
+    ``${`` to the FIRST following ``}``, and requires at least one character between them
+    (``${}`` is not a match, which is what ``[^}]+`` means). Each index only moves forward,
+    so the whole walk is O(n).
+    """
+    i, n = 0, len(value)
+    while i < n:
+        start = value.find("${", i)
+        if start == -1:
+            return
+        close = value.find("}", start + 2)
+        if close == -1:
+            return
+        if close > start + 2:
+            yield start, close + 1
+            i = close + 1
+        else:
+            # `${}` — no body, so the regex would not match here either. Resume after the
+            # opener: a match cannot start at the `{` or the `}` in between.
+            i = start + 2
+
+
+def _has_interp(value: str) -> bool:
+    """Whether ``value`` contains a ``${…}`` interpolation (see :func:`_interp_spans`)."""
+    return next(_interp_spans(value), None) is not None
+
+
+def _mask_interps(body: str, sentinel: str) -> str:
+    """Replace every ``${…}`` in ``body`` with ``sentinel`` (see :func:`_interp_spans`)."""
+    out: list[str] = []
+    prev = 0
+    for start, end in _interp_spans(body):
+        out.append(body[prev:start])
+        out.append(sentinel)
+        prev = end
+    if not out:
+        return body
+    out.append(body[prev:])
+    return "".join(out)
+
+
 _SECRETISH_URL_RE = re.compile(r"^[a-z][a-z0-9+.\-]*://[^/@\s]+@", re.IGNORECASE)
 # The line-scanning (non-anchored) twin of _SECRETISH_URL_RE, for masking a
 # credential-bearing URL that appears *anywhere* in a line of free text (see
@@ -99,7 +166,118 @@ _SECRETISH_URL_INLINE_RE = re.compile(r"[a-z][a-z0-9+.\-]*://[^/@\s]+@", re.IGNO
 # A `key: value` / `key = value` line (the shape of a settings.json-adjacent config
 # line, a frontmatter field, or a shell-style env assignment) — used to mask the value
 # side of a secret-shaped key in free text that has no JSON/dict structure to recurse.
-_KV_LINE_RE = re.compile(r"^(?P<prefix>\s*[\w.\-]+\s*[:=]\s*)(?P<value>\S.*?)(?P<trail>\s*)$")
+# Greedy `.*` with the trailing whitespace split off in Python, NOT the natural-looking
+# `(?P<value>\S.*?)(?P<trail>\s*)$`. That form is quadratic: the lazy `.*?` grows one
+# character at a time while the greedy `\s*` re-scans the run behind it, so a line like
+# `token: a` + 32 KB of spaces + `b` took 2.1s, and 64 KB took 8.6s (x4 per doubling).
+# `redact_secret_lines` strips the line ending before matching, so the body holds no
+# newline and greedy `.*` + `$` is unambiguous — one pass, no backtracking.
+_KV_LINE_RE = re.compile(r"^(?P<prefix>\s*[\w.\-]+\s*[:=]\s*)(?P<rest>\S.*)$")
+
+
+def _split_kv_line(body: str) -> tuple[str, str] | None:
+    r"""Return ``(prefix, trail)`` for a ``key: value`` line, or ``None``.
+
+    The linear replacement for the old three-group regex (see :data:`_KV_LINE_RE`).
+    ``trail`` is the run of trailing whitespace the old ``(?P<trail>\\s*)$`` captured,
+    recovered here with ``rstrip`` so the caller can rebuild the line byte-for-byte.
+    """
+    kv = _KV_LINE_RE.match(body)
+    if kv is None:
+        return None
+    rest = kv.group("rest")
+    value = rest.rstrip()
+    return kv.group("prefix"), rest[len(value) :]
+
+
+# Character classification for the URL scheme, delegated to the regex ENGINE rather than
+# reimplemented, because `[a-z]` under `re.IGNORECASE` is Unicode-aware and matches more
+# than ASCII: U+212A KELVIN SIGN case-folds to `k`, U+017F LONG S to `s`, and U+0130/U+0131
+# likewise fold into the range. An ASCII-only classification silently stops matching
+# `\u212a://user@host` — which the old regex DID mask — leaking the userinfo. That is the
+# under-masking direction, and it is exactly the failure the docstring below warns about;
+# an earlier revision of this fix shipped it. The ASCII fast path keeps the common case a
+# set lookup and only pays for a regex call on a non-ASCII character.
+_SCHEME_START_RE = re.compile(r"[a-z]", re.IGNORECASE)
+_SCHEME_CHAR_RE = re.compile(r"[a-z0-9+.\-]", re.IGNORECASE)
+_SCHEME_ASCII = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+.-")
+_SCHEME_START_ASCII = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+
+def _is_scheme_char(ch: str) -> bool:
+    r"""Whether ``ch`` matches ``[a-z0-9+.\\-]`` under ``re.IGNORECASE`` (Unicode-aware)."""
+    if ch.isascii():
+        return ch in _SCHEME_ASCII
+    return _SCHEME_CHAR_RE.match(ch) is not None
+
+
+def _is_scheme_start(ch: str) -> bool:
+    """Whether ``ch`` matches ``[a-z]`` under ``re.IGNORECASE`` (Unicode-aware)."""
+    if ch.isascii():
+        return ch in _SCHEME_START_ASCII
+    return _SCHEME_START_RE.match(ch) is not None
+
+
+def _url_cred_spans(text: str) -> Iterator[tuple[int, int]]:
+    r"""Yield ``(start, end)`` of each ``scheme://user@`` credential-bearing URL prefix.
+
+    The linear replacement for ``[a-z][a-z0-9+.\\-]*://[^/@\\s]+@`` used **non-anchored**
+    over a whole line. That pattern is quadratic for the same reason the ``${…}`` one was:
+    ``[a-z0-9+.\\-]*`` consumes to the end of a run and then backtracks hunting ``://`` at
+    EVERY starting position, so an ordinary long alphanumeric run — a minified blob, a long
+    base64 value, a one-line JSON file — costs 0.18s at 8 KB and 11s at 64 KB. Unlike the
+    ``${`` flood it needs no crafted payload at all.
+
+    A ``(?<![a-z0-9+.\\-])`` lookbehind is the obvious fix and is WRONG: it under-masks.
+    ``-https://u@h`` stops matching entirely, because the ``-`` blocks the lookbehind and
+    no match may begin at the ``-`` itself. Under-masking is the direction that leaks.
+
+    So the scan anchors on the ``://`` literal and expands outward, which reproduces the
+    regex exactly: the scheme is the maximal ``[A-Za-z0-9+.-]`` run ending at ``://``,
+    starting from the first ASCII letter in it (the pattern's first atom is ``[a-z]``);
+    the userinfo is the run after ``://`` up to the first ``/``, ``@`` or whitespace, which
+    must be a non-empty run terminated by ``@`` (``@`` is outside ``[^/@\\s]``, so greedy
+    matching cannot cross it and backtracking cannot rescue a different terminator).
+    Matches are non-overlapping and left-to-right, exactly as ``re.sub`` applies them.
+    """
+    i = 0
+    while True:
+        sep = text.find("://", i)
+        if sep == -1:
+            return
+        run = sep
+        while run > i and _is_scheme_char(text[run - 1]):
+            run -= 1
+        start = -1
+        for j in range(run, sep):
+            if _is_scheme_start(text[j]):
+                start = j
+                break
+        if start == -1:
+            i = sep + 3  # no scheme letter before `://` — no match can start here
+            continue
+        end = sep + 3
+        while end < len(text) and text[end] not in "/@" and not text[end].isspace():
+            end += 1
+        if end > sep + 3 and end < len(text) and text[end] == "@":
+            yield start, end + 1
+            i = end + 1
+        else:
+            i = sep + 3
+
+
+def _mask_url_creds(body: str, replacement: str) -> str:
+    """Replace each ``scheme://user@`` with ``replacement`` (see :func:`_url_cred_spans`)."""
+    out: list[str] = []
+    prev = 0
+    for start, end in _url_cred_spans(body):
+        out.append(body[prev:start])
+        out.append(replacement)
+        prev = end
+    if not out:
+        return body
+    out.append(body[prev:])
+    return "".join(out)
 
 
 class ConfigWriteError(Exception):
@@ -237,7 +415,7 @@ def _is_secretish(key: str, value: Any) -> bool:
         return False
     if _SECRET_KEY_RE.search(key):
         return True
-    if _INTERP_RE.search(value):
+    if _has_interp(value):
         return True
     if _SECRETISH_URL_RE.match(value):
         return True
@@ -296,13 +474,70 @@ def redact_secret_lines(text: str) -> str:
             body, eol = body[:-2], "\r\n"
         elif body.endswith("\n"):
             body, eol = body[:-1], "\n"
-        masked = _INTERP_RE.sub(REDACTION_SENTINEL, body)
-        masked = _SECRETISH_URL_INLINE_RE.sub(f"{REDACTION_SENTINEL}@", masked)
-        kv = _KV_LINE_RE.match(masked)
-        if kv and _SECRET_KEY_RE.search(kv.group("prefix")):
-            masked = f"{kv.group('prefix')}{REDACTION_SENTINEL}{kv.group('trail')}"
+        masked = _mask_interps(body, REDACTION_SENTINEL)
+        masked = _mask_url_creds(masked, f"{REDACTION_SENTINEL}@")
+        kv = _split_kv_line(masked)
+        if kv and _SECRET_KEY_RE.search(kv[0]):
+            masked = f"{kv[0]}{REDACTION_SENTINEL}{kv[1]}"
         out.append(masked + eol)
     return "".join(out)
+
+
+#: Request-scoped sink for the redacted argv of the ``claude …`` commands a config-write
+#: spawns (#958 Part 6). A route sets this to a fresh list around the write; each CLI
+#: ``_run`` appends its ``[verb, *redacted-args]`` via :func:`record_cli_argv`, so the audit
+#: line can record exactly what ran without threading an accumulator through every writer.
+#: Default ``None`` = "not capturing" (the CLI runs normally, nothing is recorded).
+cli_argv_sink: contextvars.ContextVar[list[list[str]] | None] = contextvars.ContextVar(
+    "cli_argv_sink", default=None
+)
+
+
+def _mask_json_values(obj: Any) -> Any:
+    """Return ``obj`` with every leaf value replaced by the sentinel (keys/structure kept).
+
+    Applied to a serialized config entry in argv so the audit records the entry's *shape*
+    (its keys), never a value — because a value can be a secret under a benign key (an API
+    key inside an ``args`` list) that neither key-name (:func:`redact_secrets`) nor
+    line-based (:func:`redact_secret_lines`) heuristics can catch.
+    """
+    if isinstance(obj, dict):
+        return {k: _mask_json_values(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_mask_json_values(v) for v in obj]
+    return REDACTION_SENTINEL
+
+
+def _redact_argv_arg(arg: str) -> str:
+    """Redact one argv element for the audit trail.
+
+    A JSON object/array arg (e.g. ``claude mcp add-json``'s serialized entry) has ALL its
+    values masked via :func:`_mask_json_values` — structure + keys kept, values dropped —
+    since it can carry a secret no heuristic detects. Every other arg is scanned by
+    :func:`redact_secret_lines` (masks ``${…}`` / ``scheme://user@host`` / secret-keyed KV).
+    """
+    if arg.lstrip()[:1] in ("{", "["):
+        try:
+            return json.dumps(_mask_json_values(json.loads(arg)))
+        except (ValueError, TypeError):
+            pass
+    return redact_secret_lines(arg)
+
+
+def record_cli_argv(verb: str, args: list[str]) -> None:
+    """Append ``[verb, *args]`` (each arg redacted) to the active :data:`cli_argv_sink`, if any.
+
+    A no-op when no route is capturing (``cli_argv_sink`` is ``None``). Each arg is redacted
+    by :func:`_redact_argv_arg` — a JSON entry has all its *values* masked (keys kept), other
+    args scanned line-wise — so the audit records what ran without ever persisting a value.
+    The CLI paths already keep secrets off argv by construction; this is the belt-and-braces
+    that also closes the benign-keyed-secret-inside-``args`` gap. The binary path itself is
+    intentionally not recorded (host-specific noise). Propagates across ``asyncio.to_thread``
+    because the sink is a mutable list the worker thread shares with the setting context.
+    """
+    sink = cli_argv_sink.get()
+    if sink is not None:
+        sink.append([verb, *(_redact_argv_arg(a) for a in args)])
 
 
 def merge_redacted(incoming: Any, stored: Any) -> Any:
@@ -484,39 +719,70 @@ def project_local_settings_path(project_dir: Path) -> Path:
 
     Mirrors :func:`project_settings_path` for the third (local) scope: a real file
     that is **you, this project only** — never shared, never committed (see
-    :func:`ensure_gitignored`, called by the local-scope writers after a successful
-    write). Same stale-hash / atomic-write discipline as the project file.
+    :func:`ensure_gitignored`, which the local-scope writers call *before* their write,
+    since that write drops a secret-bearing ``.bak``). Same stale-hash / atomic-write
+    discipline as the project file.
     """
     return project_dir / ".claude" / "settings.local.json"
 
 
-def ensure_gitignored(project_dir: Path, relative_path: str) -> None:
+def ensure_gitignored(
+    project_dir: Path, relative_path: str, *, ignore_backup_sibling: bool = False
+) -> None:
     """Idempotently append ``relative_path`` to ``<project_dir>/.gitignore``.
 
     Mirrors Claude Code's own behavior: a project-local file (``.claude/settings.local
     .json``, ``CLAUDE.local.md``) is private to the operator and must never be
-    accidentally committed. Called by the local-scope writers *after* a successful
-    write, so a validation failure never touches ``.gitignore``.
+    accidentally committed.
 
-    Idempotent: a ``relative_path`` already present as an exact line (surrounding
-    whitespace ignored) is left untouched — no duplicate append, and the existing
-    content is never rewritten or reordered (only ever appended to). A missing
-    ``.gitignore`` is created. This is deliberately a simple exact-line check, not a
-    full gitignore-pattern matcher — good enough for the fixed, known entries this
-    surface writes, and conservative (a near-duplicate pattern is harmless, just
-    untidy, never unsafe).
+    **Call order depends on whether the writer takes a backup.** The four
+    ``settings.local.json`` writers call this **before** their write: that write drops a
+    ``<name>.bak`` holding the PREVIOUS (unredacted) ``env`` values, so an ignore that
+    failed afterwards would leave a secret-bearing file trackable. Ignoring first is the
+    fail-closed order, at the cost of a failed write (stale-hash 409, malformed-JSON 422)
+    leaving a ``.gitignore`` entry for a file that was not created — harmless, and this
+    call is exact-line idempotent so the later successful write is a no-op here.
+    :func:`clauster.claude_md.write_local` legitimately still calls this *after* its write,
+    because its writer takes no backup and so has no such window. Shape validation
+    (:func:`validate_candidate`) runs before either order, so a 422 for a malformed
+    candidate still never reaches ``.gitignore``.
+
+    ``ignore_backup_sibling`` additionally ignores the ``<relative_path>.bak``
+    sibling. The backup-taking JSON writers reach
+    :func:`~clauster.claude_json._atomic_write_json`, which — on an overwrite — drops
+    a one-time ``<name>.bak`` holding the *previous* file contents beside the target.
+    For the secret-bearing ``settings.local.json`` that snapshot can carry the prior
+    ``env`` map (API keys and the like), so ignoring only the file itself lets the
+    plaintext backup be committed and pushed. Ignoring the sibling up front closes
+    that gap before the ``.bak`` is ever created. Callers whose writer takes no backup
+    (``CLAUDE.local.md`` is replaced without one) leave this off, so no phantom
+    ``.bak`` entry is added for a file that never exists.
+
+    Idempotent: an entry already present as an exact line (surrounding whitespace
+    ignored) is left untouched — no duplicate append, and the existing content is
+    never rewritten or reordered (only ever appended to). A missing ``.gitignore`` is
+    created. This is deliberately a simple exact-line check, not a full
+    gitignore-pattern matcher — good enough for the fixed, known entries this surface
+    writes, and conservative (a near-duplicate pattern is harmless, just untidy, never
+    unsafe).
     """
     gitignore = project_dir / ".gitignore"
     try:
         existing = gitignore.read_text(encoding="utf-8")
     except FileNotFoundError:
         existing = ""
-    if relative_path in (line.strip() for line in existing.splitlines()):
+    present = {line.strip() for line in existing.splitlines()}
+    wanted = [relative_path]
+    if ignore_backup_sibling:
+        wanted.append(relative_path + ".bak")
+    missing = [entry for entry in wanted if entry not in present]
+    if not missing:
         return
     with gitignore.open("a", encoding="utf-8") as fh:
         if existing and not existing.endswith("\n"):
             fh.write("\n")
-        fh.write(relative_path + "\n")
+        for entry in missing:
+            fh.write(entry + "\n")
 
 
 def write_settings_subtree(

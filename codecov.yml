@@ -137,6 +137,7 @@ component_management:
         - src/clauster/mcp_server.py # #527 — read-only clauster MCP stdio server
         - src/clauster/login_shepherd.py # #846 — dashboard `claude` login flow
         - src/clauster/login_status.py # #838 — `claude auth status` probe behind /healthz
+        - src/clauster/setup_wizard.py # #978 — first-run pre-boot setup app
     - component_id: provisioning
       name: provisioning
       paths:
@@ -181,6 +182,7 @@ component_management:
         - src/clauster/db/migrations/versions/0004_api_tokens.py # #302 — named public-API bearer tokens
         - src/clauster/db/migrations/versions/0003_instance_id.py # #789 — instance-identity column
         - src/clauster/db/migrations/versions/0005_hosted_instance_id.py # hosted-session instance id
+        - src/clauster/db/migrations/versions/0006_instance_liveness_pids.py # #1088 — per-instance pids
     - component_id: config_write
       name: config-write (settings.json / .mcp.json)
       # The config_write feature cluster (#687 / #690 / #732 / #738) — capability-gated
@@ -198,6 +200,7 @@ component_management:
         - src/clauster/config_write_plugins.py # #773 — plugins + marketplaces surface
         - src/clauster/config_write_mcp_cli.py # #773 — CLI-driven MCP approvals helper
         - src/clauster/config_file_writer.py # #766 — path-contained file/dir writer primitive
+        - src/clauster/config_audit.py # #958 P6 — config-change audit trail
         - src/clauster/claude_json.py
     # The config_write_* family above mirrors the same pattern as the other
     # explicit-path components (see persistence/hooks_recap notes) — Codecov's

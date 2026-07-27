@@ -308,16 +308,20 @@ def write_project_local_settings(
 
     Third (local) scope, sibling of the project/user writers above: same
     fail-closed Foundation pipeline and stale-hash guard, targeting a *third*
-    file that is you, this project only. A successful write additionally runs
-    :func:`~clauster.config_write.ensure_gitignored` so a newly created
-    ``settings.local.json`` is never accidentally committed (#766) --
-    idempotent, so a write to an already-gitignored file is a no-op there.
+    file that is you, this project only. :func:`~clauster.config_write.ensure_gitignored`
+    runs *before* the write (fail-closed: the write creates a secret-bearing ``.bak``),
+    so ``settings.local.json`` and that backup are never accidentally committed (#766) --
+    idempotent, so an already-gitignored file is a no-op there.
     """
     cw.validate_candidate(incoming, validate_misc_settings)
     path = cw.project_local_settings_path(project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Ignore BEFORE writing, never after: the write creates a `.bak` holding the PREVIOUS
+    # env values, so an ensure_gitignored that failed afterwards would leave that
+    # secret-bearing file trackable. Ignoring first is the fail-closed order — a write that
+    # then fails leaves only a harmless extra .gitignore line (the call is idempotent).
+    cw.ensure_gitignored(project_dir, ".claude/settings.local.json", ignore_backup_sibling=True)
     _locked_write_misc(path, incoming, expected_hash)
-    cw.ensure_gitignored(project_dir, ".claude/settings.local.json")
 
 
 def _compute_effective_settings(

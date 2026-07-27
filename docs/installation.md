@@ -7,6 +7,25 @@ enough (the default floor is the `claude.min_version` config default; run
 `uv` / `pip` / `pipx` installs below also need **Python 3.11+**; the standalone
 binary, install script, Scoop, Homebrew, and Nix paths do not.
 
+## Which install method? {#which-install-method}
+
+Ten ways in, one decision: pick the row that matches your host, then jump to
+its section — the methods are interchangeable, and every one still needs the
+`claude` CLI on `PATH`.
+
+| Method | Platforms | Needs Python 3.11+ | Update with | Pick it when |
+| --- | --- | --- | --- | --- |
+| [uv](#with-uv-recommended) *(recommended)* | Linux · macOS · Windows | yes | `uv tool upgrade clauster` | You have Python and no strong reason otherwise |
+| [pip / pipx](#with-pip-pipx) | Linux · macOS · Windows | yes | `pip install -U clauster` / `pipx upgrade clauster` | You already manage tools with pip/pipx |
+| [Install script](#install-script-linux-macos-no-python) | Linux · macOS | no | re-run the one-liner | Fastest checksum-verified binary install, no Python |
+| [Install script (PowerShell)](#install-script-windows-powershell) | Windows | no | re-run the one-liner | Same, on Windows |
+| [Standalone binary](#standalone-binary-no-python) | Linux (x86_64/arm64) · macOS (arm64/x86_64) · Windows (x86_64) | no | download the next release | You want to verify Sigstore / SLSA provenance yourself |
+| [Scoop](#scoop-windows) | Windows | no | `scoop update clauster` | Windows with managed updates |
+| [Homebrew](#homebrew-macos-linux) | macOS · Linux | no | `brew update && brew upgrade clauster` | Your host is brew-managed |
+| [Nix](#nix-flake) | Linux · macOS | no | `nix profile upgrade` | Your host is Nix/flake-managed |
+| [From source](#from-source-development) | anywhere with `uv` | yes | `git pull && uv sync --extra dev` | Contributing to Clauster |
+| [Docker](#docker) | any `linux/amd64` / `linux/arm64` host | no | pull the new image tag | Container stacks — needs `claude` mounted in and enforced auth |
+
 ## With uv (recommended)
 
 [`uv`](https://docs.astral.sh/uv/) can install Clauster as a standalone tool:
@@ -33,7 +52,7 @@ uvx clauster run -c clauster.yml      # or: uvx clauster doctor / hash-password
 running prefer `uv tool install` above; pin a version for a reproducible one-off
 with `uvx clauster@<version> run -c clauster.yml`.
 
-## With pip / pipx
+## With pip / pipx {#with-pip-pipx}
 
 ```sh
 pip install clauster        # or: pipx install clauster
@@ -43,7 +62,7 @@ clauster run -c clauster.yml
 The package installs a single `clauster` console entry point
 (`clauster.__main__:main`); `python -m clauster` is equivalent.
 
-## Install script (Linux & macOS, no Python)
+## Install script (Linux & macOS, no Python) {#install-script-linux-macos-no-python}
 
 The quickest way to get the standalone binary. The script detects your OS +
 architecture, downloads the matching binary from the latest release, **verifies
@@ -150,7 +169,7 @@ want the full supply-chain check.
     anyway** (installing via Scoop, below, avoids the browser-download prompt).
 
 !!! note "The live terminal view needs the `pty` extra"
-    The optional read-only live terminal view ([`pty_screen_enabled`](configuration.md))
+    The optional read-only live terminal view ([`pty_screen_enabled`](reference/config.md))
     depends on [`pyte`](https://pypi.org/project/pyte/), which
     is LGPL-licensed and so **is not bundled in the standalone binary**. On the binary, install
     it with `clauster deps install pty` (the binary bundles `pip` and side-installs the wheel
@@ -173,7 +192,7 @@ want the full supply-chain check.
     also adds a managed `<state_dir>/deps` directory to its import path at startup, so anything
     installed there (`pip install --target=<state_dir>/deps <dist>` from any Python) loads on the
     next start —
-    [`clauster deps`](operations.md#clauster-deps-inspect-and-manage-optional-extras)
+    [`clauster deps`](reference/cli.md#clauster-deps-inspect-and-manage-optional-extras)
     manages that directory (`clauster deps list` shows each extra's status; `clauster deps install
     <extra>` / `uninstall <extra>` populate or clear it).
 
@@ -191,7 +210,7 @@ clauster run -c clauster.yml
 `scoop update clauster` picks up new releases automatically (the manifest tracks
 GitHub releases and re-verifies the checksum on each update).
 
-## Homebrew (macOS & Linux)
+## Homebrew (macOS & Linux) {#homebrew-macos-linux}
 
 [Homebrew](https://brew.sh) installs the standalone binary on macOS (Apple Silicon
 and Intel) and Linux (x86_64 and arm64) from the project's tap:
@@ -261,6 +280,20 @@ host:
 docker compose run --rm clauster clauster hash-password
 ```
 
+!!! tip "First-run without a hash: the setup wizard"
+    Start the container with an **empty `/config`** and **without** the
+    `CLAUSTER_AUTH_*` vars and Clauster serves the [first-run setup
+    wizard](guides/configuration.md) instead of exiting. In a container the wizard
+    binds all interfaces (`CLAUSTER_SETUP_HOST=0.0.0.0`, baked into the image) so a
+    published port can reach it, and it is gated by a **one-time token** printed to
+    the log — `docker logs <name>` shows a
+    `http://<this-host>:7621/?token=…` URL. Open it, set `projects_root`
+    (`/projects`), a bind host, and a password; the wizard writes an auth-enabled
+    `clauster.yml` to the **persistent `/config` volume**
+    (`CLAUSTER_CONFIG=/config/clauster.yml`, so it survives recreate) and restarts
+    onto it. The token gates the reachable, not-yet-authed wizard; a plain
+    non-loopback bind with no config is otherwise refused at load (#88).
+
 ### Docker Compose
 
 A ready-to-edit [`compose.yaml`](https://github.com/schubydoo/clauster/blob/main/compose.yaml)
@@ -283,8 +316,25 @@ environment:
   CLAUSTER_AUTH_ENABLED: "true"
   CLAUSTER_AUTH_PASSWORD_REQUIRED: "true"
   CLAUSTER_AUTH_PASSWORD_HASH: ${CLAUSTER_AUTH_PASSWORD_HASH:?...}
+  CLAUSTER_AUTH_ALLOWED_ORIGINS: ${CLAUSTER_AUTH_ALLOWED_ORIGINS:-http://localhost:7621}
   PUID: "1000"
   PGID: "1000"
+```
+
+!!! warning "Set the origin you browse to"
+    The container binds `0.0.0.0`, which auto-allows **no** browser origin — only
+    a loopback bind gets `localhost` for free. If the origin you open the
+    dashboard at is not listed in `auth.allowed_origins`, the login POST is
+    refused with `403 origin check failed` and the dashboard is unreachable.
+    Completing the **first-run setup wizard** records the origin you used
+    automatically, so this only needs setting when you configure by environment
+    instead.
+
+The Compose file defaults that origin to `http://localhost:7621`. Override it for
+a LAN address, hostname, or reverse proxy — comma-separate to list several:
+
+```sh
+export CLAUSTER_AUTH_ALLOWED_ORIGINS='http://nas.local:7621,http://192.168.1.50:7621'
 ```
 
 !!! note "Hashes in a `.env` file"
@@ -305,59 +355,11 @@ searches `$CLAUSTER_CONFIG`, then `./clauster.yml`, then
 
 ### Other subcommands
 
-```text
-clauster run                  # start the server (default)
-clauster hash-password        # generate an argon2id hash for auth.password_hash
-clauster hash-token           # mint an API token + hash for auth.api_token_hash
-clauster hash-metrics-token   # mint a /metrics scrape token + hash for observability.metrics_token_hash
-clauster api-token issue|list|rotate|revoke   # manage named public-API bearer tokens
-clauster mcp                  # read-only MCP server over stdio (list + status)
-clauster config reconcile     # remove deprecated config keys, writing their replacements
-clauster doctor               # diagnose config / environment
-clauster backup | restore | migrate
-clauster install-service {systemd|launchd|windows}
-clauster reap-environments    # reap ghost bridge environments (dry-run by default)
-clauster keepers              # list or stop orphaned pty keepers
-clauster usage <transcript>   # token + approximate cost for a session transcript
-```
-
-Headless **read** commands drive the same engine the web UI uses, with no server
-running — they are read-only and never write the running service's shared state.
-`projects`, `status`, and `sessions` take `--json` for scriptable output.
-
-```text
-clauster projects                  # list discoverable projects (git / trust / bypass)
-clauster status                    # list bridge instances and their status
-clauster sessions                  # list live working sessions (claude agents)
-clauster logs <instance> [-f]      # tail a bridge's redacted log (--follow to stream)
-clauster open <instance>           # print a bridge's connect URL (--launch opens a browser)
-```
-
-Headless **write** commands spawn and stop bridges through that same engine —
-identical mode policy, singleton cap, and option validation to the dashboard. Both
-take `--json`; `start` exits non-zero on failure (`2` = bad request — unknown
-project, untrusted directory, invalid option; `1` = clauster tried and could not —
-bridge cap or launch failure). They are meant for driving clauster with **no
-server running**, but a concurrent live server is safe: the two processes
-serialize their per-project spawn/stop sections on a cross-process file lock in
-the deployment state dir, the spawn re-checks the on-disk bridge record under
-that lock (a bridge the server already started is handed back or reattached,
-never duplicated), and every state write merges onto the store's current
-contents — a record the other process added or removed in the meantime stays
-added or removed. (On Windows the file lock is unavailable, so two *processes*
-fall back to the atomic-write + re-detect behavior; a single process is always
-fully serialized.)
-
-```text
-clauster start <project> [--mode standard|pty] [--spawn-mode …] [--permission-mode …] \
-               [--name NAME] [--sandbox default|on|off] [--trust] [--json]
-clauster stop  <instance> [--json]        # stop a bridge by id / prefix / identity
-```
-
-`--mode` picks the bridge mode with no hidden coercion (the two modes are not
-interchangeable); `--trust` accepts the workspace-trust dialog before starting
-(otherwise an untrusted directory is refused). Sending a conversation turn to a
-running hosted session is not a headless command — it needs the live server.
+Everything else — the secret/token helpers, `doctor`, backup/restore,
+`config reconcile`, `keepers`, `deps`, the headless read/write commands
+(`projects`, `status`, `sessions`, `logs`, `open`, `start`, `stop`), `usage`,
+and the MCP server — is catalogued in
+[CLI commands](reference/cli.md).
 
 `clauster doctor` confirms `claude` is found and new enough and that
 `projects_root` and the state dir are usable — run it before your first spawn
@@ -433,7 +435,7 @@ interpreter falls back to the `python -m clauster run …` form.
     the run-as user's `~/.local/bin` plus the standard system dirs (resolved from
     the `--user` you pass, so regenerate if you change it). For **shell-managed**
     toolchains a static directory can't cover — nvm/pyenv `node`, `cargo`, Go —
-    extend it with [`claude.path_append` / `claude.env`](configuration.md#claude-binary-bridge-spawn-claudeconfig)
+    extend it with [`claude.path_append` / `claude.env`](reference/config.md#claude-binary-bridge-spawn-claudeconfig)
     in `clauster.yml`; those append to (never replace) this baked `PATH`.
 
 !!! note "Auth + sandboxing"

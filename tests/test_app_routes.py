@@ -1319,17 +1319,25 @@ def _setup_reaper(monkeypatch, envs, live, sink):
     monkeypatch.setattr(envmod, "EnvironmentsClient", FakeClient)
 
 
-# a live bridge (kept), two ghosts, and the cloud Default (never reaped)
+# a live bridge (kept), two ghosts, and the cloud Default (never reaped).
+# Dirs are RELATIVE and get anchored under the app's projects_root: since #1100 the
+# reaper only attributes environments inside its own tree, so an absolute "/ghost/one"
+# would be skipped as unattributable and these tests would pass vacuously.
 _ENVS = [
-    ("env_live", "bridge", "/live/dir", "live"),
-    ("env_ghost1", "bridge", "/ghost/one", "ghost-one"),
-    ("env_ghost2", "bridge", "/ghost/two", "ghost-two"),
+    ("env_live", "bridge", "live/dir", "live"),
+    ("env_ghost1", "bridge", "ghost/one", "ghost-one"),
+    ("env_ghost2", "bridge", "ghost/two", "ghost-two"),
     ("env_cloud", "cloud", None, "Default"),
 ]
 
 
-def _make_envs():
-    return [_env(*e) for e in _ENVS]
+def _live_dir(projects_root) -> str:
+    """The live bridge's cwd, anchored in projects_root (matches ``_ENVS``)."""
+    return str(Path(projects_root) / "live/dir")
+
+
+def _make_envs(projects_root):
+    return [_env(i, t, str(Path(projects_root) / d) if d else None, n) for i, t, d, n in _ENVS]
 
 
 def test_reaper_disabled_by_default_404(write_config, tmp_path):
@@ -1354,8 +1362,8 @@ def test_reaper_panel_uses_plain_copy(write_config, tmp_path):
     assert "force-delete (irreversible)" not in page
 
 
-def test_reaper_preview_lists_only_ghosts(write_config, tmp_path, monkeypatch):
-    _setup_reaper(monkeypatch, _make_envs(), {"/live/dir"}, [])
+def test_reaper_preview_lists_only_ghosts(write_config, tmp_path, projects_root, monkeypatch):
+    _setup_reaper(monkeypatch, _make_envs(projects_root), {_live_dir(projects_root)}, [])
     body = _reaper_client(write_config, tmp_path).get("/api/environments/ghosts").json()
     assert body["enabled"] is True
     assert body["total"] == 4 and body["live_dirs"] == 1
@@ -1363,9 +1371,9 @@ def test_reaper_preview_lists_only_ghosts(write_config, tmp_path, monkeypatch):
     assert ids == {"env_ghost1", "env_ghost2"}  # cloud + live excluded
 
 
-def test_reaper_archive_acts_only_on_ghosts(write_config, tmp_path, monkeypatch):
+def test_reaper_archive_acts_only_on_ghosts(write_config, tmp_path, projects_root, monkeypatch):
     sink = []
-    _setup_reaper(monkeypatch, _make_envs(), {"/live/dir"}, sink)
+    _setup_reaper(monkeypatch, _make_envs(projects_root), {_live_dir(projects_root)}, sink)
     # Client asks to archive a ghost AND the live + cloud env (stale/hostile input).
     r = _reaper_client(write_config, tmp_path).post(
         "/api/environments/reap",
@@ -1383,9 +1391,9 @@ def test_reaper_archive_acts_only_on_ghosts(write_config, tmp_path, monkeypatch)
     assert sink == [("archive", "env_ghost1")]
 
 
-def test_reaper_delete_requires_typed_confirm(write_config, tmp_path, monkeypatch):
+def test_reaper_delete_requires_typed_confirm(write_config, tmp_path, projects_root, monkeypatch):
     sink = []
-    _setup_reaper(monkeypatch, _make_envs(), {"/live/dir"}, sink)
+    _setup_reaper(monkeypatch, _make_envs(projects_root), {_live_dir(projects_root)}, sink)
     c = _reaper_client(write_config, tmp_path)
     # Wrong confirm token for delete -> 400, nothing touched.
     bad = c.post(
@@ -1404,8 +1412,8 @@ def test_reaper_delete_requires_typed_confirm(write_config, tmp_path, monkeypatc
     assert sink == [("delete", "env_ghost1", True)]  # force=True
 
 
-def test_reaper_validation_errors(write_config, tmp_path, monkeypatch):
-    _setup_reaper(monkeypatch, _make_envs(), {"/live/dir"}, [])
+def test_reaper_validation_errors(write_config, tmp_path, projects_root, monkeypatch):
+    _setup_reaper(monkeypatch, _make_envs(projects_root), {_live_dir(projects_root)}, [])
     c = _reaper_client(write_config, tmp_path)
     assert (
         c.post("/api/environments/reap", json={"action": "nope", "ids": ["x"]}).status_code == 422
@@ -1454,7 +1462,9 @@ def test_reaper_list_api_error_502(write_config, tmp_path, monkeypatch):
     assert "environments API error" in r.json()["detail"]
 
 
-def test_reaper_per_env_error_is_reported_not_fatal(write_config, tmp_path, monkeypatch):
+def test_reaper_per_env_error_is_reported_not_fatal(
+    write_config, tmp_path, projects_root, monkeypatch
+):
     from clauster import environments as envmod
 
     monkeypatch.setattr(
@@ -1462,14 +1472,16 @@ def test_reaper_per_env_error_is_reported_not_fatal(write_config, tmp_path, monk
         "load_credentials",
         lambda **k: envmod.Credentials(access_token="t", organization_uuid="o"),
     )
-    monkeypatch.setattr(envmod, "live_bridge_directories", lambda *a, **k: {"/live/dir"})
+    monkeypatch.setattr(
+        envmod, "live_bridge_directories", lambda *a, **k: {_live_dir(projects_root)}
+    )
 
     class FakeClient:
         def __init__(self, *a, **k):
             pass
 
         def list_environments(self, **k):
-            return _make_envs()
+            return _make_envs(projects_root)
 
         def archive_environment(self, env_id):
             if env_id == "env_ghost1":
@@ -1494,7 +1506,9 @@ def test_reaper_per_env_error_is_reported_not_fatal(write_config, tmp_path, monk
     assert "409" in body["errors"]["env_ghost1"]
 
 
-def test_reaper_fails_closed_on_live_set_failure(write_config, tmp_path, monkeypatch):
+def test_reaper_fails_closed_on_live_set_failure(
+    write_config, tmp_path, projects_root, monkeypatch
+):
     from clauster import environments as envmod
 
     monkeypatch.setattr(
@@ -1508,7 +1522,7 @@ def test_reaper_fails_closed_on_live_set_failure(write_config, tmp_path, monkeyp
             pass
 
         def list_environments(self, **k):
-            return _make_envs()
+            return _make_envs(projects_root)
 
     monkeypatch.setattr(envmod, "EnvironmentsClient", FakeClient)
 
@@ -2005,6 +2019,64 @@ def test_qr_unknown_instance_404(write_config, tmp_path):
     r = _client(write_config, tmp_path).get("/api/instances/ghost/qr")
     assert r.status_code == 404
     assert r.json()["detail"] == "no such instance: ghost"
+
+
+def test_route_resolves_a_unique_id_prefix(write_config, tmp_path):
+    # #1099: the dashboard and CLI both show truncated ids; the routes now accept them.
+    from clauster.models import InstanceStatus, RemoteControlInstance
+
+    client = _client(write_config, tmp_path)
+    iid = "f2c456fd-1111-2222-3333-444444444444"
+    client.app.state.runner._instances[iid] = RemoteControlInstance(
+        instance_id=iid, project="alpha", label="alpha", status=InstanceStatus.RUNNING
+    )
+    r = client.get("/api/instances/f2c456fd")
+    assert r.status_code == 200
+    assert r.json()["instance_id"] == iid
+
+
+def test_route_refuses_an_ambiguous_id_prefix_with_409(write_config, tmp_path):
+    # Ambiguity is a DIFFERENT answer from "unknown", and the operator can only act on
+    # it if told the candidates — a bare 404 would read as "that bridge is gone".
+    # 409 regresses nothing: prefixes never resolved before, so this input used to 404.
+    from clauster.models import InstanceStatus, RemoteControlInstance
+
+    client = _client(write_config, tmp_path)
+    a = "f2c456fd-aaaa-0000-0000-000000000000"
+    b = "f2c456fd-bbbb-0000-0000-000000000000"
+    for iid in (a, b):
+        client.app.state.runner._instances[iid] = RemoteControlInstance(
+            instance_id=iid, project="alpha", label="alpha", status=InstanceStatus.RUNNING
+        )
+    r = client.delete("/api/instances/f2c456fd")
+    assert r.status_code == 409
+    detail = r.json()["detail"]
+    assert a in detail and b in detail, "the candidate ids must be named, not just refused"
+    # And the bridges are untouched — refusing must never stop one of them.
+    assert client.app.state.runner.get_instance(a) is not None
+    assert client.app.state.runner.get_instance(b) is not None
+
+
+def test_forget_refuses_an_ambiguous_id_prefix_with_409(write_config, tmp_path):
+    # forget falls back to the raw identity (`resolve_bridge_id(...) or instance_id`) so a
+    # purely-persisted record still reaches runner.forget's own lookup. Without an explicit
+    # guard the ambiguous prefix rides that fallback through and comes back as a bare 404,
+    # for an id that names several REAL bridges (#1099).
+    from clauster.models import InstanceStatus, RemoteControlInstance
+
+    client = _client(write_config, tmp_path)
+    a = "f2c456fd-aaaa-0000-0000-000000000000"
+    b = "f2c456fd-bbbb-0000-0000-000000000000"
+    for iid in (a, b):
+        client.app.state.runner._instances[iid] = RemoteControlInstance(
+            instance_id=iid, project="alpha", label="alpha", status=InstanceStatus.STOPPED
+        )
+    r = client.post("/api/instances/f2c456fd/forget")
+    assert r.status_code == 409
+    assert a in r.json()["detail"] and b in r.json()["detail"]
+    # Neither record was forgotten by the refusal.
+    assert client.app.state.runner.get_instance(a) is not None
+    assert client.app.state.runner.get_instance(b) is not None
 
 
 def test_qr_no_session_url_409(write_config, tmp_path):

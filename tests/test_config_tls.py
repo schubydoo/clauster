@@ -208,10 +208,11 @@ def test_env_map_does_not_recurse_into_projects_dict():
     # `projects: dict[str, ProjectConfig]` map, or it would invent a phantom
     # CLAUSTER_PROJECTS_ALLOW_BYPASS_PERMISSIONS env var that pollutes a security-
     # sensitive section. dict/list leaves stay unmappable, as before the tls change.
-    from clauster.config import _scalar_env_map
+    from clauster.config import _env_leaf_map
 
-    env_map = _scalar_env_map(ClausterConfig)
-    assert ("projects", "allow_bypass_permissions") not in env_map.values()
+    env_map = _env_leaf_map(ClausterConfig)
+    paths = [path for path, _kind in env_map.values()]
+    assert ("projects", "allow_bypass_permissions") not in paths
     assert "CLAUSTER_PROJECTS_ALLOW_BYPASS_PERMISSIONS" not in env_map
     # The intended TLS keys are still there; the bogus whole-section scalar is not.
     assert "CLAUSTER_TLS_CERT_FILE" in env_map

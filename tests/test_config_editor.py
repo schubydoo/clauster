@@ -12,6 +12,7 @@ from clauster.config import ClausterConfig, load_config
 from clauster.config_editor import (
     EDITABLE_FIELDS,
     EXCLUDED_FIELDS,
+    TIER_B_FIELDS,
     ConfigValidationError,
     DisallowedFieldError,
     disk_state,
@@ -44,9 +45,9 @@ def _config_leaf_paths(
 ) -> list[str]:
     """Enumerate every dotted leaf-field path in ClausterConfig (nested models recurse).
 
-    Same recursion as ``config._scalar_env_map`` — nested models recurse, dict/list
-    leaves stay leaves — so the editor's coverage decision is taken against exactly the
-    addressable scalar leaves.
+    Same recursion as ``config._env_leaf_map`` — nested models recurse, dict/list leaves
+    stay leaves — so the editor's coverage decision is taken against exactly the
+    addressable leaves.
     """
     out: list[str] = []
     for name, field in model.model_fields.items():
@@ -183,6 +184,36 @@ def test_pty_screen_enabled_is_editable_bool_with_safety_note() -> None:
     assert "redact" in spec["description"].lower()
 
 
+def test_field_dep_status_reports_optional_dep_availability(tmp_path, monkeypatch) -> None:
+    # #1016 Part 2: runtime-consistent availability of the dep behind each dep-gated switch.
+    from clauster import config_editor, deps
+
+    monkeypatch.setattr("clauster.deps.shutil.which", lambda name: "/usr/local/bin/claustrum")
+    monkeypatch.setattr(deps, "probe", lambda entry: entry.key == "apprise")  # pyte absent
+    cfg = ClausterConfig(projects_root=tmp_path, state_dir=tmp_path / ".s")
+    st = config_editor.field_dep_status(cfg)
+    assert set(st) == {"claustrum.enabled", "notifications.enabled", "claude.pty_screen_enabled"}
+    assert st["claustrum.enabled"]["available"] is True
+    assert st["notifications.enabled"]["available"] is True
+    assert st["claude.pty_screen_enabled"]["available"] is False
+    assert "clauster deps install claustrum" in st["claustrum.enabled"]["hint"]
+
+
+def test_field_specs_attaches_dep_status_only_with_config(tmp_path, monkeypatch) -> None:
+    # #1016 Part 2: dep_status rides on the gated switches when config is given, not otherwise.
+    from clauster import deps
+
+    monkeypatch.setattr("clauster.deps.shutil.which", lambda name: None)  # claustrum missing
+    monkeypatch.setattr(deps, "probe", lambda entry: False)  # extras missing
+    cfg = ClausterConfig(projects_root=tmp_path, state_dir=tmp_path / ".s")
+    specs = field_specs(config=cfg)
+    assert specs["claustrum.enabled"]["dep_status"]["available"] is False
+    assert "clauster deps install claustrum" in specs["claustrum.enabled"]["dep_status"]["hint"]
+    assert "dep_status" not in specs["log_format"]  # a field with no optional dep
+    # Without config, no dep_status is computed at all (the metadata-only call path).
+    assert "dep_status" not in field_specs()["claustrum.enabled"]
+
+
 def test_verbose_toggle_is_editable_bool_with_restart_note() -> None:
     # The standard-bridge --verbose toggle is a Tier-A editable bool carrying a friendly label
     # and the standard-only / restart-required note in its description.
@@ -214,9 +245,70 @@ def test_classify_and_constraints_cover_edge_annotations() -> None:
 
     # A union with >1 non-None member falls through to the scalar-string fallback.
     assert _classify(int | str | None) == ("str", None)
+    # list[...] -> a rows editor; dict[...] -> a fixed-key map editor (Slice 4).
+    assert _classify(list[str]) == ("list", None)
+    assert _classify(dict[str, bool]) == ("map", None)
+    # _list_item_kind resolves the ELEMENT type, unwrapping a single-member Optional so a
+    # `list[str] | None` field reports "str" (not the outer "list"); a bare list -> "str".
+    from clauster.config_editor import _list_item_kind
+
+    assert _list_item_kind(list[str]) == "str"
+    assert _list_item_kind(list[str] | None) == "str"
+    assert _list_item_kind(list) == "str"
+    # A multi-member union is NOT unwrapped (len != 1), so it falls through to the first arg.
+    assert _list_item_kind(str | int) == "str"
     # Lt maps to max; Ge to min; an unrecognized metadata item is simply skipped (loop tail).
     meta = _types.SimpleNamespace(metadata=[at.Lt(lt=5), at.Ge(ge=1), object()])
     assert _constraints(meta) == {"max": 5, "min": 1}
+
+
+def test_tier_b_list_and_map_specs() -> None:
+    # Slice 4: the three non-secret list/map fields are Tier-B with rich specs the rows/checkbox
+    # editors consume. The secret url lists + auth trust lists stay OUT of Tier-B.
+    from clauster.config_editor import TIER_B_FIELDS
+
+    specs = field_specs(fields=TIER_B_FIELDS)
+    assert specs["clone.allowed_schemes"]["type"] == "list"
+    assert specs["clone.allowed_schemes"]["item_type"] == "str"
+    assert specs["clone.allowed_private_cidrs"]["type"] == "list"
+    events = specs["webhooks.events"]
+    assert events["type"] == "map"
+    assert [mk["key"] for mk in events["map_keys"]] == [
+        "spawn",
+        "ready",
+        "stop",
+        "crash",
+        "bg-settled",
+        "permission-needed",
+        "clone-done",
+    ]
+    assert {mk["key"]: mk["default"] for mk in events["map_keys"]}["crash"] is True
+    # The secret / trust lists are never Tier-B (unsafe mask round-trip / trust surface).
+    for excluded in ("webhooks.urls", "notifications.urls", "auth.allowed_origins"):
+        assert excluded not in TIER_B_FIELDS
+
+
+def test_map_field_without_registry_entry_omits_map_keys(monkeypatch) -> None:
+    # Defensive fallback: a `map`-typed field NOT registered in FIELD_MAP_KEYS gets no
+    # `map_keys` (there's no safe checkbox rendering without a known key set) rather than a
+    # crash. With the registry emptied, webhooks.events still classifies as a map, just bare.
+    from clauster.config_editor import TIER_B_FIELDS
+
+    monkeypatch.setattr("clauster.config_editor.FIELD_MAP_KEYS", {})
+    specs = field_specs(fields=TIER_B_FIELDS)
+    assert specs["webhooks.events"]["type"] == "map"
+    assert "map_keys" not in specs["webhooks.events"]
+
+
+def test_webhook_event_order_covers_every_known_event() -> None:
+    # The editor's ordered taxonomy must stay in lock-step with config.py's known-event set:
+    # a NEW webhook event added there with no matching order entry should trip THIS test, not
+    # silently drop from (or scramble) the checkbox editor.
+    from clauster.config import _WEBHOOK_KNOWN_EVENTS
+    from clauster.config_editor import _WEBHOOK_EVENT_ORDER
+
+    assert set(_WEBHOOK_EVENT_ORDER) == _WEBHOOK_KNOWN_EVENTS
+    assert len(_WEBHOOK_EVENT_ORDER) == len(_WEBHOOK_KNOWN_EVENTS)  # no dupes
 
 
 def test_file_hash_changes_with_content(write_config) -> None:
@@ -499,23 +591,34 @@ def test_every_config_leaf_is_classified_editable_or_excluded() -> None:
     # durable record that keeps the editor's surface and the config schema from drifting apart.
     leaves = set(_config_leaf_paths())
     editable = set(EDITABLE_FIELDS)
+    tier_b = set(TIER_B_FIELDS)
     excluded = set(EXCLUDED_FIELDS)
-    unclassified = leaves - editable - excluded
+    unclassified = leaves - editable - tier_b - excluded
     assert not unclassified, (
-        f"Config leaf field(s) {sorted(unclassified)} are in neither EDITABLE_FIELDS nor "
-        "EXCLUDED_FIELDS in config_editor.py. Classify each: add it to EDITABLE_FIELDS (Tier-A "
-        "operational scalar — never a secret/bind/auth/binary/structural/clone/webhook field) "
-        "with its label/help/widget metadata, OR add it to EXCLUDED_FIELDS with a one-line "
-        "reason. When unsure, EXCLUDE it (fail closed)."
+        f"Config leaf field(s) {sorted(unclassified)} are in none of EDITABLE_FIELDS, "
+        "TIER_B_FIELDS, or EXCLUDED_FIELDS in config_editor.py. Classify each: add it to "
+        "EDITABLE_FIELDS (Tier-A operational scalar), TIER_B_FIELDS (Advanced — behind the "
+        "config_write capability + step-up re-auth; only GAP-SENSITIVE clone/webhook-class "
+        "scalars, never config_write.*/login_shepherd.* or a secret/bind/auth/binary/"
+        "structural field), OR EXCLUDED_FIELDS with a one-line reason. When unsure, EXCLUDE "
+        "it (fail closed)."
     )
 
 
 def test_editable_and_excluded_are_disjoint() -> None:
-    # #660: a field cannot be both editable and intentionally-excluded — a path in both is a
+    # #660: a field cannot be in two classifications — a path in more than one is a
     # contradiction (the guard above would count it as covered while the editor surfaces it,
-    # masking a stale entry). Pin disjointness so a copy/paste slip fails loudly.
-    overlap = set(EDITABLE_FIELDS) & set(EXCLUDED_FIELDS)
-    assert not overlap, f"field(s) in BOTH EDITABLE_FIELDS and EXCLUDED_FIELDS: {sorted(overlap)}"
+    # masking a stale entry). Pin pairwise disjointness so a copy/paste slip fails loudly.
+    editable, tier_b, excluded = set(EDITABLE_FIELDS), set(TIER_B_FIELDS), set(EXCLUDED_FIELDS)
+    assert not (editable & excluded), (
+        f"field(s) in BOTH EDITABLE_FIELDS and EXCLUDED_FIELDS: {sorted(editable & excluded)}"
+    )
+    assert not (editable & tier_b), (
+        f"field(s) in BOTH EDITABLE_FIELDS and TIER_B_FIELDS: {sorted(editable & tier_b)}"
+    )
+    assert not (tier_b & excluded), (
+        f"field(s) in BOTH TIER_B_FIELDS and EXCLUDED_FIELDS: {sorted(tier_b & excluded)}"
+    )
 
 
 def test_editable_and_excluded_reference_only_real_leaves() -> None:
@@ -524,10 +627,33 @@ def test_editable_and_excluded_reference_only_real_leaves() -> None:
     # a config.py rename that orphans an entry fails here instead of silently mis-classifying.
     leaves = set(_config_leaf_paths())
     stale_editable = set(EDITABLE_FIELDS) - leaves
+    stale_tier_b = set(TIER_B_FIELDS) - leaves
     stale_excluded = set(EXCLUDED_FIELDS) - leaves
     assert not stale_editable, (
         f"EDITABLE_FIELDS names non-existent leaf(s): {sorted(stale_editable)}"
     )
+    assert not stale_tier_b, f"TIER_B_FIELDS names non-existent leaf(s): {sorted(stale_tier_b)}"
     assert not stale_excluded, (
         f"EXCLUDED_FIELDS names non-existent leaf(s): {sorted(stale_excluded)}"
     )
+
+
+def test_validation_error_message_is_operator_friendly(write_config) -> None:
+    """A bad value yields a per-field message, not the raw pydantic dump (#1034).
+
+    The dashboard banner renders this string verbatim, so it must name the field
+    and the reason — and must NOT leak the internal model name, pydantic's type
+    internals, or the errors.pydantic.dev URL.
+    """
+    raw = _raw(write_config)
+    with pytest.raises(ConfigValidationError) as ei:
+        validate_edits(
+            raw,
+            {"clone.allowed_private_cidrs": ["999.999.0.0/33"]},
+            allowed=frozenset({"clone.allowed_private_cidrs"}),
+        )
+    msg = str(ei.value)
+    assert "clone.allowed_private_cidrs" in msg
+    assert "999.999.0.0/33" in msg
+    for leaked in ("ClausterConfig", "pydantic.dev", "input_type", "[type="):
+        assert leaked not in msg

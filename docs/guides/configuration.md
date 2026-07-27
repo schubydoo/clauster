@@ -1,0 +1,111 @@
+# Configuring Clauster
+
+All settings live in `clauster.yml`.
+[`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/clauster.yml.example)
+is a lean starter (the common keys, with every other section shown commented at
+its default). This page covers how the file is found and how to override it —
+for what every key means, see the
+[configuration reference](../reference/config.md), and for changing settings
+from the browser, [the in-app config editor](config-editor.md).
+
+## Loading & overrides
+
+Clauster searches for a config in this order (first file that exists wins):
+
+1. The path passed to `clauster run -c <path>` (explicit).
+2. `$CLAUSTER_CONFIG`
+3. `./clauster.yml`
+4. `$CLAUSTER_HOME/clauster.yml`
+
+If none is found, startup fails with a `FileNotFoundError` listing the paths it
+searched.
+
+**Environment overrides.** Any *scalar* or *list* key is overridable by an
+environment variable named `CLAUSTER_<UPPER_SNAKE_PATH>` — the dotted path
+uppercased and joined with underscores. For example:
+
+- `auth.enabled` → `CLAUSTER_AUTH_ENABLED`
+- `auth.password_hash` → `CLAUSTER_AUTH_PASSWORD_HASH`
+- `claude.launch_mode` → `CLAUSTER_CLAUDE_LAUNCH_MODE` *(full dotted path — see note)*
+- `auth.allowed_origins` → `CLAUSTER_AUTH_ALLOWED_ORIGINS` *(comma-separated list)*
+
+**List keys take a comma-separated value**, which is how container tooling
+usually passes lists. Surrounding spaces are trimmed and blank entries dropped,
+so a trailing comma is harmless:
+
+```bash
+CLAUSTER_AUTH_ALLOWED_ORIGINS='https://clauster.example.com,http://localhost:7621'
+CLAUSTER_CLONE_ALLOWED_SCHEMES='https,ssh'
+```
+
+A **newline** separates as well, so the `*_FILE` form below can be written one
+entry per line. An **empty** value means an empty list — it does *not* fall
+through to the value in the YAML file.
+
+An entry that itself contains a comma can't be expressed this way; set that key
+in the YAML file instead. The realistic case is `notifications.urls`, where an
+Apprise URL often carries comma-separated targets in its query
+(`mailto://…?to=a@example,b@example`) — split on the comma, it silently becomes
+two junk URLs that only fail when a notification is sent.
+
+Which keys are lists is visible in the
+[configuration reference](../reference/config.md) — they are the ones typed
+`list[str]`.
+
+!!! note "Env mapping is by leaf path"
+    The mapping recurses nested models and uses the *full dotted path*, so
+    `claude.launch_mode` maps to `CLAUSTER_CLAUDE_LAUNCH_MODE`. `dict` leaves
+    (`projects`, `claude.env`, `webhooks.events`) **cannot** be set via env — a
+    single variable can't address one entry of a map — so they have no
+    `CLAUSTER_*` variable at all; set those in the YAML file.
+
+**Secret files (`*_FILE`).** Every `CLAUSTER_<X>` variable also accepts a
+`CLAUSTER_<X>_FILE` form that reads the value from a file instead of the
+environment — for secrets that Docker / Podman / Kubernetes / Vault render to
+files under `/run/secrets` rather than env vars, keeping them out of the process
+environment. The file's contents win over the plain variable, and trailing
+whitespace (e.g. a trailing newline) is stripped. An unreadable `_FILE` path is a
+fatal misconfiguration (it does not silently fall back). The session secret has
+its own `CLAUSTER_SESSION_SECRET_FILE` (it is read outside the config schema):
+
+- `auth.password_hash` → `CLAUSTER_AUTH_PASSWORD_HASH_FILE`
+- `auth.api_token_hash` → `CLAUSTER_AUTH_API_TOKEN_HASH_FILE`
+- `observability.metrics_token_hash` → `CLAUSTER_OBSERVABILITY_METRICS_TOKEN_HASH_FILE`
+- session secret → `CLAUSTER_SESSION_SECRET_FILE`
+
+```yaml
+# docker-compose: render a secret to a file and point clauster at it
+services:
+  clauster:
+    environment:
+      CLAUSTER_AUTH_PASSWORD_HASH_FILE: /run/secrets/clauster_pw_hash
+    secrets:
+      - clauster_pw_hash
+
+secrets:
+  clauster_pw_hash:
+    file: ./secrets/pw_hash.txt
+```
+
+**Schema is additive-only.** Old configs always validate against newer versions;
+unknown per-project keys are ignored.
+
+## Minimal example
+
+```yaml
+# loopback, no auth needed
+projects_root: ~/code
+```
+
+## LAN example (password auth)
+
+```yaml
+projects_root: ~/code
+host: 0.0.0.0
+port: 7621
+auth:
+  enabled: true
+  password_required: true
+  password_hash: "$argon2id$v=19$..."   # from `clauster hash-password`
+  cookie_secure: always                 # if no TLS-terminating proxy
+```

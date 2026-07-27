@@ -1379,6 +1379,47 @@ def test_live_session_uuids_matches_by_sanitized_cwd(runner_config):
     assert runner.live_session_uuids(root / "gamma") == set()
 
 
+def test_live_session_uuids_includes_worktree_sessions(runner_config):
+    """A worktree session counts live for its project, in lockstep with the listing (#1020).
+
+    usage.transcript_paths_for now lists worktree transcripts, so this must count them live.
+    If it did not, a RUNNING worktree session would render as a dormant conversation and the
+    Conversation (fork) picker's `!live && turn_count > 0` filter would surface it — the precise
+    situation that filter exists to prevent.
+    """
+    config, _ = runner_config
+    runner = _make_runner(runner_config)
+    root = config.projects_root
+
+    def session(uuid, cwd):
+        return WorkingSession(
+            pid=hash(uuid) & 0xFFFF,
+            cwd=cwd,
+            kind="interactive",
+            started_at=1,
+            local_uuid=uuid,
+            attribution=Attribution.TRACKED,
+        )
+
+    (root / "alpha" / ".claude" / "worktrees" / "sess-1").mkdir(parents=True, exist_ok=True)
+    (root / "alpha" / ".claude" / "worktrees-foo" / "sess-2").mkdir(parents=True, exist_ok=True)
+    (root / "alpha" / "subdir").mkdir(parents=True, exist_ok=True)
+
+    runner._sessions = [
+        session("u-root", root / "alpha"),
+        session("u-wt", root / "alpha" / ".claude" / "worktrees" / "sess-1"),
+        # Greptile P1: this cwd sanitizes into the project's worktree prefix, so the
+        # transcript scan LISTS it — matching liveness on `.claude/worktrees` containment
+        # instead left it dormant, and the picker's `!live && turn_count > 0` filter would
+        # then offer a RUNNING session as forkable. The two sides must use one rule.
+        session("u-wt-lookalike", root / "alpha" / ".claude" / "worktrees-foo" / "sess-2"),
+        # Under the project but NOT in the worktree-prefix family: a stray hand-run
+        # `claude` must still not be claimed.
+        session("u-stray", root / "alpha" / "subdir"),
+    ]
+    assert runner.live_session_uuids(root / "alpha") == {"u-root", "u-wt", "u-wt-lookalike"}
+
+
 def test_live_session_uuids_empty_when_no_sessions(runner_config):
     config, _ = runner_config
     runner = _make_runner(runner_config)
@@ -1640,9 +1681,208 @@ async def test_poll_drops_phantom_stopped_shadowing_external(runner_config, monk
         local_uuid="u",
     )
     monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
+    # The prune's premise is "the bridge IS alive, just unmanaged", so since #1096 the
+    # external session must actually BE a bridge — a hand-run `claude` sharing the cwd is
+    # EXTERNAL by design (#820) but is not evidence that this card is a phantom.
+    monkeypatch.setattr("clauster.runner.procutil.bridge_ancestor", lambda pid, **k: 990001)
     await runner.poll_once()
     assert runner.get_instance_for_project("alpha") is None  # phantom dropped
     assert "alpha" in runner.external_sessions_by_project()  # now surfaced as external
+
+
+async def test_poll_does_not_prune_on_our_own_bridges_session(runner_config, monkeypatch):
+    # #1116's honesty guard. Finding a bridge ancestor proves a bridge is responsible for the
+    # session — NOT that it is unmanaged. A session of OUR OWN bridge can read EXTERNAL when
+    # the #820 pid gate cannot enumerate the process tree (hidepid, a container). Without the
+    # managed-pid exclusion, that session becomes evidence for deleting the same project's
+    # stopped cards: the prune would eat a resumable card on the strength of our own bridge.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    live = RemoteControlInstance(
+        project="alpha",
+        label="alpha-live",
+        status=InstanceStatus.RUNNING,
+        resume_mode="standard",
+        bridge_pid=990001,
+    )
+    phantom = RemoteControlInstance(
+        project="alpha", label="phantom", status=InstanceStatus.STOPPED, resume_mode="pty"
+    )
+    runner._instances[live.instance_id] = live
+    runner._instances[phantom.instance_id] = phantom
+    sess = WorkingSession(
+        pid=990002,  # the SDK worker of OUR bridge 990001
+        cwd=config.projects_root / "alpha",
+        kind="interactive",
+        started_at=1,
+        local_uuid="u-ours",
+    )
+    monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
+    # The live bridge must stay RUNNING or its fake pid reconciles to CRASHED, becoming a
+    # SECOND candidate and tripping ">1 candidate -> prune none" — which would make the
+    # assertion below pass for a reason that has nothing to do with the managed exclusion.
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None, **k: pid == 990001
+    )
+    # Ancestry resolves to our OWN managed bridge pid.
+    monkeypatch.setattr("clauster.runner.procutil.bridge_ancestor", lambda pid, **k: 990001)
+
+    await runner.poll_once()
+
+    assert runner.get_instance(phantom.instance_id) is not None, (
+        "our own bridge's session must not be evidence for pruning our own card"
+    )
+    # Differential control: an ancestor that is NOT one of ours is real evidence, and with a
+    # single candidate row the prune does fire — so the exclusion, not inertness, decided.
+    runner2 = _make_runner(runner_config)
+    lone = RemoteControlInstance(
+        project="alpha", label="phantom", status=InstanceStatus.STOPPED, resume_mode="pty"
+    )
+    runner2._instances[lone.instance_id] = lone
+    monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
+    monkeypatch.setattr("clauster.runner.procutil.bridge_ancestor", lambda pid, **k: 777777)
+    await runner2.poll_once()
+    assert runner2.get_instance(lone.instance_id) is None, "an unmanaged bridge does prune"
+
+
+async def test_poll_prune_ignores_a_recycled_pid_from_a_stopped_instance(
+    runner_config, monkeypatch
+):
+    # `stop()` leaves `bridge_pid` on a dead card. If every historical pid counted as current
+    # ownership, an OS-recycled pid landing on a genuinely unmanaged bridge would read
+    # "managed", its evidence would be discarded, and the phantom card would stay up offering
+    # a Resume that spawns a duplicate beside it — the exact hazard this prune exists to
+    # remove. Ownership is judged on the PAIR, so a recycled pid is not ours.
+    #
+    # The stale-pid holder lives in a DIFFERENT project on purpose: it contributes its pid to
+    # the global managed set without becoming a second candidate at alpha, which would let
+    # the ">1 candidate -> prune none" guard decide this instead of the pid set.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    ghost = RemoteControlInstance(
+        project="gamma",
+        label="ghost",
+        status=InstanceStatus.STOPPED,
+        resume_mode="standard",
+        bridge_pid=555000,
+        bridge_proc_start=111.0,
+    )
+    phantom = RemoteControlInstance(
+        project="alpha", label="phantom", status=InstanceStatus.STOPPED, resume_mode="pty"
+    )
+    runner._instances[ghost.instance_id] = ghost
+    runner._instances[phantom.instance_id] = phantom
+    sess = WorkingSession(
+        pid=800,
+        cwd=config.projects_root / "alpha",
+        kind="interactive",
+        started_at=1,
+        local_uuid="u-ext",
+    )
+    monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
+    # The pair check fails: 555000 is alive again, but as somebody else's process.
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    # ...and that recycled pid is what the session's ancestry now resolves to.
+    monkeypatch.setattr("clauster.runner.procutil.bridge_ancestor", lambda pid, **k: 555000)
+
+    await runner.poll_once()
+
+    assert runner.get_instance(phantom.instance_id) is None, (
+        "a recycled pid from a stopped instance must not mask the unmanaged bridge"
+    )
+
+
+async def test_poll_prune_keeps_every_owner_at_a_shared_cwd(runner_config, monkeypatch):
+    # Several EXTERNAL sessions can share one resolved cwd with DIFFERENT bridge ancestors:
+    # a managed bridge whose session reads EXTERNAL because the #820 pid gate could not
+    # enumerate its tree, beside a genuinely unmanaged one. Keeping ONE owner per cwd made
+    # the verdict depend on which `agents --json` happened to list last — a managed owner
+    # landing last hid the live unmanaged bridge and left its phantom card up with a Resume
+    # that spawns a duplicate. Ordered managed-LAST here, which is the losing order.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    live = RemoteControlInstance(
+        project="alpha",
+        label="alpha-live",
+        status=InstanceStatus.RUNNING,
+        resume_mode="standard",
+        bridge_pid=990001,
+    )
+    phantom = RemoteControlInstance(
+        project="alpha", label="phantom", status=InstanceStatus.STOPPED, resume_mode="pty"
+    )
+    runner._instances[live.instance_id] = live
+    runner._instances[phantom.instance_id] = phantom
+    cwd = config.projects_root / "alpha"
+    sessions = [
+        WorkingSession(pid=700, cwd=cwd, kind="interactive", started_at=1, local_uuid="u-ext"),
+        WorkingSession(pid=701, cwd=cwd, kind="interactive", started_at=2, local_uuid="u-ours"),
+    ]
+    monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: sessions)
+    # The live bridge must stay RUNNING. Without this its fake pid reconciles to CRASHED,
+    # which makes it a SECOND prune candidate and trips the ">1 candidate -> prune none"
+    # guard — the phantom would then survive for a reason unrelated to what this pins.
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None, **k: pid == 990001
+    )
+    # 700 -> an UNMANAGED bridge (real evidence); 701 -> our own managed bridge, listed last.
+    owners = {700: 777777, 701: 990001}
+    monkeypatch.setattr(
+        "clauster.runner.procutil.bridge_ancestor", lambda pid, **k: owners.get(pid)
+    )
+
+    await runner.poll_once()
+    assert runner.get_instance(live.instance_id).status is InstanceStatus.RUNNING, (
+        "control: the live bridge must not become a second candidate"
+    )
+
+    assert runner.get_instance(phantom.instance_id) is None, (
+        "a managed owner listed last must not erase the unmanaged owner's evidence"
+    )
+
+
+async def test_poll_prune_reads_managed_pids_after_the_ancestry_walk(runner_config, monkeypatch):
+    # TOCTOU. `poll_once` runs LOCK-FREE, so a lock-holding adopt()/spawn() can publish a
+    # `bridge_pid` while the ancestry walk is suspended in its to_thread. If the managed-pid
+    # exclusion were snapshotted BEFORE that await, the newly-adopted bridge would be absent
+    # from it, its own session would read unmanaged, and a sibling STOPPED card would be
+    # deleted on the strength of a bridge Clauster had just adopted. The delete is only
+    # recoverable by restart (`_stopped_from_persisted` runs in `rediscover`, once), so this
+    # fails destructively — the exclusion must be read AFTER the walk.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    phantom = RemoteControlInstance(
+        project="alpha", label="phantom", status=InstanceStatus.STOPPED, resume_mode="pty"
+    )
+    runner._instances[phantom.instance_id] = phantom
+    sess = WorkingSession(
+        pid=990002,
+        cwd=config.projects_root / "alpha",
+        kind="interactive",
+        started_at=1,
+        local_uuid="u-adopted",
+    )
+    monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
+
+    # The walk itself simulates the concurrent adopt: the bridge becomes managed DURING it.
+    def _walk(pid, **kwargs):
+        runner._instances["iid-adopted"] = RemoteControlInstance(
+            instance_id="iid-adopted",
+            project="alpha",
+            label="adopted",
+            status=InstanceStatus.RUNNING,
+            resume_mode="standard",
+            bridge_pid=990001,
+        )
+        return 990001
+
+    monkeypatch.setattr("clauster.runner.procutil.bridge_ancestor", _walk)
+
+    await runner.poll_once()
+
+    assert runner.get_instance(phantom.instance_id) is not None, (
+        "a bridge adopted during the walk must not be evidence for pruning its own project"
+    )
 
 
 async def test_poll_attributes_starting_bridge_session_not_external(runner_config, monkeypatch):
@@ -1669,7 +1909,9 @@ async def test_poll_attributes_starting_bridge_session_not_external(runner_confi
     await runner.poll_once()
     assert runner.external_sessions_by_project() == {}  # NOT a phantom external row
     tracked = runner.tracked_sessions_by_instance()
-    assert tracked.get("alpha") and [s.local_uuid for s in tracked["alpha"]] == ["u-starting"]
+    # Keyed by instance_id, not project (#1020 A3).
+    key = fake.instance_id
+    assert tracked.get(key) and [s.local_uuid for s in tracked[key]] == ["u-starting"]
     inst = runner.get_instance_for_project("alpha")
     assert inst is not None and inst.status is InstanceStatus.STARTING  # still starting, kept
 
@@ -1702,7 +1944,8 @@ async def test_poll_attributes_starting_worktree_bridge_session_not_external(
     await runner.poll_once()
     assert runner.external_sessions_by_project() == {}  # attributed by worktree containment
     tracked = runner.tracked_sessions_by_instance()
-    assert tracked.get("alpha") and [s.local_uuid for s in tracked["alpha"]] == ["u-wt"]
+    key = fake.instance_id  # keyed by instance_id, not project (#1020 A3)
+    assert tracked.get(key) and [s.local_uuid for s in tracked[key]] == ["u-wt"]
 
 
 async def test_poll_ignores_background_session_at_stopped_cwd(runner_config, monkeypatch):
@@ -2051,7 +2294,8 @@ async def test_poll_external_session_at_live_bridge_cwd_stays_external(runner_co
         )
         await runner.poll_once()
         tracked = runner.tracked_sessions_by_instance()
-        assert [s.local_uuid for s in tracked.get("alpha", [])] == ["u-owned"]
+        # Keyed by instance_id, not project (#1020 A3).
+        assert [s.local_uuid for s in tracked.get(fake.instance_id, [])] == ["u-owned"]
         assert "alpha" in runner.external_sessions_by_project()
     finally:
         proc.terminate()
@@ -2093,19 +2337,73 @@ async def test_poll_inprocess_pty_session_owned_via_bridge_pid(runner_config, mo
         monkeypatch.setattr(procutil, "owned_pids", lambda roots: set(roots))
         await runner.poll_once()
         tracked = runner.tracked_sessions_by_instance()
-        assert [s.local_uuid for s in tracked.get("alpha", [])] == ["u-inproc"]
+        # Keyed by instance_id, not project (#1020 A3).
+        assert [s.local_uuid for s in tracked.get(fake.instance_id, [])] == ["u-inproc"]
         assert "alpha" not in runner.external_sessions_by_project()
     finally:
         proc.terminate()
         proc.wait(timeout=5)
 
 
-async def test_poll_ownership_unions_colocated_bridges_at_one_cwd(runner_config, monkeypatch):
-    # #820 review: a standard and a pty bridge (or N pty) may be co-located at one
-    # project root — each owns distinct worker pids. The per-cwd ownership set must
-    # UNION every co-located bridge's roots, or last-wins would flip one bridge's
-    # genuine children to EXTERNAL. Both children stay TRACKED; a session owned by
-    # neither is EXTERNAL.
+async def test_poll_pidless_stopped_row_never_absorbs_an_external_session(
+    runner_config, monkeypatch
+):
+    # #820 guard for the per-instance rewrite (#1020 A3). A project can hold a pid-less
+    # STOPPED/ERROR row alongside a LIVE bridge (#778 multi-bridge), and the liveness test
+    # that builds the candidate list is project-level, so that dead row would otherwise be
+    # a candidate. Being absent from the ownership map, it is the one `_select_owner` falls
+    # back to — so an operator's hand-run `claude` in the project dir would be re-labelled
+    # TRACKED under a bridge that isn't even running, and would vanish from the external
+    # list (and with it the Adopt affordance) instead of surfacing.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)", "claude", "remote-control"]
+    )
+    try:
+        live = RemoteControlInstance(
+            project="alpha",
+            label="alpha",
+            status=InstanceStatus.RUNNING,
+            resume_mode="pty",
+            bridge_pid=proc.pid,
+            bridge_proc_start=procutil.proc_create_time(proc.pid),
+        )
+        dead = RemoteControlInstance(
+            project="alpha",
+            label="alpha",
+            status=InstanceStatus.STOPPED,
+        )  # no bridge_pid / keeper_pid — owns nothing
+        runner._instances[live.instance_id] = live
+        runner._instances[dead.instance_id] = dead
+        cwd = config.projects_root / "alpha"
+        hand_run = WorkingSession(
+            pid=999, cwd=cwd, kind="interactive", started_at=1, local_uuid="u-handrun"
+        )
+        monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [hand_run])
+        # The live bridge owns its own child only; 999 descends from sshd/a shell.
+        monkeypatch.setattr(procutil, "owned_pids", lambda roots: {200})
+        await runner.poll_once()
+        tracked = runner.tracked_sessions_by_instance()
+        assert tracked.get(dead.instance_id, []) == []
+        assert tracked.get(live.instance_id, []) == []
+        ext = runner.external_sessions_by_project().get("alpha", [])
+        assert [s.local_uuid for s in ext] == ["u-handrun"]
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+async def test_poll_ownership_separates_colocated_bridges_at_one_cwd(runner_config, monkeypatch):
+    # #820 + #1020 A3: a standard and a pty bridge (or N pty) may be co-located at one
+    # project root — each owns distinct worker pids. Both children stay TRACKED (neither
+    # bridge flips the other's genuine children to EXTERNAL) and a session owned by
+    # neither is EXTERNAL — that is the #820 half, unchanged.
+    #
+    # What CHANGED for #1020 A3: each child now attributes to the bridge that actually
+    # owns it, instead of both landing in one project-keyed bucket. That bucket is what
+    # made the dashboard's standard-bridge row list independent interactive sessions as
+    # if it owned them.
     config = runner_config[0]
     runner = _make_runner(runner_config)
     procs = [
@@ -2115,6 +2413,7 @@ async def test_poll_ownership_unions_colocated_bridges_at_one_cwd(runner_config,
         for _ in range(2)
     ]
     try:
+        ids = []
         for mode, p in zip(("pty", "pty"), procs, strict=True):
             inst = RemoteControlInstance(
                 project="alpha",
@@ -2125,6 +2424,7 @@ async def test_poll_ownership_unions_colocated_bridges_at_one_cwd(runner_config,
                 bridge_proc_start=procutil.proc_create_time(p.pid),
             )
             runner._instances[inst.instance_id] = inst
+            ids.append(inst.instance_id)
         cwd = config.projects_root / "alpha"
         sessions = [
             WorkingSession(pid=1001, cwd=cwd, kind="interactive", started_at=1, local_uuid="a"),
@@ -2142,7 +2442,10 @@ async def test_poll_ownership_unions_colocated_bridges_at_one_cwd(runner_config,
         )
         await runner.poll_once()
         tracked = runner.tracked_sessions_by_instance()
-        assert sorted(s.local_uuid for s in tracked.get("alpha", [])) == ["a", "b"]
+        # Separated, one session per owning bridge — NOT one shared bucket keyed "alpha".
+        assert [s.local_uuid for s in tracked.get(ids[0], [])] == ["a"]
+        assert [s.local_uuid for s in tracked.get(ids[1], [])] == ["b"]
+        assert "alpha" not in tracked
         ext = runner.external_sessions_by_project().get("alpha", [])
         assert [s.local_uuid for s in ext] == ["ext"]
     finally:
@@ -3111,3 +3414,190 @@ async def test_prune_stale_pointers_tolerates_per_project_error(runner_config, m
 
     monkeypatch.setattr(runner, "_prune_one_pointer", _boom)
     await runner._prune_stale_pointers()  # logged per project, never raised
+
+
+# --------------------------------------------------------------------------- #
+# poll_once(side_effects=False): observation without announcement (#1104)
+# --------------------------------------------------------------------------- #
+def _crashing_runner(runner_config, monkeypatch):
+    """A runner holding one RUNNING instance whose process is dead."""
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    runner._instances["iid-a"] = RemoteControlInstance(
+        instance_id="iid-a",
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.RUNNING,
+        bridge_pid=4242,
+    )
+    return runner
+
+
+async def test_poll_once_observing_reports_a_crash_without_announcing_it(
+    runner_config, monkeypatch
+):
+    # #1104. The MCP read path needs poll_once's `agents --json` cross-check, but a
+    # one-shot reader has no standing to announce a death: the live service is already
+    # tracking that bridge and would fire its own event, so both firing double-notifies
+    # the operator for one crash — from a tool documented as read-only.
+    runner = _crashing_runner(runner_config, monkeypatch)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    emitted: list[str] = []
+    monkeypatch.setattr(
+        SessionRunner, "_emit_lifecycle", lambda self, event, inst: emitted.append(event)
+    )
+
+    await runner.poll_once(side_effects=False)
+
+    inst = runner.get_instance("iid-a")
+    assert inst is not None
+    assert inst.status is InstanceStatus.CRASHED, "an observing poll must still SEE the crash"
+    assert emitted == [], "an observing poll must not fire a lifecycle event"
+
+
+async def test_poll_once_default_still_announces_a_crash(runner_config, monkeypatch):
+    # Differential control for the test above: same setup, default flag. Without this,
+    # `side_effects=False` could be the only behaviour and nothing would notice.
+    runner = _crashing_runner(runner_config, monkeypatch)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    emitted: list[str] = []
+    monkeypatch.setattr(
+        SessionRunner, "_emit_lifecycle", lambda self, event, inst: emitted.append(event)
+    )
+
+    await runner.poll_once()
+
+    assert emitted == ["crash"], "the poll loop must still announce a crash"
+
+
+async def test_poll_once_observing_does_not_write_the_redacted_mirror(runner_config, monkeypatch):
+    # The other write on this path: a live bridge's public log mirror. The live service
+    # flushes it on its own loop; a read must not write into the instance's log set.
+    runner = _crashing_runner(runner_config, monkeypatch)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    flushed: list[str] = []
+    monkeypatch.setattr(
+        SessionRunner,
+        "_flush_redacted_mirror",
+        lambda self, inst: flushed.append(inst.instance_id),
+    )
+
+    await runner.poll_once(side_effects=False)
+    assert flushed == [], "an observing poll wrote the redacted log mirror"
+
+    await runner.poll_once()
+    assert flushed == ["iid-a"], "the poll loop must still flush the mirror"
+
+
+# --------------------------------------------------------------------------- #
+# resolve_bridge_id: unique-prefix matching, fail-closed on ambiguity (#1099)
+# --------------------------------------------------------------------------- #
+def _runner_with_ids(runner_config, *ids: str) -> SessionRunner:
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    for iid in ids:
+        runner._instances[iid] = RemoteControlInstance(
+            instance_id=iid, project="alpha", label="alpha", status=InstanceStatus.RUNNING
+        )
+    return runner
+
+
+def test_resolve_bridge_id_accepts_a_unique_prefix(runner_config):
+    # The bug: `clauster status` prints instance_id[:8] and every action command then
+    # rejected it, while --help, both MCP tool descriptions and the CLI reference all
+    # advertised prefixes. The tool handed you an identifier it would not accept.
+    runner = _runner_with_ids(runner_config, "f2c456fd-1111-2222-3333-444444444444")
+    assert runner.resolve_bridge_id("f2c456fd") == "f2c456fd-1111-2222-3333-444444444444"
+    assert runner.resolve_bridge_id("f") == "f2c456fd-1111-2222-3333-444444444444"
+    assert runner.bridge_id_candidates("f2c456fd") == []
+
+
+def test_resolve_bridge_id_refuses_an_ambiguous_prefix(runner_config):
+    # Fail closed. Stopping a live session the operator did not mean to touch is
+    # unrecoverable, so a prefix naming several bridges must resolve to NOTHING —
+    # never to whichever the dict happened to yield first.
+    a, b = "f2c456fd-aaaa-0000-0000-000000000000", "f2c456fd-bbbb-0000-0000-000000000000"
+    runner = _runner_with_ids(runner_config, a, b)
+    assert runner.resolve_bridge_id("f2c456fd") is None
+    assert runner.bridge_id_candidates("f2c456fd") == sorted([a, b])
+
+
+def test_resolve_bridge_id_prefers_an_exact_id_over_a_longer_one(runner_config):
+    # An exact id must win outright, so adding a bridge whose id extends an existing
+    # one can never make an id the operator already had stop resolving.
+    short, long = "f2c456fd", "f2c456fd-extra-0000-0000-000000000000"
+    runner = _runner_with_ids(runner_config, short, long)
+    assert runner.resolve_bridge_id(short) == short
+    assert runner.bridge_id_candidates(short) == []
+
+
+def test_resolve_bridge_id_treats_the_empty_string_as_unknown_not_ambiguous(runner_config):
+    # "" prefixes every id. Without the guard it would read as ambiguous-across-all and
+    # report every bridge as a candidate, which is noise rather than an answer.
+    runner = _runner_with_ids(runner_config, "aaaa-1", "bbbb-2")
+    assert runner.resolve_bridge_id("") is None
+    assert runner.bridge_id_candidates("") == []
+
+
+def test_resolve_bridge_id_still_falls_back_to_the_project_name(runner_config):
+    # The #777/#778 compatibility path the dashboard still uses must be untouched. It is
+    # tried BEFORE prefix matching (see the exact-name-beats-prefix test below), so an
+    # exact project name resolves whether or not some id also starts with it.
+    runner = _runner_with_ids(runner_config, "f2c456fd-1111-2222-3333-444444444444")
+    assert runner.resolve_bridge_id("alpha") == "f2c456fd-1111-2222-3333-444444444444"
+    assert runner.bridge_id_candidates("alpha") == []
+
+
+def test_resolve_bridge_id_prefers_an_exact_project_name_over_a_colliding_id_prefix(
+    runner_config,
+):
+    # Instance ids are UUIDs, so a project name collides with one only if it is itself
+    # hex-ish -- "cafe", "face", "deadbeef" are all plausible directory names. Ranking the
+    # prefix first made the project reading UNREACHABLE: a project name is a fixed string
+    # the operator cannot lengthen, so there was no way left to name that project, and
+    # stop/forget would silently act on an unrelated live bridge. Both readings stay
+    # reachable this way -- one more character means the id.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    named = "11111111-1111-1111-1111-111111111111"  # the bridge OF project "cafe"
+    collides = "cafe0000-2222-2222-2222-222222222222"  # an unrelated bridge, id starts "cafe"
+    for iid, project in ((named, "cafe"), (collides, "beta")):
+        runner._instances[iid] = RemoteControlInstance(
+            instance_id=iid, project=project, label=project, status=InstanceStatus.RUNNING
+        )
+
+    assert runner.resolve_bridge_id("cafe") == named, "the exact project name must win"
+    assert runner.bridge_id_candidates("cafe") == [], "an exact match is never ambiguous"
+    assert runner.resolve_bridge_id("cafe0") == collides, "the id stays reachable"
+
+
+def test_resolve_bridge_id_falls_through_to_a_prefix_when_no_project_matches(runner_config):
+    # An identity naming NO project must still reach prefix matching -- that is the whole
+    # feature. Only a name that IS a managed project short-circuits (see the next test).
+    runner = _runner_with_ids(runner_config, "cafe0000-1111-2222-3333-444444444444")
+    assert "cafe" not in runner._discovered()  # not a project under projects_root
+    assert runner.resolve_bridge_id("cafe") == "cafe0000-1111-2222-3333-444444444444"
+
+
+def test_resolve_bridge_id_does_not_treat_an_idle_project_name_as_a_prefix(
+    runner_config, projects_root
+):
+    # The hole one step further along, if exact-project-first only applied when the project
+    # had a bridge: "cafe" names a REAL project, so an idle cafe must answer "no instance"
+    # rather than resolving onto an unrelated project's cafe0000-… bridge and letting
+    # stop/resume/forget act on it. The prefix reading is still reachable as "cafe0"; the
+    # project name is the one with no alternative spelling.
+    (projects_root / "cafe").mkdir()  # a real, discoverable project with no bridge
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    other = "cafe0000-2222-2222-2222-222222222222"  # belongs to alpha, not to cafe
+    runner._instances[other] = RemoteControlInstance(
+        instance_id=other, project="alpha", label="alpha", status=InstanceStatus.RUNNING
+    )
+
+    assert "cafe" in runner._discovered(), "fixture: cafe must be discoverable"
+    assert runner.get_instance_for_project("cafe") is None, "fixture: cafe must be idle"
+    assert runner.resolve_bridge_id("cafe") is None, "an idle project must not borrow a bridge"
+    assert runner.bridge_id_candidates("cafe") == [], "not ambiguous -- it has no instance"
+    assert runner.resolve_bridge_id("cafe0") == other, "the id stays reachable"

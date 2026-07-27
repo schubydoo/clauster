@@ -103,6 +103,27 @@ def test_dashboard_has_no_serious_a11y_violations(browser: AgentBrowser, open_se
     assert violations == [], f"dashboard a11y violations (serious/critical): {violations}"
 
 
+# axe rules for the page's landmark/heading structure. These are "moderate" impact (so the
+# serious/critical gate above doesn't cover them), but they were the only real a11y gap on the
+# dashboard (#958 P4): no <main> landmark, no <h1>, content outside landmarks (region). Pinned
+# separately so a future refactor that drops the <main>/<h1> re-breaks a test, not just a scan.
+_AXE_LANDMARKS = (
+    "(async () => {"
+    "  const r = await axe.run(document, "
+    "    { runOnly: ['landmark-one-main', 'page-has-heading-one', 'region'] });"
+    "  return r.violations.map(v => ({ id: v.id, help: v.help, n: v.nodes.length }));"
+    "})()"
+)
+
+
+def test_dashboard_has_main_landmark_and_h1(browser: AgentBrowser, open_server: str) -> None:
+    """The dashboard exposes one <main> landmark + an <h1>, so all content sits in a landmark."""
+    browser.goto(open_server)
+    browser.expect_visible("#project-grid")
+    violations = browser.eval_json(_AXE_LANDMARKS)
+    assert violations == [], f"dashboard landmark/heading a11y violations: {violations}"
+
+
 def test_login_page_has_no_serious_a11y_violations(
     browser: AgentBrowser, auth_server: str
 ) -> None:

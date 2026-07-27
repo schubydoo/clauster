@@ -17,9 +17,9 @@ Three surfaces, one entry shape (mirroring Claude Code's own ``settings.json``):
   external-edit check + path containment.
 * **local** scope ⇒ ``<project>/.claude/settings.local.json`` — you, this project
   only, never shared or committed. Same stale-hash guard + path containment as
-  project scope; a successful write also runs
-  :func:`~clauster.config_write.ensure_gitignored` so a newly created file is never
-  accidentally committed (#766).
+  project scope; :func:`~clauster.config_write.ensure_gitignored` runs *before* the
+  write (the write drops a secret-bearing ``.bak``), so neither that file nor its
+  backup is ever accidentally committed (#766).
 * **user** scope ⇒ ``~/.claude/settings.json`` (the settings file — *not*
   ``~/.claude.json``), gated additionally on ``allow_user_scope`` and likewise guarded
   by the stale-hash check (it is a real file, not a ``~/.claude.json`` subtree).
@@ -46,10 +46,13 @@ from .config import PERMISSION_LABELS
 PERMISSIONS_KEY = "permissions"
 
 #: The list-valued rule buckets (each a list of opaque, never-parsed rule strings).
-_RULE_LIST_KEYS = frozenset({"allow", "deny"})
+#: ``ask`` is the third canonical Claude Code decision bucket (prompt before use) —
+#: same opaque-string shape as ``allow``/``deny``, validated identically and never
+#: parsed or executed.
+_RULE_LIST_KEYS = frozenset({"allow", "deny", "ask"})
 
 #: Allowed top-level keys inside the ``permissions`` object.
-_PERMISSION_KEYS = frozenset({"allow", "deny", "defaultMode"})
+_PERMISSION_KEYS = frozenset({"allow", "deny", "ask", "defaultMode"})
 
 #: The mode this surface refuses to set — it stays behind the footgun gate (#347/#685).
 BYPASS_MODE = "bypassPermissions"
@@ -77,8 +80,8 @@ def validate_permissions(candidate: Any) -> None:
     """Structural validator for the whole ``permissions`` object (the Foundation hook).
 
     ``candidate`` is the desired ``permissions`` object: a ``dict`` whose only
-    recognized keys are ``allow``/``deny`` (lists of non-empty rule strings) and
-    ``defaultMode`` (one of :data:`RECOGNIZED_MODES`). Unknown keys, wrong types, or an
+    recognized keys are ``allow``/``deny``/``ask`` (lists of non-empty rule strings)
+    and ``defaultMode`` (one of :data:`RECOGNIZED_MODES`). Unknown keys, wrong types, or an
     unrecognized mode reject the whole write (→ 422 via
     :func:`config_write.validate_candidate`), so a partial/garbled block never lands.
 
@@ -184,13 +187,16 @@ def write_project_local_permissions(
 
     Third (local) scope, sibling of the project/user writers above: same fail-closed
     Foundation pipeline and stale-hash guard, targeting a *third* file that is you,
-    this project only. A successful write additionally runs
-    :func:`~clauster.config_write.ensure_gitignored` so a newly created
-    ``settings.local.json`` is never accidentally committed (#766) — idempotent, so a
-    write to an already-gitignored file is a no-op there.
+    this project only. :func:`~clauster.config_write.ensure_gitignored` runs *before* the
+    write (fail-closed: the write creates a secret-bearing ``.bak``), so
+    ``settings.local.json`` and that backup are never accidentally committed (#766) —
+    idempotent, so an already-gitignored file is a no-op there.
     """
     cw.validate_candidate(incoming, validate_permissions)
     path = cw.project_local_settings_path(project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Ignore BEFORE writing, never after: the write creates a `.bak` holding the PREVIOUS
+    # values, so an ensure_gitignored that failed afterwards would leave that secret-bearing
+    # file trackable. Ignoring first is the fail-closed order (the call is idempotent).
+    cw.ensure_gitignored(project_dir, ".claude/settings.local.json", ignore_backup_sibling=True)
     cw.write_settings_subtree(path, PERMISSIONS_KEY, incoming, expected_hash)
-    cw.ensure_gitignored(project_dir, ".claude/settings.local.json")

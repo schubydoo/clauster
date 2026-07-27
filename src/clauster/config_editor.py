@@ -22,8 +22,13 @@ import yaml
 from pydantic import ValidationError
 from yaml import YAMLError
 
-from .config import PERMISSION_LABELS, ClausterConfig, load_config
-from .config_write import hash_bytes
+from .config import (
+    _WEBHOOK_DEFAULT_ON_EVENTS,
+    PERMISSION_LABELS,
+    ClausterConfig,
+    load_config,
+)
+from .config_write import hash_bytes, redact_secret_lines
 
 # Tier-A allowlist: dotted paths editable from the web UI. Operational only — no
 # auth/secret/bind/structural/clone/supply-chain field appears here (those stay
@@ -81,6 +86,30 @@ EDITABLE_FIELDS: tuple[str, ...] = (
 )
 _EDITABLE = frozenset(EDITABLE_FIELDS)
 
+# Tier-B "Advanced" allowlist (#978): operational-but-sensitive scalars editable ONLY
+# behind the config_write capability AND a step-up re-auth (see app.require_elevated).
+# These are the fields the EXCLUDED registry earmarked "GAP-SENSITIVE: defer behind the
+# #347 trust tier" — the clone/webhooks SSRF-adjacent scalars, plus (Slice 4) the three
+# NON-SECRET list/map fields: clone.allowed_schemes / clone.allowed_private_cidrs (rows
+# editors) and webhooks.events (checkbox-per-event map). Deliberately NARROW: config_write.*
+# and login_shepherd.* stay EXCLUDED forever (their reasons say "never web-editable" — RCE /
+# account-auth-state surface), and the SECRET url lists (notifications.urls, webhooks.urls)
+# plus the auth trust lists (allowed_origins, trusted_ips) stay EXCLUDED (unsafe mask
+# round-trip / trust surface). When unsure → EXCLUDED.
+TIER_B_FIELDS: tuple[str, ...] = (
+    "clone.enabled",
+    "clone.allow_private_hosts",
+    "clone.allowed_schemes",
+    "clone.allowed_private_cidrs",
+    "clone.timeout_seconds",
+    "clone.max_mb",
+    "webhooks.enabled",
+    "webhooks.timeout_seconds",
+    "webhooks.block_private_targets",
+    "webhooks.events",
+)
+_TIER_B = frozenset(TIER_B_FIELDS)
+
 # Intentionally-excluded registry (#660). Every config leaf NOT in EDITABLE_FIELDS is named
 # here with a one-line reason, so {EDITABLE_FIELDS} ∪ {EXCLUDED_FIELDS} covers EVERY leaf in
 # ClausterConfig — a newly-added config.py field with no editor decision then trips the
@@ -119,10 +148,7 @@ EXCLUDED_FIELDS: dict[str, str] = {
     "projects": "list-or-dict: per-project map; not addressable as a single editor field",
     "auth.reverse_proxy.trusted_ips": "list-or-dict + auth: IP/CIDR allowlist (list); trust",
     "auth.allowed_origins": "list-or-dict + auth: CSRF/WS origin allowlist (list); security",
-    "clone.allowed_schemes": "list-or-dict + clone: scheme allowlist (list); clone-security",
-    "clone.allowed_private_cidrs": "list-or-dict + clone: SSRF allowlist (list); security",
     "webhooks.urls": "list-or-dict + secret: egress targets (list); may embed secrets",
-    "webhooks.events": "list-or-dict: per-event map; not a single editor field",
     "notifications.urls": "list-or-dict + secret: Apprise URLs embed tokens (list+secret)",
     # secret — credential material; never round-trips to the browser.
     "auth.password_hash": "secret: credential; never round-trips to the browser",
@@ -140,15 +166,14 @@ EXCLUDED_FIELDS: dict[str, str] = {
     "auth.reverse_proxy.shared_secret_header": "auth: HMAC header name; auth surface",
     "auth.reverse_proxy.hmac_window_seconds": "auth: replay window; loosening it weakens auth",
     "auth.reverse_proxy.require_hmac": "auth: turning off drops HMAC → header-only trust",
-    # clone — user-supplied-URL / SSRF surface (GAP-SENSITIVE: defer behind #347 trust tier).
-    "clone.enabled": "clone (GAP-SENSITIVE): gates the clone/SSRF surface; defer behind #347",
-    "clone.allow_private_hosts": "clone (GAP-SENSITIVE): loosens the SSRF guard; defer (#347)",
-    "clone.timeout_seconds": "clone (GAP-SENSITIVE): clone.* kept whole in Tier-B; defer (#347)",
-    "clone.max_mb": "clone (GAP-SENSITIVE): clone.* kept whole in Tier-B; defer behind #347",
-    # webhook — outbound HTTP egress / SSRF surface (GAP-SENSITIVE: defer behind #347).
-    "webhooks.enabled": "webhook (GAP-SENSITIVE): enables outbound HTTP egress; defer behind #347",
-    "webhooks.timeout_seconds": "webhook (GAP-SENSITIVE): meaningful only with egress on; defer",
-    "webhooks.block_private_targets": "webhook (GAP-SENSITIVE): the webhook SSRF guard; defer",
+    # NOTE: clone.* and webhooks.* scalars moved to TIER_B_FIELDS (#978) — editable behind
+    # the config_write capability + step-up re-auth. The NON-SECRET clone/webhooks list/map
+    # fields (clone.allowed_schemes, clone.allowed_private_cidrs, webhooks.events) also moved
+    # to TIER_B (Slice 4, rows/checkbox editors). The SECRET URL lists (webhooks.urls,
+    # notifications.urls) and the auth trust lists (allowed_origins, trusted_ips) STAY excluded:
+    # the mask-sentinel round-trip is index-anchored (safe for the key-stable env map, unsafe for
+    # a reorderable secret list) and token-in-path URLs aren't fully masked. See the list-or-dict
+    # entries above.
     # structural + binary-path — TLS material paths; load-validated, mis-set aborts HTTPS boot.
     "tls.cert_file": "structural + binary-path: TLS material path; mis-set aborts HTTPS boot",
     "tls.key_file": "structural + binary-path: TLS key path; security-material path",
@@ -171,6 +196,11 @@ EXCLUDED_FIELDS: dict[str, str] = {
     "login_shepherd.allow_setup_token": "login-shepherd: setup-token second opt-in; mints a "
     "long-lived credential the operator copies out, file/CLI-managed only, never "
     "web-editable (same rationale as login_shepherd.enabled)",
+    # mcp (#1010) — opt-in that exposes the local-privileged, unauthenticated MCP write tools
+    # (spawn/stop/resume bridges). A browser toggle would let a dashboard session widen a
+    # separate privileged surface it doesn't otherwise control — file/CLI-managed only.
+    "mcp.allow_writes": "mcp-writes: exposes the local-privileged MCP write tools "
+    "(spawn/stop/resume); file/CLI-managed only, never web-editable (privileged capability)",
 }
 _EXCLUDED = frozenset(EXCLUDED_FIELDS)
 
@@ -227,16 +257,21 @@ def _set_by_path(mapping: dict[str, Any], dotted: str, value: Any) -> None:
     cur[parts[-1]] = value
 
 
-def editable_values(config: ClausterConfig) -> dict[str, Any]:
-    """Extract the current Tier-A field values, keyed by dotted path.
+def editable_values(
+    config: ClausterConfig, *, fields: tuple[str, ...] = EDITABLE_FIELDS
+) -> dict[str, Any]:
+    """Extract the current values for ``fields``, keyed by dotted path.
 
-    Only allowlisted fields are read, so no secret/auth/bind value is ever
-    surfaced — redaction is structural, not a post-filter.
+    Defaults to the Tier-A allowlist; the Tier-B "Advanced" surface passes
+    :data:`TIER_B_FIELDS`. Only allowlisted fields are read, so no secret/auth/
+    bind value is ever surfaced — redaction is structural, not a post-filter.
     """
-    return {path: _get_by_path(config, path) for path in EDITABLE_FIELDS}
+    return {path: _get_by_path(config, path) for path in fields}
 
 
-def editable_values_on_disk(path: str | Path) -> dict[str, Any] | None:
+def editable_values_on_disk(
+    path: str | Path, *, fields: tuple[str, ...] = EDITABLE_FIELDS
+) -> dict[str, Any] | None:
     """Re-read the Tier-A field values from the on-disk config, or ``None`` if unreadable.
 
     The editor edits the FILE, but a save deliberately does not live-reload the
@@ -249,12 +284,14 @@ def editable_values_on_disk(path: str | Path) -> dict[str, Any] | None:
     the caller can fall back to the in-memory config instead of failing the request.
     """
     try:
-        return editable_values(load_config(path))
+        return editable_values(load_config(path), fields=fields)
     except (OSError, ValueError, ValidationError, YAMLError):
         return None
 
 
-def disk_state(path: str | Path) -> tuple[str | None, set[str] | None]:
+def disk_state(
+    path: str | Path, *, fields: tuple[str, ...] = EDITABLE_FIELDS
+) -> tuple[str | None, set[str] | None]:
     """Read the on-disk config file ONCE; return ``(content hash, present Tier-A keys)``.
 
     The editor GET needs both the file's SHA-256 — the optimistic-concurrency token that
@@ -280,18 +317,21 @@ def disk_state(path: str | Path) -> tuple[str | None, set[str] | None]:
         return content_hash, None
     if not isinstance(raw, dict):
         return content_hash, None
-    return content_hash, {field for field in EDITABLE_FIELDS if _dotted_present(raw, field)}
+    return content_hash, {field for field in fields if _dotted_present(raw, field)}
 
 
-def validate_edits(raw: dict[str, Any], edits: dict[str, Any]) -> dict[str, Any]:
+def validate_edits(
+    raw: dict[str, Any], edits: dict[str, Any], *, allowed: frozenset[str] = _EDITABLE
+) -> dict[str, Any]:
     """Merge allowlisted edits onto ``raw`` and re-validate; return the candidate mapping.
 
-    Rejects any non-Tier-A key (:class:`DisallowedFieldError`) before merging, then
-    constructs :class:`ClausterConfig` so every field + model validator runs (incl.
+    Rejects any key outside ``allowed`` (:class:`DisallowedFieldError`) before merging,
+    then constructs :class:`ClausterConfig` so every field + model validator runs (incl.
     the auth fail-closed check). Raises :class:`ConfigValidationError` on failure —
-    nothing is written here.
+    nothing is written here. ``allowed`` defaults to the Tier-A set; the Tier-B
+    "Advanced" write path passes :data:`_TIER_B` so the two allowlists never mix.
     """
-    disallowed = [k for k in edits if k not in _EDITABLE]
+    disallowed = [k for k in edits if k not in allowed]
     if disallowed:
         raise DisallowedFieldError(", ".join(sorted(disallowed)))
     candidate = copy.deepcopy(raw)
@@ -300,8 +340,32 @@ def validate_edits(raw: dict[str, Any], edits: dict[str, Any]) -> dict[str, Any]
     try:
         ClausterConfig.model_validate(candidate)
     except ValidationError as exc:
-        raise ConfigValidationError(str(exc)) from exc
+        raise ConfigValidationError(_friendly_validation_message(exc)) from exc
     return candidate
+
+
+def _friendly_validation_message(exc: ValidationError) -> str:
+    """Compress a pydantic ``ValidationError`` into operator-facing per-field lines.
+
+    ``str(exc)`` leaks the internal model name, pydantic type internals, and a docs
+    URL ("1 validation error for ClausterConfig … [type=value_error, input_value=…]
+    … https://errors.pydantic.dev/…") — none of it actionable in the dashboard
+    banner (#1034). Render one ``field.path: reason`` line per error instead; the
+    full exception still reaches the log via the ``from exc`` chain.
+    """
+    parts: list[str] = []
+    for err in exc.errors(include_url=False, include_input=False):
+        loc = ".".join(str(piece) for piece in err.get("loc", ()))
+        msg = err.get("msg") or "invalid value"
+        # pydantic prefixes custom-validator failures with "Value error, " — noise here.
+        msg = msg.removeprefix("Value error, ")
+        parts.append(f"{loc}: {msg}" if loc else msg)
+    # ``msg`` can echo the offending INPUT value. Safe today because every
+    # secret-bearing field sits in EXCLUDED_FIELDS (never editable) and the
+    # secret-adjacent model validators raise static messages — but wrap in the
+    # secret-line redactor anyway so a future Tier-A/B addition or a validator
+    # that starts echoing its value cannot leak into the dashboard banner.
+    return redact_secret_lines("; ".join(parts)) or "validation failed"
 
 
 def _resolve_field_info(path: str) -> Any:
@@ -322,6 +386,10 @@ def _classify(annotation: Any) -> tuple[str, list[str] | None]:
             return _classify(non_none[0])
     if origin is Literal:
         return "enum", [str(a) for a in get_args(annotation)]
+    if origin is list:  # list[str] -> a rows editor (Slice 4)
+        return "list", None
+    if origin is dict:  # dict[str, bool] -> a fixed-key checkbox map (Slice 4)
+        return "map", None
     if annotation is bool:  # bool before int (bool is an int subclass)
         return "bool", None
     if annotation is int:
@@ -329,6 +397,21 @@ def _classify(annotation: Any) -> tuple[str, list[str] | None]:
     if annotation is float:
         return "float", None
     return "str", None
+
+
+def _list_item_kind(annotation: Any) -> str:
+    """Return the UI control type for a list field's ELEMENTS (e.g. ``list[str]`` -> "str").
+
+    Unwraps a single-member ``Optional`` first (mirrors :func:`_classify`), so a future
+    ``list[str] | None`` field reports "str" rather than the outer "list".
+    """
+    if get_origin(annotation) in (Union, types.UnionType):
+        non_none = [a for a in get_args(annotation) if a is not type(None)]
+        if len(non_none) == 1:
+            annotation = non_none[0]
+    item_args = get_args(annotation)
+    kind, _ = _classify(item_args[0]) if item_args else ("str", None)
+    return kind
 
 
 # Human section names (raw key -> heading), in display order.
@@ -399,6 +482,9 @@ FIELD_LABELS: dict[str, str] = {
     "notifications.notify_on_permission": "Notify when permission is needed",
     "notifications.notify_on_session_end": "Notify when a session ends",
     "notifications.notify_on_reconnect_failed": "Notify when reconnect fails",
+    "clone.allowed_schemes": "Allowed clone URL schemes",
+    "clone.allowed_private_cidrs": "Allowed private CIDRs",
+    "webhooks.events": "Lifecycle events emitted",
 }
 
 # Unit affix shown beside numeric controls.
@@ -421,6 +507,29 @@ FIELD_PLACEHOLDERS: dict[str, str] = {
     "instance_defaults.max_bridges": "Unset — no limit",
     "claustrum.socket_path": "Unset — defaults to <state_dir>/claustrum/daemon.sock",
     "usage.currency_symbol": "Unset — defaults to $",
+    "clone.allowed_schemes": "e.g. https",
+    "clone.allowed_private_cidrs": "e.g. 192.168.1.0/24",
+}
+
+# Fixed-key boolean maps rendered as a checkbox-per-key editor (Slice 4). Maps a dotted path
+# to the ordered event keys the editor offers; a key ABSENT from the stored map takes its
+# per-key default (mirrors WebhooksConfig.event_enabled's absent-key policy — the original
+# bridge four default ON, the #432 extended three default OFF). Order is the documented
+# taxonomy, not the (unordered) frozenset; the default is DERIVED from the config on-set so
+# this stays single-source with config.py. Only paths listed here render as a checkbox map.
+_WEBHOOK_EVENT_ORDER: tuple[str, ...] = (
+    "spawn",
+    "ready",
+    "stop",
+    "crash",
+    "bg-settled",
+    "permission-needed",
+    "clone-done",
+)
+FIELD_MAP_KEYS: dict[str, tuple[tuple[str, bool], ...]] = {
+    "webhooks.events": tuple(
+        (event, event in _WEBHOOK_DEFAULT_ON_EVENTS) for event in _WEBHOOK_EVENT_ORDER
+    ),
 }
 
 # Child field -> master switch: the child is disabled in the UI when the master is off.
@@ -558,18 +667,67 @@ def _constraints(info: Any) -> dict[str, Any]:
     return out
 
 
-def field_specs(present: set[str] | None = None) -> dict[str, dict[str, Any]]:
+def field_dep_status(config: ClausterConfig) -> dict[str, dict[str, Any]]:
+    """Runtime-consistent availability of the optional dependency behind each dep-gated switch.
+
+    A feature switch whose dependency isn't installed can't do anything if flipped on, so the
+    editor annotates (and prevents enabling) it — "Requires <dep>" (#1016). Resolution uses the
+    SAME machinery the runtime/doctor use — :func:`deps.resolve_effective_binary` for the
+    claustrum binary (honoring ``config.claustrum.binary``, #1013) and :func:`deps.probe` for the
+    pip extras — so a switch is never greyed out for a dependency that is present. Returns only the
+    switches that have an optional dep, each as ``{available, hint}``.
+    """
+    from . import deps
+
+    # Reflect what the (frozen) binary will actually import: a side-installed extra only counts
+    # once its deps dir is on sys.path, exactly as `doctor` primes it before probing (#933).
+    deps.add_deps_dir_to_sys_path(config.state_dir)
+    default_binary = type(config.claustrum).model_fields["binary"].default
+    claustrum_ok = (
+        deps.resolve_effective_binary(
+            "claustrum", config.claustrum.binary, default_binary, config.state_dir
+        )
+        is not None
+    )
+    return {
+        "claustrum.enabled": {
+            "available": claustrum_ok,
+            "hint": "Needs the claustrum binary — run `clauster deps install claustrum` first.",
+        },
+        "notifications.enabled": {
+            "available": deps.probe(deps.by_key("apprise")),
+            "hint": f"Needs the apprise dependency — {deps.install_hint(deps.by_key('apprise'))}.",
+        },
+        "claude.pty_screen_enabled": {
+            "available": deps.probe(deps.by_key("pyte")),
+            "hint": f"Needs the pyte dependency — {deps.install_hint(deps.by_key('pyte'))}.",
+        },
+    }
+
+
+def field_specs(
+    present: set[str] | None = None,
+    *,
+    fields: tuple[str, ...] = EDITABLE_FIELDS,
+    config: ClausterConfig | None = None,
+) -> dict[str, dict[str, Any]]:
     """Return rich per-field UI metadata for the editor (label, help, control, bounds).
 
-    ``present`` is the set of dotted keys literally on disk (from :func:`disk_state`).
-    A deprecated field whose key is ABSENT from ``present`` is flagged ``hidden`` so the
-    editor can drop its row — a key the user already removed (e.g. via ``config reconcile``)
-    no longer renders as a flagged-deprecated field. When ``present`` is ``None`` (the file
-    could not be read) nothing is hidden: fail-open on display, never drop a field we cannot
-    prove is absent.
+    Defaults to the Tier-A allowlist; the Tier-B "Advanced" surface passes
+    :data:`TIER_B_FIELDS`. ``present`` is the set of dotted keys literally on disk (from
+    :func:`disk_state`). A deprecated field whose key is ABSENT from ``present`` is flagged
+    ``hidden`` so the editor can drop its row — a key the user already removed (e.g. via
+    ``config reconcile``) no longer renders as a flagged-deprecated field. When ``present``
+    is ``None`` (the file could not be read) nothing is hidden: fail-open on display, never
+    drop a field we cannot prove is absent.
+
+    When ``config`` is given, a dep-gated switch (:func:`field_dep_status`) also carries a
+    ``dep_status`` (``{available, hint}``) so the editor can annotate + prevent enabling a
+    feature whose optional dependency is missing (#1016).
     """
+    dep_status = field_dep_status(config) if config is not None else {}
     specs: dict[str, dict[str, Any]] = {}
-    for path in EDITABLE_FIELDS:
+    for path in fields:
         section, key = path.split(".", 1) if "." in path else ("", path)
         info = _resolve_field_info(path)
         kind, choices = _classify(info.annotation)
@@ -592,9 +750,23 @@ def field_specs(present: set[str] | None = None) -> dict[str, dict[str, Any]]:
             "deprecated": path in DEPRECATED_FIELDS,
             "hidden": (path in DEPRECATED_FIELDS and present is not None and path not in present),
             "default": default if isinstance(default, (str, int, float, bool)) else None,
+            # A list/map renders a multi-control GROUP with no single `for=` target, so the UI
+            # captions it with a plain element (not an orphan <label for>). Scalars stay labelled.
+            "is_group": kind in ("list", "map"),
         }
         if kind in ("int", "float"):
             spec.update(_constraints(info))
             spec["step"] = 1 if kind == "int" else "any"
+        elif kind == "list":
+            # The element control type (str today) so the rows editor knows what to render.
+            spec["item_type"] = _list_item_kind(info.annotation)
+        elif kind == "map":
+            # Fixed-key boolean maps expose their ordered keys + per-key defaults; a map with
+            # no registered key set has no safe checkbox rendering, so leave map_keys absent.
+            registered = FIELD_MAP_KEYS.get(path)
+            if registered is not None:
+                spec["map_keys"] = [{"key": k, "default": d} for k, d in registered]
+        if path in dep_status:
+            spec["dep_status"] = dep_status[path]
         specs[path] = spec
     return specs

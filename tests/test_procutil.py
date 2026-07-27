@@ -587,6 +587,210 @@ def test_is_keeper_process_zombie_is_false(monkeypatch):
     assert procutil.is_keeper_process(1234) is True
 
 
+def test_is_bridge_process_zombie_is_false(monkeypatch):
+    # The bridge twin of the check above, and previously pinned by nothing: deleting the
+    # zombie arm left the whole suite green. The phantom-prune asks "is this EXTERNAL
+    # session really a live bridge?" before deleting a resumable card — a zombie answering
+    # yes would keep a card alive against a process that is already gone.
+    bridge_argv = ("claude", "remote-control", "--name", "alpha")
+    monkeypatch.setattr(
+        procutil.psutil,
+        "Process",
+        _fake_proc(status=psutil.STATUS_ZOMBIE, cmdline=bridge_argv),
+    )
+    assert procutil.is_bridge_process(1234) is False
+    # Differential control: same cmdline, RUNNING -> True, so it is the status that decided.
+    monkeypatch.setattr(
+        procutil.psutil,
+        "Process",
+        _fake_proc(status=psutil.STATUS_RUNNING, cmdline=bridge_argv),
+    )
+    assert procutil.is_bridge_process(1234) is True
+
+
+def test_bridge_ancestor_finds_the_bridge_above_an_sdk_worker(monkeypatch):
+    # THE #1116 regression test, in the shape measured on the dogfood host: `agents --json`
+    # reports a Server Mode session's pid as the SDK worker
+    # (`…/versions/2.1.220 --print --sdk-url …`), whose own cmdline is NOT a bridge cmdline.
+    # `is_bridge_process` on it therefore answered False for every session, the prune's
+    # `external_cwds` was always empty, and #1096's fix could never execute. The bridge is
+    # that worker's PARENT.
+    worker = ("/home/u/.local/share/claude/versions/2.1.220", "--print", "--sdk-url", "x")
+    bridge = ("/home/u/.local/bin/claude", "remote-control", "--name", "alpha")
+    service = ("/home/u/.local/bin/clauster", "run", "-c", "clauster.yml")
+    tree = {3227285: (worker, 3227255), 3227255: (bridge, 3153047), 3153047: (service, 1)}
+
+    class _P:
+        def __init__(self, pid):
+            if pid not in tree:
+                raise psutil.NoSuchProcess(pid)
+            self.pid = pid
+
+        def status(self):
+            return psutil.STATUS_RUNNING
+
+        def cmdline(self):
+            return list(tree[self.pid][0])
+
+        def parent(self):
+            return _P(tree[self.pid][1]) if tree[self.pid][1] in tree else None
+
+    monkeypatch.setattr(procutil.psutil, "Process", _P)
+    # The measured control: the session pid itself is NOT a bridge...
+    assert procutil.is_bridge_process(3227285) is False
+    # ...but its bridge is one hop up, which is what the prune actually needs to know.
+    assert procutil.bridge_ancestor(3227285) == 3227255
+    # A flag-form pty session IS the bridge pid, matched at depth 0.
+    assert procutil.bridge_ancestor(3227255) == 3227255
+
+
+def test_bridge_ancestor_refuses_to_answer_with_a_pty_keeper(monkeypatch):
+    # A keeper matches `is_bridge_cmdline` — it carries the bridge argv after `--`, and that
+    # test is a substring match over the joined cmdline. The keeper is the bridge's PARENT,
+    # so a pty bridge that died with its keeper not yet reaped would hand the walk to the
+    # keeper. That pid is NOT the one the prune excludes as managed (`bridge_pid`), so our
+    # own keeper would become evidence for deleting our own resumable card.
+    keeper = (
+        "python3",
+        "-m",
+        "clauster.pty_keeper",
+        "--sidecar",
+        "S",
+        "--",
+        "claude",
+        "--remote-control",
+        "alpha",
+    )
+    # The premise, asserted rather than assumed: the keeper does look like a bridge.
+    assert procutil.is_bridge_cmdline(list(keeper)) is True
+    tree = {50: (("bash",), 51), 51: (keeper, 1)}
+
+    class _P:
+        def __init__(self, pid):
+            if pid not in tree:
+                raise psutil.NoSuchProcess(pid)
+            self.pid = pid
+
+        def status(self):
+            return psutil.STATUS_RUNNING
+
+        def cmdline(self):
+            return list(tree[self.pid][0])
+
+        def parent(self):
+            return _P(tree[self.pid][1]) if tree[self.pid][1] in tree else None
+
+    monkeypatch.setattr(procutil.psutil, "Process", _P)
+    assert procutil.bridge_ancestor(50, max_depth=2) is None
+    # ...and asked about the keeper directly it still refuses, rather than naming itself.
+    assert procutil.bridge_ancestor(51) is None
+
+
+def test_bridge_ancestor_default_depth_is_the_measured_distance(monkeypatch):
+    # The default bound is 1 — the measured Server Mode distance (session pid is the SDK
+    # worker, its parent is the bridge). Slack is a liability on a gate that deletes cards,
+    # so a bridge TWO hops up must not answer at the default.
+    bridge = ("claude", "remote-control", "--name", "alpha")
+    tree = {60: (("node", "x"), 61), 61: (("sh",), 62), 62: (bridge, 1)}
+
+    class _P:
+        def __init__(self, pid):
+            if pid not in tree:
+                raise psutil.NoSuchProcess(pid)
+            self.pid = pid
+
+        def status(self):
+            return psutil.STATUS_RUNNING
+
+        def cmdline(self):
+            return list(tree[self.pid][0])
+
+        def parent(self):
+            return _P(tree[self.pid][1]) if tree[self.pid][1] in tree else None
+
+    monkeypatch.setattr(procutil.psutil, "Process", _P)
+    assert procutil.bridge_ancestor(60) is None, "two hops must not resolve at the default"
+    assert procutil.bridge_ancestor(61) == 62, "one hop is the measured distance and resolves"
+
+
+def test_bridge_ancestor_stops_before_reaching_an_unrelated_ancestor(monkeypatch):
+    # The walk must not keep climbing until *something* looks like a bridge. A session whose
+    # own bridge already exited would otherwise charge whatever bridge happens to sit further
+    # up the tree, manufacturing prune evidence — and the prune DELETES a resumable card.
+    bridge = ("claude", "remote-control", "--name", "alpha")
+    plain = ("bash",)
+    # A bridge sits 4 hops up, one beyond the bound.
+    tree = {10: (plain, 11), 11: (plain, 12), 12: (plain, 13), 13: (plain, 14), 14: (bridge, 1)}
+
+    class _P:
+        def __init__(self, pid):
+            if pid not in tree:
+                raise psutil.NoSuchProcess(pid)
+            self.pid = pid
+
+        def status(self):
+            return psutil.STATUS_RUNNING
+
+        def cmdline(self):
+            return list(tree[self.pid][0])
+
+        def parent(self):
+            return _P(tree[self.pid][1]) if tree[self.pid][1] in tree else None
+
+    monkeypatch.setattr(procutil.psutil, "Process", _P)
+    assert procutil.bridge_ancestor(10) is None
+    # Differential control: raise the bound and the same tree DOES resolve, so it is the
+    # depth limit that decided and not a broken walk.
+    assert procutil.bridge_ancestor(10, max_depth=4) == 14
+
+
+def test_bridge_ancestor_fails_closed_on_an_unreadable_tree(monkeypatch):
+    # An unreadable process tree (hidepid, a container) must never manufacture evidence that
+    # an unmanaged bridge is alive — that would delete a resumable card.
+    class _Denied:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def status(self):
+            raise psutil.AccessDenied(self.pid)
+
+        def cmdline(self):
+            raise psutil.AccessDenied(self.pid)
+
+        def parent(self):
+            raise psutil.AccessDenied(self.pid)
+
+    monkeypatch.setattr(procutil.psutil, "Process", _Denied)
+    assert procutil.bridge_ancestor(4242) is None
+
+
+def test_is_bridge_cmdline_does_not_match_the_bare_rc_alias():
+    # A deliberate miss, not an oversight (#1107). An earlier revision of this branch matched
+    # `--rc`, on the premise that Clauster's own supervisor spawns bridges with it. It does
+    # not: `supervisor.build_dispatch_argv` builds `claude --bg --rc <name>`, a BACKGROUND
+    # AGENT opening a cloud door. Both bridge spawners emit `remote-control` /
+    # `--remote-control` instead.
+    #
+    # `is_bridge_process` gates the phantom-prune, where True DELETES a resumable card. So
+    # matching the alias would let a background agent stand as proof that "the bridge is
+    # alive, just unmanaged" and prune the card out from under it. A miss only leaves a
+    # phantom card lingering, which is the failure to prefer in a delete path.
+    #
+    # The intermediate fix — anchoring on the executable basename — is also pinned below
+    # by the `somelinter` case: the binary hint matches "claude" anywhere in the joined
+    # argv, and this host's service user IS `claude`, so every path under /home/claude
+    # satisfied it.
+    assert procutil.is_bridge_cmdline(["claude", "--rc", "alpha"]) is False
+    assert procutil.is_bridge_cmdline(["claude", "--rc=alpha"]) is False
+    assert procutil.is_bridge_cmdline(["somelinter", "--rc", "/home/claude/x"]) is False
+    # The two spellings carrying the literal `remote-control` token stay matched...
+    assert procutil.is_bridge_cmdline(["claude", "--remote-control", "alpha"]) is True
+    assert procutil.is_bridge_cmdline(["claude", "remote-control", "--name", "alpha"]) is True
+    # ...and only the subcommand form is adoptable as a standard bridge.
+    assert procutil.is_standard_bridge_cmdline(["claude", "--remote-control", "alpha"]) is False
+    assert procutil.is_standard_bridge_cmdline(["claude", "remote-control", "-n", "a"]) is True
+
+
 def test_reap_if_exited_without_wnohang_is_noop(monkeypatch):
     # procutil.py 323-324: the Windows arm — no os.WNOHANG means no zombies to reap,
     # so the function returns before ever calling waitpid.

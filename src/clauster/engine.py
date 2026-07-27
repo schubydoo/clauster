@@ -21,8 +21,9 @@ refinement (or the in-process MCP, #527), not a serverless CLI. Two usage shapes
   :meth:`hydrate`, and :meth:`dispose` is a no-op (the app owns the runner).
 * **Headless CLI** — ``ClausterEngine(config)`` builds its own runner. There is no
   poll loop, so a command that reports instance state calls :meth:`hydrate` once
-  (a **read-only** ``rediscover(persist=False)`` — never ``poll_once``, so a read
-  command can't write shared state or fire lifecycle webhooks) before reading, and
+  (a **read-only** ``rediscover(persist=False)``, with no ``poll_once`` at all — the
+  CLI's reads don't need its ``agents --json`` cross-check, so the cheapest way not to
+  write shared state or fire lifecycle webhooks is not to call it) before reading, and
   :meth:`dispose` at the end. Use it as a context manager so ``dispose`` is guaranteed.
 """
 
@@ -65,9 +66,14 @@ class ClausterEngine(AbstractContextManager["ClausterEngine"]):
         The web app keeps the registry current via its poll loop; a fresh CLI
         runner has an empty one, so a command that reports instance state calls this
         first. It uses ``rediscover(persist=False)`` — a **read-only** reattach that
-        never writes the shared ``state.json`` and never fires the lifecycle
-        webhooks/notifications ``poll_once`` would, so ``clauster status`` on a host
-        running the live service can't clobber its state or emit spurious events.
+        never writes the shared ``state.json`` — and does not call ``poll_once`` at all,
+        so ``clauster status`` on a host running the live service can't clobber its state
+        or emit spurious events.
+
+        The CLI reads don't need ``poll_once``'s ``agents --json`` cross-check, so the
+        cheapest guarantee here is simply not to call it. A caller that DOES need the
+        cross-check (the MCP server) passes ``side_effects=False`` instead — see
+        :meth:`~clauster.runner.SessionRunner.poll_once` and #1104.
         """
         await self._runner.rediscover(persist=False)
 
@@ -102,11 +108,21 @@ class ClausterEngine(AbstractContextManager["ClausterEngine"]):
         return inspector.list_working_sessions(self._config.claude.binary)
 
     def resolve_instance(self, identity: str) -> RemoteControlInstance | None:
-        """Resolve an instance id / bridge identity to its instance, or ``None``."""
+        """Resolve an instance id / unique id prefix / bridge identity, or ``None``."""
         resolved = self._runner.resolve_bridge_id(identity)
         if resolved is None:
             return None
         return self._runner.get_instance(resolved)
+
+    def bridge_id_candidates(self, identity: str) -> list[str]:
+        """Return the instance_ids an AMBIGUOUS ``identity`` could mean, else empty (#1099).
+
+        Every resolve on this facade returns ``None`` for an ambiguous prefix as well as
+        for an unknown one — failing closed, because acting on the wrong live session is
+        unrecoverable. This is how a caller tells the two apart and reports the ids to
+        retry with instead of a bare "not found".
+        """
+        return self._runner.bridge_id_candidates(identity)
 
     # -- write: spawn / stop --------------------------------------------------
 
@@ -159,10 +175,14 @@ class ClausterEngine(AbstractContextManager["ClausterEngine"]):
     async def stop(self, identity: str) -> RemoteControlInstance | None:
         """Stop the bridge resolved from ``identity``; ``None`` when none matches.
 
-        Resolves an id / prefix / bridge identity the same way the ``DELETE`` route
-        does (:meth:`~clauster.runner.SessionRunner.resolve_bridge_id`), so a headless
-        stop targets exactly the instance the operator named. A headless caller must
-        :meth:`hydrate` first so the registry is populated for the resolve.
+        Resolves an id / unique id prefix / bridge identity the same way the ``DELETE``
+        route does (:meth:`~clauster.runner.SessionRunner.resolve_bridge_id`), so a
+        headless stop targets exactly the instance the operator named. A headless caller
+        must :meth:`hydrate` first so the registry is populated for the resolve.
+
+        ``None`` covers both "nothing matched" and "the prefix was ambiguous" — the
+        second never picks a bridge. Call :meth:`bridge_id_candidates` to tell them
+        apart and name the ids to retry with.
         """
         resolved = self._runner.resolve_bridge_id(identity)
         if resolved is None:
@@ -173,8 +193,9 @@ class ClausterEngine(AbstractContextManager["ClausterEngine"]):
         """Resume the stopped/crashed bridge resolved from ``identity``; ``None`` if none.
 
         The headless mirror of ``POST /api/instances/{id}/resume`` for the bridge
-        channel: resolves the id / prefix / bridge identity exactly like :meth:`stop`
-        (so a resume targets the instance the operator named), then re-spawns it into
+        channel: resolves the id / unique id prefix / bridge identity exactly like
+        :meth:`stop` — including returning ``None`` rather than guessing when a prefix
+        is ambiguous — then re-spawns it into
         its prior conversation via :meth:`~clauster.runner.SessionRunner.resume`, which
         reuses the instance's stored spawn/permission/resume modes. A headless caller
         must :meth:`hydrate` first so the registry is populated for the resolve.
@@ -214,15 +235,40 @@ class ClausterEngine(AbstractContextManager["ClausterEngine"]):
 
     @staticmethod
     def read_log_lines(path: Path, offset: int) -> tuple[int, list[str]]:
-        """Read new log lines past ``offset``, redacted; return ``(new_offset, lines)``.
+        """Read new COMPLETE log lines past ``offset``, redacted; return ``(new_offset, lines)``.
 
         Redaction is owned here (via :func:`~clauster.redact.sanitize_line`) so no
         caller re-implements it — the same guarantee the WebSocket log stream gives.
+
+        A trailing *unterminated* line is withheld and the offset rewound past it, so it
+        is emitted once its newline arrives. ``sanitize_line`` matches whole tokens, so a
+        secret flushed across two reads matched neither half and printed verbatim: a
+        follower showed ``token=ghp_ABC``, then the remainder on the next poll,
+        reassembling the secret on the operator's terminal from a stream documented as
+        redacted (#1105).
+
+        This is the same hold-and-rewind :func:`~clauster.logstream.read_new` already
+        applies to a trailing incomplete UTF-8 *character*, and the same reason
+        :func:`~clauster.logstream.initial_offset` starts on a line boundary — a
+        fragment splits a secret from its redaction context. Those covered the first
+        line and the character level; this covers the last line.
         """
         new_offset, text = logstream.read_new(path, offset)
         if not text:
             return new_offset, []
-        lines = [sanitize_line(line) for line in text.splitlines()]
+        complete, newline, partial = text.rpartition("\n")
+        # Rewind by the withheld bytes (not characters — the offset is a byte offset).
+        # Computed off `new_offset` rather than the caller's `offset` so a rotation reset
+        # inside `read_new` is preserved.
+        new_offset -= len(partial.encode("utf-8"))
+        if not newline:
+            return new_offset, []  # nothing terminated yet; consume nothing
+        # `.split("\n")` matches the WebSocket route, whose carry this mirrors: line
+        # completeness can only be judged on "\n", so `str.splitlines()`'s extra
+        # boundaries (\r, \v, \f,  ) would emit as "complete" a line this offset
+        # arithmetic still counts as withheld. The lone \r of a CRLF log is stripped
+        # per line so the visible output is unchanged.
+        lines = [sanitize_line(line.rstrip("\r")) for line in complete.split("\n")]
         return new_offset, lines
 
     # -- lifecycle ------------------------------------------------------------

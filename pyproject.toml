@@ -8,7 +8,7 @@ license = { text = "Apache-2.0" }
 authors = [{ name = "schubydoo", email = "12485317+schubydoo@users.noreply.github.com" }]
 keywords = ["claude", "claude-code", "remote-control", "self-hosted", "homelab"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Framework :: FastAPI",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3.11",
@@ -67,6 +67,15 @@ dev = [
     # offending test with an all-thread traceback instead, so a hang fails fast and
     # points at itself.
     "pytest-timeout>=2.3",
+    # httpx2 (pydantic's httpx 2.x line, #888): Starlette 1.3+ deprecates plain httpx with
+    # its TestClient and auto-uses httpx2 when installed (`import httpx2 as httpx`), so this
+    # silences the StarletteDeprecationWarning and moves the test client to the intended
+    # backend. Dev-only — the shipped package's outbound-webhook client stays on httpx>=0.27
+    # (unifying the production client on httpx2 is a separate follow-up per #888).
+    # Floor is >=2.7: 2.5.x signalled TestClient WebSocket disconnect differently, which
+    # stopped exercising the pty-screen WS-disconnect handler (a coverage regression #888
+    # deferred on); 2.7.0 restores the plain-httpx WebSocketDisconnect behaviour.
+    "httpx2>=2.7",
     "ruff>=0.8",
     "pyright>=1.1.390",
     "yamllint>=1.38",
@@ -93,6 +102,17 @@ docs = [
     # Build the mkdocs-material documentation site (see mkdocs.yml + docs/).
     # Not needed at runtime; `mkdocs build --strict` / `mkdocs serve` only.
     "mkdocs-material>=9.5",
+    # Old-URL redirects for moved/renamed pages: every page move MUST add an entry
+    # to `redirect_maps` in mkdocs.yml, or the published URL 404s (`--strict` does
+    # NOT catch missing redirects — it only validates internal links).
+    # Pinned exactly: 1.2.3 adds a `properdocs` dependency (a second documentation
+    # engine in the docs env that injects text into builds) and caps mkdocs<=1.6.1,
+    # blocking MkDocs upgrades. Keep 1.2.2 until the maintainer decides otherwise —
+    # do not accept a Renovate bump to 1.2.3.
+    "mkdocs-redirects==1.2.2",
+    # Surfaces the root community-health files (UPGRADING, CHANGELOG, CONTRIBUTING,
+    # SUPPORT, SECURITY) on the site while they stay canonical at the repo root.
+    "mkdocs-include-markdown-plugin>=6.2",
 ]
 notify = [
     # Outbound crash/lifecycle notifications (see notify.py + notifications.*).

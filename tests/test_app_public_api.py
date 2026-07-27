@@ -121,13 +121,16 @@ def test_v1_instance_delete_and_resume_are_aliased(write_config):
     client = _client(write_config)
     # No live instance exists, so both 404 the same way through either surface —
     # proving the v1 route reaches the identical handler, not just "some 404".
-    internal_delete = client.delete("/api/instances/ghost", headers={"origin": ORIGIN})
-    v1_delete = client.delete("/api/v1/instances/ghost", headers={"origin": ORIGIN})
+    # No Origin header on purpose: auth is off here, and the CSRF Origin gate now
+    # runs on the auth-off path too — a *present* cross-site Origin would 403 before
+    # the handler. An absent Origin (a non-browser client) passes, reaching the route.
+    internal_delete = client.delete("/api/instances/ghost")
+    v1_delete = client.delete("/api/v1/instances/ghost")
     assert v1_delete.status_code == internal_delete.status_code
     assert v1_delete.json() == internal_delete.json()
 
-    internal_resume = client.post("/api/instances/ghost/resume", headers={"origin": ORIGIN})
-    v1_resume = client.post("/api/v1/instances/ghost/resume", headers={"origin": ORIGIN})
+    internal_resume = client.post("/api/instances/ghost/resume")
+    v1_resume = client.post("/api/v1/instances/ghost/resume")
     assert v1_resume.status_code == internal_resume.status_code
     assert v1_resume.json() == internal_resume.json()
 
@@ -142,12 +145,16 @@ def test_v1_instance_get_by_id_is_aliased(write_config):
 
 def test_v1_agent_delete_and_resume_are_aliased(write_config):
     client = _client(write_config)
-    internal_delete = client.delete("/api/agents/ghost-job", headers={"origin": ORIGIN})
-    v1_delete = client.delete("/api/v1/agents/ghost-job", headers={"origin": ORIGIN})
+    # No Origin header: auth is off and the CSRF Origin gate now guards the auth-off
+    # path, so a present cross-site Origin would 403 before the handler; an absent one
+    # (non-browser client) passes through to the route, which is what this aliasing
+    # check needs to reach.
+    internal_delete = client.delete("/api/agents/ghost-job")
+    v1_delete = client.delete("/api/v1/agents/ghost-job")
     assert v1_delete.status_code == internal_delete.status_code
 
-    internal_resume = client.post("/api/agents/ghost-job/resume", headers={"origin": ORIGIN})
-    v1_resume = client.post("/api/v1/agents/ghost-job/resume", headers={"origin": ORIGIN})
+    internal_resume = client.post("/api/agents/ghost-job/resume")
+    v1_resume = client.post("/api/v1/agents/ghost-job/resume")
     assert v1_resume.status_code == internal_resume.status_code
 
 

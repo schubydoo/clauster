@@ -1,69 +1,15 @@
-# Configuration
+# Configuration reference
 
-All settings live in `clauster.yml`. The full, commented schema is in
-[`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/clauster.yml.example).
-This page is the exhaustive field reference. The tables below are **generated from
-the pydantic models** in `src/clauster/config.py` (via
-`scripts/gen_config_reference.py`), so they never drift from the code — a CI check
-fails the build if a field is added or changed without regenerating this page.
+The exhaustive field reference for `clauster.yml` — every section, every key.
+The tables below are **generated from the pydantic models** in
+`src/clauster/config.py` (via `scripts/gen_config_reference.py`), so they never
+drift from the code — a CI check fails the build if a field is added or changed
+without regenerating this page.
 
-## Loading & overrides
-
-Clauster searches for a config in this order (first file that exists wins):
-
-1. The path passed to `clauster run -c <path>` (explicit).
-2. `$CLAUSTER_CONFIG`
-3. `./clauster.yml`
-4. `$CLAUSTER_HOME/clauster.yml`
-
-If none is found, startup fails with a `FileNotFoundError` listing the paths it
-searched.
-
-**Environment overrides.** Any *scalar* key is overridable by an environment
-variable named `CLAUSTER_<UPPER_SNAKE_PATH>` — the dotted path uppercased and
-joined with underscores. For example:
-
-- `auth.enabled` → `CLAUSTER_AUTH_ENABLED`
-- `auth.password_hash` → `CLAUSTER_AUTH_PASSWORD_HASH`
-- `claude.launch_mode` → `CLAUSTER_CLAUDE_LAUNCH_MODE` *(full dotted path — see note)*
-
-!!! note "Env mapping is by leaf path"
-    The mapping recurses nested models and uses the *full dotted path*, so
-    `claude.launch_mode` maps to `CLAUSTER_CLAUDE_LAUNCH_MODE`. `dict`/`list`
-    leaves (e.g. `projects`, `reverse_proxy.trusted_ips`,
-    `clone.allowed_private_cidrs`) **cannot** be set via env — a single env var
-    can't express them unambiguously; set those in the YAML file.
-
-**Secret files (`*_FILE`).** Every `CLAUSTER_<X>` variable also accepts a
-`CLAUSTER_<X>_FILE` form that reads the value from a file instead of the
-environment — for secrets that Docker / Podman / Kubernetes / Vault render to
-files under `/run/secrets` rather than env vars, keeping them out of the process
-environment. The file's contents win over the plain variable, and trailing
-whitespace (e.g. a trailing newline) is stripped. An unreadable `_FILE` path is a
-fatal misconfiguration (it does not silently fall back). The session secret has
-its own `CLAUSTER_SESSION_SECRET_FILE` (it is read outside the config schema):
-
-- `auth.password_hash` → `CLAUSTER_AUTH_PASSWORD_HASH_FILE`
-- `auth.api_token_hash` → `CLAUSTER_AUTH_API_TOKEN_HASH_FILE`
-- `observability.metrics_token_hash` → `CLAUSTER_OBSERVABILITY_METRICS_TOKEN_HASH_FILE`
-- session secret → `CLAUSTER_SESSION_SECRET_FILE`
-
-```yaml
-# docker-compose: render a secret to a file and point clauster at it
-services:
-  clauster:
-    environment:
-      CLAUSTER_AUTH_PASSWORD_HASH_FILE: /run/secrets/clauster_pw_hash
-    secrets:
-      - clauster_pw_hash
-
-secrets:
-  clauster_pw_hash:
-    file: ./secrets/pw_hash.txt
-```
-
-**Schema is additive-only.** Old configs always validate against newer versions;
-unknown per-project keys are ignored.
+How a config file is found, environment-variable overrides, and `*_FILE` secret
+files are covered in [Configuring Clauster](../guides/configuration.md).
+Changing settings from the browser is covered in
+[the in-app config editor](../guides/config-editor.md).
 
 ## Top level (`ClausterConfig`)
 
@@ -99,7 +45,7 @@ nested under `auth`).
 | `resume_recap` | bool | `false` | Install a `SessionStart` hook in the runtime user's `~/.claude/settings.json` that recaps the most recent prior transcript for the cwd into a restarted (standard-mode) bridge. Opt-in: edits the user's Claude settings and injects prior turns. |
 | `resume_recap_max_chars` | int | `8000` | Character budget (≥500) for the recap injection (most recent turns kept). |
 | `launch_mode` | `standard` \| `pty` | `standard` | Launch mode for **new** bridges. `pty` = native true-resume under a PTY keeper (a POSIX pty, or a ConPTY keeper on Windows with the `pty` extra installed; falls back to standard when that extra is absent). A bridge keeps the mode it launched with — editing this never re-modes a running or stopped bridge. (Renamed from `resume_mode`, still accepted as a deprecated alias.) |
-| `pty_screen_enabled` | bool | `false` | (pty mode) Publish a redacted, read-only render of the bridge's live terminal screen for the dashboard's live-terminal view (#534). Off by default; needs the optional `pyte` dependency (`pip install 'clauster[pty]'`) — without it the feature stays dormant. The standalone binary does not bundle `pyte` (LGPL): either run clauster from a `pip`/`uv` install with the `[pty]` extra, or keep the binary and side-load `pyte` by setting `CLAUSTER_PYTE_PATH` to a directory holding an installed `pyte` (#702) — the binary appends it to `sys.path` only when set. The render is best-effort secret-redacted, so treat the live view as auth-gated, not secret-proof. |
+| `pty_screen_enabled` | bool | `false` | (pty mode) Publish a redacted, read-only render of the bridge's live terminal screen for the dashboard's live-terminal view (#534). Off by default; needs the optional `pyte` dependency (`pip install 'clauster[pty]'`) — without it the feature stays dormant. The standalone binary does not bundle `pyte` (LGPL): install it there with `clauster deps install pty` (#904), or manually side-load `pyte` by setting `CLAUSTER_PYTE_PATH` to a directory holding an installed `pyte` (#702) — the binary appends it to `sys.path` only when set. The render is best-effort secret-redacted, so treat the live view as auth-gated, not secret-proof. |
 | `path_append` | list[str] | `[]` | Directories appended to the bridge subprocess `PATH` so a `claude` session can resolve user-local tools (e.g. `~/.local/bin`) that a minimal service `PATH` omits. `~` is expanded; entries are appended in order after the inherited `PATH`, never replacing it. Applies to both standard and pty bridges. |
 | `node_from_nvm` | bool | `true` | Resolve nvm's `default` node version at each bridge spawn and append its bin dir to the bridge subprocess `PATH` (after `path_append`). Puts `node`/`npx`/`npm` AND any nvm-global CLI (e.g. `agent-browser`) — all of which live in that one bin dir — on the raw process `PATH`, so they resolve in EVERY spawn context, not just `bash -c`: dash/`sh -c`, direct `execvp` (how Claude Code spawns MCP stdio servers), and subagents all inherit it, unlike a `BASH_ENV` nvm-init which only non-interactive bash sources. Fixes `npx`/`node`-based MCP servers (e.g. codecov, context7) showing `✘ Failed to connect` under a systemd deployment. On by default and fail-safe: a no-op (never raises) when nvm, its `default` alias, or POSIX `bash` aren't available — spawn is never blocked by this, and the resolved dir is appended last so it never shadows a `path_append` entry. POSIX-only (nvm is a bash function); ignored on Windows. Set to `false` to opt out (e.g. you pin node another way). |
 <!-- END GEN: claude -->
@@ -120,7 +66,7 @@ claude:
     FOO: "bar"
 ```
 
-A unit generated by [`clauster install-service`](installation.md#run-as-a-systemd-service-linux)
+A unit generated by [`clauster install-service`](../installation.md#run-as-a-systemd-service-linux)
 already bakes `~/.local/bin` + the system dirs into the service `PATH`, so `path_append`
 is for what a static directory can't cover — **shell-managed** toolchains like nvm/pyenv
 `node`, `cargo`, or Go — and for deployments that don't use the generated unit (Docker,
@@ -139,7 +85,7 @@ matters — and nvm's bin dir is version-specific, so it's never baked into a st
 `path_append`. Interactive-launch deployments inherit `node` from your shell and
 never hit this.
 
-Set `claude.node_from_nvm: true` (off by default) to fix it: at each bridge spawn,
+`claude.node_from_nvm` (**on by default**) fixes it: at each bridge spawn,
 Clauster resolves nvm's `default` node version (`nvm which default`, same
 resolution nvm itself uses) and appends its bin dir to the bridge `PATH`, after
 `path_append`. It tracks nvm's current default across node upgrades — no shim
@@ -185,14 +131,14 @@ projects:
 <!-- BEGIN GEN: auth -->
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `enabled` | bool | `false` | **Master auth switch.** Must be `true` for password / reverse-proxy auth to actually gate requests. |
+| `enabled` | bool | `false` | **Master auth switch.** Must be `true` for password / reverse-proxy auth to actually gate requests. The `false` default is safe only on loopback: a non-loopback bind **refuses to start** without enforced auth (fail-closed) unless `allow_unauthenticated_network` explicitly opts out. |
 | `password_required` | bool | `false` | Require password login. Needs `password_hash`. |
 | `password_hash` | str \| null | `null` | argon2id hash from `clauster hash-password`. |
 | `api_token_hash` | str \| null | `null` | SHA-256 hash of an inbound API bearer token from `clauster hash-token`. Enables `Authorization: Bearer <token>` auth for headless/API clients. Only the hash is stored; the raw token is shown once. |
-| `allow_unauthenticated_network` | bool | `false` | Explicit opt-out: permit a non-loopback bind **without** enforced auth (e.g. a trusted LAN). `ops._check_auth` downgrades this to a warning. |
+| `allow_unauthenticated_network` | bool | `false` | Explicit opt-out: permit a non-loopback bind **without** enforced auth (e.g. a trusted LAN). `ops._check_auth` downgrades this to a warning. When `auth.enabled` is `false`, **anyone who can reach the port has full operator control of this host** — the dashboard drives a shell; treat it accordingly. A non-loopback bind auto-allows no `Origin`, so pair this with `allowed_origins` (the cross-site gate runs even with auth off) or the dashboard's own writes and live views are rejected. |
 | `cookie_secure` | `auto` \| `always` \| `never` | `auto` | Session-cookie `Secure` flag. `auto` = Secure only over https (or a trusted proxy's `X-Forwarded-Proto=https`). |
 | `session_max_age_seconds` | int | `604800` | Session lifetime (≥1; default 7 days). |
-| `allowed_origins` | list[str] | `[]` | Extra WebSocket / CSRF origins (e.g. the proxy domain). |
+| `allowed_origins` | list[str] | `[]` | Extra WebSocket / CSRF origins (e.g. the proxy domain). The `Origin` allowlist is enforced on unsafe methods and WebSocket handshakes **even when `enabled` is `false`** — it is a cross-site defence, not an authentication method. A loopback bind auto-allows only `127.0.0.1`/`localhost`/`[::1]` **at the configured port**, so list your real browser-facing origin here whenever it differs: a non-loopback bind, a reverse proxy or tunnel, or an SSH port-forward onto a different local port. |
 <!-- END GEN: auth -->
 
 ### `auth.reverse_proxy` (`ReverseProxyConfig`)
@@ -218,7 +164,7 @@ projects:
     2. `password_required` with an empty `password_hash` is refused (it would
        lock everyone out or be silently skipped).
 
-See [Security](security.md) and [Networking](networking.md) for the full matrix.
+See [Security](../security.md) and [Networking](../networking.md) for the full matrix.
 
 ## `api` — the versioned `/api/v1` public surface (`ApiConfig`)
 
@@ -232,7 +178,7 @@ The dashboard's ~60 unversioned `/api/...` routes are unchanged and keep serving
 the Alpine frontend. Alongside them, `/api/v1/...` aliases the public, stable
 resource subset (project list, session reads, instance spawn/stop/resume, agent
 spawn/stop/resume) under the same handlers and the same auth gate — see
-[the public API guide](public-api.md) for the full route list and the
+[the public API guide](../public-api.md) for the full route list and the
 `clauster api-token` CLI.
 
 ## `ui` — web-dashboard kill switch (`UiConfig`)
@@ -257,7 +203,7 @@ setting: enabling the API never implies disabling the UI, or vice versa — you
 can run web-UI+API, API-only, UI-only (docs off), or any other combination.
 Restart-required, and **not** web-editable (a browser toggle that can kill the
 browser surface is a footgun with no way back in from the browser — see the
-[in-app config editor](#in-app-config-editor) section below).
+[in-app config editor](../guides/config-editor.md)).
 
 !!! warning "No login page means no session-cookie auth"
     With the UI off there is no `/login` route, so session-cookie (and
@@ -266,7 +212,7 @@ browser surface is a footgun with no way back in from the browser — see the
     authenticate. If `auth.enabled` is on and neither is configured, Clauster
     logs a loud startup warning — it does **not** refuse to start, since that
     would brick a deployment that flips `ui.enabled` off before minting a
-    token. See [API-only deployment](public-api.md#api-only-deployment) in the
+    token. See [API-only deployment](../public-api.md#api-only-deployment) in the
     public API guide.
 
 ## `db` — persistence-layer knobs (`DbConfig`)
@@ -281,8 +227,11 @@ browser surface is a footgun with no way back in from the browser — see the
 `clauster.db` named `pre-<revision-before>-<revision-after>-<timestamp>.db`
 under `state_dir/backups/`, written just before a migration that changed the
 schema. To roll back: stop Clauster, replace `state_dir/clauster.db` with the
-desired `state_dir/backups/pre-*.db` snapshot (and its `-wal`/`-shm` siblings if
-present), then start the matching (older) `clauster` binary — a newer binary
+desired `state_dir/backups/pre-*.db` snapshot, **delete any stale
+`clauster.db-wal` / `clauster.db-shm` sidecars** (the snapshot is a
+self-contained `VACUUM INTO` copy; a leftover WAL belongs to the migrated
+database and must not be replayed), then start the matching (older) `clauster`
+binary — a newer binary
 would immediately re-run the same migration against the restored file. This is
 complementary to `clauster backup` / `restore` (a full `state_dir` + config
 tarball); the snapshot here is automatic, DB-only, and scoped to the migration
@@ -368,8 +317,8 @@ mode exists.
 `claude setup-token` is a full TUI that only renders its authorize link under a
 real terminal (#846), so that mode is driven over a pty and needs the same
 optional `pyte` dependency as the live pty-screen view — `pip install
-'clauster[pty]'` (or `CLAUSTER_PYTE_PATH` on the standalone binary; see
-`pty_screen_enabled` above). Without it, picking "Create a long-lived token"
+'clauster[pty]'` on a package install, `clauster deps install pty` on the
+standalone binary (or `CLAUSTER_PYTE_PATH`; see `pty_screen_enabled` above). Without it, picking "Create a long-lived token"
 fails closed with a message pointing at subscription sign-in (`claude auth
 login`) instead, which stays on its original plain-pipe transport and needs no
 extra dependency.
@@ -404,6 +353,26 @@ Secret-shaped values are masked on read and written through the config editor's
 redaction path — the same surface as any other `env` row or `settings.json` key. The
 login detector (`claude auth status --json`) already reports all three as logged-in, so
 an account configured this way is **not** nagged to sign in.
+
+## `mcp` — `clauster mcp` write-tool gate (`McpConfig`)
+
+The [`clauster mcp`](../mcp.md) stdio server exposes read tools (`list_sessions` /
+`session_status`) always, and **write** tools (`spawn_session` / `stop_session` /
+`resume_session`) only when `allow_writes` is on. The stdio transport is
+local-privileged and **unauthenticated** by design, so the write surface is gated
+behind this switch and defaults **off** — attaching the server to an agent cannot
+start, stop, or resume a bridge until an operator opts in. Like the `config_write`
+and `login_shepherd` gates it is **not** web-editable (file/CLI-managed only).
+
+> **Changed in 1.0 (breaking):** the write tools shipped always-on in #950; they now
+> default off. An MCP client that drove `spawn`/`stop`/`resume_session` needs
+> `mcp.allow_writes: true`. See [UPGRADING](../upgrading.md).
+
+<!-- BEGIN GEN: mcp -->
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `allow_writes` | bool | `false` | Expose the `clauster mcp` **write** tools (`spawn_session` / `stop_session` / `resume_session`) that start, stop, and resume bridges. Off by default: the stdio MCP surface is read-only (`list_sessions` / `session_status` only) until you opt in. The surface is local-privileged and unauthenticated, so turning this on lets any agent the server is attached to drive the bridge lifecycle. **Not** web-editable — file/CLI-managed only, like the auth / config_write / login_shepherd gates. |
+<!-- END GEN: mcp -->
 
 ## `usage` — per-project cost/token badge (`UsageConfig`)
 
@@ -443,7 +412,7 @@ runs.
 ## `observability` — read-only metrics endpoint (`ObservabilityConfig`)
 
 A Prometheus exposition of point-in-time gauges, off by default and behind the
-auth guard. See [Networking](networking.md) for scraping behind auth.
+auth guard. See [Networking](../networking.md) for scraping behind auth.
 
 <!-- BEGIN GEN: observability -->
 | Key | Type | Default | Description |
@@ -551,7 +520,7 @@ guessed session id against the token. It is `null` until the bridge reports a
 starter session.
 
 The extended events carry an `event_type` discriminator instead and do **not**
-reuse the bridge shape — see [Public API → Lifecycle webhooks](public-api.md#lifecycle-webhooks)
+reuse the bridge shape — see [Public API → Lifecycle webhooks](../public-api.md#lifecycle-webhooks)
 for each body. Sensitive fields are redacted and credential-bearing values (the
 clone URL, the raw session id, the permission-prompt body) are never sent.
 
@@ -567,7 +536,16 @@ token is reported in health and never affects the bridge lifecycle.
 The socket and a `0600` auth token live under `<state_dir>/claustrum/` (`0700`).
 Hosted sessions get their own dashboard panel — start a session, watch it stream
 live, drive it, approve/deny tool prompts, and resume or recover it after a
-restart (see [Architecture](architecture.md)).
+restart (see [How it works](../concepts/how-it-works.md)).
+
+**Getting the daemon.** The channel needs the `claustrum` binary. The supported way is
+`clauster deps install claustrum` — it downloads the pinned, SHA-256-verified release for your
+OS/arch from [`schubydoo/claustrum`](https://github.com/schubydoo/claustrum) into
+`<state_dir>/deps/bin` and Clauster uses it automatically (no need to also set `binary`). An
+explicit `binary` path, or a `claustrum` already on `PATH`, still wins if set. Like every managed
+side-install it is fail-closed (a checksum mismatch refuses) and is **not** covered by Clauster's
+own release signature — you are trusting that project's pinned release. `clauster deps list` shows
+whether it is installed; `clauster deps uninstall claustrum` removes it.
 
 <!-- BEGIN GEN: claustrum -->
 | Key | Type | Default | Description |
@@ -622,103 +600,4 @@ When TLS is active the connection is `https`, so `auth.cookie_secure: auto` mark
 the session cookie `Secure` and the plain-http cookie warning is suppressed.
 Self-signed-cert generation and ACME/Let's Encrypt are **out of scope** for this
 block — point it at an already-provisioned cert + key. See
-[Networking → Native HTTPS](networking.md#native-https-built-in-tls).
-
-## Minimal example
-
-```yaml
-# loopback, no auth needed
-projects_root: ~/code
-```
-
-## LAN example (password auth)
-
-```yaml
-projects_root: ~/code
-host: 0.0.0.0
-port: 7621
-auth:
-  enabled: true
-  password_required: true
-  password_hash: "$argon2id$v=19$..."   # from `clauster hash-password`
-  cookie_secure: always                 # if no TLS-terminating proxy
-```
-
-## In-app config editor
-
-The dashboard can edit `clauster.yml` directly, so you don't have to shell into
-the host for routine operational tweaks. The editor is backed by two auth-gated
-routes — `GET /api/config` (read the editable values + a content hash) and
-`PUT /api/config` (apply edits) — and is deliberately conservative: it edits a
-fixed allowlist, re-validates before writing, and never live-reloads.
-
-### What's editable — the Tier-A allowlist
-
-Only an explicit **Tier-A allowlist** of *operational* fields is editable from
-the browser. These are the day-to-day knobs that are safe to change at runtime:
-
-<!-- BEGIN GEN: editable_fields -->
-| Section | Editable fields |
-| --- | --- |
-| `(top-level)` | `log_format` |
-| `api` | `openapi_enabled` |
-| `claude` | `min_version`, `agents_json_poll_interval_seconds`, `startup_grace_seconds`, `auto_enable_remote_control`, `resume_recap`, `resume_recap_max_chars`, `launch_mode`, `pty_screen_enabled` |
-| `instance_defaults` | `spawn_mode`, `permission_mode`, `verbose`, `session_name_prefix`, `capacity`, `max_bridges` |
-| `claustrum` | `enabled`, `socket_path`, `spawn_timeout_seconds`, `keep_children`, `request_timeout_seconds` |
-| `logs` | `bridge_log_max_size_mb`, `keep_rotated`, `redact_session_url`, `strip_ansi_in_stream`, `retention_max_age_days`, `retention_max_files`, `retention_max_total_mb` |
-| `reaper` | `ui_enabled` |
-| `usage` | `mode`, `currency`, `currency_symbol`, `fx_rate`, `token_total_includes_cache`, `show_cost` |
-| `metrics` | `enabled`, `normalize_cpu`, `show_disk`, `sample_interval_seconds`, `poll_seconds` |
-| `observability` | `prometheus_enabled` |
-| `notifications` | `enabled`, `browser_enabled`, `notify_on_crash`, `notify_on_ready`, `notify_on_stop`, `notify_on_permission`, `notify_on_session_end`, `notify_on_reconnect_failed` |
-<!-- END GEN: editable_fields -->
-
-The allowlist is the source of truth in `src/clauster/config_editor.py`
-(`EDITABLE_FIELDS`); `GET /api/config` returns it so the UI only renders fields
-it can actually write.
-
-### Why everything else is excluded (the security boundary)
-
-The allowlist is a **structural** security boundary, not a UI hint. Anything that
-is a secret, a bind/exposure decision, an auth gate, a clone/supply-chain guard,
-or a structural setting is excluded — for example `auth.*` (passwords, tokens,
-the `enabled` master switch), `host`/`port`, `projects_root`, the `projects` map,
-`clone.*`, `webhooks.*`, and the binary paths (`claude.binary`/`claustrum.binary`).
-Those stay file- or CLI-managed. (The rest of the `claustrum` block — `enabled`,
-`socket_path`, the timeouts — *is* editable, restart-required; see the table
-above.)
-
-The exclusion is enforced two ways:
-
-- **Never read back.** `GET /api/config` returns *only* the allowlisted values,
-  so a secret or bind value is never serialized to the browser in the first
-  place — redaction is structural, not a post-filter.
-- **Never written.** A `PUT` carrying any non-allowlisted key is rejected with a
-  `400` (it is never silently dropped), and the merged config is re-validated by
-  constructing the full `ClausterConfig` before anything touches disk — so an
-  edit that *would* open the dashboard (e.g. disabling auth on a non-loopback
-  bind) trips the same fail-closed auth validator that guards startup and is
-  refused with a `422`.
-
-To change an excluded field, edit `clauster.yml` on the host directly.
-
-### How a write is applied (backup, atomic write, lost-update guard)
-
-`PUT /api/config` is fail-closed and ordered so a bad edit never reaches disk:
-
-1. **Validate first.** A disallowed key (`400`) or a value that fails
-   re-validation (`422`) is rejected before any I/O.
-2. **Lost-update guard.** The `PUT` body must include the `hash` returned by the
-   `GET` it was based on. If the file changed on disk since then (an external
-   edit, or a concurrent save), the write is rejected with a `409` rather than
-   clobbering the newer content. The hash is compared against the exact bytes
-   read, so there is no time-of-check/time-of-use gap.
-3. **Backup + atomic replace.** The previous file is copied to a timestamped
-   `clauster.yml.bak-*` (the five most recent are kept) before the new content
-   is written to a unique same-directory temp file and `os.replace`d into place —
-   a reader never sees a half-written file. Edits are rendered onto a
-   comment-preserving round-trip, so your inline comments survive.
-
-The write does **not** live-reload: the running process keeps its startup config
-until it is restarted, and the `PUT` response sets `restart_required: true` to
-say so.
+[Networking → Native HTTPS](../networking.md#native-https-built-in-tls).

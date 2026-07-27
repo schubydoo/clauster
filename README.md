@@ -36,7 +36,7 @@ a project, start a bridge, and attach to it from `claude.ai/code` or the mobile 
 > **Status: pre-1.0, in active development.** Loopback-only by default; password and
 > reverse-proxy auth are available for networked deployments (see
 > [Auth & networking](#auth--networking)). **No telemetry, ever** — see
-> [Privacy & data at rest](docs/privacy.md) for what Clauster keeps locally.
+> [Privacy & data at rest](https://schubydoo.github.io/clauster/privacy/) for what Clauster keeps locally.
 
 **Install now:** `curl -fsSL https://raw.githubusercontent.com/schubydoo/clauster/main/install.sh | bash`
 
@@ -68,136 +68,39 @@ The full install recipes and verification steps are in the
 
 ## Features
 
-Everything below is implemented and shipping. Items marked **(opt-in)** are gated
-behind a config flag and off by default — the flag is named inline so you can find
-it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/clauster.yml.example).
+A self-hosted dashboard for the `claude` sessions running on your own machine —
+start them, watch them, and pick them up from your phone.
 
-<details>
-<summary>Show all features</summary>
+- **Projects & bridges** — a card per directory under `projects_root`; start, stop
+  and resume bridges, choose the spawn and permission mode, and open any session in
+  Claude by deep link or QR code.
+- **Visibility** — live bridge-log tail over a WebSocket, a read-only transcript
+  viewer, and per-project cost and token totals.
+- **In-app editing** — edit a project's Claude Code config surfaces and an allowlist
+  of operational `clauster.yml` settings, without reaching for SSH.
+- **Safety** — workspace-trust prompts before a first spawn, session URLs redacted
+  out of the streamed log (the on-disk bridge log stays verbatim unless you set
+  `logs.redact_session_url`), and an auth model that fails closed on a network bind.
+- **Interactive Sessions** — an opt-in pty mode with true resume and a read-only live
+  terminal view.
+- **Extras** — outbound notifications and webhooks, a Prometheus endpoint, a
+  ghost-environment reaper, **experimental** background agents, and an MCP server
+  (read-only until you opt into its write tools). Each is off, or read-only, by
+  default.
 
-### Projects & bridges
+That is the short list, not the whole of it — every feature is documented in full on
+the **[documentation site](https://schubydoo.github.io/clauster/)**; start at the
+[Quickstart](https://schubydoo.github.io/clauster/quickstart/) or
+[How it works](https://schubydoo.github.io/clauster/concepts/how-it-works/).
 
-- **Project discovery** — one card per directory under `projects_root`, with git /
-  `CLAUDE.md` / trust badges.
-- **Bridge lifecycle** — start / stop / **resume** bridges; live status
-  (Starting / Running / Stopped / Crashed / Error). A bridge that launches but
-  never registers an environment is reported honestly as `Error` after a grace
-  window, not a phantom `Running`.
-- **Spawn controls** — pick the spawn mode (same-dir / worktree / session),
-  permission mode, and resume mode (Server Mode / Interactive Session true-resume) per launch;
-  `claude.launch_mode` is the pre-selected default. `bypassPermissions` is
-  double-gated: a per-project config ceiling
-  (`projects.<name>.allow_bypass_permissions`) **and** a type-the-project-name
-  confirm in the UI.
-- **Open in Claude** — a deep link to the primary session plus a scannable QR code
-  that opens it in the Claude app (claude.ai/code or mobile), attached to the
-  running bridge. Bridges are **cloud-visible**; the experimental hosted
-  live-view channel is **local-only** — it streams in the dashboard but is never
-  attachable from the Claude app.
-- **External session surfacing** — sessions you started from a terminal or Desktop
-  (not via Clauster) are discovered and shown with a distinct indicator.
-- **Create / clone projects** — make a new project or clone a git URL, with SSRF
-  guards, transport lockdown, a size cap, and a "code runs on start" warning for
-  cloned repos. Clones stream **live progress** over a WebSocket and never
-  auto-spawn (they land discovered-but-stopped).
-
-### Visibility & editing
-
-- **Live log tail** — the bridge debug log streamed over a WebSocket, ANSI-stripped
-  and ID-redacted (`env_`/`session_`/`cse_` IDs, bare UUIDs, and secret-shaped
-  tokens — API keys, bearer headers). Redaction is hybrid by default (verbatim on
-  disk, redacted over the wire); `logs.redact_session_url` redacts on disk too.
-- **Claude Code config editor** — edit a project's Claude Code config surfaces
-  from the dashboard: `CLAUDE.md`, `settings.json` (its `env` map as friendly
-  key/value rows or raw JSON, plus `model` / misc keys), permissions, hooks, MCP
-  servers, subagents, skills, and plugins — at user / project scope (plus **local**
-  for all but subagents and skills), with secret-shaped values **masked** on the
-  surfaces that carry them (settings `env`, MCP). Every write is lost-update-guarded
-  and trust-gated; `CLAUDE.md` writes are additionally audit-logged. (Distinct from
-  the **Config editor** below, which edits `clauster.yml` itself.)
-- **Config editor** — edit an allowlist of *operational* `clauster.yml` settings
-  from the dashboard (`GET`/`PUT /api/config`). Only a Tier-A allowlist is
-  exposed — auth, bind, secret, and structural fields are never editable or even
-  read back to the browser. Writes are lost-update-guarded (a content hash from
-  the read must still match on write), backed up, and applied atomically with
-  your comments preserved; the running process keeps its startup config until
-  restarted. See [docs/configuration.md](docs/configuration.md#in-app-config-editor).
-- **Per-project cost badge** — approximate USD + token totals rolled up from a
-  project's session transcripts. Token counts are exact (read from the transcript
-  `usage`); the dollar figure is a ballpark — a hand-maintained USD price table
-  (`usage.py`, as of 2026-05) that drifts as pricing changes, with unpriced models
-  counting as 0. `usage.mode` selects what the badge shows — `cost`, `tokens`, or
-  `off` (hide it for privacy / screen-share); `usage.show_cost: false` is a
-  deprecated alias for `off`.
-
-### Safety
-
-- **Workspace trust** — starting a bridge in an untrusted directory prompts a
-  just-in-time "trust the files in this folder?" confirm (an explicit checkbox) that
-  writes the Claude workspace-trust flag and then spawns; trusted directories show a
-  green shield by the project name and start with no prompt.
-- **Auto-enable remote control** — before the first spawn, Clauster marks remote
-  control as acknowledged in the runtime user's `~/.claude.json` so a detached-stdin
-  bridge isn't stuck on the one-time interactive "Enable Remote Control?" prompt. On
-  by default (`claude.auto_enable_remote_control`); set false to manage it yourself.
-
-</details>
-
-### Opt-in extras
-
-<details>
-<summary>Show all opt-in extras</summary>
-
-- **Conversation recap on restart (opt-in)** — `claude remote-control` restarts into
-  a fresh, empty context, so a restarted bridge "forgets" the prior conversation.
-  With `claude.resume_recap` enabled, Clauster installs a `SessionStart` hook in the
-  runtime user's Claude settings that recaps the most recent prior transcript for
-  that directory back into the new session.
-- **Native true-resume / "Interactive Session" mode (opt-in)** — `claude.launch_mode: pty`
-  runs the `claude --remote-control` flag form under a PTY *keeper* sidecar (a POSIX pty,
-  or a Windows **ConPTY** via the `pty` extra — else `pty` falls back to Server Mode), which
-  **genuinely restores prior conversation context** on Resume (`--continue`) rather
-  than recapping it. The keeper outlives a Clauster restart and is stopped by signal.
-  Single-session (vs. the default multi-session server). The dashboard surfaces the
-  resume mode per bridge and rediscovers a running pty bridge after a Clauster restart.
-- **Ghost-environment reaper** — find and archive/delete the server-side bridge
-  environments that outlive their bridge and clutter the claude.ai/code "New session"
-  selector. The CLI (`clauster reap-environments`) is always available; the
-  **dashboard UI is opt-in** (`reaper.ui_enabled`) because it exposes a destructive
-  first-party API in the browser. Archive is reversible; force-delete requires
-  typing `DELETE`.
-- **Background agents (experimental)** — a dashboard panel that lists, dispatches,
-  stops, and resumes Claude Code *background* sessions (`claude --bg`), backed by
-  `GET/POST/DELETE /api/agents` plus `POST /api/agents/{job_id}/resume`. It rides
-  Claude Code's **agent-view research
-  preview**, so it's experimental and may change with the upstream CLI.
-- **Outbound notifications & webhooks** — get told when a bridge changes state.
-  `notifications` push a human message (Slack/Discord/Telegram/email via Apprise,
-  the `notify` extra) on a **crash**; `webhooks` deliver a JSON `POST` to your own
-  endpoint on every `spawn` / `ready` / `stop` / `crash` transition (no extra
-  dependency, `http(s)` only), plus three opt-in events — `bg-settled`,
-  `permission-needed`, `clone-done` (default off; enable per-event under
-  `webhooks.events`). Both are off by default, and a failing endpoint is
-  always logged-and-swallowed so it never affects a bridge's lifecycle. See
-  [Operations → Crash alerts](https://schubydoo.github.io/clauster/operations/#crash-alerts)
-  and [Lifecycle webhooks](https://schubydoo.github.io/clauster/operations/#lifecycle-webhooks).
-- **Prometheus `/metrics`** — opt into a read-only text-format scrape endpoint
-  (`observability.prometheus_enabled`) exposing build info, bridge counts by
-  status, a crash counter, and per-bridge CPU/RSS. It stays behind the auth guard
-  unless you set `observability.metrics_token_hash` for token-based scraping. See
-  [Operations → Metrics](https://schubydoo.github.io/clauster/operations/#metrics).
-- **Hosted live-view channel (opt-in, experimental)** — an alternate substrate to
-  the remote-control bridge. With `claustrum.enabled: true`, Clauster connect-or-spawns
-  a single `claustrum` daemon per deployment and runs `claude` headless over its
-  stream-json channel, streaming the session **live in the browser** (with permission
-  prompts surfaced in the UI) instead of being driven from Claude Desktop / claude.ai.
-  Off by default and fail-closed — an unreachable daemon surfaces in `/healthz` and
-  never affects the bridge lifecycle. Requires the separate `claustrum` daemon
-  binary, which is **not yet publicly distributed** — there is
-  currently no public install or build recipe, so leave `claustrum.enabled: false`
-  unless you already have the binary on your `PATH`.
-
-</details>
+<!-- Convention (#995): keep this list SHORT and version-agnostic. A README that
+     makes no version-specific claims cannot drift; the ~1,148-word feature catalogue
+     this replaced was a second copy of the docs site and went stale whenever `main`
+     moved ahead of the newest release. Per-feature detail belongs on the docs site,
+     which lives next to the code and is updated in the same PR. Note the site is
+     built from `main` on every push and is NOT versioned (no `mike`), so it too can
+     describe unreleased behaviour — the release notes for the newest tag are the
+     authority on what is actually in a given install. -->
 
 ## Install
 
@@ -220,7 +123,7 @@ Or pick another path — `uv tool install clauster` (recommended for a Python ho
 https://github.com/schubydoo/clauster && scoop install clauster`), or
 [Docker](#docker). Full recipes — including supply-chain verification — are in the
 [Installation guide](https://schubydoo.github.io/clauster/installation/). To hack
-on Clauster itself, use the dev quick-start below.
+on Clauster itself, see [CONTRIBUTING.md](https://github.com/schubydoo/clauster/blob/main/CONTRIBUTING.md) for the from-source path.
 
 ### Uninstall
 
@@ -236,34 +139,18 @@ on Clauster itself, use the dev quick-start below.
   longer need it. Docker Compose users: run `docker compose down` from the directory
   containing `compose.yaml` (add `-v` to also delete named volumes).
 - Full purge: stop Clauster first, then remove your `state_dir` if you want local
-  state/config gone too. See [Privacy & data at rest](docs/privacy.md#how-to-purge)
+  state/config gone too. See [Privacy & data at rest](https://schubydoo.github.io/clauster/privacy/#how-to-purge)
   and the [Installation guide](https://schubydoo.github.io/clauster/installation/).
-
-## Quick start (dev)
-
-> **Just running Clauster, not hacking on it?** Follow the canonical
-> [Quickstart guide](https://schubydoo.github.io/clauster/quickstart/) — it takes you
-> from nothing to your first attachable bridge in a few minutes. The steps below are
-> the **from-source** path for working on Clauster itself.
-
-```sh
-uv sync --extra dev
-cp clauster.yml.example clauster.yml    # edit projects_root
-uv run clauster
-```
-
-Then open <http://127.0.0.1:7621>. `claude` must be on your `PATH` (Clauster spawns
-it; it isn't vendored).
 
 ## First bridge in 60 seconds
 
-With the server running (above) and an **authenticated `claude` on your `PATH`**,
-spawning your first bridge is a handful of clicks — no terminal needed once it's
-started. Clauster *spawns* `claude` — it doesn't vendor it — and a spawned bridge
+Start Clauster (run `clauster`; it serves <http://127.0.0.1:7621> by default). With
+an **authenticated `claude` on your `PATH`**, spawning your first bridge is a handful
+of clicks — no terminal needed once it's started. Clauster *spawns* `claude` — it doesn't vendor it — and a spawned bridge
 inherits the host user's `claude` authentication, so `claude` must be logged in
 (interactive `claude` login **or** `ANTHROPIC_API_KEY` in the environment — either
 satisfies the check) before any bridge can connect. `clauster doctor` (step 2)
-confirms it; see the [Quickstart prerequisites](docs/quickstart.md) for the full
+confirms it; see the [Quickstart prerequisites](https://schubydoo.github.io/clauster/quickstart/) for the full
 list.
 
 1. **Point Clauster at your code.** Set `projects_root` in `clauster.yml` to a
@@ -272,7 +159,8 @@ list.
 2. **Sanity-check the host (optional).** `clauster doctor` confirms `claude` is found,
    new enough, and **logged in** (the bridge inherits this login), and that
    `projects_root` / the state dir are usable — fix any ✗ before spawning.
-3. **Open the dashboard** at <http://127.0.0.1:7621>. You'll see one card per project.
+3. **Open the dashboard** at <http://127.0.0.1:7621>. You'll see one card per project
+   to start — a project running several sessions later shows a card for each.
 4. **Launch a bridge.** On a project's card, click **Run Claude here ▾**, choose
    **In claude.ai / Desktop**, pick a permission mode, then **Run**. Clauster
    launches `claude remote-control` in that directory and the card flips to
@@ -283,7 +171,9 @@ list.
    No SSH session.
 6. **Stop or resume.** **Stop** signals the bridge; **Resume** relaunches it (with
    `claude.resume_recap` or `claude.launch_mode: pty` it can carry the prior conversation
-   forward — see [Opt-in extras](#opt-in-extras)). For a deliberate fresh start,
+   forward — see the
+   [configuration guide](https://schubydoo.github.io/clauster/guides/configuration/)).
+   For a deliberate fresh start,
    **Forget** the stopped session and launch again with **Run Claude here**.
 
 > Exposing this beyond loopback (e.g. on your LAN)? Read
@@ -331,6 +221,28 @@ docker run -d --name clauster \
   JSON (both redact session URLs / bearer ids). Health is at `/healthz`. Images
   are cosign-signed with build provenance + SBOM attestations.
 
+### First-run setup wizard (Docker)
+
+Prefer a browser to the `hash-password` + env-var recipe above? Start the container with an
+**empty `/config`** and **without** the `CLAUSTER_AUTH_*` vars — Clauster serves the first-run
+[setup wizard](https://schubydoo.github.io/clauster/guides/configuration/) instead. In a container the wizard binds all interfaces
+(so a published port can reach it) and is gated by a **one-time token** printed to the log:
+
+```sh
+docker run -d --name clauster -p 7621:7621 \
+  -e PUID=1000 -e PGID=1000 \
+  -v /path/to/config:/config -v /path/to/projects:/projects \
+  ghcr.io/schubydoo/clauster:latest
+docker logs clauster        # → "...first-run setup at http://<this-host>:7621/?token=… (will write /config/clauster.yml)"
+```
+
+Open that URL (substituting the host that reaches the container) — the token gates access, so
+copy it exactly. Set `projects_root` (`/projects`), a bind host, and a password; the wizard
+writes an **auth-enabled** `/config/clauster.yml` on the persistent volume and restarts onto it.
+Because the config lands on `/config` (not the container's ephemeral layer), it survives
+`docker rm` / image updates. The token is single-use for that first boot; once a config exists
+the wizard never runs again.
+
 ### Docker Compose
 
 A ready-to-edit [`compose.yaml`](https://github.com/schubydoo/clauster/blob/main/compose.yaml) is included:
@@ -352,15 +264,19 @@ switch) together with either password login (`auth.password_required` + a hash f
 `clauster hash-password`) or reverse-proxy trust (peer-IP allowlist + HMAC header) —
 or, to opt out on a trusted LAN, `auth.allow_unauthenticated_network`. Sessions
 are signed cookies with server-side revocation ("log out everywhere"); WebSocket
-connections are authenticated before accept and origin-checked.
+connections are authenticated before accept and origin-checked. The origin
+allowlist is a cross-site defence rather than an authentication method, so it is
+enforced even with `auth.enabled: false`; a non-loopback bind auto-trusts no
+origin and must set `auth.allowed_origins`.
 
 ## Configuration
 
-All settings live in `clauster.yml` — see
-[`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/clauster.yml.example) for the full, commented schema. Any
-scalar key is overridable by an environment variable of the form
-`CLAUSTER_<UPPER_SNAKE_PATH>`. The schema is additive-only — old configs always
-validate against newer versions.
+All settings live in `clauster.yml` —
+[`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/clauster.yml.example) is a lean starter, and
+[`docs/reference/config.md`](https://schubydoo.github.io/clauster/reference/config/) is the exhaustive per-key reference. Any
+scalar or list key is overridable by an environment variable of the form
+`CLAUSTER_<UPPER_SNAKE_PATH>` (lists take a comma-separated value). The schema is
+additive-only — old configs always validate against newer versions.
 
 | Common flag | Default | What it does |
 | --- | --- | --- |
@@ -391,7 +307,15 @@ clauster reap-environments    # reap ghost bridge environments (dry-run by defau
 clauster keepers              # list or stop orphaned pty keepers
 clauster usage <transcript>   # token + approximate cost for a session transcript
 clauster config reconcile     # remove deprecated config keys, writing their replacements
+clauster deps list|install|uninstall          # manage optional extras beside the standalone binary
+clauster projects | status | sessions         # headless reads (--json), no server needed
+clauster logs <instance> | open <instance>    # tail a bridge's redacted log / print its connect URL
+clauster start <project> | stop <instance>    # headless spawn/stop through the same engine as the UI
+#   <instance> = full id, a unique prefix of one (as printed by `status`), or a project name
 ```
+
+Full per-command reference:
+[docs/reference/cli.md](https://schubydoo.github.io/clauster/reference/cli/).
 
 ## Roadmap
 
@@ -409,11 +333,11 @@ translation contributor appears).
 
 *Shipped:*
 
-- **Public API** — a documented, versioned [`/api/v1`](docs/public-api.md) surface with
+- **Public API** — a documented, versioned [`/api/v1`](https://schubydoo.github.io/clauster/public-api/) surface with
   named Bearer tokens (distinct from the session cookie), managed via
   `clauster api-token issue|list|rotate|revoke`; an opt-in OpenAPI schema
   (`api.openapi_enabled`) is available for third-party dashboards.
-- The in-repo [`docs/`](docs/index.md) pages (setup, networking, config reference,
+- The in-repo [`docs/`](https://schubydoo.github.io/clauster/) pages (setup, networking, config reference,
   security model) are published as a live docs site at
   [schubydoo.github.io/clauster](https://schubydoo.github.io/clauster/).
 
@@ -426,8 +350,8 @@ and CI-gated on Linux; macOS / Windows are in the test matrix. Apache-2.0 licens
 
 Questions, bugs, and feature requests all go through
 [GitHub Issues](https://github.com/schubydoo/clauster/issues) — Discussions are
-intentionally not enabled. See [`SUPPORT.md`](SUPPORT.md) for how to get help, and
-[`SECURITY.md`](SECURITY.md) to report a vulnerability privately.
+intentionally not enabled. See [`SUPPORT.md`](https://github.com/schubydoo/clauster/blob/main/SUPPORT.md) for how to get help, and
+[`SECURITY.md`](https://github.com/schubydoo/clauster/blob/main/SECURITY.md) to report a vulnerability privately.
 
 ## License
 

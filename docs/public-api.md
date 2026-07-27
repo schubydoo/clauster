@@ -41,6 +41,28 @@ changed.
 A request to a route not on this list (e.g. `GET /api/v1/widget`) 404s — the
 internal surface was never aliased, by design.
 
+### `{instance_id}` accepts a unique prefix
+
+Every `{instance_id}` path segment resolves a full instance id, a **unique prefix** of
+one, or a project name ([#1099](https://github.com/schubydoo/clauster/issues/1099)).
+
+Both **exact** forms outrank a prefix: a full instance id first, then a project name, then
+a unique prefix. A segment naming one of your projects is **never** reinterpreted as a
+prefix — if that project has no instance the reply is **404**, never another project's
+bridge. This matters only for a hex-ish project name (`cafe`, `deadbeef`) that happens to
+prefix an unrelated instance's UUID; the id stays reachable by typing one more character.
+
+A prefix matching **several** instances is refused with **409** rather than resolved to
+an arbitrary one — acting on the wrong live session is unrecoverable — and the `detail`
+names the candidates:
+
+```json
+{"detail": "ambiguous instance id 'f2c456fd' — matches f2c456fd-aaaa-…, f2c456fd-bbbb-…; use more characters"}
+```
+
+An id matching nothing is still **404**. Only input that previously 404'd can reach the
+409, since prefixes did not resolve before #1099.
+
 ## Authenticating
 
 Every `/api/v1` request needs the same credential any other `/api/*` route
@@ -48,7 +70,9 @@ needs whenever `auth.enabled` is set: a session cookie, trusted-reverse-proxy
 auth, or an `Authorization: Bearer <token>` header. A headless/API client uses a
 Bearer token — see [Named API tokens](#named-api-tokens-clauster-api-token)
 below to mint one. With `auth.enabled: false` the whole API (bare and `/api/v1`
-alike) is unauthenticated, matching the existing `/api/*` posture.
+alike) is unauthenticated, matching the existing `/api/*` posture — safe only on
+loopback, because a non-loopback bind refuses to start without enforced auth
+unless `auth.allow_unauthenticated_network` explicitly opts out.
 
 ```sh
 curl -H "Authorization: Bearer clauster_pat_…" https://clauster.example/api/v1/instances
@@ -58,14 +82,16 @@ curl -H "Authorization: Bearer clauster_pat_…" https://clauster.example/api/v1
 
 Tokens are managed **CLI-first** — there is no dashboard surface for token
 management yet (planned for a later release). Each token has a unique,
-operator-chosen `--label`; only its SHA-256 hash is ever stored, and a raw
-token is shown to you exactly once, at issue/rotate time.
+operator-chosen label; only its SHA-256 hash is ever stored, and a raw
+token is shown to you exactly once, at issue/rotate time. On `issue`, `rotate`,
+and `revoke` the label can be given either as a positional argument or with
+`--label` — the two forms are equivalent.
 
 ```sh
-clauster api-token issue --label ci-runner    # mint + print a new token (once)
+clauster api-token issue ci-runner            # mint + print a new token (once)
 clauster api-token list                       # label, created, last-used — never the token
 clauster api-token rotate ci-runner           # mint a fresh secret for an existing label
-clauster api-token revoke ci-runner           # delete a token; it stops authenticating immediately
+clauster api-token revoke --label ci-runner   # delete a token; it stops authenticating immediately
 ```
 
 Tokens never expire by default and are revocable at any time. The legacy
@@ -83,7 +109,7 @@ serve the interactive docs UI at `/docs` and the raw schema at `/openapi.json`.
 Both sit **behind the same auth guard** as every other `/api/*` route — an
 unauthenticated request gets a `401`, not a login-page redirect, and there is
 no way to expose docs without also exposing the API they document. See the
-`api` section in [Configuration](configuration.md) for the full toggle
+`api` section in [Configuration](reference/config.md) for the full toggle
 reference.
 
 ## API-only deployment
@@ -126,7 +152,7 @@ Beyond the inbound `/api/v1` reads, Clauster can push an **outbound** machine-re
 JSON `POST` to your own HTTP endpoint on a lifecycle transition — for wiring it into an
 automation, a queue, or your own dashboard. Enable and configure them under `webhooks:`
 in `clauster.yml` (see the
-[`webhooks` field reference](configuration.md#webhooks-outbound-lifecycle-webhooks-webhooksconfig)),
+[`webhooks` field reference](reference/config.md#webhooks-outbound-lifecycle-webhooks-webhooksconfig)),
 and see [Operations → Lifecycle webhooks](operations.md#lifecycle-webhooks) for the
 operational behaviour (fail-open, no retry, which bridges emit). This section is the
 **payload reference**.

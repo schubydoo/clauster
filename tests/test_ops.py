@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
 import sys
 import tarfile
 from pathlib import Path
@@ -12,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from clauster import deps
+from clauster import ops as ops_mod
 from clauster.config import load_config
 from clauster.ops import (
     FAIL,
@@ -125,10 +127,22 @@ def test_doctor_git_missing_warns(write_config, tmp_path, monkeypatch):
 # ----- optional-extras rows (#904) --------------------------------------
 
 
+def _extras_cfg(*, notify: bool = True, urls: list[str] | None = None):
+    # Minimal config stand-in for _check_extras' feature gates (#1016): only apprise is gated,
+    # on notifications.enabled AND a configured url (runtime imports apprise only then).
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        notifications=SimpleNamespace(
+            enabled=notify, urls=urls if urls is not None else ["mailto://x"]
+        ),
+    )
+
+
 def test_check_extras_warns_with_install_hint_when_missing(monkeypatch):
     monkeypatch.setattr(deps, "probe", lambda entry: False)
     monkeypatch.setattr(deps.sys, "platform", "linux")  # pywinpty (win32-only) is skipped
-    by = {c.name: c for c in _check_extras()}
+    by = {c.name: c for c in _check_extras(_extras_cfg())}  # both features enabled
     assert set(by) == {"extra:pyte", "extra:apprise"}
     assert by["extra:pyte"].status == WARN
     assert "Live terminal view (#534)" in by["extra:pyte"].detail
@@ -139,7 +153,7 @@ def test_check_extras_warns_with_install_hint_when_missing(monkeypatch):
 def test_check_extras_ok_when_present(monkeypatch):
     monkeypatch.setattr(deps, "probe", lambda entry: True)
     monkeypatch.setattr(deps.sys, "platform", "linux")
-    by = {c.name: c for c in _check_extras()}
+    by = {c.name: c for c in _check_extras(_extras_cfg())}
     assert by["extra:pyte"].status == OK
     assert "available" in by["extra:pyte"].detail
 
@@ -147,8 +161,23 @@ def test_check_extras_ok_when_present(monkeypatch):
 def test_check_extras_includes_win32_entry_only_on_windows(monkeypatch):
     monkeypatch.setattr(deps, "probe", lambda entry: False)
     monkeypatch.setattr(deps.sys, "platform", "win32")
-    names = {c.name for c in _check_extras()}
+    names = {c.name for c in _check_extras(_extras_cfg())}
     assert "extra:pywinpty" in names
+
+
+def test_check_extras_gates_apprise_on_notifications(monkeypatch):
+    # #1016: apprise is nagged only when notifications will actually send — enabled AND a url
+    # configured (runtime imports apprise only then). pyte/pywinpty are NOT gated: pyte also
+    # reassembles the connect-URL and pywinpty is the Windows ConPTY backend, beyond the live view.
+    monkeypatch.setattr(deps, "probe", lambda entry: False)
+    monkeypatch.setattr(deps.sys, "platform", "linux")
+    # notifications off -> no apprise row; pyte still shows (it's ungated)
+    off = {c.name for c in _check_extras(_extras_cfg(notify=False))}
+    assert "extra:apprise" not in off and "extra:pyte" in off
+    # enabled but no url -> still no apprise (runtime would never import it)
+    assert "extra:apprise" not in {c.name for c in _check_extras(_extras_cfg(urls=[]))}
+    # enabled + a url -> apprise surfaces
+    assert "extra:apprise" in {c.name for c in _check_extras(_extras_cfg(urls=["mailto://x"]))}
 
 
 def test_doctor_adds_managed_deps_dir_before_probing(write_config, tmp_path, monkeypatch):
@@ -160,7 +189,9 @@ def test_doctor_adds_managed_deps_dir_before_probing(write_config, tmp_path, mon
     order: list[str] = []
     real_check = ops_mod._check_extras
     monkeypatch.setattr(deps, "add_deps_dir_to_sys_path", lambda sd: order.append(f"add:{sd}"))
-    monkeypatch.setattr(ops_mod, "_check_extras", lambda: order.append("probe") or real_check())
+    monkeypatch.setattr(
+        ops_mod, "_check_extras", lambda cfg: order.append("probe") or real_check(cfg)
+    )
     run_doctor(cfg, check_port=False)
     # Both that it ran with the right state_dir AND that it ran before the extra probes.
     assert order == [f"add:{load_config(cfg).state_dir}", "probe"]
@@ -169,7 +200,7 @@ def test_doctor_adds_managed_deps_dir_before_probing(write_config, tmp_path, mon
 def test_doctor_includes_extra_rows_never_failing(write_config, tmp_path):
     checks, ok = run_doctor(_cfg_file(write_config, tmp_path))
     extra_rows = [c for c in checks if c.name.startswith("extra:")]
-    assert extra_rows  # at least pyte + apprise on a POSIX host
+    assert extra_rows  # pyte is ungated (#1016), so it shows on a POSIX host by default
     # Extras are optional: a missing one WARNs but must never FAIL (which would flip the
     # doctor exit code for a dormant feature).
     assert all(c.status in {OK, WARN} for c in extra_rows)
@@ -621,6 +652,131 @@ def test_backup_includes_config(write_config, tmp_path):
     cfg_out = tmp_path / "restored.yml"
     result = restore_backup(archive, state_dir=tmp_path / "st", config_out=cfg_out)
     assert cfg_out.is_file() and result["config"] == str(cfg_out)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file-mode semantics")
+def test_restore_config_out_forces_0600_even_when_source_is_loose(write_config, tmp_path):
+    # The restored config carries the argon2 password hash, so restore --config-out must
+    # write it owner-only (0600) — never the umask-derived 0644 that shutil.copy2 would
+    # otherwise carry over from the loose extracted source (matching config_writer / the
+    # setup wizard). Pin the umask to 0022 so extraction reproduces the 0644 source the
+    # finding describes, then prove the destination is tightened to 0600 regardless.
+    config = load_config(_cfg_file(write_config, tmp_path))
+    _seed_state(config.state_dir)
+    archive = make_backup(config, tmp_path / "out")
+    cfg_out = tmp_path / "restored.yml"
+    old_umask = os.umask(0o022)
+    try:
+        result = restore_backup(archive, state_dir=tmp_path / "st", config_out=cfg_out)
+    finally:
+        os.umask(old_umask)
+    assert result["config"] == str(cfg_out)
+    assert cfg_out.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink/mode semantics")
+def test_restore_config_out_replaces_symlink_without_touching_its_target(write_config, tmp_path):
+    # A symlink sitting at --config-out must be REPLACED, not written through: copy2 would
+    # follow it, overwriting an unrelated file with the config (and the old chmod would then
+    # tighten that unrelated file). os.replace swaps the link itself, so the victim keeps
+    # both its content and its mode.
+    config = load_config(_cfg_file(write_config, tmp_path))
+    _seed_state(config.state_dir)
+    archive = make_backup(config, tmp_path / "out")
+
+    victim = tmp_path / "unrelated.txt"
+    victim.write_text("do not clobber", encoding="utf-8")
+    victim.chmod(0o644)
+    cfg_out = tmp_path / "restored.yml"
+    cfg_out.symlink_to(victim)
+
+    restore_backup(archive, state_dir=tmp_path / "st", config_out=cfg_out, force=True)
+
+    assert victim.read_text(encoding="utf-8") == "do not clobber"
+    assert victim.stat().st_mode & 0o777 == 0o644
+    assert not cfg_out.is_symlink()
+    assert cfg_out.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode semantics")
+def test_restore_config_out_does_not_tighten_its_parent_directory(write_config, tmp_path):
+    # --config-out is an operator-chosen path (often a shared /etc or project dir), so the
+    # restore must not chmod its parent to 0700 the way atomicio.atomic_write_text does —
+    # that would lock out other users/services (the #978 reasoning the setup wizard records).
+    config = load_config(_cfg_file(write_config, tmp_path))
+    _seed_state(config.state_dir)
+    archive = make_backup(config, tmp_path / "out")
+
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o755)
+    restore_backup(archive, state_dir=tmp_path / "st", config_out=shared / "clauster.yml")
+
+    assert shared.stat().st_mode & 0o777 == 0o755
+
+
+def test_restore_config_out_failure_leaves_no_temp_and_no_partial(
+    write_config, tmp_path, monkeypatch
+):
+    # If the atomic swap fails, the restore must leave NOTHING behind: no half-written temp
+    # beside the destination (it would hold the argon2 hash), and no partial destination.
+    # This is the branch that replaced the old copy2+chmod, whose failure mode was a
+    # permissive config left on disk after a restore reported as failed.
+    config = load_config(_cfg_file(write_config, tmp_path))
+    _seed_state(config.state_dir)
+    archive = make_backup(config, tmp_path / "out")
+
+    dest_dir = tmp_path / "dest"
+    dest_dir.mkdir()
+    cfg_out = dest_dir / "clauster.yml"
+
+    def _boom(src, dst, **kwargs):
+        raise OSError("swap failed")
+
+    monkeypatch.setattr(ops_mod.atomicio, "replace_with_retry", _boom)
+    with pytest.raises(OSError, match="swap failed"):
+        restore_backup(archive, state_dir=tmp_path / "st", config_out=cfg_out)
+
+    assert not cfg_out.exists()
+    assert list(dest_dir.iterdir()) == []
+
+
+def test_restore_config_out_closes_fd_when_fdopen_fails(write_config, tmp_path, monkeypatch):
+    # Mirror of test_atomic_write_text_closes_fd_when_fdopen_fails for the restore path:
+    # if os.fdopen raises before the `with` adopts the fd (EMFILE under fd-table pressure),
+    # the raw mkstemp fd must be closed rather than leaked onto an unlinked inode, and the
+    # temp — which would hold the argon2 hash — removed.
+    config = load_config(_cfg_file(write_config, tmp_path))
+    _seed_state(config.state_dir)
+    archive = make_backup(config, tmp_path / "out")
+
+    dest_dir = tmp_path / "dest"
+    dest_dir.mkdir()
+    captured: dict[str, int] = {}
+    real_mkstemp = ops_mod.tempfile.mkstemp
+    real_close = ops_mod.os.close
+    closed: list[int] = []
+
+    def _spy_mkstemp(*a, **k):
+        fd, name = real_mkstemp(*a, **k)
+        captured["fd"] = fd
+        return fd, name
+
+    def _boom_fdopen(*a, **k):
+        raise OSError("too many open files")
+
+    def _spy_close(fd):
+        closed.append(fd)
+        real_close(fd)
+
+    monkeypatch.setattr(ops_mod.tempfile, "mkstemp", _spy_mkstemp)
+    monkeypatch.setattr(ops_mod.os, "fdopen", _boom_fdopen)
+    monkeypatch.setattr(ops_mod.os, "close", _spy_close)
+
+    with pytest.raises(OSError, match="too many open files"):
+        restore_backup(archive, state_dir=tmp_path / "st", config_out=dest_dir / "clauster.yml")
+    assert captured["fd"] in closed  # the raw fd was closed, not leaked
+    assert list(dest_dir.iterdir()) == []  # temp removed, destination not written
 
 
 def test_restore_refuses_nonempty_without_force(write_config, tmp_path):
@@ -1194,6 +1350,30 @@ def test_safe_extract_skips_member_without_file_object(tmp_path, monkeypatch):
     assert not (dest / "state" / "ghost.txt").exists()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX execute-bit semantics")
+def test_safe_extract_never_grants_execute_bit(tmp_path):
+    # A restore archive is untrusted: _safe_extract_tar must NOT carry an archived member's
+    # mode onto disk. If it did, a crafted backup could set the execute bit on e.g.
+    # state/deps/bin/claustrum and — since deps.installed_binary_path gates only on
+    # is_file(), not os.access(X_OK) — get a planted native binary executed by the next
+    # daemon spawn (execve requires the exec bit). Extraction writes via open(..., "wb") at
+    # the umask default, which never sets an execute bit, so an archived 0755 member lands
+    # non-executable regardless of the ambient umask.
+    arch = tmp_path / "evil.tar.gz"
+    with tarfile.open(arch, "w:gz") as tar:
+        data = b"#!/bin/sh\necho pwned\n"
+        info = tarfile.TarInfo("state/deps/bin/claustrum")
+        info.size = len(data)
+        info.mode = 0o755  # attacker-set executable bit in the archive
+        tar.addfile(info, io.BytesIO(data))
+    dest = tmp_path / "out"
+    dest.mkdir()
+    _safe_extract_tar(arch, dest)
+    planted = dest / "state" / "deps" / "bin" / "claustrum"
+    assert planted.is_file()
+    assert not (planted.stat().st_mode & 0o111)  # no user/group/other execute bits
+
+
 def test_restore_rolls_back_when_swap_fails(write_config, tmp_path, monkeypatch):
     # ops.py 484-488: when the staged->live rename fails mid-swap (old dir already
     # moved aside), the old state_dir must be moved BACK and the staged copy removed —
@@ -1251,12 +1431,30 @@ def test_restore_swap_failure_into_fresh_dest_cleans_staging(write_config, tmp_p
     assert not list(tmp_path.glob(".fresh.restore-*"))  # staged dir cleaned up
 
 
+def _bin_cfg(tmp_path, *, claustrum_enabled=False, claustrum_binary=None):
+    """Minimal config stand-in for _check_binary_deps: state_dir + a real claustrum sub-config.
+
+    Uses a real ``ClaustrumConfig`` (not a bare namespace) so the binary resolver can read
+    ``claustrum.binary`` and its pydantic default (#1013).
+    """
+    from types import SimpleNamespace
+
+    from clauster.config import ClaustrumConfig
+
+    claustrum = (
+        ClaustrumConfig(enabled=claustrum_enabled, binary=claustrum_binary)
+        if claustrum_binary is not None
+        else ClaustrumConfig(enabled=claustrum_enabled)
+    )
+    return SimpleNamespace(state_dir=tmp_path, claustrum=claustrum)
+
+
 def test_check_binary_deps_warns_when_shawl_missing(monkeypatch, tmp_path):
     from clauster import ops
 
     monkeypatch.setattr(ops.deps.sys, "platform", "win32")
     monkeypatch.setattr(ops.shutil, "which", lambda name: None)  # not on PATH, not in managed dir
-    by = {c.name: c for c in ops._check_binary_deps(tmp_path)}
+    by = {c.name: c for c in ops._check_binary_deps(_bin_cfg(tmp_path))}
     assert by["binary:shawl"].status == WARN
     assert "clauster deps install shawl" in by["binary:shawl"].detail
 
@@ -1269,7 +1467,7 @@ def test_check_binary_deps_ok_via_managed_dir(monkeypatch, tmp_path):
     exe = deps.managed_bin_dir(tmp_path) / "shawl.exe"
     exe.parent.mkdir(parents=True)
     exe.write_bytes(b"x")
-    by = {c.name: c for c in ops._check_binary_deps(tmp_path)}
+    by = {c.name: c for c in ops._check_binary_deps(_bin_cfg(tmp_path))}
     assert by["binary:shawl"].status == OK
 
 
@@ -1278,12 +1476,212 @@ def test_check_binary_deps_ok_via_path(monkeypatch, tmp_path):
 
     monkeypatch.setattr(ops.deps.sys, "platform", "win32")
     monkeypatch.setattr(ops.shutil, "which", lambda name: "/usr/bin/shawl")
-    by = {c.name: c for c in ops._check_binary_deps(tmp_path)}
+    by = {c.name: c for c in ops._check_binary_deps(_bin_cfg(tmp_path))}
     assert by["binary:shawl"].status == OK
 
 
 def test_check_binary_deps_skips_off_platform(monkeypatch, tmp_path):
     from clauster import ops
 
-    monkeypatch.setattr(ops.deps.sys, "platform", "linux")  # shawl is win32-only
-    assert ops._check_binary_deps(tmp_path) == []
+    # shawl is win32-only; claustrum is gated OFF here, so a linux host with the channel
+    # disabled reports no managed-binary checks.
+    monkeypatch.setattr(ops.deps.sys, "platform", "linux")
+    assert ops._check_binary_deps(_bin_cfg(tmp_path)) == []
+
+
+def test_check_binary_deps_claustrum_gated_on_enabled(monkeypatch, tmp_path):
+    from clauster import ops
+
+    # Direct Session channel OFF -> claustrum is not surfaced even on a supported platform.
+    monkeypatch.setattr(ops.deps.sys, "platform", "linux")
+    monkeypatch.setattr(ops.deps.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(ops.shutil, "which", lambda name: None)
+    assert not [
+        c for c in ops._check_binary_deps(_bin_cfg(tmp_path)) if c.name == "binary:claustrum"
+    ]
+    # Channel ON + binary absent -> a WARN nudging `deps install claustrum`.
+    by = {c.name: c for c in ops._check_binary_deps(_bin_cfg(tmp_path, claustrum_enabled=True))}
+    assert by["binary:claustrum"].status == WARN
+    assert "clauster deps install claustrum" in by["binary:claustrum"].detail
+
+
+def test_check_binary_deps_honors_configured_claustrum_binary(monkeypatch, tmp_path):
+    from clauster import ops
+
+    # #1013 Bug 1: a configured claustrum.binary (the documented minimal-PATH workaround —
+    # an absolute path off PATH and outside the managed dir) must read as AVAILABLE, not a
+    # false "unavailable". Preflight/doctor now resolve the same way the daemon spawns.
+    monkeypatch.setattr(ops.deps.sys, "platform", "linux")
+    monkeypatch.setattr(ops.deps.platform, "machine", lambda: "x86_64")
+    # PATH resolves ONLY the operator's absolute path; nothing in the managed dir.
+    monkeypatch.setattr(
+        ops.shutil,
+        "which",
+        lambda name: "/home/op/go/bin/claustrum" if name.startswith("/") else None,
+    )
+    # A resolved claustrum is version-probed (#1013 Bug 3-4); stub a current version so this
+    # test stays about presence resolution (Bug 1), not the floor.
+    monkeypatch.setattr(ops, "_claustrum_version", lambda binary: deps.claustrum_pinned_version())
+    cfg = _bin_cfg(tmp_path, claustrum_enabled=True, claustrum_binary="/home/op/go/bin/claustrum")
+    by = {c.name: c for c in ops._check_binary_deps(cfg)}
+    assert by["binary:claustrum"].status == OK
+    assert "available" in by["binary:claustrum"].detail
+
+
+# ----- claustrum version floor + shadowing (#1013 Bug 3-5) ---------------
+
+
+def _stub_run(stdout):
+    from types import SimpleNamespace
+
+    return lambda *a, **k: SimpleNamespace(stdout=stdout)
+
+
+def test_claustrum_version_parses_program_prefixed_output(monkeypatch):
+    from clauster import ops
+
+    monkeypatch.setattr(ops.subprocess, "run", _stub_run("claustrum v1.7.1 (built 2026-01-01)\n"))
+    assert ops._claustrum_version("/x/claustrum") == "v1.7.1"
+
+
+def test_claustrum_version_tolerates_unstamped_dev_build(monkeypatch):
+    from clauster import ops
+
+    monkeypatch.setattr(
+        ops.subprocess, "run", _stub_run("claustrum claustrum-dev (built unknown)\n")
+    )
+    assert ops._claustrum_version("/x/claustrum") == "claustrum-dev"
+
+
+def test_claustrum_version_tolerates_bare_version(monkeypatch):
+    from clauster import ops
+
+    monkeypatch.setattr(ops.subprocess, "run", _stub_run("v1.8.0\n"))
+    assert ops._claustrum_version("/x/claustrum") == "v1.8.0"
+
+
+def test_claustrum_version_empty_output_returns_empty(monkeypatch):
+    from clauster import ops
+
+    monkeypatch.setattr(ops.subprocess, "run", _stub_run("\n"))
+    assert ops._claustrum_version("/x/claustrum") == ""
+
+
+def test_check_claustrum_version_ok_at_or_above_floor(monkeypatch):
+    from clauster import ops
+
+    monkeypatch.setattr(ops, "_claustrum_version", lambda binary: "v9.9.9")
+    c = ops._check_claustrum_version("/x/claustrum")
+    assert c.status == OK and "v9.9.9" in c.detail
+
+
+def test_check_claustrum_version_warns_below_floor(monkeypatch):
+    from clauster import ops
+
+    monkeypatch.setattr(ops, "_claustrum_version", lambda binary: "v0.0.1")
+    c = ops._check_claustrum_version("/x/claustrum")
+    assert c.status == WARN and "could not confirm" in c.detail
+
+
+def test_check_claustrum_version_warns_on_unstamped_dev(monkeypatch):
+    # The maintainer's own dogfood runs an unstamped `claustrum-dev`: advisory WARN, never FAIL.
+    from clauster import ops
+
+    monkeypatch.setattr(ops, "_claustrum_version", lambda binary: "claustrum-dev")
+    c = ops._check_claustrum_version("/x/claustrum")
+    assert c.status == WARN and "claustrum-dev" in c.detail
+
+
+def test_check_claustrum_version_warns_on_probe_error(monkeypatch):
+    from clauster import ops
+
+    def _boom(binary):
+        raise subprocess.SubprocessError("boom")
+
+    monkeypatch.setattr(ops, "_claustrum_version", _boom)
+    c = ops._check_claustrum_version("/x/claustrum")
+    assert c.status == WARN and "version" in c.detail.lower()
+
+
+def _managed_shawl(tmp_path):
+    """Create a managed shawl.exe under <tmp_path>/deps/bin and return its Path."""
+    from clauster import ops
+
+    exe = ops.deps.managed_bin_dir(tmp_path) / "shawl.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"x")
+    return exe
+
+
+def test_managed_shadow_check_warns_when_managed_shadowed(tmp_path, monkeypatch):
+    from clauster import ops
+
+    monkeypatch.setattr(ops.deps.sys, "platform", "win32")  # shawl resolves on win32
+    _managed_shawl(tmp_path)
+    # A genuinely different executable (own inode) wins resolution.
+    other = tmp_path / "elsewhere" / "shawl.exe"
+    other.parent.mkdir(parents=True)
+    other.write_bytes(b"y")
+    c = ops._managed_shadow_check("shawl", "Shawl", _bin_cfg(tmp_path), str(other))
+    assert c is not None and c.status == WARN and "shadowed" in c.detail
+
+
+def test_managed_shadow_check_none_when_resolved_is_managed(tmp_path, monkeypatch):
+    from clauster import ops
+
+    monkeypatch.setattr(ops.deps.sys, "platform", "win32")
+    exe = _managed_shawl(tmp_path)
+    assert ops._managed_shadow_check("shawl", "Shawl", _bin_cfg(tmp_path), str(exe)) is None
+
+
+@needs_symlink
+def test_managed_shadow_check_no_false_warning_via_symlink(tmp_path, monkeypatch):
+    # #1013 Bug 5 review: a symlink / alternate spelling of the SAME file must not warn (compare
+    # inode identity, not path strings).
+    from clauster import ops
+
+    monkeypatch.setattr(ops.deps.sys, "platform", "win32")
+    exe = _managed_shawl(tmp_path)
+    link = tmp_path / "link-to-shawl.exe"
+    link.symlink_to(exe)
+    assert ops._managed_shadow_check("shawl", "Shawl", _bin_cfg(tmp_path), str(link)) is None
+
+
+def test_managed_shadow_check_none_when_resolved_unstattable(tmp_path, monkeypatch):
+    # A racing removal (resolved path gone) can't confirm a shadow -> stay silent, don't nag.
+    from clauster import ops
+
+    monkeypatch.setattr(ops.deps.sys, "platform", "win32")
+    _managed_shawl(tmp_path)
+    assert (
+        ops._managed_shadow_check("shawl", "Shawl", _bin_cfg(tmp_path), "/no/such/shawl") is None
+    )
+
+
+def test_managed_shadow_check_none_when_no_managed(tmp_path):
+    from clauster import ops
+
+    assert (
+        ops._managed_shadow_check("shawl", "Shawl", _bin_cfg(tmp_path), "/usr/bin/shawl") is None
+    )
+
+
+def test_check_binary_deps_surfaces_claustrum_shadow(monkeypatch, tmp_path):
+    from clauster import ops
+
+    # managed claustrum installed, but PATH resolves a DIFFERENT binary -> OK version row + a
+    # shadow WARN row (#1013 Bug 5).
+    monkeypatch.setattr(ops.deps.sys, "platform", "linux")
+    monkeypatch.setattr(ops.deps.platform, "machine", lambda: "x86_64")
+    managed = ops.deps.managed_bin_dir(tmp_path) / "claustrum"
+    managed.parent.mkdir(parents=True)
+    managed.write_bytes(b"x")
+    other = tmp_path / "elsewhere" / "claustrum"
+    other.parent.mkdir(parents=True)
+    other.write_bytes(b"y")
+    monkeypatch.setattr(ops.shutil, "which", lambda name: str(other))
+    monkeypatch.setattr(ops, "_claustrum_version", lambda binary: deps.claustrum_pinned_version())
+    by = {c.name: c for c in ops._check_binary_deps(_bin_cfg(tmp_path, claustrum_enabled=True))}
+    assert by["binary:claustrum"].status == OK
+    assert by["binary:claustrum:shadow"].status == WARN
+    assert "shadowed" in by["binary:claustrum:shadow"].detail

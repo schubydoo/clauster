@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1@sha256:87999aa3d42bdc6bea60565083ee17e86d1f3339802f543c0d03998580f9cb89
 #
 # Multi-arch (linux/amd64, linux/arm64) image for clauster: Alpine + musl,
 # non-root, PUID/PGID, healthcheck, JSON logs.
@@ -79,6 +79,13 @@ ENV PATH="/app/.venv/bin:$PATH" \
     CLAUSTER_PORT=7621 \
     CLAUSTER_LOG_FORMAT=json \
     CLAUSTER_HOME=/config \
+    # Config lives on the /config volume, not the ephemeral /app overlay: the first-run wizard
+    # writes here and normal loads read here, so a completed setup survives recreate (#1017).
+    CLAUSTER_CONFIG=/config/clauster.yml \
+    # Bind the first-run setup wizard to all interfaces too (a loopback-bound wizard is
+    # unreachable via a published port). The non-loopback bind is gated by a one-time token
+    # printed to the container log — see README "Docker" (#1017).
+    CLAUSTER_SETUP_HOST=0.0.0.0 \
     PUID=1000 \
     PGID=1000
 

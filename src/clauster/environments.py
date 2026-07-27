@@ -258,12 +258,39 @@ class EnvironmentsClient(_AnthropicHTTPClient):
         self._request("DELETE", path)
 
 
-def find_ghosts(environments: list[Environment], live_directories: set[str]) -> list[Environment]:
-    """Bridge environments whose directory has no live bridge on this host.
+def find_ghosts(
+    environments: list[Environment],
+    live_directories: set[str],
+    *,
+    projects_root: Path | None,
+) -> list[Environment]:
+    """Bridge environments under ``projects_root`` whose directory has no live bridge.
 
-    NEVER includes a cloud environment. A bridge env with an unknown/absent
-    ``directory`` is conservatively skipped (we don't reap what we can't attribute).
+    NEVER includes a cloud environment. A bridge env is conservatively skipped — we
+    don't reap what we can't attribute — when its ``directory`` is absent, and also
+    when that directory falls OUTSIDE ``projects_root``.
+
+    The containment gate is load-bearing (#1100). ``live_directories`` is inherently
+    instance-scoped: :func:`live_bridge_directories` sees only the sessions of the OS
+    user running this instance, plus the pointers under *this* ``projects_root``. It
+    is filtered against an **account-wide** environment list, so a live bridge owned
+    by another instance or another OS user is missing from the live set through no
+    fault of its own, and without this gate classifies as a ghost and gets archived
+    out from under its running session. An instance may only reap what it could own.
+
+    ``projects_root`` of ``None`` means nothing is attributable, so nothing is reaped
+    — fail closed, and say so, because a silent empty result reads as "all clean".
     """
+    if projects_root is None:
+        skipped = sum(1 for e in environments if e.is_bridge and not e.is_cloud)
+        if skipped:
+            _log.warning(
+                "reaper has no projects_root to attribute against; skipping all %d bridge "
+                "environment(s) rather than risk archiving a live bridge (#1100)",
+                skipped,
+            )
+        return []
+    root = Path(_norm(str(projects_root)))
     live = {_norm(d) for d in live_directories}
     ghosts: list[Environment] = []
     for env in environments:
@@ -272,7 +299,10 @@ def find_ghosts(environments: list[Environment], live_directories: set[str]) -> 
         directory = env.config.directory
         if not directory:
             continue  # unattributable -> leave it alone
-        if _norm(directory) not in live:
+        normalized = _norm(directory)
+        if not Path(normalized).is_relative_to(root):
+            continue  # another instance's / another user's tree -> not ours to reap
+        if normalized not in live:
             ghosts.append(env)
     return ghosts
 
@@ -284,12 +314,19 @@ def _norm(directory: str) -> str:
 def live_bridge_directories(binary: str, projects_root: Path | None = None) -> set[str]:
     """Directories that currently host a live bridge (the reaper's "keep" set).
 
-    Sourced from ``claude agents --json`` cwds (host-wide live sessions) plus a
-    live-pointer walk under projects_root. Unlike bridge attribution (which
-    kind-gates, see ``inspector``), live `claude --bg` sessions count here too —
-    over-keeping is the safe direction for the reaper. **Deliberately NOT best-effort**: if the
-    agents-json probe fails this raises, because reaping with an incomplete live set
-    could archive a still-live bridge. The CLI must abort rather than guess.
+    Sourced from ``claude agents --json`` cwds plus a live-pointer walk under
+    projects_root. Unlike bridge attribution (which kind-gates, see ``inspector``),
+    live `claude --bg` sessions count here too — over-keeping is the safe direction
+    for the reaper. **Deliberately NOT best-effort**: if the agents-json probe fails
+    this raises, because reaping with an incomplete live set could archive a
+    still-live bridge. The CLI must abort rather than guess.
+
+    **This set is instance-scoped, never host-wide** (#1100). ``claude agents --json``
+    reports only the sessions of the OS user running it — a bridge owned by another
+    user is invisible here — and the pointer walk covers only *this* ``projects_root``.
+    So an empty/narrow result does NOT mean "no live bridge exists on this host", and
+    callers must not treat absence from this set as proof a bridge is dead:
+    :func:`find_ghosts` therefore also requires containment in ``projects_root``.
     """
     from . import inspector, pointers
     from .discovery import discover_projects

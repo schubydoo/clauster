@@ -14,10 +14,11 @@ junit.xml
 node_modules/
 
 # --- Local tooling (not part of the project) ---
+# CLAUDE.md and AGENTS.md are committed; CLAUDE.local.md holds per-machine notes.
 .claude/
+.serena/
 .vscode/settings.json
-CLAUDE.md
-AGENTS.md
+CLAUDE.local.md
 
 # --- Local config with real host paths (commit clauster.yml.example instead) ---
 clauster.yml
@@ -41,3 +42,7 @@ scratch/
 
 # mkdocs-material build output (`mkdocs build`) — generated, never committed.
 /site/
+
+# PyInstaller binary build output (`pyinstaller clauster.spec`) — generated, never committed.
+/build/
+/dist/

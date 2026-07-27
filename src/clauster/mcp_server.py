@@ -13,7 +13,9 @@ Read tools:
 ``session_status``
     The detail of one session, looked up by its id.
 
-Write tools (#527 write slice) — the **bridge** channel only, thin wrappers over
+Write tools (#527 write slice) — **gated behind ``mcp.allow_writes``** (#1010,
+default off), so the surface is read-only until the operator opts in. The **bridge**
+channel only, thin wrappers over
 the #775 :class:`~clauster.engine.ClausterEngine` facade (the same
 ``spawn_detailed``/``stop``/``resume`` the dashboard ``/api`` routes call, so the
 per-mode policy, standard-singleton cap, option validation, and per-project spawn
@@ -114,8 +116,9 @@ _INVALID_REQUEST = -32600
 _METHOD_NOT_FOUND = -32601
 _INTERNAL_ERROR = -32603
 
-# Max bytes for one JSON-RPC line. Our two read-only tools' replies are small, and
-# a *request* is tiny (a method name + a short id) — so a generous-but-bounded cap
+# Max bytes for one JSON-RPC line. Our tools' replies are small (session summaries /
+# structural lifecycle fields), and a *request* is tiny (a method name + a short id)
+# — so a generous-but-bounded cap
 # keeps a single pathological/oversized line from growing the read buffer without
 # limit, while never tripping on a legitimate message. An overlong line is drained
 # and answered with a parse error rather than crashing the server (see ``serve``).
@@ -128,14 +131,18 @@ _MAX_LINE_BYTES = 8 * 1024 * 1024
 async def gather_sessions(config: ClausterConfig) -> list[dict[str, Any]]:
     """Collect every observable session into a flat list of plain dicts.
 
-    Reuses the dashboard's read path verbatim: a :class:`SessionRunner` is built
-    and reconciled once (``rediscover`` + ``poll_once``, the same liveness +
-    ``agents --json`` cross-check the poll loop runs), then its managed bridges,
+    Reuses the dashboard's read path: a :class:`SessionRunner` is built and reconciled
+    once — ``rediscover(persist=False)`` + ``poll_once(side_effects=False)``, the same
+    liveness + ``agents --json`` cross-check the poll loop runs, minus its writes and
+    lifecycle events (#1104) — then its managed bridges,
     tracked/external working sessions, the supervisor's background jobs, and the
     persisted hosted-session records are each mapped into a uniform summary. No
     session-listing logic is duplicated here — only assembled.
 
-    Read-only: nothing is spawned, stopped, or mutated. Hosted sessions are read
+    Read-only, and enforced rather than asserted: no bridge is spawned or stopped, the
+    shared ``state.json`` is not written, and no lifecycle event, webhook, or
+    notification fires. Instance status IS reconciled in memory, so a bridge that died
+    is reported as crashed — observed, not announced. Hosted sessions are read
     from the runner's persistence container (the same DB-backed store the app
     uses; no live daemon connection is opened by this short-lived process), so
     they appear with their last-known status.
@@ -151,15 +158,28 @@ async def gather_sessions(config: ClausterConfig) -> list[dict[str, Any]]:
 
     runner = SessionRunner(config)
     # Reconcile persisted bridges into live instances and refresh liveness +
-    # the agents --json cross-check exactly as the FastAPI poll loop does, so a
-    # one-shot process reports the same picture the dashboard would.
-    await runner.rediscover()
-    await runner.poll_once()
+    # the agents --json cross-check, so a one-shot process reports the same picture
+    # the dashboard would — but WITHOUT the poll loop's writes. This is a read tool,
+    # and it commonly runs against a host where the live service owns that state
+    # (#1104): `persist=True` would rewrite the shared `state.json` on every session
+    # list, and the crash arm would fire a duplicate webhook + notification for a
+    # bridge the service is already tracking.
+    #
+    # `poll_once` is still called rather than dropped: `tracked_sessions_by_instance`
+    # below reads the cross-check it computes, so skipping it would silently report
+    # every bridge with zero sessions. `side_effects=False` keeps the observation and
+    # drops the announcements.
+    await runner.rediscover(persist=False)
+    await runner.poll_once(side_effects=False)
 
     tracked = runner.tracked_sessions_by_instance()
     for inst in runner.list_instances():
         sessions.append(_summarize_instance(inst, kind="bridge"))
-        for ws in tracked.get(inst.project, []):
+        # Keyed by instance_id, not project (#1020 A3): a project-keyed lookup inside this
+        # per-instance loop emitted every session once per bridge on that project, so a
+        # project running a standard bridge plus two interactive ones reported each session
+        # three times.
+        for ws in tracked.get(inst.instance_id, []):
             summary = _summarize_working(ws, kind="bridge-session")
             summary["project"] = (
                 inst.project
@@ -196,12 +216,19 @@ def _summarize_instance(inst: RemoteControlInstance, *, kind: str) -> dict[str, 
     """Summarize a :class:`RemoteControlInstance` (bridge or hosted) read-only.
 
     Only structural/lifecycle fields are surfaced — never log or transcript
-    content. The id is the bridge's project for a bridge (stable and
-    human-meaningful; the runner registry itself is keyed by instance_id since
-    issue 777), or the ``claustrum_process_id`` for a hosted session.
+    content. The id is the bridge's ``instance_id`` for a bridge, or the
+    ``claustrum_process_id`` for a hosted session.
+
+    The bridge id was the project name until #1020. A project may run several bridges
+    (#778), so that id was not unique: every bridge on a project serialized the SAME id,
+    `session_status` could only ever return whichever was registered first, and — once
+    a working session's ``parent_instance`` became an instance_id — nothing a client
+    could see joined a child session back to its owning bridge. ``project`` is still
+    reported as its own field, so the human-meaningful name is not lost, and
+    `session_status` still accepts a project name when it names exactly one bridge.
     """
     is_hosted = kind == "hosted"
-    session_id = inst.claustrum_process_id if is_hosted else inst.project
+    session_id = inst.claustrum_process_id if is_hosted else inst.instance_id
     summary: dict[str, Any] = {
         "id": session_id,
         "kind": kind,
@@ -277,7 +304,9 @@ def _summarize_job(job: BackgroundJob) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # Tool definitions
 # --------------------------------------------------------------------------- #
-_TOOLS: list[dict[str, Any]] = [
+# The read tools are always exposed; the write tools below are gated behind
+# ``mcp.allow_writes`` (#1010) so the default surface is read-only.
+_READ_TOOLS: list[dict[str, Any]] = [
     {
         "name": "list_sessions",
         "title": "List Clauster sessions",
@@ -293,21 +322,33 @@ _TOOLS: list[dict[str, Any]] = [
         "title": "Clauster session status",
         "description": (
             "Report the status of one Clauster session by its id (a bridge "
-            "project name, a hosted claustrum_process_id, a background-agent id, "
-            "or a working-session uuid). Read-only."
+            "instance id or project name, a hosted claustrum_process_id, a "
+            "background-agent id, or a working-session uuid). A UNIQUE prefix of a "
+            "bridge instance id also resolves; a prefix matching several bridges is "
+            "reported as found: false with an 'ambiguous' list rather than guessing. "
+            "Read-only."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "id": {
                     "type": "string",
-                    "description": "The session id to look up (as returned by list_sessions).",
+                    "description": (
+                        "The session id to look up (as returned by list_sessions), a "
+                        "bridge's project name, or a unique prefix of a bridge id."
+                    ),
                 }
             },
             "required": ["id"],
             "additionalProperties": False,
         },
     },
+]
+
+# Write tools (#950) — gated behind ``mcp.allow_writes`` (#1010, default off). They
+# mutate bridge state, so the default read-only surface never advertises or dispatches
+# them; an operator opts in explicitly.
+_WRITE_TOOLS: list[dict[str, Any]] = [
     {
         "name": "spawn_session",
         "title": "Start a Clauster bridge",
@@ -332,7 +373,8 @@ _TOOLS: list[dict[str, Any]] = [
                 "custom_name": {"type": "string", "description": "Display name (standard only)."},
                 "sandbox": {
                     "type": "string",
-                    "description": "default | on | off (standard only).",
+                    "description": "default | on | off (standard only). Disabled in this release "
+                    "(#1037) — accepted but inert; returns via #1046.",
                 },
                 "trust": {
                     "type": "boolean",
@@ -347,13 +389,23 @@ _TOOLS: list[dict[str, Any]] = [
         "name": "stop_session",
         "title": "Stop a Clauster bridge",
         "description": (
-            "Stop the bridge named by an id (a project name / id / prefix, as returned "
-            "by list_sessions). Returns stopped: false when no managed bridge matches."
+            "Stop the bridge named by an id (a project name, a full instance id, or a "
+            "UNIQUE prefix of one, as returned by list_sessions). Returns stopped: false "
+            "when no managed bridge matches. A prefix matching several bridges is "
+            "REFUSED, not guessed: the reply is stopped: false with an 'ambiguous' list "
+            "of the full ids — retry with a longer prefix rather than treating the "
+            "bridge as already stopped."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "id": {"type": "string", "description": "The bridge id to stop."},
+                "id": {
+                    "type": "string",
+                    "description": (
+                        "The bridge to stop: project name, full instance id, or a unique "
+                        "prefix of one."
+                    ),
+                },
             },
             "required": ["id"],
             "additionalProperties": False,
@@ -364,8 +416,10 @@ _TOOLS: list[dict[str, Any]] = [
         "title": "Resume a Clauster bridge",
         "description": (
             "Resume a stopped/crashed bridge into its prior conversation, reusing its "
-            "stored spawn/permission/resume modes. id is a project name / id / prefix "
-            "(as returned by list_sessions). Returns resumed: false when none matches. "
+            "stored spawn/permission/resume modes. id is a project name, a full instance "
+            "id, or a UNIQUE prefix of one (as returned by list_sessions). Returns "
+            "resumed: false when none matches; a prefix matching several bridges is "
+            "REFUSED with an 'ambiguous' list of the full ids rather than guessing. "
             "Bridge channel only — hosted-session resume is not exposed here."
         ),
         "inputSchema": {
@@ -397,9 +451,44 @@ async def _tool_session_status(config: ClausterConfig, args: dict[str, Any]) -> 
     if not isinstance(raw, str) or not raw.strip():
         raise ValueError("session_status requires a non-empty string 'id'")
     wanted = raw.strip()
-    for session in await gather_sessions(config):
+    sessions = await gather_sessions(config)
+    for session in sessions:
         if session.get("id") == wanted:
             return {"found": True, "session": session}
+    # A bridge's id is its instance_id since #1020, but a project name was the documented
+    # way to name a bridge before that, so keep accepting one — while a project running
+    # SEVERAL bridges (#778) genuinely doesn't name a single session. Report that instead
+    # of returning whichever happened to be registered first, and hand back the ids the
+    # caller can retry with.
+    bridges = [s for s in sessions if s.get("kind") == "bridge" and s.get("project") == wanted]
+    if len(bridges) == 1:
+        return {"found": True, "session": bridges[0]}
+    if bridges:
+        return {"found": False, "id": wanted, "ambiguous": [s["id"] for s in bridges]}
+    # A unique id PREFIX resolves too (#1099), in the same order the engine resolver uses:
+    # exact id, then exact project name, then prefix — an abbreviation must never outrank
+    # either exact form. Restricted to bridges because a bridge id is the only one the
+    # tooling abbreviates (`clauster status` prints 8 characters); hosted / background /
+    # working ids are echoed verbatim by `list_sessions`, so a partial one is a typo.
+    # `wanted` is non-empty (validated above), so there is no prefixes-everything case.
+    prefixed = sorted(
+        (
+            s
+            for s in sessions
+            if s.get("kind") == "bridge" and str(s.get("id", "")).startswith(wanted)
+        ),
+        key=lambda s: str(s.get("id", "")),
+    )
+    if len(prefixed) == 1:
+        return {"found": True, "session": prefixed[0]}
+    if prefixed:
+        # Refused, not guessed — reporting the candidates so the caller can retry with a
+        # longer prefix, exactly as `stop_session` / `resume_session` do.
+        return {
+            "found": False,
+            "id": wanted,
+            "ambiguous": [str(s.get("id", "")) for s in prefixed],
+        }
     return {"found": False, "id": wanted}
 
 
@@ -472,8 +561,13 @@ async def _tool_stop_session(config: ClausterConfig, args: dict[str, Any]) -> di
     with ClausterEngine(config) as engine:
         await engine.hydrate()
         inst = await engine.stop(wanted)
+        # An ambiguous id prefix resolves to nothing rather than guessing (#1099).
+        # Reported as `ambiguous`, matching `session_status`, because a bare
+        # `{"stopped": false}` reads to an agent as "already stopped" — it would report
+        # the bridge as down while it is still running, and never retry with a longer id.
+        ambiguous = engine.bridge_id_candidates(wanted) if inst is None else []
     if inst is None:
-        return {"stopped": False, "id": wanted}
+        return {"stopped": False, "id": wanted, **({"ambiguous": ambiguous} if ambiguous else {})}
     return {"stopped": True, "session": _summarize_instance(inst, kind="bridge")}
 
 
@@ -485,37 +579,80 @@ async def _tool_resume_session(config: ClausterConfig, args: dict[str, Any]) -> 
     with ClausterEngine(config) as engine:
         await engine.hydrate()
         inst = await engine.resume(wanted)
+        ambiguous = engine.bridge_id_candidates(wanted) if inst is None else []  # see stop (#1099)
     if inst is None:
-        return {"resumed": False, "id": wanted}
+        return {"resumed": False, "id": wanted, **({"ambiguous": ambiguous} if ambiguous else {})}
     return {"resumed": True, "session": _summarize_instance(inst, kind="bridge")}
 
 
-_TOOL_HANDLERS = {
+_READ_TOOL_HANDLERS = {
     "list_sessions": _tool_list_sessions,
     "session_status": _tool_session_status,
+}
+_WRITE_TOOL_HANDLERS = {
     "spawn_session": _tool_spawn_session,
     "stop_session": _tool_stop_session,
     "resume_session": _tool_resume_session,
 }
 
 
+def tools_for(*, allow_writes: bool) -> list[dict[str, Any]]:
+    """Return the tool definitions advertised by ``tools/list`` for the active mode.
+
+    Read tools always; the #950 write tools only when ``allow_writes`` (#1010).
+    Kept in lockstep with :func:`handlers_for` so the advertised surface can never
+    drift from the dispatchable one (asserted by the capability-sync test).
+    """
+    return [*_READ_TOOLS, *_WRITE_TOOLS] if allow_writes else list(_READ_TOOLS)
+
+
+def handlers_for(*, allow_writes: bool) -> dict[str, Any]:
+    """Return the tool handlers dispatchable by ``tools/call`` for the active mode.
+
+    The write handlers are present only when ``allow_writes`` — so a ``spawn_session``
+    call on a read-only server is an *unknown tool* (fail-closed), not a silent no-op.
+    """
+    return (
+        {**_READ_TOOL_HANDLERS, **_WRITE_TOOL_HANDLERS}
+        if allow_writes
+        else dict(_READ_TOOL_HANDLERS)
+    )
+
+
+def capability_label(*, allow_writes: bool) -> str:
+    """One-line description of the active tool surface (startup banner / logs)."""
+    if allow_writes:
+        return "read+write (list/status + spawn/stop/resume)"
+    return "read-only (list/status; writes gated by mcp.allow_writes)"
+
+
 # --------------------------------------------------------------------------- #
 # JSON-RPC / MCP server
 # --------------------------------------------------------------------------- #
 class MCPServer:
-    """A minimal stdio JSON-RPC 2.0 server speaking the read-only MCP subset.
+    """A minimal stdio JSON-RPC 2.0 server speaking the MCP tool subset.
 
     Drives the ``initialize`` handshake, answers ``tools/list`` / ``tools/call``
-    for the two read-only tools, and replies to ``ping``. Unknown methods get a
-    JSON-RPC ``method not found`` error; a tool that raises is returned as an
-    ``isError`` tool result rather than crashing the server (fail-closed, never
-    silently). Notifications (no ``id``) are acknowledged without a reply.
+    for the active tool set — the read tools always, the #950 write tools only when
+    ``mcp.allow_writes`` is on (#1010, default off) — and replies to ``ping``.
+    Unknown methods get a JSON-RPC ``method not found`` error; a tool that raises is
+    returned as an ``isError`` tool result rather than crashing the server
+    (fail-closed, never silently). On a read-only server a write-tool call is simply
+    an unknown tool. Notifications (no ``id``) are acknowledged without a reply.
     """
 
     def __init__(self, config: ClausterConfig) -> None:
-        """Bind the server to an already-loaded :class:`ClausterConfig`."""
+        """Bind the server to an already-loaded :class:`ClausterConfig`.
+
+        The advertised tool set and the dispatch table are both derived from the
+        one ``mcp.allow_writes`` flag (#1010), so ``tools/list`` and ``tools/call``
+        agree on the active surface — read-only by default, +write when opted in.
+        """
         self._config = config
         self._initialized = False
+        self._allow_writes = config.mcp.allow_writes
+        self._tools = tools_for(allow_writes=self._allow_writes)
+        self._handlers = handlers_for(allow_writes=self._allow_writes)
 
     async def handle(self, message: dict[str, Any]) -> dict[str, Any] | None:
         """Dispatch one parsed JSON-RPC message, returning a response or ``None``.
@@ -545,7 +682,7 @@ class MCPServer:
         if method == "ping":
             return _result(msg_id, {})
         if method == "tools/list":
-            return _result(msg_id, {"tools": _TOOLS})
+            return _result(msg_id, {"tools": self._tools})
         if method == "tools/call":
             return await self._on_tools_call(msg_id, params)
         return _error(msg_id, _METHOD_NOT_FOUND, f"unknown method: {method}")
@@ -569,20 +706,20 @@ class MCPServer:
     async def _on_tools_call(
         self, msg_id: int | str | None, params: dict[str, Any]
     ) -> dict[str, Any]:
-        """Answer ``tools/call``: run a read-only tool and wrap its result.
+        """Answer ``tools/call``: run the named tool and wrap its result.
 
         A handler that raises is reported as an ``isError`` tool result (per the
         tools spec) so the client sees the failure as data, not a transport
         error — and never as a misleading empty success.
         """
         name = params.get("name")
-        if not isinstance(name, str) or name not in _TOOL_HANDLERS:
+        if not isinstance(name, str) or name not in self._handlers:
             return _result(msg_id, _tool_error(f"unknown tool: {name!r}"))
         arguments = params.get("arguments") or {}
         if not isinstance(arguments, dict):
             return _result(msg_id, _tool_error("tool arguments must be an object"))
         try:
-            payload = await _TOOL_HANDLERS[name](self._config, arguments)
+            payload = await self._handlers[name](self._config, arguments)
         except Exception as exc:  # noqa: BLE001 - surface as an isError tool result, never crash
             _log.warning("tool %s failed: %s", name, exc)
             return _result(msg_id, _tool_error(f"{name} failed: {exc}"))
@@ -696,7 +833,9 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(
         prog="clauster mcp",
-        description="Run the read-only Clauster MCP server over stdio (#527).",
+        description="Run the Clauster MCP server over stdio (#527/#950). Read-only by "
+        "default (list_sessions / session_status); set `mcp.allow_writes: true` to also "
+        "expose the write tools (spawn/stop/resume_session).",
     )
     parser.add_argument("-c", "--config", help="path to clauster.yml")
     args = parser.parse_args(argv)
@@ -709,7 +848,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # All human-readable output goes to stderr — stdout is the protocol channel
     # and must carry nothing but MCP messages (stdio transport requirement).
-    print(f"clauster mcp {__version__} | read-only | stdio", file=sys.stderr)
+    label = capability_label(allow_writes=config.mcp.allow_writes)
+    print(f"clauster mcp {__version__} | {label} | stdio", file=sys.stderr)
     try:
         asyncio.run(_run_stdio(config))
     except KeyboardInterrupt:

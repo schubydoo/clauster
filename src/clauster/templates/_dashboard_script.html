@@ -86,6 +86,10 @@
   // ({mode: {short, long, effect}}) shared with the launch <select> and the config editor.
   // permLabel()/permissionEffect() read from THIS map — no second hand-maintained copy.
   const PERMISSION_LABELS = {{ permission_labels | tojson }};
+  // Recognized hook lifecycle events (#958 Part 5): server-injected from the backend
+  // validator (config_write_hooks.RECOGNIZED_EVENTS), sorted, so the Hooks rows editor's
+  // event <select> never drifts from what the write surface accepts.
+  const HOOK_EVENTS = {{ hook_events | tojson }};
   const USAGE_MODE = {{ usage_mode | tojson }};  // usage.mode — "cost" | "tokens" | "off"
   const CURRENCY = {{ currency | tojson }};  // usage.currency — code, shown in the tooltip
   const CURRENCY_SYMBOL = {{ currency_symbol | tojson }};  // resolved symbol for cost mode
@@ -97,6 +101,10 @@
   const CLAUSTRUM_ENABLED = {{ claustrum_enabled | tojson }};  // claustrum.enabled — hosted live-view channel
   const JSON_HEADERS = Object.freeze({ "Content-Type": "application/json" });
   const CONFIG_MASK = "********";  // config-write redaction sentinel; leave in place to keep the stored value
+  // New-subagent frontmatter scaffold (#958 Part 5). Deliberately omits `name:` — the
+  // Name box is the single source and _syncAgentName injects it into the frontmatter on
+  // save. `description` is required (non-empty), so the operator fills it in.
+  const AGENT_TEMPLATE = "---\ndescription:\n---\n\n";
   // Browser (Web Notifications) channel (#541): the master switch + the per-event
   // toggles the client honours on a polled bridge status transition. crash/ready/stop
   // are the transitions the client can observe from /api/instances without a server push.
@@ -150,8 +158,8 @@
       _byId: {},              // rk -> row, across both collections (key-aware lookups)
       ptyPending: {},         // project -> true while a pty launch awaits its first row (#779)
       externalSessions: {},
-      trackedSessions: {},  // instance id (project) -> live working sessions under its bridge (#570)
-      bridgeSessOpen: {},   // instance id -> true while its multi-session list is expanded (#570)
+      trackedSessions: {},  // instance_id -> live working sessions under THAT bridge (#570, #1020)
+      bridgeSessOpen: {},   // row key (rk) -> true while its multi-session list is expanded (#570)
       externalOpen: {},   // project name -> true while its external-session detail is expanded
       adoptableProjects: [],  // names whose external session is a standard bridge we can adopt (#330)
       // --- in-app config editor (FE-3, Tier-A allowlist) ---
@@ -161,6 +169,28 @@
         error: "", saved: false, trigger: null, gen: 0,
       },
       configQuery: "",
+      // --- Advanced (Tier-B) config: clone.*/webhooks.* scalars behind the config_write ---
+      // --- capability + a step-up re-auth (#978). Distinct from configEditor's Tier-A ---
+      // --- allowlist; a separate PUT /api/config/advanced with its own unlock + hash. ---
+      // `supported` gates the whole affordance (config-write off => the surface 404s, so
+      // don't even show the unlock). `unlocked` flips true once POST /api/reauth succeeds;
+      // a later 403 reauth_required (window lapsed) re-locks and re-prompts.
+      configAdvanced: {
+        supported: {{ config_write_enabled | tojson }},
+        // Step-up needs a PASSWORD to prove. auth.enabled can be true with none configured
+        // (reverse-proxy / API-token-only auth), where /api/reauth can never succeed — so
+        // gate the unlock form on whether a password hash is actually set (#978 review),
+        // and show a "needs a password" note otherwise.
+        passwordSet: {{ auth_password_set | tojson }},
+        unlocked: false, loading: false, saving: false, gen: 0,
+        reauthPassword: "", reauthing: false, reauthError: "",
+        error: "", saved: false,
+        fields: {}, specs: {}, edits: {}, editable: [], hash: null,
+        // Slice 4: list fields edit as {id, value} rows (stable ids so x-for keys on
+        // identity, never array index — else an add/remove steals input focus); `rowSeq`
+        // mints those ids. Map fields (webhooks.events) edit as {key, on, default} rows.
+        rowSeq: 0,
+      },
       // --- Claude Code config management (#773) — the first UI over the gated ---
       // --- /api/config-write/* surfaces. Distinct from configEditor above, which ---
       // --- edits clauster.yml; this manages the host's Claude Code config. ---
@@ -182,8 +212,33 @@
           mode: "rows", envRows: [], envError: "", envSeq: 0,
         },
         // JSON surfaces sharing _loadJsonSurface/_saveJsonSurface (#773 slice B).
-        permissions: { text: "", orig: "", hash: null },
-        hooks: { text: "", orig: "", hash: null },
+        // Permissions (#958 Part 5): a friendly rows editor over allow/deny/ask +
+        // defaultMode, layered on the raw JSON like #765's env rows. In rows mode the
+        // buckets + defaultMode are the source of truth for the WHOLE permissions
+        // object (it has no other keys); a shape the rows can't show (unknown key,
+        // non-string rule, unlisted mode) falls back to raw. `rowSeq` mints stable
+        // per-row ids so x-for keys on identity, not array index.
+        permissions: {
+          text: "", orig: "", hash: null,
+          mode: "rows",
+          buckets: [
+            { key: "allow", label: "Allow", rows: [] },
+            { key: "deny", label: "Deny", rows: [] },
+            { key: "ask", label: "Ask", rows: [] },
+          ],
+          defaultMode: "", rowsError: "", rowSeq: 0,
+        },
+        // Hooks (#958 Part 5): a flat rows editor over the nested
+        // `event → [{matcher?, hooks:[{type:"command", command, timeout?}]}]` shape.
+        // Each row is one command hook (event, matcher, command, timeout); on save the
+        // rows regroup by (event, matcher). Commands are opaque, never-run text — stored
+        // verbatim (validate-never-execute). A shape the flat rows can't represent (a
+        // non-command hook type, an unknown key, a bad type) falls back to raw JSON.
+        hooks: {
+          text: "", orig: "", hash: null,
+          mode: "rows",
+          rows: [], rowsError: "", rowSeq: 0,
+        },
         // Subagents (#773 slice C): a list surface (list + per-agent markdown editor),
         // user/project only, with read-only built-ins/plugins.
         subagents: {
@@ -203,7 +258,7 @@
           name: "", entryText: "", orig: "",
           confirm: "", busy: false, ops: 0, deletingName: "",
           approvals: {
-            enabled: [], disabled: [], orig: "", loading: false,
+            enabled: [], disabled: [], locked: [], orig: "", loading: false, ready: false,
             confirm: "", busy: false, ops: 0, resetConfirm: "", resetBusy: false,
           },
         },
@@ -303,9 +358,6 @@
       // project name -> operator-typed custom bridge/session display name (#780,
       // standard/Server Mode only — blank keeps the project-name default).
       customName: {},
-      // project name -> per-launch sandbox toggle (#780, standard/Server Mode only):
-      // "default" (send nothing) | "on" (--sandbox) | "off" (--no-sandbox).
-      sandboxMode: {},
       // Resume picker (#303, pty/Interactive Session only): project name -> the picked
       // past-conversation uuid ("" = fresh conversation; reset on every popover open
       // and after each launch so a stale pick can never silently fork a later spawn),
@@ -379,6 +431,30 @@
       focusModalClose(el) {
         this.$nextTick(() => { const b = el.querySelector(".btn-close"); if (b) b.focus(); });
       },
+      // #1031: bring action-revealed feedback into view. The config panels render
+      // delete confirms at the panel foot and the Advanced save/error banners above
+      // a bottom Save button, so the acting control and its feedback can sit on
+      // opposite sides of the fold — the action looks dead until the user scrolls.
+      // querySelector, not $refs: modal content sits under modal_shell's nested
+      // x-data scope (#1030), so refs registered there never reach dashboard().
+      revealFeedback(selector, focusInput = false) {
+        // Alpine applies the x-show display flip AFTER $nextTick callbacks run
+        // (verified empirically: the confirm box still computes display:none at
+        // tick time, so a bare focus() silently no-ops). Retry across a few
+        // animation frames until the element is actually laid out.
+        const attempt = (tries) => {
+          const el = document.querySelector(selector);
+          if (!el || !el.offsetParent) {  // absent or not yet visible (x-show pending)
+            if (tries > 0) requestAnimationFrame(() => attempt(tries - 1));
+            return;
+          }
+          el.scrollIntoView({ behavior: "smooth", block: "center" });
+          if (!focusInput) return;
+          const inp = el.matches("input, textarea") ? el : el.querySelector("input, textarea");
+          if (inp) inp.focus({ preventScroll: true });
+        };
+        this.$nextTick(() => attempt(5));
+      },
       // Toggle the readiness panel open/closed. Replaces:
       //   @click="readiness.showPanel = !readiness.showPanel"
       toggleReadinessPanel() { this.readiness.showPanel = !this.readiness.showPanel; },
@@ -388,6 +464,13 @@
       // Close the readiness panel. Replaces:
       //   @click="readiness.showPanel = false"
       closeReadinessPanel() { this.readiness.showPanel = false; },
+      // #1033: an un-registered Background launch with no prompt parks at "send a
+      // prompt to start" forever (the bg card has no composer), so the Run button
+      // blocks it. With `lcloud` the session is conversational from claude.ai and
+      // a blank first prompt is legitimate. Server mirrors this as a 422.
+      bgPromptMissing(lmode, lcloud, lprompt) {
+        return lmode === "detached" && !lcloud && !(lprompt || "").trim();
+      },
       // Clear both np.error and np.warn (name / type-radio inputs). Replaces:
       //   @input="np.error = null; np.warn = null"
       clearNpErrors() { this.np.error = null; this.np.warn = null; },
@@ -423,7 +506,6 @@
           this.permMode[n] = DEFAULT_PERMISSION_MODE;
           this.resumeMode[n] = DEFAULT_RESUME_MODE;
           this.customName[n] = "";
-          this.sandboxMode[n] = "default";
         }
         this.trustState = { ...INITIAL_TRUST };
         await this.refresh();
@@ -904,6 +986,11 @@
       configFieldDisabled(path) {
         const spec = this.configEditor.specs[path];
         if (!spec) return false;
+        // #1016: an optional-dep switch whose dependency is missing can't be turned ON (the
+        // feature would silently not work). It stays togglable OFF, so an existing
+        // on-but-dep-missing config isn't trapped — configFieldHint() annotates it either way.
+        const depStatus = spec.dep_status;
+        if (depStatus && !depStatus.available && !this.configEditor.edits[path]) return true;
         // #664: the browser-notifications channel can't deliver in an insecure context or an
         // unsupported browser — facts the server config can't change. Disable the toggle so we
         // never silently offer a no-op. (A mere "denied" permission is left enabled: the user
@@ -971,6 +1058,10 @@
           const caveat = this.notifyClientCaveat();
           if (caveat) return caveat;
         }
+        // #1016: surface the "Requires <dep>" hint whenever the optional dependency is missing —
+        // even if the switch is currently on (a misconfig worth showing), not just when disabled.
+        const spec = this.configEditor.specs[path];
+        if (spec && spec.dep_status && !spec.dep_status.available) return spec.dep_status.hint;
         return this.configFieldDisabled(path) ? this.configDependHint(path) : "";
       },
       scrollToSection(section) {
@@ -1046,6 +1137,21 @@
           c.edits = { ...c.fields };  // seed the form from current values
         } catch (e) { c.error = "Failed to load configuration."; }
         finally { c.loading = false; }
+        // Advanced (Tier-B) init (#978): re-lock the UI, then try a step-up-gated load.
+        // A live elevation cookie (within the 10-min window) reloads straight into the
+        // unlocked view; otherwise the panel shows the unlock prompt. Fire-and-forget so
+        // it never blocks the Tier-A editor from opening.
+        const a = this.configAdvanced;
+        a.gen = (a.gen || 0) + 1;  // bump so a stale in-flight advanced load/save is dropped on reopen
+        a.unlocked = false; a.error = ""; a.saved = false; a.reauthError = ""; a.reauthPassword = "";
+        // Clear the busy flags too: a request stranded by the gen guard leaves its own
+        // reauthing/saving/loading set (its finally is gen-guarded), so the reopened modal
+        // must reset them here or its Unlock/Save button stays disabled until a reload.
+        a.reauthing = false; a.saving = false; a.loading = false;
+        a.fields = {}; a.specs = {}; a.edits = {}; a.editable = []; a.hash = null;
+        // Only probe when a step-up can actually succeed: with no password configured the
+        // endpoint would 403 forever — the panel shows a "needs a password" note instead.
+        if (a.supported && a.passwordSet) this.advancedLoad();
       },
       async saveConfig() {
         const c = this.configEditor;
@@ -1160,6 +1266,216 @@
           "warning",
         );
       },
+      // --- Advanced (Tier-B) config panel (#978) -----------------------------
+      // GET the Tier-B values behind the config_write capability + step-up gate. A 403 keeps
+      // the panel locked (needs a fresh password proof); a 404 means config-write was turned
+      // off. Shared by the modal-open init and the post-unlock reload.
+      async advancedLoad() {
+        const a = this.configAdvanced;
+        const myGen = a.gen;  // a modal close+reopen bumps gen and voids this in-flight load
+        a.loading = true; a.error = "";
+        try {
+          const res = await fetch(ROOT + "/api/config/advanced");
+          if (a.gen !== myGen) return false;  // stale: a newer open owns the state now
+          if (this._authExpired(res)) return false;
+          if (res.status === 403) { a.unlocked = false; return false; }  // step-up required
+          if (res.status === 404) { a.supported = false; return false; }  // config-write off
+          if (!res.ok) { a.error = "Failed to load advanced settings."; return false; }
+          const d = await res.json();
+          a.fields = d.fields || {}; a.specs = d.specs || {};
+          a.editable = d.editable || []; a.hash = d.hash;
+          this._advancedSeedEdits();  // seed the form (scalars direct; list/map into row structs)
+          a.unlocked = true;
+          return true;
+        } catch (e) { a.error = "Failed to load advanced settings."; return false; }
+        finally { if (a.gen === myGen) a.loading = false; }
+      },
+      // Step up: re-prove the operator password for a short unlock window, then load.
+      async advancedUnlock() {
+        const a = this.configAdvanced;
+        if (a.reauthing) return;  // single-flight (the button is also :disabled while in flight)
+        const myGen = a.gen;  // a close+reopen voids this reauth's response (stale-modal guard)
+        a.reauthing = true; a.reauthError = "";
+        try {
+          const res = await fetch(ROOT + "/api/reauth", {
+            method: "POST", headers: JSON_HEADERS,
+            body: JSON.stringify({ password: a.reauthPassword }),
+          });
+          if (a.gen !== myGen) return;  // modal was closed+reopened mid-reauth — drop this response
+          if (res.ok) { a.reauthPassword = ""; await this.advancedLoad(); return; }
+          if (res.status === 429) { a.reauthError = "Too many attempts — wait a moment and retry."; return; }
+          if (res.status === 401) {
+            // reauth's own 401 means a bad password; the guard's 401 (a dead SESSION, detail
+            // "authentication required") should bounce to /login rather than read as a typo.
+            const d = await res.json().catch(() => ({}));
+            if (d.detail === "authentication required") { window.location.assign(ROOT + "/login"); return; }
+            a.reauthError = "Incorrect password."; return;
+          }
+          a.reauthError = "Could not verify — try again.";
+        } catch (e) { a.reauthError = "Could not verify — try again."; }
+        finally { if (a.gen === myGen) a.reauthing = false; }
+      },
+      // Group the Tier-B editable paths by section (order-preserving) for the render.
+      advancedGroups() {
+        const a = this.configAdvanced;
+        const groups = [], byKey = {};
+        for (const p of a.editable) {
+          const spec = a.specs[p] || {};
+          const sec = spec.section || "";
+          if (!byKey[sec]) { byKey[sec] = { section: sec, label: spec.section_label || sec, paths: [] }; groups.push(byKey[sec]); }
+          byKey[sec].paths.push(p);
+        }
+        return groups;
+      },
+      // Seed the edit model from the current baseline (a.fields). Scalars copy directly;
+      // a `list` field becomes {id, value} rows and a `map` field becomes {key, on, default}
+      // rows — deep structures, NOT aliases of a.fields, so editing never mutates the baseline.
+      _advancedSeedEdits() {
+        const a = this.configAdvanced;
+        const edits = {};
+        for (const p of a.editable) {
+          const spec = a.specs[p] || {};
+          const val = a.fields[p];
+          if (spec.type === "list") {
+            const items = Array.isArray(val) ? val : [];
+            edits[p] = items.map((v) => ({ id: a.rowSeq++, value: String(v) }));
+          } else if (spec.type === "map") {
+            const seed = (val && typeof val === "object") ? val : {};
+            edits[p] = (spec.map_keys || []).map((mk) => ({
+              key: mk.key, default: mk.default,
+              on: (mk.key in seed) ? !!seed[mk.key] : mk.default,
+            }));
+          } else {
+            edits[p] = val;
+          }
+        }
+        a.edits = edits;
+      },
+      // The value to SEND for a path, derived from the edit model. list -> array of trimmed
+      // non-empty strings; map -> a MINIMAL dict (only keys whose value differs from the
+      // per-key default, so an all-default map serializes to {} and never materializes all 7).
+      advancedCurrent(p) {
+        const a = this.configAdvanced;
+        const spec = a.specs[p] || {};
+        if (spec.type === "list") {
+          return (a.edits[p] || []).map((r) => (r.value || "").trim()).filter((v) => v !== "");
+        }
+        if (spec.type === "map") {
+          const out = {};
+          for (const r of (a.edits[p] || [])) { if (r.on !== r.default) out[r.key] = r.on; }
+          return out;
+        }
+        return a.edits[p];
+      },
+      // The baseline (a.fields[p]) normalised through the SAME rules, so a dirty compare is
+      // apples-to-apples (a list keeps order; a map is reduced to its minimal non-default form).
+      advancedBaseline(p) {
+        const a = this.configAdvanced;
+        const spec = a.specs[p] || {};
+        const val = a.fields[p];
+        // Normalise the baseline the SAME way advancedCurrent() serialises (trim + drop blanks),
+        // so a stored value like " https " or "" doesn't read as dirty the instant the panel opens
+        // (which would then silently trim/drop it on the next save — fail-closed violation, #982).
+        if (spec.type === "list") {
+          return (Array.isArray(val) ? val : []).map((v) => String(v).trim()).filter((v) => v !== "");
+        }
+        if (spec.type === "map") {
+          const seed = (val && typeof val === "object") ? val : {};
+          const out = {};
+          for (const mk of (spec.map_keys || [])) {
+            const on = (mk.key in seed) ? !!seed[mk.key] : mk.default;
+            if (on !== mk.default) out[mk.key] = on;
+          }
+          return out;
+        }
+        return val;
+      },
+      // Order-stable stringify (object keys sorted) so a map dirty-compare ignores key order.
+      _advCanon(v) {
+        if (Array.isArray(v)) return "[" + v.map((x) => this._advCanon(x)).join(",") + "]";
+        if (v && typeof v === "object") {
+          return "{" + Object.keys(v).sort().map(
+            (k) => JSON.stringify(k) + ":" + this._advCanon(v[k])).join(",") + "}";
+        }
+        return JSON.stringify(v);
+      },
+      advancedFieldDirty(p) {
+        const a = this.configAdvanced;
+        const t = (a.specs[p] || {}).type;
+        if (t === "list" || t === "map") {
+          return this._advCanon(this.advancedCurrent(p)) !== this._advCanon(this.advancedBaseline(p));
+        }
+        return a.edits[p] !== a.fields[p];
+      },
+      advancedListAdd(p) {
+        const a = this.configAdvanced;
+        if (!Array.isArray(a.edits[p])) a.edits[p] = [];  // seed first so push hits the reactive array
+        a.edits[p].push({ id: a.rowSeq++, value: "" });
+      },
+      advancedListRemove(p, id) {
+        const rows = this.configAdvanced.edits[p] || [];
+        const i = rows.findIndex((r) => r.id === id);
+        if (i >= 0) rows.splice(i, 1);
+      },
+      advancedDirty() {
+        const a = this.configAdvanced;
+        return a.editable.some((p) => this.advancedFieldDirty(p));
+      },
+      // Persist changed Tier-B fields via PUT /api/config/advanced. A 403 mid-edit means the
+      // unlock window lapsed — re-lock and re-prompt rather than silently failing.
+      async advancedSave() {
+        const a = this.configAdvanced;
+        if (a.saving) return;
+        const myGen = a.gen;  // capture: a modal close+reopen voids this save's response
+        const edits = {};
+        for (const p of a.editable) {
+          const t = (a.specs[p] || {}).type;
+          if (t === "list" || t === "map") {
+            if (this.advancedFieldDirty(p)) edits[p] = this.advancedCurrent(p);  // send full value
+            continue;
+          }
+          const v = a.edits[p];
+          if ((t === "int" || t === "float") && (v === "" || v === null)) continue;  // blanked -> no change
+          if (v !== a.fields[p]) edits[p] = v;
+        }
+        if (Object.keys(edits).length === 0) {
+          a.error = "No changes to save."; a.saved = false;
+          this.revealFeedback('[data-test="adv-error"]');
+          return;
+        }
+        a.saving = true; a.error = ""; a.saved = false;
+        try {
+          const res = await fetch(ROOT + "/api/config/advanced", {
+            method: "PUT", headers: JSON_HEADERS,
+            body: JSON.stringify({ edits, hash: a.hash }),
+          });
+          if (a.gen !== myGen) return;  // closed+reopened mid-save — drop this stale response
+          if (this._authExpired(res)) return;
+          if (res.ok) {
+            const d = await res.json();
+            a.hash = d.hash; a.saved = true;
+            a.fields = { ...a.fields, ...edits };  // advance the baseline by the fields actually sent
+            this._advancedSeedEdits();  // re-seed (list/map need fresh row structs, not an alias)
+          } else if (res.status === 403) {
+            a.unlocked = false; a.reauthError = "Session expired — re-enter your password.";
+          } else if (res.status === 409) {
+            a.error = "The config file changed on disk — close and reopen to reload.";
+          } else {
+            const d = await res.json().catch(() => ({}));
+            a.error = d.detail || ("Save failed (" + res.status + ").");
+          }
+        } catch (e) { a.error = "Save failed."; }
+        finally {
+          if (a.gen === myGen) {
+            a.saving = false;
+            // The banners render ABOVE the fold while Save sits at the panel foot —
+            // bring whichever one this save produced into view (#1031).
+            if (a.error || a.saved) {
+              this.revealFeedback(a.error ? '[data-test="adv-error"]' : '[data-test="adv-saved"]');
+            }
+          }
+        }
+      },
       // --- Claude Code config management (#773) ------------------------------
       // Open/close mirror the configEditor modal: remember the opener for focus
       // restore, lock background scroll, bump `gen` so a stale save is dropped.
@@ -1245,13 +1561,24 @@
       configMgmtSetSurface(key) {
         const c = this.configMgmt;
         if (c.surface === key) return;  // clicking the active tab must not wipe edits
-        c.surface = key; c.error = ""; c.saved = false;
-        c.subagents.editing = false; c.subagents.deletingName = "";  // leave any list-editor
-        c.mcp.editing = false; c.mcp.deletingName = "";
-        c.skills.editing = false; c.skills.deletingName = "";
+        // Clear EVERY per-write confirm-token on a surface switch: each is a
+        // scope-specific type-the-name token, so one typed on one surface must not linger
+        // (and appear pre-satisfied) after a tab switch — the shared footer token
+        // (#958 P3) plus each list-editor's own token, the MCP-approvals save/reset
+        // tokens, and the plugins action/install tokens. Those nested tokens are
+        // otherwise only reset by their loaders, which run AFTER an `await fetch`;
+        // clearing them here closes that window so an armed action (esp. the approvals
+        // *reset* and the plugins actions, whose gates check neither loading flag) can
+        // never carry across a switch.
+        c.surface = key; c.error = ""; c.saved = false; c.confirm = "";
+        c.subagents.editing = false; c.subagents.deletingName = ""; c.subagents.confirm = "";
+        c.mcp.editing = false; c.mcp.deletingName = ""; c.mcp.confirm = "";
+        c.mcp.approvals.confirm = ""; c.mcp.approvals.resetConfirm = "";
+        c.skills.editing = false; c.skills.deletingName = ""; c.skills.confirm = "";
+        c.plugins.confirm = ""; c.plugins.installConfirm = "";
         // Some surfaces have no local scope; drop out of local before loading one.
         if (c.scope === "local" && this.configMgmtNoLocalSurfaces.includes(key)) {
-          c.scope = "project"; c.confirm = "";
+          c.scope = "project";
         }
         this.configMgmtReload();
       },
@@ -1298,11 +1625,13 @@
       _reloadSurface(surface, myGen) {
         if (surface === "claude-md") return this._loadClaudeMd(myGen);
         if (surface === "settings") return this._loadSettings(myGen);
+        if (surface === "permissions") return this._loadPermissions(myGen);
+        if (surface === "hooks") return this._loadHooks(myGen);
         if (surface === "subagents") return this._loadSubagents(myGen);
         if (surface === "mcp") return this._loadMcp(myGen);
         if (surface === "skills") return this._loadSkills(myGen);
         if (surface === "plugins") return this._loadPlugins(myGen);
-        return this._loadJsonSurface(surface, myGen);  // permissions | hooks
+        return this._loadJsonSurface(surface, myGen);  // defensive default (all surfaces routed above)
       },
       // Shared JSON-surface loader: GET /api/config-write/<surface> and pretty-print
       // the (server-redacted) object into that surface's editor. settings/permissions/
@@ -1523,6 +1852,332 @@
         return "Duplicate key" + (dupes.size > 1 ? "s" : "") + " — rename or remove to save: " +
           [...dupes].join(", ");
       },
+      // --- #958 Part 5: friendly permissions rows over allow/deny/ask + defaultMode --
+      // The permissions object has ONLY these keys, so the rows are the source of truth
+      // for the WHOLE object (no non-row keys to preserve, unlike settings' env). Rules
+      // are opaque, never-secret strings (no mask round-trip). Anything the rows can't
+      // represent falls back to raw, so nothing is ever hidden or silently dropped.
+      async _loadPermissions(myGen) {
+        const c = this.configMgmt;
+        await this._loadJsonSurface("permissions", myGen);
+        if (c.gen !== myGen) return;  // superseded — skip the row rebuild
+        // Rebuild the rows from the freshly loaded JSON; an unrepresentable shape
+        // (unknown key, non-string rule, unlisted mode) drops to raw rather than
+        // silently showing an empty/partial editor.
+        if (!c.error && !this._permissionsRowsFromText()) c.permissions.mode = "raw";
+      },
+      // The recognized defaultMode options = the canonical labels minus the footgun-
+      // gated bypassPermissions (mirrors the backend's RECOGNIZED_MODES) — never a
+      // hand-listed copy. {value, label} so the <select> renders friendly text.
+      configMgmtPermissionModeOptions() {
+        return Object.keys(PERMISSION_LABELS)
+          .filter((m) => m !== "bypassPermissions")
+          .map((m) => ({ value: m, label: (PERMISSION_LABELS[m] && PERMISSION_LABELS[m].long) || m }));
+      },
+      // Canonicalize a permissions-shaped object into the saved JSON: non-empty rules
+      // per bucket kept VERBATIM (opaque data — never trimmed/rewritten), buckets dropped
+      // when empty, defaultMode only when set. Both rows-dirty sides run through this so a
+      // freshly loaded doc never reads dirty.
+      _permissionsCanonicalize(obj) {
+        const out = {};
+        for (const key of ["allow", "deny", "ask"]) {
+          const src = obj[key];
+          if (!Array.isArray(src)) continue;
+          const vals = [];
+          for (const r of src) {
+            // Rules are OPAQUE data the backend stores verbatim — never trim/rewrite
+            // them (that could silently change the matched policy). Drop only a truly
+            // empty "" row (an untouched blank the user added / cleared); a whitespace
+            // rule is a real, non-empty rule the backend accepts, so it's preserved.
+            const v = typeof r === "string" ? r : "";
+            if (v !== "") vals.push(v);
+          }
+          if (vals.length) out[key] = vals;
+        }
+        if (typeof obj.defaultMode === "string" && obj.defaultMode) out.defaultMode = obj.defaultMode;
+        return JSON.stringify(out, null, 2);
+      },
+      // Serialize the current buckets + defaultMode into the saved permissions JSON.
+      // Pure (no state mutation) so it's safe to call from configMgmtDirty every render.
+      _permissionsSerialized() {
+        const p = this.configMgmt.permissions;
+        const obj = {};
+        for (const b of p.buckets) obj[b.key] = b.rows.map((r) => r.value);
+        obj.defaultMode = p.defaultMode;
+        return this._permissionsCanonicalize(obj);
+      },
+      // Normalize a permissions JSON string through the SAME canonicalization the rows
+      // apply, so an on-disk empty bucket / unset mode doesn't read as a phantom change.
+      // Falls back to the input verbatim for a non-object / unparseable text.
+      _permissionsNormalize(text) {
+        let obj;
+        try { obj = JSON.parse(text || "{}"); } catch (e) { return text; }
+        if (obj === null || typeof obj !== "object" || Array.isArray(obj)) return text;
+        return this._permissionsCanonicalize(obj);
+      },
+      // Rebuild the buckets + defaultMode from permissions.text. Returns false (and sets
+      // rowsError) for any shape the rows can't represent without lying — the caller then
+      // stays in raw. Never coerces: an unknown key, a non-string rule, or a defaultMode
+      // the editor doesn't offer (incl. the footgun bypassPermissions) sends you to raw.
+      _permissionsRowsFromText() {
+        const p = this.configMgmt.permissions;
+        let obj;
+        try { obj = JSON.parse(p.text || "{}"); }
+        catch (e) { p.rowsError = "Fix the JSON in Raw view before using rows."; return false; }
+        if (obj === null || typeof obj !== "object" || Array.isArray(obj)) {
+          p.rowsError = "permissions must be a JSON object to use rows."; return false;
+        }
+        const known = new Set(["allow", "deny", "ask", "defaultMode"]);
+        const unknown = Object.keys(obj).filter((k) => !known.has(k));
+        if (unknown.length) {
+          p.rowsError = "permissions has keys the rows can't show (" + unknown.join(", ") +
+            ") — edit in Raw JSON."; return false;
+        }
+        const buckets = [];
+        for (const [key, label] of [["allow", "Allow"], ["deny", "Deny"], ["ask", "Ask"]]) {
+          const src = obj[key];
+          const rows = [];
+          if (src !== undefined) {
+            if (!Array.isArray(src)) {
+              p.rowsError = key + " must be a list of rule strings — edit in Raw JSON."; return false;
+            }
+            for (const v of src) {
+              if (typeof v !== "string") {
+                p.rowsError = key + " has a non-text rule — edit in Raw JSON."; return false;
+              }
+              rows.push({ id: ++p.rowSeq, value: v });
+            }
+          }
+          buckets.push({ key, label, rows });
+        }
+        let dm = "";
+        if (obj.defaultMode !== undefined) {
+          const ok = typeof obj.defaultMode === "string" &&
+            this.configMgmtPermissionModeOptions().some((o) => o.value === obj.defaultMode);
+          if (!ok) {
+            p.rowsError = "defaultMode isn't one the rows offer — edit in Raw JSON."; return false;
+          }
+          dm = obj.defaultMode;
+        }
+        p.buckets = buckets; p.defaultMode = dm; p.rowsError = ""; return true;
+      },
+      configMgmtPermissionsMode(mode) {
+        const p = this.configMgmt.permissions;
+        if (p.mode === mode) return;
+        if (mode === "raw") {
+          // Materialize the rows into raw. Keep the loaded text VERBATIM when the rows
+          // carry no semantic change (the stored doc may not be canonical — key order,
+          // an empty bucket, whitespace), so a no-edit Rows→Raw toggle doesn't read as
+          // unsaved under raw's literal dirty-check; otherwise show the canonical edits.
+          const ser = this._permissionsSerialized();
+          p.text = ser === this._permissionsNormalize(p.orig) ? p.orig : ser;
+          p.mode = "raw"; p.rowsError = ""; return;
+        }
+        // Entering rows: rebuild from the (possibly raw-edited) text; an unrepresentable
+        // shape can't be shown as rows, so stay in raw with the hint.
+        if (this._permissionsRowsFromText()) p.mode = "rows";
+      },
+      _permBucket(key) {
+        return this.configMgmt.permissions.buckets.find((b) => b.key === key);
+      },
+      configMgmtAddPermRow(key) {
+        const p = this.configMgmt.permissions;
+        const b = this._permBucket(key);
+        if (!b) return;
+        b.rows.push({ id: ++p.rowSeq, value: "" });
+        // A blank row is dropped on serialize, so it can't dirty the doc until typed.
+        // Move focus to the new field for keyboard flow.
+        this.$nextTick(() => {
+          const inputs = document.querySelectorAll('[data-test="cm-perm-rule-' + key + '"]');
+          const last = inputs[inputs.length - 1];
+          if (last && last.focus) last.focus();
+        });
+      },
+      configMgmtRemovePermRow(key, idx) {
+        const b = this._permBucket(key);
+        if (b) b.rows.splice(idx, 1);
+      },
+      // --- #958 Part 5: flat hooks rows over the nested event→matcher→command shape ---
+      // A row is one command hook (event, matcher, command, timeout). On save the rows
+      // regroup by (event, matcher) into `{matcher?, hooks:[…]}` groups — so two rows
+      // sharing an (event, matcher) become one group with two commands (the canonical
+      // form). Commands are OPAQUE, never-run text stored verbatim. Any shape the flat
+      // rows can't faithfully represent falls back to raw.
+      async _loadHooks(myGen) {
+        const c = this.configMgmt;
+        await this._loadJsonSurface("hooks", myGen);
+        if (c.gen !== myGen) return;  // superseded — skip the row rebuild
+        if (!c.error && !this._hooksRowsFromText()) c.hooks.mode = "raw";
+      },
+      // Flatten a hooks object to [{event, matcher, command, timeout}] rows, or return
+      // null if ANY part isn't representable as flat command-hook rows (unknown event,
+      // non-list groups, unknown group/entry keys, a non-"command" hook type, an empty
+      // command, or a non-integer timeout). Never coerces — an odd shape goes to raw.
+      _flattenHooks(obj) {
+        if (obj === null || typeof obj !== "object" || Array.isArray(obj)) return null;
+        const events = new Set(HOOK_EVENTS);
+        const rows = [];
+        for (const event of Object.keys(obj)) {
+          if (!events.has(event)) return null;
+          const groups = obj[event];
+          if (!Array.isArray(groups)) return null;
+          // Two groups sharing a matcher would MERGE into one on re-serialize (rows
+          // regroup by (event, matcher)), which can reorder firing across an intervening
+          // different-matcher group — a semantic change. Fall back to raw instead of
+          // silently rewriting: a doc that can't round-trip losslessly isn't rows-shaped.
+          const seenMatchers = new Set();
+          for (const g of groups) {
+            if (g === null || typeof g !== "object" || Array.isArray(g)) return null;
+            for (const k of Object.keys(g)) { if (k !== "matcher" && k !== "hooks") return null; }
+            let matcher = "";
+            if (g.matcher !== undefined) {
+              if (typeof g.matcher !== "string") return null;
+              matcher = g.matcher;
+            }
+            if (seenMatchers.has(matcher)) return null;  // duplicate group → raw
+            seenMatchers.add(matcher);
+            const hooks = g.hooks;
+            if (!Array.isArray(hooks) || !hooks.length) return null;
+            for (const hk of hooks) {
+              if (hk === null || typeof hk !== "object" || Array.isArray(hk)) return null;
+              for (const k of Object.keys(hk)) {
+                if (k !== "type" && k !== "command" && k !== "timeout") return null;
+              }
+              if (hk.type !== "command") return null;
+              if (typeof hk.command !== "string" || !hk.command) return null;
+              // Mirror the backend's #770 plugin-owned guard: a command referencing the
+              // plugin-root interpolation is plugin-owned (this surface can't write it —
+              // the backend 422s the whole write). Keep it in raw where it's visible,
+              // never as an invisible editable row that poisons every save.
+              if (hk.command.indexOf("CLAUDE_PLUGIN_ROOT") !== -1) return null;
+              let timeout = "";
+              if (hk.timeout !== undefined) {
+                // The rows editor treats timeout as a whole number ≥ 0; the backend is
+                // laxer (any int), so a negative timeout is representable on disk but not
+                // in rows. Fall back to raw rather than opening it as an unsavable row.
+                if (typeof hk.timeout !== "number" || !Number.isInteger(hk.timeout) || hk.timeout < 0) {
+                  return null;
+                }
+                timeout = String(hk.timeout);
+              }
+              rows.push({ event, matcher, command: hk.command, timeout });
+            }
+          }
+        }
+        return rows;
+      },
+      // Rebuild the hook rows from hooks.text. Returns false (+ rowsError) for a shape
+      // the flat rows can't represent, so the caller stays in raw.
+      _hooksRowsFromText() {
+        const h = this.configMgmt.hooks;
+        let obj;
+        try { obj = JSON.parse(h.text || "{}"); }
+        catch (e) { h.rowsError = "Fix the JSON in Raw view before using rows."; return false; }
+        const flat = this._flattenHooks(obj);
+        if (flat === null) {
+          h.rowsError = "These hooks can't be shown as rows (a non-command hook, an " +
+            "unknown key, or a bad type) — edit in Raw JSON.";
+          return false;
+        }
+        h.rows = flat.map((r) => ({
+          id: ++h.rowSeq, event: r.event, matcher: r.matcher, command: r.command, timeout: r.timeout,
+        }));
+        h.rowsError = "";
+        return true;
+      },
+      // Parse a row's timeout box to a non-negative integer, or null (unset/invalid).
+      _hookTimeoutInt(s) {
+        const t = (s === undefined || s === null ? "" : String(s)).trim();
+        if (t === "") return null;
+        const n = Number(t);
+        return Number.isInteger(n) && n >= 0 ? n : null;
+      },
+      // Group rows by event then matcher (first-seen order) into the hooks object JSON.
+      // Blank-command rows are dropped; commands + matchers are kept verbatim (opaque).
+      _serializeHookRows(rows) {
+        const out = {};
+        // event -> Map(matcher -> group). A Map (not a plain object) so a matcher named
+        // `__proto__`/`constructor`/`toString` — all backend-valid opaque strings — keys
+        // by value instead of hitting Object.prototype and corrupting the grouping.
+        const idx = {};
+        for (const r of rows) {
+          const command = r.command;
+          if (!command) continue;  // an untouched/cleared row isn't a hook
+          const event = r.event;
+          if (!event || !HOOK_EVENTS.includes(event)) continue;
+          const matcher = r.matcher || "";
+          if (!out[event]) { out[event] = []; idx[event] = new Map(); }
+          let group = idx[event].get(matcher);
+          if (!group) {
+            group = matcher ? { matcher: matcher, hooks: [] } : { hooks: [] };
+            idx[event].set(matcher, group);
+            out[event].push(group);
+          }
+          const hook = { type: "command", command: command };
+          const t = this._hookTimeoutInt(r.timeout);
+          if (t !== null) hook.timeout = t;
+          group.hooks.push(hook);
+        }
+        return JSON.stringify(out, null, 2);
+      },
+      _hooksSerialized() {
+        return this._serializeHookRows(this.configMgmt.hooks.rows);
+      },
+      // Normalize a hooks JSON string through the SAME flatten→regroup the rows apply, so
+      // a freshly loaded doc never reads dirty. Non-representable / unparseable text is
+      // returned verbatim (compared literally in raw mode).
+      _hooksNormalize(text) {
+        let obj;
+        try { obj = JSON.parse(text || "{}"); } catch (e) { return text; }
+        const flat = this._flattenHooks(obj);
+        if (flat === null) return text;
+        return this._serializeHookRows(flat);
+      },
+      configMgmtHooksMode(mode) {
+        const h = this.configMgmt.hooks;
+        if (h.mode === mode) return;
+        if (mode === "raw") {
+          // Keep the loaded text verbatim on a no-edit toggle (see the permissions
+          // editor for why), else show the canonical regrouped serialization.
+          const ser = this._hooksSerialized();
+          h.text = ser === this._hooksNormalize(h.orig) ? h.orig : ser;
+          h.mode = "raw"; h.rowsError = ""; return;
+        }
+        if (this._hooksRowsFromText()) h.mode = "rows";
+      },
+      configMgmtAddHookRow() {
+        const h = this.configMgmt.hooks;
+        h.rows.push({ id: ++h.rowSeq, event: HOOK_EVENTS[0] || "", matcher: "", command: "", timeout: "" });
+        this.$nextTick(() => {
+          const inputs = document.querySelectorAll('[data-test="cm-hook-command"]');
+          const last = inputs[inputs.length - 1];
+          if (last && last.focus) last.focus();
+        });
+      },
+      configMgmtRemoveHookRow(idx) {
+        this.configMgmt.hooks.rows.splice(idx, 1);
+      },
+      // The recognized lifecycle events for the row event <select> (server-injected,
+      // never a hand-listed copy). A method so the CSP-build x-for can iterate it.
+      configMgmtHookEvents() {
+        return HOOK_EVENTS;
+      },
+      // A non-empty timeout that isn't a whole number ≥ 0 would be silently dropped on
+      // save, so warn AND block Save (see configMgmtCanSave) until it's fixed. Only rows
+      // that would actually be written (a non-empty command) are checked.
+      configMgmtHooksRowsWarning() {
+        const rows = this.configMgmt.hooks.rows;
+        const bad = [];
+        for (let i = 0; i < rows.length; i++) {
+          const r = rows[i];
+          if (!r.command) continue;  // dropped on save anyway
+          const t = (r.timeout || "").trim();
+          if (t !== "" && this._hookTimeoutInt(t) === null) bad.push(i + 1);
+        }
+        if (!bad.length) return "";
+        return "Timeout must be a whole number ≥ 0 — fix row" +
+          (bad.length > 1 ? "s " : " ") + bad.join(", ");
+      },
       configMgmtDirty() {
         const c = this.configMgmt;
         if (c.surface === "claude-md") return c.claudeMd.content !== c.claudeMd.orig;
@@ -1536,7 +2191,24 @@
           const ser = this._settingsEnvSerialized();
           return ser !== null && ser !== this._settingsNormalize(c.settings.orig);
         }
-        const st = c[c.surface];  // settings(raw) | permissions | hooks — JSON surfaces
+        // Permissions ROWS mode: the buckets + defaultMode are the canonical source of
+        // truth, so compare their serialized form against the canonicalized original
+        // (the stored doc may not be canonical — key order, an empty `"deny": []`).
+        // RAW mode falls through to the literal text compare below (like settings/hooks),
+        // so clearing the box or editing any key — even one the rows can't show — reads
+        // as dirty. The no-edit Rows→Raw toggle is kept clean by preserving the original
+        // text verbatim on switch (see configMgmtPermissionsMode), not by canonicalizing
+        // here — canonicalizing raw would wrongly hide an edit to an unrepresentable key.
+        if (c.surface === "permissions" && c.permissions.mode === "rows") {
+          return this._permissionsSerialized() !== this._permissionsNormalize(c.permissions.orig);
+        }
+        // Hooks rows mode: the flat rows are the source of truth; compare their regrouped
+        // serialization against the canonicalized original. Raw mode falls through to the
+        // literal compare below.
+        if (c.surface === "hooks" && c.hooks.mode === "rows") {
+          return this._hooksSerialized() !== this._hooksNormalize(c.hooks.orig);
+        }
+        const st = c[c.surface];  // settings(raw) | permissions(raw) | hooks(raw) — literal dirty
         return st ? st.text !== st.orig : false;
       },
       configMgmtCanSave() {
@@ -1546,6 +2218,10 @@
         if (c.confirm !== this.configMgmtConfirmToken()) return false;  // type-the-name gate
         // Rows mode: block a save that would silently collapse duplicate env keys.
         if (c.surface === "settings" && c.settings.mode === "rows" && this.configMgmtEnvRowsWarning()) {
+          return false;
+        }
+        // Hooks rows mode: block a save that would silently drop an invalid timeout.
+        if (c.surface === "hooks" && c.hooks.mode === "rows" && this.configMgmtHooksRowsWarning()) {
           return false;
         }
         return this.configMgmtDirty();
@@ -1589,15 +2265,23 @@
       async _saveJsonSurface(surface, myGen) {
         const c = this.configMgmt;
         const st = c[surface];
-        // Settings in rows mode saves the rows' serialized form (the raw text is only
-        // materialized on a mode switch); every other JSON surface saves its textarea.
-        const raw = (surface === "settings" && c.settings.mode === "rows")
-          ? this._settingsEnvSerialized() : st.text;
+        // Settings/permissions in rows mode save the rows' serialized form (the raw
+        // text is only materialized on a mode switch); every other JSON surface (and
+        // raw mode) saves its textarea.
+        let raw;
+        if (surface === "settings" && c.settings.mode === "rows") raw = this._settingsEnvSerialized();
+        else if (surface === "permissions" && c.permissions.mode === "rows") raw = this._permissionsSerialized();
+        else if (surface === "hooks" && c.hooks.mode === "rows") raw = this._hooksSerialized();
+        else raw = st.text;
         // Fail closed: a null serialization means the base JSON is unusable — refuse to
         // write rather than send a body that would drop the non-env keys.
         if (raw === null) { c.error = "settings.json is not valid — switch to Raw JSON to fix it."; return; }
         let payload;
-        try { payload = JSON.parse(raw); }
+        // A blank/whitespace-only box means "clear this surface": treat it as the empty
+        // object rather than letting JSON.parse("") throw a spurious "must be valid JSON"
+        // (#958 P3). The object check below still applies to the resulting {}.
+        const trimmed = (raw || "").trim();
+        try { payload = JSON.parse(trimmed === "" ? "{}" : trimmed); }
         catch (e) { c.error = surface + " must be valid JSON."; return; }
         if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
           c.error = surface + " must be a JSON object."; return;
@@ -1640,7 +2324,38 @@
         c.gen = (c.gen || 0) + 1;  // supersede any in-flight configMgmtOpenAgent fetch
         c.error = ""; c.saved = false; s.deletingName = "";
         s.editing = true; s.isNew = true;
-        s.name = ""; s.content = ""; s.orig = ""; s.hash = null; s.confirm = "";
+        s.name = ""; s.content = AGENT_TEMPLATE; s.orig = ""; s.hash = null; s.confirm = "";
+      },
+      // #958 Part 5: the Name box is the single source of a subagent's name. The backend
+      // requires the frontmatter `name:` to equal the filename, so rather than making the
+      // operator type it twice and keep them in sync, inject/replace the top-level `name:`
+      // in the content's YAML frontmatter from the Name box at save time. Creates a
+      // frontmatter block if the doc has none. `name` is a validated identifier (lowercase
+      // letters, digits, hyphens), so it never needs YAML quoting. Only the top-level
+      // `name:` line is touched (the `m` flag anchors to line-start — nested keys are safe).
+      _syncAgentName(content, name) {
+        const nm = (name || "").trim();
+        if (!nm) return content;  // canSave blocks a blank name; nothing to inject
+        // Strip a leading BOM so frontmatter starting at byte 1 is recognized — the
+        // backend requires the opening `---` at the very start (\A), so a BOM'd file
+        // would otherwise fail to validate; stripping it makes it savable.
+        const text = (content || "").replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
+        // Match a frontmatter block anchored at the start (mirrors the backend's \A---).
+        const m = text.match(/^---[ \t]*\n([\s\S]*?)\n---[ \t]*(\n[\s\S]*|)$/);
+        if (!m) {
+          // No cleanly-delimited leading frontmatter. Do NOT restructure the doc — that
+          // could bury real (but malformed / leading-whitespace) frontmatter as body.
+          // Leave it for the backend to validate and explain (missing name/frontmatter).
+          return text;
+        }
+        let yaml = m[1];
+        const rest = m[2] || "";  // "" or "\n<body…>"
+        // Remove EVERY top-level `name:` line then prepend the single authoritative one:
+        // a YAML loader takes the LAST value on duplicate keys, so replacing only the
+        // first could leave a stale name that still mismatches the filename (422).
+        yaml = yaml.replace(/^name[ \t]*:.*(?:\n|$)/gm, "").replace(/\n+$/, "");
+        yaml = "name: " + nm + (yaml ? "\n" + yaml : "");
+        return "---\n" + yaml + "\n---" + rest;
       },
       async configMgmtOpenAgent(name) {
         const c = this.configMgmt, s = c.subagents;
@@ -1682,7 +2397,9 @@
         const gen = c.gen; s.ops += 1; s.busy = true; c.error = ""; c.saved = false;
         try {
           const body = Object.assign(this._configMgmtTarget(), {
-            content: s.content, confirm: s.confirm, hash: s.hash,
+            // The Name box is authoritative — sync it into the frontmatter so the operator
+            // never types the name twice (the backend requires the two to match).
+            content: this._syncAgentName(s.content, s.name), confirm: s.confirm, hash: s.hash,
           });
           const res = await fetch(ROOT + "/api/config-write/subagents/" + encodeURIComponent(s.name), {
             method: "PUT", headers: JSON_HEADERS, body: JSON.stringify(body),
@@ -1697,6 +2414,7 @@
         const c = this.configMgmt, s = c.subagents;
         c.gen = (c.gen || 0) + 1;  // supersede any in-flight configMgmtOpenAgent fetch
         c.error = ""; c.saved = false; s.deletingName = name; s.confirm = "";
+        this.revealFeedback('[data-test="cm-agent-delete-confirm"]', true);
       },
       configMgmtCancelDeleteAgent() {
         this.configMgmt.subagents.deletingName = ""; this.configMgmt.subagents.confirm = "";
@@ -1757,9 +2475,10 @@
           // scopes have none. Load them under the same gen so a switch drops both.
           if (c.scope === "project") await this._loadMcpApprovals(myGen);
           else {
-            m.approvals.enabled = []; m.approvals.disabled = [];
+            m.approvals.enabled = []; m.approvals.disabled = []; m.approvals.locked = [];
             m.approvals.orig = this._mcpApprovalsSig([], []);
             m.approvals.loading = false;  // non-project has no approvals fetch to gate
+            m.approvals.ready = true;     // nothing to load = resolved (panel is hidden anyway)
           }
         } catch (e) { if (c.gen === myGen) c.error = "Failed to load MCP servers."; }
       },
@@ -1827,6 +2546,7 @@
         const c = this.configMgmt, m = c.mcp;
         c.gen = (c.gen || 0) + 1;  // supersede any in-flight load
         c.error = ""; c.saved = false; m.deletingName = name; m.confirm = "";
+        this.revealFeedback('[data-test="cm-mcp-delete-confirm"]', true);
       },
       configMgmtCancelDeleteMcp() {
         const m = this.configMgmt.mcp;
@@ -1869,8 +2589,12 @@
         // than at its "" init. A stale "" would read as false-dirty ('[]|[]' !== '')
         // and let a Save PUT an empty enabled/disabled that clobbers real stored
         // choices to unset — a silent data-loss the "fail closed" rule forbids. On
-        // success both are overwritten below.
-        ap.enabled = []; ap.disabled = []; ap.orig = this._mcpApprovalsSig([], []);
+        // success both are overwritten below. `ready` stays false until BOTH the decisions
+        // AND the ownership (`locked`) metadata land, so a failed/partial load fails closed:
+        // the panel shows an unavailable notice instead of editable toggles whose empty state
+        // would hide the `settings` badge and let a save clobber real ~/.claude.json choices.
+        ap.enabled = []; ap.disabled = []; ap.locked = []; ap.orig = this._mcpApprovalsSig([], []);
+        ap.ready = false;
         // `loading` hides the toggles until the real state lands. A post-action reload
         // (save/delete/approvals-save/reset) calls _loadMcp directly WITHOUT c.loading,
         // so the surface stays visible; without this flag the panel would show the
@@ -1887,7 +2611,11 @@
           if (c.gen !== myGen) return;
           ap.enabled = Array.isArray(d.enabled) ? d.enabled.slice() : [];
           ap.disabled = Array.isArray(d.disabled) ? d.disabled.slice() : [];
+          // Servers whose effective decision is owned by a settings file: the ~/.claude.json
+          // write path can't change them, so the panel renders these rows read-only (#958 P2).
+          ap.locked = Array.isArray(d.locked) ? d.locked.slice() : [];
           ap.orig = this._mcpApprovalsSig(ap.enabled, ap.disabled);
+          ap.ready = true;  // decisions + ownership both landed: controls may go live
         } catch (e) { /* approvals are secondary — the baseline above keeps the panel non-dirty */ }
         finally { if (c.gen === myGen) ap.loading = false; }
       },
@@ -1897,8 +2625,14 @@
         if (ap.disabled.indexOf(name) !== -1) return "disabled";
         return "unset";
       },
+      configMgmtMcpApprovalLocked(name) {
+        // A settings file owns this server's decision, so the ~/.claude.json write path
+        // can't change it (settings wins on reload). The row is shown read-only (#958 P2).
+        return this.configMgmt.mcp.approvals.locked.indexOf(name) !== -1;
+      },
       configMgmtMcpSetApproval(name, state) {
         const ap = this.configMgmt.mcp.approvals;
+        if (this.configMgmtMcpApprovalLocked(name)) return;  // settings-owned: not ours to change
         ap.enabled = ap.enabled.filter(n => n !== name);
         ap.disabled = ap.disabled.filter(n => n !== name);
         if (state === "enabled") ap.enabled.push(name);
@@ -1911,7 +2645,7 @@
       },
       configMgmtCanSaveMcpApprovals() {
         const c = this.configMgmt, ap = c.mcp.approvals;
-        if (ap.busy || this.configMgmtNeedsProject()) return false;
+        if (ap.busy || !ap.ready || this.configMgmtNeedsProject()) return false;  // fail closed if unloaded
         if (ap.confirm !== this.configMgmtConfirmToken()) return false;  // type-the-name gate
         return this.configMgmtMcpApprovalsDirty();
       },
@@ -1935,7 +2669,7 @@
       },
       configMgmtCanResetMcp() {
         const c = this.configMgmt, ap = c.mcp.approvals;
-        if (ap.resetBusy || this.configMgmtNeedsProject()) return false;
+        if (ap.resetBusy || !ap.ready || this.configMgmtNeedsProject()) return false;  // fail closed if unloaded
         return ap.resetConfirm === this.configMgmtConfirmToken();  // type-the-name gate
       },
       async configMgmtResetMcpChoices() {
@@ -2031,6 +2765,7 @@
         const c = this.configMgmt, s = c.skills;
         c.gen = (c.gen || 0) + 1;  // supersede any in-flight configMgmtOpenSkill fetch
         c.error = ""; c.saved = false; s.deletingName = name; s.confirm = "";
+        this.revealFeedback('[data-test="cm-skill-delete-confirm"]', true);
       },
       configMgmtCancelDeleteSkill() {
         this.configMgmt.skills.deletingName = ""; this.configMgmt.skills.confirm = "";
@@ -2859,14 +3594,18 @@
       // A standard `claude remote-control` bridge is multi-session; surface every live
       // session under it (not just the starter). pty bridges are single-session, so this
       // expander is gated to standard mode at the row — they keep showing only their one.
-      bridgeSessions(name) {
-        const s = this.trackedSessions[name];
+      // Takes a ROW KEY (`i.rk`, the instance_id), never a project name: /api/sessions/tracked
+      // is keyed per bridge instance (#1020 A3), so a project-keyed lookup would hand every
+      // bridge on a project the same list. start()'s optimistic placeholder has no
+      // instance_id, so its rk is the project name and it correctly finds nothing yet.
+      bridgeSessions(rk) {
+        const s = this.trackedSessions[rk];
         return Array.isArray(s) ? s : [];
       },
-      bridgeSessionCount(name) { return this.bridgeSessions(name).length; },
+      bridgeSessionCount(rk) { return this.bridgeSessions(rk).length; },
       // Singular/plural label for the expander ("1 live session" vs "N live sessions").
-      bridgeSessionLabel(name) {
-        const n = this.bridgeSessionCount(name);
+      bridgeSessionLabel(rk) {
+        const n = this.bridgeSessionCount(rk);
         return n + (n === 1 ? " live session" : " live sessions");
       },
       // Show the expander for any STANDARD bridge with at least one live session. The row's
@@ -2874,10 +3613,10 @@
       // or start a session) — distinct from these per-session claude.ai/code deep links, which
       // jump straight into a specific working session, so even a single session is worth a
       // direct link. pty bridges are single-session by construction (issue #570).
-      hasBridgeSessions(name) {
-        return this.resumeModeOf(name) !== "pty" && this.bridgeSessionCount(name) > 0;
+      hasBridgeSessions(rk) {
+        return this.resumeModeOf(rk) !== "pty" && this.bridgeSessionCount(rk) > 0;
       },
-      toggleBridgeSessions(name) { this.bridgeSessOpen[name] = !this.bridgeSessOpen[name]; },
+      toggleBridgeSessions(rk) { this.bridgeSessOpen[rk] = !this.bridgeSessOpen[rk]; },
       // Stable x-for key + short label: the local RFC-4122 UUID is unique per session;
       // fall back to project:pid for a pre-2.1.139 CLI that might omit it.
       bridgeSessionKey(s) { return s.local_uuid || (s.parent_instance + ":" + s.pid); },
@@ -3548,7 +4287,6 @@
         if (!(name in this.permMode)) this.permMode[name] = DEFAULT_PERMISSION_MODE;
         if (!(name in this.resumeMode)) this.resumeMode[name] = DEFAULT_RESUME_MODE;
         if (!(name in this.customName)) this.customName[name] = "";
-        if (!(name in this.sandboxMode)) this.sandboxMode[name] = "default";
         if (proj && proj.trust_state) this.trustState[name] = proj.trust_state;
         // The rows list only exists once there is ≥1 project; the very first project has no
         // #project-grid yet (the empty-state renders instead), so reload to render it.
@@ -3616,11 +4354,9 @@
           // mode is ever added.
           const customName = (this.customName[name] || "").trim();
           if (effective === "standard" && customName) reqBody.name = customName;
-          // Sandbox toggle (#780) — standard-only, SAME `=== 'standard'` gate as the
-          // template's x-show so the two can't diverge; only send an explicit on/off
-          // ("default" means "let claude decide", so omit the field entirely).
-          const sandbox = this.sandboxMode[name] || "default";
-          if (effective === "standard" && sandbox !== "default") reqBody.sandbox = sandbox;
+          // Sandbox toggle (#780) removed for 1.0 (#1037): it never reached the session
+          // worker, so the launch popover no longer offers it and no `sandbox` field is
+          // sent. Returns behind preflight + platform gating in #1046.
           // Resume picker (#303) — pty/Interactive Session only, SAME `=== 'pty'` gate
           // as the template's x-show so the two can't diverge; "" means a fresh
           // conversation, so omit the field entirely.
@@ -3702,7 +4438,11 @@
             this.errors[name] = body.detail || "failed to adopt";
             this.toast(name + ": adopt failed", "error");
           } else {
-            this.instances[name] = body;
+            // Via _absorbRow, not a bare assign: every other insert path stamps the row's
+            // `rk` and indexes it in _byId, and an unstamped row has `rk === undefined` —
+            // which now silently breaks every key-aware lookup on it (status, Stop, QR,
+            // and this PR's live-session expander) until the next poll overwrites it.
+            this._absorbRow(body);
             // Optimistically drop the now-managed session from the external lists so the
             // "external session active" note + Manage button disappear at once (the server
             // reclassifies it TRACKED on its next poll; the refresh() below confirms).
@@ -4357,6 +5097,22 @@
       // (Identifier case: `value2.bind(scope2)`, verified in @alpinejs/csp@3.15.12
       // dist), so parent dashboard() state/methods (confirmTrust, coerceSpawnMode,
       // toggleClaudeMd) are reachable through `this` here.
+      // #1114: First prompt and Session name are <textarea>, not <input>, so a password
+      // manager never treats them as login fields. That swap costs one thing an <input>
+      // gave for free — it silently flattens pasted newlines — so restore it here.
+      // Typed Enter is suppressed at the element with `.prevent`; this covers PASTE and
+      // drag-drop, which no key handler sees. Without it a pasted multi-line value would
+      // reach the server, which rejects control characters in a bridge display name — a
+      // paste that used to work would start failing.
+      // Collapsed to spaces rather than stripped, so "a\nb" stays two words.
+      sanitizePrompt() {
+        this.lprompt = String(this.lprompt || "").replace(/[\r\n]+/g, " ");
+      },
+      // Same for the parent-scope, project-keyed Session name (see the `this` note above:
+      // dashboard() state is reachable from here through the merged data stack).
+      sanitizeName() {
+        this.customName[name] = String(this.customName[name] || "").replace(/[\r\n]+/g, " ");
+      },
       // Receive the "launch-pop-close" window event and close the popover for this row.
       // (The old inline handler was an if-statement, which the CSP parser rejects.)
       onLaunchPopClose(event) {
@@ -4462,6 +5218,38 @@
       authorizeUrl: null, output: "", code: "", error: null, result: null, copied: false,
       pending: false, pendingMessage: "", pollTimer: null, rechecking: false,
       toggle() { this.open = !this.open; },
+      // Rehydrate the in-progress flow from the server on load (#1078). This state is
+      // per-page-load, so without this a reload renders the empty Start form while the
+      // server still holds the flow open — every /start then 409s ("already in progress")
+      // with no Cancel control anywhere, because Cancel lives behind `started`. Reading the
+      // server's view restores it, and the panel auto-opens so the stuck flow is visible
+      // rather than hidden behind a collapsed toggle.
+      //
+      // Advisory: a failed fetch, or the 404 the route returns when the feature is disabled,
+      // just leaves the idle form exactly as before. Never starts polling — a rehydrated
+      // flow is parked awaiting a code, not verifying a submitted one (that is `pending`,
+      // which only /code and /status set).
+      async init() {
+        try {
+          const res = await fetch(ROOT + "/api/login-shepherd/state");
+          if (!res.ok) return;
+          const body = await res.json();
+          if (!body.active) return;
+          if (body.mode) this.mode = body.mode;
+          this.authorizeUrl = body.authorize_url || null;
+          this.started = true;
+          this.open = true;
+          // A code was already submitted and the verification is still running. Resume
+          // polling: `poll()` is the ONLY thing that finalizes an exited flow and extracts
+          // a one-time setup-token, so a reload that left this false would strand that
+          // credential until the idle reclaim destroyed it unseen.
+          if (body.pending) {
+            this.pending = true;
+            this.pendingMessage = "Still verifying…";
+            this.startPolling();
+          }
+        } catch (e) { /* advisory — leave the idle form untouched */ }
+      },
       async start() {
         this.busy = true; this.error = null;
         try {
@@ -4553,6 +5341,11 @@
       async startAnother() { await this.cancel(); },
       reset() {
         this.stopPolling();
+        // Back to the default mode too, since init() can now adopt a live flow's mode:
+        // rehydrating a `setup-token` flow started before allow_setup_token was turned off
+        // would otherwise leave `mode` pinned there with no rendered control to change it,
+        // and the next Start would 404 on the gate with no way back but a page reload.
+        this.mode = "login";
         this.started = false; this.finished = false; this.authorizeUrl = null;
         this.output = ""; this.code = ""; this.result = null; this.error = null;
         this.copied = false; this.pending = false; this.pendingMessage = "";

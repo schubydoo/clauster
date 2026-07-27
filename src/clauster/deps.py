@@ -17,7 +17,10 @@ import hashlib
 import importlib.metadata
 import importlib.util
 import io
+import platform
+import shutil
 import sys
+import tarfile
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -89,14 +92,35 @@ def by_key(key: str) -> Extra:
     raise KeyError(key)
 
 
+def host_arch() -> str:
+    """Return this host's CPU arch normalised to a release-asset token (``x86_64``/``arm64``).
+
+    ``platform.machine()`` reports platform-specific spellings — ``x86_64``/``AMD64`` for 64-bit
+    Intel, ``aarch64``/``arm64``/``ARM64`` for 64-bit ARM — that GoReleaser (claustrum) collapses
+    to ``x86_64``/``arm64``. An unrecognised machine returns its lowercased raw value, which
+    matches no registered variant (an unsupported arch resolves to "no build", never a wrong one).
+    """
+    machine = platform.machine().lower()
+    if machine in ("x86_64", "amd64", "x64"):
+        return "x86_64"
+    if machine in ("arm64", "aarch64"):
+        return "arm64"
+    return machine
+
+
 def applies(entry: Extra | BinaryDep) -> bool:
     """Return whether ``entry`` (an :class:`Extra` or :class:`BinaryDep`) is relevant here.
 
-    A ``None`` marker applies everywhere; otherwise the entry is only relevant when
-    its marker matches :data:`sys.platform` (e.g. ``pywinpty``/``shawl`` on ``"win32"``), so
-    doctor and the UI don't nag a Linux host about a Windows-only extra or binary.
+    A ``None`` platform marker applies everywhere; otherwise the entry is only relevant when its
+    marker matches :data:`sys.platform` (e.g. ``pywinpty``/``shawl`` on ``"win32"``). A
+    :class:`BinaryDep` may additionally pin ``arch_marker`` — then the host arch must also match
+    (:func:`host_arch`) — so doctor and the UI don't nag a Linux host about a Windows-only binary,
+    nor offer an arm64 host the x86_64 archive.
     """
-    return entry.platform_marker is None or sys.platform == entry.platform_marker
+    if entry.platform_marker is not None and sys.platform != entry.platform_marker:
+        return False
+    arch = getattr(entry, "arch_marker", None)  # Extra has no arch_marker -> arch-agnostic
+    return arch is None or host_arch() == arch
 
 
 def probe(entry: Extra) -> bool:
@@ -461,8 +485,11 @@ class BinaryDep:
     """One managed standalone-binary dependency: a pinned release archive + the exe inside it.
 
     ``platform_marker`` mirrors :class:`Extra` (a :data:`sys.platform` value, e.g. ``"win32"``),
-    so :func:`applies` gates it off-platform. ``url``/``sha256`` pin an exact release archive;
-    ``member`` is the file to extract from that archive and ``dest`` its filename under the managed
+    so :func:`applies` gates it off-platform. ``arch_marker`` is a normalised CPU arch
+    (``"x86_64"``/``"arm64"``, see :func:`host_arch`) or ``None`` for arch-agnostic binaries
+    (Shawl); a multi-arch tool (claustrum) registers one entry per (platform, arch). ``url``/
+    ``sha256`` pin an exact release archive; ``member`` is the file to extract from that archive
+    (``.zip`` or ``.tar.gz``, chosen by the url suffix) and ``dest`` its filename under the managed
     ``bin`` dir. Bumping the version means updating ``version``/``url``/``sha256`` together.
     """
 
@@ -474,35 +501,156 @@ class BinaryDep:
     sha256: str
     member: str
     dest: str
+    arch_marker: str | None = None
 
 
-BINARY_DEPS: tuple[BinaryDep, ...] = (
-    # Bump version + url + sha256 together; Renovate can't track a source-pinned checksum, so
-    # this is a periodic manual refresh — tracked post-1.0 by #934.
-    BinaryDep(
-        key="shawl",
-        label="Windows service wrapper (Shawl)",
-        platform_marker="win32",
-        version="v1.9.0",
-        url="https://github.com/mtkennerly/shawl/releases/download/v1.9.0/shawl-v1.9.0-win64.zip",
-        sha256="f883c5d09c9beae2efaeabd8513e7d3f57cd1d0864cec3df4f4a7b6ee904351c",
-        member="shawl.exe",
-        dest="shawl.exe",
+# The Shawl release the Windows service wrapper is pinned to. Renovate watches
+# mtkennerly/shawl (github-releases) via the customManager keyed on this `# renovate:`
+# line (renovate.json, #934) and bumps ONLY this constant — the download URL derives
+# from it, so version + URL can never drift out of sync. The `sha256` below is NOT
+# auto-updated (the hosted Renovate App reads github-releases' git-tag digest, not the
+# release ASSET's file checksum), so a version-bump PR carries a stale hash until it is
+# refreshed from GitHub's own published asset digest (`scripts/check_binary_dep_pins.py`
+# verifies each pin against that digest and prints the correct value; and `deps install`
+# fail-closes on a mismatch, so a stale hash can never silently ship — it just refuses).
+# renovate: datasource=github-releases depName=mtkennerly/shawl
+_SHAWL_VERSION = "v1.9.0"
+
+# The claustrum Direct Session daemon (schubydoo/claustrum, Apache-2.0) — a GoReleaser Go binary
+# shipped as one archive per (OS, arch): Linux/Darwin as `.tar.gz`, Windows as `.zip`, with the
+# binary at the archive root (`claustrum` / `claustrum.exe`). We register one BinaryDep per variant
+# (all keyed "claustrum"); :func:`applies` selects the row matching this host's (sys.platform,
+# host_arch()). The version is a single Renovate-bumped constant the URLs derive from; the sha256s
+# are the release's checksums.txt asset digests (refreshed by scripts/check_binary_dep_pins.py and
+# fail-closed at install, exactly like Shawl above). Same `# renovate:` customManager pattern.
+# renovate: datasource=github-releases depName=schubydoo/claustrum
+_CLAUSTRUM_VERSION = "v1.7.1"
+_CLAUSTRUM_VER_BARE = _CLAUSTRUM_VERSION.removeprefix("v")  # tag "v1.7.1" -> asset infix "1.7.1"
+
+# (platform_marker, GoReleaser OS token, arch_marker, archive ext, sha256 of the archive)
+_CLAUSTRUM_VARIANTS: tuple[tuple[str, str, str, str, str], ...] = (
+    (
+        "linux",
+        "Linux",
+        "x86_64",
+        "tar.gz",
+        "fca4be9cc54a7080050f78e9b9f5f0b1b1bebefba0297828ea8b36927358e8c1",
+    ),
+    (
+        "linux",
+        "Linux",
+        "arm64",
+        "tar.gz",
+        "3c2bbba12844dcd3f3bed4ebe0245091a2c2da8dcb622ae88161cca34a4d8328",
+    ),
+    (
+        "darwin",
+        "Darwin",
+        "x86_64",
+        "tar.gz",
+        "9e8a18802ce280e9e39d53cf0ef24fa6f941a6ad695a78f73ad7f675010b4d10",
+    ),
+    (
+        "darwin",
+        "Darwin",
+        "arm64",
+        "tar.gz",
+        "aa3042a6f98809e8a0c8e459d240737f37d34a5dd814431fd6fd2cb0b148bb60",
+    ),
+    (
+        "win32",
+        "Windows",
+        "x86_64",
+        "zip",
+        "c89a2dd1f97545fb8279b0ad2a8ea7bc1f4d2fa3d4af66f01fce4a11a6141076",
+    ),
+    (
+        "win32",
+        "Windows",
+        "arm64",
+        "zip",
+        "23a9371cb4d2c6318387b383016091a5b04dd52b3cf0317882a07c1224d9f058",
     ),
 )
 
 
+def _claustrum_deps() -> tuple[BinaryDep, ...]:
+    """Build the per-(OS, arch) claustrum :class:`BinaryDep` variants from the variant table."""
+    deps = []
+    for platform_marker, os_name, arch, ext, sha256 in _CLAUSTRUM_VARIANTS:
+        member = "claustrum.exe" if os_name == "Windows" else "claustrum"
+        deps.append(
+            BinaryDep(
+                key="claustrum",
+                label="Direct Session daemon (claustrum)",
+                platform_marker=platform_marker,
+                arch_marker=arch,
+                version=_CLAUSTRUM_VERSION,
+                url=(
+                    f"https://github.com/schubydoo/claustrum/releases/download/{_CLAUSTRUM_VERSION}"
+                    f"/claustrum_{_CLAUSTRUM_VER_BARE}_{os_name}_{arch}.{ext}"
+                ),
+                sha256=sha256,
+                member=member,
+                dest=member,
+            )
+        )
+    return tuple(deps)
+
+
+BINARY_DEPS: tuple[BinaryDep, ...] = (
+    BinaryDep(
+        key="shawl",
+        label="Windows service wrapper (Shawl)",
+        platform_marker="win32",
+        version=_SHAWL_VERSION,
+        url=(
+            f"https://github.com/mtkennerly/shawl/releases/download/"
+            f"{_SHAWL_VERSION}/shawl-{_SHAWL_VERSION}-win64.zip"
+        ),
+        sha256="f883c5d09c9beae2efaeabd8513e7d3f57cd1d0864cec3df4f4a7b6ee904351c",
+        member="shawl.exe",
+        dest="shawl.exe",
+    ),
+    *_claustrum_deps(),
+)
+
+
 def binary_dep_names() -> tuple[str, ...]:
-    """Return the registered managed-binary keys (e.g. ``("shawl",)``)."""
-    return tuple(dep.key for dep in BINARY_DEPS)
+    """Return the registered managed-binary keys, de-duplicated (e.g. ``("shawl", "claustrum")``).
+
+    A multi-arch binary (claustrum) has several :data:`BINARY_DEPS` rows under one key; the CLI
+    choices and doctor want the key once, so collapse duplicates while preserving order.
+    """
+    seen: list[str] = []
+    for dep in BINARY_DEPS:
+        if dep.key not in seen:
+            seen.append(dep.key)
+    return tuple(seen)
 
 
 def binary_dep_for(key: str) -> BinaryDep:
-    """Return the :class:`BinaryDep` for ``key`` (raises ``KeyError`` if unknown)."""
+    """Return the first :class:`BinaryDep` row for ``key`` (raises ``KeyError`` if unknown).
+
+    For a multi-arch binary this is any row (used only for key-agnostic fields like ``label``);
+    to pick the row for *this* host use :func:`resolve_binary_dep`.
+    """
     for dep in BINARY_DEPS:
         if dep.key == key:
             return dep
     raise KeyError(key)
+
+
+def resolve_binary_dep(key: str) -> BinaryDep | None:
+    """Return the :class:`BinaryDep` row for ``key`` that :func:`applies` here, else ``None``.
+
+    ``None`` means the key is unknown OR there is no build for this (platform, arch) — callers
+    treat both as "not installable/available here" (a clean skip, never a wrong-arch install).
+    """
+    for dep in BINARY_DEPS:
+        if dep.key == key and applies(dep):
+            return dep
+    return None
 
 
 def managed_bin_dir(state_dir: str | Path) -> Path:
@@ -510,10 +658,48 @@ def managed_bin_dir(state_dir: str | Path) -> Path:
     return managed_deps_dir(state_dir) / BIN_SUBDIR
 
 
+def claustrum_pinned_version() -> str:
+    """Return the claustrum release version clauster pins/ships (e.g. ``v1.7.1``).
+
+    The advisory compatibility floor for the Direct Session daemon (#1013): the doctor
+    version check WARNs when the running/configured binary can't be confirmed at or above it.
+    """
+    return _CLAUSTRUM_VERSION
+
+
 def installed_binary_path(key: str, state_dir: str | Path) -> Path | None:
-    """Return the managed path of binary ``key`` if it is installed, else ``None``."""
-    dest = managed_bin_dir(state_dir) / binary_dep_for(key).dest
+    """Return the managed path of binary ``key`` if it is installed here, else ``None``.
+
+    Uses :func:`resolve_binary_dep` so the dest matches this host's variant (``claustrum`` vs
+    ``claustrum.exe``); an unknown key or unsupported platform/arch reads as not-installed.
+    """
+    dep = resolve_binary_dep(key)
+    if dep is None:
+        return None
+    dest = managed_bin_dir(state_dir) / dep.dest
     return dest if dest.is_file() else None
+
+
+def resolve_effective_binary(
+    key: str, configured: str, default: str, state_dir: str | Path
+) -> str | None:
+    """Resolve the binary a configurable dep would actually run, or ``None`` (#1013).
+
+    Mirrors the precedence the claustrum daemon spawns with, so a presence check and the
+    daemon can never disagree *by construction*: an explicit or ``PATH`` hit on the
+    *configured* value wins, and the managed ``<state_dir>/deps/bin`` install is a fallback
+    ONLY while the configured value is still the ``default`` — an operator who pointed
+    ``binary`` at a specific path must see it fail rather than have a different version
+    silently substituted. Pure/read-only (a ``shutil.which`` plus one file stat).
+    """
+    resolved = shutil.which(configured)
+    if resolved is not None:
+        return resolved
+    if configured == default:
+        managed = installed_binary_path(key, state_dir)
+        if managed is not None:
+            return str(managed)
+    return None
 
 
 #: Upper bound on a managed-binary download (Shawl's win64 zip is ~1.3 MB). A body larger than this
@@ -537,6 +723,33 @@ def _default_fetch(url: str) -> bytes:
         return resp.read(_MAX_FETCH_BYTES)
 
 
+def _extract_member(data: bytes, url: str, member: str) -> bytes:
+    """Return the bytes of a single ``member`` from a ``.zip`` or ``.tar.gz`` archive in memory.
+
+    Format is chosen by ``url`` suffix (GoReleaser ships Linux/Darwin as ``.tar.gz``, Windows as
+    ``.zip``). Only the ONE named member is read — never ``extractall`` — and nothing is written to
+    disk here (the caller places the returned bytes atomically at a fixed ``dest``), so there is no
+    traversal/symlink/device escape onto the host regardless of member type. The real integrity
+    control is the caller's SHA-256 pin, verified BEFORE this runs — the checks here are
+    defense-in-depth on an already-trusted archive: we insist the tar member is a **regular file**
+    (a dir/symlink/hardlink squatting the name is refused, rather than silently following a link to
+    some other in-archive entry's bytes). A missing member raises ``KeyError``; a non-regular tar
+    member raises ``ValueError``. The caller (:func:`install_binary_dep`) catches both plus
+    ``TarError``/``BadZipFile``.
+    """
+    if url.endswith((".tar.gz", ".tgz")):
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+            info = archive.getmember(member)  # KeyError if absent
+            if info.issym() or info.islnk():  # a link would be FOLLOWED to another entry's bytes
+                raise ValueError(f"{member!r} is a link, not a regular file, in the archive")
+            extracted = archive.extractfile(info)
+            if extracted is None:  # a dir / device / fifo entry squatting the name
+                raise ValueError(f"{member!r} is not a regular file in the archive")
+            return extracted.read()
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        return archive.read(member)
+
+
 def install_binary_dep(
     key: str,
     state_dir: str | Path,
@@ -556,9 +769,12 @@ def install_binary_dep(
     if key not in binary_dep_names():
         _err(f"unknown binary {key!r}; choose from {', '.join(binary_dep_names())}")
         return 2
-    dep = binary_dep_for(key)
-    if not applies(dep):
-        _err(f"{dep.label} is only for {dep.platform_marker}; not applicable on this platform")
+    dep = resolve_binary_dep(key)
+    if dep is None:
+        _err(
+            f"no {key} build for this platform/arch ({sys.platform}/{host_arch()}); "
+            "nothing to install"
+        )
         return 2
     dest = managed_bin_dir(state_dir) / dep.dest
     print(PROVENANCE_NOTICE_BINARY, file=sys.stderr)
@@ -582,9 +798,8 @@ def install_binary_dep(
         _err(f"checksum mismatch for {dep.url}: expected {dep.sha256}, got {actual} — refusing")
         return 1
     try:
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            payload = archive.read(dep.member)
-    except (KeyError, zipfile.BadZipFile, OSError) as exc:
+        payload = _extract_member(data, dep.url, dep.member)
+    except (KeyError, tarfile.TarError, zipfile.BadZipFile, OSError, ValueError) as exc:
         _err(f"could not extract {dep.member} from the archive: {exc}")
         return 1
     # Atomic install: write to a sibling temp then replace, so a partial write (e.g. a full disk)
@@ -614,7 +829,11 @@ def uninstall_binary_dep(key: str, state_dir: str | Path) -> int:
     if key not in binary_dep_names():
         _err(f"unknown binary {key!r}; choose from {', '.join(binary_dep_names())}")
         return 2
-    dest = managed_bin_dir(state_dir) / binary_dep_for(key).dest
+    dep = resolve_binary_dep(key)
+    if dep is None:  # no build for this platform/arch → nothing could have been installed here
+        _err(f"{key} has no build for this platform/arch — nothing to remove")
+        return 0
+    dest = managed_bin_dir(state_dir) / dep.dest
     try:
         dest.unlink()
     except FileNotFoundError:

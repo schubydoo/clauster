@@ -37,6 +37,7 @@ from .config import (
     SANDBOX_MODES,
     SPAWN_MODES,
     ClausterConfig,
+    first_config_path,
     load_config,
     resolve_cert_path,
 )
@@ -85,7 +86,7 @@ _TOP_LEVEL_FLAGS = {"-h", "--help", "--version"}
 
 # Surfaced in `clauster --help` so needing `-c` isn't a surprise. Keep the order and
 # env-var names in lockstep with `clauster.config` (module docstring + `_candidate_paths`)
-# and docs/configuration.md, which are the canonical descriptions of the search order.
+# and docs/guides/configuration.md, which are the canonical descriptions of the search order.
 _CONFIG_DISCOVERY_EPILOG = (
     "config discovery (when -c/--config is omitted, the first existing file wins):\n"
     "  1. $CLAUSTER_CONFIG\n"
@@ -231,7 +232,9 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     mcp_p = sub.add_parser(
-        "mcp", help="run the read-only MCP server over stdio (list + status, #527)"
+        "mcp",
+        help="run the MCP server over stdio; read-only by default (list + status), "
+        "writes opt-in via mcp.allow_writes (#527/#950)",
     )
     mcp_p.add_argument("-c", "--config", help="path to clauster.yml")
 
@@ -241,9 +244,7 @@ def main(argv: list[str] | None = None) -> int:
     token_sub = token_p.add_subparsers(dest="token_verb")
     token_issue_p = token_sub.add_parser("issue", help="mint a new named token")
     token_issue_p.add_argument("-c", "--config", help="path to clauster.yml")
-    token_issue_p.add_argument(
-        "--label", required=True, help="unique operator-facing name for the token"
-    )
+    _add_token_label_args(token_issue_p)
     token_list_p = token_sub.add_parser(
         "list", help="list named tokens (label / created / last-used — never the secret)"
     )
@@ -252,10 +253,10 @@ def main(argv: list[str] | None = None) -> int:
         "rotate", help="mint a fresh secret for an existing label"
     )
     token_rotate_p.add_argument("-c", "--config", help="path to clauster.yml")
-    token_rotate_p.add_argument("label", help="the token's label")
+    _add_token_label_args(token_rotate_p)
     token_revoke_p = token_sub.add_parser("revoke", help="permanently delete a named token")
     token_revoke_p.add_argument("-c", "--config", help="path to clauster.yml")
-    token_revoke_p.add_argument("label", help="the token's label")
+    _add_token_label_args(token_revoke_p)
 
     # Headless read commands over the shared engine facade (#775, Slice A).
     projects_p = sub.add_parser("projects", help="list discoverable projects (no server)")
@@ -269,13 +270,13 @@ def main(argv: list[str] | None = None) -> int:
     sessions_p.add_argument("--json", action="store_true", help="emit JSON instead of a table")
     logs_p = sub.add_parser("logs", help="tail a bridge's redacted log")
     logs_p.add_argument("-c", "--config", help="path to clauster.yml")
-    logs_p.add_argument("instance", help="instance id (or a prefix / bridge identity)")
+    logs_p.add_argument("instance", help="instance id (or a unique prefix / bridge identity)")
     logs_p.add_argument(
         "-f", "--follow", action="store_true", help="stream new lines until Ctrl-C"
     )
     open_p = sub.add_parser("open", help="print a bridge's connect URL")
     open_p.add_argument("-c", "--config", help="path to clauster.yml")
-    open_p.add_argument("instance", help="instance id (or a prefix / bridge identity)")
+    open_p.add_argument("instance", help="instance id (or a unique prefix / bridge identity)")
     open_p.add_argument("--launch", action="store_true", help="also open the URL in a browser")
     start_p = sub.add_parser("start", help="start a bridge for a project (no server)")
     start_p.add_argument("-c", "--config", help="path to clauster.yml")
@@ -298,7 +299,9 @@ def main(argv: list[str] | None = None) -> int:
         "--name", help="custom display name for a standard bridge (ignored for pty)"
     )
     start_p.add_argument(
-        "--sandbox", choices=SANDBOX_MODES, help="per-launch sandbox toggle for a standard bridge"
+        "--sandbox",
+        choices=SANDBOX_MODES,
+        help="per-launch sandbox toggle for a standard bridge (disabled this release; see #1046)",
     )
     start_p.add_argument(
         "--trust",
@@ -308,7 +311,7 @@ def main(argv: list[str] | None = None) -> int:
     start_p.add_argument("--json", action="store_true", help="emit JSON instead of a status line")
     stop_p = sub.add_parser("stop", help="stop a bridge by instance id / identity")
     stop_p.add_argument("-c", "--config", help="path to clauster.yml")
-    stop_p.add_argument("instance", help="instance id (or a prefix / bridge identity)")
+    stop_p.add_argument("instance", help="instance id (or a unique prefix / bridge identity)")
     stop_p.add_argument("--json", action="store_true", help="emit JSON instead of a status line")
 
     # Treat bare `clauster` / `clauster -c x` as `run` for backward compatibility.
@@ -359,14 +362,19 @@ def main(argv: list[str] | None = None) -> int:
 
         return mcp_main(["-c", args.config] if args.config else [])
     if args.command == "api-token":
-        if args.token_verb == "issue":  # noqa: S105 — a subcommand name, not a secret
-            return _api_token_issue(args.config, args.label)
         if args.token_verb == "list":  # noqa: S105 — a subcommand name, not a secret
             return _api_token_list(args.config)
-        if args.token_verb == "rotate":  # noqa: S105 — a subcommand name, not a secret
-            return _api_token_rotate(args.config, args.label)
-        if args.token_verb == "revoke":  # noqa: S105 — a subcommand name, not a secret
-            return _api_token_revoke(args.config, args.label)
+        label_verbs = {  # noqa: S105 — subcommand names, not secrets
+            "issue": _api_token_issue,
+            "rotate": _api_token_rotate,
+            "revoke": _api_token_revoke,
+        }
+        action = label_verbs.get(args.token_verb)
+        if action is not None:
+            label = _resolve_token_label(args.token_verb, args)
+            if label is None:
+                return 2
+            return action(args.config, label)
         token_p.print_help(sys.stderr)
         return 2
     if args.command in ("projects", "status", "sessions", "logs", "open"):
@@ -482,6 +490,49 @@ def _hash_metrics_token() -> int:
 # `_authenticate`). Each verb here opens its own short-lived `Persistence` (the
 # same fail-closed migrate-to-head + legacy-import the server runs) and
 # disposes it before returning — there is no long-lived DB connection in the CLI.
+
+
+def _add_token_label_args(parser: argparse.ArgumentParser) -> None:
+    """Accept the token label as EITHER a positional or ``--label`` (#958 P7).
+
+    The three verbs that take a label (``issue`` / ``rotate`` / ``revoke``) used to
+    disagree — ``issue`` required ``--label`` while ``rotate``/``revoke`` took a
+    positional, so ``api-token revoke --label X`` errored. Both forms are now accepted
+    on all three; neither is required at the argparse level (:func:`_resolve_token_label`
+    enforces "exactly one label" in the dispatch, so a missing label is a clean exit 2).
+    """
+    parser.add_argument("label", nargs="?", default=None, help="the token's label")
+    parser.add_argument(
+        "--label",
+        dest="label_flag",
+        default=None,
+        metavar="LABEL",
+        help="the token's label (equivalent to the positional form)",
+    )
+
+
+def _resolve_token_label(verb: str, args: argparse.Namespace) -> str | None:
+    """Return the label from the positional OR ``--label`` form, or ``None`` on error.
+
+    The two forms are equivalent; supplying both with DIFFERENT values is rejected (so a
+    typo can't silently pick one). Prints the error itself and returns ``None`` — the
+    caller exits 2 — when no label was given or the two forms disagree.
+    """
+    positional, flag = args.label, args.label_flag
+    if positional is not None and flag is not None and positional != flag:
+        print(
+            f"clauster: api-token {verb}: give the label once (positional or --label), not both",
+            file=sys.stderr,
+        )
+        return None
+    label = flag if flag is not None else positional
+    if not label:
+        print(
+            f"clauster: api-token {verb}: a label is required (positional or --label)",
+            file=sys.stderr,
+        )
+        return None
+    return label
 
 
 def _open_persistence_or_exit(config) -> Persistence:
@@ -647,14 +698,24 @@ def _deps_list(config_path: str | None) -> int:
             else:
                 status, detail = "missing", entry.capability_label
             print(f"{name:<8} {entry.dist:<10} {status:<10} {detail}")
-    for dep in deps.BINARY_DEPS:
-        if not deps.applies(dep):
-            status, detail = "n/a", f"{dep.label} (other platform)"
-        elif deps.installed_binary_path(dep.key, config.state_dir):
-            status, detail = "installed", f"{dep.label} {dep.version} in deps dir"
+    for key in deps.binary_dep_names():
+        dep = deps.resolve_binary_dep(key)  # the row for THIS host, or None off-platform/arch
+        if dep is None:
+            status, detail = "n/a", f"{deps.binary_dep_for(key).label} (other platform/arch)"
+        elif (resolved := ops.resolve_configured_binary(key, config)) is not None:
+            # Resolve the same way doctor/preflight and the daemon do (#1013): a configured
+            # or PATH binary counts as installed, not "missing". Keep the managed-dir row's
+            # pinned-version label; otherwise show the path actually in effect.
+            status = "installed"
+            managed = deps.installed_binary_path(key, config.state_dir)
+            detail = (
+                f"{dep.label} {dep.version} in deps dir"
+                if managed is not None and resolved == str(managed)
+                else f"{dep.label} at {resolved}"
+            )
         else:
             status, detail = "missing", dep.label
-        print(f"{dep.key:<8} {'(binary)':<10} {status:<10} {detail}")
+        print(f"{key:<9} {'(binary)':<10} {status:<10} {detail}")
     return 0
 
 
@@ -1034,7 +1095,9 @@ def _reap_environments(config_path: str | None, archive: bool, force_delete: boo
         )
         return 2
 
-    ghosts = environments.find_ghosts(envs, live)
+    # projects_root scopes the classification: this instance may only reap
+    # environments inside its own tree (#1100).
+    ghosts = environments.find_ghosts(envs, live, projects_root=config.projects_root)
     print(
         f"clauster: {len(envs)} env(s), {len(live)} live dir(s), {len(ghosts)} ghost(s)",
         file=sys.stderr,
@@ -1282,6 +1345,24 @@ def _set_process_title(config: ClausterConfig) -> None:
             pass
 
 
+def _reexec_argv() -> list[str]:
+    """Build the argv vector for the in-place restart re-exec (#1014).
+
+    A frozen PyInstaller one-file build has ``sys.executable`` == the clauster binary
+    **and** ``sys.argv[0]`` == that same path, so the interpreter slot and ``argv[0]``
+    collapse to one token. Passing both — ``[BIN, BIN, "run", "-c", cfg]`` — hands
+    argparse a stray positional (``unrecognized arguments: <bin> run``) and aborts,
+    killing the setup wizard's post-completion restart and ``POST /api/restart``. Drop
+    the duplicate when frozen; a source/venv run keeps the usual
+    ``[python, script, *args]`` (``sys.executable`` is the interpreter there, distinct
+    from ``argv[0]``). Extracted from :func:`_reexec` so the vector is testable without
+    replacing the process image — the whole-function monkeypatch is what hid the bug.
+    """
+    if deps.is_frozen():
+        return [sys.executable, *sys.argv[1:]]
+    return [sys.executable, *sys.argv]
+
+
 def _reexec() -> None:  # pragma: no cover - replaces the process image; tested via monkeypatch
     """Re-exec this interpreter in place with the same argv (the #483 restart mechanism).
 
@@ -1295,14 +1376,96 @@ def _reexec() -> None:  # pragma: no cover - replaces the process image; tested 
     endpoint triggers exactly one re-exec without actually replacing the test process.
     """
     # S606: re-exec the SAME interpreter with our own argv — no shell, no user input
-    # (argv is the process's own ``sys.argv``). This is the whole point of the action.
-    os.execv(sys.executable, [sys.executable, *sys.argv])  # noqa: S606
+    # (argv is the process's own ``sys.argv``, frozen-corrected by ``_reexec_argv``).
+    # This is the whole point of the action.
+    os.execv(sys.executable, _reexec_argv())  # noqa: S606
+
+
+def _run_setup_wizard(config_path: str | None) -> int:
+    """Serve the loopback first-run setup wizard, then re-exec onto the new config (#978).
+
+    Reached only when no ``clauster.yml`` exists. The wizard writes one (auth enabled) and
+    asks its server to shut down; we then re-exec so ``load_config`` succeeds on the restart.
+    """
+    from . import setup_wizard
+
+    write_path = first_config_path(config_path)
+    # The wizard binds a fixed loopback port (nothing else is running on first run). Allow an
+    # override for the rare case that port is already taken, and so tests can isolate it.
+    try:
+        port = int(os.environ.get("CLAUSTER_SETUP_PORT", setup_wizard.DEFAULT_PORT))
+        if not 1 <= port <= 65535:
+            raise ValueError  # out of range would just fail the bind — fall back to default
+    except ValueError:
+        port = setup_wizard.DEFAULT_PORT
+    setup_logging("text")
+    host = setup_wizard.resolve_setup_host()
+    # A non-loopback bind (e.g. the Docker image's CLAUSTER_SETUP_HOST=0.0.0.0) is reachable
+    # off-host, so mint a one-time token that gates the wizard; a loopback bind is the boundary
+    # itself and needs none (#1017). The token is printed only here, to the server log.
+    setup_token = setup_wizard.mint_setup_token(host)
+    # CLAUSTER_HOST (if set) overrides the file's bind on the post-setup re-exec, so the wizard
+    # fixes its bind field to it instead of offering a choice it would silently ignore (#1017).
+    env_host = os.environ.get("CLAUSTER_HOST", "").strip() or None
+    env_port = setup_wizard.resolve_env_port()  # CLAUSTER_PORT also overrides on re-exec
+    # CLAUSTER_PORT is reapplied verbatim over the written config on re-exec, so a set-but-invalid
+    # value would let setup "succeed" and then the app fail to load (#1017 review). Refuse up front
+    # with a clear, fail-closed message rather than writing a config the restart can't use. (Only
+    # PORT needs this — an arbitrary CLAUSTER_HOST string loads fine; it can only fail later at
+    # bind, which surfaces its own error.)
+    if "CLAUSTER_PORT" in os.environ and env_port is None:
+        print(
+            f"clauster: CLAUSTER_PORT={os.environ['CLAUSTER_PORT']!r} is not a valid port "
+            "(1-65535). Fix or unset it and restart — first-run setup won't write a config the "
+            "app would then refuse to load.",
+            file=sys.stderr,
+        )
+        return 2
+    # CLAUSTER_HOST likewise reapplies over the written config on re-exec, and any string loads
+    # (only the bind fails), so a set-but-unbindable value would let setup "succeed" and then the
+    # app fail to bind. Refuse it up front too (#1017 review).
+    if env_host is not None and not setup_wizard.host_is_bindable(env_host):
+        print(
+            f"clauster: CLAUSTER_HOST={env_host!r} cannot be bound on this machine "
+            "(unresolvable, or not an address on any local interface). Fix or unset it and "
+            "restart — first-run setup won't write a config the app would then fail to bind.",
+            file=sys.stderr,
+        )
+        return 2
+    app = setup_wizard.create_setup_app(
+        write_path, port=port, setup_token=setup_token, env_host=env_host, env_port=env_port
+    )
+    print(
+        f"clauster {__version__}: no configuration found — starting first-run setup at "
+        f"{setup_wizard.setup_url(host, port, token=setup_token)}  (will write {write_path})",
+        file=sys.stderr,
+    )
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            host=host,
+            port=port,
+            log_level="info",
+            log_config=None,
+            proxy_headers=False,
+        )
+    )
+    app.state.uvicorn_server = server
+    server.run()  # blocks until the wizard submits (should_exit) or the operator quits
+    if getattr(app.state, "setup_complete", False):
+        print("clauster: setup complete — restarting on the new configuration.", file=sys.stderr)
+        _reexec()
+    return 0
 
 
 def _run(config_path: str | None) -> int:
     try:
         config = load_config(config_path)
-    except (FileNotFoundError, ValueError) as exc:
+    except FileNotFoundError:
+        # First run: no clauster.yml exists yet. Serve the loopback setup wizard to write one,
+        # then re-exec onto it (#978). A malformed EXISTING config still errors below.
+        return _run_setup_wizard(config_path)
+    except ValueError as exc:
         print(f"clauster: config error: {exc}", file=sys.stderr)
         return 2
 

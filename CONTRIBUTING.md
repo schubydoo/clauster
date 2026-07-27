@@ -4,7 +4,7 @@ Thanks for your interest in Clauster!
 
 ## Code of conduct
 
-This project adheres to the [Contributor Covenant](CODE_OF_CONDUCT.md) code of
+This project adheres to the [Contributor Covenant](https://github.com/schubydoo/clauster/blob/main/CODE_OF_CONDUCT.md) code of
 conduct. By participating, you are expected to uphold it; please report
 unacceptable behavior as described there.
 
@@ -15,15 +15,15 @@ uv sync --extra dev
 npm ci                                 # markdownlint-cli2 (pinned, integrity-checked)
 uv run pre-commit install              # auto-lint on commit (ruff + yaml/markdown)
 cp clauster.yml.example clauster.yml   # edit projects_root
-uv run clauster
+uv run clauster run -c clauster.yml
 ```
 
-A [`justfile`](justfile) and a [`Makefile`](Makefile) wrap these commands, so
+A [`justfile`](https://github.com/schubydoo/clauster/blob/main/justfile) and a [`Makefile`](https://github.com/schubydoo/clauster/blob/main/Makefile) wrap these commands, so
 `just setup` / `make setup` do the first three lines and `just check` /
 `make check` run every pre-PR gate below in one shot. Both run the same commands —
 use whichever you have (`just` is a separate install; `make` ships with most
 systems). The `uv run …` invocations documented here remain the source of truth.
-Local dev pins Python **3.13** via [`.python-version`](.python-version) to match
+Local dev pins Python **3.13** via [`.python-version`](https://github.com/schubydoo/clauster/blob/main/.python-version) to match
 the CI coverage-gate interpreter (`uv` still supports the full 3.11+ floor).
 
 ## Before opening a PR
@@ -82,20 +82,43 @@ the CI coverage-gate interpreter (`uv` still supports the full 3.11+ floor).
   `CHANGELOG.md` or bump the version in `pyproject.toml` / `src/clauster/__init__.py`**
   — knope owns those, regenerating them in the release PR.
 
-  On same-repo PRs that touch `src/` and lack a changeset, a bot may post a
-  **suggested** changeset fragment as a one-time PR comment (the
-  `changeset-autodraft` workflow). It does **not** commit to your branch — copy the
-  suggestion in, confirm the bump type (`patch` / `minor` / `major` / `perf` /
-  `security` / `build`) and the summary sentence match what your change actually
-  does, adjust if not, and commit it yourself. It's a **DRAFT** guessed from the
-  diff — don't trust it blindly. (Fork PRs get the advisory `Changeset check` nag
-  instead and should add the changeset by hand.)
+  Any same-repository PR that touches `src/` without a changeset trips the advisory
+  `Changeset check`, which nags until you add a `.changeset/*.md` fragment by hand
+  (or apply the `no-changelog` label for an internal-only change). Fork contributors
+  must add the fragment manually — this check does not run on fork PRs. Confirm the
+  bump type (`patch` / `minor` / `major` / `perf` / `security` / `build`) and the
+  summary sentence match what your change actually does before you commit it.
 
 CI runs the test suite on **Linux, macOS, and Windows** across Python 3.11–3.14
 (all merge-blocking; each OS enforces a consistent 96% coverage gate — Windows
 via `.coveragerc-win`, which excludes the POSIX/ConPTY code it can't run), plus
 lint, security scanners, and dependency review. Internal PRs run a representative
 subset of the OS/Python legs; the full matrix runs on release and fork PRs.
+
+## Branching and review
+
+- **Branch off fresh `origin/main`** (`git fetch` first) and open a PR — every
+  change merges through one; the branch ruleset rejects direct pushes to `main`.
+  PRs always target `main`; don't stack one PR on another's branch.
+- **History is linear and PRs are squash-merged.** If your branch falls behind,
+  `git rebase origin/main` — the instinctive `git merge main` produces a merge
+  commit the ruleset will reject. The ruleset is also strict-up-to-date, so a
+  stale base shows the PR as BEHIND until rebased.
+- **[Greptile](https://www.greptile.com/) reviews every PR automatically** and
+  usually comments within a few minutes of a push. Read its summary (a green
+  score does not mean zero findings), then reply **and** resolve each inline
+  thread on the thread itself — unresolved review threads block the merge.
+- **The maintainer may add a second Claude review** to a PR, usually when Greptile
+  is rate-limited or a change warrants another pass. You may see its comments on
+  your PR; they are advisory and never block a merge. It runs on the maintainer's
+  personal subscription, so it is maintainer-invoked only — `@claude` from anyone
+  else is ignored. Treat its findings like any review comment: reply, and push a
+  fix or say why one isn't needed.
+
+AI coding agents get the same rules in machine-facing form from
+[AGENTS.md](https://github.com/schubydoo/clauster/blob/main/AGENTS.md) (Claude Code additionally reads [CLAUDE.md](https://github.com/schubydoo/clauster/blob/main/CLAUDE.md)).
+If you change a workflow or gate, update those files in the same PR so they don't
+drift.
 
 ## Documentation
 
@@ -108,7 +131,7 @@ reading the bridge debug log, the `KillMode` restart caveat, and backup/recovery
 
 Clauster **self-hosts** its front-end dependencies (no CDN) so the dashboard works
 on an air-gapped / loopback deploy and `script-src` / `connect-src` stay `'self'`.
-Vendored assets live under [`src/clauster/static/vendor/<dep>/`](src/clauster/static/vendor)
+Vendored assets live under [`src/clauster/static/vendor/<dep>/`](https://github.com/schubydoo/clauster/tree/main/src/clauster/static/vendor)
 (Alpine is the one exception — it sits flat at `static/alpine.csp.min.js`). To add or update one:
 
 1. **Fetch the published dist** — `npm pack <pkg>@<version>` then `tar xzf` and copy the
@@ -116,7 +139,7 @@ Vendored assets live under [`src/clauster/static/vendor/<dep>/`](src/clauster/st
    add the package to `package.json` — there's no runtime `dependencies` block; the
    tarball is the source.
 2. **Pin it for Renovate** — add a two-line block to
-   [`static/vendor/versions.txt`](src/clauster/static/vendor/versions.txt) in the exact
+   [`static/vendor/versions.txt`](https://github.com/schubydoo/clauster/blob/main/src/clauster/static/vendor/versions.txt) in the exact
    shape the `customManager` regex matches:
 
    ```text
@@ -131,7 +154,7 @@ Vendored assets live under [`src/clauster/static/vendor/<dep>/`](src/clauster/st
 3. **License + provenance** — copy the upstream `LICENSE` to `vendor/<dep>/LICENSE` and
    write a `vendor/<dep>/README.md` (package, version, a file→source table, and an
    `## Updating` recipe). When the asset is **shipped to users**, also add a section to
-   [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) and credit it in the dashboard
+   [`THIRD_PARTY_NOTICES.md`](https://github.com/schubydoo/clauster/blob/main/THIRD_PARTY_NOTICES.md) and credit it in the dashboard
    footer (guarded by `test_dashboard_footer_credits_vendored_assets`).
 4. **Reference it cache-busted** — link it in the template with `?v={{ asset_version }}`
    (the clauster version), so an upgrade busts the `immutable` static cache. Tests in
@@ -140,4 +163,4 @@ Vendored assets live under [`src/clauster/static/vendor/<dep>/`](src/clauster/st
 ## License
 
 By contributing, you agree that your contributions are licensed under the
-project's [Apache-2.0 License](LICENSE).
+project's [Apache-2.0 License](https://github.com/schubydoo/clauster/blob/main/LICENSE).

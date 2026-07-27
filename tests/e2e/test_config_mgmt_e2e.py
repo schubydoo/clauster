@@ -76,6 +76,42 @@ def test_config_mgmt_save_disabled_until_confirm_matches(
     browser.expect_visible('[data-test="cm-save"]:not([disabled])')
 
 
+def test_config_mgmt_confirm_clears_on_surface_switch(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Switching surface tabs clears the typed scope confirm-token (#958 P3)."""
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    # Type the confirm token on the default (CLAUDE.md) doc surface...
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    browser.expect_value('[data-test="cm-confirm"]', "alpha")
+    # ...then switch to another doc surface: the stale token must NOT linger (it would
+    # otherwise read as pre-satisfied on the new surface).
+    browser.click('[data-test="cm-surface-permissions"]')
+    browser.expect_visible('[data-test="cm-view-permissions"]')
+    browser.expect_value('[data-test="cm-confirm"]', "")
+
+
+def test_config_mgmt_blank_json_saves_as_empty(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Clearing a JSON surface and saving treats the blank box as {} (#958 P3)."""
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-permissions"]')
+    browser.expect_visible('[data-test="cm-view-permissions"]')
+    # Permissions defaults to the rows editor (#958 Part 5); drop to the raw-JSON
+    # escape hatch to exercise the blank-box path.
+    browser.click('[data-test="cm-permissions-mode-raw"]')
+    browser.expect_visible('[data-test="cm-permissions-text"]')
+    # Clear the JSON box entirely, then save. A blank box must be accepted as the
+    # empty-object default rather than rejected with "must be valid JSON".
+    browser.fill('[data-test="cm-permissions-text"]', "")
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    browser.click('[data-test="cm-save"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+
 def test_config_mgmt_settings_tab_loads(browser: AgentBrowser, config_mgmt_server: Server) -> None:
     """Switching to the Settings tab loads the JSON editor for the scope."""
     _open_modal(browser, config_mgmt_server)
@@ -101,6 +137,10 @@ def test_config_mgmt_permissions_project_round_trip(
     browser.select('[data-test="cm-project"]', "alpha")
     browser.click('[data-test="cm-surface-permissions"]')
     browser.expect_visible('[data-test="cm-view-permissions"]')
+    # Permissions defaults to the rows editor (#958 Part 5); drop to raw JSON to save
+    # the block as literal JSON (the rows path is covered separately below).
+    browser.click('[data-test="cm-permissions-mode-raw"]')
+    browser.expect_visible('[data-test="cm-permissions-text"]')
     # alpha has no settings.json yet -> the permissions view is {} (fetch bound).
     browser.expect_value('[data-test="cm-permissions-text"]', "{}")
 
@@ -108,6 +148,36 @@ def test_config_mgmt_permissions_project_round_trip(
     browser.fill('[data-test="cm-confirm"]', "alpha")
     browser.click('[data-test="cm-save"]')
     browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+    stored = json.loads(
+        (projects_root / "alpha" / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    assert stored["permissions"]["allow"] == ["Bash(ls:*)"]
+
+
+def test_config_mgmt_permissions_rows_round_trip(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Adding an allow rule via the rows editor writes it into the project's settings.json."""
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-permissions"]')
+    browser.expect_visible('[data-test="cm-view-permissions"]')
+    # Rows mode is the default. Add an allow rule, type it, and save.
+    browser.click('[data-test="cm-perm-add-allow"]')
+    browser.expect_visible('[data-test="cm-perm-rule-allow"]')  # let the x-for row hydrate
+    browser.fill('[data-test="cm-perm-rule-allow"]', "Bash(ls:*)")
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    browser.click('[data-test="cm-save"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+    stored = json.loads(
+        (projects_root / "alpha" / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    assert stored["permissions"]["allow"] == ["Bash(ls:*)"]
 
     settings = projects_root / "alpha" / ".claude" / "settings.json"
     assert settings.exists(), "expected alpha/.claude/settings.json to be written"
@@ -207,6 +277,8 @@ def test_config_mgmt_hooks_tab_loads(browser: AgentBrowser, config_mgmt_server: 
     browser.select('[data-test="cm-project"]', "alpha")
     browser.click('[data-test="cm-surface-hooks"]')
     browser.expect_visible('[data-test="cm-view-hooks"]')
+    # Hooks defaults to the rows editor (#958 Part 5); drop to raw JSON to see the loaded {}.
+    browser.click('[data-test="cm-hooks-mode-raw"]')
     browser.expect_value('[data-test="cm-hooks-text"]', "{}")
 
 
@@ -250,6 +322,42 @@ def test_config_mgmt_new_subagent_round_trip(
     saved = projects_root / "alpha" / ".claude" / "agents" / "my-agent.md"
     assert saved.exists(), "expected alpha/.claude/agents/my-agent.md to be written"
     assert "an e2e agent" in saved.read_text(encoding="utf-8")
+
+
+def test_config_mgmt_new_subagent_name_single_source(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """The Name box alone drives both the filename and the frontmatter name (#958 Part 5).
+
+    The content carries NO `name:` line — the editor injects it from the Name box on save,
+    so the backend's "frontmatter name must match the filename" check passes without the
+    operator typing the name twice.
+    """
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-subagents"]')
+    browser.expect_visible('[data-test="cm-agent-new"]')
+    browser.click('[data-test="cm-agent-new"]')
+    browser.expect_visible('[data-test="cm-agent-editor"]')
+
+    browser.fill('[data-test="cm-agent-name"]', "solo-agent")
+    # No `name:` in the frontmatter — just description + body.
+    browser.fill(
+        '[data-test="cm-agent-content"]',
+        "---\ndescription: single-source agent\n---\nDo it.\n",
+    )
+    browser.fill('[data-test="cm-agent-confirm"]', "alpha")
+    browser.click('[data-test="cm-agent-save"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+    saved = projects_root / "alpha" / ".claude" / "agents" / "solo-agent.md"
+    assert saved.exists(), "expected alpha/.claude/agents/solo-agent.md to be written"
+    text = saved.read_text(encoding="utf-8")
+    assert "name: solo-agent" in text  # injected from the Name box
+    assert "single-source agent" in text
 
 
 def test_config_mgmt_mcp_tab_loads(browser: AgentBrowser, config_mgmt_server: Server) -> None:
@@ -401,6 +509,9 @@ def test_config_mgmt_hooks_save_round_trip(
     browser.select('[data-test="cm-project"]', "alpha")
     browser.click('[data-test="cm-surface-hooks"]')
     browser.expect_visible('[data-test="cm-view-hooks"]')
+    # Rows is the default; drop to raw JSON to save a literal hooks block (the rows path
+    # is covered by test_config_mgmt_hooks_rows_round_trip below).
+    browser.click('[data-test="cm-hooks-mode-raw"]')
     browser.expect_value('[data-test="cm-hooks-text"]', "{}")
 
     hooks = {"SessionStart": [{"hooks": [{"type": "command", "command": "echo e2e-hook"}]}]}
@@ -413,6 +524,157 @@ def test_config_mgmt_hooks_save_round_trip(
     assert saved.exists(), "expected alpha/.claude/settings.json to be written"
     on_disk = json.loads(saved.read_text(encoding="utf-8"))
     assert on_disk.get("hooks") == hooks
+
+
+def test_config_mgmt_hooks_rows_round_trip(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Adding a hook via the rows editor writes the nested command group to settings.json."""
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-hooks"]')
+    browser.expect_visible('[data-test="cm-view-hooks"]')
+    # Rows mode default: add a hook, pick the event, type the command, save.
+    browser.click('[data-test="cm-hooks-add"]')
+    browser.expect_visible('[data-test="cm-hook-command"]')  # let the x-for row hydrate
+    browser.select('[data-test="cm-hook-event"]', "SessionStart")
+    browser.fill('[data-test="cm-hook-command"]', "echo rows-hook")
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    browser.click('[data-test="cm-save"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+    on_disk = json.loads(
+        (projects_root / "alpha" / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    assert on_disk["hooks"] == {
+        "SessionStart": [{"hooks": [{"type": "command", "command": "echo rows-hook"}]}]
+    }
+
+
+def _seed_alpha_settings(config_mgmt_server: Server, settings: dict) -> None:
+    """Write alpha's .claude/settings.json directly (bypassing the write API) for a test."""
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+    path = projects_root / "alpha" / ".claude" / "settings.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(settings), encoding="utf-8")
+
+
+def test_config_mgmt_hooks_duplicate_matcher_falls_back_to_raw(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Duplicate (event, matcher) groups can't round-trip as rows → open in Raw with a hint."""
+    _seed_alpha_settings(
+        config_mgmt_server,
+        {
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo a"}]},
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo b"}]},
+                ]
+            }
+        },
+    )
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-hooks"]')
+    browser.expect_visible('[data-test="cm-view-hooks"]')
+    # Non-representable → raw fallback (verbatim) with the explanatory error, never a
+    # silent regroup that would reorder firing.
+    browser.expect_visible('[data-test="cm-hooks-rows-error"]')
+    browser.expect_visible('[data-test="cm-hooks-text"]')
+
+
+def test_config_mgmt_hooks_plugin_owned_command_falls_back_to_raw(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A hook command referencing CLAUDE_PLUGIN_ROOT stays in Raw (visible), never a row."""
+    _seed_alpha_settings(
+        config_mgmt_server,
+        {
+            "hooks": {
+                "SessionStart": [
+                    {"hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/run.sh"}]}
+                ]
+            }
+        },
+    )
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-hooks"]')
+    browser.expect_visible('[data-test="cm-view-hooks"]')
+    browser.expect_visible('[data-test="cm-hooks-rows-error"]')
+    browser.expect_visible('[data-test="cm-hooks-text"]')
+
+
+def test_config_mgmt_hooks_invalid_timeout_blocks_save(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A non-integer timeout warns and disables Save rather than being silently dropped."""
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-hooks"]')
+    browser.expect_visible('[data-test="cm-view-hooks"]')
+    browser.click('[data-test="cm-hooks-add"]')
+    browser.expect_visible('[data-test="cm-hook-command"]')
+    browser.fill('[data-test="cm-hook-command"]', "echo x")
+    browser.fill('[data-test="cm-hook-timeout"]', "1.5")  # not a whole number
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    browser.expect_visible('[data-test="cm-hooks-timeout-warn"]')
+    browser.expect_disabled('[data-test="cm-save"]')
+
+
+def test_config_mgmt_hooks_prototype_matcher_round_trip(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A matcher named __proto__ (a backend-valid opaque string) groups correctly via rows."""
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-hooks"]')
+    browser.expect_visible('[data-test="cm-view-hooks"]')
+    browser.click('[data-test="cm-hooks-add"]')
+    browser.expect_visible('[data-test="cm-hook-matcher"]')
+    browser.select('[data-test="cm-hook-event"]', "PreToolUse")
+    browser.fill('[data-test="cm-hook-matcher"]', "__proto__")
+    browser.fill('[data-test="cm-hook-command"]', "echo proto")
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    browser.click('[data-test="cm-save"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+    on_disk = json.loads(
+        (projects_root / "alpha" / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    assert on_disk["hooks"] == {
+        "PreToolUse": [
+            {"matcher": "__proto__", "hooks": [{"type": "command", "command": "echo proto"}]}
+        ]
+    }
+
+
+def test_config_mgmt_hooks_negative_timeout_falls_back_to_raw(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A hook with a negative timeout (backend-lax) opens in Raw, not an unsavable row."""
+    _seed_alpha_settings(
+        config_mgmt_server,
+        {
+            "hooks": {
+                "Stop": [{"hooks": [{"type": "command", "command": "echo x", "timeout": -1}]}]
+            }
+        },
+    )
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-hooks"]')
+    browser.expect_visible('[data-test="cm-view-hooks"]')
+    browser.expect_visible('[data-test="cm-hooks-rows-error"]')
+    browser.expect_visible('[data-test="cm-hooks-text"]')
 
 
 def test_config_mgmt_subagent_delete_round_trip(
@@ -521,3 +783,130 @@ def test_config_mgmt_mcp_approvals_round_trip(
     alpha_key = str(projects_root / "alpha")
     stored = json.loads(claude_json.read_text(encoding="utf-8"))
     assert "gizmo" in stored["projects"][alpha_key]["enabledMcpjsonServers"]
+
+
+def test_config_mgmt_mcp_settings_owned_approval_is_read_only(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A settings-file-owned approval renders read-only, not as a revertible toggle (#961).
+
+    ``claude mcp add-json --scope local`` relocates an approval into
+    ``settings.local.json``; the ~/.claude.json write path can't change it, so the
+    panel must show that server's row read-only (a ``settings`` badge + disabled
+    approve/reject/unset) rather than offer an action that silently reverts on reload.
+    """
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-mcp"]')
+    browser.expect_visible('[data-test="cm-mcp-new"]')
+    # Commit a server so it appears in the approvals panel.
+    browser.click('[data-test="cm-mcp-new"]')
+    browser.expect_visible('[data-test="cm-mcp-editor"]')
+    browser.fill('[data-test="cm-mcp-name"]', "gizmo")
+    browser.fill('[data-test="cm-mcp-entry"]', '{"command": "echo", "env": {"K": "v"}}')
+    browser.fill('[data-test="cm-mcp-confirm"]', "alpha")
+    browser.click('[data-test="cm-mcp-save"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+    # Approve gizmo via settings.local.json (what `claude mcp add-json --scope local` does),
+    # then re-enter the surface so the approvals reload folds the settings decision in.
+    settings_local = projects_root / "alpha" / ".claude" / "settings.local.json"
+    settings_local.parent.mkdir(parents=True, exist_ok=True)
+    settings_local.write_text(json.dumps({"enabledMcpjsonServers": ["gizmo"]}), encoding="utf-8")
+    browser.click('[data-test="cm-surface-permissions"]')
+    browser.expect_visible('[data-test="cm-view-permissions"]')
+    browser.click('[data-test="cm-surface-mcp"]')
+    browser.expect_visible('[data-test="cm-mcp-approvals"]')
+
+    # The row is now settings-owned: badge shown, and every approval control disabled.
+    browser.expect_visible('[data-test="cm-mcp-locked-gizmo"]')
+    browser.expect_disabled('[data-test="cm-mcp-approve-gizmo"]')
+    browser.expect_disabled('[data-test="cm-mcp-reject-gizmo"]')
+    browser.expect_disabled('[data-test="cm-mcp-unset-gizmo"]')
+
+
+def test_config_mgmt_mcp_approvals_confirm_clears_on_surface_switch(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """The MCP-approvals confirm surface stays blank after a surface round-trip (#960).
+
+    Smoke coverage for the nested-token path Greptile flagged: the approvals confirm
+    is not pre-satisfied after navigating away and back. NOTE this asserts the
+    *steady* end state only — the reload's `_loadMcpApprovals` also zeros the token
+    synchronously on return, so it cannot discriminate the in-window race the handler
+    fix closes (there is no JS unit harness to test the handler in isolation). It
+    guards the observable invariant and documents the nested path, not the race.
+    """
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-mcp"]')
+    browser.expect_visible('[data-test="cm-mcp-new"]')
+    # Commit a server so the per-server approvals panel renders.
+    browser.click('[data-test="cm-mcp-new"]')
+    browser.expect_visible('[data-test="cm-mcp-editor"]')
+    browser.fill('[data-test="cm-mcp-name"]', "gizmo")
+    browser.fill('[data-test="cm-mcp-entry"]', '{"command": "echo", "env": {"K": "v"}}')
+    browser.fill('[data-test="cm-mcp-confirm"]', "alpha")
+    browser.click('[data-test="cm-mcp-save"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+    # Arm the approvals save: approve makes the panel dirty, then type the token.
+    browser.expect_visible('[data-test="cm-mcp-approvals"]')
+    browser.click('[data-test="cm-mcp-approve-gizmo"]')
+    browser.expect_visible('[data-test="cm-mcp-approvals-confirm"]')
+    browser.fill('[data-test="cm-mcp-approvals-confirm"]', "alpha")
+    browser.expect_value('[data-test="cm-mcp-approvals-confirm"]', "alpha")
+
+    # Navigate away and back WITHOUT saving; the nested token must not linger.
+    browser.click('[data-test="cm-surface-permissions"]')
+    browser.expect_visible('[data-test="cm-view-permissions"]')
+    browser.click('[data-test="cm-surface-mcp"]')
+    browser.expect_visible('[data-test="cm-mcp-approvals"]')
+    # Re-approve to reveal the confirm input again: it must be blank, not pre-satisfied.
+    browser.click('[data-test="cm-mcp-approve-gizmo"]')
+    browser.expect_visible('[data-test="cm-mcp-approvals-confirm"]')
+    browser.expect_value('[data-test="cm-mcp-approvals-confirm"]', "")
+
+
+def test_delete_confirm_scrolls_into_view_and_focuses(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Arming a delete brings its confirm box into view and focuses the input (#1031).
+
+    The confirm renders at the panel foot while the row's Delete button can sit
+    anywhere above it — without the reveal, the panel doesn't move and Delete
+    looks like a no-op. The focus assertion is the discriminating check: it can
+    only pass when configMgmtAskDeleteAgent actually ran revealFeedback.
+    """
+    _open_modal(browser, config_mgmt_server)
+    browser.click('[data-test="cm-surface-subagents"]')
+    browser.expect_visible('[data-test="cm-agent-new"]')
+    browser.click('[data-test="cm-agent-new"]')
+    browser.expect_visible('[data-test="cm-agent-editor"]')
+    browser.fill('[data-test="cm-agent-name"]', "del-target")
+    browser.fill(
+        '[data-test="cm-agent-content"]',
+        "---\ndescription: temp\n---\n\nBody.",
+    )
+    browser.fill('[data-test="cm-agent-confirm"]', "alpha")
+    browser.click('[data-test="cm-agent-save"]')
+    browser.expect_visible('[data-test="cm-agent-del-del-target"]')
+
+    browser.click('[data-test="cm-agent-del-del-target"]')
+    browser.expect_visible('[data-test="cm-agent-delete-confirm"]')
+    # Discriminating assertion: the confirm INPUT holds focus only via the reveal.
+    import time
+
+    deadline = time.monotonic() + 5
+    focused = False
+    while time.monotonic() < deadline and not focused:
+        focused = browser.eval_json(
+            "(() => document.activeElement ==="
+            " document.querySelector('[data-test=\"cm-agent-delete-input\"]'))()"
+        )
+        if not focused:
+            time.sleep(0.2)
+    assert focused, "delete-confirm input should receive focus when the confirm is armed"

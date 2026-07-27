@@ -168,13 +168,29 @@ def test_validate_frontmatter_accepts_dict_memory() -> None:
     sub.validate_frontmatter({"name": "x", "description": "d", "memory": {"k": "v"}})
 
 
+def test_validate_frontmatter_passes_unknown_keys_through() -> None:
+    # #958/DF-3: an unrecognized frontmatter key (forward-compat with Claude Code) is
+    # passed through, not rejected — while the required name/description and the known
+    # security-relevant keys are still validated.
+    sub.validate_frontmatter(
+        {"name": "x", "description": "d", "license": "MIT", "metadata": {"a": 1}}
+    )  # no raise
+
+
+def test_validate_frontmatter_accepts_well_formed_env() -> None:
+    # #959 (Greptile P1): ``env`` became reachable when the allowlist was dropped; a
+    # well-formed name→scalar map is accepted (scalars cover YAML str/int/float/bool).
+    sub.validate_frontmatter(
+        {"name": "x", "description": "d", "env": {"API_HOST": "example.com", "PORT": 8080}}
+    )  # no raise
+
+
 @pytest.mark.parametrize(
     "candidate",
     [
         ["not", "a", "dict"],
         {"description": "d"},  # missing name
         {"name": "x"},  # missing description
-        {"name": "x", "description": "d", "bogus": 1},  # unknown key
         {"name": "Bad Name", "description": "d"},  # invalid name shape
         {"name": "x", "description": ""},  # empty description
         {"name": "x", "description": 5},  # wrong type
@@ -202,6 +218,9 @@ def test_validate_frontmatter_accepts_dict_memory() -> None:
         {"name": "x", "description": "d", "background": "yes"},
         {"name": "x", "description": "d", "isolation": ""},
         {"name": "x", "description": "d", "color": ""},
+        {"name": "x", "description": "d", "env": 42},  # not a mapping
+        {"name": "x", "description": "d", "env": {"": "v"}},  # empty var name
+        {"name": "x", "description": "d", "env": {"K": ["a"]}},  # non-scalar value
     ],
 )
 def test_validate_frontmatter_rejects_bad_shape(candidate: object) -> None:

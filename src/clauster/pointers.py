@@ -32,6 +32,13 @@ CLAUDE_PROJECTS_DIR = Path("~/.claude/projects").expanduser()
 
 _SANITIZE_RE = re.compile(r"[^a-zA-Z0-9]")
 
+# Where `claude remote-control --spawn worktree` places each session's git worktree,
+# relative to the project root. Lives here — beside ``sanitize_cwd`` — because two
+# unrelated consumers must agree on it: ``inspector`` attributes a session to a bridge by
+# containment in this subtree, and ``usage`` finds worktree transcripts by the sanitized
+# form of it. A second copy would drift and silently resurrect #1020.
+WORKTREE_SUBDIR = Path(".claude") / "worktrees"
+
 
 class PointerStillLive(RuntimeError):
     """Raised when :func:`clear_pointer` is asked to drop a still-live bridge's pointer."""

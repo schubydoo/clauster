@@ -14,6 +14,7 @@ from pathlib import Path
 from clauster.config import ClausterConfig
 from clauster.engine import ClausterEngine
 from clauster.models import RemoteControlInstance
+from clauster.redact import sanitize_line
 
 
 class _FakePersistence:
@@ -25,6 +26,7 @@ class _FakePersistence:
 
 
 class _FakeRunner:
+    candidates: list[str] = []
     """Minimal SessionRunner stand-in — no DB, just the methods the facade calls."""
 
     def __init__(
@@ -47,7 +49,12 @@ class _FakeRunner:
         return list(self._instances.values())
 
     def resolve_bridge_id(self, identity: str) -> str | None:
+        # Exact-match only, on purpose: the engine is a passthrough, and the real
+        # prefix/ambiguity logic is pinned against the real resolver in test_runner.py.
         return identity if identity in self._instances else None
+
+    def bridge_id_candidates(self, identity: str) -> list[str]:
+        return list(self.candidates)
 
     def get_instance(self, instance_id: str) -> RemoteControlInstance | None:
         return self._instances.get(instance_id)
@@ -80,6 +87,20 @@ def _engine(tmp_path: Path, projects_root: Path, runner: _FakeRunner) -> Clauste
         {"projects_root": str(projects_root), "state_dir": str(tmp_path / "state")}
     )
     return ClausterEngine(cfg, runner=runner)  # type: ignore[arg-type]
+
+
+def test_bridge_id_candidates_passes_through_to_the_runner(tmp_path, projects_root):
+    # #1099: every engine resolve returns None for an ambiguous prefix exactly as it does
+    # for an unknown one, so this is the only way a CLI/MCP caller can tell the two apart
+    # and name the ids to retry with instead of printing a bare "not found".
+    runner = _FakeRunner(claude_json=tmp_path / "claude.json")
+    engine = _engine(tmp_path, projects_root, runner)
+    assert engine.bridge_id_candidates("nope") == []
+    runner.candidates = ["f2c456fd-aaaa", "f2c456fd-bbbb"]
+    try:
+        assert engine.bridge_id_candidates("f2c456fd") == ["f2c456fd-aaaa", "f2c456fd-bbbb"]
+    finally:
+        runner.candidates = []
 
 
 # -- list_projects: discovery + the bypass stamp -------------------------------
@@ -275,6 +296,83 @@ def test_read_log_lines_advances_offset_and_sanitizes(tmp_path):
     offset2, lines2 = ClausterEngine.read_log_lines(log, offset)
     assert lines2 == []
     assert offset2 == offset
+
+
+def test_read_log_lines_never_prints_a_secret_split_across_two_reads(tmp_path):
+    # #1105, the security case. `sanitize_line` matches whole tokens, so a mid-line flush
+    # landing INSIDE a secret used to print the fragment verbatim (it matches no pattern)
+    # and the remainder on the next poll — reassembling the secret on the operator's
+    # terminal from a stream `--help`, the docs and this method all document as redacted.
+    log = tmp_path / "bridge.log"
+    # Deliberately LOW-ENTROPY, and it must stay that way. `redact.py` matches token SHAPE
+    # (`gh[pousr]_[A-Za-z0-9]{16,}` — no entropy gate), so a repetitive fixture exercises the
+    # matcher exactly like a random one. gitleaks' `github-pat` rule additionally requires
+    # entropy >= 3, so a realistic-looking fixture here fails the `secret scan` CI job. Do not
+    # "improve" this into something that looks like a real token.
+    secret = "ghp_" + "FAKE" * 9
+    assert sanitize_line(f"token={secret}") == "token=<redacted>"  # whole token: caught
+    assert sanitize_line(f"token={secret[:8]}") == f"token={secret[:8]}"  # fragment: not
+
+    log.write_text(f"token={secret[:8]}", encoding="utf-8")  # bridge flushed half a line
+    offset, lines = ClausterEngine.read_log_lines(log, 0)
+    assert lines == [], "an unterminated line must be withheld, not printed as a fragment"
+    assert offset == 0, "withheld bytes must not be consumed, or the tail is lost"
+
+    with log.open("a", encoding="utf-8") as fh:  # the bridge completes the line
+        fh.write(f"{secret[8:]}\n")
+    offset, lines = ClausterEngine.read_log_lines(log, offset)
+
+    assert lines == ["token=<redacted>"]
+    assert offset == log.stat().st_size
+    # The whole point: neither read put any part of the secret on stdout.
+    assert secret[8:] not in "".join(lines)
+
+
+def test_read_log_lines_emits_complete_lines_and_holds_only_the_partial(tmp_path):
+    # The withholding must not cost the lines that ARE complete in the same read, and the
+    # rewound offset must resume exactly at the partial rather than re-emitting a line.
+    log = tmp_path / "bridge.log"
+    # write_bytes, not write_text: this asserts a BYTE offset, and text mode translates
+    # "\n"->"\r\n" on Windows, which would make the expected offset platform-dependent.
+    log.write_bytes(b"first\nsecond\npart")
+
+    offset, lines = ClausterEngine.read_log_lines(log, 0)
+    assert lines == ["first", "second"]
+    assert offset == len(b"first\nsecond\n")
+
+    with log.open("ab") as fh:
+        fh.write(b"ial\n")
+    offset, lines = ClausterEngine.read_log_lines(log, offset)
+    assert lines == ["partial"], "the held fragment must rejoin its remainder, not duplicate"
+    assert offset == log.stat().st_size
+
+
+def test_read_log_lines_holds_a_multibyte_partial_by_bytes_not_characters(tmp_path):
+    # The offset is a BYTE offset; rewinding by len(str) would desync on any non-ASCII
+    # log line and corrupt every subsequent read.
+    log = tmp_path / "bridge.log"
+    # write_bytes, not write_text: the assertion below is a BYTE count, and text mode
+    # translates "\n"->"\r\n" on Windows, making it platform-dependent.
+    log.write_bytes("done\nté".encode())  # 'é' is 2 bytes, 1 character
+
+    offset, lines = ClausterEngine.read_log_lines(log, 0)
+    assert lines == ["done"]
+    assert offset == len(b"done\n")
+
+    with log.open("ab") as fh:
+        fh.write(b"st\n")
+    offset, lines = ClausterEngine.read_log_lines(log, offset)
+    assert lines == ["tést"]
+    assert offset == log.stat().st_size
+
+
+def test_read_log_lines_strips_the_cr_of_a_crlf_log(tmp_path):
+    # Line completeness can only be judged on "\n", so this path splits on "\n" rather
+    # than str.splitlines(). Strip the lone \r so a CRLF-written log reads unchanged.
+    log = tmp_path / "bridge.log"
+    log.write_bytes(b"alpha\r\nbeta\r\n")
+    _, lines = ClausterEngine.read_log_lines(log, 0)
+    assert lines == ["alpha", "beta"]
 
 
 def test_initial_log_offset_delegates(tmp_path):

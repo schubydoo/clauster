@@ -15,18 +15,44 @@ three trust paths:
 
 - **Password login** → a signed-cookie session (`issue_session` /
   `read_session`).
+- **Bearer token** → `Authorization: Bearer …`, checked against
+  `auth.api_token_hash` or the `api_tokens` table (`verify_token`).
 - **Reverse proxy** → peer-IP allowlist + an HMAC-signed header (`peer_trusted`
   / `verify_proxy_hmac`).
 - **Cross-site guard** → a strict `Origin` allowlist (`build_allowed_origins` /
-  `normalize_origin`).
+  `normalize_origin`). Unlike the credential paths above, this one is **not**
+  gated on `auth.enabled` — see below.
 
 ### The master switch
 
-`auth.enabled` is the master switch. The runtime guard gates on it, so
-**`password_required` or `reverse_proxy.enabled` without `auth.enabled: true` is
-a silent open door** — the operator sets a password, but the dashboard is still
-served to anyone. The config validator refuses that combination on a
-non-loopback bind.
+`auth.enabled` is the master switch **for the credential paths**. The runtime
+guard gates them on it, so **`password_required` or `reverse_proxy.enabled`
+without `auth.enabled: true` is a silent open door** — the operator sets a
+password, but the dashboard is still served to anyone. The config validator
+refuses that combination on a non-loopback bind.
+
+**The cross-site `Origin` guard is deliberately outside that switch.** It is a
+CSRF/WS-hijack defence, not an authentication method: a browser page the operator
+visits can reach a loopback-bound service regardless of whether a password is
+set, so the allowlist is enforced on every unsafe method and every WebSocket
+handshake **even when `auth.enabled` is false**. With auth off there is no
+credential to exempt, so the gate rejects only a *present* `Origin` that isn't
+allowlisted — an absent `Origin` (a CLI/script client, never a browser) still
+passes.
+
+`build_allowed_origins` auto-allows `127.0.0.1`/`localhost`/`[::1]` **at
+`config.port`** for a loopback bind, and *nothing* for a non-loopback bind — so the
+default deployment needs no configuration. Note what the auto-allow keys on: the
+**bind host**, not the address the browser used. So a non-loopback bind rejects even
+`http://localhost:<port>` — a published Docker port (the image binds `0.0.0.0`) is
+the common case — and must list its browser-facing origin in `auth.allowed_origins`.
+A loopback bind needs the entry too whenever the browser arrives by some other route:
+a reverse proxy or tunnel (the `Origin` is the public hostname), or an SSH
+port-forward onto a *different* local port (`-L 9000:localhost:7621` →
+`http://localhost:9000`, port mismatch). With auth enabled this was already true; the
+change extends the same requirement to auth-off deployments, which previously skipped
+the check entirely. It fails closed and visibly — a rejected write with
+`origin check failed`, or a WS that won't connect.
 
 ### Two startup validators
 
@@ -94,7 +120,10 @@ Failed logins are rate-limited in two layers, returning **`429` with a
 
 ### WebSockets & origins
 
-WebSocket connections are **authenticated before accept** and origin-checked.
+WebSocket connections are **authenticated before accept** and origin-checked —
+and the origin check runs **even when `auth.enabled` is `false`** (see
+[The master switch](#the-master-switch)), because a cross-site page can open a
+socket to a loopback service regardless of whether a password is set.
 Add the proxy domain or any extra trusted origins to `auth.allowed_origins`.
 
 ## HTTP security headers
@@ -160,7 +189,12 @@ Put an **IdP / IAP** in front — an SSO/forward-auth proxy (Authelia, Authentik
 Cloudflare Access, Pomerium, oauth2-proxy) or a private overlay (Tailscale,
 WireGuard) — so a real identity is checked *before* a request reaches Clauster.
 The reverse-proxy path (peer-IP allowlist + an HMAC-signed user header,
-`auth.reverse_proxy`) is built to trust exactly such a proxy. Once it is your
+`auth.reverse_proxy`) is built to trust exactly such a proxy. The proxy's
+identity check is **admission, not access control**: Clauster is single-operator
+by design, so whoever the IdP admits acts with the one operator's full host
+control, and the config-write audit trail attributes actions to the constant
+`admin` actor rather than the IdP identity. The IdP group is an on/off switch
+for the whole host — it should contain exactly one person. Once it is your
 primary gate, prefer **dropping `password_required` entirely** — the `/login`
 route is deliberately exempt from the auth middleware (so a locked-out operator
 can always reach it), which means there is *no* Clauster-side option to restrict
@@ -277,7 +311,7 @@ whose host is — or resolves to — a loopback / link-local / private / CGNAT /
 metadata IP, using the **same** private-range classifier as the clone guard
 (it imports `provisioning._EXTRA_PRIVATE_NETS`). Default-off preserves the
 LAN-receiver use case. See
-[`webhooks`](configuration.md#webhooks-outbound-lifecycle-webhooks-webhooksconfig)
+[`webhooks`](reference/config.md#webhooks-outbound-lifecycle-webhooks-webhooksconfig)
 in the configuration reference for the field.
 
 ## bypassPermissions footgun gate
@@ -293,3 +327,12 @@ closed: if it cannot enumerate the live bridge set it aborts rather than risk
 archiving a still-live environment. The destructive **dashboard** surface is off
 by default and gated by `reaper.ui_enabled`; archive is reversible, force-delete
 requires typing `DELETE`.
+
+It is also **scoped to this instance's `projects_root`**. The environment list is
+account-wide while the liveness check is instance-scoped — it sees only this OS
+user's sessions and this instance's projects — so an environment outside
+`projects_root` is unattributable and never reaped. Without that rail, reaping on
+one instance could archive another instance's *live* environment and tear down
+its running session. See
+[`clauster reap-environments`](reference/cli.md#clauster-reap-environments-archive-ghost-environments)
+for the scope rules, including the shared-`projects_root` caveat.

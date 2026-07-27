@@ -46,6 +46,17 @@ A second validator independently refuses to start when `password_required` is
 set but `password_hash` is empty — regardless of host — because that would lock
 everyone out or be silently skipped.
 
+> **Every non-loopback bind also needs `auth.allowed_origins`.** A loopback bind
+> auto-trusts `127.0.0.1`/`localhost`/`[::1]` at its own port; a non-loopback
+> bind auto-trusts **nothing**. The strict `Origin` allowlist gates every unsafe
+> request and every WebSocket handshake — and, since 1.0, it does so *whether or
+> not* `auth.enabled` is set, because it is a cross-site defence rather than an
+> authentication method. So list the browser-facing origin, or the dashboard's
+> own actions and live views are refused with `origin check failed`. This bites
+> even when you browse the service at `http://localhost:<port>` (a published
+> Docker port, for instance) — the *bind* host is what decides, not the address
+> you type.
+
 ## Password auth on a non-loopback bind
 
 ```yaml
@@ -98,7 +109,7 @@ falling back to plain HTTP. The key material is never logged.
 
 Clauster can generate and manage a self-signed RSA-2048 cert+key pair for you,
 no external tools required. This requires the `cryptography` package (already a
-core dependency from v0.13 onwards):
+core dependency since 0.13):
 
 ```yaml
 projects_root: ~/code
@@ -221,6 +232,15 @@ The login rate-limiter never keys on the bare header: a forged-username flood fr
 a trusted IP collapses to the shared-IP global backoff, so it can't mint a fresh
 per-user login budget.
 
+!!! warning "Proxy identity is admission, not access control"
+    Clauster reads `user_header` only to authenticate the request. The identity
+    does not scope anything: every admitted request acts with the full
+    single-operator capability, and the config-write audit log records the
+    constant `admin` actor rather than the header value — actions by two
+    different IdP users are indistinguishable there. Admitting a second person
+    to this proxy grants them your shell; treat the IdP group as an on/off
+    switch for the whole host, not as per-user access control.
+
 ### Recipe — Caddy `forward_auth` + Authelia
 
 Caddy delegates each request to Authelia, then forwards Authelia's `Remote-User`
@@ -307,3 +327,9 @@ The container binds `0.0.0.0` internally, so it **requires enforced auth to
 start** — the bundled `compose.yaml` sets `CLAUSTER_AUTH_ENABLED=true` and
 `CLAUSTER_AUTH_PASSWORD_REQUIRED=true` and expects a
 `CLAUSTER_AUTH_PASSWORD_HASH`. See [Installation](installation.md#docker).
+
+Because that bind is non-loopback, it also needs `auth.allowed_origins` (see the
+callout above) — otherwise the login POST is refused with `403 origin check
+failed`. Completing the first-run setup wizard records the origin you reached it
+at automatically; a Compose deployment configured purely by environment sets
+`CLAUSTER_AUTH_ALLOWED_ORIGINS` instead (comma-separated for more than one).

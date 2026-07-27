@@ -78,6 +78,69 @@ def test_permissions_and_hooks_surfaces_present_when_enabled(write_config):
     assert 'data-test="cm-hooks-text"' in html
 
 
+def test_permissions_rows_editor_present_when_enabled(write_config):
+    # #958 Part 5: the permissions surface gains a friendly allow/deny/ask rows editor
+    # + a defaultMode select, layered over the raw-JSON escape hatch. Assert the mode
+    # toggle, the rows scaffold, the mode select, and the raw textarea are all wired.
+    html = _html(write_config, _ON)
+    assert 'data-test="cm-permissions-mode-rows"' in html
+    assert 'data-test="cm-permissions-mode-raw"' in html
+    assert 'data-test="cm-permissions-rows"' in html
+    assert 'data-test="cm-perm-defaultmode"' in html
+    assert 'data-test="cm-permissions-rows-error"' in html
+    # The per-bucket row/add/remove data-tests are Alpine-bound (x-for), so their
+    # binding expressions appear in the markup even before the rows hydrate.
+    assert "'cm-perm-rule-' + bucket.key" in html
+    assert "'cm-perm-add-' + bucket.key" in html
+    # The raw JSON textarea stays as the escape hatch for unrepresentable shapes.
+    assert 'data-test="cm-permissions-text"' in html
+    # The rows editor + its projection/vocabulary helpers are wired in the Alpine script.
+    assert "configMgmtPermissionsMode(" in html
+    assert "_permissionsSerialized(" in html
+    assert "configMgmtPermissionModeOptions(" in html
+    assert "configMgmtAddPermRow(" in html
+
+
+def test_hooks_rows_editor_present_when_enabled(write_config):
+    # #958 Part 5: the hooks surface gains a flat rows editor (event/matcher/command/
+    # timeout) over the nested shape, layered on the raw-JSON escape hatch.
+    html = _html(write_config, _ON)
+    assert 'data-test="cm-hooks-mode-rows"' in html
+    assert 'data-test="cm-hooks-mode-raw"' in html
+    assert 'data-test="cm-hooks-rows"' in html
+    assert 'data-test="cm-hooks-table"' in html
+    assert 'data-test="cm-hook-event"' in html
+    assert 'data-test="cm-hook-matcher"' in html
+    assert 'data-test="cm-hook-command"' in html
+    assert 'data-test="cm-hook-timeout"' in html
+    assert 'data-test="cm-hook-remove"' in html
+    assert 'data-test="cm-hooks-add"' in html
+    assert 'data-test="cm-hooks-rows-error"' in html
+    # The raw JSON textarea stays as the escape hatch.
+    assert 'data-test="cm-hooks-text"' in html
+    # The rows editor + its projection/vocabulary helpers are wired in the Alpine script.
+    assert "configMgmtHooksMode(" in html
+    assert "_hooksSerialized(" in html
+    assert "configMgmtAddHookRow(" in html
+    assert "configMgmtHookEvents(" in html
+    # The event vocabulary is server-injected from the backend validator (no drift).
+    assert "const HOOK_EVENTS =" in html
+
+
+def test_hook_events_match_backend_recognized_events(write_config):
+    # The injected HOOK_EVENTS const must equal the backend's RECOGNIZED_EVENTS (sorted)
+    # so the rows editor's event <select> never offers an event the write surface rejects.
+    import json
+    import re
+
+    from clauster.config_write_hooks import RECOGNIZED_EVENTS
+
+    html = _html(write_config, _ON)
+    m = re.search(r"const HOOK_EVENTS = (\[[^\]]*\]);", html)
+    assert m, "HOOK_EVENTS const not found in the rendered dashboard"
+    assert json.loads(m.group(1)) == sorted(RECOGNIZED_EVENTS)
+
+
 def test_settings_env_rows_editor_present_when_enabled(write_config):
     # #765: the settings surface gains a friendly env key/value rows editor layered
     # over the raw-JSON escape hatch. Assert the mode toggle, the row editor, and the
@@ -110,6 +173,11 @@ def test_subagents_surface_present_when_enabled(write_config):
     assert 'data-test="cm-agent-editor"' in html
     # The Local scope tab is conditionally hidden for user/project-only surfaces.
     assert "configMgmtSurfaceHasLocal()" in html
+    # #958 Part 5: the Name box is the single source — auto-synced into the frontmatter
+    # on save (no double entry), with a hint and a seeded new-agent template.
+    assert 'data-test="cm-agent-name-hint"' in html
+    assert "_syncAgentName(" in html
+    assert "const AGENT_TEMPLATE =" in html
 
 
 def test_mcp_surface_present_when_enabled(write_config):
