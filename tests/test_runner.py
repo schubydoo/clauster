@@ -1684,10 +1684,103 @@ async def test_poll_drops_phantom_stopped_shadowing_external(runner_config, monk
     # The prune's premise is "the bridge IS alive, just unmanaged", so since #1096 the
     # external session must actually BE a bridge — a hand-run `claude` sharing the cwd is
     # EXTERNAL by design (#820) but is not evidence that this card is a phantom.
-    monkeypatch.setattr("clauster.runner.procutil.is_bridge_process", lambda pid: True)
+    monkeypatch.setattr("clauster.runner.procutil.bridge_ancestor", lambda pid, **k: 990001)
     await runner.poll_once()
     assert runner.get_instance_for_project("alpha") is None  # phantom dropped
     assert "alpha" in runner.external_sessions_by_project()  # now surfaced as external
+
+
+async def test_poll_does_not_prune_on_our_own_bridges_session(runner_config, monkeypatch):
+    # #1116's honesty guard. Finding a bridge ancestor proves a bridge is responsible for the
+    # session — NOT that it is unmanaged. A session of OUR OWN bridge can read EXTERNAL when
+    # the #820 pid gate cannot enumerate the process tree (hidepid, a container). Without the
+    # managed-pid exclusion, that session becomes evidence for deleting the same project's
+    # stopped cards: the prune would eat a resumable card on the strength of our own bridge.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    live = RemoteControlInstance(
+        project="alpha",
+        label="alpha-live",
+        status=InstanceStatus.RUNNING,
+        resume_mode="standard",
+        bridge_pid=990001,
+    )
+    phantom = RemoteControlInstance(
+        project="alpha", label="phantom", status=InstanceStatus.STOPPED, resume_mode="pty"
+    )
+    runner._instances[live.instance_id] = live
+    runner._instances[phantom.instance_id] = phantom
+    sess = WorkingSession(
+        pid=990002,  # the SDK worker of OUR bridge 990001
+        cwd=config.projects_root / "alpha",
+        kind="interactive",
+        started_at=1,
+        local_uuid="u-ours",
+    )
+    monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
+    # Ancestry resolves to our OWN managed bridge pid.
+    monkeypatch.setattr("clauster.runner.procutil.bridge_ancestor", lambda pid, **k: 990001)
+
+    await runner.poll_once()
+
+    assert runner.get_instance(phantom.instance_id) is not None, (
+        "our own bridge's session must not be evidence for pruning our own card"
+    )
+    # Differential control: an ancestor that is NOT one of ours is real evidence, and with a
+    # single candidate row the prune does fire — so the exclusion, not inertness, decided.
+    runner2 = _make_runner(runner_config)
+    lone = RemoteControlInstance(
+        project="alpha", label="phantom", status=InstanceStatus.STOPPED, resume_mode="pty"
+    )
+    runner2._instances[lone.instance_id] = lone
+    monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
+    monkeypatch.setattr("clauster.runner.procutil.bridge_ancestor", lambda pid, **k: 777777)
+    await runner2.poll_once()
+    assert runner2.get_instance(lone.instance_id) is None, "an unmanaged bridge does prune"
+
+
+async def test_poll_prune_reads_managed_pids_after_the_ancestry_walk(runner_config, monkeypatch):
+    # TOCTOU. `poll_once` runs LOCK-FREE, so a lock-holding adopt()/spawn() can publish a
+    # `bridge_pid` while the ancestry walk is suspended in its to_thread. If the managed-pid
+    # exclusion were snapshotted BEFORE that await, the newly-adopted bridge would be absent
+    # from it, its own session would read unmanaged, and a sibling STOPPED card would be
+    # deleted on the strength of a bridge Clauster had just adopted. The delete is only
+    # recoverable by restart (`_stopped_from_persisted` runs in `rediscover`, once), so this
+    # fails destructively — the exclusion must be read AFTER the walk.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    phantom = RemoteControlInstance(
+        project="alpha", label="phantom", status=InstanceStatus.STOPPED, resume_mode="pty"
+    )
+    runner._instances[phantom.instance_id] = phantom
+    sess = WorkingSession(
+        pid=990002,
+        cwd=config.projects_root / "alpha",
+        kind="interactive",
+        started_at=1,
+        local_uuid="u-adopted",
+    )
+    monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
+
+    # The walk itself simulates the concurrent adopt: the bridge becomes managed DURING it.
+    def _walk(pid, **kwargs):
+        runner._instances["iid-adopted"] = RemoteControlInstance(
+            instance_id="iid-adopted",
+            project="alpha",
+            label="adopted",
+            status=InstanceStatus.RUNNING,
+            resume_mode="standard",
+            bridge_pid=990001,
+        )
+        return 990001
+
+    monkeypatch.setattr("clauster.runner.procutil.bridge_ancestor", _walk)
+
+    await runner.poll_once()
+
+    assert runner.get_instance(phantom.instance_id) is not None, (
+        "a bridge adopted during the walk must not be evidence for pruning its own project"
+    )
 
 
 async def test_poll_attributes_starting_bridge_session_not_external(runner_config, monkeypatch):

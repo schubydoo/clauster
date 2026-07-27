@@ -517,7 +517,7 @@ async def test_prune_does_not_wipe_unrelated_stopped_siblings(runner_config, mon
         runner._instances[iid] = runner._stopped_from_row(
             iid, {"project_name": "alpha", "label": label, "resume_mode": "pty"}
         )
-    monkeypatch.setattr("clauster.runner.procutil.is_bridge_process", lambda pid: True)
+    monkeypatch.setattr("clauster.runner.procutil.bridge_ancestor", lambda pid, **k: 990001)
     monkeypatch.setattr(
         "clauster.inspector.list_working_sessions",
         lambda *a, **k: [_external_session(config.projects_root / "alpha")],
@@ -539,7 +539,7 @@ async def test_prune_still_removes_a_lone_phantom(runner_config, monkeypatch):
     runner._instances["iid-a"] = runner._stopped_from_row(
         "iid-a", {"project_name": "alpha", "label": "alpha", "resume_mode": "pty"}
     )
-    monkeypatch.setattr("clauster.runner.procutil.is_bridge_process", lambda pid: True)
+    monkeypatch.setattr("clauster.runner.procutil.bridge_ancestor", lambda pid, **k: 990001)
     monkeypatch.setattr(
         "clauster.inspector.list_working_sessions",
         lambda *a, **k: [_external_session(config.projects_root / "alpha")],
@@ -573,7 +573,7 @@ async def test_prune_removes_a_phantom_even_when_a_sibling_is_live(runner_config
     # The external session's pid is NOT a descendant of the live bridge, so reconcile
     # correctly classes it EXTERNAL rather than folding it into the live instance.
     monkeypatch.setattr("clauster.runner.procutil.owned_pids", lambda roots: set(roots))
-    monkeypatch.setattr("clauster.runner.procutil.is_bridge_process", lambda pid: True)
+    monkeypatch.setattr("clauster.runner.procutil.bridge_ancestor", lambda pid, **k: 990001)
     monkeypatch.setattr(
         "clauster.inspector.list_working_sessions",
         lambda *a, **k: [_external_session(config.projects_root / "alpha", pid=999)],
@@ -825,7 +825,7 @@ async def test_prune_ignores_a_hand_run_claude_that_is_not_a_bridge(runner_confi
     runner._instances["iid-a"] = runner._stopped_from_row(
         "iid-a", {"project_name": "alpha", "label": "alpha", "resume_mode": "pty"}
     )
-    monkeypatch.setattr("clauster.runner.procutil.is_bridge_process", lambda pid: False)
+    monkeypatch.setattr("clauster.runner.procutil.bridge_ancestor", lambda pid, **k: None)
     monkeypatch.setattr(
         "clauster.inspector.list_working_sessions",
         lambda *a, **k: [_external_session(config.projects_root / "alpha")],
