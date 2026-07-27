@@ -2268,3 +2268,121 @@ def test_teardown_conpty_close_error_is_swallowed() -> None:
     sh._flow = flow  # noqa: SLF001 - internals test
     sh._teardown(flow)  # noqa: SLF001 - a close() that raises must never propagate
     assert sh._flow is None
+
+
+class _TeardownProc:
+    """Minimal `Popen` stand-in for the teardown tests (real trees are platform-bound).
+
+    `pid=None` builds the `_ConPtyPopen` shape: the attribute is never set at all, rather
+    than set to None — so `getattr(proc, "pid", None)` exercises the real missing-attribute
+    path. Kept on the INSTANCE so no test has to mutate (and restore) class state.
+    """
+
+    def __init__(self, pid: int | None = 4242) -> None:
+        if pid is not None:
+            self.pid = pid
+        self.terminated = False
+
+    def poll(self):
+        return None
+
+    def terminate(self):
+        self.terminated = True
+
+    def kill(self):
+        self.terminated = True
+
+    def wait(self, timeout=None):
+        return 0
+
+
+def test_teardown_kills_the_whole_tree_on_windows(shepherd, monkeypatch) -> None:
+    """Windows teardown reaps the process TREE before terminating the child.
+
+    `Popen.terminate()` on Windows kills only the process it is handed — never its
+    descendants (`Popen.kill is Popen.terminate` there, both TerminateProcess). A child
+    that outlives it keeps our stdout pipe open, so the reader thread never sees EOF: the
+    join burns its full 5s and then LEAKS the thread. Measured on a Windows VM against the
+    `.cmd` stub (cmd.exe -> python.exe): 5026ms with the reader still alive, 20ms after.
+
+    The tree kill is PREPENDED, not substituted — `terminate()` and its escalation still
+    run, so nothing that depends on that ordering changes.
+    """
+    monkeypatch.setattr(ls, "_is_win32", lambda: True)
+    killed: list[int] = []
+    monkeypatch.setattr(ls.procutil, "force_kill_tree", lambda pid: killed.append(pid))
+
+    proc = _TeardownProc()
+    flow = ls._Flow(mode="login", proc=proc)  # type: ignore[arg-type]
+    shepherd._flow = flow
+    shepherd._teardown(flow)
+
+    assert killed == [4242], "Windows teardown must reap the process tree"
+    assert proc.terminated, "the tree kill is prepended to terminate(), not a replacement"
+
+
+def test_teardown_skips_the_tree_kill_for_a_conpty_proc(shepherd, monkeypatch) -> None:
+    """A ConPTY flow has no `pid` to reap, and must not raise reaching for one.
+
+    `_ConPtyPopen` is a deliberate `Popen` SUBSET (poll/wait/terminate/kill) — pywinpty
+    owns the process and exposes no `pid`. An unguarded `flow.proc.pid` raised
+    `AttributeError` here and broke the whole ConPTY teardown path on Windows. It also
+    never needed the tree kill: its reader polls `isalive()` rather than blocking on a
+    read, so it exits on its own once the child dies.
+    """
+    monkeypatch.setattr(ls, "_is_win32", lambda: True)
+    killed: list[int] = []
+    monkeypatch.setattr(ls.procutil, "force_kill_tree", lambda pid: killed.append(pid))
+
+    proc = _TeardownProc(pid=None)  # the _ConPtyPopen subset: no `pid` attribute at all
+    flow = ls._Flow(mode="setup-token", proc=proc)  # type: ignore[arg-type]
+    shepherd._flow = flow
+    shepherd._teardown(flow)  # must not raise
+
+    assert killed == [], "a pid-less ConPTY proc must not be tree-killed"
+    assert proc.terminated, "it still gets the normal terminate()"
+
+
+def test_teardown_survives_a_tree_kill_that_raises(shepherd, monkeypatch) -> None:
+    """A failing tree kill degrades to the old behaviour — it never strands the flow.
+
+    The reap is best-effort. An unguarded raise would skip the terminate, the reader
+    join, the control-end close AND the `self._flow = None` clear, leaving the shepherd
+    permanently `active` with no way to start another login — strictly worse than the
+    leaked reader thread the tree kill exists to prevent.
+    """
+    monkeypatch.setattr(ls, "_is_win32", lambda: True)
+
+    def _boom(pid: int) -> None:
+        raise OSError("psutil could not walk the tree")
+
+    monkeypatch.setattr(ls.procutil, "force_kill_tree", _boom)
+
+    proc = _TeardownProc()
+    flow = ls._Flow(mode="login", proc=proc)  # type: ignore[arg-type]
+    shepherd._flow = flow
+    shepherd._teardown(flow)  # must not raise
+
+    assert proc.terminated, "teardown must carry on to terminate() after a failed reap"
+    assert shepherd._flow is None, "a failed reap must still clear the active flow"
+
+
+def test_teardown_still_uses_terminate_on_posix(shepherd, monkeypatch) -> None:
+    """POSIX teardown keeps the graceful SIGTERM and never force-kills the tree.
+
+    There `terminate()` is a real SIGTERM (unlike Windows, where it is already
+    TerminateProcess) and the stop-child-first ordering documented in `_teardown` is
+    load-bearing — it is what makes a blocked pty read return EOF on macOS/BSD. A tree
+    kill here would trade graceful shutdown for SIGKILL to fix a problem POSIX lacks.
+    """
+    monkeypatch.setattr(ls, "_is_win32", lambda: False)
+    killed: list[int] = []
+    monkeypatch.setattr(ls.procutil, "force_kill_tree", lambda pid: killed.append(pid))
+
+    proc = _TeardownProc()
+    flow = ls._Flow(mode="login", proc=proc)  # type: ignore[arg-type]
+    shepherd._flow = flow
+    shepherd._teardown(flow)
+
+    assert killed == [], "POSIX teardown must not force-kill the tree"
+    assert proc.terminated, "POSIX teardown must still send the graceful terminate()"
