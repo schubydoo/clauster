@@ -632,3 +632,114 @@ def test_disabled_surface_404s_even_for_bogus_scope(write_config, tmp_path, meth
     enabled = "config_write:\n  enabled: true\n  allow_user_scope: true\n"
     with _client(write_config, tmp_path, enabled) as c:
         assert c.request(method, url, json=body).status_code == 422
+
+
+def test_interp_scan_matches_the_regex_it_replaced_exactly():
+    """The hand-rolled ``${…}`` scan is byte-equivalent to the regex it replaced.
+
+    The old ``\\$\\{[^}]+\\}`` was quadratic on hostile input (CodeQL py/polynomial-redos),
+    so it was replaced by a linear hand scan. Equivalence is the whole risk of that swap —
+    a redaction helper that stops matching something the regex matched leaks — so it is
+    asserted exhaustively over every short string built from the characters that can
+    possibly matter, rather than a handful of chosen examples.
+    """
+    import itertools
+    import re
+
+    old = re.compile(r"\$\{[^}]+\}")
+    sent = cw.REDACTION_SENTINEL
+    for length in range(6):
+        for combo in itertools.product("${}a$ ", repeat=length):
+            s = "".join(combo)
+            assert bool(old.search(s)) is cw._has_interp(s), f"bool differs for {s!r}"
+            assert old.sub(sent, s) == cw._mask_interps(s, sent), f"sub differs for {s!r}"
+
+
+def test_interp_scan_is_linear_on_hostile_input():
+    """A pathological value must not stall the request that redacts it.
+
+    `${` repeated with no closing brace is the shape that made the old regex restart a
+    full-length scan at every opener: measured ~2s at 128 KB and ~2 minutes at 1 MB, on a
+    value that arrives unbounded from a cloned repository's `.claude/settings.json`. The
+    bound is deliberately loose (the scan is microseconds) so it flags a return to
+    quadratic behaviour without flaking on a loaded CI runner.
+    """
+    import time
+
+    hostile = "${" * 500_000  # 1 MB, no closing brace anywhere
+    start = time.perf_counter()
+    assert cw._has_interp(hostile) is False
+    assert cw._mask_interps(hostile, cw.REDACTION_SENTINEL) == hostile
+    elapsed = time.perf_counter() - start
+    assert elapsed < 2.0, f"interpolation scan took {elapsed:.2f}s — quadratic behaviour is back"
+
+
+def test_url_and_kv_scans_match_the_regexes_they_replaced():
+    """The two hand-rolled line scans are byte-equivalent to the regexes they replaced.
+
+    Both were quadratic (see the linearity test below). Equivalence is the whole risk of
+    replacing them, and the failure mode is silent under-masking, so it is asserted
+    exhaustively over the characters that can matter for each pattern rather than by
+    example. Includes ``-https://u@h`` specifically: the obvious ``(?<![a-z0-9+.-])``
+    lookbehind "fix" leaves that string completely unmasked, which is the leak direction.
+    """
+    import itertools
+    import re
+
+    old_url = re.compile(r"[a-z][a-z0-9+.\-]*://[^/@\s]+@", re.IGNORECASE)
+    old_kv = re.compile(r"^(?P<prefix>\s*[\w.\-]+\s*[:=]\s*)(?P<value>\S.*?)(?P<trail>\s*)$")
+    repl = f"{cw.REDACTION_SENTINEL}@"
+
+    def kv_old(body: str):
+        m = old_kv.match(body)
+        return None if m is None else (m.group("prefix"), m.group("trail"))
+
+    # The Unicode alphabet is NOT decorative. `[a-z]` under re.IGNORECASE is Unicode-aware:
+    # U+212A KELVIN SIGN folds to `k`, U+017F LONG S to `s`, U+0130/U+0131 likewise. An
+    # ASCII-only scan silently stopped masking `\u212a://user@host`, leaking the userinfo —
+    # an earlier revision of this fix shipped exactly that, and an ASCII-only test alphabet
+    # is what let it through.
+    for alphabet, maxlen in (("a:/@.-", 7), ("k = v", 6), ("a\u212a:/@-", 6)):
+        for length in range(maxlen):
+            for combo in itertools.product(alphabet, repeat=length):
+                s = "".join(combo)
+                assert old_url.sub(repl, s) == cw._mask_url_creds(s, repl), f"url differs {s!r}"
+                assert kv_old(s) == cw._split_kv_line(s), f"kv differs {s!r}"
+
+    # The lookbehind trap, pinned explicitly so a future "simplification" cannot reintroduce it.
+    assert cw._mask_url_creds("-https://u@h", repl) == f"-{cw.REDACTION_SENTINEL}@h"
+
+    # EVERY codepoint the old pattern's `[a-z]` accepts under IGNORECASE, as a single-char
+    # scheme — the shape that leaked. Enumerated rather than sampled: the class is small
+    # (52 ASCII letters plus 4 case-folding characters) and this is the whole of it.
+    for code in range(0x11000):
+        ch = chr(code)
+        if re.match(r"[a-z]", ch, re.IGNORECASE):
+            probe = f"{ch}://u@h"
+            assert old_url.sub(repl, probe) == cw._mask_url_creds(probe, repl), (
+                f"scheme char U+{code:04X} diverges — under-masking leaks the userinfo"
+            )
+
+
+def test_redact_secret_lines_is_linear_on_every_hostile_shape():
+    """No single line can stall the redaction pass, whichever pattern it targets.
+
+    Three separate quadratics lived on three consecutive lines of this function. The
+    ``${`` flood needed a crafted payload; the other two did not — an ordinary long
+    alphanumeric run (a minified blob, a long base64 value, a one-line JSON file) cost
+    0.18s at 8 KB and 11.25s at 64 KB, and ``key: value`` with a long internal whitespace
+    run cost 8.6s at 64 KB. Bounds are loose because each shape now runs in milliseconds.
+    """
+    import time
+
+    shapes = {
+        "interpolation flood": "${" * 500_000,
+        "alphanumeric run": "a" * 256_000,
+        "internal whitespace run": "token: a" + " " * 64_000 + "b",
+        "minified blob": "a." * 500_000,
+    }
+    for label, payload in shapes.items():
+        start = time.perf_counter()
+        cw.redact_secret_lines(payload)
+        elapsed = time.perf_counter() - start
+        assert elapsed < 2.0, f"{label} took {elapsed:.2f}s — quadratic behaviour is back"
