@@ -7,12 +7,14 @@ name: Claude Code
 # excluded below so the two workflows never both fire on one comment.
 #
 # SECURITY: claude-code-action only runs for users with WRITE access to the repository
-# and denies bots by default, so that is the load-bearing control. The author-association
-# gate below is defence in depth: issue_comment / issues / pull_request_review events run
-# in the BASE repo context WITH secrets, and the repo's "require approval for external
-# contributors" Actions policy does NOT cover comment events (it only gates
-# pull_request-triggered runs). Gating in YAML means a non-collaborator's "@claude" costs
-# no runner time at all, and the rule is auditable here rather than inside the action.
+# and denies bots by default. The author-association gate below is deliberately NARROWER
+# than that — maintainer only — because this spends a personal subscription quota rather
+# than repository budget. It is also defence in depth: issue_comment / issues /
+# pull_request_review events run in the BASE repo context WITH secrets, and the repo's
+# "require approval for external contributors" Actions policy does NOT cover comment
+# events (it only gates pull_request-triggered runs). Gating in YAML means anyone else's
+# "@claude" costs no runner time at all, and the rule is auditable here rather than
+# inside the action.
 #
 # Default posture is advisory: `contents: read`, so Claude can read and comment but not
 # push. Bump to `contents: write` only if "@claude fix it" should be able to commit —
@@ -42,24 +44,27 @@ concurrency:
 
 jobs:
   claude:
+    # MAINTAINER ONLY. Every branch requires author_association == 'OWNER': this spends
+    # the maintainer's personal subscription quota, so it is not a facility a
+    # collaborator may draw on. A non-owner's "@claude" is ignored entirely.
     if: >-
       (
         github.event_name == 'issue_comment' &&
         contains(github.event.comment.body, '@claude') &&
         !contains(github.event.comment.body, '@claude review') &&
-        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+        github.event.comment.author_association == 'OWNER'
       ) || (
         github.event_name == 'pull_request_review_comment' &&
         contains(github.event.comment.body, '@claude') &&
-        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+        github.event.comment.author_association == 'OWNER'
       ) || (
         github.event_name == 'pull_request_review' &&
         contains(github.event.review.body, '@claude') &&
-        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association)
+        github.event.review.author_association == 'OWNER'
       ) || (
         github.event_name == 'issues' &&
         (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')) &&
-        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.issue.author_association)
+        github.event.issue.author_association == 'OWNER'
       )
     runs-on: ubuntu-latest
     timeout-minutes: 20

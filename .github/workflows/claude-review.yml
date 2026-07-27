@@ -4,8 +4,8 @@ name: Claude Code Review
 # this is the second opinion for when Greptile is rate-limited (its cap is 100 reviews
 # a month) or when a PR wants another pass.
 #
-# Two ways to start it:
-#   • comment "@claude review" on a pull request (collaborators only)
+# Two ways for the MAINTAINER to start it — nobody else can, see the `if:` below:
+#   • comment "@claude review" on a pull request
 #   • Actions → this workflow → Run workflow, giving a PR number. The dispatch form
 #     also selects which review command to use, which is how we compare them.
 #
@@ -22,9 +22,10 @@ name: Claude Code Review
 #      pull request cannot rewrite the rules that govern its own review.
 #
 # SECURITY: the action itself only runs for users with write access, and denies bots by
-# default. The `if:` below is defence in depth — it also stops the job spinning up at
-# all. Advisory only: `contents: read` (Claude cannot push) and the instructions require
-# a COMMENT review, never REQUEST_CHANGES, so it can never gate a merge.
+# default. The `if:` below is both narrower than that — maintainer only — and cheaper,
+# since it stops the job spinning up at all. Advisory only: `contents: read` (Claude
+# cannot push) and the instructions require a COMMENT review, never REQUEST_CHANGES, so
+# it can never gate a merge.
 
 on:
   issue_comment:
@@ -62,13 +63,20 @@ concurrency:
 
 jobs:
   review:
-    # Comment path: a top-level comment on a PR (issue.pull_request is set) containing
-    # "@claude review", from a trusted collaborator. Nothing else fires it.
+    # MAINTAINER ONLY, both paths. This runs on the maintainer's personal subscription
+    # token, so invoking it spends their quota — it is not a shared repo facility, and a
+    # collaborator with write access must not be able to draw on it. Comparing against
+    # `github.repository_owner` rather than a hardcoded username keeps that true if the
+    # repo is ever transferred.
     if: >-
-      github.event_name == 'workflow_dispatch' || (
+      (
+        github.event_name == 'workflow_dispatch' &&
+        github.triggering_actor == github.repository_owner
+      ) || (
+        github.event_name == 'issue_comment' &&
         github.event.issue.pull_request &&
         contains(github.event.comment.body, '@claude review') &&
-        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+        github.event.comment.author_association == 'OWNER'
       )
     runs-on: ubuntu-latest
     timeout-minutes: 30
