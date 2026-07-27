@@ -298,12 +298,14 @@ def test_alembic_ini_is_ascii_readable_under_ascii_locale():
     assert parser.has_section("alembic")
 
 
+@pytest.mark.real_migration  # drives Alembic itself; the template copy would bypass it
 def test_persistence_propagates_migration_error(tmp_path):
     with mock.patch.object(bootstrap.command, "upgrade", side_effect=RuntimeError("boom")):
         with pytest.raises(MigrationError):
             Persistence(tmp_path)
 
 
+@pytest.mark.real_migration  # drives Alembic itself; the template copy would bypass it
 def test_persistence_disposes_engine_when_construction_fails(tmp_path):
     # A failed startup step must dispose the just-built engine (no pool leak) before
     # propagating — the caller never receives the object to dispose() itself.
@@ -467,6 +469,7 @@ def test_snapshot_skips_when_db_file_not_yet_created(tmp_path):
         engine.dispose()
 
 
+@pytest.mark.real_migration  # drives Alembic itself; the template copy would bypass it
 def test_persistence_snapshots_on_first_boot_by_default(tmp_path):
     p = Persistence(tmp_path)
     try:

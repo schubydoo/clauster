@@ -14,6 +14,10 @@ from typing import Any
 import pytest
 from hypothesis import settings
 
+from clauster.db import bootstrap as db_bootstrap
+from clauster.db import engine as db_engine
+from clauster.db import persistence as db_persistence
+
 
 def _can_create_symlink() -> bool:
     """Whether this runner can create a symlink (probed once, at import).
@@ -368,3 +372,67 @@ async def wait_until(
         if asyncio.get_event_loop().time() >= deadline:
             raise AssertionError(f"condition not met within {timeout}s")
         await asyncio.sleep(interval)
+
+
+# ---------------------------------------------------------------------------
+# Template database: run Alembic ONCE per worker, then copy the file per test.
+# ---------------------------------------------------------------------------
+# Every test that builds an app pays `Persistence()` = engine + `upgrade_to_head`,
+# and on Windows that is **157.7 ms** (vs 7.9 ms on Linux — a 20x blowup, measured
+# on a Windows VM at commit 5fef238). Across the ~2371 app-building tests that is
+# the single largest slice of the Windows CI matrix's cost. The schema is identical
+# for all of them, so migrating it thousands of times is pure waste: migrate once
+# into a template file and copy that instead.
+#
+# Fidelity: the copy IS a real migrated database — the same bytes Alembic produced,
+# at head — so a test cannot tell the difference by inspecting the schema.
+#
+# The fast path applies ONLY to a database that does not exist yet (the fresh-state_dir
+# case). A test that pre-seeds a DB at an older revision, or one testing migration
+# behaviour itself, has a non-empty file and takes the REAL upgrade untouched. Opt out
+# explicitly with `@pytest.mark.real_migration` when a test needs Alembic to run even
+# on a fresh database.
+
+_TEMPLATE_DB: Path | None = None
+_REAL_UPGRADE = db_bootstrap.upgrade_to_head
+
+
+def _db_path_for(engine: object) -> Path | None:
+    """The SQLite file an engine points at, or None if it isn't a plain file URL."""
+    database = getattr(getattr(engine, "url", None), "database", None)
+    return Path(database) if database else None
+
+
+def _template_db_path() -> Path:
+    """Build (once per process) a migrated-to-head database and return its path."""
+    global _TEMPLATE_DB
+    if _TEMPLATE_DB is None:
+        root = Path(tempfile.mkdtemp(prefix="clauster-db-template-"))
+        engine = db_engine.create_db_engine(root)
+        try:
+            _REAL_UPGRADE(engine, root, backup_before_migrate=False)
+        finally:
+            db_engine.dispose_engine(engine)
+        _TEMPLATE_DB = root / db_engine.DB_FILENAME
+    return _TEMPLATE_DB
+
+
+def _templated_upgrade(engine, state_dir, *, backup_before_migrate: bool = True) -> None:
+    """Seed a brand-new database from the template; otherwise run the real migration."""
+    path = _db_path_for(engine)
+    if path is None or (path.exists() and path.stat().st_size > 0):
+        _REAL_UPGRADE(engine, state_dir, backup_before_migrate=backup_before_migrate)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(_template_db_path(), path)
+
+
+@pytest.fixture(autouse=True)
+def _fast_migrations(request, monkeypatch):
+    """Swap `upgrade_to_head` for the template-copy fast path (opt out per test)."""
+    if request.node.get_closest_marker("real_migration"):
+        return
+    # Patch BOTH bindings: `persistence` imported the symbol by value at import time,
+    # so patching only the `bootstrap` module would leave the real one in use there.
+    monkeypatch.setattr(db_bootstrap, "upgrade_to_head", _templated_upgrade)
+    monkeypatch.setattr(db_persistence, "upgrade_to_head", _templated_upgrade)
