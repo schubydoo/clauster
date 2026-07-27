@@ -248,6 +248,14 @@ _READY_POLL_INTERVAL = 0.25
 # cold start skips it. And bound how long we wait for the poisoned idle bridge to stop.
 _POISON_GRACE = 4.0
 _POISON_STOP_TIMEOUT = 5.0
+
+# How long to wait for a force-killed process TREE to actually die. Distinct from
+# `_POISON_STOP_TIMEOUT` on purpose: that one is a GRACEFUL-stop grace period (how long
+# to let a bridge shut itself down), whereas this bounds a post-SIGKILL/TerminateProcess
+# death, which is sub-100ms unless the target is stuck in an uninterruptible kernel wait
+# — and 5s would not save that either. Kept separate so retuning the grace period can't
+# silently retune the reap.
+_TREE_REAP_WAIT = 2.0
 # #867 L4: nothing else prunes bridge-pointer.json, so a project accumulates a pointer that
 # outlives its (server-reaped) environment. At startup, clear clauster's OWN pointers that
 # are both non-live AND older than this — a live or recently-stopped-resumable session is
@@ -2657,6 +2665,37 @@ class SessionRunner:
             await asyncio.sleep(_READY_POLL_INTERVAL)
         else:
             try:
+                # On Windows `kill()` IS `terminate()` (both TerminateProcess) and neither
+                # touches descendants, so killing the pid we hold leaves the real bridge
+                # running whenever `claude` resolves to a `.cmd`/npm shim — the npm case is
+                # the NORMAL Windows install, so "never leave an idle orphan bridge behind"
+                # was exactly what this did there. Reap the tree first; the plain `kill()`
+                # still runs below and stays the only path on POSIX, where the pid we hold
+                # IS the bridge.
+                #
+                # Guarded on its own, NOT by the `except (ProcessLookupError, OSError)`
+                # below: psutil's error family (`NoSuchProcess`/`AccessDenied`/
+                # `ZombieProcess`) descends from `Exception`, not `OSError`, so that tuple
+                # cannot catch it. An escape here is the worst of the three reap sites — it
+                # would skip `kill()`, the `wait()`, AND `clear_pointer()`, leaving the
+                # poisoned pointer in place (the exact loop this method exists to break)
+                # and propagating out before `_persist()` writes the ERROR status.
+                #
+                # `wait_timeout` because the NEXT steps are gated on death: `proc.wait()`
+                # below only confirms the pid WE hold (the `.cmd` shim), while the pointer
+                # records the real bridge — a descendant. `kill()` is asynchronous, so
+                # without the wait `clear_pointer`'s liveness guard can still see that
+                # descendant alive, refuse, and leave the poisoned pointer for the next
+                # launch to reattach to — the exact loop this method exists to break.
+                # Affordable here (already off the loop in a thread), unlike the
+                # claustrum call site.
+                if procutil.is_windows():
+                    try:
+                        await asyncio.to_thread(
+                            procutil.force_kill_tree, proc.pid, wait_timeout=_TREE_REAP_WAIT
+                        )
+                    except Exception as exc:  # noqa: BLE001 — must not skip kill/clear_pointer
+                        _log.debug("tree kill of poisoned bridge %s failed: %s", proc.pid, exc)
                 proc.kill()  # never leave an idle orphan bridge behind
                 # Reap + confirm death BEFORE clearing: otherwise clear_pointer's liveness
                 # guard can still see the just-killed pid as alive and refuse (a poison loop).

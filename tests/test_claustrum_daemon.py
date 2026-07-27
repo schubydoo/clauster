@@ -22,6 +22,7 @@ import tempfile
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
+import psutil
 import pytest
 
 from clauster.claustrum_client import AuthRejected, DaemonUnreachable
@@ -271,6 +272,60 @@ async def test_spawn_launcher_hang_times_out(make_daemon, monkeypatch):
     with pytest.raises(DaemonSpawnError) as excinfo:
         await daemon.ensure()
     assert "did not detach" in str(excinfo.value)
+
+
+async def test_spawn_launcher_hang_reaps_the_tree_on_windows(make_daemon, monkeypatch):
+    """A timed-out launcher is reaped as a TREE on Windows, not just the pid we hold.
+
+    The launcher is a `.cmd`/shim → python → detached-child chain there, and `kill()`
+    reaps only its argument — so a launcher killed mid-detach would leave that chain
+    running with our log file open.
+    """
+    monkeypatch.setenv("FAKE_CLAUSTRUM_HANG_LAUNCHER", "1")
+    monkeypatch.setattr("clauster.claustrum_daemon.procutil.is_windows", lambda: True)
+    killed: list[int] = []
+    monkeypatch.setattr(
+        "clauster.claustrum_daemon.procutil.force_kill_tree", lambda pid: killed.append(pid)
+    )
+    daemon = make_daemon(spawn_timeout_seconds=0.5)
+
+    with pytest.raises(DaemonSpawnError):
+        await daemon.ensure()
+    assert killed, "the launcher's tree must be reaped on Windows"
+
+
+async def test_spawn_launcher_hang_tree_kill_failure_still_raises(make_daemon, monkeypatch):
+    """A failing reap must not mask the DaemonSpawnError this path exists to raise."""
+    monkeypatch.setenv("FAKE_CLAUSTRUM_HANG_LAUNCHER", "1")
+    monkeypatch.setattr("clauster.claustrum_daemon.procutil.is_windows", lambda: True)
+
+    def _boom(pid: int) -> None:
+        # psutil's error family descends from Exception, NOT OSError — which is exactly why
+        # the production guard is `except Exception`. An OSError here would pass even
+        # against a too-narrow guard.
+        raise psutil.AccessDenied(pid)
+
+    monkeypatch.setattr("clauster.claustrum_daemon.procutil.force_kill_tree", _boom)
+    daemon = make_daemon(spawn_timeout_seconds=0.5)
+
+    with pytest.raises(DaemonSpawnError) as excinfo:
+        await daemon.ensure()
+    assert "did not detach" in str(excinfo.value)
+
+
+async def test_spawn_launcher_hang_does_not_tree_kill_on_posix(make_daemon, monkeypatch):
+    """POSIX keeps the plain `kill()` — the launcher we hold is the process to stop."""
+    monkeypatch.setenv("FAKE_CLAUSTRUM_HANG_LAUNCHER", "1")
+    monkeypatch.setattr("clauster.claustrum_daemon.procutil.is_windows", lambda: False)
+    killed: list[int] = []
+    monkeypatch.setattr(
+        "clauster.claustrum_daemon.procutil.force_kill_tree", lambda pid: killed.append(pid)
+    )
+    daemon = make_daemon(spawn_timeout_seconds=0.5)
+
+    with pytest.raises(DaemonSpawnError):
+        await daemon.ensure()
+    assert killed == [], "POSIX must not force-kill the tree"
 
 
 async def test_spawned_daemon_rejects_token(make_daemon, monkeypatch):
