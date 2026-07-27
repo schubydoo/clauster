@@ -1,0 +1,93 @@
+name: Claude Code
+
+# Interactive "@claude" assistant — answers questions and makes suggestions on issues
+# and PRs. Runs on the maintainer's subscription token.
+#
+# For a full PR review use "@claude review", which is handled by claude-review.yml and
+# excluded below so the two workflows never both fire on one comment.
+#
+# SECURITY: claude-code-action only runs for users with WRITE access to the repository
+# and denies bots by default. The author-association gate below is deliberately NARROWER
+# than that — maintainer only — because this spends a personal subscription quota rather
+# than repository budget. It is also defence in depth: issue_comment / issues /
+# pull_request_review events run in the BASE repo context WITH secrets, and the repo's
+# "require approval for external contributors" Actions policy does NOT cover comment
+# events (it only gates pull_request-triggered runs). Gating in YAML means anyone else's
+# "@claude" costs no runner time at all, and the rule is auditable here rather than
+# inside the action.
+#
+# Default posture is advisory: `contents: read`, so Claude can read and comment but not
+# push. Bump to `contents: write` only if "@claude fix it" should be able to commit —
+# note the action does not open PRs on its own; it pushes a branch and links the compare
+# page so a human still opens the PR.
+#
+# ⚠️ Edits to this file only take effect once merged: claude-code-action refuses to run
+# when the workflow differs from the copy on the default branch, and it skips with a
+# warning while the job still reports GREEN.
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    types: [opened]
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: claude-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  claude:
+    # MAINTAINER ONLY. Every branch requires author_association == 'OWNER': this spends
+    # the maintainer's personal subscription quota, so it is not a facility a
+    # collaborator may draw on. A non-owner's "@claude" is ignored entirely.
+    if: >-
+      (
+        github.event_name == 'issue_comment' &&
+        contains(github.event.comment.body, '@claude') &&
+        !contains(github.event.comment.body, '@claude review') &&
+        github.event.comment.author_association == 'OWNER'
+      ) || (
+        github.event_name == 'pull_request_review_comment' &&
+        contains(github.event.comment.body, '@claude') &&
+        github.event.comment.author_association == 'OWNER'
+      ) || (
+        github.event_name == 'pull_request_review' &&
+        contains(github.event.review.body, '@claude') &&
+        github.event.review.author_association == 'OWNER'
+      ) || (
+        github.event_name == 'issues' &&
+        (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')) &&
+        github.event.issue.author_association == 'OWNER'
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write # post replies / review comments
+      issues: write # reply on issues
+      id-token: write
+      actions: read # read CI results on PRs
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Run Claude Code
+        id: claude
+        uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          additional_permissions: |
+            actions: read
+          # Stop Claude writing "#1"/"#2" to enumerate points — GitHub auto-links
+          # a hash+number into a link to an unrelated issue/PR.
+          claude_args: |
+            --append-system-prompt "When listing or referring to findings or numbered points, do not write them as #1, #2, etc. GitHub turns a hash followed by digits into a link to an unrelated issue or PR. Use Finding 1, (1), or a short description instead."
