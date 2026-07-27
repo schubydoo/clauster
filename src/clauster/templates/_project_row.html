@@ -108,7 +108,17 @@
                            composer, so launched blank it idles forever. -->
                       <div class="mt-2" x-show="lmode === 'detached'" x-cloak>
                         <label class="form-label small mb-1" for="lprompt-{{ p.name }}">First prompt <span class="text-secondary" x-text="lcloud ? '(optional)' : '(required)'">(required)</span></label>
-                        <input id="lprompt-{{ p.name }}" type="text" class="form-control form-control-sm" x-model="lprompt" placeholder="Initial instruction…" {{ NO_AUTOFILL }}>
+                        {# x-if, not x-show: the input must LEAVE the DOM when the popover is
+                           shut (#1114). This row template renders once per project, so an
+                           x-show popover keeps a copy of this field mounted for every card —
+                           16 on an 8-project dashboard — while the never-filled controls
+                           (`np-name`/`np-url`) are singletons. Field-level opt-out markup is
+                           exhausted and identical on both, so field COUNT is the remaining
+                           difference. `lprompt` lives on the row scope, so the value survives
+                           unmount/remount. #}
+                        <template x-if="lopen">
+                          <input id="lprompt-{{ p.name }}" type="text" class="form-control form-control-sm" x-model="lprompt" placeholder="Initial instruction…" {{ NO_AUTOFILL }}>
+                        </template>
                         <p class="form-hint text-secondary small mt-1 mb-0" data-test="launch-bg-prompt-required"
                            id="bg-prompt-req-{{ p.name }}"
                            x-show="bgPromptMissing(lmode, lcloud, lprompt)" x-cloak>
@@ -180,9 +190,15 @@
                           <div class="col-12"
                                {% if pty_supported %}x-show="(resumeMode['{{ p.name }}'] || defaultResumeMode) === 'standard'"{% endif %} x-cloak>
                             <label class="form-label small mb-1" for="name-{{ p.name }}">Session name <span class="text-secondary">(optional)</span></label>
-                            <input id="name-{{ p.name }}" type="text" class="form-control form-control-sm" x-model="customName['{{ p.name }}']"
-                                   maxlength="128" placeholder="{{ p.name }}" aria-describedby="name-hint-{{ p.name }}"
-                                   title="Custom display name for this bridge, shown in claude.ai/code in place of the project name. Leave blank to use the project name." {{ NO_AUTOFILL }}>
+                            {# Unmounted with the popover, same reasoning as First prompt above
+                               (#1114). `customName` lives on the parent `dashboard()` scope
+                               keyed by project name — NOT the row scope — so the typed value
+                               survives the remount, and even a full row-fragment replacement. #}
+                            <template x-if="lopen">
+                              <input id="name-{{ p.name }}" type="text" class="form-control form-control-sm" x-model="customName['{{ p.name }}']"
+                                     maxlength="128" placeholder="{{ p.name }}" aria-describedby="name-hint-{{ p.name }}"
+                                     title="Custom display name for this bridge, shown in claude.ai/code in place of the project name. Leave blank to use the project name." {{ NO_AUTOFILL }}>
+                            </template>
                             <p id="name-hint-{{ p.name }}" class="form-hint text-secondary small mt-1 mb-0">Leave blank to use the project name (<code>{{ p.name }}</code>).</p>
                           </div>
                           {# Sandbox toggle (#780) removed for 1.0 (#1037): `--sandbox` never

@@ -638,7 +638,11 @@ def test_dashboard_friendly_labels_and_label_associations(write_config):
     assert 'x-text="permLabel(lperm)"' in page  # Run button shows a friendly permission label
     assert 'x-text="filterLabel(f)"' in page  # Active-zone filter chips use friendly names
     assert "permLabel(" in page  # the helper is wired (also used by the hosted row when enabled)
+    # Label AND input id both render. The id now sits inside a `<template x-if="lopen">`
+    # (#1114), so it is present in the served HTML but only enters the DOM when the popover
+    # opens — asserting `for=` alone would pass even if the input had been dropped entirely.
     assert 'for="lprompt-' in page  # the "First prompt" input is label-associated
+    assert 'id="lprompt-' in page
     assert 'aria-labelledby="np-type-label"' in page  # New-project "Type" radio group is labelled
 
 

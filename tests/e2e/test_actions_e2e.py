@@ -153,3 +153,23 @@ def test_background_launch_requires_prompt_unless_cloud(
     browser.fill('[id="lprompt-alpha"]', "count to three")
     browser.expect_hidden(hint)
     browser.expect_enabled(run)
+
+    # #1114: the popover's text inputs must be UNMOUNTED, not merely hidden, while it is
+    # shut. This row template renders once per project, so an x-show popover leaves a copy
+    # of both fields in the DOM for every card — which is the one structural difference
+    # left between these fields and the never-autofilled `np-*` singletons.
+    # Deliberately page-global, not scoped to [data-project="alpha"]: the hypothesis is about
+    # how many of these fields exist across the WHOLE document, which is the difference from
+    # the singleton np-* controls. It assumes no other popover is open.
+    fields = "input[id^='lprompt-'], input[id^='name-']"
+    assert browser.get_count(fields) >= 1, (
+        "control: the fields must exist while the popover is open"
+    )
+    browser.click('[data-project="alpha"] [data-test="run-launch"]')  # close it
+    browser.expect_hidden('[data-project="alpha"] .launch-pop')
+    # `get_count` returns 0 on a driver failure too, so a bare `== 0` can pass vacuously if the
+    # browser died between the two calls. Prove the driver is still answering first.
+    assert browser.get_count('[data-test="run-launch"]') >= 1, "control: the driver is still alive"
+    assert browser.get_count(fields) == 0, (
+        "closed popovers must leave no launch text inputs mounted"
+    )
