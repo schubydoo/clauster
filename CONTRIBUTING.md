@@ -108,6 +108,12 @@ subset of the OS/Python legs; the full matrix runs on release and fork PRs.
   usually comments within a few minutes of a push. Read its summary (a green
   score does not mean zero findings), then reply **and** resolve each inline
   thread on the thread itself — unresolved review threads block the merge.
+- **The maintainer may add a second Claude review** to a PR, usually when Greptile
+  is rate-limited or a change warrants another pass. You may see its comments on
+  your PR; they are advisory and never block a merge. It runs on the maintainer's
+  personal subscription, so it is maintainer-invoked only — `@claude` from anyone
+  else is ignored. Treat its findings like any review comment: reply, and push a
+  fix or say why one isn't needed.
 
 AI coding agents get the same rules in machine-facing form from
 [AGENTS.md](https://github.com/schubydoo/clauster/blob/main/AGENTS.md) (Claude Code additionally reads [CLAUDE.md](https://github.com/schubydoo/clauster/blob/main/CLAUDE.md)).
