@@ -50,6 +50,16 @@ on:
         default: medium
         type: choice
         options: [low, medium, high]
+      model:
+        description: "Model for the review (the action otherwise defaults to Sonnet)"
+        required: false
+        default: claude-opus-5
+        type: string
+      debug_artifact:
+        description: "Upload the raw execution JSON as an artifact (see the ⚠️ in the upload step)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -94,12 +104,24 @@ jobs:
           INPUT_PR: ${{ inputs.pr }}
           INPUT_COMMAND: ${{ inputs.command }}
           INPUT_EFFORT: ${{ inputs.effort }}
+          INPUT_MODEL: ${{ inputs.model }}
+          # Read through env, never interpolated into the script body: a comment body is
+          # attacker-shaped text even though only the owner can reach this job.
+          COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
           set -euo pipefail
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            PR="$INPUT_PR"; COMMAND="$INPUT_COMMAND"; EFFORT="$INPUT_EFFORT"
+            PR="$INPUT_PR"; COMMAND="$INPUT_COMMAND"; EFFORT="$INPUT_EFFORT"; MODEL="$INPUT_MODEL"
           else
-            PR="$COMMENT_PR"; COMMAND="plugin"; EFFORT="medium"
+            PR="$COMMENT_PR"; EFFORT="medium"; MODEL="claude-opus-5"
+            # "@claude review builtin" selects the CLI's own command; anything else is
+            # the plugin. The comment path is the ONLY trigger the action gives PR
+            # context to, so both variants have to be reachable from here — on
+            # workflow_dispatch the action has no PR and its comment-posting is inert.
+            case "$COMMENT_BODY" in
+              *"@claude review builtin"*) COMMAND="builtin" ;;
+              *) COMMAND="plugin" ;;
+            esac
           fi
           # PR reaches `ref:` below, so it is validated rather than trusted. The
           # comment path supplies a GitHub-typed integer; the dispatch path is a
@@ -107,12 +129,15 @@ jobs:
           case "$PR" in ''|*[!0-9]*) echo "::error::refusing non-numeric PR number '$PR'"; exit 1 ;; esac
           case "$COMMAND" in plugin|builtin) ;; *) echo "::error::unknown command '$COMMAND'"; exit 1 ;; esac
           case "$EFFORT" in low|medium|high) ;; *) echo "::error::unknown effort '$EFFORT'"; exit 1 ;; esac
+          # MODEL reaches a CLI flag, so keep it to the shape a model name actually has.
+          case "$MODEL" in ''|*[!a-zA-Z0-9.-]*) echo "::error::implausible model '$MODEL'"; exit 1 ;; esac
           {
             echo "pr=$PR"
             echo "command=$COMMAND"
             echo "effort=$EFFORT"
+            echo "model=$MODEL"
           } >> "$GITHUB_OUTPUT"
-          echo "::notice::Reviewing PR #$PR with the $COMMAND command (effort $EFFORT)"
+          echo "::notice::Reviewing PR #$PR with the $COMMAND command (effort $EFFORT, model $MODEL)"
 
       - name: Check out the base branch
         # No `ref:` → the default branch. This is the workspace root, so
@@ -143,6 +168,15 @@ jobs:
           trigger_phrase: "@claude review"
           plugin_marketplaces: "https://github.com/anthropics/claude-code.git"
           plugins: "code-review@claude-code-plugins"
+          # Keep the other reporters out of Claude's context:
+          #   greptile-apps[bot] — this reviewer exists to be a SECOND opinion; if it
+          #     reads the first one it anchors on it and confirms rather than finds.
+          #   codecov[bot] — its patch-coverage comment steers the review toward
+          #     coverage gaps, which the instructions file already delegates to the 96%
+          #     gate as something not worth a reviewer's attention.
+          # This filters what the ACTION feeds in. The plugin can still reach comments
+          # through `gh` itself, so the instructions file also forbids reading them.
+          exclude_comments_by_actor: "greptile-apps[bot],codecov[bot]"
           # `--comment` is REQUIRED. Without it the plugin completes having posted
           # nothing at all — a silent no-op that still reports success.
           prompt: |
@@ -168,13 +202,23 @@ jobs:
             finding, because the pull request then looks reviewed when it was not.
           claude_args: |
             --max-turns 60
+            --model ${{ steps.resolve.outputs.model }}
+            --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr list:*),Bash(gh pr comment:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh search:*),mcp__github_inline_comment__create_inline_comment"
 
       - name: Review with the built-in /code-review
         if: steps.resolve.outputs.command == 'builtin'
+        env:
+          # `/code-review` normally runs as a BACKGROUND subagent with its own context.
+          # Measured on run 30299759069: 6.4 minutes of work, $1.41, and `num_turns: 0`
+          # — the main loop never saw the findings, so nothing was posted and the job
+          # still went green. This forces the review into the foreground so its findings
+          # land in the conversation that can act on them.
+          CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1"
         uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           trigger_phrase: "@claude review"
+          exclude_comments_by_actor: "greptile-apps[bot],codecov[bot]" # see the plugin step
           # The prompt is the bare command and NOTHING else. Without `ultra`, the
           # built-in command reads everything after the flags as the review TARGET, so
           # prose here would be parsed as a file path rather than as instructions.
@@ -183,4 +227,60 @@ jobs:
           claude_args: |
             --max-turns 60
             --add-dir pr-head
-            --append-system-prompt "Read ./.github/claude-review-instructions.md and treat it as the highest-priority review rules, overriding your defaults where they differ. The pull request's own working tree is at ./pr-head. This review was requested explicitly: review the pull request even if it is a draft or has been reviewed before. If you cannot review it, post a comment saying why rather than finishing silently."
+            --model ${{ steps.resolve.outputs.model }}
+            --append-system-prompt "Read ./.github/claude-review-instructions.md and treat it as the highest-priority review rules, overriding your defaults where they differ. The pull request's own working tree is at ./pr-head. This review was requested explicitly: review the pull request even if it is a draft or has been reviewed before. Form your findings from the code and the diff alone — do not read other reviewers' comments on the pull request. If you cannot review it, post a comment saying why rather than finishing silently."
+
+      - name: Fail if the review produced nothing
+        # Both observed failures reported SUCCESS while posting nothing, which is the
+        # worst outcome available: the PR looks reviewed when it was not. The action
+        # writes a result record with the two numbers that distinguish them —
+        #   num_turns: 0                → the review ran as a background subagent and
+        #                                 the main loop never saw its findings
+        #   permission_denials_count>0  → the review ran and was then blocked from
+        #                                 posting (missing --allowedTools)
+        # Turning either into a red job is what makes green mean "actually reviewed".
+        if: always() && steps.resolve.outputs.pr != ''
+        env:
+          LOG: /home/runner/work/_temp/claude-execution-output.json
+        run: |
+          set -uo pipefail
+          if [ ! -f "$LOG" ]; then
+            echo "::warning::no execution log at $LOG — cannot verify the review ran"
+            exit 0
+          fi
+          # Slurp handles both shapes: a single JSON array, or one object per line.
+          RESULT=$(jq -s -c 'flatten | map(select(type == "object" and .type == "result")) | last // empty' "$LOG" 2>/dev/null)
+          if [ -z "$RESULT" ]; then
+            echo "::warning::could not parse a result record — the log format may have changed upstream"
+            exit 0
+          fi
+          TURNS=$(printf '%s' "$RESULT" | jq -r '.num_turns // "?"')
+          DENIALS=$(printf '%s' "$RESULT" | jq -r '.permission_denials_count // 0')
+          COST=$(printf '%s' "$RESULT" | jq -r '.total_cost_usd // "?"')
+          echo "::notice::review finished: turns=$TURNS denials=$DENIALS cost=\$$COST"
+          FAILED=0
+          if [ "$TURNS" = "0" ]; then
+            echo "::error::the review took 0 turns — its findings never reached the conversation that posts them, so nothing was published"
+            FAILED=1
+          fi
+          if [ "$DENIALS" != "0" ]; then
+            echo "::error::$DENIALS tool call(s) were denied — the review most likely could not post. Check --allowedTools against what the command needs"
+            FAILED=1
+          fi
+          exit "$FAILED"
+
+      - name: Upload the raw execution log
+        # ⚠️ OFF BY DEFAULT AND IT SHOULD STAY THAT WAY. Artifacts on a public repo are
+        # downloadable by anyone, and this file carries the full transcript including
+        # tool output — the same exposure `show_full_output` is disabled for. Turn it on
+        # only to diagnose a specific run, on a diff you are content to publish.
+        # It exists because run 30299759069 spent 6.4 minutes producing findings that
+        # went nowhere: the log is written to a runner temp file and dies with the
+        # runner, so there was nothing left to diagnose.
+        if: always() && inputs.debug_artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: claude-review-execution-${{ steps.resolve.outputs.pr }}-${{ github.run_id }}
+          path: /home/runner/work/_temp/claude-execution-output.json
+          if-no-files-found: warn
+          retention-days: 3

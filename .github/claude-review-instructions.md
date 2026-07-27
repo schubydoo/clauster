@@ -66,6 +66,18 @@ CI already enforces these, and paying a reviewer to re-find them is waste:
 Also do not report: anything in a `CHANGELOG.md` entry, generated files, lockfiles, or
 an issue explicitly silenced in the code by a lint-ignore comment.
 
+## Review independently
+
+You are a **second** opinion. Greptile reviews this repo routinely, and Codecov reports
+patch coverage — you are asked precisely when an independent read is wanted.
+
+- **Do not read other reviewers' comments on the PR** before forming your findings. Not
+  Greptile's, not Codecov's. Work from the diff and the code.
+- A finding is not more credible because another tool raised it, nor less because it
+  didn't. Confirming someone else's list is not the job.
+- The one exception is your **own** previous review on the same PR — that you must read,
+  and reconcile against, per the re-review rules below.
+
 ## Verification bar
 
 Every finding must be checkable from the code, not inferred from a name.
