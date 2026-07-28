@@ -16,6 +16,18 @@ name: "Release: prepare (version PR)"
 on:
   push:
     branches: [main]
+  # Manual trigger for the rare release that must force a version knope won't
+  # compute on its own — notably the 0.x -> 1.0.0 cut (knope maps a breaking change
+  # on a 0.x line to a minor bump, never to 1.0; see the "releasing 1.0" recipe).
+  # Dispatch from main with override_version set; leave it blank and this behaves
+  # exactly like a normal push.
+  workflow_dispatch:
+    inputs:
+      override_version:
+        description: "Force this exact version for the release PR (e.g. 1.0.0). Blank = the normal changeset-computed bump."
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -26,6 +38,9 @@ concurrency:
 
 jobs:
   prepare-release:
+    # Push events are already main-only; this also constrains a manual dispatch to
+    # main, so the release branch can only ever be prepared from main's history.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -105,6 +120,14 @@ jobs:
           version: 0.23.0
       - name: Open or refresh the release PR
         if: ${{ steps.changesets.outputs.has == 'true' }}
-        run: knope prepare-release --verbose
+        # OVERRIDE is set only on a manual dispatch with override_version; on a push
+        # it is empty and knope computes the next version from the changesets as usual.
+        run: |
+          if [ -n "${OVERRIDE}" ]; then
+            knope prepare-release --verbose --override-version "${OVERRIDE}"
+          else
+            knope prepare-release --verbose
+          fi
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          OVERRIDE: ${{ inputs.override_version }}
