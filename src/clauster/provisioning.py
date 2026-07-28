@@ -103,9 +103,7 @@ def create_project(projects_root: Path, name: str, *, git_init: bool = False) ->
     except FileExistsError as exc:  # lost the exists()->mkdir race
         raise TargetExists(f"a directory named {name!r} already exists") from exc
     if git_init:
-        # Resolve then exec (mirrors clone_project): Windows CreateProcess only
-        # auto-appends .exe, so a bare "git" would skip a git.cmd shim that
-        # shutil.which resolves — running a different/again-resolved binary.
+        # Resolve then exec — see clone_project for why a bare "git" is wrong on Windows.
         resolved_git = shutil.which("git")
         if resolved_git is None:
             raise GitUnavailable("git is not installed on the host")
@@ -161,11 +159,16 @@ def _ip_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address, cfg: CloneCon
 def validate_clone_url(url: str, cfg: CloneConfig) -> None:
     """Scheme allowlist + SSRF IP check. Raises on rejection; returns None if allowed.
 
+    Only the private / CGNAT class is unlockable (``clone.allow_private_hosts``, or a
+    ``clone.allowed_private_cidrs`` entry); loopback / link-local / multicast / reserved /
+    unspecified are blocked unconditionally — see :func:`_ip_blocked`. The
+    :class:`BlockedCloneHost` message names ``allow_private_hosts`` for every class, so it
+    prescribes a remedy that does nothing for those always-blocked addresses.
+
     Residual DNS-rebind TOCTOU: we resolve here and git re-resolves at clone time,
     so a name that flips public->private between the two reaches the private target.
     Accepted for a single-user loopback tool; note the surface grows if Clauster is
-    bound non-loopback (still auth-gated, and private ranges stay blocked unless the
-    operator opts in via allow_private_hosts).
+    bound non-loopback (still auth-gated).
     """
     # urlsplit() and the lazy .port property both raise ValueError on a malformed
     # URL (e.g. a bad IPv6 literal "///[", or an out-of-range/non-numeric port).
@@ -326,9 +329,9 @@ def _run_clone_streaming(
 ) -> None:
     """Run ``git clone`` (``cmd``), forwarding stderr progress lines to ``progress_cb``.
 
-    Raise ``CloneFailed`` on a non-zero exit or if the clone exceeds
-    ``timeout_seconds`` — a watchdog terminates the process so a stalled transfer
-    can never hang the worker thread. When ``on_proc`` is given it is called with the
+    Raise ``CloneFailed`` on a non-zero exit or if the clone exceeds ``timeout_seconds``
+    — a watchdog terminates the process (the whole tree on Windows) so a stalled transfer
+    does not hang the worker thread indefinitely. When ``on_proc`` is given it is called with the
     spawned process so a caller can terminate it (explicit cancel, #573); a terminated
     git exits non-zero, surfacing as ``CloneFailed`` (the caller cleans the temp dir).
     """
@@ -354,23 +357,16 @@ def _run_clone_streaming(
         # (3.12s). Best-effort and broadly guarded — a failed reap must still leave the plain
         # `terminate()` to run, since this is a watchdog thread whose raise nobody observes.
         #
-        # `poll() is None` is a PID-REUSE guard, not an optimisation. `Timer.cancel()` in the
-        # `finally` below genuinely loses its race sometimes, so this callback can fire after
-        # the clone finished and `proc.wait()` reaped the child. `proc.terminate()` is safe
-        # then (CPython short-circuits on `returncode is not None`), but `force_kill_tree`
-        # takes a BARE PID with no identity check and would bypass that — on POSIX, where
-        # `wait()` really does free the pid, that is a hard kill aimed at whatever recycled
-        # it. Windows happens to be safe anyway (the open handle blocks reuse, and a reap
-        # after the child exits can't reach the orphan regardless — verified on a VM), but
-        # relying on that would leave a trap for anyone who later drops the platform gate.
-        #
-        # ⚠️ For that reader: `poll()` NARROWS the window, it does not close it. `poll()`
-        # and `force_kill_tree(proc.pid)` are separate steps, and the main thread's
-        # `proc.wait()` can reap the child in between — freeing the pid before psutil
-        # looks it up. Closing it needs identity rather than a bare pid: pass an expected
-        # `create_time()` and bail on mismatch, the shape `_expected_epoch` /
-        # `jiffies_to_epoch` already use elsewhere in this module. Do that BEFORE dropping
-        # the `is_windows()` gate, not after.
+        # `poll() is None` is a PID-REUSE guard, not an optimisation: `Timer.cancel()` below
+        # does lose its race sometimes, so this can fire after `proc.wait()` reaped the child.
+        # `proc.terminate()` is safe then (CPython short-circuits on `returncode is not None`),
+        # but `force_kill_tree` takes a BARE PID with no identity check — on POSIX, where
+        # `wait()` frees the pid, that is a hard kill aimed at whatever recycled it. Windows is
+        # safe anyway (the open handle blocks reuse — verified on a VM), but don't rely on it.
+        # ⚠️ `poll()` only NARROWS the window: it and `force_kill_tree(proc.pid)` are separate
+        # steps and `proc.wait()` can reap in between. Closing it needs identity, not a bare
+        # pid — pass an expected `create_time()` and bail on mismatch (the `_expected_epoch` /
+        # `jiffies_to_epoch` shape used elsewhere here) BEFORE dropping the `is_windows()` gate.
         if procutil.is_windows() and proc.poll() is None:
             try:
                 procutil.force_kill_tree(proc.pid)

@@ -143,11 +143,13 @@ def _target_allowed(url: str, *, block_private: bool) -> bool:
 
 
 class WebhookEmitter:
-    """POSTs a lifecycle event to each accepted URL; fail-open and off the loop.
+    """POSTs a lifecycle event to each accepted URL; fail-open.
 
-    ``active`` is True only when webhooks are enabled and at least one URL passed the
-    scheme check — callers can cheaply skip building a payload otherwise. Construction
-    never raises.
+    ``active`` is True only when webhooks are enabled and at least one configured URL
+    survived **both** filters — the http(s) scheme check and, when ``block_private_targets``
+    is on, the SSRF target guard — so callers can cheaply skip building a payload otherwise.
+    Construction never raises. Nothing here detaches the POST: callers wrap :meth:`aemit`
+    in ``create_task`` so it never sits on a lifecycle path.
     """
 
     def __init__(self, config: WebhooksConfig) -> None:
@@ -203,7 +205,12 @@ class WebhookEmitter:
             _log.warning("webhook POST failed (url redacted): %s", exc)
 
     async def aemit(self, event: str, payload: dict) -> None:
-        """Emit ``event`` to every usable url off the loop. Never raises (fail-open)."""
+        """Emit ``event`` to every usable url, awaiting all POSTs concurrently.
+
+        Each POST is bounded by ``timeout_seconds``. Swallows every ``Exception``
+        (fail-open); ``CancelledError`` still propagates. Callers detach it with
+        ``create_task`` so a lifecycle path never waits on it.
+        """
         if not self.wants(event):
             return
         body = {"event": event, **payload}

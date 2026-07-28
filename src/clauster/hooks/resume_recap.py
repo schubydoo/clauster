@@ -71,8 +71,11 @@ def _text_from_content(content: object) -> str:
 def extract_turns(transcript_path: str) -> list[tuple[str, str]]:
     """Return ``[(role, text), ...]`` for user/assistant turns, in file order.
 
-    Skips queue/attachment/meta rows, empty turns, and any turn that contains a
-    prior recap (the SENTINEL) to avoid compounding recaps across restarts.
+    Keeps only rows typed ``user``/``assistant`` that still have text once tool and
+    thinking blocks are dropped; any turn containing a prior recap (the SENTINEL) is
+    skipped too, to avoid compounding recaps across restarts. Queue/attachment/meta
+    rows are filtered only incidentally — by a foreign ``type`` or by having no text
+    block left — not by an explicit check.
     """
     turns: list[tuple[str, str]] = []
     try:

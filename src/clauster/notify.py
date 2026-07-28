@@ -2,9 +2,9 @@
 
 Apprise is an **optional** dependency (the ``notify`` extra). The notifier imports
 it lazily and degrades to a no-op when it's absent or disabled, so importing this
-module never requires Apprise. Sends are **best-effort and fail-closed**: a send
-error is logged and swallowed — a broken notification endpoint must never affect a
-bridge's lifecycle. The actual send is synchronous (network I/O), so callers use
+module never requires Apprise. Sends are **best-effort**: a send error is logged and
+swallowed (non-fatal, not fail-closed) — a broken notification endpoint must never
+affect a bridge's lifecycle. The actual send is synchronous (network I/O), so callers use
 :meth:`Notifier.anotify` to run it off the event loop.
 """
 
@@ -56,9 +56,6 @@ class Notifier:
                 else:
                     _log.warning("notifications: Apprise rejected a url (redacted); skipping it")
         except Exception:  # noqa: BLE001 - construction must never raise into bridge startup
-            # Honours the "Construction never raises" contract: any unexpected Apprise
-            # error degrades to inactive (self._apprise stays None) instead of taking the
-            # bridge down at startup.
             _log.exception("notifications: building the Apprise client failed; disabling")
             return
         if accepted:
@@ -72,7 +69,7 @@ class Notifier:
         return self._apprise is not None
 
     def _send(self, title: str, body: str) -> None:
-        """Send synchronously (best-effort); log and swallow any error (fail-closed)."""
+        """Send synchronously; log and swallow any error so it never reaches the lifecycle."""
         if self._apprise is None:
             return
         try:
@@ -81,7 +78,7 @@ class Notifier:
             _log.exception("notification send failed")
 
     async def anotify(self, title: str, body: str) -> None:
-        """Send off the event loop. Never raises (the underlying send is fail-closed)."""
+        """Send off the event loop. Never raises (the underlying send swallows errors)."""
         if self._apprise is None:
             return
         await asyncio.to_thread(self._send, title, body)

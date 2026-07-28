@@ -90,9 +90,10 @@ def _read_claude_json(claude_json: Path) -> tuple[str | None, dict]:
     """Return ``(raw_text, parsed_dict)`` for ``claude_json``.
 
     ``raw_text`` is the verbatim on-disk content (for the one-time backup) or
-    ``None`` when the file is missing/unreadable/corrupt — matching the prior
-    behavior of skipping the backup in those cases. The parsed value is always a
-    dict (a valid-JSON non-object root is coerced to ``{}``).
+    ``None`` when the file is missing or holds unparseable JSON — the backup is
+    skipped in those cases. A read error (``PermissionError``) and a non-UTF-8 file
+    propagate on purpose; see the comment below. The parsed value is always a dict
+    (a valid-JSON non-object root is coerced to ``{}``).
     """
     try:
         raw = claude_json.read_text(encoding="utf-8")

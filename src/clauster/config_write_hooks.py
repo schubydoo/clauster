@@ -92,8 +92,8 @@ _HOOK_ENTRY_KEYS = frozenset({"type", "command", "timeout"})
 #: scripts are portable. That interpolation is meaningless (and never resolved) outside
 #: a plugin's own hook definition, so a candidate ``command`` referencing it did not
 #: originate as project/user/local content — it was copied from (or intends to shadow)
-#: a plugin-owned hook. Plugin hooks are managed **only** by installing/enabling/
-#: disabling the plugin (a separate, not-yet-built surface, #342 scope), never by
+#: a plugin-owned hook. Plugin hooks are managed **only** through the plugin surface
+#: (:mod:`clauster.config_write_plugins`, #342 scope), never by
 #: writing this subtree; a candidate carrying the marker is rejected fail-closed
 #: (whole write → 422) rather than silently accepted or silently stripped.
 _PLUGIN_ROOT_MARKER = "CLAUDE_PLUGIN_ROOT"
@@ -107,7 +107,9 @@ def _validate_hook_entry(entry: Any, where: str) -> None:
 
     A command hook is ``{"type": "command", "command": <non-empty str>, "timeout"?:
     <int>}``. The ``command`` is stored verbatim and **never parsed, resolved, or
-    executed** — only its type (non-empty ``str``) is checked. ``type`` must be the
+    executed** — it is checked only for type (non-empty ``str``) and for the plugin-owned
+    ``CLAUDE_PLUGIN_ROOT`` marker (see :data:`_PLUGIN_ROOT_MARKER`), which rejects the
+    whole write. ``type`` must be the
     literal ``"command"``; any other type (``prompt``/``agent``/``http``/``mcp_tool``)
     is rejected here. Unknown keys reject the whole write.
     """
@@ -127,7 +129,6 @@ def _validate_hook_entry(entry: Any, where: str) -> None:
 
     command = entry.get("command")
     if not isinstance(command, str) or not command:
-        # The command is OPAQUE data: validated for shape only, never run or resolved.
         raise cw.InvalidCandidateError(f"{where} 'command' must be a non-empty string")
 
     if _PLUGIN_ROOT_MARKER in command:

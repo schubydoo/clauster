@@ -498,7 +498,7 @@ def validate_approvals(candidate: Any) -> None:
 
 
 def read_project_approvals(claude_json: Path, project_dir: Path) -> dict[str, list[str]]:
-    """Return ``{"enabled": [...], "disabled": [...]}`` for ``project_dir``.
+    """Return ``{"enabled": [...], "disabled": [...], "locked": [...]}`` for ``project_dir``.
 
     No secret ever lives in an approval list (server *names* only), so unlike the
     server-map readers above this needs no redaction. A missing project entry (or
@@ -594,9 +594,8 @@ def write_project_approvals(
 
     def _persisted(incoming: list[str], prev: list[str]) -> list[str]:
         """Keep the caller's decisions for free names and the prior value for owned ones."""
-        # Panel-owned decisions from the caller, then each settings-owned name's original
-        # base-layer value — dedup, order-preserving. For a NON-owned name this is the
-        # caller's (validated, disjoint) decision; an owned name comes only from `prev`.
+        # Dedup, order-preserving: the caller's decisions for free names first, then each
+        # settings-owned name's original base-layer value from `prev`.
         seen: set[str] = set()
         out: list[str] = []
         for name in [n for n in incoming if n not in owned] + [n for n in prev if n in owned]:
@@ -704,11 +703,8 @@ def _settings_owned_names(
     ``locked`` list) and the writer preserves their base value rather than persisting the
     settings-derived one. Fail-safe: unreadable/malformed files contribute nothing.
 
-    With ``strict=True`` (the write path), a settings file that EXISTS but can't be parsed
-    makes :func:`_settings_mcp_lists` raise instead of silently contributing nothing:
-    ownership that can't be verified must fail the write closed rather than let a
-    settings-owned decision leak into ``~/.claude.json`` if the file was corrupted between
-    the panel's read and this write (#958 P2 fail-closed).
+    With ``strict=True`` (the write path) an existing-but-unparseable settings file raises
+    instead — see :func:`_settings_mcp_lists` (#958 P2 fail-closed).
     """
     owned: set[str] = set()
     for settings_path in (

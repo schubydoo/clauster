@@ -321,6 +321,10 @@ def expected_confirm_token(scope: Scope, project_name: str | None) -> str:
     literal :data:`USER_SCOPE_TOKEN`. The server *always* derives this itself and never
     trusts a client-supplied "expected" value — that is what makes the confirm a real
     CSRF / accidental-click guard.
+
+    Raises ``HTTPException(400)`` for a project/local-scope write with no resolved project
+    name: it can then have no valid token, so it fails closed rather than matching an
+    empty string.
     """
     if scope == "user":
         return USER_SCOPE_TOKEN
@@ -427,9 +431,14 @@ def redact_secrets(data: Any, _key: str = "") -> Any:
 
     Redaction is **structural, not a post-filter**: a secret-shaped leaf is emitted as
     :data:`REDACTION_SENTINEL` while building the display value, so the live secret is
-    never assembled into the response in the first place. Recurses dicts (keys carry
-    the secret-hint) and lists; non-secret scalars pass through unchanged. Mirrors
-    ``config_editor.editable_values`` (read only what's safe to surface).
+    never assembled into the response in the first place. Recurses dicts and lists;
+    non-secret scalars pass through unchanged. Mirrors ``config_editor.editable_values``
+    (read only what's safe to surface).
+
+    Hint scope: a dict key is the secret-hint for its own scalar leaf and for the elements
+    of a list value, but a **nested dict re-derives the hint from its own keys** — a secret
+    at ``{"auth": {"value": "sk-live-…"}}`` is therefore returned unmasked here. Use
+    :func:`_mask_json_values` where values must never surface regardless of key.
     """
     if isinstance(data, dict):
         return {
@@ -613,7 +622,9 @@ def read_nested_subtree(
     .mcpServers`` for local-scope MCP servers, mirroring the existing trust flags at
     ``projects[<abs-project-path>].hasTrustDialogAccepted``, see :mod:`clauster.trust`).
     Any missing level (file, ``outer_key``, ``inner_key``, or a non-dict at any level)
-    reads as ``None`` — never an error; a missing local config is simply empty.
+    reads as ``None`` — a missing local config is simply empty. A file that exists but is
+    unparseable (non-UTF-8, malformed JSON, or not a JSON object) raises
+    :class:`InvalidCandidateError` (→ 422): we never treat an unreadable config as empty.
     """
     try:
         raw = claude_json.read_bytes()

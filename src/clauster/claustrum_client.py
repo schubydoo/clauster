@@ -7,11 +7,12 @@ dependency-free :class:`ClaustrumClient` that owns one persistent connection,
 correlates id-bearing responses to their requests, and demuxes the id-less
 ``type:"stream"`` notifications into per-process :class:`ProcessStream` fan-out.
 
-What this slice deliberately does NOT do (later slices own these): connect-or-
-spawn daemon lifecycle (CL-2 ``claustrum_daemon``), auto-reconnect-with-backoff
-+ reattach-on-startup (CL-6), and the hosted-session spawn/redact/broadcast
-pipeline (CL-4 ``hosted``). The :meth:`ClaustrumClient.reattach` RPC — the
-mechanism CL-6 builds on — is provided here.
+Out of scope for this module (owned elsewhere): connect-or-spawn daemon lifecycle
+(CL-2 ``claustrum_daemon``), the hosted-session spawn/redact/broadcast pipeline
+(CL-4 ``hosted``), and reattach-on-startup (CL-6 ``hosted_state`` + the ``app``
+lifespan). The :meth:`ClaustrumClient.reattach` RPC those build on is provided
+here; there is no background auto-reconnect-with-backoff anywhere yet — recovery
+is caller-driven.
 
 Wire contract (``claustrum/docs/PROTOCOL.md``), the parts this client honors:
 
@@ -201,7 +202,11 @@ class ProcessStream:
 
     @staticmethod
     def _decode(data: object) -> bytes | None:
-        """Base64-decode a frame's payload, returning None (with a warning) when unusable."""
+        """Base64-decode a frame's payload, returning None when it is unusable.
+
+        An absent or non-string ``data`` is dropped silently; undecodable base64 is
+        dropped with a warning.
+        """
         if not isinstance(data, str):
             return None
         try:

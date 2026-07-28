@@ -48,10 +48,9 @@ from .procutil import KEEPER_SUBCOMMAND
 from .recap import RECAP_SUBCOMMAND
 from .tls_provision import generate_self_signed
 
-# setproctitle is a required dependency (so the retitle works out of the box). The
-# guard is defensive, not optionality: a cosmetic process-rename must never crash
-# `clauster run` if the wheel is somehow missing/unbuildable on an exotic platform —
-# we degrade to a no-op instead.
+# setproctitle is a required dependency; this guard is defensive, not optionality — a
+# cosmetic retitle must never crash `clauster run` if the wheel is somehow missing or
+# unbuildable on an exotic platform, so degrade to a no-op instead.
 try:
     import setproctitle as _setproctitle
 except ImportError:  # defensive: a cosmetic retitle must not break startup
@@ -98,9 +97,8 @@ _CONFIG_DISCOVERY_EPILOG = (
 def main(argv: list[str] | None = None) -> int:
     """Parse ``argv``, dispatch to the requested subcommand, and return its exit code."""
     argv = list(sys.argv[1:] if argv is None else argv)
-    # Internal frozen-binary entry point, handled BEFORE argparse so it never appears
-    # in --help: a one-file build re-invokes itself to run the SessionStart recap hook
-    # (its bundled resume_recap.py lives in an ephemeral _MEIxxx dir). See clauster.recap.
+    # Internal frozen-binary entry point, handled BEFORE argparse so it never appears in
+    # --help. See _recap_hook / clauster.recap.
     if argv and argv[0] == RECAP_SUBCOMMAND:
         return _recap_hook()
     # Same frozen-binary trick for the PTY keeper: a one-file build re-invokes itself as
@@ -671,7 +669,12 @@ def _doctor(config_path: str | None) -> int:
 
 
 def _load_or_exit(config_path: str | None):
-    """Load the config, exiting 2 with a one-line message when it is missing or invalid."""
+    """Load the config, exiting 2 with a one-line message on a missing or rejected config.
+
+    Only ``FileNotFoundError`` and ``ValueError`` (validation) are caught. A config whose
+    YAML does not parse raises ``yaml.YAMLError``, which is not a ``ValueError``, so it
+    still escapes as a traceback rather than the clean exit 2.
+    """
     try:
         return load_config(config_path)
     except (FileNotFoundError, ValueError) as exc:
@@ -680,11 +683,14 @@ def _load_or_exit(config_path: str | None):
 
 
 def _deps_list(config_path: str | None) -> int:
-    """List each optional extra: capability, whether it's importable, and any managed version.
+    """List each optional extra and managed binary: capability, status, and any version.
 
-    ``loaded`` = importable now (installed or already on ``sys.path``); ``installed`` = present in
-    ``<state_dir>/deps`` but pending a restart; ``missing`` = absent; ``n/a`` = a platform-scoped
-    entry (e.g. ``pywinpty``) that doesn't apply here. The table goes to stdout so it can be piped.
+    For an extra: ``loaded`` = importable now (installed or already on ``sys.path``);
+    ``installed`` = present in ``<state_dir>/deps`` but pending a restart; ``missing`` = absent;
+    ``n/a`` = a platform-scoped entry (e.g. ``pywinpty``) that doesn't apply here. For a managed
+    binary (``shawl`` / ``claustrum``) ``installed`` means it resolves at all — from the deps dir,
+    a configured path, or ``PATH`` (#1013) — and ``n/a`` means another platform/arch. The table
+    goes to stdout so it can be piped.
     """
     config = _load_or_exit(config_path)
     installed = deps.installed_versions(config.state_dir)
@@ -783,7 +789,7 @@ def _restore(backup: str, state_dir: str, config_out: str | None, force: bool) -
 
 
 def _migrate(config_path: str | None) -> int:
-    """Migrate the state store to head and report the resulting schema version."""
+    """Re-save ``state.json`` at the current JSON schema; print the schema + instance count."""
     config = _load_or_exit(config_path)
     result = ops.migrate_state(config)
     print(
@@ -885,10 +891,8 @@ def _reconcile(config_path: str | None, *, dry_run: bool, assume_yes: bool) -> i
 
     def decide(finding: Finding) -> Decision:
         """Accept every proposal unprompted under --yes/--dry-run, else ask the operator."""
-        # --dry-run is a non-interactive PREVIEW: accept every proposal to show the full
-        # would-be plan, never prompt. build_plan() runs decide() eagerly, BEFORE the
-        # dry_run guard below, so without this a --dry-run blocks on input() on a real TTY
-        # (#650 — the docstring already promised dry-run "prints the plan and writes nothing").
+        # build_plan() runs decide() eagerly, BEFORE the dry_run guard below, so without this
+        # a --dry-run would block on input() on a real TTY (#650).
         if assume_yes or dry_run:
             return Decision(
                 apply=True, value=finding.proposed_value, has_value=finding.has_replacement
@@ -947,12 +951,14 @@ def _shawl_available(state_dir: str | None) -> bool:
 def _install_service(
     kind: str, config_path: str | None, user: str | None, write: bool | str = False
 ) -> int:
-    """Print a service unit, or write it to disk when ``--write`` is given.
+    """Print a service unit, or apply it when ``--write`` is given.
 
     ``write`` is False (print to stdout — the back-compatible default), True (write to
-    the conventional ``ops.default_service_path``), or a path string (write there). A
-    write that the process can't perform (a system path without privileges) fails
-    closed with a clear hint rather than a traceback.
+    the conventional ``ops.default_service_path``), or a path string (write there). For
+    ``kind == "windows"`` any truthy ``write`` instead REGISTERS and starts the service via
+    Shawl — nothing is written to disk, so a ``--write PATH`` is ignored there. A write
+    that the process can't perform (a system path without privileges) fails closed with a
+    clear hint rather than a traceback.
     """
     state_dir: str | None = None
     if kind == "windows":
@@ -1264,8 +1270,8 @@ def _tls_files(config: ClausterConfig) -> tuple[str, str] | None:
     checked both paths at load, but a cert could be deleted or chmod-ed away between
     load and serve.  Aborts (never silently falls back to plain HTTP) if either file is
     now missing/unreadable.  A final pre-flight builds the SSL context exactly as uvicorn
-    will, so a malformed/mismatched cert also aborts cleanly here — with our ``TLS
-    error`` message and exit 2 — rather than crashing uvicorn with a raw traceback.
+    will, so a malformed/mismatched cert also raises here — for the caller to report and
+    abort on — rather than crashing uvicorn with a raw traceback.
 
     For ``provision = self-signed``: calls the provisioner to generate (or reuse) the
     cert+key under ``state_dir/tls/``, then runs the same pre-flight verify.
@@ -1321,8 +1327,8 @@ def _verify_cert_chain(cert: Path, key: Path) -> None:
     """Pre-flight the cert + key by building the SSL context uvicorn will, or fail closed.
 
     Catches a malformed/mismatched cert (one that passes existence/readability but won't
-    parse) so it aborts here with our ``TLS error`` message + exit 2, instead of crashing
-    uvicorn with a raw traceback at serve time. The re-raised ``ValueError`` carries only
+    parse) and raises ``ValueError`` so the caller can abort startup, instead of uvicorn
+    crashing with a raw traceback at serve time. The re-raised ``ValueError`` carries only
     the cert + key PATHS and the generic SSL/PEM reason — never the private-key bytes. A
     seam so tests can stub the parse without a real keypair (the parse itself is tested
     directly).
@@ -1395,10 +1401,12 @@ def _reexec() -> None:  # pragma: no cover - replaces the process image; tested 
 
 
 def _run_setup_wizard(config_path: str | None) -> int:
-    """Serve the loopback first-run setup wizard, then re-exec onto the new config (#978).
+    """Serve the first-run setup wizard, then re-exec onto the new config (#978).
 
-    Reached only when no ``clauster.yml`` exists. The wizard writes one (auth enabled) and
-    asks its server to shut down; we then re-exec so ``load_config`` succeeds on the restart.
+    Reached only when no ``clauster.yml`` exists. The wizard binds loopback unless
+    ``CLAUSTER_SETUP_HOST`` widens it (the Docker image sets ``0.0.0.0``), in which case a
+    one-time setup token gates it. It writes a config (auth enabled) and asks its server to
+    shut down; we then re-exec so ``load_config`` succeeds on the restart.
     """
     from . import setup_wizard
 
@@ -1497,12 +1505,8 @@ def _run(config_path: str | None) -> int:
         print(f"clauster: could not probe claude version: {exc}", file=sys.stderr)
         return 2
 
-    # Fail closed BEFORE serving: re-resolve the TLS material (the config validator
-    # already checked it at load, but a cert could vanish or lose read permission
-    # between load and serve). For self-signed, generate/renew the cert+key now.
-    # A bad cert here aborts startup — Clauster must never silently fall back to
-    # plain HTTP when TLS was asked for.  RuntimeError surfaces a missing
-    # `cryptography` package with a clear install hint.
+    # Fail closed BEFORE serving: re-resolve (or generate) the TLS material — see _tls_files.
+    # Clauster must never silently fall back to plain HTTP when TLS was asked for.
     try:
         tls_files = _tls_files(config)
     except (ValueError, RuntimeError, OSError) as exc:

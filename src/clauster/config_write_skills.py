@@ -293,9 +293,12 @@ def list_skills(base: Path) -> list[dict[str, Any]]:
 
     Each entry: ``{"name", "has_skill_md", "files", "description"?, "disable_model_
     invocation"?, "frontmatter_error"?}``. A skill whose ``SKILL.md`` fails structural
-    validation is still listed (so a hand-edited/corrupt skill is visible, not hidden)
-    with ``frontmatter_error`` set instead of raising — a single bad skill must never
-    break the whole listing.
+    validation or is not UTF-8 is still listed (so a hand-edited/corrupt skill is visible,
+    not hidden) with ``frontmatter_error`` set instead of raising.
+
+    That per-skill tolerance covers parse errors only: an ``OSError`` — reading an
+    unreadable ``SKILL.md`` (EACCES/EIO), or enumerating members via ``resolve()``/
+    ``rglob()`` — is **not** caught and fails the whole listing, not just that skill.
 
     **Redaction (consistency with the file-body read view).** Both the surfaced
     ``description`` and any ``frontmatter_error`` fragment run through
@@ -395,7 +398,6 @@ def read_skill_file(
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise cw.InvalidCandidateError(f"{relative} is not valid UTF-8") from exc
-    # Redact and hash from the SAME bytes (single read) — no second read to drift from.
     content = cw.redact_secret_lines(text)
     return content, cw.hash_bytes(raw), exists
 

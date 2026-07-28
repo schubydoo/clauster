@@ -30,10 +30,11 @@ This is simpler and safer than silently replacing an in-flight login (which coul
 orphan a subprocess mid-OAuth-exchange or interleave two operators' pastes).
 
 **Never logs the pasted code or the resulting token.** Both are treated as
-secrets: they are never passed to a log call, and any captured subprocess output
-that might echo them is redacted before it is logged (it is still returned
-verbatim to the one authorized caller over the API response, which is the whole
-point of the feature).
+secrets: they are never passed to a log call, and captured subprocess output that
+might echo them is redacted everywhere it is logged *or* returned. The only thing
+handed back verbatim, to the one authorized caller over the API response, is the
+extracted ``setup-token`` credential itself — which is the whole point of the
+feature.
 """
 
 from __future__ import annotations
@@ -363,8 +364,8 @@ class LoginShepherd:
         The lazy half of the un-wedging: called only from `start()`, so an abandoned flow is
         reclaimed by the operator's next sign-in attempt rather than by a background timer.
         The stale flow is detached under `_flow_lock` and torn down OUTSIDE it — `_teardown`
-        blocks (terminate + reader join, up to ~10s) and re-acquires the lock itself, so
-        holding it across the call would both stall every other caller and deadlock.
+        blocks (terminate + escalate + reader join, worst case ~15s), so holding the lock
+        across the call would stall every other caller.
 
         Concurrency: whichever caller wins the lock detaches the flow and owns its teardown; a
         racing caller then sees `None` and proceeds to spawn. Only one can spawn (the spawn
@@ -484,11 +485,8 @@ class LoginShepherd:
                 struct.pack("HHHH", SCREEN_ROWS, _LOGIN_PTY_COLS, 0, 0),
             )
         except OSError as exc:
-            # Best-effort, like pty_keeper's winsize ioctl: a failure here means the
-            # slave stays at whatever default winsize the pty was opened with, so a very
-            # long authorize URL *could* still wrap and get truncated — but it is never
-            # fatal to the login flow, so log at debug and keep going rather than abort
-            # the spawn (unlike the ECHO disable below, which IS security-critical).
+            # Best-effort, like pty_keeper's winsize ioctl (see the docstring): a failure
+            # only risks a wrapped, truncated URL.
             _log.debug("login_shepherd: failed to widen pty winsize for %s: %s", mode, exc)
         try:
             attrs = termios.tcgetattr(slave_fd)
@@ -598,7 +596,7 @@ class LoginShepherd:
         Blocks (synchronously — callers run this via `asyncio.to_thread`) until an
         authorize URL appears in the subprocess output, the process exits, or
         `START_TIMEOUT_SECONDS` elapses. Fails closed: if no URL ever appears, the
-        raw captured output is returned in the raised error's message (never
+        REDACTED captured output is returned in the raised error's message (never
         hung-forever) and the subprocess is reaped before raising.
 
         ``mode == "login"`` uses the verified plain-pipe transport (`_spawn_pipe`),
@@ -913,39 +911,26 @@ class LoginShepherd:
         closed last (in place of the pty master). Its `close()` is broadly guarded below since a
         stale ConPTY can raise a pywinpty-specific error, not just `OSError`.
         """
-        # Stop the child FIRST — for a PTY flow this is what unblocks the reader: closing
-        # master_fd out from under a blocked os.read does not interrupt it on macOS/BSD,
-        # but the child's exit closes the pty slave and a still-open master then returns
-        # EOF/EIO on every POSIX platform. (A plain-pipe reader watches the child's stdout,
-        # which the child's exit likewise EOFs — it was never affected.)
+        # Stop the child FIRST — see the docstring: this is what unblocks a PTY reader.
         if flow.proc.poll() is None:
-            # On Windows, reap the process TREE first. `terminate()` there kills only the
-            # process it is handed, never its descendants, so a surviving grandchild keeps
-            # our stdout pipe open and the reader below never sees EOF — it burns the full
-            # 5s join and then LEAKS the thread, because the join times out rather than
-            # succeeding. Measured on a Windows VM: 5026ms teardown with the reader still
-            # alive, versus 20ms and a clean exit with the tree killed.
-            #
-            # PREPENDED to the existing sequence rather than replacing it: `terminate()`
-            # still runs below (it is a no-op on an already-dead process — CPython handles
-            # the ERROR_ACCESS_DENIED-means-already-exited case), so the terminate-then-
-            # escalate ordering and everything that depends on it are untouched.
-            #
-            # Costs no gracefulness, because on Windows `Popen.kill is Popen.terminate`
-            # (both TerminateProcess — verified True there, False on POSIX). POSIX is
-            # excluded because there `terminate()` is a real SIGTERM and the stop-child-
-            # first ordering documented above is load-bearing.
-            #
-            # Guarded on a real `pid`: the ConPTY transport's `proc` is a `_ConPtyPopen`,
-            # a deliberate `Popen` SUBSET (poll/wait/terminate/kill) with no `pid`, and
-            # pywinpty owns that process. It also never had this problem — its reader polls
-            # `isalive()` instead of blocking on a read, so it exits on its own.
-            #
-            # Broadly guarded for the same reason the second `wait` below is: this is a
-            # best-effort reap, and an unguarded raise would skip the terminate, the reader
-            # join, the control-end close AND the `self._flow = None` clear — stranding the
-            # flow `active` forever, which is strictly worse than the leaked thread it fixes.
-            # Failing here just degrades to the old behaviour, so debug-log and carry on.
+            # On Windows, reap the process TREE first: `terminate()` there kills only the
+            # process it is handed, never descendants, so a surviving grandchild holds our
+            # stdout open, the reader below burns its full 5s join and then LEAKS the thread
+            # (measured on a Windows VM: 5026ms with the reader still alive, vs 20ms and a
+            # clean exit with the tree killed). PREPENDED, not replacing: `terminate()` still
+            # runs below (a no-op on an already-dead process — CPython handles the
+            # ERROR_ACCESS_DENIED-means-already-exited case), so the terminate-then-escalate
+            # ordering and everything depending on it are untouched. It costs no gracefulness
+            # because on Windows `Popen.kill is Popen.terminate` (both TerminateProcess —
+            # verified True there, False on POSIX); POSIX is excluded because there
+            # `terminate()` is a real SIGTERM and the stop-child-first ordering documented
+            # above is load-bearing. Guarded on a real `pid`: the ConPTY transport's proc is a
+            # `_ConPtyPopen`, a deliberate `Popen` SUBSET (poll/wait/terminate/kill) with no
+            # `pid`, pywinpty owns that process, and its `isalive()`-polling reader never had
+            # the problem. Broadly guarded like the second `wait` below — an unguarded raise
+            # would skip the terminate, the reader join, the control-end close AND the
+            # `self._flow = None` clear, stranding the flow `active` forever, strictly worse
+            # than the leaked thread this fixes. Failing here degrades to the old behaviour.
             tree_pid = getattr(flow.proc, "pid", None)
             if _is_win32() and tree_pid is not None:
                 try:
@@ -1032,11 +1017,9 @@ def _pump_pty(flow: _Flow) -> None:  # pragma: skip-on-win — POSIX pty reader 
         try:
             chunk = os.read(master_fd, 65536)
         except OSError as exc:
-            # EIO is the expected "child exited, pty half-closed" signal on Linux; any
-            # other OSError (e.g. the fd was already closed by a concurrent teardown)
-            # is likewise treated as end-of-stream rather than propagated — a reader
-            # thread crashing has no caller to observe it, and the flow is being torn
-            # down either way.
+            # EIO is the expected "child exited, pty half-closed" signal; any other OSError
+            # (e.g. an fd already closed by a concurrent teardown) is end-of-stream too —
+            # see the docstring.
             if exc.errno not in (errno.EIO,):
                 _log.debug("login_shepherd: pty read ended for %s: %s", flow.mode, exc)
             break

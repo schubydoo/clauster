@@ -135,6 +135,10 @@ def write_claude_md(
     When ``claude_json`` is given, the write is refused unless the project dir is
     trusted there — this confines writes to trusted dirs (a symlinked project that
     resolves outside projects_root won't be trusted), matching the spawn trust gate.
+
+    ``state_dir`` + ``user`` drive the best-effort audit append
+    (:func:`clauster.config_audit.record`); with ``state_dir=None`` the append is
+    skipped entirely and the write is unaudited.
     """
     target = _target(project_path)
     # Validate the path shape first, then authorize: a symlinked project dir that
@@ -297,9 +301,7 @@ def _write_scoped(root: Path, relative: str, content: str, expected_hash: str | 
         # Runs INSIDE write_file's per-target lock (the same lock the editor's
         # write_claude_md holds), so the stale-hash check and the replace are one
         # critical section across BOTH surfaces — neither can validate old bytes then
-        # lost-update the other. `found` (existence) is tracked separately from content:
-        # an existing but empty file (the "blank" op) still requires a hash, so a later
-        # expected_hash=None PUT is a 409, not a silent overwrite.
+        # lost-update the other.
         found = current is not None
         if expected_hash is None:
             if found:
@@ -345,10 +347,12 @@ def write_project_local_claude_md(
 ) -> None:
     """Validate + write the local-scope ``CLAUDE.local.md``; gitignore it on success.
 
-    A successful write always runs
-    :func:`~clauster.config_write.ensure_gitignored` (idempotent — a no-op once the
-    entry exists) so a newly created ``CLAUDE.local.md`` is never accidentally
-    committed (#766), mirroring the local-scope JSON writers.
+    A successful write always runs :func:`~clauster.config_write.ensure_gitignored`
+    (idempotent — a no-op once the entry exists) so a newly created
+    ``CLAUDE.local.md`` is never accidentally committed (#766). Unlike the
+    local-scope JSON writers, which ignore *before* writing because their write
+    drops a secret-bearing ``.bak``, the ignore runs *after* the write here: this is
+    content-tier, not credential storage, and no backup file is created.
     """
     _write_scoped(project_dir, LOCAL_FILENAME, content, expected_hash)
     cw.ensure_gitignored(project_dir, LOCAL_FILENAME)

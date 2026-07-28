@@ -51,7 +51,11 @@ def _version_ge(have: str, want: str) -> bool:
     """Compare dotted versions numerically (2.1.156 >= 2.1.145). Missing/odd parts -> 0."""
 
     def parse(v: str) -> tuple[int, ...]:
-        """Split a dotted version into an int tuple, treating a non-numeric segment as 0."""
+        """Split a dotted version into an int tuple, keeping each segment's digits.
+
+        ``v1`` -> 1 (the leading letter is dropped, which is what lets a ``v1.7.1``-shaped
+        token compare against a bare floor); a segment with no digits at all becomes 0.
+        """
         parts = []
         for seg in v.split("."):
             digits = "".join(c for c in seg if c.isdigit())
@@ -143,8 +147,7 @@ def run_doctor(
         )
     )
 
-    # port (warn-only). Skipped for the running server's dashboard preflight, where the
-    # port is in use *by this very server* and the warning is always a false positive.
+    # port (warn-only; see the ``check_port`` paragraph in the docstring)
     if check_port:
         checks.append(_check_port(config.host, config.port))
 
@@ -644,7 +647,12 @@ def _check_node_toolchain(config: ClausterConfig) -> Check | None:
 
 
 def _check_port(host: str, port: int) -> Check:
-    """Warn when ``port`` already has a listener on loopback (Clauster likely running)."""
+    """Warn when ``port`` already has a listener on loopback (Clauster likely running).
+
+    ``host`` is accepted for call-site symmetry but never probed — the check is
+    deliberately loopback-only, so a non-loopback bind reports "free" whenever nothing
+    is listening on 127.0.0.1.
+    """
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(0.5)
@@ -847,8 +855,10 @@ def restore_backup(
 ) -> RestoreResult:
     """Restore state (and optionally config) from a backup.
 
-    Extraction is hardened against path traversal / absolute paths / symlink escape
-    (see _safe_extract_tar).
+    Raises ``FileNotFoundError`` for a missing archive, and ``FileExistsError`` when
+    ``state_dir`` is non-empty or ``config_out`` already exists unless ``force=True`` — a
+    forced restore of the state dir is replace-not-merge. Extraction is hardened against
+    path traversal / absolute paths / symlink escape (see _safe_extract_tar).
     """
     backup = backup.expanduser()
     state_dir = state_dir.expanduser()
@@ -898,11 +908,12 @@ class MigrateResult(TypedDict):
 def migrate_state(config: ClausterConfig) -> MigrateResult:
     """Force state.json to the current schema, then re-save canonical.
 
-    ``StateStore.load`` migrates (and ``.bak``s) older schemas on read; clauster.yml
-    is additive-only, so this just confirms it still validates.
+    ``StateStore.load`` migrates (and ``.bak``s) older schemas on read; this forces that
+    read, then rewrites state.json canonically at ``CURRENT_SCHEMA``. clauster.yml is
+    additive-only and is not touched here — the caller already loaded and validated it.
     """
     store = StateStore(config.state_dir)
-    data = store.load()  # migrates older schema in place (taking a .bak)
+    data = store.load()
     store.save(data)  # rewrite canonical at CURRENT_SCHEMA
     return {"schema_version": CURRENT_SCHEMA, "instances": len(data)}
 
@@ -1145,8 +1156,11 @@ def windows_service_commands(
     ``install-service windows --write`` runs these directly (from an elevated prompt); the
     ``windows`` kind of :func:`render_service_unit` renders the SAME commands as an inspectable
     ``.bat``. Shawl's ``add`` does the ``sc create``; ``sc config … start= auto`` + ``sc start``
-    finish it. A ``"`` in any interpolated path is illegal on Windows and would break the mirrored
-    ``.bat`` quoting, so it is rejected here too rather than run.
+    finish it. A ``"`` is illegal in a Windows path and would break the mirrored ``.bat``
+    quoting, so the shawl / executable / working-dir paths are rejected here rather than run.
+    The **config path is not checked on this argv route** — only the ``.bat`` renderer validates
+    it — so a config path containing a ``"`` raises there and passes through here (harmless in
+    practice: these run as list-argv, never through a shell).
     """
     exe, launch = _service_launch_command(python)
     cfg = config_path or "/etc/clauster/clauster.yml"

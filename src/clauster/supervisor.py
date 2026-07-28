@@ -60,7 +60,11 @@ _log = logging.getLogger("clauster.supervisor")
 
 
 def _clean(value: object, *, limit: int | None = None) -> str:
-    """Coerce a free-text field to a redacted ``str`` (``""`` for non-strings)."""
+    """Coerce a free-text field to a redacted ``str`` (``""`` for non-strings).
+
+    When ``limit`` is given, over-cap text is cut to it and a literal ``…<truncated>``
+    marker appended — the only caller-visible signal that the field was shortened.
+    """
     if not isinstance(value, str):
         return ""
     text = redact_for_disk(value)
@@ -417,8 +421,9 @@ def resume_background_job(
     id — a resume mints a fresh 8-hex id (and a new session UUID) that inherits the
     prior transcript, so the resumed agent surfaces as a new panel row.
 
-    Fail-closed: a job that no longer exists, has no recorded session UUID, or has
-    no cwd raises :class:`ResumeError` rather than dispatching a malformed resume.
+    Fail-closed: a job that is still live, no longer exists, has no recorded session
+    UUID, or has no cwd raises :class:`ResumeError` rather than dispatching a duplicate
+    or malformed resume.
     """
     job = next((j for j in list_background_jobs(jobs_dir, roster_json) if j.id == job_id), None)
     if job is None:
@@ -547,15 +552,10 @@ def stop_background_job(
         )
 
     removed, detail = _remove_job(resolved, job_id)
-    # Stuck-orphan fallback (#485): when `claude rm` soft-fails (transient supervisor
-    # down) the on-disk job dir is never dropped, so the row can never be forgotten
-    # from the UI. We can drop that record ourselves — but ONLY when (a) the worker is
-    # confirmed dead (pid is None: the liveness guard found no live worker) AND (b) the
-    # failure was specifically the supervisor-down *soft-fail*, not a hard error or a
-    # timeout. A timeout can mean the supervisor is still alive and mid-remove, so it
-    # could rewrite the dir right after we delete it — narrow to the soft-fail so we
-    # never race a still-working supervisor. Fail closed: a still-live worker keeps the
-    # cloud-deregistering path and is NEVER force-forgotten by deleting its dir.
+    # Stuck-orphan fallback (#485; docstring step 4), narrowed to the supervisor-down
+    # SOFT-FAIL and never a hard error or a timeout: a timeout can mean the supervisor is
+    # still alive and mid-remove, and would rewrite the dir right after we deleted it. Fail
+    # closed on `pid is None`, so a still-live worker is NEVER force-forgotten this way.
     if not removed and pid is None and _RM_SOFT_FAIL in detail.lower():
         forced, forced_detail = _force_remove_job_dir(job_id, jobs_dir)
         if forced:

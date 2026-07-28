@@ -386,8 +386,6 @@ class SessionHistoryStore:
                 )
             return True
         except SQLAlchemyError as exc:
-            # Best-effort, fail-closed: history is non-authoritative, so a write
-            # failure degrades to a missing row, never a failed spawn/stop.
             _log.warning("could not record session event (%s/%s): %s", project_name, kind, exc)
             return False
 
@@ -559,9 +557,9 @@ class ApiTokenStore:
     mutating verb here is driven by the CLI, which owns its own short-lived
     :class:`~clauster.db.persistence.Persistence`.
 
-    Reads are fail-closed: a DB error degrades ``is_active_hash`` to ``False``
-    (deny) and ``list_all`` to ``[]`` — mirroring :class:`StateStore` /
-    :class:`HostedStateStore`, never a crash on a hiccup. ``touch_last_used`` is
+    Reads fail closed, each in the direction that is safe for it: a DB error denies in
+    ``is_active_hash`` (``False``) and RAISES :class:`OSError` in :meth:`list_all` — an
+    empty audit list would read as "no bearer tokens exist". ``touch_last_used`` is
     best-effort and swallows write errors — a lost bookkeeping update must never
     fail the request it authenticated.
     """

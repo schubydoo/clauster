@@ -9,12 +9,13 @@ agent's stdout NDJSON frames, sends user messages, and stops the session.
 Frame routing splits the stdout stream two ways (per
 ``scratch/ccd-remote-protocol-spec.md`` §5–6 + ``scratch/hosted-protocol-empirical.md``):
 
-* **control_request** frames are the control plane. The MCP ``initialize``
-  handshake is auto-answered with an empty success so a session never wedges on
-  it. *Every other* control_request — notably tool-permission prompts
-  (``can_use_tool``) — is **parked** (recorded, surfaced, never auto-answered):
-  fail-closed, the agent waits until something explicitly responds. CL-5 builds
-  the approve/deny UI on top of :attr:`HostedSession.pending_requests`.
+* **control_request** frames are the control plane. The MCP handshake/transport
+  subtypes (``initialize``, ``mcp_message`` — :data:`_AUTO_ACK_SUBTYPES`) are
+  auto-answered with an empty success so a session never wedges on them. *Every
+  other* control_request — notably tool-permission prompts (``can_use_tool``) — is
+  **parked** (recorded, surfaced, never auto-answered): fail-closed, the agent waits
+  until something explicitly responds. The approve/deny UI (CL-5) is built on
+  :attr:`HostedSession.pending_requests`.
 * **data** frames (``system``/``assistant``/``user``/``result``/…) are redacted
   (defense-in-depth, every string leaf), appended to a bounded ring buffer with a
   monotonic ``event_seq``, and fanned out to browser subscribers. The ``system``
@@ -24,10 +25,11 @@ CL-4b (#231) wired this engine to the app: the app-layer ``channel`` dispatch in
 ``app.api_spawn`` routes ``channel="hosted"`` requests to :class:`HostedManager`
 (a registry kept separate from the project-keyed bridge runner), plus the
 ``/api/instances/{id}/message`` endpoint and the ``/ws/hosted/{id}`` WebSocket.
-Still ahead: the input/live-view UI (CL-4c), the permission approve/deny UI
-(CL-5), and ``state.json`` persistence + reattach for clauster-restart resilience
-(CL-6). This module stays a pure, daemon-driven library — the same posture CL-1
-took for :mod:`clauster.claustrum_client`.
+The input/live-view UI (CL-4c), the permission approve/deny UI (CL-5), and
+persistence + reattach for clauster-restart resilience (CL-6,
+:mod:`clauster.hosted_state`) have since shipped on top of it. This module stays a
+pure, daemon-driven library — the same posture CL-1 took for
+:mod:`clauster.claustrum_client`.
 """
 
 from __future__ import annotations
@@ -155,13 +157,9 @@ class HostedSession:
         self._process_id = process_id
         self._claude_binary = claude_binary
         self._on_permission_needed = on_permission_needed
-        # Size the subscriber queue to hold a full replay snapshot without dropping the
-        # newest events. subscribe() offers up to ring_size retained events into a fresh
-        # queue, optionally preceded by one "gap" marker for an evicted prefix; and
-        # _Subscriber.offer drops the NEW event when the queue is full. A queue smaller
-        # than the snapshot would keep the OLDEST events and drop the freshest on a
-        # first-view reconnect — the inverse of a live view. The +1 reserves room for the
-        # leading gap marker, so even a full, already-evicted ring replays in full. (#422)
+        # Raise any caller-supplied queue to the full-snapshot floor: a smaller queue would
+        # keep the OLDEST replayed events and drop the freshest on a first-view reconnect
+        # (_Subscriber.offer drops the NEW event when full). See _DEFAULT_QUEUE_MAXSIZE (#422).
         self._queue_maxsize = max(queue_maxsize, ring_size + 1)
         self._stop_grace = stop_grace if stop_grace is not None else _STOP_GRACE_SECONDS
         self.status: InstanceStatus = InstanceStatus.STARTING
@@ -488,7 +486,11 @@ class HostedSession:
         self._emit({"type": "frame", "frame": _redact_obj(frame)})
 
     async def _handle_control_request(self, frame: dict[str, Any]) -> None:
-        """Auto-ack an MCP-handshake request; park anything else (fail-closed)."""
+        """Auto-ack the MCP handshake/transport subtypes; park anything else (fail-closed).
+
+        The auto-answered set is exactly :data:`_AUTO_ACK_SUBTYPES` (``initialize`` and
+        ``mcp_message``); every other subtype — notably ``can_use_tool`` — is parked.
+        """
         request_id = frame.get("request_id")
         request = frame.get("request")
         request = request if isinstance(request, dict) else {}
@@ -500,8 +502,7 @@ class HostedSession:
             await self._send_control_response(request_id, {})
             self._emit({"type": "control_ack", "request_id": request_id, "subtype": subtype})
             return
-        # Park everything else (tool-permission prompts, unknown subtypes): never
-        # auto-answer a request that could grant a capability. CL-5 responds.
+        # Never auto-answer a request that could grant a capability.
         parked = _ControlRequest(request_id, subtype if isinstance(subtype, str) else "", request)
         self._pending[request_id] = parked
         self._emit(

@@ -215,7 +215,8 @@ def canonical_name(name: str) -> str:
 
     Mirrors PEP 503 normalisation (lowercase; runs of ``-``, ``_``, ``.`` collapse to a
     single ``-``) so a RECORD's ``Name`` matches our registry's ``dist`` regardless of how
-    the wheel spelled it.
+    the wheel spelled it. Leading/trailing dashes are additionally stripped, which PEP 503
+    itself does not do (``_foo_`` → ``foo`` here, ``-foo-`` per the spec).
     """
     out = []
     prev_dash = False
@@ -366,8 +367,9 @@ def uninstall_extra(extra_name: str, state_dir: str | Path) -> int:
     managed dir). Only the extra's own top-level distribution(s) are removed — shared/transitive
     dependencies stay (removing them safely needs a dependency graph; the bulk uninstaller that
     clears the whole managed dir is #904 slice 2b). Exit codes: ``2`` unknown extra, ``1`` when a
-    matched distribution has no RECORD manifest so its files couldn't be removed, ``0`` otherwise
-    (removing an absent extra is a no-op, not an error — the end state already holds).
+    matched distribution could not be fully removed (no RECORD manifest, or a file survived the
+    unlink — locked or permission-denied), ``0`` otherwise (removing an absent extra is a no-op,
+    not an error — the end state already holds).
     """
     if extra_name not in extra_names():
         _err(f"unknown extra {extra_name!r}; choose from {', '.join(extra_names())}")
@@ -429,8 +431,8 @@ def _remove_distribution(dist: importlib.metadata.Distribution, target: Path) ->
         except FileNotFoundError:
             pass  # already gone — nothing left behind
         except OSError:
-            # Locked (e.g. a running process holds a Windows .pyd) or permission-denied: the
-            # file SURVIVES, so the extra is NOT fully removed. Record it and don't claim success.
+            # The file survives a lock/permission error, so the extra is NOT fully removed
+            # (see docstring). Record it and don't claim success.
             left_behind = True
             continue
         dirs.add(located.parent)
@@ -761,7 +763,8 @@ def install_binary_dep(
     """Download + verify + place a managed binary (e.g. ``shawl``); return an exit code.
 
     Fetches the pinned release archive, refuses it unless its SHA-256 matches the hardcoded pin,
-    extracts the exe into ``<state_dir>/deps/bin``, and (best-effort) marks it executable. Prints
+    extracts the exe into ``<state_dir>/deps/bin`` and marks it executable (no-op semantics on
+    Windows; a chmod failure aborts the install like any other write error). Prints
     the provenance notice + requires confirmation unless ``assume_yes``; ``fetch``/``confirm`` are
     test seams. Exit codes: ``2`` unknown/off-platform, ``1`` declined / download / checksum /
     extract / write failure, ``0`` installed.
@@ -824,7 +827,9 @@ def install_binary_dep(
 def uninstall_binary_dep(key: str, state_dir: str | Path) -> int:
     """Remove a managed binary (e.g. ``shawl``) from ``<state_dir>/deps/bin``; return an exit code.
 
-    Exit codes: ``2`` unknown binary, ``0`` otherwise (removing an absent binary is a no-op).
+    Exit codes: ``2`` unknown binary, ``1`` when the file exists but can't be unlinked
+    (locked/permission-denied), ``0`` otherwise (removing an absent binary, or one with no build
+    for this platform/arch, is a no-op).
     """
     if key not in binary_dep_names():
         _err(f"unknown binary {key!r}; choose from {', '.join(binary_dep_names())}")

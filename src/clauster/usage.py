@@ -206,9 +206,10 @@ def _iter_transcript_lines(path: Path) -> Iterator[str]:
 def parse_transcript(path: Path) -> TranscriptUsage:
     """Aggregate token usage from a transcript JSONL, grouped by model.
 
-    Tolerant: blank lines and malformed records are skipped; only assistant
-    messages carrying a ``usage`` block contribute. The transcript can be huge, so
-    it is streamed line by line (never loaded whole).
+    Tolerant: blank lines and malformed records are skipped; a record contributes only
+    when it carries a ``message`` dict holding a ``usage`` dict — in practice the
+    assistant messages, though the role itself is not checked. The transcript can be
+    huge, so it is streamed line by line (never loaded whole).
     """
     result = TranscriptUsage(path=Path(path))
     for line in _iter_transcript_lines(path):
@@ -582,9 +583,10 @@ def resolve_session_transcript(
     not weaken the gate — the parent-identity check is applied per directory, against an
     enumerated set derived from the project path, never from ``session``.
     """
-    # Reject anything that isn't a bare filename stem outright: separators,
-    # parent refs, NUL, or an absolute/drive-qualified value. We never join an
-    # attacker-influenced separator into the path.
+    # Reject the obvious traversal shapes outright: empty stem, parent refs, separators,
+    # NUL. A drive-qualified value ("C:evil") survives this — pathlib drops the left
+    # operand when the right side carries a drive — and is caught by the parent-identity
+    # check below, which is therefore load-bearing, not belt-and-braces.
     if (
         not session
         or session in (".", "..")
@@ -597,9 +599,9 @@ def resolve_session_transcript(
     for directory in [own, *_worktree_candidate_dirs(project_path, claude_projects_dir)]:
         transcript_dir = directory.resolve()
         candidate = (transcript_dir / f"{session}.jsonl").resolve()
-        # Defense in depth: even after the component checks above, confirm the
-        # resolved file sits directly in the expected dir (parent identity), so a
-        # symlink or surprise normalization can't smuggle it elsewhere.
+        # Confirm the resolved file sits directly in the expected dir (parent identity),
+        # so a drive-qualified stem, a symlink, or a surprise normalization can't smuggle
+        # it elsewhere.
         if candidate.parent != transcript_dir:
             continue
         try:
@@ -641,15 +643,9 @@ def aggregate_project_usage(
 def _transcript_dir_stamp(project_path: Path, claude_projects_dir: Path) -> tuple[int, int, int]:
     """Return a ``(file_count, total_size, max_mtime_ns)`` stamp of a project's transcripts.
 
-    Used to invalidate the usage cache: an appended transcript line moves the
-    file's mtime *and* grows it, a new or removed session changes ``file_count``,
-    and the aggregate ``total_size`` catches an append whose mtime lands in the
-    same coarse filesystem tick as the cached stamp (an append always grows the
-    file, even when the second-resolution mtime does not visibly advance). Using
-    ``st_mtime_ns`` (integer nanoseconds) rather than the float ``st_mtime`` also
-    removes the rounding ambiguity that could mask a sub-second change. Together
-    these make a stale token/cost rollup structurally impossible to serve past a
-    transcript write while staying a cheap stat-only probe.
+    The usage cache's invalidation key — see the rationale at the top of this module for why
+    all three components are needed (``st_mtime_ns`` rather than the float ``st_mtime`` also
+    removes the rounding ambiguity that could mask a sub-second change).
 
     A file that vanishes between the listing and its ``stat`` (a racing session
     cleanup) is skipped — the next rollup re-stats and re-stamps, so a transient
@@ -700,8 +696,9 @@ class _UsageCache:
 
         Hands back a deep copy on every call so a mutating caller never touches the
         cached object. On a cache miss the public behavior of
-        :func:`aggregate_project_usage` is preserved exactly (including a propagated
-        ``OSError`` from an unreadable transcript file).
+        :func:`aggregate_project_usage` is preserved exactly: an ``OSError`` raised while
+        *reading* a transcript propagates and is not cached, while a transcript that fails
+        to *open* is skipped by the aggregator rather than surfaced.
         """
         key = (str(project_path), str(claude_projects_dir))
         stamp = _transcript_dir_stamp(project_path, claude_projects_dir)

@@ -94,7 +94,7 @@ def record(
     keys: list[str] | None = None,
     extra: dict[str, Any] | None = None,
 ) -> None:
-    """Append one audit record for a committed config write. Best-effort, never raises.
+    """Append one audit record for a committed config write. Best-effort.
 
     ``surface`` is the config surface (``"permissions"`` / ``"mcp"`` / ``"claude-md"`` …),
     ``scope`` one of ``project`` / ``user`` / ``local``, ``target`` the file (or resource)
@@ -104,8 +104,12 @@ def record(
     ``{"argv": [...], "before_sha256": ..., "after_sha256": ...}`` for the CLI surfaces.
 
     ``state_dir`` is ``None`` only in unit contexts that don't exercise the audit trail;
-    the append is skipped rather than erroring so those callers need no state dir. A real
+    the append is skipped rather than erroring so those callers need no state dir. An
     :class:`OSError` on the append is swallowed + logged (the write already committed).
+    Only ``OSError`` is caught, so a :class:`ValueError` from ``json.dumps`` — in practice
+    a circular reference in ``extra`` — still propagates. A merely unserializable value
+    does not: ``default=str`` coerces it, and ``ensure_ascii`` escapes a surrogate in
+    ``target`` instead of failing to encode it.
     """
     if state_dir is None:
         return
@@ -149,10 +153,12 @@ def file_fingerprints(paths: Iterable[Path]) -> dict[str, dict[str, str | int] |
     Used to take a before/after picture of the files a CLI-driven config mutation might
     touch, so :func:`diff_fingerprints` can report which ones actually changed. Records
     only a content HASH + byte size, never the bytes — the audit trail's key-names-never-
-    values invariant extends to file contents (``~/.claude.json`` holds real tokens). A
-    missing/unreadable file fingerprints as ``None`` (so a create/remove is detectable);
-    keyed by the absolute path (this is the operator's own local audit log — the path is
-    exactly the "where did it land?" answer the trail exists to give).
+    values invariant extends to file contents (``~/.claude.json`` holds real tokens). An
+    ABSENT file fingerprints as ``None``; one that exists but can't be read fingerprints as
+    ``{"unreadable": True}``, so :func:`diff_fingerprints` reports ``indeterminate`` rather
+    than miscalling a create/remove. Keyed by the absolute path (this is the operator's own
+    local audit log — the path is exactly the "where did it land?" answer the trail exists
+    to give).
     """
     out: dict[str, dict[str, Any] | None] = {}
     for path in paths:
@@ -220,7 +226,8 @@ async def arecord(state_dir: Path | None, **fields: Any) -> None:
     The config writers already run their filesystem work via ``asyncio.to_thread``; the
     audit append is filesystem work too, so it is offloaded the same way rather than run
     on the event-loop thread, where a slow state dir would stall unrelated requests. Same
-    best-effort contract: never raises. ``fields`` are the keyword-only args of
+    best-effort contract, and the same caveat: :func:`record` swallows ``OSError`` only, so
+    an encoding ``ValueError`` propagates through here too. ``fields`` are the args of
     :func:`record` (``surface`` / ``scope`` / ``target`` / ``action`` / ``actor`` / ``keys``
     / ``extra``).
     """

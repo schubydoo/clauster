@@ -94,9 +94,10 @@ def ensure_recap_hook_installed(
 ) -> bool:
     """Idempotently register the SessionStart recap hook. Returns True if changed.
 
-    Identifies our entry by the hook *script filename* so a changed interpreter
-    (e.g. a moved venv) rewrites the command in place rather than duplicating.
-    Unrelated SessionStart hooks (context-mode, the user's own) are preserved.
+    Identifies our entry by a stable marker (:data:`_HOOK_MARKERS`: the hook script
+    filename, or the frozen binary's :data:`RECAP_SUBCOMMAND`) so a changed interpreter,
+    moved venv, or pip↔binary switch rewrites the command in place rather than
+    duplicating. Unrelated SessionStart hooks (context-mode, the user's own) are preserved.
     """
     script = script or HOOK_SCRIPT
     command = command or hook_command(script=script)

@@ -53,7 +53,11 @@ class CredentialsError(RuntimeError):
 
 
 class EnvironmentsAPIError(RuntimeError):
-    """The environments API returned a non-2xx status or an unusable body."""
+    """The environments API returned a 4xx/5xx status or an undecodable body.
+
+    Also raised locally with ``status=0`` when the transport refuses a non-https URL,
+    i.e. before any request is sent.
+    """
 
     def __init__(self, status: int, detail: str) -> None:
         """Build the error from the API HTTP status and detail text."""
@@ -84,7 +88,9 @@ def load_credentials(
     """Read the OAuth access token + org UUID from their single documented files.
 
     Parsed with the stdlib (do NOT assume ``jq`` is installed). Raises
-    ``CredentialsError`` on a missing file/field or an expired token.
+    ``CredentialsError`` on a missing file or field. Expiry is checked **only when the
+    caller supplies ``now_ms``** (ms epoch); with the default ``None`` an expired token is
+    returned unchecked — ``code_sessions.check_anchor_health`` calls it that way.
     """
     cred_file = Path(credentials_path).expanduser()
     try:

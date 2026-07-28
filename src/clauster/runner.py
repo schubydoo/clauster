@@ -123,7 +123,12 @@ class SpawnError(RuntimeError):
 
 
 class UnknownProject(SpawnError):
-    """The named project does not exist under projects_root."""
+    """The named project does not exist under projects_root — or the instance is unknown.
+
+    This module's generic 404. Besides the two spawn-path project raises it also covers a
+    referenced ``instance_id`` that is not (or is no longer) a managed instance: resume,
+    stop, and forget all raise it, as does a session another clauster process forgot.
+    """
 
 
 class NotTrusted(SpawnError):
@@ -131,7 +136,13 @@ class NotTrusted(SpawnError):
 
 
 class InvalidSpawnOption(SpawnError):
-    """Bad spawn_mode/permission_mode value, or worktree requested for a non-git project."""
+    """Bad spawn/permission/resume/sandbox mode, name, or resume_session_id (mapped to 422).
+
+    Also raised for a worktree spawn on a non-git project, an unusable ``custom_name``
+    (too long, or control/format characters — #780), and a ``resume_session_id`` that is
+    not a UUID, is combined with the internal resume path, is used outside pty mode, or
+    does not name a conversation of this project (#303).
+    """
 
 
 class PermissionModeNotAllowed(SpawnError):
@@ -139,14 +150,23 @@ class PermissionModeNotAllowed(SpawnError):
 
 
 class CapacityExceeded(SpawnError):
-    """A new bridge would exceed instance_defaults.max_bridges (clauster-enforced cap)."""
+    """A new bridge would exceed instance_defaults.max_bridges (clauster-enforced cap).
+
+    ⚠️ The tally counts only live bridges of OTHER projects — every STARTING/RUNNING
+    bridge of the project being spawned is excluded. That holds for the standard path
+    (capped at one per project by an earlier idempotent early-return) but not for pty,
+    where N sessions per project are allowed, so a project's own live pty sessions
+    contribute nothing to the count and the cap under-enforces for them.
+    """
 
 
 class InstanceStillLive(RuntimeError):
-    """Raised when forget() is asked to drop a bridge that is still STARTING/RUNNING.
+    """Raised when a lifecycle op is refused because the instance is still live.
 
-    Not a SpawnError: forget is a lifecycle op, not a spawn, and the caller maps this
-    to 409 (Stop it first) rather than the 4xx the spawn errors map to.
+    Two raise sites: forget() on a bridge that is STARTING/RUNNING or still has a live
+    bridge/keeper pid, and adopt() on a project that is already managed in ANY status.
+    Not a SpawnError: these are lifecycle ops, not spawns, and the caller maps this to
+    409 (Stop it first) rather than the 4xx the spawn errors map to.
     """
 
 
@@ -536,8 +556,9 @@ class SessionRunner:
         default ``asyncio`` thread-pool, ``min(32, cpu+4)``; past that the samples batch),
         not the sum
         (#407; previously serial, which is why a high bridge count outran ``poll_seconds``
-        and triggered ``_warn_if_refresh_slow``). The PID create-time guard mirrors the
-        per-request path so a recycled PID is never attributed to a bridge. Each bridge is
+        and triggered ``_warn_if_refresh_slow``). Each sample goes through
+        :meth:`_sample_one_bridge`, whose PID create-time guard drops a recycled PID rather
+        than attributing it to the bridge. Each bridge is
         isolated via ``return_exceptions`` — one failing sampler is logged and dropped, never
         the rest. The cache is replaced wholesale, so a stopped/crashed bridge's stale sample
         drops out.
@@ -658,14 +679,9 @@ class SessionRunner:
 
         With N instances per project the bare-name fallback resolves via
         :meth:`get_instance_for_project` (#778) to the LAST-REGISTERED match, in any
-        status. ⚠️ Until #1143 that was also the row the dashboard displayed, and this
-        docstring drew a safety conclusion from the coincidence — that a name action
-        could never target a bridge the operator cannot see. **That no longer holds.**
-        The client now keys rows by ``instance_id`` and prefers a live row, so with a
-        live bridge and a newer stopped row for one project the two disagree: the
-        dashboard shows the live bridge while a bare name resolves to the stopped row.
-        Do not close that gap by restoring a project-keyed client fold (that WAS
-        #1143) — narrow the name resolution instead.
+        status — which since #1143 is **not** necessarily the row the dashboard shows. See
+        that method's ⚠️ note for the divergence and why the fix is to narrow the name
+        resolution, never to restore a project-keyed client fold.
 
         This fallback is for the surfaces where a human types a project name rather
         than an id: the CLI, the MCP tools, and the HTTP routes that still accept
@@ -843,21 +859,17 @@ class SessionRunner:
         sessions running in the project's git worktrees.
 
         Those worktrees MUST stay in lockstep with :func:`usage.transcript_paths_for`,
-        which lists the same set (#1020). If a worktree session were listed but not
-        counted live here, it would render as a dormant conversation and the launch
-        popover's Conversation picker (``!live && turn_count > 0``) would surface it.
-        That picker always sends ``--fork-session`` alongside ``--resume <uuid>``, so it
-        only ever BRANCHES: a fresh session id, picked conversation never clobbered.
-        (The two flags are independent — ``hosted``/``supervisor`` send ``--resume``
-        bare to continue a conversation in place — the picker simply never offers that.)
-        Surfacing a live session there is not destructive. Whether it SHOULD be offered is
-        an open product question (``scratch`` FE-5): Claude Code's own ``/branch`` branches
-        a live conversation by design, but it does so from the writing process itself,
-        whereas this picker would spawn a SECOND process against a transcript the first is
-        still appending to. Either way, what this function owes the picker is an ACCURATE
-        flag — the filter can then be whatever we decide. Hosted
-        (claustrum) sessions are folded in separately by the route, since they run no
-        ``agents --json`` session.
+        which lists the same set (#1020): a worktree session listed but not counted live
+        here would render as a dormant conversation and be surfaced by the launch popover's
+        Conversation picker (``!live && turn_count > 0``). That picker always sends
+        ``--fork-session`` alongside ``--resume <uuid>``, so it only ever BRANCHES — a
+        fresh session id, picked conversation never clobbered — and surfacing a live
+        session there is not destructive. (The two flags are independent;
+        ``hosted``/``supervisor`` send ``--resume`` bare to continue in place.) What this
+        function owes the picker is an ACCURATE flag; what the picker should filter on is
+        an open product question tracked separately (``scratch`` FE-5). Hosted (claustrum)
+        sessions are folded in separately by the route, since they run no ``agents --json``
+        session.
         """
         target = pointers.sanitize_cwd(project_path)
         # The SAME string rule usage._transcript_dirs_for scans with, so the listing and the
@@ -944,7 +956,13 @@ class SessionRunner:
         return {"bridge_pid": pid, "bridge_proc_start": proc_start}
 
     def _persist_subset(self) -> dict[str, dict]:
-        """Build the persistable record for every live instance, keyed by instance id."""
+        """Build the record to persist, keyed by instance id.
+
+        The previously-persisted map overlaid with the currently-tracked instances — not
+        the live instances alone: the comprehension below also admits a dead card that is
+        not row-backed or is still present in ``_persisted``, and the overlay retains every
+        earlier row (see the comment on the return).
+        """
         live = {
             inst.instance_id: {
                 "project_name": inst.project,
@@ -1032,8 +1050,10 @@ class SessionRunner:
         Best-effort: the state store is non-authoritative, so a write failure (disk
         full, revoked perms — surfaced as :class:`OSError` per the store contract)
         degrades to a stale on-disk record, never a failed spawn/stop or a 500 on the
-        dashboard poll. ``_last_saved``/``_persisted`` are left unchanged on failure so
-        the next persist retries (mirrors :meth:`HostedManager._persist`).
+        dashboard poll. ``_last_saved`` is left unchanged on failure, which is what makes
+        the next persist retry; ``_persisted`` has already been advanced to the freshly
+        refreshed base by then, and the next attempt re-reads it anyway. Mirrors
+        :meth:`HostedManager._persist`.
 
         Held under ``_persist_lock`` so interleaving callers can't race the store's
         per-row prune into a :class:`StaleDataError` (#471) — and, since #949, under
@@ -1202,8 +1222,10 @@ class SessionRunner:
     ) -> SpawnOutcome:
         """Spawn a new bridge for ``name`` (returning the existing one if already up).
 
-        Validates spawn/permission modes, ensures remote control + the recap hook are
-        set up, launches the process, and watches it until it reaches RUNNING or ERROR.
+        Validates spawn/permission modes, fails closed on an untrusted directory, then
+        best-effort pre-enables remote control and the recap hook when configured (each
+        gated on its config flag, attempted once per process, and an ``OSError`` only
+        warns), launches the process, and watches it until it reaches RUNNING or ERROR.
 
         ``resume_mode`` ("standard"/"pty") picks the launch mode for *this* bridge,
         overriding the ``claude.launch_mode`` config default (the per-launch picker).
@@ -1223,11 +1245,14 @@ class SessionRunner:
 
         ``sandbox`` (#780) is the per-launch OS-level filesystem/network isolation
         toggle for a *standard* bridge — tri-state ``"default"``/``"on"``/``"off"``
-        (``None`` == ``"default"``). ``"default"`` appends neither flag (claude's
-        own off-by-default / ``sandbox.*`` settings win — zero behavior change),
-        ``"on"`` appends ``--sandbox``, ``"off"`` appends ``--no-sandbox``. Validated
-        before any spawn side effect. Like ``custom_name`` it is standard-only; the
-        pty form is out of scope for #780.
+        (``None`` == ``"default"``). It is validated before any spawn side effect (a bad
+        value still 422s), but the toggle is DISABLED for 1.0 (#1037,
+        ``config.SANDBOX_TOGGLE_ENABLED``): every requested value is coerced to
+        ``"default"``, so NEITHER ``--sandbox`` nor ``--no-sandbox`` currently reaches the
+        bridge. #1046 re-enables it, at which point ``"on"`` appends ``--sandbox`` and
+        ``"off"`` appends ``--no-sandbox``, while ``"default"`` keeps appending neither
+        (claude's own off-by-default / ``sandbox.*`` settings win). Like ``custom_name``
+        it is standard-only; the pty form is out of scope for #780.
 
         Concurrent spawns of the *same* project are serialized by a per-project lock:
         a double-click, retry, or second browser tab must not both pass the
@@ -1375,7 +1400,6 @@ class SessionRunner:
 
         The body of :meth:`spawn_detailed`, split out so the locking lives in the caller.
         """
-        # Body of spawn_detailed(), always run under the per-project lock (see spawn()).
         proj = self._resolve_project(name)
         # Refresh the persist merge-base under the locks (#949): the persisted-record
         # reads below (the reattach probe's saved modes) and this spawn's trailing
@@ -1847,9 +1871,9 @@ class SessionRunner:
             # live standard bridge in the same project (#777).
             resume_target=existing,
             custom_name=carried_name,
-            # Keep the sandbox choice across a resume, parity with custom_name (#780):
-            # the instance records the resolved tri-state, so a resumed bridge re-passes
-            # the same --sandbox/--no-sandbox (or neither) instead of reverting to default.
+            # Forward the recorded sandbox tri-state so the choice survives a resume,
+            # parity with custom_name (#780). Inert while the toggle is disabled (#1037):
+            # the recorded value is always "default" until #1046 re-enables it.
             sandbox=existing.sandbox_mode,
         )
 
@@ -1861,7 +1885,15 @@ class SessionRunner:
         resume_mode: str | None = None,
         sandbox: str | None = None,
     ) -> None:
-        """Reject an unrecognized spawn, permission, resume, or sandbox option."""
+        """Reject an unrecognized spawn option, or one this ``proj`` forbids.
+
+        Screens ``spawn_mode`` / ``permission_mode`` / ``resume_mode`` / ``sandbox``
+        against their allowed sets (:class:`InvalidSpawnOption`), then applies the two
+        project-scoped policy gates that are the reason ``proj`` is passed at all: a
+        ``worktree`` spawn on a non-git project (:class:`InvalidSpawnOption`), and a
+        permission mode the project's config forbids — the bypassPermissions 403 gate
+        (:class:`PermissionModeNotAllowed`).
+        """
         if spawn_mode not in SPAWN_MODES:
             raise InvalidSpawnOption(
                 f"invalid spawn_mode {spawn_mode!r}; expected one of {SPAWN_MODES}"
@@ -1931,7 +1963,7 @@ class SessionRunner:
         survivor is by definition the most recently *spawned* bridge, so order by the
         ``<ms>-<seq>`` the filename already encodes (``_unique_log_path``) — NOT by mtime: the
         filename is the spawn order we actually want, and reading it avoids a ``stat()`` per
-        candidate (no TOCTOU against log retention, which prunes on this same thread). Returns
+        candidate, so there is no TOCTOU window against a concurrent retention prune. Returns
         None when the dir/glob can't be read or no log remains (retention may have pruned a
         long-idle bridge's set).
 
@@ -1960,8 +1992,8 @@ class SessionRunner:
     def _prune_logs(self, protected: set[str]) -> None:
         """Apply the ``logs.retention_*`` policy to the bridge-log dir (best-effort).
 
-        Groups files into per-spawn sets (a ``.log`` and its ``.raw.log`` /
-        ``.stderr.log`` / ``.keeper.json`` / ``.keeper.log`` siblings share a stem) and
+        Groups files into per-spawn sets (a ``.log`` and its ``.raw.log`` / ``.stderr.log``
+        / ``.keeper.json`` / ``.keeper.log`` / ``.screen.json`` siblings share a stem) and
         deletes whole sets that exceed the configured age / count / total-size limits,
         oldest first. ``protected`` (the set keys of live instances' logs, snapshotted on
         the event loop by the caller) is never pruned. A ``0`` limit disables that
@@ -2239,12 +2271,13 @@ class SessionRunner:
     ) -> bool:
         """Whether the bridge launches under the PTY keeper (Interactive Session).
 
-        A bridge's mode is fixed at first launch. Precedence: an explicit
-        *requested* mode (the per-launch picker) wins for a fresh start; else when
-        *prior* is given (a resume of an existing instance) its recorded
-        ``resume_mode`` wins, so ``stop()`` and ``resume()`` can never disagree
-        about the same bridge; else the global ``claude.launch_mode`` seeds a
-        brand-new bridge. Without honoring *prior*, editing the config under a
+        A bridge's mode is fixed at first launch. Precedence: an explicit *requested*
+        mode (the per-launch picker) always wins, on a fresh start AND on a resume; else
+        *prior*'s recorded ``resume_mode``; else the global ``claude.launch_mode`` seeds a
+        brand-new bridge. ``stop()`` and ``resume()`` can never disagree about the same
+        bridge because :meth:`resume_detailed` passes the prior instance's own mode as
+        *requested* — this function does not enforce that on its own. Without honoring
+        *prior* at all, editing the config under a
         running/stopped bridge would silently flip its mode on the next resume
         while stop still treated it as the old mode. On Windows the keeper rides a
         ConPTY (pywinpty); without the ``pty`` extra installed it falls back to
@@ -2360,9 +2393,10 @@ class SessionRunner:
     ) -> subprocess.Popen:
         """Launch the PTY keeper detached so it outlives a Clauster restart.
 
-        Same detached pattern as the subcommand `_popen` (own session, stdin
-        detached, stdout/stderr to a file) — the keeper, not Clauster, holds the
-        bridge's terminal, so it survives independently and keeps the bridge alive.
+        Same detached pattern as the subcommand `_popen` (own session/process group,
+        stdout+stderr to a file), plus stdin detached on EVERY platform — `_popen` does
+        that only on Windows. The keeper, not Clauster, holds the bridge's terminal, so
+        it survives independently and keeps the bridge alive.
         """
         cmd = self._keeper_launch_cmd(sidecar, cwd, bridge_argv, screen_sidecar)
         keeper_log = sidecar.with_suffix(".log")  # the keeper's own stdout/stderr
@@ -2556,10 +2590,13 @@ class SessionRunner:
         return instance
 
     def _cleanup_keeper(self, pid: int) -> None:
-        """Reap the keeper (Clauster's direct child); force it down if it lingers.
+        """Wind the keeper down: reap it, then force its tree down if it lingers.
 
-        The keeper self-exits once its bridge is gone, so this is usually just a
-        reap; the force path covers a keeper that somehow outlives its bridge.
+        The keeper self-exits once its bridge is gone, so for a keeper this process
+        spawned this is usually just a reap. A REATTACHED keeper (pid recovered from a
+        sidecar/row another process wrote, #1088) is not our child — ``reap_if_exited``
+        is a no-op on it, and the real path is the grace loop plus the create-time
+        re-verify before ``force_kill_tree``.
         """
         # Identity, snapshotted BEFORE the grace: `is_keeper_process` alone answers "is this
         # pid *a* keeper", never "is it *THIS* keeper", and on a host that spawns keepers
@@ -2577,10 +2614,9 @@ class SessionRunner:
         # tree of whatever now holds it would take down an unrelated process — including,
         # if the recycled holder is itself a keeper, that keeper's live bridge.
         #
-        # The create-time pair is what makes this "the same discipline as
-        # `procutil.kill_if_match`" true rather than merely claimed: that helper gates on
-        # live + cmdline + a create-time match, and a cmdline check alone passes for any
-        # keeper at all.
+        # The create-time pair is what gives this the same discipline as
+        # `procutil.kill_if_match` (live + cmdline + create-time): cmdline alone passes for
+        # ANY keeper.
         #
         # Exact `!=`, and deliberately NOT the tolerance its siblings use. Both values come
         # from `proc_create_time`, but that is psutil's `starttime/CLK_TCK + boot_time()`,
@@ -2737,14 +2773,12 @@ class SessionRunner:
                 # poisoned pointer in place (the exact loop this method exists to break)
                 # and propagating out before `_persist()` writes the ERROR status.
                 #
-                # `wait_timeout` because the NEXT steps are gated on death: `proc.wait()`
-                # below only confirms the pid WE hold (the `.cmd` shim), while the pointer
-                # records the real bridge — a descendant. `kill()` is asynchronous, so
-                # without the wait `clear_pointer`'s liveness guard can still see that
-                # descendant alive, refuse, and leave the poisoned pointer for the next
-                # launch to reattach to — the exact loop this method exists to break.
-                # Affordable here (already off the loop in a thread), unlike the
-                # claustrum call site.
+                # `wait_timeout` because the NEXT steps are gated on death: `kill()` is
+                # asynchronous and `proc.wait()` below only confirms the pid WE hold (the
+                # `.cmd` shim), while the pointer records the real bridge — a descendant
+                # `clear_pointer`'s liveness guard would otherwise still see alive, refuse,
+                # and leave the poisoned pointer for the next launch. Affordable here
+                # (already off the loop in a thread), unlike the claustrum call site.
                 if procutil.is_windows():
                     try:
                         await asyncio.to_thread(
@@ -2866,12 +2900,15 @@ class SessionRunner:
     async def _watch_startup(self, instance_id: str) -> None:
         """Resolve a STARTING bridge off the request path.
 
-        Re-reads the bridge log until the bridge registers an environment (-> the
-        existing :meth:`_apply_markers` promotes it to RUNNING) or until the
-        ``startup_grace_seconds`` budget expires while it is still alive but
-        unregistered — which is a failed start (ERROR), not a running bridge.
-        Process death during startup is delegated to :meth:`_reconcile_status` so
-        the CRASHED/STOPPED outcome matches the poll loop exactly.
+        Re-reads the bridge's own readiness source until it registers — the bridge log
+        for a standard bridge (:meth:`_apply_markers` promotes it to RUNNING, then
+        :meth:`_post_spawn_enrich` runs), the keeper sidecar for a pty bridge
+        (:meth:`_apply_pty_info`; readiness is the connect URL, and no enrich step) — or
+        until the ``startup_grace_seconds`` budget expires while it is still alive but
+        unregistered, which is a failed start (ERROR), not a running bridge. Both legs
+        re-flush the redacted mirror each tick. Process death during startup is delegated
+        to :meth:`_reconcile_status` so the CRASHED/STOPPED outcome matches the poll loop
+        exactly.
         """
         grace = self._config.claude.startup_grace_seconds
         deadline = time.monotonic() + grace
@@ -2954,8 +2991,9 @@ class SessionRunner:
             await self._persist()  # persist the intent so a restart doesn't mislabel it CRASHED
 
             pid = instance.bridge_pid
-            # A pty bridge needs its keeper reaped even if the bridge pid is already
-            # gone (the keeper is Clauster's direct child); capture it up front.
+            # A pty bridge needs its keeper wound down even if the bridge pid is already
+            # gone; capture it up front. A reattached keeper is NOT our child —
+            # `_cleanup_keeper` re-verifies identity before it kills anything.
             keeper_pid = instance.keeper_pid
             if pid is None:
                 if keeper_pid is not None:
@@ -2989,10 +3027,14 @@ class SessionRunner:
         rebuilds a STOPPED card from it) — then re-persists so ``state.json`` no longer
         carries it.
 
-        Fail closed: a live bridge (STARTING/RUNNING, or one whose bridge/keeper process
-        is still alive despite a lagging status) is refused with
+        Fail closed on a record that is still in the IN-MEMORY registry: STARTING/RUNNING,
+        or a lagging status whose bridge/keeper process is still alive, is refused with
         :class:`InstanceStillLive` — it must be Stopped first; forget never kills a
-        process. Raises :class:`UnknownProject` when there's no such record at all.
+        process. ⚠️ That gate does not cover a record present only in ``_persisted``
+        (the supported not-yet-materialized path): such a row is pruned with no liveness
+        check, even though ``rediscover`` deliberately leaves rows UNCARDED precisely when
+        their bridge/keeper is live-but-untracked. Raises :class:`UnknownProject` when
+        there's no such record at all.
         """
         # Determine project name before taking the lock (needed for per-project lock and
         # the pointer clear below). Fall back to the persisted record — a forgotten bridge
@@ -3112,7 +3154,11 @@ class SessionRunner:
             _log.debug("stop signal to pid %s was a no-op: %s", pid, exc)
 
     async def _await_exit(self, name: str, pid: int, proc_start: float | None) -> None:
-        """Wait out the shutdown grace, then force the tree down and reap the child."""
+        """Wait out the shutdown grace, then force the tree down and reap the child.
+
+        ``name`` is not read: the wait is entirely on the (``pid``, ``proc_start``) pair,
+        and no per-project lock or flock is taken here despite the call site passing one.
+        """
         for _ in range(20):  # ~5s grace for a clean shutdown
             alive = await asyncio.to_thread(procutil.is_live_bridge, pid, proc_start)
             if not alive:
@@ -3342,6 +3388,13 @@ class SessionRunner:
 
         ``held_keepers`` is passed in rather than read from ``_instances`` because this
         runs in a worker thread; see :meth:`_modes_with_an_unclaimed_live_bridge`.
+
+        The sweep is an UNANCHORED prefix glob (``{name}-*.keeper.json``) and
+        ``PROJECT_NAME_RE`` allows ``-``, so for project ``app`` a live keeper of sibling
+        ``app-staging`` also answers True — unlike :meth:`_latest_debug_log_for`, which
+        anchors the ``<name>-<ms>-<seq>`` stem. The error direction is the safe one (it
+        over-blocks, hiding cards), but the honest reading of the answer is "a live keeper
+        whose stem has this project as a prefix".
         """
         for sidecar in self._log_dir.glob(f"{name}-*.keeper.json"):
             info = self._read_sidecar(sidecar)
@@ -3385,15 +3438,25 @@ class SessionRunner:
         keeper/bridge pids in the sidecar. Without this, rediscover falls through to
         ``_stopped_from_persisted`` and the card reads STOPPED while a live keeper
         leaks: uncontrollable (Stop/observe gone), and a Resume would spawn a *second*
-        keeper. Glob the project's sidecars newest-first and, when one names a still-
-        live keeper (``is_keeper_process`` — cmdline-gated against PID reuse) holding a
-        ready, live bridge (pid + proc-start matched), rebuild it as a managed RUNNING
-        instance so stop()/poll_once own it again.
+        keeper. Glob the sidecars newest-first and, when one names a still-live keeper
+        (``is_keeper_process`` — cmdline-gated against PID reuse) holding a ready, live
+        bridge (pid + proc-start matched), rebuild it as a managed RUNNING instance so
+        stop()/poll_once own it again.
 
         Returns ``None`` when nothing is reattachable (no persisted record, not pty, or
         no live keeper) — rediscover then resurrects the STOPPED card as before. Only a
         sidecar in the ``"ready"`` state reattaches; a bridge still mid-startup falls
         back to STOPPED (the orphan-keeper sweep can reap a genuinely stuck one).
+
+        ⚠️ Two gaps in the sweep as written. The glob is an UNANCHORED prefix match
+        (``{name}-*.keeper.json``) and ``PROJECT_NAME_RE`` allows ``-``, so for project
+        ``app`` it also reads sibling ``app-staging``'s sidecars — nothing else here pins
+        the candidate to this project, and :meth:`_latest_debug_log_for` anchors the
+        ``<name>-<ms>-<seq>`` stem precisely to avoid that. And the pid gate below checks
+        int-not-bool but NOT ``> 0``, so a sidecar holding a negative pid raises
+        ``ValueError`` out of ``is_keeper_process`` (which only catches the psutil
+        process errors) instead of being skipped — :meth:`_has_unclaimed_live_keeper`
+        guards that case, this does not.
         """
         if not saved:
             return None
@@ -3606,10 +3669,9 @@ class SessionRunner:
                 current.status,
                 current.intentional_stop,
             ) != ours_generation:
-                # Status and intent are in the tuple deliberately. `stop()` sets STOPPED and
-                # `intentional_stop` but never clears `bridge_pid`, so a pid-only compare
-                # passes for a stop that completed while we were in the liveness probe — and
-                # we would revert the operator's Stop to RUNNING, permanently.
+                # Status and intent are in the tuple deliberately — see the docstring: a
+                # completed `stop()` leaves `bridge_pid` set, so a pid-only compare would
+                # revert the operator's Stop to RUNNING, permanently.
                 return
             current.bridge_pid, current.bridge_proc_start = pair
             current.keeper_pid = keeper_pid
@@ -3643,9 +3705,10 @@ class SessionRunner:
         ``clauster stop <id>`` fail for every id but the oldest.
 
         Liveness is the (pid, proc_start) PAIR — never a bare pid, which is reusable — so a
-        recycled pid cannot resurrect an unrelated process as somebody's bridge. A pty row
-        additionally carries its keeper pid, checked by cmdline (``is_keeper_process``) for
-        the same reason.
+        recycled pid cannot resurrect an unrelated process as somebody's bridge. A pty row's
+        keeper is re-derived from the keeper sidecar (:meth:`_recover_keeper_pid`, correlated
+        to this bridge's pid + proc-start) and never taken from the row, whose keeper pid may
+        be stale — reusing it would let ``stop()`` reap a stranger's process tree.
 
         Returns ``(claimed, stopped)``. ``claimed`` is the projects that had at least one
         LIVE row, so the legacy pointer walk can skip them and the two paths never both
@@ -3764,7 +3827,8 @@ class SessionRunner:
                 if not info or info.get("bridge_pid") != pid:
                     continue
                 # Correlate on proc-start too, and require a READY state — matching
-                # `_recover_keeper_pid` and `_reattach_pty_from_sidecar`. Several interactive
+                # `_reattach_pty_from_sidecar` (`_recover_keeper_pid` matches on the pid pair
+                # only, deliberately: it wants the keeper, not usability). Several interactive
                 # sessions share one project's log dir, so a stale sidecar left by a recycled
                 # pid would otherwise hand its connect URL to a different session.
                 if info.get("state") != "ready":
@@ -3839,7 +3903,9 @@ class SessionRunner:
     async def rediscover(self, *, persist: bool = True) -> None:
         """Re-detect bridges after a restart: reattach live ones, resurrect dead ones.
 
-        A bridge found *alive* is reattached as RUNNING. A discovered project whose
+        A bridge found *alive* is reattached as RUNNING once its connect facts resolve, and
+        as STARTING while they do not — liveness is not usability, see
+        :meth:`_reattach_rows_with_pids`. A discovered project whose
         bridge is gone but which has a persisted record (its process died while
         Clauster was down — e.g. a host reboot) is resurrected as a STOPPED,
         resumable card instead of being dropped; one with no persisted record is
@@ -3890,23 +3956,17 @@ class SessionRunner:
                 # sidecar so a live keeper is re-managed (Stop/observe restored)
                 # rather than leaking behind a STOPPED card; fall through to the
                 # STOPPED resurrection when no live keeper remains.
-                # TWO lookups on purpose, because `saved` and the id answer different
-                # questions: `saved` supplies only the modes and label (this leg is gated
-                # on `resume_mode == "pty"`), while the id is ADOPTED. Resolving both from
-                # one `unclaimed_only=True` call disabled the leg outright — the row pass
-                # has already carded every row of this project, so it returned None,
-                # `saved` was empty, and `_reattach_pty_from_sidecar` bailed on its first
-                # line for precisely the dead-row-plus-live-keeper case MF-1 exists to fix.
-                # So: modes from ANY row of the project, id only from an UNCLAIMED one, so
-                # the live keeper is never written over another session's record (SF-4).
-                # None -> mint a fresh id, one extra card, the same trade the pointer leg
-                # below already makes for an ambiguous project (#1088).
-                # Both lookups are pinned to `resume_mode="pty"`. Only a pty bridge has a
-                # keeper sidecar, so a standard row can supply neither the modes (its
-                # `resume_mode` makes the leg bail before it globs) nor the id (adopting
-                # it would write the keeper's pids over a standard session's record). No
-                # pty row at all means there is no pty session to recover, and the empty
-                # `saved` correctly bails on the leg's first line.
+                # TWO lookups on purpose, both pinned to pty (only a pty bridge has a
+                # sidecar, and adopting a standard row's id would write the keeper's pids
+                # over a standard session's record): modes/label from ANY pty row of the
+                # project, but the id only from an UNCLAIMED one, so a recovered live keeper
+                # is never written over another session's record (SF-4). Resolving both from
+                # one `unclaimed_only=True` call disabled the leg outright — the row pass has
+                # already carded every row, so `saved` came back empty and the leg bailed on
+                # its first line, for precisely the dead-row-plus-live-keeper case MF-1
+                # exists to fix. No pty row -> empty `saved` -> the leg bails, correctly; no
+                # unclaimed row -> mint a fresh id, one extra card, the same trade the
+                # pointer leg below makes for an ambiguous project (#1088).
                 modes_hit = self._persisted_for_project(proj.name, resume_mode="pty")
                 persisted_saved = modes_hit[1] if modes_hit is not None else {}
                 unclaimed_hit = self._persisted_for_project(
@@ -4256,8 +4316,10 @@ class SessionRunner:
         ``claude remote-control`` subcommand process; a pty (flag-form) external bridge
         is excluded (unsafe to adopt — see :meth:`adopt`), as is one whose pointer has
         gone stale. Computed from the same pointer + cmdline + cwd-attribution checks
-        :meth:`adopt` enforces, so the dashboard's Adopt affordance can never offer an
-        adoption that :meth:`adopt` would then refuse. Synchronous (filesystem +
+        :meth:`adopt` enforces, so the dashboard's Adopt affordance never offers an
+        adoption that fails *those* gates. It does NOT mirror adopt's already-managed
+        check, and state can change between this read and the click — :meth:`adopt`
+        re-verifies under its locks and is the authority. Synchronous (filesystem +
         ``psutil``); call it off-loop.
         """
         discovered = self._discovered()
@@ -4282,10 +4344,11 @@ class SessionRunner:
 
         Off-loop work, applied on-loop.
 
-        ``side_effects=False`` makes this observation-only: it still reconciles every
-        instance's status in memory (a reader must be able to SEE a crashed bridge) and
-        still computes the session cross-check, but emits no lifecycle event and writes
-        no file. Reserved for read paths that need the cross-check
+        ``side_effects=False`` makes this write-free, not read-only: it still mutates the
+        in-memory registry (status reconcile — a reader must be able to SEE a crashed
+        bridge — plus cross-process adoption and the phantom-card prune) and still computes
+        the session cross-check, but emits no lifecycle event and writes no file. Reserved
+        for read paths that need the cross-check
         :meth:`tracked_sessions_by_instance` depends on — the headless MCP server (#1104)
         — where the alternative was either mutating the live deployment on every session
         list or reporting no sessions at all. Pair it with ``rediscover(persist=False)``;
@@ -4505,17 +4568,12 @@ class SessionRunner:
         # opened a terminal there is wrong. `live_projects` used to mask this by accident;
         # testing the thing the premise actually claims is the honest replacement.
         #
-        # Walked up the ANCESTRY rather than tested on the session pid itself (#1116).
-        #
-        # Precisely: this was inert for SERVER MODE only, not for the prune as a whole. A
-        # Server Mode session's pid is the SDK worker (`…/versions/<ver> --print --sdk-url
-        # …`), whose cmdline is never a bridge cmdline, so `is_bridge_process(s.pid)`
-        # answered False and an unmanaged standard bridge could never be seen — measured on
-        # a live host, where the one reported session pid is the worker and the bridge is
-        # its parent. A flag-form pty session, by contrast, reports the BRIDGE's own pid,
-        # which does match, so that shape already worked and still does — the walk matches at
-        # depth 0. So this widens a half-working gate rather than turning on a dead one,
-        # which is the accurate risk framing: the Server Mode arm is newly live.
+        # Walked up the ANCESTRY, not tested on the session pid itself (#1116): a Server
+        # Mode session's pid is the SDK worker and the bridge is its parent, so a direct
+        # `is_bridge_process(s.pid)` never matched it. A flag-form pty session reports the
+        # BRIDGE's own pid and matches at depth 0, so that shape already worked — this
+        # widens a half-working gate rather than turning on a dead one, and the accurate
+        # risk framing is that the Server Mode arm is newly live.
         #
         # Then excluded by MANAGED pid, which is what keeps this honest: finding a bridge
         # ancestor proves a bridge is responsible for the session, NOT that it is unmanaged.
@@ -4586,34 +4644,23 @@ class SessionRunner:
         # onto the retained `_persisted` map, which keeps the record (intentionally — it
         # preserves the project's modes for a later managed spawn).
         #
-        # ⚠️ Recoverable by RESTART, not by the next poll. An earlier version of this
-        # comment claimed the latter; it is false in the long-running service.
-        # `_stopped_from_persisted` is reachable only from `rediscover`, which the server
-        # runs ONCE (`start_poll_loop`), and the per-tick `_adopt_rows_from_store` is
-        # live-rows-only by explicit design — so a card pruned here stays gone from the
-        # dashboard until Clauster restarts. That asymmetry is why the gate above resolves
-        # its exclusion post-await instead of trusting a stale snapshot: until #1116 this
-        # whole path was inert (`is_bridge_process` on a session pid never answered True),
-        # so every latent false positive in it goes from unreachable to live at once.
-        # Gathered per PROJECT first, then decided per INSTANCE (#1096). The old form asked
-        # `inst.project not in live_projects` — a project-level question standing in for an
-        # instance-level one, which since #778 (N instances per project) is wrong in BOTH
-        # directions:
-        #
-        #   over-prune  — with no live sibling, ONE unmanaged bridge at the project root
-        #                 deleted EVERY stopped row for that project, including unrelated
-        #                 resumable interactive sessions;
-        #   under-prune — with a live sibling, the project is in `live_projects`, so a
-        #                 genuine phantom was never pruned at all — exactly the misleading
-        #                 Stopped/Resume card this prune exists to remove.
-        #
-        # `live_projects` is gone from the test. NOT because a live sibling can't coexist
-        # with an EXTERNAL session — it demonstrably can: reconcile's ownership gate is pid
-        # DESCENT (#820), so an operator's hand-run `claude` at a managed bridge's cwd is
-        # designed to stay EXTERNAL. The guard is replaced by a stricter one below: the
-        # prune's premise is "the bridge IS alive, just unmanaged", so the external session
-        # must actually BE a bridge. Project liveness never tested that; it only happened to
-        # shield stopped cards as a side effect, while also suppressing genuine phantoms.
+        # ⚠️ Recoverable by RESTART, not by the next poll (an earlier revision of this
+        # comment claimed the latter). `_stopped_from_persisted` is reachable only from
+        # `rediscover`, which the server runs ONCE (`start_poll_loop`), and the per-tick
+        # `_adopt_rows_from_store` is live-rows-only by explicit design — so a card pruned
+        # here stays gone from the dashboard until Clauster restarts. That asymmetry is why
+        # the gate above resolves its exclusion post-await instead of trusting a stale
+        # snapshot: the Server Mode arm of this path was inert until #1116 (see above), so
+        # its latent false positives all go from unreachable to live at once.
+        # Gathered per PROJECT first, then decided per INSTANCE (#1096). The old
+        # `inst.project not in live_projects` test was project-level, which since #778 (N
+        # instances per project) is wrong in BOTH directions: over-prune — one unmanaged
+        # bridge at the project root deleted EVERY stopped row for that project; under-prune
+        # — a live sibling put the project in `live_projects`, so a genuine phantom was never
+        # pruned. A live sibling demonstrably CAN coexist with an EXTERNAL session (ownership
+        # is pid DESCENT, #820), so project liveness never tested the prune's premise — "the
+        # bridge IS alive, just unmanaged" — and the stricter guard below does: the external
+        # session must actually BE a bridge.
         candidates: dict[str, list[str]] = {}
         for n, inst in list(self._instances.items()):
             # Only prune non-live (STOPPED/CRASHED) phantoms. A RUNNING/STARTING instance
@@ -4714,11 +4761,14 @@ class SessionRunner:
         )
 
     def _notify_event(self, event: str, instance: RemoteControlInstance) -> None:
-        """Fire a best-effort lifecycle notification (off-loop; never blocks/raises, #541).
+        """Fire a best-effort lifecycle notification (fire-and-forget, #541).
 
         ``event`` is a key of :data:`~clauster.config._NOTIFY_EVENTS`. No-op unless the
         outbound notifier is active AND this event's per-event toggle is on. Routes
         through the same fire-and-forget Apprise path the crash alert always used.
+
+        Must be called on the event loop (it schedules a task); the send itself runs
+        off-thread, never blocks, and swallows its own errors.
         """
         if not self._notifier.active or not self._config.notifications.event_enabled(event):
             return
@@ -4783,9 +4833,10 @@ class SessionRunner:
         non-terminal rows carry no cost. Any failure is swallowed by the store — a
         lost history row never affects a spawn or stop.
 
-        Called from a lifecycle path that is normally on the event loop. If invoked
-        without a running loop (a synchronous status-apply call), it falls back to a
-        direct best-effort synchronous append so the row is still recorded.
+        Called on the event loop, through :meth:`_emit_lifecycle`. The no-running-loop
+        branch is a defensive fallback (a direct best-effort synchronous append) that no
+        current caller reaches — ``_emit_lifecycle``'s other two sinks would raise out of
+        ``asyncio.create_task`` on that path whenever webhooks/notifications are enabled.
 
         Fail-closed end-to-end: the cheap in-memory prologue, the off-loop cost
         snapshot, and the append are all logged-and-swallowed, on both the async and
@@ -4861,9 +4912,8 @@ class SessionRunner:
                     claude_projects_dir=self._claude_projects_dir,
                 )
             except Exception as exc:  # noqa: BLE001 — cost is best-effort; the row is not
-                # ANY snapshot failure (an unreadable transcript / discovery walk → OSError,
-                # or a malformed-transcript parse → ValueError, etc.) must degrade only the
-                # cost to null — never drop the terminal row. The caller still appends it.
+                # OSError from a transcript/discovery read, ValueError from a malformed
+                # transcript, etc. — any of them degrades the cost only, never the row.
                 _log.warning("session-history cost snapshot failed for %s: %s", project, exc)
                 return None
 
@@ -4894,11 +4944,12 @@ class SessionRunner:
         task.add_done_callback(self._notify_tasks.discard)
 
     def _emit_webhook(self, event: str, instance: RemoteControlInstance) -> None:
-        """Fire a best-effort lifecycle webhook (off-loop; never blocks/raises, #371).
+        """Fire a best-effort lifecycle webhook (fire-and-forget, fail-open, #371).
 
         ``event`` is one of ``spawn`` / ``ready`` / ``stop`` / ``crash``. No-op unless
-        webhooks are active and this event is enabled. The POST is fire-and-forget and
-        fail-open — a slow or broken endpoint can't affect the bridge lifecycle.
+        webhooks are active and this event is enabled. Must be called on the event loop
+        (it schedules a task); the POST itself never blocks or raises — a slow or broken
+        endpoint can't affect the bridge lifecycle.
         """
         if not self._webhooks.wants(event):
             return
@@ -5050,8 +5101,7 @@ class SessionRunner:
 
     async def shutdown(self) -> None:
         """Cancel the poll loop and startup watches, leaving managed bridges running."""
-        # Cancel the poll task and any in-flight startup watches; leave bridges
-        # running (they are detached and survive a Clauster restart).
+        # Bridges are left running: they are detached and survive a Clauster restart.
         for task in list(self._startup_watches.values()):
             if not task.done():
                 task.cancel()

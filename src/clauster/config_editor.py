@@ -1,8 +1,10 @@
 """Safe-allowlist config editing for the in-app editor (FE-3, #299).
 
-Only an explicit **Tier-A allowlist** of operational fields is editable from the
-web UI; everything security / secret / bind / structural / supply-chain is
-excluded and never round-trips to the browser. Edits are re-validated by
+Two explicit allowlists are editable from the web UI: **Tier-A** (operational,
+always) and **Tier-B** "Advanced" (#978 — operational-but-sensitive, only behind
+the ``config_write`` capability plus a step-up re-auth). Everything else —
+security / secret / bind / structural / supply-chain — is excluded and never
+round-trips to the browser. Edits are re-validated by
 constructing :class:`~clauster.config.ClausterConfig` — which trips the existing
 auth fail-closed validator — before any write. Design: ``scratch/fe3-config-editor-spike.md``.
 
@@ -110,10 +112,11 @@ TIER_B_FIELDS: tuple[str, ...] = (
 )
 _TIER_B = frozenset(TIER_B_FIELDS)
 
-# Intentionally-excluded registry (#660). Every config leaf NOT in EDITABLE_FIELDS is named
-# here with a one-line reason, so {EDITABLE_FIELDS} ∪ {EXCLUDED_FIELDS} covers EVERY leaf in
-# ClausterConfig — a newly-added config.py field with no editor decision then trips the
-# coverage guard test (it is in neither set) rather than silently appearing or not appearing.
+# Intentionally-excluded registry (#660). Every config leaf in neither allowlist is named here
+# with a one-line reason, so {EDITABLE_FIELDS} ∪ {TIER_B_FIELDS} ∪ {EXCLUDED_FIELDS} covers
+# EVERY leaf in ClausterConfig — a newly-added config.py field with no editor decision then
+# trips the coverage guard test (it is in none of the three) rather than silently appearing
+# or not appearing.
 # Reason tags: secret (credential material — never round-trips to the browser), bind (network
 # bind — open-dashboard / restart-only), auth (lockout / open-dashboard / bypass / CSRF
 # surface), binary-path (what executes — RCE surface), structural (boot / identity /
@@ -210,7 +213,10 @@ class ConfigEditError(Exception):
 
 
 class DisallowedFieldError(ConfigEditError):
-    """A requested key is not in the Tier-A allowlist (fail-closed: reject, never drop)."""
+    """A requested key is outside the active allowlist (fail-closed: reject, never drop).
+
+    "Active" is Tier-A on the ordinary editor surface and Tier-B on the Advanced one.
+    """
 
 
 class StaleConfigError(ConfigEditError):
@@ -263,8 +269,8 @@ def editable_values(
     """Extract the current values for ``fields``, keyed by dotted path.
 
     Defaults to the Tier-A allowlist; the Tier-B "Advanced" surface passes
-    :data:`TIER_B_FIELDS`. Only allowlisted fields are read, so no secret/auth/
-    bind value is ever surfaced — redaction is structural, not a post-filter.
+    :data:`TIER_B_FIELDS`. Nothing here re-checks ``fields``, so callers must pass an
+    allowlist constant — an arbitrary dotted path would be resolved and returned verbatim.
     """
     return {path: _get_by_path(config, path) for path in fields}
 
@@ -272,11 +278,12 @@ def editable_values(
 def editable_values_on_disk(
     path: str | Path, *, fields: tuple[str, ...] = EDITABLE_FIELDS
 ) -> dict[str, Any] | None:
-    """Re-read the Tier-A field values from the on-disk config, or ``None`` if unreadable.
+    """Re-read the allowlisted field values from the on-disk config, or ``None`` if unreadable.
 
-    The editor edits the FILE, but a save deliberately does not live-reload the
-    running config (a hot-swap is unsafe — the runner and other readers hold the
-    startup object). Serving the in-memory config would therefore show STALE values
+    ``fields`` is Tier-A by default; the Tier-B "Advanced" surface passes
+    :data:`TIER_B_FIELDS`. The editor edits the FILE, but a save deliberately does not
+    live-reload the running config (a hot-swap is unsafe — the runner and other readers
+    hold the startup object). Serving the in-memory config would therefore show STALE values
     after any save until a restart, making a successful save look reverted. Reading
     the file keeps the returned fields consistent with the content ``hash`` (both
     from disk) and reflects what the next restart will load. Returns ``None`` on a
@@ -292,12 +299,14 @@ def editable_values_on_disk(
 def disk_state(
     path: str | Path, *, fields: tuple[str, ...] = EDITABLE_FIELDS
 ) -> tuple[str | None, set[str] | None]:
-    """Read the on-disk config file ONCE; return ``(content hash, present Tier-A keys)``.
+    """Read the on-disk config file ONCE; return the content hash + the ``fields`` present.
 
     The editor GET needs both the file's SHA-256 — the optimistic-concurrency token that
-    guards a save against a concurrent external edit — and the set of Tier-A dotted keys
+    guards a save against a concurrent external edit — and the subset of ``fields``
     *literally* written on disk, used to drop a deprecated row once its key is gone (e.g.
     after ``config reconcile``). Both derive from the same bytes, so read them once.
+    ``fields`` is Tier-A by default; the Tier-B "Advanced" surface passes
+    :data:`TIER_B_FIELDS`.
 
     Returns ``(None, None)`` when the file can't be read (fail-open on display: the editor
     still opens on the in-memory fallback, and a save is safely rejected for the missing hash
@@ -653,7 +662,13 @@ def _humanize(key: str) -> str:
 
 
 def _constraints(info: Any) -> dict[str, Any]:
-    """Extract numeric min/max bounds from a field's annotated-type metadata."""
+    """Extract numeric min/max bounds from a field's annotated-type metadata.
+
+    Note the bounds are emitted as INCLUSIVE ``min``/``max`` even for an exclusive
+    ``gt``/``lt``, so a control can offer the endpoint itself (e.g.
+    ``claude.startup_grace_seconds`` is ``gt=0`` yet advertises ``min: 0``) and the save
+    then 422s on re-validation.
+    """
     out: dict[str, Any] = {}
     for meta in info.metadata:
         if isinstance(meta, at.Ge):

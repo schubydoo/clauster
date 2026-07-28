@@ -105,8 +105,9 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger("clauster.mcp")
 
-# The MCP revision this server implements. We echo back the client's requested
-# version when we support it, else fall back to this (per the lifecycle spec).
+# The MCP revision this server implements — the only one it speaks, and the version
+# `initialize` always replies with (per the lifecycle spec: never claim one we don't
+# implement).
 PROTOCOL_VERSION = "2025-06-18"
 _SERVER_NAME = "clauster"
 
@@ -116,12 +117,10 @@ _INVALID_REQUEST = -32600
 _METHOD_NOT_FOUND = -32601
 _INTERNAL_ERROR = -32603
 
-# Max bytes for one JSON-RPC line. Our tools' replies are small (session summaries /
-# structural lifecycle fields), and a *request* is tiny (a method name + a short id)
-# — so a generous-but-bounded cap
-# keeps a single pathological/oversized line from growing the read buffer without
-# limit, while never tripping on a legitimate message. An overlong line is drained
-# and answered with a parse error rather than crashing the server (see ``serve``).
+# Max bytes for one JSON-RPC line. Replies are small (session summaries / structural
+# lifecycle fields) and requests tinier, so this generous-but-bounded cap never trips on a
+# legitimate message while stopping one pathological line from growing the read buffer
+# without limit. An overlong line is answered with a parse error, not a crash (see ``serve``).
 _MAX_LINE_BYTES = 8 * 1024 * 1024
 
 
@@ -157,18 +156,15 @@ async def gather_sessions(config: ClausterConfig) -> list[dict[str, Any]]:
     sessions: list[dict[str, Any]] = []
 
     runner = SessionRunner(config)
-    # Reconcile persisted bridges into live instances and refresh liveness +
-    # the agents --json cross-check, so a one-shot process reports the same picture
-    # the dashboard would — but WITHOUT the poll loop's writes. This is a read tool,
-    # and it commonly runs against a host where the live service owns that state
-    # (#1104): `persist=True` would rewrite the shared `state.json` on every session
-    # list, and the crash arm would fire a duplicate webhook + notification for a
-    # bridge the service is already tracking.
+    # Why no writes: this read tool commonly runs against a host where the live service
+    # owns that state (#1104) — `persist=True` would rewrite the shared `state.json` on
+    # every session list, and the crash arm would fire a duplicate webhook + notification
+    # for a bridge the service is already tracking.
     #
-    # `poll_once` is still called rather than dropped: `tracked_sessions_by_instance`
-    # below reads the cross-check it computes, so skipping it would silently report
-    # every bridge with zero sessions. `side_effects=False` keeps the observation and
-    # drops the announcements.
+    # Why `poll_once` is called at all rather than dropped: `tracked_sessions_by_instance`
+    # below reads the cross-check it computes, so skipping it would silently report every
+    # bridge with zero sessions. `side_effects=False` keeps the observation, drops the
+    # announcements.
     await runner.rediscover(persist=False)
     await runner.poll_once(side_effects=False)
 
@@ -669,9 +665,10 @@ class MCPServer:
         msg_id = message.get("id")
         params = message.get("params") or {}
 
-        # Notifications (no ``id``) are never answered — a JSON-RPC peer treats a
-        # reply to a notification as a protocol violation. Ack the one we track and
-        # silently drop any other, before the request branches below can reply.
+        # Well-formed notifications (no ``id``) are never answered — a JSON-RPC peer treats
+        # a reply to a notification as a protocol violation. (A malformed message is still
+        # answered with an ``id: null`` error by the two validation branches above.) Ack the
+        # one we track and silently drop any other, before the request branches can reply.
         if "id" not in message:
             if method == "notifications/initialized":
                 self._initialized = True
@@ -688,10 +685,13 @@ class MCPServer:
         return _error(msg_id, _METHOD_NOT_FOUND, f"unknown method: {method}")
 
     def _on_initialize(self, msg_id: int | str | None, params: dict[str, Any]) -> dict[str, Any]:
-        """Answer ``initialize``: negotiate the protocol version + advertise tools."""
-        # Per the MCP lifecycle spec, echo the requested version only when we actually
-        # support it; otherwise advertise the version we DO speak (never claim a version
-        # we don't implement, which would mislead the client about our capabilities).
+        """Answer ``initialize``: reply with the one protocol version we implement.
+
+        Plus the tools *capability* flag and ``serverInfo`` — the tool list itself comes
+        from ``tools/list``.
+        """
+        # Per the MCP lifecycle spec, never claim a version we don't implement: we speak
+        # exactly one, so the reply is always PROTOCOL_VERSION whatever was requested.
         requested = params.get("protocolVersion")
         version = requested if requested == PROTOCOL_VERSION else PROTOCOL_VERSION
         return _result(
@@ -758,11 +758,10 @@ async def serve(config: ClausterConfig, reader: asyncio.StreamReader, writer: IO
         try:
             line = await reader.readline()
         except ValueError:
-            # An over-limit line: StreamReader raises ValueError / LimitOverrunError
-            # when a single line exceeds its buffer cap, AND discards the overlong
-            # data through the newline as it does so — so the buffer is already
-            # realigned on the next message. Answer with a parse error and keep
-            # serving; never crash the loop on oversized input.
+            # An over-limit line: StreamReader raises ValueError when a single line exceeds
+            # its buffer cap, and drops the buffered data. The tail of the oversized line
+            # may still arrive and read as a fragment (answered with a further parse error),
+            # but the loop always recovers — never crash on oversized input.
             if not _write(writer, _error(None, _PARSE_ERROR, "message too large")):
                 return  # client hung up
             continue

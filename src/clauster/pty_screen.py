@@ -525,8 +525,11 @@ class PtyScreen:
         Windows ConPTY fallback (#905): `claude setup-token` emits the authorize URL as an
         OSC 8 hyperlink whose target pyte drops from the rendered display, so the display
         scan returns None there. When it does, fall back to the URI captured from the raw
-        byte stream (:meth:`_scan_osc8`), run through the SAME :func:`_select_authorize_url`
-        rule so the two paths can never disagree.
+        byte stream (:meth:`_scan_osc8`) — but only a URI that is BOTH on a known
+        Claude/Anthropic auth host AND an authorize-endpoint path. That is a stricter bar
+        than the visible text path applies, because an OSC 8 target the operator cannot see
+        must never be trusted on host or path alone; :func:`_select_authorize_url` then
+        picks among the survivors.
         """
         with self._lock:
             display = list(self._screen.display)
@@ -534,9 +537,7 @@ class PtyScreen:
         url = extract_authorize_url(_unwrap_display(display))
         if url is not None:
             return url
-        # ConPTY renders the authorize URL as an OSC 8 hyperlink whose target pyte drops from
-        # the display (#905); fall back to the URI captured from the raw OSC 8 sequences. An
-        # OSC 8 target is HIDDEN from the operator (they see only the link label), so — unlike
+        # An OSC 8 target is HIDDEN from the operator (they see only the link label), so — unlike
         # the visible text path, which the operator can eyeball — a hidden target must clear a
         # STRICTER bar: it is handed back only if it is BOTH on a known Claude/Anthropic auth
         # host AND an authorize-endpoint path. That blocks a hidden decoy on an unknown host

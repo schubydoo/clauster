@@ -293,9 +293,9 @@ class InstanceDefaults(BaseModel):
 class ProjectConfig(BaseModel):
     """Per-project config (the `projects:` map). Additive-only; unknown keys ignored.
 
-    `allow_bypass_permissions` is the *hard ceiling* for the footgun gate: a project
-    can never be spawned with `--permission-mode bypassPermissions` unless this is set
-    here in clauster.yml. The dashboard's per-session typed-confirm is the second layer.
+    `allow_bypass_permissions` is the *hard ceiling* for the bypassPermissions footgun
+    gate — see its `description` below (the generated docs' copy) and
+    :meth:`ClausterConfig.bypass_denied`, the one place every spawn channel consults it.
     """
 
     allow_bypass_permissions: bool = Field(
@@ -343,10 +343,11 @@ class ReverseProxyConfig(BaseModel):
     @field_validator("trusted_ips")
     @classmethod
     def _validate_trusted_ips(cls, v: list[str]) -> list[str]:
-        """Reject a malformed IP/CIDR instead of letting it silently never match."""
-        # Fail fast on a malformed IP/CIDR rather than letting `auth.peer_trusted` silently
-        # skip it at runtime — a quiet no-op entry in an auth allowlist is a footgun (the
-        # proxy peer it was meant to admit silently never matches).
+        """Reject a malformed IP/CIDR rather than letting ``auth.peer_trusted`` skip it.
+
+        A quiet no-op entry in an auth allowlist is a footgun: ``peer_trusted`` skips an
+        unparseable entry at runtime, so the proxy peer it was meant to admit never matches.
+        """
         for entry in v:
             ipaddress.ip_network(entry, strict=False)
         return v
@@ -354,8 +355,7 @@ class ReverseProxyConfig(BaseModel):
     @model_validator(mode="after")
     def _require_secret_or_trusted_ips(self) -> ReverseProxyConfig:
         """Refuse an enabled proxy config that could never authenticate anyone."""
-        # Fail closed on an un-runnable proxy config rather than silently authenticating
-        # nobody. `trusted_ips` is the FIRST gate for BOTH modes: every enforcement point
+        # `trusted_ips` is the FIRST gate for BOTH modes: every enforcement point
         # checks `peer_trusted(peer_ip, trusted_ips)` before anything else, and that is
         # always False with an empty list — so an empty allowlist makes proxy auth admit no
         # one regardless of mode. HMAC mode additionally needs a `shared_secret` to verify
@@ -438,18 +438,12 @@ class AuthConfig(BaseModel):
     @classmethod
     def _blank_token_hash_is_none(cls, v: object) -> object:
         """Treat a blank token hash as unset, and reject one that is not SHA-256 hex."""
-        # A blank / whitespace-only hash can never match a presented token (it fails
-        # closed), but a truthy "  " would still satisfy the enforced-auth check in
-        # _missing_enforced_auth and PERMIT a non-loopback bind that no token can ever
-        # authenticate — a locked-out dashboard flying a false "enforced auth" flag.
-        # Normalize it to None so only a REAL hash counts, mirroring the empty
-        # password_hash being treated as unset.
-        #
-        # A non-empty value that is NOT a 64-char lowercase hex digest can never
-        # match a token (``hash_token`` always returns SHA-256 hex) yet would still
-        # satisfy the enforced-auth check and PERMIT a non-loopback bind — the same
-        # false-"enforced auth" footgun. Reject it loudly so the operator fixes the
-        # config instead of shipping a dashboard no token can ever unlock.
+        # Neither a blank/whitespace-only hash nor a non-64-char-lowercase-hex one can ever
+        # match a presented token (`hash_token` always returns SHA-256 hex) — yet either is
+        # truthy enough to satisfy _missing_enforced_auth and PERMIT a non-loopback bind no
+        # token can unlock: a locked-out dashboard flying a false "enforced auth" flag.
+        # Normalize blank to None (mirroring the empty password_hash) and reject a malformed
+        # hash loudly, so the operator fixes the config instead.
         if isinstance(v, str) and not v.strip():
             return None
         if isinstance(v, str) and not re.fullmatch(r"[0-9a-f]{64}", v):
@@ -462,16 +456,17 @@ class AuthConfig(BaseModel):
     @field_validator("password_hash", mode="before")
     @classmethod
     def _blank_password_hash_is_none(cls, v: object) -> object:
-        """Treat a blank password hash as unset so the dummy-hash guard can't become a login."""
-        # A blank / whitespace-only password hash can never verify a password, but an
-        # empty string is falsy-yet-not-None: it slips past the `password_hash is None`
-        # unset checks and, paired with auth.verify_password's dummy-hash timing guard,
-        # would make the source-visible dummy password a working login credential
-        # (CWE-798). Normalize it to None so only a REAL hash counts — mirroring
-        # _blank_token_hash_is_none, and closing the `password_hash: ""` yaml path and
-        # the present-but-empty CLAUSTER_AUTH_PASSWORD_HASH env-var path at load time.
-        # No hex-format check here: an argon2id hash is a structured `$argon2id$...`
-        # string, not a fixed-width hex digest.
+        """Treat a blank password hash as unset so only a REAL hash counts.
+
+        Defense-in-depth, not the sole guard: ``auth.verify_password`` already ends in
+        ``return bool(stored_hash)``, so an empty hash can never authenticate against the
+        source-visible dummy hash its timing guard verifies against (CWE-798). What this
+        adds is that ``password_hash`` is genuinely ``None`` rather than falsy-yet-not-None
+        for the ``password_hash is None`` unset checks — closing the ``password_hash: ""``
+        yaml path and the present-but-empty ``CLAUSTER_AUTH_PASSWORD_HASH`` env-var path at
+        load time, mirroring ``_blank_token_hash_is_none``. No hex-format check here: an
+        argon2id hash is a structured ``$argon2id$...`` string, not a fixed-width digest.
+        """
         if isinstance(v, str) and not v.strip():
             return None
         return v
@@ -577,8 +572,6 @@ class CloneConfig(BaseModel):
     @classmethod
     def _validate_cidrs(cls, v: list[str]) -> list[str]:
         """Reject a malformed CIDR — a no-op entry in an SSRF allowlist is a footgun."""
-        # Fail fast on a malformed CIDR rather than letting it silently never match
-        # (this is an SSRF allowlist — a quiet no-op entry is a footgun).
         for cidr in v:
             ipaddress.ip_network(cidr, strict=False)
         return v
@@ -611,7 +604,9 @@ class ConfigWriteConfig(BaseModel):
     Both flags default **off** and are deliberately **not** in the config-editor
     Tier-A allowlist: the code-execution capability is file/CLI-managed only and can
     never be turned on from the browser (mirrors the auth/bind/secret exclusions).
-    A missing/garbled flag means *off* (fail closed).
+    An absent flag means *off* (fail closed); an unparseable one fails config load
+    loudly rather than being coerced. Note pydantic's lax bool parsing accepts ``yes``
+    / ``on`` / ``1`` as true, so a sloppy-but-truthy value turns this RCE gate ON.
     """
 
     enabled: bool = Field(
@@ -672,8 +667,10 @@ class McpConfig(BaseModel):
 
     ``allow_writes`` defaults **off** — the surface is read-only until the operator
     opts in — so attaching the server to an agent cannot start, stop, or resume a
-    bridge unless writes are explicitly enabled. A missing/garbled flag means *off*
-    (fail closed). **Not** in the config-editor Tier-A allowlist: a privileged-
+    bridge unless writes are explicitly enabled. An absent flag means *off* (fail
+    closed); an unparseable one fails config load loudly rather than being coerced —
+    though pydantic's lax bool parsing does accept ``yes`` / ``on`` / ``1`` as true.
+    **Not** in the config-editor Tier-A allowlist: a privileged-
     capability switch is file/CLI-managed only, never web-editable (mirrors the
     auth / config_write / login_shepherd exclusions).
     """
@@ -691,7 +688,13 @@ class McpConfig(BaseModel):
 
 
 class LogsConfig(BaseModel):
-    """Bridge-log rotation sizing and WebSocket redaction/ANSI-stripping toggles."""
+    """Bridge-log rotation sizing, retention caps, and stream-hygiene toggles.
+
+    The three ``retention_*`` caps prune whole bridge-log sets on each spawn — distinct
+    from ``bridge_log_max_size_mb`` / ``keep_rotated``, which size the rotation of a
+    single live log. ``redact_session_url`` and ``strip_ansi_in_stream`` govern what
+    reaches the WebSocket (and, for the former, the on-disk log too).
+    """
 
     bridge_log_max_size_mb: int = Field(
         default=10, ge=1, description="Per-bridge debug-log rotation size (≥1 MB)."
@@ -752,8 +755,9 @@ class UsageConfig(BaseModel):
     it ``1.0`` for USD and set it explicitly for any other currency. ``currency`` is
     the code shown in the tooltip; ``currency_symbol`` is what ``cost`` mode renders
     (defaults to ``$`` when unset and ``currency`` is ``USD``, otherwise the code).
-    A non-USD ``currency`` left at ``fx_rate: 1.0`` is almost certainly a mistake —
-    it stamps a foreign symbol on a dollar amount — so it is logged at load.
+    A non-USD ``currency`` left at ``fx_rate: 1.0`` is almost certainly a mistake — it
+    stamps a foreign symbol on a dollar amount — so it is logged at load, but only in
+    ``cost`` mode (the other modes render no cost figure to mislabel).
 
     ``token_total_includes_cache`` controls whether cache (creation + read) tokens
     count toward the displayed token total; they usually dominate, so set it false
@@ -804,17 +808,20 @@ class UsageConfig(BaseModel):
     @field_validator("currency", mode="before")
     @classmethod
     def _normalize_currency(cls, v: object) -> object:
-        """Strip and upper-case the currency code so ``usd`` compares equal to ``USD``."""
-        # Normalize the code so "usd"/" USD " compare equal to "USD" — otherwise a
-        # lowercase code spuriously trips the no-FX warning and the symbol fallback.
+        """Strip and upper-case the currency code so ``usd`` compares equal to ``USD``.
+
+        Otherwise a lowercase code spuriously trips the no-FX warning and the symbol
+        fallback, both of which compare against the literal ``"USD"``.
+        """
         return v.strip().upper() if isinstance(v, str) else v
 
     @field_validator("currency_symbol", mode="before")
     @classmethod
     def _blank_symbol_to_none(cls, v: object) -> object:
-        """Treat a blank currency symbol as unset so ``effective_symbol`` falls back."""
-        # An empty / whitespace-only symbol renders a blank badge; treat it as unset so
-        # `effective_symbol` falls back to `$` (USD) or the currency code.
+        """Treat a blank currency symbol as unset so ``effective_symbol`` falls back.
+
+        An empty / whitespace-only symbol would otherwise render a blank badge.
+        """
         if isinstance(v, str) and not v.strip():
             return None
         return v
@@ -831,9 +838,7 @@ class UsageConfig(BaseModel):
     @model_validator(mode="after")
     def _resolve_mode_and_warn(self) -> UsageConfig:
         """Fold the deprecated ``show_cost`` into ``mode``, warning when ``mode`` wins."""
-        # `usage.mode` is authoritative. The deprecated `show_cost=false` is honored
-        # (mapped to `mode: off`) only when `mode` was not set explicitly; if both are
-        # given, mode wins. Mirrors the launch_mode/resume_mode alias precedence.
+        # Mirrors the launch_mode/resume_mode alias precedence.
         if not self.show_cost:
             if "mode" in self.model_fields_set:
                 if self.mode != "off":
@@ -913,11 +918,14 @@ class MetricsConfig(BaseModel):
 class ObservabilityConfig(BaseModel):
     """Read-only observability surfaces (a Prometheus ``/metrics`` exposition).
 
-    ``prometheus_enabled`` gates a text-format ``/metrics`` endpoint that exposes a
-    handful of point-in-time gauges (build info, bridge counts by status, project
-    count) from live runner state. Off by default — opt in explicitly. When off,
-    ``/metrics`` returns 404. The endpoint stays **behind** the auth guard, so a
-    scraper must satisfy whatever auth the deployment enforces (see the PR note).
+    ``prometheus_enabled`` gates a text-format ``/metrics`` endpoint that exposes
+    point-in-time gauges from live runner state (build info, bridge counts by status,
+    project count, per-bridge cpu/rss, a crash counter, hosted/claustrum gauges). Off
+    by default — opt in explicitly. When off, ``/metrics`` returns 404.
+
+    The endpoint stays **behind** the auth guard UNLESS ``metrics_token_hash`` is set:
+    a request carrying a valid scrape token is then admitted to ``/metrics`` alone with
+    no session, since Prometheus cannot log in.
     """
 
     prometheus_enabled: bool = Field(
@@ -943,12 +951,9 @@ class ObservabilityConfig(BaseModel):
     @classmethod
     def _blank_metrics_hash_is_none(cls, v: object) -> object:
         """Treat a blank metrics hash as unset, and reject one that is not SHA-256 hex."""
-        # Mirror auth.api_token_hash: a blank / whitespace-only hash can never match a
-        # presented token (it fails closed), so normalize it to None so only a REAL hash
-        # counts. A non-empty value that is NOT a 64-char lowercase hex digest can never
-        # match a token (``hash_token`` always returns SHA-256 hex) — reject it loudly so
-        # the operator fixes the config instead of shipping a /metrics token nothing can
-        # ever present successfully.
+        # Mirrors auth.api_token_hash's validator: blank -> None, and a value that is not
+        # 64-char lowercase hex is rejected loudly (``hash_token`` always returns SHA-256
+        # hex) rather than shipping a /metrics token nothing can present successfully.
         if isinstance(v, str) and not v.strip():
             return None
         if isinstance(v, str) and not re.fullmatch(r"[0-9a-f]{64}", v):
@@ -988,9 +993,12 @@ class NotificationsConfig(BaseModel):
       via the JS ``Notification`` API; needs no extra and no URL, but the browser
       grants it only after the user accepts the permission prompt.
 
-    Both channels share the per-event ``notify_on_*`` toggles. ``crash`` defaults ON
-    (the historical behaviour); every other event defaults OFF, so an upgrade never
-    starts emitting a new "come look" signal without an explicit opt-in.
+    Both channels read the per-event ``notify_on_*`` toggles, but the browser channel
+    observes only ``crash`` / ``ready`` / ``stop`` — the three statuses the dashboard
+    poll can see. ``permission-needed``, ``session-ended`` and ``reconnect-failed`` are
+    outbound-only and have no browser effect. ``crash`` defaults ON (the historical
+    behaviour); every other event defaults OFF, so an upgrade never starts emitting a
+    new "come look" signal without an explicit opt-in.
     """
 
     enabled: bool = Field(
@@ -1198,11 +1206,13 @@ class ClaustrumConfig(BaseModel):
 def resolve_cert_path(field: str, raw: str) -> Path:
     """Resolve a TLS material path to a readable absolute file, or fail closed.
 
-    Expands ``~``, resolves to an absolute path (collapsing any ``..`` traversal so
-    the value can't quietly escape its intended directory), and confirms the target
-    is a regular file the process can read. Every failure raises ``ValueError`` — a
-    missing cert/key must abort startup, never fall back to plain HTTP. The path is
-    echoed in the message (a filesystem path, not the key material), the bytes never.
+    Expands ``~`` and canonicalises to an absolute path (``..`` and symlinks collapsed,
+    so the value that reaches uvicorn is the one shown in any error), then confirms the
+    target is a regular file the process can read. There is no containment check — any
+    readable file on the host is accepted, wherever it sits. Every failure raises
+    ``ValueError`` — a missing cert/key must abort startup, never fall back to plain
+    HTTP. The path is echoed in the message (a filesystem path, not the key material),
+    the bytes never.
     """
     expanded = Path(raw).expanduser()
     # resolve() collapses `..`/symlinks to a single canonical absolute path; strict
@@ -1276,8 +1286,6 @@ class TlsConfig(BaseModel):
     @model_validator(mode="after")
     def _validate_material(self) -> TlsConfig:
         """Validate the TLS material for the chosen provision mode, resolving paths at load."""
-        # Fail closed at load: validate config shape per provision mode and, for
-        # provision=off, resolve both paths to readable absolute files (or raise).
         # Store the resolved paths back so the server hands uvicorn canonical absolutes
         # and a second defense-in-depth check at start-up sees the same values.
         if self.provision == "self-signed":
@@ -1411,11 +1419,12 @@ class ClausterConfig(BaseModel):
 
     @property
     def tls_active(self) -> bool:
-        """Whether native TLS termination is configured (a validated cert + key present).
+        """Whether a ``tls`` section is present, i.e. native HTTPS termination is requested.
 
-        The single source of truth shared by the server bring-up (which hands uvicorn
-        ``ssl_certfile``/``ssl_keyfile``) and the cookie-Secure startup warning (which
-        stays quiet because the connection is now https).
+        Intent, not validated material: with ``provision = self-signed`` no cert/key
+        exists at config-load time (the pair is generated at startup). Read by the
+        cookie-Secure startup warning, which stays quiet because the connection is now
+        https; the server bring-up tests ``config.tls`` directly rather than this.
         """
         return self.tls is not None
 
@@ -1457,8 +1466,13 @@ class ClausterConfig(BaseModel):
 
     @model_validator(mode="after")
     def _loopback_or_authed(self) -> ClausterConfig:
-        """Refuse a non-loopback bind unless authentication will actually gate requests."""
-        # Non-loopback bind is only allowed once authentication will ACTUALLY gate it.
+        """Refuse a non-loopback bind without enforced auth, and a hash-less password login.
+
+        The non-loopback rule has an explicit escape hatch —
+        ``auth.allow_unauthenticated_network`` permits an unauthenticated non-loopback
+        bind. The second rule (``password_required`` set with no ``password_hash``) is
+        host-independent and has no opt-out: it raises on loopback too.
+        """
         # The runtime guard enforces auth only when `auth.enabled` is true; with it false
         # every request passes through unauthenticated, so `password_required` /
         # `reverse_proxy.enabled` *without* `auth.enabled` is a silent open door — the
@@ -1525,8 +1539,6 @@ def _nested_model(ann: object) -> type[BaseModel] | None:
     """
     if isinstance(ann, type) and issubclass(ann, BaseModel):
         return ann
-    # Only unwrap a Union/Optional (`X | None` or `Optional[X]`) — never a generic
-    # container like dict/list, whose args are a key/value type, not a section model.
     if get_origin(ann) in (Union, types.UnionType):
         for arg in get_args(ann):
             if isinstance(arg, type) and issubclass(arg, BaseModel):
@@ -1607,9 +1619,7 @@ def _split_env_list(value: str) -> list[str]:
     raw newline. That entry then matches nothing, which for an allowlist
     means a silent misconfiguration surfacing only as ``origin check failed``. Origins,
     URLs, CIDRs, schemes and hostnames cannot contain a newline, so treating it as a
-    separator cannot split a legitimate value. A filesystem path legally can (as it can
-    contain a comma), so a ``claude.path_append`` entry holding either must be set in the
-    YAML file — see below.
+    separator cannot split a legitimate value.
 
     Blanks are dropped so a trailing separator yields ``[]`` rather than ``[""]``, which
     would fail validation in a way that hides the operator's intent. An empty value is
@@ -1635,12 +1645,14 @@ def _set_nested(d: dict, path: tuple[str, ...], value: object) -> None:
 
 
 def _read_secret_file(file_var: str, file_path: str) -> str:
-    """Return the secret in ``file_path``, trailing whitespace stripped. Fail closed.
+    """Return the secret in ``file_path``, surrounding whitespace stripped. Fail closed.
 
-    Secret files (Docker/K8s/Vault render them under ``/run/secrets``) usually carry
-    a trailing newline, so it is stripped. Every failure mode surfaces rather than
-    silently falling back to the plain env var: an unreadable path, non-UTF-8 bytes
-    (a binary/corrupt mount), or an empty file (a blank-rendered secret) all raise.
+    Secret files (Docker/K8s/Vault render them under ``/run/secrets``) usually carry a
+    trailing newline, so the value is stripped — at BOTH ends, so a secret whose first
+    byte is whitespace is altered too. Every failure mode surfaces rather than silently
+    falling back to the plain env var: an unreadable path, non-UTF-8 bytes (a binary/
+    corrupt mount), or a file that is empty or whitespace-only (a blank-rendered secret)
+    all raise.
     """
     try:
         value = Path(file_path).read_text(encoding="utf-8").strip()
