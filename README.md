@@ -47,6 +47,8 @@ dashboard password, writes a `clauster.yml`, and starts on it. Then click
 > reverse-proxy auth are available for networked deployments (see
 > [Auth & networking](#auth--networking)). **No telemetry, ever** — see
 > [Privacy & data at rest](https://schubydoo.github.io/clauster/privacy/) for what Clauster keeps locally.
+> **Upgrading from 0.12?** 1.0 has five breaking changes — see
+> [UPGRADING.md](https://github.com/schubydoo/clauster/blob/main/UPGRADING.md).
 
 <table>
   <tr>
