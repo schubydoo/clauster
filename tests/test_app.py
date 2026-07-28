@@ -1040,6 +1040,42 @@ def test_dashboard_pty_bridge_is_resumable(write_config):
     assert 'return i.status === "stopped" || i.status === "crashed";' in gate
 
 
+def test_dashboard_flags_a_resume_the_cap_will_decline(write_config):
+    """Say a Resume cannot run BEFORE the click, not only after (#1145 follow-up).
+
+    Standard bridges are capped at one live per project and the cap RETURNS the live
+    bridge rather than raising, so a Resume against a stopped sibling revives nothing.
+    #1145 made the server report that honestly; this surfaces it up front.
+
+    This guard could not work before #1144: the project-keyed map structurally could not
+    hold a stopped row and its live sibling at the same time, so the predicate returned
+    null every time. It is only satisfiable now that rows key by instance_id.
+
+    The server's ``created === false`` handling stays in place regardless — a client-side
+    prediction must never be the only thing between the operator and a false success.
+    """
+    page = _client(write_config).get("/").text
+    assert "resumeBlockedReason(key) {" in page
+    # The reason is VISIBLE text, not a tooltip: a disabled control's title never fires
+    # on touch, and this is a phone-first product.
+    assert 'data-test="resume-blocked"' in page
+    # "/ resumable" in the group label means resumable NOW.
+    assert "this.endedBridges().some((i) => !this.resumeBlockedReason(i.rk))" in page
+
+    # a11y: the Resume control must stay FOCUSABLE (aria-disabled), never `disabled` —
+    # a disabled button leaves the tab order, so a keyboard or screen-reader user lands
+    # on Forget having never been told Resume existed, let alone why it cannot run.
+    button = page.split('data-test="resume-session"', 1)[1].split(">", 1)[0]
+    assert ":aria-disabled=" in button
+    assert ":aria-describedby=" in button
+    assert ":disabled=" not in button, "disabled removes the control from the tab order"
+    # ...so the click, not the attribute, is what refuses.
+    assert "resumeBlockedReason(i.rk) || resume(i.rk)" in button
+
+    # The server-side backstop is untouched: the prediction supplements it, never replaces it.
+    assert "if (body.created === false) {" in page
+
+
 def test_dashboard_resume_not_gated_on_environment_id(write_config):
     """Resume must not require ``environment_id`` (#1145).
 

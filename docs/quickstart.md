@@ -130,9 +130,9 @@ stay visible on the card.
   `claude.launch_mode: pty`, or recap the prior conversation with
   `claude.resume_recap`. See [the two bridge modes](index.md#the-two-bridge-modes).
   Resume stays available across a clauster restart. One Server Mode bridge runs per
-  project at a time, so resuming a stopped one while another is already live returns
-  the live bridge and says so, rather than starting a second — stop the live one first.
-  *Interactive Sessions* are not capped this way.
+  project at a time, so a stopped card whose project already has a live bridge says so
+  on the card and its Resume does nothing — stop the live one first, or **Forget** the
+  stopped card. *Interactive Sessions* are not capped this way.
 - **Fork a past conversation** — launching an *Interactive Session*, the
   **Conversation** picker (under *More options*) lists the project's previous
   conversations by their first prompt. Picking one forks it into the new
