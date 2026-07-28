@@ -3883,10 +3883,15 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     async def api_instances() -> list[RemoteControlInstance]:
         """Every managed bridge, one row per instance (registration order).
 
-        A project may contribute several rows (#778): at most one standard
-        (server-mode) bridge plus any number of interactive (pty) sessions.
-        Group client-side by ``project`` and key rows by ``instance_id`` —
-        ``project`` is not unique.
+        A project may contribute several rows (#778): at most one *live* standard
+        (server-mode) bridge, plus any number of stopped/resumable standard rows and
+        any number of interactive (pty) sessions. The cap is on live bridges, not on
+        rows — a fresh spawn mints a new ``instance_id``, so stopped standard rows
+        accumulate until they are forgotten.
+
+        Group client-side by ``project`` and key rows by ``instance_id`` — ``project``
+        is not unique. Keying a client collection by ``project`` silently drops rows
+        and was #1143.
         """
         return runner.list_instances()
 
