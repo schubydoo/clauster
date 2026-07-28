@@ -960,8 +960,36 @@
                 <div class="d-flex align-items-center flex-wrap gap-1">
                   {{ desktop_row_head("Stopped") }}
                   <span class="text-secondary small ms-1" x-show="statusNote(i.rk)" x-cloak x-text="statusNote(i.rk)"></span>
+                  {# Why Resume can't run, as VISIBLE text: a disabled control's tooltip
+                     never fires on touch, and this is a phone-first product. Carries an id
+                     so the button can point at it with aria-describedby. #}
+                  <span class="text-secondary small ms-1" data-test="resume-blocked"
+                        :id="'resume-blocked-' + i.rk"
+                        x-show="resumeBlockedReason(i.rk)" x-cloak
+                        x-text="resumeBlockedReason(i.rk)"></span>
                   <span class="ms-auto d-flex gap-1">
-                    <button type="button" class="btn btn-sm btn-success" data-test="resume-session" @click="resume(i.rk)"
+                    {# aria-disabled, NOT :disabled — a disabled button leaves the tab order,
+                       so a keyboard/SR user would land on Forget with no hint Resume existed
+                       and never hear the reason. Focusable + described keeps the explanation
+                       reachable. Note `.btn.disabled` also sets pointer-events:none, so a
+                       MOUSE click is swallowed by CSS; the @click short-circuit is what
+                       refuses on the keyboard path, where the control is still activatable.
+
+                       The `.disabled` look is deliberate, not inherited: it drops the label
+                       to ~1.5:1, which WCAG exempts for a control declared inactive, and the
+                       information the operator needs is the reason beside it — rendered at
+                       full contrast, not colour-coded. Every other inactive control here uses
+                       the same treatment, and a bespoke one for this button would be the
+                       odd one out.
+
+                       `:title` stays the plain Resume text: with pointer-events:none the
+                       hover tooltip can never fire while blocked, and aria-describedby
+                       outranks title for the description, so a reason here reaches nobody. #}
+                    <button type="button" class="btn btn-sm btn-success" data-test="resume-session"
+                            @click="refuseResume(i.rk) || resume(i.rk)"
+                            :aria-disabled="!!resumeBlockedReason(i.rk)"
+                            :class="{ disabled: !!resumeBlockedReason(i.rk) }"
+                            :aria-describedby="resumeBlockedReason(i.rk) ? ('resume-blocked-' + i.rk) : null"
                             :title="'Resume — reconnects the prior session (keeps ' + (resumeModeOf(i.rk) || 'standard') + ' mode).'">
                       <svg class="ico me-1" aria-hidden="true"><use href="#ic-restart"/></svg>Resume</button>
                     {# `!!` coercion: a busy-map key absent on first paint renders this DISABLED
