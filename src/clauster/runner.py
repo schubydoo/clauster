@@ -655,11 +655,21 @@ class SessionRunner:
         an ambiguous prefix must never pick one. Callers that want to say *which* ids it
         could have meant read :meth:`bridge_id_candidates`.
 
-        With N instances per project the name fallback resolves via
-        :meth:`get_instance_for_project` (#778) to the instance the project-keyed
-        client actually DISPLAYS (its map folds last-registered-wins), so a name
-        action never targets a bridge the operator cannot see. Per-session
-        operations on a multi-session project must send the instance_id.
+        With N instances per project the bare-name fallback resolves via
+        :meth:`get_instance_for_project` (#778) to the LAST-REGISTERED match, in any
+        status. ⚠️ Until #1143 that was also the row the dashboard displayed, and this
+        docstring drew a safety conclusion from the coincidence — that a name action
+        could never target a bridge the operator cannot see. **That no longer holds.**
+        The client now keys rows by ``instance_id`` and prefers a live row, so with a
+        live bridge and a newer stopped row for one project the two disagree: the
+        dashboard shows the live bridge while a bare name resolves to the stopped row.
+        Do not close that gap by restoring a project-keyed client fold (that WAS
+        #1143) — narrow the name resolution instead.
+
+        This fallback is for the surfaces where a human types a project name rather
+        than an id: the CLI, the MCP tools, and the HTTP routes that still accept
+        either. Per-session operations on a multi-session project must send the
+        instance_id — the dashboard already does, refusing to act when it has none.
         """
         resolved, _ = self._resolve_bridge_ref(identity)
         return resolved

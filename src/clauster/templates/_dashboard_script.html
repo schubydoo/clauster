@@ -4384,8 +4384,7 @@
           // re-click on a live Server Mode bridge would render a second "starting" card,
           // read "2 running" in the badge, and let rowOf(project) resolve to the id-less
           // placeholder (blanking the live bridge's metrics chip) until the POST returns.
-          const cur = this.standardFor(name);
-          if (!(cur && ["running", "starting"].includes(cur.status))) {
+          if (!(existing && ["running", "starting"].includes(existing.status))) {
             this.instances[name] = this._stamp({ project: name, status: "starting" });
           }
         }

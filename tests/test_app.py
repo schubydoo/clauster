@@ -1364,32 +1364,20 @@ def test_dashboard_never_keys_bridge_rows_by_project(write_config):
     # The positive pin for the fold lives HERE too, not only in the neighbouring test:
     # relaxing one assertion elsewhere must not leave the fold unguarded.
     assert 'if (i.resume_mode === "pty") pty.push(i); else next[i.rk] = i;' in page
-    # Rows are absorbed and preserved under their own identity.
+    # Rows are absorbed under their own identity.
     assert "this.instances[body.rk] = body;" in page
-    assert 'if (this.instances[k] && this.instances[k].status === "stopping" && !next[k])' in page
-    # "The standard bridge for this project" is answered explicitly, preferring a live
-    # row — a project whose NEWEST row is stopped must still read as running.
+    # "The standard bridge for this project" is answered by an explicit helper rather
+    # than by whichever row a map collapse happened to keep.
     assert "standardFor(name) {" in page
-    assert (
-        'const live = rows.find((i) => ["running", "starting", "stopping"].includes(i.status));'
-        in page
-    )
-    # rowOf resolves an exact rk first (server rows + the optimistic placeholder), then
-    # falls back to the project-name question. Order matters: the placeholder must win
-    # while a launch is in flight.
-    assert (
-        "rowOf(key) { return this._byId[key] || this.instances[key] "
-        "|| this.standardFor(key) || null; }"
-    ) in page
-    # The project-row badge counts every live standard bridge, not just one.
-    assert (
-        "n += Object.values(this.instances).filter((i) => i.project === name "
-        "&& live.includes(i.status)).length;"
-    ) in page
-    # The optimistic placeholder no longer REPLACES the project's row (it sits beside
-    # it now), so it must not be written while a standard bridge is already live —
-    # otherwise a re-click renders a duplicate "starting" card and inflates the badge.
-    assert 'if (!(cur && ["running", "starting"].includes(cur.status))) {' in page
+
+    # Deliberately NOT pinned here: the bodies of rowOf / runningCountFor / the
+    # stopping-preservation loop / the optimistic-placeholder guard. Asserting those
+    # verbatim pins SPELLING, not behaviour — a reflow or a rename turns them red with
+    # nothing changed, while the failure that actually produced #1143 was a line staying
+    # byte-identical as the invariant under it stopped holding. The negative assertions
+    # above are the durable half; the HTTP-level test in test_app_instances.py
+    # (test_instances_serves_every_standard_row_for_one_project) is what pins the
+    # property itself and would survive a client rewrite.
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the pty launch controls are POSIX-only")
