@@ -1,47 +1,54 @@
 <h1 align="center">Clauster</h1>
 
 <p align="center">
-  <em>A self-hosted web dashboard for spawning and managing Claude Code <code>remote-control</code><br>
-  bridges into any project directory on a remote host — then attach to them from<br>
-  <code>claude.ai/code</code> or the Claude mobile app. No SSH session required.</em>
+  <b>Run Claude Code on your own server — and drive it from your phone.</b><br>
+  Clauster is a self-hosted web dashboard that starts Claude Code sessions in any
+  project directory on your homelab, NAS, or VPS. You attach from
+  <code>claude.ai/code</code> or the Claude mobile app. No SSH session required.
 </p>
 
 <p align="center">
   <a href="https://github.com/schubydoo/clauster/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/schubydoo/clauster/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/schubydoo/clauster/actions/workflows/lint.yml"><img alt="Lint" src="https://github.com/schubydoo/clauster/actions/workflows/lint.yml/badge.svg"></a>
-  <a href="https://codecov.io/gh/schubydoo/clauster"><img alt="codecov" src="https://codecov.io/gh/schubydoo/clauster/graph/badge.svg"></a>
-  <a href="https://greptile.com"><img alt="Reviewed by Greptile" src="https://img.shields.io/badge/Greptile-reviewed-7C3AED"></a>
-  <a href="https://scorecard.dev/viewer/?uri=github.com/schubydoo/clauster"><img alt="OpenSSF Scorecard" src="https://api.securityscorecards.dev/projects/github.com/schubydoo/clauster/badge"></a>
-  <a href="https://www.bestpractices.dev/projects/13081"><img alt="OpenSSF Best Practices" src="https://www.bestpractices.dev/projects/13081/badge"></a>
-</p>
-
-<p align="center">
   <a href="https://pypi.org/project/clauster/"><img alt="PyPI" src="https://img.shields.io/pypi/v/clauster?logo=pypi&logoColor=white"></a>
-  <a href="https://pypi.org/project/clauster/"><img alt="Python versions" src="https://img.shields.io/pypi/pyversions/clauster"></a>
   <a href="https://github.com/schubydoo/clauster/blob/main/LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
-  <a href="https://github.com/schubydoo/clauster/pkgs/container/clauster"><img alt="GHCR" src="https://img.shields.io/badge/ghcr.io-clauster-2496ED?logo=docker&logoColor=white"></a>
-  <a href="https://github.com/astral-sh/ruff"><img alt="Ruff" src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json"></a>
-  <a href="https://pre-commit.com/"><img alt="pre-commit" src="https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit&logoColor=white"></a>
+  <a href="https://schubydoo.github.io/clauster/"><img alt="Docs" src="https://img.shields.io/badge/docs-schubydoo.github.io-informational"></a>
 </p>
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/schubydoo/clauster/main/docs/screenshots/clauster-demo.gif" alt="Spawn a Claude session from the Clauster dashboard — open a project's launch menu, trust the directory, and the session starts, then shows Running under Active sessions" width="860">
 </p>
 
-Anthropic's first-party tooling assumes terminal access on the host to spawn a
-bridge in a given project directory. Clauster fills that gap: a browser-based dispatcher of
-`claude remote-control` instances on a remote machine (NAS, homelab box). You pick
-a project, start a bridge, and attach to it from `claude.ai/code` or the mobile app.
+## Why not just SSH in and run `claude`?
 
-> **Status: pre-1.0, in active development.** Loopback-only by default; password and
+| | SSH + terminal | Clauster |
+| --- | --- | --- |
+| **From a phone** | Type into a mobile SSH client | Tap a project in a browser, then use the Claude app |
+| **When you close the laptop** | Session dies with the shell | Session keeps running on the host; reattach later |
+| **Starting a session** | `cd` to the project, remember the flags | One click per project, spawn + permission modes preset |
+
+If you already live in a terminal on the same machine as your code, you don't need this.
+Clauster is for when your code lives on **a box you don't want to SSH into every time**.
+
+## Quick start
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/schubydoo/clauster/main/install.sh | bash
+clauster run
+```
+
+Open <http://127.0.0.1:7621> — run with no config and Clauster serves a
+loopback-only **first-run setup wizard** that asks for your projects folder and a
+dashboard password, writes a `clauster.yml`, and starts on it. Then click
+**Run Claude here** on a project. Full recipes (uv / pip, Docker, systemd, reverse proxy) →
+[Installation guide](https://schubydoo.github.io/clauster/installation/).
+
+> **Status: 1.0 — stable and actively developed.** Requires an Anthropic account
+> with Claude Code access. Loopback-only by default; password and
 > reverse-proxy auth are available for networked deployments (see
 > [Auth & networking](#auth--networking)). **No telemetry, ever** — see
 > [Privacy & data at rest](https://schubydoo.github.io/clauster/privacy/) for what Clauster keeps locally.
-
-**Install now:** `curl -fsSL https://raw.githubusercontent.com/schubydoo/clauster/main/install.sh | bash`
-
-The full install recipes and verification steps are in the
-[Installation guide](https://schubydoo.github.io/clauster/installation/).
+> **Upgrading from 0.12?** 1.0 has five breaking changes — see
+> [UPGRADING.md](https://github.com/schubydoo/clauster/blob/main/UPGRADING.md).
 
 <table>
   <tr>
@@ -123,7 +130,7 @@ Or pick another path — `uv tool install clauster` (recommended for a Python ho
 https://github.com/schubydoo/clauster && scoop install clauster`), or
 [Docker](#docker). Full recipes — including supply-chain verification — are in the
 [Installation guide](https://schubydoo.github.io/clauster/installation/). To hack
-on Clauster itself, see [CONTRIBUTING.md](https://github.com/schubydoo/clauster/blob/main/CONTRIBUTING.md) for the from-source path.
+on Clauster itself, see [Contributing](#contributing) below.
 
 ### Uninstall
 
@@ -141,6 +148,12 @@ on Clauster itself, see [CONTRIBUTING.md](https://github.com/schubydoo/clauster/
 - Full purge: stop Clauster first, then remove your `state_dir` if you want local
   state/config gone too. See [Privacy & data at rest](https://schubydoo.github.io/clauster/privacy/#how-to-purge)
   and the [Installation guide](https://schubydoo.github.io/clauster/installation/).
+
+## Contributing
+
+Working on Clauster itself? [`CONTRIBUTING.md`](https://github.com/schubydoo/clauster/blob/main/CONTRIBUTING.md) has the
+from-source dev setup (`uv sync --extra dev`), the local test/lint gates, and
+the branching + review workflow.
 
 ## First bridge in 60 seconds
 
@@ -182,79 +195,20 @@ list.
 
 ## Docker
 
-Multi-arch images (`linux/amd64`, `linux/arm64`) are published to GHCR on each release.
-The image binds `0.0.0.0`, so it **requires enforced auth** to start. First generate a
-password hash — this runs `clauster` *inside* the image, so you don't need it on the host:
+Multi-arch images (`linux/amd64`, `linux/arm64`) are published to GHCR on each
+release, cosign-signed with provenance + SBOM attestations. Two things to know
+before `docker run`:
 
-```sh
-docker run --rm -it ghcr.io/schubydoo/clauster:latest clauster hash-password
-```
+- The image binds `0.0.0.0`, so it **refuses to start without enforced auth** —
+  set `CLAUSTER_AUTH_ENABLED=true`, `CLAUSTER_AUTH_PASSWORD_REQUIRED=true`, and a
+  `CLAUSTER_AUTH_PASSWORD_HASH` (generate one with
+  `docker run --rm -it ghcr.io/schubydoo/clauster:latest clauster hash-password`).
+- `claude` is **not baked into the image** — mount the CLI onto the container
+  `PATH` (or set `CLAUSTER_CLAUDE_BINARY`) along with the runtime user's
+  `~/.claude` credentials.
 
-Copy the printed `$argon2id$…` hash, then start the server with auth enabled:
-
-```sh
-docker run -d --name clauster \
-  -p 7621:7621 \
-  -e PUID=1000 -e PGID=1000 \
-  -e CLAUSTER_AUTH_ENABLED=true \
-  -e CLAUSTER_AUTH_PASSWORD_REQUIRED=true \
-  -e 'CLAUSTER_AUTH_PASSWORD_HASH=$argon2id$v=19$...' \
-  -v /path/to/config:/config \
-  -v /path/to/projects:/projects \
-  ghcr.io/schubydoo/clauster:latest
-```
-
-- The image binds `0.0.0.0`, so it won't start without **enforced** auth — set
-  `CLAUSTER_AUTH_ENABLED=true` **and** `CLAUSTER_AUTH_PASSWORD_REQUIRED=true` **and** a
-  `CLAUSTER_AUTH_PASSWORD_HASH` (or configure reverse-proxy trust in `/config/clauster.yml`),
-  or the container exits on start. Single-quote the hash env value — the argon2 hash
-  contains `$` that your shell would otherwise expand.
-- `/config` holds `clauster.yml` + state; `/projects` is your `projects_root`.
-  `PUID`/`PGID` remap the runtime user to own bind-mounts.
-- `claude` is **not** baked in — tell Clauster where it is one of two ways: mount the
-  binary somewhere on the container `PATH` (the default `claude.binary: claude` is
-  resolved via `PATH`), **or** set `CLAUSTER_CLAUDE_BINARY=/abs/path/to/claude` (a.k.a.
-  `claude.binary`) to an absolute path you've mounted anywhere. Either way, also mount
-  the runtime user's `~/.claude` credentials — or build a derived image that installs
-  `claude`.
-- Logs are human text by default; set `CLAUSTER_LOG_FORMAT=json` for structured
-  JSON (both redact session URLs / bearer ids). Health is at `/healthz`. Images
-  are cosign-signed with build provenance + SBOM attestations.
-
-### First-run setup wizard (Docker)
-
-Prefer a browser to the `hash-password` + env-var recipe above? Start the container with an
-**empty `/config`** and **without** the `CLAUSTER_AUTH_*` vars — Clauster serves the first-run
-[setup wizard](https://schubydoo.github.io/clauster/guides/configuration/) instead. In a container the wizard binds all interfaces
-(so a published port can reach it) and is gated by a **one-time token** printed to the log:
-
-```sh
-docker run -d --name clauster -p 7621:7621 \
-  -e PUID=1000 -e PGID=1000 \
-  -v /path/to/config:/config -v /path/to/projects:/projects \
-  ghcr.io/schubydoo/clauster:latest
-docker logs clauster        # → "...first-run setup at http://<this-host>:7621/?token=… (will write /config/clauster.yml)"
-```
-
-Open that URL (substituting the host that reaches the container) — the token gates access, so
-copy it exactly. Set `projects_root` (`/projects`), a bind host, and a password; the wizard
-writes an **auth-enabled** `/config/clauster.yml` on the persistent volume and restarts onto it.
-Because the config lands on `/config` (not the container's ephemeral layer), it survives
-`docker rm` / image updates. The token is single-use for that first boot; once a config exists
-the wizard never runs again.
-
-### Docker Compose
-
-A ready-to-edit [`compose.yaml`](https://github.com/schubydoo/clauster/blob/main/compose.yaml) is included:
-
-```sh
-# 1. generate a password hash (runs inside the image)
-docker compose run --rm clauster clauster hash-password
-# 2. export it single-quoted, then edit the projects/claude volumes in compose.yaml
-export CLAUSTER_AUTH_PASSWORD_HASH='$argon2id$v=19$...'
-# 3. start (the image's HEALTHCHECK is inherited)
-docker compose up -d
-```
+Full run + [`compose.yaml`](https://github.com/schubydoo/clauster/blob/main/compose.yaml) recipes, volumes, and PUID/PGID
+mapping: [Installation → Docker](https://schubydoo.github.io/clauster/installation/#docker).
 
 ## Auth & networking
 
@@ -322,8 +276,10 @@ Full per-command reference:
 Planned work, roughly in priority order — the public-facing companion to the in-repo
 `scratch/TODO.md`.
 
-- **Session naming** — predictable/branded session display names instead of the
-  random adjective-noun defaults; list active/resumable sessions in the UI.
+- **Friendlier default session names** — Server-Mode bridges already accept a custom launch
+  name (#780) and the dashboard lists active/resumable sessions per project; the remaining
+  work is a more predictable *default* than the random adjective-noun one, and extending
+  custom names to Interactive Sessions.
 
 Not planned: clauster is a **single-operator** tool — multi-user accounts, OIDC login,
 and per-user GDPR tooling were considered and declined (one deployment serves one
@@ -345,6 +301,20 @@ translation contributor appears).
 
 Python 3.11+ · FastAPI · Alpine.js + Jinja2 + Tabler · `uv` · `pydantic`. Developed
 and CI-gated on Linux; macOS / Windows are in the test matrix. Apache-2.0 licensed.
+
+## Project health
+
+<p>
+  <a href="https://github.com/schubydoo/clauster/actions/workflows/lint.yml"><img alt="Lint" src="https://github.com/schubydoo/clauster/actions/workflows/lint.yml/badge.svg"></a>
+  <a href="https://codecov.io/gh/schubydoo/clauster"><img alt="codecov" src="https://codecov.io/gh/schubydoo/clauster/graph/badge.svg"></a>
+  <a href="https://greptile.com"><img alt="Reviewed by Greptile" src="https://img.shields.io/badge/Greptile-reviewed-7C3AED"></a>
+  <a href="https://scorecard.dev/viewer/?uri=github.com/schubydoo/clauster"><img alt="OpenSSF Scorecard" src="https://api.securityscorecards.dev/projects/github.com/schubydoo/clauster/badge"></a>
+  <a href="https://www.bestpractices.dev/projects/13081"><img alt="OpenSSF Best Practices" src="https://www.bestpractices.dev/projects/13081/badge"></a>
+  <a href="https://pypi.org/project/clauster/"><img alt="Python versions" src="https://img.shields.io/pypi/pyversions/clauster"></a>
+  <a href="https://github.com/schubydoo/clauster/pkgs/container/clauster"><img alt="GHCR" src="https://img.shields.io/badge/ghcr.io-clauster-2496ED?logo=docker&logoColor=white"></a>
+  <a href="https://github.com/astral-sh/ruff"><img alt="Ruff" src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json"></a>
+  <a href="https://pre-commit.com/"><img alt="pre-commit" src="https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit&logoColor=white"></a>
+</p>
 
 ## Support
 

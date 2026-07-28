@@ -51,5 +51,5 @@ version you installed, check the
 - **Want to contribute a fix or feature?** See
   [`CONTRIBUTING.md`](https://github.com/schubydoo/clauster/blob/main/CONTRIBUTING.md) for dev setup and the PR checklist.
 
-Clauster is pre-1.0 and maintained by [@schubydoo](https://github.com/schubydoo)
+Clauster is maintained by [@schubydoo](https://github.com/schubydoo)
 in spare time, so please be patient — but every report helps. Thanks!

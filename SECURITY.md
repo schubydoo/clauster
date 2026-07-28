@@ -12,8 +12,8 @@ coordinate disclosure and credit you, if you'd like.
 
 ## Supported versions
 
-Clauster is pre-1.0 and under active development; only the latest release on
-`main` receives security fixes.
+Clauster is actively developed; only the latest release receives security
+fixes.
 
 ## Scope & threat model
 
@@ -39,3 +39,32 @@ infrastructure**, not a multi-tenant service. Key considerations:
 
 Reports that require already having shell/host access, or that amount to "the
 operator can manage their own host," are generally out of scope.
+
+## Supply-chain and CI controls
+
+The threat model above is backed by controls you can inspect in
+[`.github/workflows/`](https://github.com/schubydoo/clauster/tree/main/.github/workflows):
+
+- **Static + dependency analysis on every PR** — CodeQL, OSV-Scanner, and
+  GitHub dependency review; secret scanning and Trivy image scanning run in the
+  security workflow.
+- **Continuous fuzzing** — ClusterFuzzLite runs the Atheris harnesses in
+  [`fuzz/`](https://github.com/schubydoo/clauster/tree/main/fuzz) on PRs and on
+  a schedule.
+- **Pinned everything** — every GitHub Action is pinned to a full commit SHA
+  (enforced transitively into reusable workflows), and Python dependencies
+  resolve from the committed `uv.lock`.
+- **Keyless, token-free releases** — PyPI publishes via Trusted Publishing
+  (OIDC; no long-lived API token exists to steal), and every binary and
+  container image is Sigstore-signed with SLSA provenance — the
+  [installation guide](https://schubydoo.github.io/clauster/installation/)
+  documents the `cosign` / `gh attestation verify` flow.
+- **Public scorecards** — OpenSSF Scorecard and Best Practices are tracked
+  continuously (badges in the README's Project health section).
+
+## Past advisories
+
+- [GHSA-h4g2-xfmw-q2c9](https://github.com/schubydoo/clauster/security/advisories/GHSA-h4g2-xfmw-q2c9)
+  (2026-06) — non-loopback deployments could serve the dashboard
+  unauthenticated when `auth.enabled` was unset. Fixed fail-closed in 0.2.2; a
+  non-loopback bind now refuses to start without enforced auth.

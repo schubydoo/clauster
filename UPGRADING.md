@@ -125,15 +125,33 @@ only extends that same requirement to deployments running *without* a password, 
 previously skipped the check entirely. (And if you're reachable beyond your own machine,
 setting a password is worth doing regardless.)
 
-## 0.12 → 0.13: SQLite-only; `database_url` removed
+## 0.12 → 1.0: SQLite-only; `database_url` removed
 
-0.13 commits to SQLite as the only persistence substrate (#796) — the
+1.0 commits to SQLite as the only persistence substrate (#796) — the
 never-really-supported `database_url` config key (a Postgres DSN escape hatch)
 is gone. A leftover `database_url` (the YAML key **or** the
 `CLAUSTER_DATABASE_URL[_FILE]` env override) is **ignored with a logged
 warning**, not rejected — your data goes to SQLite regardless. Remove the
 key/env to silence the warning. `clauster.db` under `state_dir` remains the only database;
 nothing about the schema, migrations, or `state_dir` layout changes.
+
+## 0.12 → 1.0: Docker image is now Alpine-based
+
+The published container image moved from Debian-slim to an **Alpine (musl)** base — it's
+smaller and installs explicitly pinned, Renovate-tracked packages instead of an unpinned
+`apt upgrade`. Running the stock image (`docker run …`) is unchanged. Two setups **are**
+affected:
+
+- **You build a derived image `FROM` the clauster image**: use `apk` (not `apt`) to add
+  packages, and note that **`su-exec` replaces `gosu`** as the privilege-drop helper.
+- **You mount the host `claude` binary into the container** (the README /
+  `compose.yaml` pattern): a glibc build from your host **no longer execs** on the musl
+  base — launches fail with `exec /usr/local/bin/claude: no such file or directory` (or
+  `claude: not found` via a shell) even though the file is present; the kernel is
+  reporting the missing glibc loader, not the binary. Mount a **musl** build instead, or
+  build a derived image that installs one:
+  `apk add --no-cache bash curl && curl -fsSL https://claude.ai/install.sh | bash`
+  (the installer needs `bash`; busybox `sh` can't run it).
 
 ## 0.11 → 0.12: the state store moves to SQLite
 
@@ -156,6 +174,25 @@ simplest recovery is to restore the pre-upgrade `clauster backup` tarball and
 reinstall the prior version. To revert by hand instead: stop clauster, delete
 `clauster.db`, rename `state.json.imported` / `hosted_state.json.imported` back
 (drop the `.imported` suffix), and reinstall the prior clauster version.
+
+## Upgrade, by install method
+
+Match how you installed (the same rows as the
+[installation decision table](https://schubydoo.github.io/clauster/installation/#which-install-method)),
+then restart however you run it — systemd unit, supervisor, container, terminal:
+
+| Installed via | Upgrade with |
+| --- | --- |
+| uv | `uv tool upgrade clauster` |
+| pip / pipx | `pip install -U clauster` / `pipx upgrade clauster` |
+| Install script (Linux & macOS) | re-run the one-liner — it fetches and checksum-verifies the latest release |
+| Install script (Windows, PowerShell) | re-run the one-liner |
+| Standalone binary | download the next release, verify it against `SHA256SUMS`, replace the file |
+| Scoop | `scoop update clauster` |
+| Homebrew | `brew update && brew upgrade clauster` |
+| Nix | `nix profile upgrade` |
+| Docker / GHCR | pull the new tag + recreate — see below |
+| From source | `git pull` + restart — see below |
 
 ## PyPI install
 
@@ -196,6 +233,30 @@ detect dependency drift, so re-run `uv sync --extra dev` whenever
 `pyproject.toml` / `uv.lock` changed (per the code block above). (The database
 migrates automatically on startup; `clauster migrate` is only for folding in a
 pre-0.12 flat-file `state.json`.)
+
+## Rolling back
+
+Any upgrade is reversible if you took the pre-upgrade backup:
+
+1. Stop Clauster.
+2. Restore the tarball: `clauster restore <archive> --state-dir ~/.clauster`
+   (point `--state-dir` at your configured `state_dir`; add
+   `--config-out /path/to/clauster.yml` to also write the config back, and
+   `--force` to overwrite a non-empty target).
+3. Reinstall the **prior** version (e.g. `uv tool install clauster==<old>`,
+   `pip install clauster==<old>`, pin `CLAUSTER_VERSION=<old>` when re-running
+   the install script, or run the older binary / image tag) and start it.
+
+Skipped the backup? If the upgrade ran a schema migration, Clauster snapshotted
+`clauster.db` first: the five most recent pre-migration copies live under
+`state_dir/backups/` as `pre-<rev-before>-<rev-after>-<timestamp>.db`
+(`db.backup_before_migrate`, on by default). Stop Clauster, copy the snapshot
+back over `state_dir/clauster.db`, **delete any stale `clauster.db-wal` /
+`clauster.db-shm` sidecars** (the snapshot is a self-contained `VACUUM INTO`
+copy; a leftover WAL belongs to the migrated database and must not be
+replayed), and start the matching **older** binary — a newer one would
+immediately re-run the same migration. This recovers the database only, not the rest of
+`state_dir` or your config.
 
 > **Server Mode** bridges are detached and survive a Clauster restart, so the
 > upgrade only refreshes the manager and doesn't interrupt them.
