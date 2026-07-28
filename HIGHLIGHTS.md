@@ -19,6 +19,11 @@ managing Claude Code remote-control bridges on your own host. Highlights since 0
   sessions per project (each in its own git worktree) alongside a standard bridge, fork
   any past conversation into a new session, give sessions custom names, and rely on a
   hardened self-heal path so a restarted bridge never comes back idle with no session.
+- **The dashboard reports what is actually running.** Bridges are tracked per instance rather
+  than per project, so every session gets its own card instead of one silently displacing the
+  rest; Resume survives a restart instead of vanishing from stopped cards; and when the
+  one-Server-Mode-bridge-per-project cap would decline a resume, the card says so before you
+  click, rather than reporting a success that never happened.
 - **Windows & cross-OS parity.** Interactive (true-resume PTY) sessions now run on Windows
   over ConPTY, the hosted channel speaks Windows named pipes, and state writes are hardened
   — bringing Windows to parity with POSIX across the 3-OS test matrix.
