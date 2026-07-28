@@ -1,11 +1,22 @@
 # CLAUDE.md
 
-**Read [AGENTS.md](AGENTS.md) first — it holds the shared instructions for this repo:
-build/test commands, architecture, safety invariants, testing rules, style, and the
-git/PR workflow. This file adds only what is specific to Claude Code.**
+**The shared instructions for this repo live in [AGENTS.md](AGENTS.md): build/test
+commands, architecture, safety invariants, testing rules, style, and the git/PR
+workflow. The line below imports it, so it loads with this file — you do not need to
+open it separately. This file adds only what is specific to Claude Code.**
+
+@AGENTS.md
 
 Keeping the shared rules in one file is deliberate. A second copy drifts on the next
 merge, and stale instructions are worse than none.
+
+⚠️ **That `@AGENTS.md` line is load-bearing — do not "tidy" it into a plain link.**
+Claude Code reads `CLAUDE.md`, not `AGENTS.md`; a markdown link is a suggestion an agent
+may or may not follow, while `@` is an import that is expanded into context at launch.
+This file linked rather than imported until 2026-07-27, which meant the safety invariants
+and merge gates were never actually delivered — every session either chose to open
+`AGENTS.md` or worked without it. Note `@` is inert inside backticks or code fences, so
+`` `@AGENTS.md` `` in prose does NOT import.
 
 ---
 
