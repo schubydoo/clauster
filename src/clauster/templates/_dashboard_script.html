@@ -153,7 +153,10 @@
       // the component data-stack (no window fallback), so script-level consts referenced
       // from DIRECTIVES must be surfaced as component state under a scoped name.
       projectNames: PROJECT_NAMES,
-      instances: {},          // project -> its STANDARD bridge row (or an optimistic placeholder)
+      // rk -> a STANDARD bridge row (rk = instance_id), N per project (#1109/#1143). The
+      // one deliberate exception is start()'s optimistic placeholder, whose identity is
+      // not minted yet, so `_stamp` falls its rk back to the project name.
+      instances: {},
       ptySessions: [],        // interactive (pty) session rows, N per project (#779)
       _byId: {},              // rk -> row, across both collections (key-aware lookups)
       ptyPending: {},         // project -> true while a pty launch awaits its first row (#779)
@@ -729,14 +732,18 @@
       // for now — bg jobs are keyed by cwd, not project name).
       runningCountFor(name) {
         let n = 0;
-        const i = this.instances[name];
-        if (i && ["running", "starting", "stopping"].includes(i.status)) n++;
-        n += this.ptySessions.filter((s) => s.project === name && ["running", "starting", "stopping"].includes(s.status)).length;
+        // Count EVERY live standard row for the project, not "the" one (#1143). The spawn
+        // cap allows only one LIVE standard bridge per project, so this is about the row
+        // the old map surfaced: a stopped row could occupy the project's single slot and
+        // hide a live sibling, undercounting the badge to 0.
+        const live = ["running", "starting", "stopping"];
+        n += Object.values(this.instances).filter((i) => i.project === name && live.includes(i.status)).length;
+        n += this.ptySessions.filter((s) => s.project === name && live.includes(s.status)).length;
         n += this.hosted.filter((h) => h.project === name && ["running", "starting"].includes(h.status)).length;
         return n;
       },
-      // Bridge rows currently alive: each project's standard bridge PLUS every live
-      // interactive (pty) session — one row per instance, keyed by rk (#779).
+      // Bridge rows currently alive: every live standard bridge PLUS every live
+      // interactive (pty) session — one row per instance, keyed by rk (#779, #1143).
       activeBridges() {
         const live = ["running", "starting", "stopping"];
         return [...Object.values(this.instances), ...this.ptySessions].filter((i) => live.includes(i.status));
@@ -3231,18 +3238,28 @@
           if (this._authExpired(iRes) || this._authExpired(sRes) || this._authExpired(aRes) || this._authExpired(dRes) || this._authExpired(tRes)) return;
           if (iRes.ok) {
             const list = await iRes.json();
-            // Split the flat instance list (#779): the project-keyed map holds each
-            // project's single STANDARD bridge; interactive (pty) sessions are a flat
-            // id-keyed collection — a project map would clobber N sessions to one.
+            // Split the flat instance list (#779): interactive (pty) sessions are a flat
+            // id-keyed collection, standard bridges an rk-keyed map. BOTH key by identity,
+            // never by project (#1143): a project may contribute several standard rows
+            // (#1109), and a project-keyed map silently kept only the last of them.
+            // On the common shape that was not merely lossy but backwards: a pid-less
+            // stopped row is carded in rediscover's THIRD pass (runner.py ~4033), after
+            // every live one, so the running bridge was the row dropped and a project
+            // read "nothing running" while its bridge was alive. (For a stopped row that
+            // still carries a pid the loser is simply arbitrary — pass 1 cards those
+            // beside live rows in one loop over `_persisted`, which the store loads with
+            // no ORDER BY.) Either way the map was the wrong shape for the data.
             const next = {};
             const pty = [];
             for (const i of list) {
               this._stamp(i);
-              if (i.resume_mode === "pty") pty.push(i); else next[i.project] = i;
+              if (i.resume_mode === "pty") pty.push(i); else next[i.rk] = i;
             }
             // Preserve a local optimistic "stopping" until the server confirms it's gone.
-            for (const n of Object.keys(this.instances)) {
-              if (this.instances[n] && this.instances[n].status === "stopping" && !next[n]) next[n] = this.instances[n];
+            // Keyed by rk, so stopping ONE of a project's bridges can't hold a card open
+            // for a sibling that is genuinely gone.
+            for (const k of Object.keys(this.instances)) {
+              if (this.instances[k] && this.instances[k].status === "stopping" && !next[k]) next[k] = this.instances[k];
             }
             const byId = {};
             for (const i of Object.values(next)) byId[i.rk] = i;
@@ -3438,7 +3455,26 @@
       // sessions of one project can't collide; the key-aware helpers below resolve
       // either a project name (the standard bridge, project-row callers) or an rk.
       _stamp(i) { i.rk = i.instance_id || i.project; return i; },
-      rowOf(key) { return this._byId[key] || this.instances[key] || null; },
+      // The project row (Zone 1) and every name-keyed helper ask "the standard bridge for
+      // this project" — a question with several answers since #1109. Answer it explicitly
+      // rather than letting a map collapse decide (#1143): a LIVE bridge wins, else the
+      // most recently started row. Without the liveness preference a project whose newest
+      // row is stopped reads as stopped while an older bridge of the same project runs.
+      standardFor(name) {
+        // The pty predicate is redundant with the fold today, but it makes this helper
+        // correct on its own terms rather than on a caller's invariant.
+        const rows = Object.values(this.instances)
+          .filter((i) => i.project === name && i.resume_mode !== "pty");
+        if (!rows.length) return null;
+        const live = rows.find((i) => ["running", "starting", "stopping"].includes(i.status));
+        if (live) return live;
+        // `started_at` is absent on an optimistic placeholder and on a row rebuilt from a
+        // DB row that never recorded one; treat those as oldest so a real timestamp wins.
+        return rows.reduce((a, b) => ((b.started_at || "") > (a.started_at || "") ? b : a));
+      },
+      // Resolution order: exact rk (server rows + the optimistic placeholder, whose rk IS
+      // its project name), then the project-name fallback above.
+      rowOf(key) { return this._byId[key] || this.instances[key] || this.standardFor(key) || null; },
       labelOf(key) { return (this.rowOf(key) || {}).project || key; },
       // Replace/insert one fresh server row into the right collection (+ the id index),
       // so an action's response lands without waiting for the next poll.
@@ -3448,12 +3484,15 @@
           const at = this.ptySessions.findIndex((s) => s.instance_id === body.instance_id);
           if (at >= 0) this.ptySessions.splice(at, 1, body); else this.ptySessions.push(body);
         } else {
-          this.instances[body.project] = body;
+          this.instances[body.rk] = body;
           // A refresh during the in-flight launch may have indexed the optimistic
-          // project-keyed placeholder; drop it or rowOf(project) keeps returning the
-          // stale "starting" row until the next poll (rowOf falls back to the fresh
-          // this.instances[project] once the entry is gone).
+          // project-keyed placeholder; drop it from BOTH collections or rowOf(project)
+          // keeps returning the stale "starting" row until the next poll. The map entry
+          // matters now that rows are rk-keyed (#1143): the placeholder's key is the
+          // project name, so the fresh row lands beside it instead of replacing it, and
+          // rowOf's exact-key hit would keep preferring the stale one.
           delete this._byId[body.project];
+          if (body.rk !== body.project) delete this.instances[body.project];
         }
         this._byId[body.rk] = body;
         return body;
@@ -4332,14 +4371,23 @@
         // session is launched next to a live standard bridge, #779); a resumable
         // card hides the picker, so an untouched picker falls back to the stopped
         // standard bridge's recorded mode rather than the global default.
-        const existing = this.instances[name];
+        const existing = this.standardFor(name);
         const mode = this.resumeMode[name] || (existing && existing.resume_mode);
         const effective = mode || DEFAULT_RESUME_MODE;
         // Optimistic feedback: a standard launch owns the project card; an
         // interactive (pty) launch renders a pending stub row in the Active zone —
         // writing it into the project-keyed map would masquerade as a standard row.
         if (effective === "pty") this.ptyPending[name] = true;
-        else this.instances[name] = this._stamp({ project: name, status: "starting" });
+        else {
+          // Only when no standard row is already live for the project. Pre-#1143 the
+          // placeholder REPLACED the project's row; now it would sit beside it, so a
+          // re-click on a live Server Mode bridge would render a second "starting" card,
+          // read "2 running" in the badge, and let rowOf(project) resolve to the id-less
+          // placeholder (blanking the live bridge's metrics chip) until the POST returns.
+          if (!(existing && ["running", "starting"].includes(existing.status))) {
+            this.instances[name] = this._stamp({ project: name, status: "starting" });
+          }
+        }
         try {
           const reqBody = {
             project: name,
@@ -4429,7 +4477,6 @@
             + "Clauster will take it over so you can Stop and observe it. Its prior "
             + "conversation isn't recoverable — a later Resume starts a fresh session.")) return;
         this.errors[name] = null;
-        const prev = this.instances[name];
         try {
           const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/adopt",
                                   { method: "POST" });
@@ -4454,7 +4501,8 @@
           }
         } catch (e) {
           this.errors[name] = String(e);
-          if (prev) this.instances[name] = prev; else delete this.instances[name];
+          // No rollback: nothing here removed a row (only the success path touches the
+          // map, via _absorbRow), and the unconditional refresh() below is authoritative.
           this.toast(name + ": adopt failed", "error");
         }
         await this.refresh();

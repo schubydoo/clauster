@@ -425,6 +425,41 @@ def test_adopt_endpoint_already_managed_returns_409(runner_config):
         assert resp.status_code == 409
 
 
+def test_instances_serves_every_standard_row_for_one_project(runner_config):
+    """/api/instances must not de-duplicate standard rows by project (#1143).
+
+    The route's contract is "one row per instance; ``project`` is not unique", and the
+    dashboard fix depends on it. Nothing exercised that promise through HTTP before —
+    the multi-row property was covered only at the runner layer — so a fold reappearing
+    on the server would have been caught by no test at this surface.
+
+    Ordered the way rediscover cards them: the live row first, the pid-less stopped rows
+    appended after. That is the shape under which a project-keyed client map kept the
+    stopped row and hid the running bridge.
+    """
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    live = RemoteControlInstance(project="alpha", label="alpha", status=InstanceStatus.RUNNING)
+    older = RemoteControlInstance(project="alpha", label="alpha", status=InstanceStatus.STOPPED)
+    newer = RemoteControlInstance(project="alpha", label="alpha", status=InstanceStatus.STOPPED)
+    for inst in (live, older, newer):
+        runner._instances[inst.instance_id] = inst
+
+    with TestClient(create_app(config, runner=runner)) as client:
+        rows = client.get("/api/instances").json()
+
+    assert [r["instance_id"] for r in rows] == [
+        live.instance_id,
+        older.instance_id,
+        newer.instance_id,
+    ], "all three rows survive, in registration order — not folded to one per project"
+    # The property the client relies on: a running row is present even though later rows
+    # for the same project are stopped.
+    alpha = [r for r in rows if r["project"] == "alpha"]
+    assert len(alpha) == 3
+    assert sum(r["status"] == "running" for r in alpha) == 1
+
+
 def test_adopt_endpoint_unknown_project_returns_404(runner_config):
     with _client(runner_config) as client:
         resp = client.post("/api/projects/does-not-exist/adopt")

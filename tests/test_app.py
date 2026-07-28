@@ -1314,9 +1314,10 @@ def test_dashboard_multi_session_client_plumbing(write_config):
     spawn advisories (warnings[]) surface as toasts.
     """
     page = _client(write_config).get("/").text
-    # The fold: pty rows go to the flat id-keyed collection, never the project map.
+    # The fold: pty rows go to the flat id-keyed collection, standard rows to the
+    # rk-keyed map — neither is keyed by project (#1143).
     assert "ptySessions" in page
-    assert 'if (i.resume_mode === "pty") pty.push(i); else next[i.project] = i;' in page
+    assert 'if (i.resume_mode === "pty") pty.push(i); else next[i.rk] = i;' in page
     assert "_stamp(i) { i.rk = i.instance_id || i.project; return i; }" in page
     # Rows key by rk in both zones (the project name is not unique any more).
     assert page.count(':key="i.rk"') == 2  # Active + Recent bridge loops
@@ -1334,6 +1335,49 @@ def test_dashboard_multi_session_client_plumbing(write_config):
     # a stale project-keyed placeholder from the id index.
     assert "const pty = this.ptySessions.filter((s) => liveStatuses.includes(s.status));" in page
     assert "delete this._byId[body.project];" in page
+
+
+def test_dashboard_never_keys_bridge_rows_by_project(write_config):
+    """No SERVER row may be keyed by project name (#1143).
+
+    A project contributes several standard rows since #1109. On the common shape a
+    project-keyed map did not merely lose rows, it kept the wrong one: a pid-less
+    stopped row is carded in rediscover's third pass, after every live one, so the
+    RUNNING bridge was the row dropped and the dashboard reported "nothing running"
+    while a bridge was alive.
+
+    The one sanctioned project-keyed write is start()'s optimistic placeholder, whose
+    instance_id is not minted yet (`_stamp` falls its rk back to the project name) —
+    do not "fix" that one to satisfy the title.
+
+    Caveat on strength: the negative assertion below is textual, so an equivalent
+    spelling (`const k = i.project; next[k] = i`) would slip past it. It stops the
+    literal regression and a careless revert, not a determined rewrite. The predecessor
+    of this test pinned the buggy line *verbatim as correct*, which is why #1109 and
+    #1118 could invalidate its assumption without turning anything red — that is the
+    failure this test exists to not repeat.
+    """
+    page = _client(write_config).get("/").text
+    # The regression itself, and any equivalent reintroduction.
+    assert "next[i.project]" not in page
+    assert "this.instances[body.project] =" not in page
+    # The positive pin for the fold lives HERE too, not only in the neighbouring test:
+    # relaxing one assertion elsewhere must not leave the fold unguarded.
+    assert 'if (i.resume_mode === "pty") pty.push(i); else next[i.rk] = i;' in page
+    # Rows are absorbed under their own identity.
+    assert "this.instances[body.rk] = body;" in page
+    # "The standard bridge for this project" is answered by an explicit helper rather
+    # than by whichever row a map collapse happened to keep.
+    assert "standardFor(name) {" in page
+
+    # Deliberately NOT pinned here: the bodies of rowOf / runningCountFor / the
+    # stopping-preservation loop / the optimistic-placeholder guard. Asserting those
+    # verbatim pins SPELLING, not behaviour — a reflow or a rename turns them red with
+    # nothing changed, while the failure that actually produced #1143 was a line staying
+    # byte-identical as the invariant under it stopped holding. The negative assertions
+    # above are the durable half; the HTTP-level test in test_app_instances.py
+    # (test_instances_serves_every_standard_row_for_one_project) is what pins the
+    # property itself and would survive a client rewrite.
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the pty launch controls are POSIX-only")
