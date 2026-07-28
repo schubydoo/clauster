@@ -129,8 +129,8 @@ _ELEVATION_MAX_AGE_SECONDS = 600  # 10-minute unlock window; re-prove the passwo
 _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _SESSION_USER = "admin"  # single-user in v0.2; multi-user is v0.3
 
-# Result type for _spawn_or_http: the create route awaits a SpawnOutcome, the
-# resume route a bare RemoteControlInstance (#778) — same exception mapping.
+# Result type for _spawn_or_http: both the create and resume routes await a
+# SpawnOutcome (#778, #1145) — same exception mapping.
 _SpawnT = TypeVar("_SpawnT")
 
 # The OpenAPI docs UI + schema — off by default, gated like any other /api/...
@@ -4380,8 +4380,8 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         """Await a spawn/resume coroutine, mapping its exceptions to HTTP codes.
 
         Shared by the create and resume routes so the mapping lives in one place.
-        Generic over the coroutine's result: the create route awaits a
-        :class:`~clauster.runner.SpawnOutcome`, resume a bare instance (#778).
+        Generic over the coroutine's result; both routes now await a
+        :class:`~clauster.runner.SpawnOutcome` (#778, #1145).
         """
         try:
             return await coro
@@ -4640,22 +4640,35 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/api/instances/{instance_id}/resume")
-    async def api_resume(instance_id: str) -> RemoteControlInstance:
+    async def api_resume(instance_id: str) -> dict:
         """Re-spawn a stopped/crashed bridge or hosted session into its prior conversation.
 
         Bridges reuse their stored spawn/permission modes; a hosted session respawns
         a fresh daemon process with ``--resume <claude_session_uuid>`` (CL-7).
+
+        The body is the instance plus the same additive outcome keys the create route
+        returns (#778): ``created`` is False — with ``reason`` — when nothing was
+        revived because the standard-singleton cap handed back the already-live bridge
+        for that project instead. That case answers 200 with a **different**
+        ``instance_id`` than the one asked for, so a caller that ignores ``created``
+        reports a resume that never happened as success (#1145).
         """
         hosted = app.state.hosted.get_instance(instance_id)
         if hosted is not None:
-            return await _resume_hosted(instance_id, hosted)
+            return _spawn_body(await _resume_hosted(instance_id, hosted), created=True)
         resolved = runner.resolve_bridge_id(instance_id)
         if resolved is None:
             raise _unresolved_bridge(
                 runner, instance_id, f"no managed instance to resume: {instance_id!r}"
             )
         try:
-            return await _spawn_or_http(runner.resume(resolved))
+            outcome = await _spawn_or_http(runner.resume_detailed(resolved))
+            return _spawn_body(
+                outcome.instance,
+                created=outcome.created,
+                reason=outcome.reason,
+                warnings=outcome.warnings,
+            )
         except HTTPException as exc:
             # Only a genuine spawn failure (SpawnError -> 409) means the bridge tried to
             # come back and could not — that is the case worth a #541 reconnect-failed

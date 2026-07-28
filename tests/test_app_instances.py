@@ -153,6 +153,56 @@ def test_forget_clears_bridge_pointer(runner_config, monkeypatch):
         assert pointer.with_name(pointer.name + ".bak").exists()  # backed up first
 
 
+def test_resume_declined_by_cap_reports_created_false(runner_config, monkeypatch):
+    """A resume the standard-singleton cap declines must say so, not read as success (#1145).
+
+    Standard bridges are capped at one live per project, and the cap is enforced by
+    RETURNING the live bridge rather than raising. The resume route used to drop the
+    SpawnOutcome and answer 200 with that other instance's body — so the dashboard
+    absorbed a different row and toasted "<project>: running" for a card that was still
+    stopped. An affirmative false success in the bridge lifecycle, which the project's
+    first invariant forbids.
+    """
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    with _client(runner_config) as client:
+        first = client.post("/api/instances", json={"project": "alpha"}).json()["instance_id"]
+        client.delete(f"/api/instances/{first}")  # -> stopped, resumable
+        second = client.post("/api/instances", json={"project": "alpha"}).json()["instance_id"]
+        assert second != first  # a fresh spawn mints a new identity
+
+        resumed = client.post(f"/api/instances/{first}/resume")
+        assert resumed.status_code == 200, resumed.text
+        body = resumed.json()
+        # Nothing was revived, and the body is the OTHER bridge — both must be visible
+        # to the caller rather than inferred.
+        assert body["created"] is False
+        assert "capped at one per project" in (body["reason"] or "")
+        assert body["instance_id"] == second
+
+        # The card asked for is still stopped: the resume genuinely did not happen.
+        rows = {i["instance_id"]: i for i in client.get("/api/instances").json()}
+        assert rows[first]["status"] == "stopped"
+
+
+def test_resume_succeeds_and_reuses_the_instance_id(runner_config, monkeypatch):
+    """A real resume revives the SAME row and reports created=True (#1145).
+
+    The control for the test above: with no live sibling to trip the cap, resume must
+    actually launch, keep the stopped row's instance_id rather than minting a second
+    card, and carry created=True.
+    """
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    with _client(runner_config) as client:
+        first = client.post("/api/instances", json={"project": "alpha"}).json()["instance_id"]
+        client.delete(f"/api/instances/{first}")
+
+        body = client.post(f"/api/instances/{first}/resume").json()
+        assert body["created"] is True
+        assert body["instance_id"] == first  # revived in place, not duplicated
+        assert body["status"] == "running"
+        assert len(client.get("/api/instances").json()) == 1
+
+
 def test_forget_running_bridge_409(runner_config, monkeypatch):
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
     with _client(runner_config) as client:

@@ -183,8 +183,9 @@ These are off by default. Set the flag, restart, hard-refresh, then verify.
         `standard` bridges. `[auto]`
       - `[auto]` Drive a conversation (give the agent a codeword), then **Stop**. The card must
         then show a **Resume** button — a stopped pty bridge is *resumable* even though it
-        has **no `environment_id`** (regression guard: `isResumable` accepts
-        `resume_mode === "pty"`). Click **Resume**: the respawn argv carries `--continue`
+        has **no `environment_id`** (regression guard: `isResumable` is status-only, so no
+        row can be excluded for lacking an environment — #1145 deleted the pty carve-out
+        along with the gate it worked around). Click **Resume**: the respawn argv carries `--continue`
         (asserted by the E2E). The *content* check — the new session **restores the prior
         conversation** (the agent recalls the codeword with no tools), true resume not just
         the recap, continuing the prior transcript rather than a fresh `.jsonl` — stays
