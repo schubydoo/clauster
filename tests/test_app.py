@@ -1314,9 +1314,10 @@ def test_dashboard_multi_session_client_plumbing(write_config):
     spawn advisories (warnings[]) surface as toasts.
     """
     page = _client(write_config).get("/").text
-    # The fold: pty rows go to the flat id-keyed collection, never the project map.
+    # The fold: pty rows go to the flat id-keyed collection, standard rows to the
+    # rk-keyed map — neither is keyed by project (#1143).
     assert "ptySessions" in page
-    assert 'if (i.resume_mode === "pty") pty.push(i); else next[i.project] = i;' in page
+    assert 'if (i.resume_mode === "pty") pty.push(i); else next[i.rk] = i;' in page
     assert "_stamp(i) { i.rk = i.instance_id || i.project; return i; }" in page
     # Rows key by rk in both zones (the project name is not unique any more).
     assert page.count(':key="i.rk"') == 2  # Active + Recent bridge loops
@@ -1334,6 +1335,48 @@ def test_dashboard_multi_session_client_plumbing(write_config):
     # a stale project-keyed placeholder from the id index.
     assert "const pty = this.ptySessions.filter((s) => liveStatuses.includes(s.status));" in page
     assert "delete this._byId[body.project];" in page
+
+
+def test_dashboard_never_keys_bridge_rows_by_project(write_config):
+    """No client collection may be keyed by project name (#1143).
+
+    A project contributes several standard bridges since #1109, and `rediscover`
+    cards live rows before pid-less stopped ones — so a project-keyed map does not
+    merely lose rows, it deterministically keeps a STOPPED row over the RUNNING one
+    and the dashboard reports "nothing running" while a bridge is alive.
+
+    This asserts the property (no project-keyed write survives) rather than pinning a
+    specific line: the predecessor of this test pinned the buggy line verbatim, which
+    is why #1109 and #1118 could invalidate the assumption without turning anything
+    red.
+    """
+    page = _client(write_config).get("/").text
+    # The regression itself, and any equivalent reintroduction.
+    assert "next[i.project]" not in page
+    assert "this.instances[body.project] =" not in page
+    assert "this.instances[name] = body" not in page
+    # Rows are absorbed and preserved under their own identity.
+    assert "this.instances[body.rk] = body;" in page
+    assert 'if (this.instances[k] && this.instances[k].status === "stopping" && !next[k])' in page
+    # "The standard bridge for this project" is answered explicitly, preferring a live
+    # row — a project whose NEWEST row is stopped must still read as running.
+    assert "standardFor(name) {" in page
+    assert (
+        'const live = rows.find((i) => ["running", "starting", "stopping"].includes(i.status));'
+        in page
+    )
+    # rowOf resolves an exact rk first (server rows + the optimistic placeholder), then
+    # falls back to the project-name question. Order matters: the placeholder must win
+    # while a launch is in flight.
+    assert (
+        "rowOf(key) { return this._byId[key] || this.instances[key] "
+        "|| this.standardFor(key) || null; }"
+    ) in page
+    # The project-row badge counts every live standard bridge, not just one.
+    assert (
+        "n += Object.values(this.instances).filter((i) => i.project === name "
+        "&& live.includes(i.status)).length;"
+    ) in page
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the pty launch controls are POSIX-only")
