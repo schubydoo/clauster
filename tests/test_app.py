@@ -1062,6 +1062,13 @@ def test_dashboard_flags_a_resume_the_cap_will_decline(write_config):
     # "/ resumable" in the group label means resumable NOW.
     assert "this.endedBridges().some((i) => !this.resumeBlockedReason(i.rk))" in page
 
+    # NOTE on assertion style: the two substring pins below (`some(...)` above and the
+    # click short-circuit) are brittle BY DESIGN — a rename or reflow breaks them with no
+    # behaviour change, which is the point: this guard was deleted once for being
+    # unfireable, so a rewrite should force a re-read rather than pass silently. The
+    # load-bearing, property-based assertions are the `:disabled` absence (a whole class
+    # of markup) and the created===false backstop.
+
     # a11y: the Resume control must stay FOCUSABLE (aria-disabled), never `disabled` —
     # a disabled button leaves the tab order, so a keyboard or screen-reader user lands
     # on Forget having never been told Resume existed, let alone why it cannot run.

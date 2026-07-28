@@ -3524,8 +3524,14 @@
       // A one-line "why" + nudge for the two recoverable, you-didn't-end-it states.
       statusNote(name) {
         const s = this.displayStatus(name);
-        if (s === "interrupted") return "Ended without a Stop (host restart or external exit) — Resume to continue.";
-        if (s === "crashed") return "The bridge exited unexpectedly — Resume to continue.";
+        // Keep the CAUSE, drop the call to action when a Resume cannot run: this note and
+        // resumeBlockedReason render side by side, and "Resume to continue" next to
+        // "stop it first" told the operator to do the thing the neighbouring sentence
+        // says will not work — on exactly the row this pairing exists for (bridge A
+        // crashed, so you started B).
+        const tail = this.resumeBlockedReason(name) ? "" : " — Resume to continue.";
+        if (s === "interrupted") return "Ended without a Stop (host restart or external exit)" + tail;
+        if (s === "crashed") return "The bridge exited unexpectedly" + tail;
         return null;
       },
       isRunning(name) { return this.statusOf(name) === "running"; },
@@ -3595,6 +3601,12 @@
       resumeBlockedReason(key) {
         const i = this.rowOf(key) || {};
         if (i.resume_mode === "pty") return null;  // interactive sessions have no cap
+        // The sibling test below is NEGATIVE (`!== "pty"`) where the server's cap is
+        // positive (`=== "standard"`). Deliberate: `instances` also holds start()'s
+        // optimistic placeholder, which carries NO `resume_mode` at all, and a strict
+        // `=== "standard"` would miss it while a standard spawn is genuinely in flight.
+        // ⚠️ A third resume mode would land here AND in refresh()'s split and be counted
+        // as blocking — over-predicting, the unsafe direction. Revisit both if one is added.
         const live = Object.values(this.instances).find(
           (r) =>
             r.project === i.project &&
