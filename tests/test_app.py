@@ -1029,8 +1029,15 @@ def test_dashboard_pty_bridge_is_resumable(write_config):
     # ended row is. Assert the property (a status-only gate, which cannot exclude a pty
     # row) rather than a string that could drift into an unrelated function and keep the
     # test green while testing nothing.
+    #
+    # Anchored to isResumable's own body rather than searched page-wide: that return
+    # line is generic enough that some future `isEnded` helper could carry it verbatim
+    # while isResumable itself grew an early return excluding pty rows — the test would
+    # stay green while the thing it guards had broken. Slicing the function is the same
+    # drift the comment above warns about, applied to this assertion too.
     page = _client(write_config).get("/").text
-    assert 'return i.status === "stopped" || i.status === "crashed";' in page
+    gate = page.split("isResumable(key) {", 1)[1].split("},", 1)[0]
+    assert 'return i.status === "stopped" || i.status === "crashed";' in gate
 
 
 def test_dashboard_resume_not_gated_on_environment_id(write_config):
@@ -1054,7 +1061,9 @@ def test_dashboard_resume_not_gated_on_environment_id(write_config):
     assert "if (body.created === false) {" in page
     # ...and says which card it is about, at "warning" not "info": unlike start()'s
     # idempotent branch, this means the requested action did not happen.
-    assert 'this.toast(label + ": " + body.reason, "warning");' in page
+    # ...unconditionally, so a decline that arrived without a `reason` still says
+    # something rather than silently snapping the card back to stopped.
+    assert 'this.toast(label + ": " + (body.reason || "nothing was resumed"), "warning");' in page
     # The declined body is NOT absorbed. It shares the clicked row's project, so
     # absorbing would write the other instance over that row's slot — the card would
     # vanish and a running one appear in its place, reading as "the resume worked".

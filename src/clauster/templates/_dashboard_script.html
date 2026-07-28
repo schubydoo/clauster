@@ -4431,7 +4431,12 @@
             // did not happen.
             if (body.created === false) {
               if (row && prevStatus) row.status = prevStatus;
-              if (body.reason) this.toast(label + ": " + body.reason, "warning");
+              // Fallback, not decoration: every decline path sets a reason today, but a
+              // future one that forgot would snap the card back to stopped with NO
+              // message — the same silence this branch exists to remove, minus the
+              // false success. The branch stays honest without trusting the server's
+              // phrasing to exist.
+              this.toast(label + ": " + (body.reason || "nothing was resumed"), "warning");
             } else {
               this._absorbRow(body);
               // Advisories from the outcome (#778) — a same-dir pty resume raises the

@@ -4648,10 +4648,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
         The body is the instance plus the same additive outcome keys the create route
         returns (#778): ``created`` is False — with ``reason`` — when nothing was
-        revived because the standard-singleton cap handed back the already-live bridge
-        for that project instead. That case answers 200 with a **different**
-        ``instance_id`` than the one asked for, so a caller that ignores ``created``
-        reports a resume that never happened as success (#1145).
+        revived, because the standard-singleton cap handed back the already-live bridge
+        for that project instead, or because an interactive (pty) target was already
+        live. A caller that ignores ``created`` reports a resume that never happened as
+        success (#1145). The body's ``instance_id`` is usually a *different* bridge, but
+        the pty path hands back the target itself — so comparing ids is not a substitute
+        for reading ``created``.
         """
         hosted = app.state.hosted.get_instance(instance_id)
         if hosted is not None:
