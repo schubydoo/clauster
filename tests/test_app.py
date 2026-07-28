@@ -1018,15 +1018,58 @@ def test_dashboard_has_interrupted_status_logic(write_config):
 
 
 def test_dashboard_pty_bridge_is_resumable(write_config):
-    # Regression (true-resume reachability): a stopped pty bridge has no
-    # environment_id (the flag form leaves no env ghost), so isResumable() must
-    # also accept resume_mode === "pty". Otherwise the Resume button — the only
-    # path to POST /resume -> spawn(resume=True) -> `claude --continue` — never
-    # renders, and pty true-resume is unreachable from the UI (only "Start bridge"
-    # shows, which is a fresh session with no --continue).
-    resp = _client(write_config).get("/")
-    assert resp.status_code == 200
-    assert 'i.resume_mode === "pty"' in resp.text
+    # Regression (true-resume reachability): a stopped pty bridge must keep its Resume
+    # button — it is the only path to POST /resume -> spawn(resume=True) ->
+    # `claude --continue`. Without it only "Start bridge" shows, which is a fresh
+    # session with no --continue.
+    #
+    # This used to assert `i.resume_mode === "pty"` appeared in the page, because pty was
+    # carved out of an environment_id gate. #1145 deleted that gate outright, so the
+    # carve-out is gone too — pty rows are resumable now for the same reason every other
+    # ended row is. Assert the property (a status-only gate, which cannot exclude a pty
+    # row) rather than a string that could drift into an unrelated function and keep the
+    # test green while testing nothing.
+    #
+    # Anchored to isResumable's own body rather than searched page-wide: that return
+    # line is generic enough that some future `isEnded` helper could carry it verbatim
+    # while isResumable itself grew an early return excluding pty rows — the test would
+    # stay green while the thing it guards had broken. Slicing the function is the same
+    # drift the comment above warns about, applied to this assertion too.
+    page = _client(write_config).get("/").text
+    gate = page.split("isResumable(key) {", 1)[1].split("},", 1)[0]
+    assert 'return i.status === "stopped" || i.status === "crashed";' in gate
+
+
+def test_dashboard_resume_not_gated_on_environment_id(write_config):
+    """Resume must not require ``environment_id`` (#1145).
+
+    ``resume()`` never reads that field — it re-spawns in the same cwd and the
+    bridge-pointer.json drives the reconnection — and the field is not persisted, so a
+    card rebuilt from a DB row never carries one. Gating on it meant every stopped
+    Server Mode bridge lost its Resume button permanently at the first restart.
+
+    Resumable does not mean resumable *now*: standard bridges are capped at one live per
+    project and the cap RETURNS the live bridge instead of raising, so a Resume against a
+    stopped sibling is a silent no-op. That case must be explained, not offered.
+    """
+    page = _client(write_config).get("/").text
+    # The gate no longer mentions environment_id in either polarity.
+    assert "!!i.environment_id" not in page
+    assert "i.environment_id ||" not in page
+    # A declined resume (nothing revived — the cap returned the project's already-live
+    # bridge) must not be reported as success. The client reads `created`.
+    assert "if (body.created === false) {" in page
+    # ...and says which card it is about, at "warning" not "info": unlike start()'s
+    # idempotent branch, this means the requested action did not happen.
+    # ...unconditionally, so a decline that arrived without a `reason` still says
+    # something rather than silently snapping the card back to stopped.
+    assert 'this.toast(label + ": " + (body.reason || "nothing was resumed"), "warning");' in page
+    # The declined body is NOT absorbed. It shares the clicked row's project, so
+    # absorbing would write the other instance over that row's slot — the card would
+    # vanish and a running one appear in its place, reading as "the resume worked".
+    # _absorbRow therefore lives only in the else branch.
+    absorbed = page.index("this._absorbRow(body);", page.index("if (body.created === false) {"))
+    assert page.index("} else {", page.index("if (body.created === false) {")) < absorbed
 
 
 def test_dashboard_resume_controls_render(write_config):

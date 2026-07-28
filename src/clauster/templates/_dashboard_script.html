@@ -3558,15 +3558,19 @@
         return this.connectUrlMissing(name) ? "Preparing connect link…" : "";
       },
       errorOf(name) { return this.errors[name] || null; },
-      // A stopped/crashed bridge that still has an environment can reconnect to it —
-      // show "Resume" instead of "Start" and reuse its stored permission mode.
+      // A stopped/crashed bridge can be revived — show "Resume" instead of "Start" and
+      // reuse its stored permission mode.
+      //
+      // Deliberately NOT gated on `environment_id` (#1145). `resume()` does not read that
+      // field: it re-spawns `claude remote-control` in the same cwd and the reconnection
+      // is driven by the bridge-pointer.json the prior run left behind. Meanwhile
+      // `environment_id` is not persisted (it is not in the store's field set), so a card
+      // rebuilt from a DB row never has one — which made every stopped Server Mode bridge
+      // lose its Resume button the moment clauster restarted, permanently. pty rows only
+      // escaped because they were explicitly exempted from the same gate.
       isResumable(key) {
         const i = this.rowOf(key) || {};
-        // A pty (flag-form) bridge has no environment_id — true-resume works via
-        // `claude --continue`, not an environment reconnect — so treat a stopped pty
-        // instance as resumable too, else the Resume button (the only path to
-        // /resume → --continue) never renders and true-resume is unreachable.
-        return (i.status === "stopped" || i.status === "crashed") && (!!i.environment_id || i.resume_mode === "pty");
+        return i.status === "stopped" || i.status === "crashed";
       },
       resumeModeOf(key) { return (this.rowOf(key) || {}).resume_mode || ""; },
       // Plain-language effect of each permission mode, surfaced inline so it's visible
@@ -4459,8 +4463,35 @@
             if (row && prevStatus) row.status = prevStatus;
             this.toast(label + ": restart failed", "error");
           } else {
-            this._absorbRow(body);
-            if (body.status === "running") this.toast(label + ": running", "success");
+            // created===false means NOTHING was revived — the cap handed back the
+            // project's already-live bridge, or the target was already live. Reporting
+            // that as "<label>: running" was an affirmative false success (#1145).
+            //
+            // Do NOT _absorbRow it: for a standard row `body.project` equals the clicked
+            // row's project, so absorbing writes the OTHER instance over this row's slot
+            // — the clicked card vanishes from Recent and a running card appears in its
+            // place, which reads as "the resume worked", the very impression being fixed.
+            // Restore the row instead (it still holds the optimistic "starting" set
+            // before the POST) and let the trailing refresh() bring in server truth.
+            //
+            // Not "info" like start()'s idempotent branch: there, created===false means
+            // you asked for a bridge and have one. Here it means the action you asked for
+            // did not happen.
+            if (body.created === false) {
+              if (row && prevStatus) row.status = prevStatus;
+              // Fallback, not decoration: every decline path sets a reason today, but a
+              // future one that forgot would snap the card back to stopped with NO
+              // message — the same silence this branch exists to remove, minus the
+              // false success. The branch stays honest without trusting the server's
+              // phrasing to exist.
+              this.toast(label + ": " + (body.reason || "nothing was resumed"), "warning");
+            } else {
+              this._absorbRow(body);
+              // Advisories from the outcome (#778) — a same-dir pty resume raises the
+              // no-worktree advisory on every call, and dropping it here would lose it.
+              for (const w of body.warnings || []) this.toast(w, "warning");
+              if (body.status === "running") this.toast(label + ": running", "success");
+            }
           }
         } catch (e) {
           this.errors[label] = String(e);

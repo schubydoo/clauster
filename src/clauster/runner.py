@@ -1776,7 +1776,26 @@ class SessionRunner:
         return SpawnOutcome(instance=instance, created=True, warnings=spawn_warnings)
 
     async def resume(self, instance_id: str) -> RemoteControlInstance:
+        """Re-spawn a stopped/crashed bridge; the instance only.
+
+        The thin wrapper over :meth:`resume_detailed`, mirroring
+        :meth:`spawn` / :meth:`spawn_detailed`. Callers that must tell "revived" from
+        "the cap handed back a DIFFERENT, already-live bridge" need the outcome, not the
+        instance — see :meth:`resume_detailed`.
+        """
+        return (await self.resume_detailed(instance_id)).instance
+
+    async def resume_detailed(self, instance_id: str) -> SpawnOutcome:
         """Re-spawn a stopped/crashed bridge, reconnecting to its prior session.
+
+        Returns the full :class:`SpawnOutcome` because a resume can legitimately
+        decline to revive anything: standard bridges are capped at one live per
+        project, and the cap is enforced by RETURNING the live bridge rather than
+        raising (#1145). Dropping ``created``/``reason`` here made the API answer a
+        declined resume with **200 and an instance that was never revived** — usually a
+        different bridge, though the cap and the pty already-live path can both hand back
+        the target itself — which the dashboard then reported as success. A silent failure
+        in the bridge lifecycle, the one thing this project's first invariant forbids.
 
         Re-running ``claude remote-control`` in the same cwd reconnects to the
         existing environment + session (the bridge-pointer.json the prior run
@@ -1803,7 +1822,7 @@ class SessionRunner:
         # → None so the fallback path (not the validator) runs on resume, exactly as it
         # did on first spawn where custom_name was None.
         carried_name = existing.label if existing.label != existing.project else None
-        return await self.spawn(
+        return await self.spawn_detailed(
             existing.project,
             spawn_mode=existing.spawn_mode,
             permission_mode=existing.permission_mode,
