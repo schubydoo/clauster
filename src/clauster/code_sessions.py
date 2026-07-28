@@ -98,6 +98,7 @@ class CodeSessionsClient(_AnthropicHTTPClient):
         super().__init__(credentials, transport=transport or _CODE_TRANSPORT, base=base)
 
     def _headers(self) -> dict:
+        """Return the base headers plus the version header this beta namespace requires."""
         # This beta namespace additionally requires an anthropic-version header.
         return {**super()._headers(), "anthropic-version": ANTHROPIC_VERSION}
 

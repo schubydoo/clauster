@@ -430,6 +430,7 @@ def _recap_hook() -> int:
 
 
 def _hash_password() -> int:
+    """Prompt twice for a password and print its hash; exit 2 if empty or mismatched."""
     password = getpass.getpass("Password: ")
     if not password:
         print("clauster: empty password", file=sys.stderr)
@@ -655,6 +656,7 @@ _STATUS_MARK = {ops.OK: "✓", ops.WARN: "!", ops.FAIL: "✗"}
 
 
 def _doctor(config_path: str | None) -> int:
+    """Print every doctor check to stderr; exit 1 when any of them failed."""
     checks, ok = ops.run_doctor(config_path)
     for c in checks:
         print(
@@ -669,6 +671,7 @@ def _doctor(config_path: str | None) -> int:
 
 
 def _load_or_exit(config_path: str | None):
+    """Load the config, exiting 2 with a one-line message when it is missing or invalid."""
     try:
         return load_config(config_path)
     except (FileNotFoundError, ValueError) as exc:
@@ -736,6 +739,7 @@ def _deps_uninstall(config_path: str | None, target: str) -> int:
 
 
 def _backup(config_path: str | None, output: str) -> int:
+    """Write a state backup to ``output`` and print its path; exit 1 if the write fails."""
     config = _load_or_exit(config_path)
     try:
         path = ops.make_backup(config, Path(output))
@@ -753,6 +757,7 @@ def _backup(config_path: str | None, output: str) -> int:
 
 
 def _restore(backup: str, state_dir: str, config_out: str | None, force: bool) -> int:
+    """Restore ``backup`` into ``state_dir``, reporting a missing, colliding, or unsafe archive."""
     try:
         result = ops.restore_backup(
             Path(backup),
@@ -778,6 +783,7 @@ def _restore(backup: str, state_dir: str, config_out: str | None, force: bool) -
 
 
 def _migrate(config_path: str | None) -> int:
+    """Migrate the state store to head and report the resulting schema version."""
     config = _load_or_exit(config_path)
     result = ops.migrate_state(config)
     print(
@@ -878,6 +884,7 @@ def _reconcile(config_path: str | None, *, dry_run: bool, assume_yes: bool) -> i
         return 0
 
     def decide(finding: Finding) -> Decision:
+        """Accept every proposal unprompted under --yes/--dry-run, else ask the operator."""
         # --dry-run is a non-interactive PREVIEW: accept every proposal to show the full
         # would-be plan, never prompt. build_plan() runs decide() eagerly, BEFORE the
         # dry_run guard below, so without this a --dry-run blocks on input() on a real TTY
@@ -1068,6 +1075,11 @@ def _rollback_windows_service(*, created: bool) -> None:
 
 
 def _reap_environments(config_path: str | None, archive: bool, force_delete: bool) -> int:
+    """Report the hosted environments no live bridge owns, then archive or delete them.
+
+    Lists only unless ``archive`` or ``force_delete`` is set, and refuses to reap at all
+    when the live-bridge set cannot be established (exit 2) rather than guessing.
+    """
     config = _load_or_exit(config_path)
     try:
         creds = environments.load_credentials(now_ms=int(time.time() * 1000))
@@ -1198,6 +1210,7 @@ def _keepers(config_path: str | None, kill_pid: int | None) -> int:
 
 
 def _usage(transcript: str) -> int:
+    """Print per-model token counts and approximate cost for one transcript JSONL."""
     try:
         u = usage.parse_transcript(Path(transcript))
     except FileNotFoundError as exc:
@@ -1459,6 +1472,7 @@ def _run_setup_wizard(config_path: str | None) -> int:
 
 
 def _run(config_path: str | None) -> int:
+    """Serve the dashboard, falling back to the setup wizard when no config exists yet."""
     try:
         config = load_config(config_path)
     except FileNotFoundError:

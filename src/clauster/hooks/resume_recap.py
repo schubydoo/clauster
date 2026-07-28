@@ -189,6 +189,7 @@ def compute_recap(transcript_path: str, session_id: str | None, max_chars: int) 
 
 
 def _max_chars() -> int:
+    """Return the recap size budget from the environment, ignoring unset/invalid/tiny values."""
     try:
         value = int(os.environ.get(ENV_MAX_CHARS, ""))
     except (ValueError, TypeError):

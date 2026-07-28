@@ -120,6 +120,7 @@ class TokenTotals:
 
 
 def _price_for(model: str, prices: dict[str, ModelPrice]) -> ModelPrice | None:
+    """Return the first price whose family name is a substring of ``model``, else None."""
     low = model.lower()
     for family, price in prices.items():
         if family in low:
@@ -154,6 +155,7 @@ class _ByModelAggregate:
 
     @property
     def totals(self) -> TokenTotals:
+        """Every per-model total merged into one ``TokenTotals``."""
         agg = TokenTotals()
         for t in self.by_model.values():
             agg.merge(t)
@@ -164,6 +166,7 @@ class _ByModelAggregate:
         return sum((cost_usd(m, t, prices) or 0.0) for m, t in self.by_model.items())
 
     def unpriced_models(self, prices: dict[str, ModelPrice] = PRICES) -> list[str]:
+        """List the models seen here that have no entry in the price table."""
         return [m for m in self.by_model if _price_for(m, prices) is None]
 
 

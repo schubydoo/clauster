@@ -285,6 +285,7 @@ def _release_flock_if_acquired(cm) -> Callable[[asyncio.Task], None]:
     """
 
     def _release(task: asyncio.Task) -> None:
+        """Release the flock only once the task finished without cancellation or error."""
         if not task.cancelled() and task.exception() is None:
             cm.__exit__(None, None, None)
 
@@ -872,6 +873,7 @@ class SessionRunner:
             project_root = Path(project_path)
 
         def _belongs(cwd: Path) -> bool:
+            """Decide whether ``cwd`` is this project's, pairing the name rule with containment."""
             sanitized = pointers.sanitize_cwd(cwd)
             if sanitized == target:
                 return True
@@ -942,6 +944,7 @@ class SessionRunner:
         return {"bridge_pid": pid, "bridge_proc_start": proc_start}
 
     def _persist_subset(self) -> dict[str, dict]:
+        """Build the persistable record for every live instance, keyed by instance id."""
         live = {
             inst.instance_id: {
                 "project_name": inst.project,
@@ -1075,6 +1078,7 @@ class SessionRunner:
     # ----- discovery helpers ---------------------------------------------
 
     def _discovered(self) -> dict[str, Project]:
+        """Return the discovered projects under ``projects_root``, keyed by name."""
         # Cached (short TTL + mtime-invalidated): this runs on every poll_once and
         # many lookup paths. A trust write invalidates the cache explicitly
         # (trust_project), so the post-write re-read still reflects the new state.
@@ -1084,6 +1088,7 @@ class SessionRunner:
         }
 
     def _resolve_project(self, name: str) -> Project:
+        """Resolve ``name`` to a discovered project, rejecting invalid or unknown names."""
         # Path-traversal defense (spec §9): only ever spawn a discovered project.
         if not is_valid_project_name(name):
             raise UnknownProject(f"invalid project name: {name!r}")
@@ -1366,6 +1371,10 @@ class SessionRunner:
         resume_session_id: str | None = None,
         trust: bool = False,
     ) -> SpawnOutcome:
+        """Spawn (or hand back) a bridge for ``name`` with the per-project lock held.
+
+        The body of :meth:`spawn_detailed`, split out so the locking lives in the caller.
+        """
         # Body of spawn_detailed(), always run under the per-project lock (see spawn()).
         proj = self._resolve_project(name)
         # Refresh the persist merge-base under the locks (#949): the persisted-record
@@ -1852,6 +1861,7 @@ class SessionRunner:
         resume_mode: str | None = None,
         sandbox: str | None = None,
     ) -> None:
+        """Reject an unrecognized spawn, permission, resume, or sandbox option."""
         if spawn_mode not in SPAWN_MODES:
             raise InvalidSpawnOption(
                 f"invalid spawn_mode {spawn_mode!r}; expected one of {SPAWN_MODES}"
@@ -1879,6 +1889,7 @@ class SessionRunner:
             )
 
     def _unique_log_path(self, name: str) -> Path:
+        """Return a log path unique to this spawn, so no two spawns can share a stem."""
         self._log_dir.mkdir(parents=True, exist_ok=True)
         # Unique per spawn so the parser never reads a previous run's markers — AND so the
         # 0600 O_EXCL pre-create can't FileExistsError. The millisecond timestamp alone
@@ -1976,6 +1987,7 @@ class SessionRunner:
             sets.setdefault(self._log_set_key(p.name), []).append(p)
 
         def _stat(paths: list[Path]) -> tuple[float, int]:
+            """Return the newest mtime and total size across one log set, skipping unstattable."""
             mtime, size = 0.0, 0
             for p in paths:
                 try:
@@ -2157,6 +2169,7 @@ class SessionRunner:
         debug_path: Path | None = None,
         sandbox: SandboxMode = "default",
     ) -> subprocess.Popen:
+        """Launch the detached bridge subprocess with a resolved binary and scrubbed env."""
         # The bridge writes its --debug-file to `debug_path` (the private raw parse-
         # source when on-disk redaction is on); the captured-stderr sibling stays keyed
         # off the public `log_path`. They coincide when redaction is off.
@@ -2627,6 +2640,7 @@ class SessionRunner:
 
     @staticmethod
     def _read_markers(log_path: Path) -> bridge_log.BridgeMarkers:
+        """Parse the bridge markers out of ``log_path``, returning empties if it can't be read."""
         try:
             # errors="replace": the debug log is raw bridge output; a stray
             # non-UTF-8 byte must not raise UnicodeDecodeError (a ValueError,
@@ -2642,6 +2656,11 @@ class SessionRunner:
         markers: bridge_log.BridgeMarkers,
         proc: subprocess.Popen,
     ) -> None:
+        """Fold parsed markers into ``instance`` and derive its status from them plus liveness.
+
+        Emits the ``ready`` lifecycle event only on the transition into RUNNING, never on
+        every poll.
+        """
         prev_status = instance.status
         instance.bridge_id = markers.bridge_id or instance.bridge_id
         instance.environment_id = markers.environment_id or instance.environment_id
@@ -2819,6 +2838,7 @@ class SessionRunner:
             instance.error_detail = redact.redact_for_disk(text)[-2000:]
 
     def _project_path(self, name: str) -> Path | None:
+        """Return the discovered path for ``name``, or None when it is not a known project."""
         proj = self._discovered().get(name)
         return proj.path if proj is not None else None
 
@@ -2835,6 +2855,7 @@ class SessionRunner:
         self._startup_watches[instance_id] = task
 
         def _done(t: asyncio.Task, _iid: str = instance_id) -> None:
+            """Drop the finished watch from the registry and log an unexpected failure."""
             if self._startup_watches.get(_iid) is t:
                 self._startup_watches.pop(_iid, None)
             if not t.cancelled() and (exc := t.exception()) is not None:
@@ -3091,6 +3112,7 @@ class SessionRunner:
             _log.debug("stop signal to pid %s was a no-op: %s", pid, exc)
 
     async def _await_exit(self, name: str, pid: int, proc_start: float | None) -> None:
+        """Wait out the shutdown grace, then force the tree down and reap the child."""
         for _ in range(20):  # ~5s grace for a clean shutdown
             alive = await asyncio.to_thread(procutil.is_live_bridge, pid, proc_start)
             if not alive:
@@ -4521,6 +4543,7 @@ class SessionRunner:
         reconciled = list(self._sessions)
 
         def _owners_by_cwd() -> dict[Path, set[int]]:
+            """Map each external session's resolved cwd to the bridge pids that own it."""
             out: dict[Path, set[int]] = {}
             for s in reconciled:
                 if s.attribution is not Attribution.EXTERNAL:
@@ -4643,6 +4666,7 @@ class SessionRunner:
 
     @staticmethod
     def _reconcile_status(instance: RemoteControlInstance, alive: bool) -> None:
+        """Move a vanished bridge to STOPPED or CRASHED, by whether the exit was expected."""
         status = instance.status
         if status in (InstanceStatus.RUNNING, InstanceStatus.STARTING) and not alive:
             # session mode is single-shot: the bridge exits when its session ends, so a
@@ -4777,6 +4801,7 @@ class SessionRunner:
         def _append(
             project: str, mode: str, session_ref: str | None, usage: ProjectUsage | None
         ) -> None:
+            """Append one session-history row, attaching a cost snapshot when usage is known."""
             totals = usage.totals if usage is not None else None
             cost = (
                 CostSnapshot(
@@ -4855,6 +4880,7 @@ class SessionRunner:
             return
 
         async def _write() -> None:
+            """Snapshot usage and append the event off-thread, never raising into the loop."""
             # Mirror the sync path's swallow-and-log so a parser/DB error surfaces as a
             # tidy warning, not asyncio's "Task exception was never retrieved" noise.
             try:
@@ -5003,6 +5029,7 @@ class SessionRunner:
             self._metrics_task = asyncio.create_task(self._metrics_refresh_forever())
 
     async def _poll_forever(self) -> None:
+        """Run ``poll_once`` on the configured interval, logging and continuing on error."""
         interval = self._config.claude.agents_json_poll_interval_seconds
         while True:
             try:
@@ -5016,6 +5043,7 @@ class SessionRunner:
             await asyncio.sleep(interval)
 
     def _cancel_startup_watch(self, instance_id: str) -> None:
+        """Cancel and forget the startup watch for ``instance_id``, if one is running."""
         task = self._startup_watches.pop(instance_id, None)
         if task is not None and not task.done():  # pragma: skip-on-win
             task.cancel()

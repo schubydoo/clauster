@@ -96,6 +96,7 @@ def _target(project_path: Path) -> Path:
 
 
 def _sha256(text: str) -> str:
+    """Return the hex SHA-256 digest of ``text`` encoded as UTF-8."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
@@ -292,6 +293,7 @@ def _write_scoped(root: Path, relative: str, content: str, expected_hash: str | 
     cw.validate_candidate(content, validate_content)
 
     def _verify_unchanged(current: bytes | None) -> None:
+        """Reject the write when the on-disk bytes no longer match ``expected_hash``."""
         # Runs INSIDE write_file's per-target lock (the same lock the editor's
         # write_claude_md holds), so the stale-hash check and the replace are one
         # critical section across BOTH surfaces — neither can validate old bytes then

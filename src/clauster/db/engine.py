@@ -102,6 +102,7 @@ def _arm_sqlite_pragmas(engine: Engine) -> None:
 
     @event.listens_for(engine, "connect")
     def _set_sqlite_pragma(dbapi_connection: object, _record: object) -> None:
+        """Apply the durability/concurrency pragmas to each new SQLite connection."""
         cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
         try:
             # SQLite silently refuses WAL on some filesystems (network/overlay mounts)

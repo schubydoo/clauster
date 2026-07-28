@@ -45,6 +45,7 @@ def trust_directory(path: Path, claude_json: Path = CLAUDE_JSON) -> None:
     resolved = str(path.resolve())
 
     def _set_trust(data: dict) -> None:
+        """Mark the resolved path trust-accepted, creating the projects entry if absent."""
         projects = data.get("projects")
         if not isinstance(projects, dict):
             projects = {}
@@ -75,6 +76,7 @@ def ensure_remote_control_enabled(claude_json: Path = CLAUDE_JSON) -> bool:
     """
 
     def _set_flags(data: dict) -> bool | None:
+        """Set every remote-control ack flag, signalling no-write when all are already set."""
         if all(data.get(flag) is True for flag in _REMOTE_CONTROL_FLAGS):
             return False  # already acknowledged — signal "nothing to write"
         for flag in _REMOTE_CONTROL_FLAGS:

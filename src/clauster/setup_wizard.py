@@ -331,10 +331,12 @@ def create_setup_app(
 
     @app.get("/healthz")
     async def healthz() -> dict:
+        """Report that this process is up and still serving the setup wizard."""
         return {"status": "setup"}
 
     @app.get("/", response_class=HTMLResponse)
     async def form(request: Request) -> Response:
+        """Render the setup form, or a 403 gate page when the setup token is required."""
         # Token mode: the page itself is gated, so a reachable non-loopback bind never even
         # renders the form to someone who didn't read the token from the server log. The token
         # is then embedded (below) so the same-origin submit can echo it as a header.
@@ -366,6 +368,7 @@ def create_setup_app(
 
     @app.post("/setup")
     async def submit(request: Request) -> Response:
+        """Apply the CSRF gate and validate the posted fields, then write the initial config."""
         # No auth exists yet, so the submit is CSRF-gated — one of two ways (module docstring):
         # * Token mode (non-loopback bind): require the one-time token as an ``X-Setup-Token``
         #   header. A custom header can't be set on a cross-origin request without a CORS

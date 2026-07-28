@@ -303,6 +303,7 @@ class _Flow:
             return "".join(self.buffer)
 
     def append(self, chunk: str) -> None:
+        """Append a chunk of captured subprocess output under the buffer lock."""
         with self.lock:
             self.buffer.append(chunk)
 
@@ -1117,6 +1118,7 @@ def _stable_match_finder(find: Callable[[], _T | None]) -> Callable[[str], _T | 
     prev: list[_T | None] = [None]
 
     def _condition(_snapshot: str) -> _T | None:
+        """Return the match only once ``find()`` has yielded the same value twice running."""
         current = find()
         was, prev[0] = prev[0], current
         return current if current is not None and current == was else None

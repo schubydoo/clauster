@@ -78,6 +78,11 @@ class GitUnavailable(ProvisionError):
 
 
 def _safe_target(projects_root: Path, name: str) -> Path:
+    """Validate ``name`` and return its not-yet-existing path directly under ``projects_root``.
+
+    Raises ``InvalidProjectName`` when the name is malformed or resolves outside the
+    root, and ``TargetExists`` when a directory of that name is already there.
+    """
     if not is_valid_project_name(name):
         raise InvalidProjectName(f"invalid project name: {name!r}")
     target = projects_root / name
@@ -124,6 +129,7 @@ def create_project(projects_root: Path, name: str, *, git_init: bool = False) ->
 
 
 def _ip_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address, cfg: CloneConfig) -> bool:
+    """Decide whether ``ip`` is an SSRF-unsafe clone target under ``cfg``."""
     # Normalize IPv4-mapped IPv6 (::ffff:a.b.c.d) to its IPv4 so the loopback/
     # private/CGNAT classification below can't be bypassed via the mapped form.
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
@@ -222,6 +228,7 @@ def _git_env() -> dict[str, str]:
 
 
 def _dir_size_mb(path: Path) -> float:
+    """Sum the tree's file sizes in MiB, logging (not raising on) any file it cannot stat."""
     total = 0
     for root, _dirs, files in os.walk(path):
         for f in files:
@@ -336,6 +343,7 @@ def _run_clone_streaming(
     timed_out = threading.Event()
 
     def _terminate() -> None:
+        """Mark the clone timed out and kill it — the whole process tree on Windows."""
         timed_out.set()
         # Reap the TREE on Windows, not just the process we hold. `terminate()` there kills
         # only its argument, and `git clone` spawns helpers (`git-remote-https`) that inherit
@@ -381,6 +389,7 @@ def _run_clone_streaming(
         fd = stderr.fileno()
 
         def _emit(raw: bytes) -> None:
+            """Record one non-empty stderr line in the tail buffer and forward it onward."""
             line = raw.decode("utf-8", "replace").strip()
             if not line:
                 return
@@ -408,6 +417,7 @@ def _run_clone_streaming(
 
 
 def _stderr_tail(stderr: bytes | str | None, limit: int = 400) -> str:
+    """Return the last ``limit`` characters of ``stderr`` as text, or "" when there is none."""
     if stderr is None:
         return ""
     text = stderr.decode("utf-8", "replace") if isinstance(stderr, bytes) else stderr

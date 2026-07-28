@@ -343,6 +343,7 @@ class ReverseProxyConfig(BaseModel):
     @field_validator("trusted_ips")
     @classmethod
     def _validate_trusted_ips(cls, v: list[str]) -> list[str]:
+        """Reject a malformed IP/CIDR instead of letting it silently never match."""
         # Fail fast on a malformed IP/CIDR rather than letting `auth.peer_trusted` silently
         # skip it at runtime — a quiet no-op entry in an auth allowlist is a footgun (the
         # proxy peer it was meant to admit silently never matches).
@@ -352,6 +353,7 @@ class ReverseProxyConfig(BaseModel):
 
     @model_validator(mode="after")
     def _require_secret_or_trusted_ips(self) -> ReverseProxyConfig:
+        """Refuse an enabled proxy config that could never authenticate anyone."""
         # Fail closed on an un-runnable proxy config rather than silently authenticating
         # nobody. `trusted_ips` is the FIRST gate for BOTH modes: every enforcement point
         # checks `peer_trusted(peer_ip, trusted_ips)` before anything else, and that is
@@ -435,6 +437,7 @@ class AuthConfig(BaseModel):
     @field_validator("api_token_hash", mode="before")
     @classmethod
     def _blank_token_hash_is_none(cls, v: object) -> object:
+        """Treat a blank token hash as unset, and reject one that is not SHA-256 hex."""
         # A blank / whitespace-only hash can never match a presented token (it fails
         # closed), but a truthy "  " would still satisfy the enforced-auth check in
         # _missing_enforced_auth and PERMIT a non-loopback bind that no token can ever
@@ -459,6 +462,7 @@ class AuthConfig(BaseModel):
     @field_validator("password_hash", mode="before")
     @classmethod
     def _blank_password_hash_is_none(cls, v: object) -> object:
+        """Treat a blank password hash as unset so the dummy-hash guard can't become a login."""
         # A blank / whitespace-only password hash can never verify a password, but an
         # empty string is falsy-yet-not-None: it slips past the `password_hash is None`
         # unset checks and, paired with auth.verify_password's dummy-hash timing guard,
@@ -572,6 +576,7 @@ class CloneConfig(BaseModel):
     @field_validator("allowed_private_cidrs")
     @classmethod
     def _validate_cidrs(cls, v: list[str]) -> list[str]:
+        """Reject a malformed CIDR — a no-op entry in an SSRF allowlist is a footgun."""
         # Fail fast on a malformed CIDR rather than letting it silently never match
         # (this is an SSRF allowlist — a quiet no-op entry is a footgun).
         for cidr in v:
@@ -799,6 +804,7 @@ class UsageConfig(BaseModel):
     @field_validator("currency", mode="before")
     @classmethod
     def _normalize_currency(cls, v: object) -> object:
+        """Strip and upper-case the currency code so ``usd`` compares equal to ``USD``."""
         # Normalize the code so "usd"/" USD " compare equal to "USD" — otherwise a
         # lowercase code spuriously trips the no-FX warning and the symbol fallback.
         return v.strip().upper() if isinstance(v, str) else v
@@ -806,6 +812,7 @@ class UsageConfig(BaseModel):
     @field_validator("currency_symbol", mode="before")
     @classmethod
     def _blank_symbol_to_none(cls, v: object) -> object:
+        """Treat a blank currency symbol as unset so ``effective_symbol`` falls back."""
         # An empty / whitespace-only symbol renders a blank badge; treat it as unset so
         # `effective_symbol` falls back to `$` (USD) or the currency code.
         if isinstance(v, str) and not v.strip():
@@ -815,6 +822,7 @@ class UsageConfig(BaseModel):
     @field_validator("mode", mode="before")
     @classmethod
     def _coerce_yaml_off(cls, v: object) -> object:
+        """Map the boolean YAML 1.1 turns an unquoted ``off`` into back to the string."""
         # YAML 1.1 parses an unquoted ``off`` as the boolean False (like yes/no/on/off),
         # so ``usage: {mode: off}`` would otherwise fail the Literal. Map it back to the
         # string so the config works without quoting. (``on``/True isn't a valid mode.)
@@ -822,6 +830,7 @@ class UsageConfig(BaseModel):
 
     @model_validator(mode="after")
     def _resolve_mode_and_warn(self) -> UsageConfig:
+        """Fold the deprecated ``show_cost`` into ``mode``, warning when ``mode`` wins."""
         # `usage.mode` is authoritative. The deprecated `show_cost=false` is honored
         # (mapped to `mode: off`) only when `mode` was not set explicitly; if both are
         # given, mode wins. Mirrors the launch_mode/resume_mode alias precedence.
@@ -933,6 +942,7 @@ class ObservabilityConfig(BaseModel):
     @field_validator("metrics_token_hash", mode="before")
     @classmethod
     def _blank_metrics_hash_is_none(cls, v: object) -> object:
+        """Treat a blank metrics hash as unset, and reject one that is not SHA-256 hex."""
         # Mirror auth.api_token_hash: a blank / whitespace-only hash can never match a
         # presented token (it fails closed), so normalize it to None so only a REAL hash
         # counts. A non-empty value that is NOT a 64-char lowercase hex digest can never
@@ -1265,6 +1275,7 @@ class TlsConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_material(self) -> TlsConfig:
+        """Validate the TLS material for the chosen provision mode, resolving paths at load."""
         # Fail closed at load: validate config shape per provision mode and, for
         # provision=off, resolve both paths to readable absolute files (or raise).
         # Store the resolved paths back so the server hands uvicorn canonical absolutes
@@ -1429,6 +1440,7 @@ class ClausterConfig(BaseModel):
     @field_validator("projects_root", "state_dir", mode="before")
     @classmethod
     def _expand_user(cls, v: object) -> object:
+        """Expand a leading ``~`` in the path fields before the rest of validation runs."""
         if isinstance(v, (str, Path)):
             return Path(v).expanduser()
         return v
@@ -1436,6 +1448,7 @@ class ClausterConfig(BaseModel):
     @field_validator("projects_root")
     @classmethod
     def _projects_root_exists(cls, v: Path) -> Path:
+        """Require ``projects_root`` to be an existing, readable directory."""
         if not v.is_dir():
             raise ValueError(f"projects_root does not exist or is not a directory: {v}")
         if not os.access(v, os.R_OK):
@@ -1444,6 +1457,7 @@ class ClausterConfig(BaseModel):
 
     @model_validator(mode="after")
     def _loopback_or_authed(self) -> ClausterConfig:
+        """Refuse a non-loopback bind unless authentication will actually gate requests."""
         # Non-loopback bind is only allowed once authentication will ACTUALLY gate it.
         # The runtime guard enforces auth only when `auth.enabled` is true; with it false
         # every request passes through unauthenticated, so `password_required` /
@@ -1471,6 +1485,7 @@ class ClausterConfig(BaseModel):
 
 
 def _candidate_paths(explicit: Path | None) -> list[Path]:
+    """List the config paths to try in precedence order, or just ``explicit`` when given."""
     if explicit is not None:
         return [explicit]
     paths: list[Path] = []
@@ -1608,6 +1623,7 @@ def _split_env_list(value: str) -> list[str]:
 
 
 def _set_nested(d: dict, path: tuple[str, ...], value: object) -> None:
+    """Set ``value`` at the nested ``path``, creating intermediate dicts as needed."""
     cur = d
     for key in path[:-1]:
         nxt = cur.get(key)
@@ -1648,6 +1664,7 @@ _LEGACY_ENV_ALIASES: dict[str, tuple[str, ...]] = {
 
 
 def _apply_env_overrides(data: dict) -> dict:
+    """Overlay the ``CLAUSTER_*`` variables (and their ``_FILE`` twins) onto ``data``."""
     leaves = _env_leaf_map(ClausterConfig)
     kinds = {path: kind for path, kind in leaves.values()}
     for env_name, (path, kind) in leaves.items():

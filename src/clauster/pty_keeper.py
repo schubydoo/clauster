@@ -453,6 +453,7 @@ def run_keeper(
         return 70
 
     def _acquire_ctty() -> None:  # pragma: no cover — runs in the forked child, pre-exec
+        """Lead a new session and claim the PTY slave as the child's controlling terminal."""
         # Make the bridge its own session leader FIRST: TIOCSCTTY only works for a
         # session leader with no controlling terminal. Without this setsid the
         # bridge stays in the launcher's session and never acquires the PTY as its
@@ -604,6 +605,7 @@ def _project_from_sidecar(filename: str) -> str | None:
 
 
 def _int_or_none(value: object) -> int | None:
+    """Return ``value`` when it is a genuine ``int``, rejecting ``bool`` and everything else."""
     # ``bool`` is a subclass of ``int``, so a corrupt sidecar carrying e.g.
     # ``"keeper_pid": true`` would otherwise resolve to PID 1. Exclude it,
     # matching the convention in procutil.py.

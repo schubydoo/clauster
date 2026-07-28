@@ -597,6 +597,7 @@ def write_subtree(claude_json: Path, subtree_key: str, mutate: Callable[[Any], A
     """
 
     def _apply(data: dict) -> None:
+        """Replace the top-level subtree with whatever ``mutate`` returns for it."""
         data[subtree_key] = mutate(data.get(subtree_key))
 
     update_claude_json(claude_json, _apply)
@@ -650,6 +651,7 @@ def write_nested_subtree(
     """
 
     def _apply(data: dict) -> None:
+        """Create the outer/inner path as needed, then replace the nested subtree."""
         outer = data.get(outer_key)
         if not isinstance(outer, dict):
             outer = {}
@@ -814,6 +816,7 @@ def write_settings_subtree(
     """
 
     def _mutate(current_bytes: bytes) -> dict[str, Any]:
+        """Check the expected hash, then merge ``incoming`` into the target subtree."""
         if expected_hash is None:
             if current_bytes:
                 raise StaleConfigWriteError(f"{path.name} already exists; a hash is required")

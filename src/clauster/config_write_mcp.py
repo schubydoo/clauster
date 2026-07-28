@@ -277,6 +277,7 @@ def write_user_servers(claude_json: Path, incoming: dict[str, Any]) -> None:
     cw.validate_candidate(incoming, validate_mcp_servers)
 
     def _mutate(current: Any) -> dict[str, Any]:
+        """Merge ``incoming`` over the stored map, restoring any redacted secrets."""
         stored = current if isinstance(current, dict) else {}
         return cw.merge_redacted(incoming, stored)
 
@@ -318,6 +319,7 @@ def write_project_local_servers(
     cw.validate_candidate(incoming, validate_mcp_servers)
 
     def _mutate(current: Any) -> dict[str, Any]:
+        """Merge ``incoming`` over the stored project-local map, restoring redacted secrets."""
         stored = current if isinstance(current, dict) else {}
         return cw.merge_redacted(incoming, stored)
 
@@ -591,6 +593,7 @@ def write_project_approvals(
     owned = _settings_owned_names(claude_json, project_dir, strict=True)
 
     def _persisted(incoming: list[str], prev: list[str]) -> list[str]:
+        """Keep the caller's decisions for free names and the prior value for owned ones."""
         # Panel-owned decisions from the caller, then each settings-owned name's original
         # base-layer value — dedup, order-preserving. For a NON-owned name this is the
         # caller's (validated, disjoint) decision; an owned name comes only from `prev`.
@@ -603,6 +606,7 @@ def write_project_approvals(
         return out
 
     def _apply(data: dict) -> None:
+        """Rewrite this project's enabled/disabled approval lists inside the write lock."""
         outer = data.get(PROJECTS_KEY)
         if not isinstance(outer, dict):
             outer = {}
@@ -680,6 +684,7 @@ def _settings_mcp_lists(
         return [], []
 
     def _names(key: str) -> list[str]:
+        """Return the string entries of ``data[key]``, tolerating a missing or odd value."""
         names = data.get(key)
         return [n for n in names if isinstance(n, str)] if isinstance(names, list) else []
 

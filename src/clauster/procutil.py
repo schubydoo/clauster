@@ -57,6 +57,7 @@ _EXACT_PROC_START_TOLERANCE = 0.05
 
 
 def _clk_tck() -> int:
+    """Return the kernel clock-tick rate, defaulting to 100 where it is unavailable."""
     try:
         return os.sysconf("SC_CLK_TCK") or 100
     except (ValueError, AttributeError, OSError):

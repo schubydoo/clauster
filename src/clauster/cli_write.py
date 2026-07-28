@@ -61,6 +61,7 @@ def cmd_start(
     """Start (or hand back an already-live) bridge for ``project``; print the instance."""
 
     async def _go() -> SpawnOutcome:
+        """Reattach to live bridges, then start (or hand back) the one for ``project``."""
         with ClausterEngine(config) as engine:
             await engine.hydrate()  # read-only reattach so the idempotency check sees live bridges
             return await engine.start(
@@ -127,6 +128,7 @@ def cmd_stop(config: ClausterConfig, identity: str, *, as_json: bool) -> int:
     ambiguous: list[str | None] = [None]
 
     async def _go() -> RemoteControlInstance | None:
+        """Hydrate the registry, then stop ``identity``, noting an ambiguous match on miss."""
         with ClausterEngine(config) as engine:
             await engine.hydrate()  # populate the registry so the identity resolves
             stopped = await engine.stop(identity)

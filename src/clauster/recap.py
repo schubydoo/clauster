@@ -72,6 +72,7 @@ def _matching_hook(entry: object) -> dict | None:
 
 
 def _atomic_write_json(path: Path, data: dict) -> None:
+    """Write ``data`` to ``path`` as JSON via a same-directory temp file and ``os.replace``."""
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".settings.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:

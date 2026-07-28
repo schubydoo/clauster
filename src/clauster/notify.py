@@ -36,6 +36,7 @@ class Notifier:
             _log.warning("notifications enabled but no urls configured; sending nothing")
 
     def _build(self) -> None:
+        """Build the Apprise sink from the configured URLs; stay disabled on any failure."""
         try:
             import apprise  # type: ignore[import-not-found]  # optional `notify` extra
         except ImportError:

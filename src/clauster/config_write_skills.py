@@ -464,6 +464,7 @@ def write_skill(
         raise cw.StaleConfigWriteError(f"skill {name!r} changed on disk since it was loaded")
 
     def _build(staging: Path) -> None:
+        """Write every skill member into the private staging tree, byte-exact."""
         # Contained, direct writes -- NOT fw.write_file(), which additionally takes its
         # own cross-process flock per target. The staging dir is a fresh, private,
         # uncontested tree that no other writer can see until replace_tree promotes it

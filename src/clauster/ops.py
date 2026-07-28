@@ -51,6 +51,7 @@ def _version_ge(have: str, want: str) -> bool:
     """Compare dotted versions numerically (2.1.156 >= 2.1.145). Missing/odd parts -> 0."""
 
     def parse(v: str) -> tuple[int, ...]:
+        """Split a dotted version into an int tuple, treating a non-numeric segment as 0."""
         parts = []
         for seg in v.split("."):
             digits = "".join(c for c in seg if c.isdigit())
@@ -527,6 +528,7 @@ def claude_cli_json() -> Path:
 
 
 def _check_state_dir_writable(state_dir: Path) -> Check:
+    """Check that the state dir — or its nearest existing ancestor — is writable."""
     # Read-only diagnostic: NEVER create the tree (that would mask a misconfigured
     # path). Probe an existing dir; otherwise check the nearest existing ancestor.
     sd = state_dir.expanduser()
@@ -593,6 +595,7 @@ def _check_claude_login(creds_path: Path | None = None) -> Check:
 
 
 def _check_auth(config: ClausterConfig) -> Check:
+    """Check the auth block for the inconsistencies the config validator would reject."""
     a = config.auth
     if a.password_required and not a.password_hash:
         return Check("auth", FAIL, "password_required but no password_hash set")
@@ -641,6 +644,7 @@ def _check_node_toolchain(config: ClausterConfig) -> Check | None:
 
 
 def _check_port(host: str, port: int) -> Check:
+    """Warn when ``port`` already has a listener on loopback (Clauster likely running)."""
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(0.5)

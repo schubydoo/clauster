@@ -236,6 +236,7 @@ def _locked_write_misc(path: Path, incoming: dict[str, Any], expected_hash: str 
     """
 
     def _mutate(current_bytes: bytes) -> dict[str, Any]:
+        """Check the expected hash, then swap in the merged non-owned partition."""
         if expected_hash is None:
             if current_bytes:
                 raise cw.StaleConfigWriteError(f"{path.name} already exists; a hash is required")

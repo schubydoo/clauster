@@ -153,6 +153,7 @@ def https_transport(*, timeout: float = 30) -> Transport:
     """
 
     def _transport(method: str, url: str, headers: dict, body: bytes | None) -> tuple[int, bytes]:
+        """Refuse any non-https URL, then run the round-trip against its host."""
         parts = urlsplit(url)
         if parts.scheme != "https" or not parts.netloc:
             raise EnvironmentsAPIError(0, f"refusing non-https URL: {url!r}")
@@ -162,6 +163,7 @@ def https_transport(*, timeout: float = 30) -> Transport:
 
 
 def _https_roundtrip(method, parts, headers, body, timeout):  # pragma: no cover - live network I/O
+    """Run one certificate-verified HTTPS request, returning the status and raw body."""
     # Explicit verifying context checks cert chain + hostname (rule is a cross-version
     # audit nag; on py3.11+ with create_default_context() certs ARE verified) — never disable.
     # nosemgrep: python.lang.security.audit.httpsconnection-detected.httpsconnection-detected
@@ -197,6 +199,7 @@ class _AnthropicHTTPClient:
         self._base = base.rstrip("/")
 
     def _headers(self) -> dict:
+        """Return the auth, organization, beta, and content-type headers every call carries."""
         return {
             "Authorization": f"Bearer {self._cred.access_token}",
             "x-organization-uuid": self._cred.organization_uuid,
@@ -209,6 +212,7 @@ class EnvironmentsClient(_AnthropicHTTPClient):
     """Minimal client for the Anthropic environments API (list/archive/delete)."""
 
     def _request(self, method: str, path: str) -> dict:
+        """Send one API call and decode its JSON body, raising on 4xx/5xx or bad JSON."""
         status, raw = self._transport(method, self._base + path, self._headers(), None)
         if status >= 400:
             raise EnvironmentsAPIError(status, raw.decode("utf-8", "replace")[:500])
@@ -308,6 +312,7 @@ def find_ghosts(
 
 
 def _norm(directory: str) -> str:
+    """Return ``directory`` user-expanded and fully resolved, for comparison as a string."""
     return str(Path(directory).expanduser().resolve())
 
 

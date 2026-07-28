@@ -153,6 +153,7 @@ class ProcessStream:
         self._subscribers = [s for s in self._subscribers if s.queue is not queue]
 
     def _broadcast(self, event: DaemonStreamEvent) -> None:
+        """Offer ``event`` to every subscribed watcher queue."""
         for sub in self._subscribers:
             sub.offer(event)
 
@@ -193,12 +194,14 @@ class ProcessStream:
             self._emit_line(stream, seq, line)
 
     def _emit_line(self, stream: str, seq: int, line: bytes) -> None:
+        """Broadcast one output line, decoding it lossily so bad bytes can't break the stream."""
         self._broadcast(
             {"type": "line", "stream": stream, "seq": seq, "line": line.decode("utf-8", "replace")}
         )
 
     @staticmethod
     def _decode(data: object) -> bytes | None:
+        """Base64-decode a frame's payload, returning None (with a warning) when unusable."""
         if not isinstance(data, str):
             return None
         try:
@@ -467,6 +470,7 @@ class ClaustrumClient:
             self._pending.pop(request_id, None)
 
     def _allocate_id(self) -> int:
+        """Return the next monotonically increasing JSON-RPC request id."""
         self._next_id += 1
         return self._next_id
 
@@ -530,6 +534,7 @@ class ClaustrumClient:
                 self._fail_pending(DaemonUnreachable("claustrum connection lost"))
 
     def _dispatch(self, raw: bytes) -> None:
+        """Route one inbound frame to its process stream or its pending request, dropping junk."""
         try:
             frame = json.loads(raw)
         except (ValueError, UnicodeDecodeError):
@@ -547,6 +552,7 @@ class ClaustrumClient:
             self._resolve(request_id, frame)
 
     def _resolve(self, request_id: int, frame: dict[str, Any]) -> None:
+        """Settle the future waiting on ``request_id`` from the frame's result or error."""
         future = self._pending.get(request_id)
         if future is None or future.done():
             return
@@ -563,6 +569,7 @@ class ClaustrumClient:
         future.set_result(result if isinstance(result, dict) else {})
 
     def _fail_pending(self, exc: Exception) -> None:
+        """Fail every in-flight request with ``exc`` and clear the pending map."""
         pending, self._pending = self._pending, {}
         for future in pending.values():
             if not future.done():
