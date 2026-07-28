@@ -110,8 +110,11 @@ subset of the OS/Python legs; the full matrix runs on release and fork PRs.
   thread on the thread itself — unresolved review threads block the merge.
 - **The maintainer may add a second Claude review** to a PR, usually when Greptile
   is rate-limited or a change warrants another pass. You may see its comments on
-  your PR; they are advisory and never block a merge. It runs on the maintainer's
-  personal subscription, so a top-level `@claude review` comment from the maintainer
+  your PR. Its *verdict* is advisory — it comments, it never requests changes — but
+  its **inline threads block the merge exactly like Greptile's**, because the branch
+  ruleset requires every review thread to be resolved regardless of who opened it.
+  It runs on the maintainer's personal subscription, so a top-level `@claude review`
+  comment from the maintainer
   is the only thing that starts it — there is no general-purpose `@claude` bot in this
   repo, and any other mention (including one inside a review thread) does nothing.
   Treat its findings like any review comment: reply, and push a fix or say why one
