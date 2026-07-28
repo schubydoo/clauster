@@ -91,6 +91,28 @@ Every finding must be checkable from the code, not inferred from a name.
 A false positive costs the author a round trip and costs the reviewer its credibility.
 When uncertain, say nothing.
 
+### Do not run the test suite
+
+**Reviewing is a reading job here. Don't attempt `uv run pytest`, `just check`, `uv sync`,
+or any build.** The runner has no virtualenv, so a real run would mean a full `uv sync
+--extra dev` plus the suite — minutes of quota to reproduce what CI already runs across
+three OSes and four Python versions, on every PR, for free.
+
+CI is the measurement, and for anything platform- or timing-sensitive it is a *better*
+instrument than this runner: a Linux box cannot settle a Windows wall-clock claim.
+
+So when a PR asserts a test result or a performance number:
+
+- Check that the change *could* produce it — read the code, the fixtures, the markers.
+- Say what you verified and how, and name CI as the gate for the rest. "Verified by
+  reading; the 3.11 leg is the measurement" is a complete answer, not an apology.
+- Do **not** frame the absence of a local run as a limitation of the review. It is the
+  design.
+
+Attempting it anyway is worse than useless: the calls are denied, and the workflow reads a
+non-zero denial count as a signal that the review was blocked from *publishing* — so
+routine denials train that warning to be ignored.
+
 ## Volume
 
 At most **five Nits** per review. If there are more, post the five that matter and add
