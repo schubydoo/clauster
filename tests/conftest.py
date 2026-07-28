@@ -17,10 +17,6 @@ import pytest
 from hypothesis import settings
 from sqlalchemy import Engine
 
-from clauster.db import bootstrap as db_bootstrap
-from clauster.db import engine as db_engine
-from clauster.db import persistence as db_persistence
-
 
 def _can_create_symlink() -> bool:
     """Whether this runner can create a symlink (probed once, at import).
@@ -110,6 +106,19 @@ os.environ["CLAUSTER_HOME"] = str(Path(_SESSION_HOME) / ".clauster")
 os.environ.pop("CLAUSTER_CONFIG", None)
 os.environ.pop("CLAUSTER_STATE_DIR", None)
 atexit.register(lambda: shutil.rmtree(_SESSION_HOME, ignore_errors=True))
+
+# ⚠️ BELOW the pin on purpose — `# noqa: E402` is the cost of keeping the invariant above.
+# These are the only module-level `clauster` imports in this file; every other one is
+# function-local for exactly this reason. Nothing they pull in resolves `~` at import today
+# (verified: `clauster.db.*` reaches 13 clauster modules and none of them is `discovery`,
+# `supervisor` or `pointers`), so importing them at the top was not a live bug — but it
+# removed the ORDERING GUARANTEE. The next `from .discovery import …` added to `config.py`
+# or `auth.py`, a change with no visible connection to tests, would then freeze a real-home
+# path at collection. That is the failure this block exists to make structurally impossible,
+# so the imports move rather than the pin.
+from clauster.db import bootstrap as db_bootstrap  # noqa: E402
+from clauster.db import engine as db_engine  # noqa: E402
+from clauster.db import persistence as db_persistence  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -401,9 +410,17 @@ _REAL_UPGRADE = db_bootstrap.upgrade_to_head
 
 
 def _db_path_for(engine: Engine) -> Path | None:
-    """The SQLite file an engine points at, or None if it isn't a plain file URL."""
+    """The SQLite file an engine points at, or None if it isn't a plain file URL.
+
+    ``:memory:`` counts as "not a file": `sqlite://` yields ``database == ":memory:"``, and
+    treating that as a path would copy the template to a file literally called ``:memory:``
+    in the CWD (or raise on Windows, where ``:`` is invalid in a name) while the engine's
+    actual in-memory database stayed empty. Not reachable today — `Persistence` always goes
+    through ``resolve_url`` — but production's own snapshot helper guards it explicitly, and
+    matching that costs one clause.
+    """
     database = getattr(getattr(engine, "url", None), "database", None)
-    return Path(database) if database else None
+    return Path(database) if database and database != ":memory:" else None
 
 
 def _assert_template_is_migrated(path: Path) -> None:
@@ -438,6 +455,13 @@ def _template_db_path() -> Path:
     global _TEMPLATE_DB
     if _TEMPLATE_DB is None:
         root = Path(tempfile.mkdtemp(prefix="clauster-db-template-"))
+        # Registered BEFORE anything that can raise. `_assert_template_is_migrated` below
+        # raises on a bad template, and with the registration after it the temp dir would
+        # survive the session — the exact accumulation this PR exists to stop. Worse,
+        # `_TEMPLATE_DB` stays None on that path, so the next test re-enters here and
+        # re-migrates: one leaked dir and one full Alembic run per test thereafter, with the
+        # useful first traceback buried under thousands of identical ones.
+        atexit.register(shutil.rmtree, root, ignore_errors=True)
         target = root / "template.db"
         engine = db_engine.create_db_engine(root / "build")
         try:
@@ -449,12 +473,16 @@ def _template_db_path() -> Path:
             # the main file is a 4096-byte header. That happens to hold today, but it is a
             # coupling to production-code internals this fixture doesn't own — and its failure
             # is invisible (see `_assert_template_is_migrated`).
+            # Bound parameter for the target, matching `_snapshot_before_migrate` exactly —
+            # sqlite accepts any expression there, so this avoids hand-quoting a path into
+            # SQL text. The previous quote-doubling was never exercised (the path is a
+            # `mkdtemp` result), which is precisely what makes that kind of escaping easy to
+            # break later without noticing. Verified locally on sqlite 3.46.1.
             with engine.connect() as conn:
-                conn.exec_driver_sql(f"VACUUM INTO '{str(target).replace(chr(39), chr(39) * 2)}'")
+                conn.exec_driver_sql("VACUUM INTO ?", (str(target),))
         finally:
             db_engine.dispose_engine(engine)
         _assert_template_is_migrated(target)
-        atexit.register(shutil.rmtree, root, ignore_errors=True)
         _TEMPLATE_DB = target
     return _TEMPLATE_DB
 

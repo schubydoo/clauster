@@ -132,6 +132,13 @@ Conventions live alongside the tests; the rules that matter most in-context:
   **Never remove, reorder, or run tests around that block, and never point a test at
   the real home directory.**
 - Coverage is gated at **96%**. New code needs tests in the same PR.
+- **Alembic is stubbed for a fresh database.** An autouse fixture swaps `upgrade_to_head`
+  for a copy of a once-per-worker template, so a test that asserts on migration
+  *side-effects* through `Persistence` — pre-migrate snapshots, `backups/`, Alembic call
+  counts — must be marked **`@pytest.mark.real_migration`** or it exercises the copy
+  instead. The failure mode is asymmetric: forgetting the marker doesn't error, it makes
+  the test pass **vacuously**. `--strict-markers` catches a typo'd marker; nothing catches
+  an absent one.
 - Use the existing fixtures rather than constructing app state by hand.
 - Tests must pass on Linux, macOS, and Windows — CI runs all three. Use
   `Path.as_posix()`, gate POSIX-only calls (`fcntl`, mode bits), and write
