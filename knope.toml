@@ -85,6 +85,17 @@ type = "PrepareRelease"
 type = "Command"
 command = "python3 scripts/changelog_compare_link.py $version"
 
+# Fold the maintainer-curated HIGHLIGHTS.md into this version's section (below the
+# heading + compare link, above the generated change sections). The Release step
+# publishes the GitHub release with the same notes it wrote to the changelog, so this
+# is how a human-readable Highlights summary reaches the release body — folded in at
+# prepare time, never a post-publish edit of the immutable release (#305). Empty/absent
+# HIGHLIGHTS.md = no-op, so ordinary point releases just get the generated notes. The
+# `git commit -am` below re-stages the edited CHANGELOG.md.
+[[workflows.steps]]
+type = "Command"
+command = "python3 scripts/inject_highlights.py $version"
+
 [[workflows.steps]]
 type = "Command"
 command = "uv lock"

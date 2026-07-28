@@ -23,6 +23,10 @@ ignores:
   # consumed at release prep), not prose docs — MD041's "first line must be an H1"
   # doesn't apply to them.
   - ".changeset/**"
+  # HIGHLIGHTS.md is curated release-note content folded into the changelog/release
+  # body by scripts/inject_highlights.py (#305), not a standalone doc — same as
+  # CHANGELOG.md above, MD041's first-line-H1 rule doesn't apply.
+  - "HIGHLIGHTS.md"
 
 config:
   default: true
