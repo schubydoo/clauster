@@ -802,7 +802,10 @@
       // ended bridges are resumable by definition (isResumable), ended hosted only with a
       // claude_session_uuid, ended detached agents never. (#333 Option B)
       hasResumable() {
-        return this.endedBridges().length > 0
+        // "resumable" in the label must mean resumable NOW: a group whose every bridge is
+        // blocked by the one-live-standard-bridge cap offers no Resume that can do
+        // anything, so the label would promise an action none of the rows can perform.
+        return this.endedBridges().some((i) => !this.resumeBlockedReason(i.rk))
           || this.endedHosted().some((h) => h.claude_session_uuid);
       },
       // Status -> left-rail colour: the rail encodes liveness/attention, NOT mode (mode is
@@ -3521,8 +3524,18 @@
       // A one-line "why" + nudge for the two recoverable, you-didn't-end-it states.
       statusNote(name) {
         const s = this.displayStatus(name);
-        if (s === "interrupted") return "Ended without a Stop (host restart or external exit) — Resume to continue.";
-        if (s === "crashed") return "The bridge exited unexpectedly — Resume to continue.";
+        // Keep the CAUSE, drop the call to action when a Resume cannot run: this note and
+        // resumeBlockedReason render side by side, and "Resume to continue" next to
+        // "stop it first" told the operator to do the thing the neighbouring sentence
+        // says will not work — on exactly the row this pairing exists for (bridge A
+        // crashed, so you started B).
+        // Still terminate the sentence when blocked: the reason renders in the very next
+        // span with a 0.25rem gap, so an unpunctuated cause ran straight into it as one
+        // sentence — and a screen reader got no pause either, on the exact pairing this
+        // was written to make readable.
+        const tail = this.resumeBlockedReason(name) ? "." : " — Resume to continue.";
+        if (s === "interrupted") return "Ended without a Stop (host restart or external exit)" + tail;
+        if (s === "crashed") return "The bridge exited unexpectedly" + tail;
         return null;
       },
       isRunning(name) { return this.statusOf(name) === "running"; },
@@ -3571,6 +3584,54 @@
       isResumable(key) {
         const i = this.rowOf(key) || {};
         return i.status === "stopped" || i.status === "crashed";
+      },
+      // Resumable does not mean resumable RIGHT NOW. Standard bridges are capped at one
+      // live per project, and the cap is enforced by RETURNING the live bridge rather than
+      // raising — so a Resume against a stopped standard row while a sibling is live
+      // revives nothing. #1145 made the server say so; this says it BEFORE the click.
+      //
+      // ⚠️ This is a prediction, not the truth. The server's `created === false` answer
+      // (handled in resume()) is the authority and stays in place: a guard that can drift
+      // must never be the only thing standing between the operator and a false success.
+      //
+      // It could not work before #1143/#1144 — the project-keyed map structurally could not
+      // hold a stopped row and its live sibling at once, so this returned null every time.
+      // Now that rows key by instance_id it is satisfiable, which is why it lands here and
+      // not in #1147.
+      //
+      // "stopping" counts as live: that status is client-only, set optimistically before
+      // the DELETE returns, so the server row is still RUNNING and the cap still fires.
+      // Every other live set in this file reads the same three statuses.
+      resumeBlockedReason(key) {
+        const i = this.rowOf(key) || {};
+        if (i.resume_mode === "pty") return null;  // interactive sessions have no cap
+        // The sibling test below is NEGATIVE (`!== "pty"`) where the server's cap is
+        // positive (`=== "standard"`). Deliberate: `instances` also holds start()'s
+        // optimistic placeholder, which carries NO `resume_mode` at all, and a strict
+        // `=== "standard"` would miss it while a standard spawn is genuinely in flight.
+        // ⚠️ A third resume mode would land here AND in refresh()'s split and be counted
+        // as blocking — over-predicting, the unsafe direction. Revisit both if one is added.
+        const live = Object.values(this.instances).find(
+          (r) =>
+            r.project === i.project &&
+            r.rk !== i.rk &&
+            r.resume_mode !== "pty" &&
+            ["running", "starting", "stopping"].includes(r.status),
+        );
+        return live
+          ? "A Server Mode bridge is already running for this project — stop it first, or Forget this card."
+          : null;
+      },
+      // Refuse a blocked Resume *audibly*. `.btn.disabled` sets pointer-events:none, so a
+      // mouse click never reaches the handler and Enter/Space is the ONLY path that does —
+      // and returning the reason string silently made that path "the click did nothing",
+      // the failure this whole change removes. aria-describedby covers a screen-reader
+      // user who focuses the control; a sighted keyboard user got nothing. Truthy when it
+      // refused, so the caller reads `refuseResume(rk) || resume(rk)`.
+      refuseResume(key) {
+        const why = this.resumeBlockedReason(key);
+        if (why) this.toast(this.labelOf(key) + ": " + why, "warning");
+        return !!why;
       },
       resumeModeOf(key) { return (this.rowOf(key) || {}).resume_mode || ""; },
       // Plain-language effect of each permission mode, surfaced inline so it's visible
