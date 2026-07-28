@@ -986,7 +986,7 @@
                        hover tooltip can never fire while blocked, and aria-describedby
                        outranks title for the description, so a reason here reaches nobody. #}
                     <button type="button" class="btn btn-sm btn-success" data-test="resume-session"
-                            @click="resumeBlockedReason(i.rk) || resume(i.rk)"
+                            @click="refuseResume(i.rk) || resume(i.rk)"
                             :aria-disabled="!!resumeBlockedReason(i.rk)"
                             :class="{ disabled: !!resumeBlockedReason(i.rk) }"
                             :aria-describedby="resumeBlockedReason(i.rk) ? ('resume-blocked-' + i.rk) : null"

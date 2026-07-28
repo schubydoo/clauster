@@ -3529,7 +3529,11 @@
         // "stop it first" told the operator to do the thing the neighbouring sentence
         // says will not work — on exactly the row this pairing exists for (bridge A
         // crashed, so you started B).
-        const tail = this.resumeBlockedReason(name) ? "" : " — Resume to continue.";
+        // Still terminate the sentence when blocked: the reason renders in the very next
+        // span with a 0.25rem gap, so an unpunctuated cause ran straight into it as one
+        // sentence — and a screen reader got no pause either, on the exact pairing this
+        // was written to make readable.
+        const tail = this.resumeBlockedReason(name) ? "." : " — Resume to continue.";
         if (s === "interrupted") return "Ended without a Stop (host restart or external exit)" + tail;
         if (s === "crashed") return "The bridge exited unexpectedly" + tail;
         return null;
@@ -3617,6 +3621,17 @@
         return live
           ? "A Server Mode bridge is already running for this project — stop it first, or Forget this card."
           : null;
+      },
+      // Refuse a blocked Resume *audibly*. `.btn.disabled` sets pointer-events:none, so a
+      // mouse click never reaches the handler and Enter/Space is the ONLY path that does —
+      // and returning the reason string silently made that path "the click did nothing",
+      // the failure this whole change removes. aria-describedby covers a screen-reader
+      // user who focuses the control; a sighted keyboard user got nothing. Truthy when it
+      // refused, so the caller reads `refuseResume(rk) || resume(rk)`.
+      refuseResume(key) {
+        const why = this.resumeBlockedReason(key);
+        if (why) this.toast(this.labelOf(key) + ": " + why, "warning");
+        return !!why;
       },
       resumeModeOf(key) { return (this.rowOf(key) || {}).resume_mode || ""; },
       // Plain-language effect of each permission mode, surfaced inline so it's visible

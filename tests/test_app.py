@@ -1076,8 +1076,17 @@ def test_dashboard_flags_a_resume_the_cap_will_decline(write_config):
     assert ":aria-disabled=" in button
     assert ":aria-describedby=" in button
     assert ":disabled=" not in button, "disabled removes the control from the tab order"
-    # ...so the click, not the attribute, is what refuses.
-    assert "resumeBlockedReason(i.rk) || resume(i.rk)" in button
+
+    # The status note must not tell you to Resume while Resume is blocked: the two render
+    # side by side, so an unconditional " — Resume to continue." puts the opposite
+    # instruction next to the reason. Nothing else can catch this — the strings live in a
+    # Jinja template, so the coverage gate sees no change when they revert.
+    assert 'const tail = this.resumeBlockedReason(name) ? "." : " — Resume to continue.";' in page
+
+    # A blocked activation must be perceivable, not a silent no-op: `.btn.disabled` sets
+    # pointer-events:none, so Enter/Space is the only path that reaches the handler.
+    assert "refuseResume(key) {" in page
+    assert "refuseResume(i.rk) || resume(i.rk)" in button
 
     # The server-side backstop is untouched: the prediction supplements it, never replaces it.
     assert "if (body.created === false) {" in page

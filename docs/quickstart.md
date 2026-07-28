@@ -132,7 +132,9 @@ stay visible on the card.
   Resume stays available across a clauster restart. One *Server Mode* bridge runs per
   project at a time, so a stopped card whose project already has a live one says so on
   the card, and its Resume does nothing — stop the live bridge first, or **Forget** the
-  stopped card. A live *Interactive Session* never blocks a resume; those aren't capped.
+  stopped card. A bridge started *outside* Clauster is only found on the click, so there
+  the card stays silent and the resume is declined with a message instead. A live
+  *Interactive Session* never blocks a resume; those aren't capped.
 - **Fork a past conversation** — launching an *Interactive Session*, the
   **Conversation** picker (under *More options*) lists the project's previous
   conversations by their first prompt. Picking one forks it into the new
