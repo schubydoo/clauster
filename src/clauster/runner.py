@@ -593,17 +593,25 @@ class SessionRunner:
         return self._instances.get(instance_id)
 
     def get_instance_for_project(self, project_name: str) -> RemoteControlInstance | None:
-        """Return the instance the project-keyed dashboard displays for this project.
+        """Resolve a bare project name to one instance: the LAST-registered match.
 
-        A project may hold one standard bridge plus N interactive (pty) sessions
-        (#777). The pre-#779 client folds ``GET /api/instances`` into a project-keyed
-        map (``map[project] = row``), so the LAST-registered row wins the project's
-        card — and its name-identity actions (Stop / Resume / Forget / QR send the
-        project name) must target exactly that displayed instance, in any status.
-        Preferring anything else (a live bridge, the oldest row) would act on a
-        bridge the operator cannot see. Callers that only need liveness use
-        :meth:`has_running_instance` instead (#778). Does not raise; ``None`` when
-        no instance matches.
+        This is the **CLI/MCP** name fallback (``clauster stop|logs|open <project>``,
+        via :meth:`resolve_bridge_id`) — a convenience for the surfaces where a human
+        types a project instead of an instance id. Last-registered wins so the name
+        lands on the most recently registered bridge rather than a long-dead one; a
+        caller that needs a specific bridge passes its ``instance_id``, and one that
+        only needs liveness uses :meth:`has_running_instance` (#778).
+
+        ⚠️ This is **not** "the bridge the dashboard shows". Until #1143 the client
+        folded ``GET /api/instances`` into a project-keyed map, so last-registered was
+        also what the operator saw, and this method existed to mirror it. The client
+        now keys rows by ``instance_id`` and picks a LIVE row over a stopped one, so
+        the two can differ: with a live bridge and a newer stopped row for one project,
+        the dashboard shows the live bridge while ``clauster stop <project>`` resolves
+        to the stopped row. Do not reintroduce a project-keyed fold to close that gap
+        (that WAS #1143) — narrow the name resolution instead.
+
+        Does not raise; ``None`` when no instance matches.
         """
         found: RemoteControlInstance | None = None
         for inst in self._instances.values():

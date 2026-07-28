@@ -153,7 +153,10 @@
       // the component data-stack (no window fallback), so script-level consts referenced
       // from DIRECTIVES must be surfaced as component state under a scoped name.
       projectNames: PROJECT_NAMES,
-      instances: {},          // project -> its STANDARD bridge row (or an optimistic placeholder)
+      // rk -> a STANDARD bridge row (rk = instance_id), N per project (#1109/#1143). The
+      // one deliberate exception is start()'s optimistic placeholder, whose identity is
+      // not minted yet, so `_stamp` falls its rk back to the project name.
+      instances: {},
       ptySessions: [],        // interactive (pty) session rows, N per project (#779)
       _byId: {},              // rk -> row, across both collections (key-aware lookups)
       ptyPending: {},         // project -> true while a pty launch awaits its first row (#779)
@@ -729,8 +732,10 @@
       // for now — bg jobs are keyed by cwd, not project name).
       runningCountFor(name) {
         let n = 0;
-        // Count EVERY live standard bridge for the project, not "the" one (#1143) — the
-        // badge said "1 running" with two live bridges under the same project.
+        // Count EVERY live standard row for the project, not "the" one (#1143). The spawn
+        // cap allows only one LIVE standard bridge per project, so this is about the row
+        // the old map surfaced: a stopped row could occupy the project's single slot and
+        // hide a live sibling, undercounting the badge to 0.
         const live = ["running", "starting", "stopping"];
         n += Object.values(this.instances).filter((i) => i.project === name && live.includes(i.status)).length;
         n += this.ptySessions.filter((s) => s.project === name && live.includes(s.status)).length;
@@ -3237,9 +3242,13 @@
             // id-keyed collection, standard bridges an rk-keyed map. BOTH key by identity,
             // never by project (#1143): a project may contribute several standard rows
             // (#1109), and a project-keyed map silently kept only the last of them.
-            // Worse than arbitrary — `rediscover` cards live rows BEFORE pid-less stopped
-            // ones, so the running bridge was always the one overwritten, and a project
-            // with any stopped row read as "nothing running" while its bridge was alive.
+            // On the common shape that was not merely lossy but backwards: a pid-less
+            // stopped row is carded in rediscover's THIRD pass (runner.py ~4033), after
+            // every live one, so the running bridge was the row dropped and a project
+            // read "nothing running" while its bridge was alive. (For a stopped row that
+            // still carries a pid the loser is simply arbitrary — pass 1 cards those
+            // beside live rows in one loop over `_persisted`, which the store loads with
+            // no ORDER BY.) Either way the map was the wrong shape for the data.
             const next = {};
             const pty = [];
             for (const i of list) {
@@ -3452,7 +3461,10 @@
       // most recently started row. Without the liveness preference a project whose newest
       // row is stopped reads as stopped while an older bridge of the same project runs.
       standardFor(name) {
-        const rows = Object.values(this.instances).filter((i) => i.project === name);
+        // The pty predicate is redundant with the fold today, but it makes this helper
+        // correct on its own terms rather than on a caller's invariant.
+        const rows = Object.values(this.instances)
+          .filter((i) => i.project === name && i.resume_mode !== "pty");
         if (!rows.length) return null;
         const live = rows.find((i) => ["running", "starting", "stopping"].includes(i.status));
         if (live) return live;
@@ -4366,7 +4378,17 @@
         // interactive (pty) launch renders a pending stub row in the Active zone —
         // writing it into the project-keyed map would masquerade as a standard row.
         if (effective === "pty") this.ptyPending[name] = true;
-        else this.instances[name] = this._stamp({ project: name, status: "starting" });
+        else {
+          // Only when no standard row is already live for the project. Pre-#1143 the
+          // placeholder REPLACED the project's row; now it would sit beside it, so a
+          // re-click on a live Server Mode bridge would render a second "starting" card,
+          // read "2 running" in the badge, and let rowOf(project) resolve to the id-less
+          // placeholder (blanking the live bridge's metrics chip) until the POST returns.
+          const cur = this.standardFor(name);
+          if (!(cur && ["running", "starting"].includes(cur.status))) {
+            this.instances[name] = this._stamp({ project: name, status: "starting" });
+          }
+        }
         try {
           const reqBody = {
             project: name,
@@ -4456,7 +4478,6 @@
             + "Clauster will take it over so you can Stop and observe it. Its prior "
             + "conversation isn't recoverable — a later Resume starts a fresh session.")) return;
         this.errors[name] = null;
-        const prev = this.standardFor(name);
         try {
           const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/adopt",
                                   { method: "POST" });
@@ -4481,7 +4502,8 @@
           }
         } catch (e) {
           this.errors[name] = String(e);
-          if (prev) this.instances[prev.rk] = prev; else delete this.instances[name];
+          // No rollback: nothing here removed a row (only the success path touches the
+          // map, via _absorbRow), and the unconditional refresh() below is authoritative.
           this.toast(name + ": adopt failed", "error");
         }
         await this.refresh();

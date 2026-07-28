@@ -1338,23 +1338,32 @@ def test_dashboard_multi_session_client_plumbing(write_config):
 
 
 def test_dashboard_never_keys_bridge_rows_by_project(write_config):
-    """No client collection may be keyed by project name (#1143).
+    """No SERVER row may be keyed by project name (#1143).
 
-    A project contributes several standard bridges since #1109, and `rediscover`
-    cards live rows before pid-less stopped ones — so a project-keyed map does not
-    merely lose rows, it deterministically keeps a STOPPED row over the RUNNING one
-    and the dashboard reports "nothing running" while a bridge is alive.
+    A project contributes several standard rows since #1109. On the common shape a
+    project-keyed map did not merely lose rows, it kept the wrong one: a pid-less
+    stopped row is carded in rediscover's third pass, after every live one, so the
+    RUNNING bridge was the row dropped and the dashboard reported "nothing running"
+    while a bridge was alive.
 
-    This asserts the property (no project-keyed write survives) rather than pinning a
-    specific line: the predecessor of this test pinned the buggy line verbatim, which
-    is why #1109 and #1118 could invalidate the assumption without turning anything
-    red.
+    The one sanctioned project-keyed write is start()'s optimistic placeholder, whose
+    instance_id is not minted yet (`_stamp` falls its rk back to the project name) —
+    do not "fix" that one to satisfy the title.
+
+    Caveat on strength: the negative assertion below is textual, so an equivalent
+    spelling (`const k = i.project; next[k] = i`) would slip past it. It stops the
+    literal regression and a careless revert, not a determined rewrite. The predecessor
+    of this test pinned the buggy line *verbatim as correct*, which is why #1109 and
+    #1118 could invalidate its assumption without turning anything red — that is the
+    failure this test exists to not repeat.
     """
     page = _client(write_config).get("/").text
     # The regression itself, and any equivalent reintroduction.
     assert "next[i.project]" not in page
     assert "this.instances[body.project] =" not in page
-    assert "this.instances[name] = body" not in page
+    # The positive pin for the fold lives HERE too, not only in the neighbouring test:
+    # relaxing one assertion elsewhere must not leave the fold unguarded.
+    assert 'if (i.resume_mode === "pty") pty.push(i); else next[i.rk] = i;' in page
     # Rows are absorbed and preserved under their own identity.
     assert "this.instances[body.rk] = body;" in page
     assert 'if (this.instances[k] && this.instances[k].status === "stopping" && !next[k])' in page
@@ -1377,6 +1386,10 @@ def test_dashboard_never_keys_bridge_rows_by_project(write_config):
         "n += Object.values(this.instances).filter((i) => i.project === name "
         "&& live.includes(i.status)).length;"
     ) in page
+    # The optimistic placeholder no longer REPLACES the project's row (it sits beside
+    # it now), so it must not be written while a standard bridge is already live —
+    # otherwise a re-click renders a duplicate "starting" card and inflates the badge.
+    assert 'if (!(cur && ["running", "starting"].includes(cur.status))) {' in page
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the pty launch controls are POSIX-only")
