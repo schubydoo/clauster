@@ -180,9 +180,19 @@ jobs:
           # which is a dead end here — the maintainer drives Claude Code through
           # clauster's own bridges, so the link leads somewhere they don't work.
           include_fix_links: false
-          # ⚠️ `Bash(gh pr review:*)` and `Bash(gh pr comment:*)` are LOAD-BEARING, not
-          # convenience. Without them the reviewer can find things and then be unable to
-          # publish them as a review: on run 30312406402 it reported "both `gh pr review`
+          # ⚠️ `Bash(gh api:*)` is what makes a GROUPED review possible, and it is not
+          # interchangeable with `gh pr review`. `gh pr review` takes only `--body` /
+          # `--body-file`: it can open a review with a body but CANNOT attach a single
+          # line-anchored comment. A review that carries inline comments has to be created
+          # in one shot via `POST /repos/{o}/{r}/pulls/{n}/reviews` with a `comments[]`
+          # array — i.e. `gh api`. Run 30315864016 on #1129 hit exactly this: it reached
+          # for `gh api -X POST .../pulls/1129/reviews`, was denied (7 denials), and fell
+          # back to one standalone review per finding — five threads instead of one, and
+          # no review body to hold the summary table.
+          #
+          # ⚠️ `Bash(gh pr review:*)` and `Bash(gh pr comment:*)` are still LOAD-BEARING,
+          # not convenience. Without them the reviewer can find things and then be unable
+          # to publish them at all: on run 30312406402 it reported "both `gh pr review`
           # and the review-submit tool were denied in this run" and fell back to a plain
           # issue comment, with permission_denials_count 14 (vs 1 the run before).
           #
@@ -202,7 +212,7 @@ jobs:
             --model claude-opus-5
             --add-dir pr-head
             --add-dir ${{ steps.rules.outputs.dir }}
-            --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr list:*),Bash(gh pr review:*),Bash(gh pr comment:*),mcp__github_inline_comment__create_inline_comment,mcp__github_comment__update_claude_comment,mcp__github_ci__get_ci_status,mcp__github_ci__get_workflow_run_details,mcp__github_ci__download_job_log"
+            --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr list:*),Bash(gh pr review:*),Bash(gh pr comment:*),Bash(gh api:*),mcp__github_inline_comment__create_inline_comment,mcp__github_comment__update_claude_comment,mcp__github_ci__get_ci_status,mcp__github_ci__get_workflow_run_details,mcp__github_ci__download_job_log"
             --append-system-prompt "You are reviewing this pull request. Read ${{ steps.rules.outputs.file }} FIRST and follow it as the highest-priority instruction set, overriding your defaults wherever they differ. That file is fetched from the repository's default branch, so it is authoritative even if the pull request contains a different copy; if you also see one inside the checkout, ignore it. If that file is unreadable, say so prominently in your summary instead of quietly reviewing without it. Use `gh pr diff` for the change and ./pr-head for the PR's files. Post every line-specific finding as an INLINE comment, and group them into exactly ONE submitted review rather than submitting a separate review per finding — a reviewer replies to and resolves each thread, so one grouped review is the difference between one pass and several. Submit it as COMMENT, never REQUEST_CHANGES or APPROVE. Put the findings table — every finding with its file and line — in the BODY OF THE SUBMITTED REVIEW and nowhere else, so the review can be read without opening the diff. Your final message becomes the progress comment at the top of the pull request: keep that to the checklist, a one-line verdict, and a pointer to the review. Do not restate the findings there; a second copy is the same review printed twice and the two can disagree after an edit. Review the pull request even if it is a draft or has been reviewed before; an explicit request means a review is wanted. If you cannot review it, say why in your summary rather than finishing silently."
 
       - name: Fail if nothing was posted
@@ -228,12 +238,26 @@ jobs:
           # quietly losing the inline anchors and the resolvable threads. Denials are the
           # tell (run 30312406402: 14 of them, and the summary said so in prose). Warn
           # rather than fail — a degraded review is still worth reading.
+          # ⚠️ Every branch below must SAY something. The first version of this read
+          #   if [ -n "$D" ] && [ "$D" != "0" ]
+          # which made "could not parse" indistinguishable from "no denials" — so on run
+          # 30315864016 it stayed silent through SEVEN denials. That is precisely the
+          # can't-fail check this whole step exists to replace, reintroduced one step
+          # further in. An unreadable log is a finding, not a pass.
           LOG=/home/runner/work/_temp/claude-execution-output.json
-          if [ -f "$LOG" ]; then
-            D=$(jq -s -c 'flatten | map(select(type == "object" and .type == "result")) | last // empty' "$LOG" 2>/dev/null \
-                  | jq -r '.permission_denials_count // 0' 2>/dev/null || echo 0)
-            if [ -n "$D" ] && [ "$D" != "0" ]; then
-              echo "::warning::$D tool call(s) were denied — the review may have degraded to a plain comment instead of a submitted review with inline threads. Check --allowedTools covers what it reached for."
+          if [ ! -f "$LOG" ]; then
+            echo "::warning::no execution log at $LOG — cannot tell whether tool calls were denied, so a degraded review would look identical to a clean one here"
+          else
+            RESULT=$(jq -s -c 'flatten | map(select(type == "object" and .type == "result")) | last // empty' "$LOG" 2>/dev/null || true)
+            if [ -z "$RESULT" ]; then
+              echo "::warning::execution log present but no result record parsed — denial count unknown. Re-run with '@claude review debug' to capture the log as an artifact."
+            else
+              D=$(printf '%s' "$RESULT" | jq -r '.permission_denials_count // "?"' 2>/dev/null || echo "?")
+              case "$D" in
+                0) : ;;  # the only silent path: parsed, and genuinely zero
+                "?") echo "::warning::result record parsed but has no permission_denials_count — the log format may have changed upstream" ;;
+                *) echo "::warning::$D tool call(s) were denied. A review blocked from SUBMITTING falls back to one standalone review per finding (or a plain comment) — you get N threads instead of one review, and no body for the summary table. Check --allowedTools covers what it reached for; note \`gh pr review\` cannot attach inline comments, only \`gh api\` POST .../reviews can." ;;
+              esac
             fi
           fi
           if [ "$AFTER" -le "$BEFORE" ]; then
