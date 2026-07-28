@@ -5,14 +5,17 @@ import atexit
 import json
 import os
 import shutil
+import sqlite3
 import sys
 import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
 import pytest
 from hypothesis import settings
+from sqlalchemy import Engine
 
 
 def _can_create_symlink() -> bool:
@@ -103,6 +106,19 @@ os.environ["CLAUSTER_HOME"] = str(Path(_SESSION_HOME) / ".clauster")
 os.environ.pop("CLAUSTER_CONFIG", None)
 os.environ.pop("CLAUSTER_STATE_DIR", None)
 atexit.register(lambda: shutil.rmtree(_SESSION_HOME, ignore_errors=True))
+
+# ⚠️ BELOW the pin on purpose — `# noqa: E402` is the cost of keeping the invariant above.
+# These are the only module-level `clauster` imports in this file; every other one is
+# function-local for exactly this reason. Nothing they pull in resolves `~` at import today
+# (verified: `clauster.db.*` reaches 13 clauster modules and none of them is `discovery`,
+# `supervisor` or `pointers`), so importing them at the top was not a live bug — but it
+# removed the ORDERING GUARANTEE. The next `from .discovery import …` added to `config.py`
+# or `auth.py`, a change with no visible connection to tests, would then freeze a real-home
+# path at collection. That is the failure this block exists to make structurally impossible,
+# so the imports move rather than the pin.
+from clauster.db import bootstrap as db_bootstrap  # noqa: E402
+from clauster.db import engine as db_engine  # noqa: E402
+from clauster.db import persistence as db_persistence  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -368,3 +384,127 @@ async def wait_until(
         if asyncio.get_event_loop().time() >= deadline:
             raise AssertionError(f"condition not met within {timeout}s")
         await asyncio.sleep(interval)
+
+
+# ---------------------------------------------------------------------------
+# Template database: run Alembic ONCE per worker, then copy the file per test.
+# ---------------------------------------------------------------------------
+# Every test that builds an app pays `Persistence()` = engine + `upgrade_to_head`,
+# and on Windows that is **157.7 ms** (vs 7.9 ms on Linux — a 20x blowup, measured
+# on a Windows VM at commit 5fef238). Across the ~2371 app-building tests that is
+# the single largest slice of the Windows CI matrix's cost. The schema is identical
+# for all of them, so migrating it thousands of times is pure waste: migrate once
+# into a template file and copy that instead.
+#
+# Fidelity: the copy IS a real migrated database — the same bytes Alembic produced,
+# at head — so a test cannot tell the difference by inspecting the schema.
+#
+# The fast path applies ONLY to a database that does not exist yet (the fresh-state_dir
+# case). A test that pre-seeds a DB at an older revision, or one testing migration
+# behaviour itself, has a non-empty file and takes the REAL upgrade untouched. Opt out
+# explicitly with `@pytest.mark.real_migration` when a test needs Alembic to run even
+# on a fresh database.
+
+_TEMPLATE_DB: Path | None = None
+_REAL_UPGRADE = db_bootstrap.upgrade_to_head
+
+
+def _db_path_for(engine: Engine) -> Path | None:
+    """The SQLite file an engine points at, or None if it isn't a plain file URL.
+
+    ``:memory:`` counts as "not a file": `sqlite://` yields ``database == ":memory:"``, and
+    treating that as a path would copy the template to a file literally called ``:memory:``
+    in the CWD (or raise on Windows, where ``:`` is invalid in a name) while the engine's
+    actual in-memory database stayed empty. Not reachable today — `Persistence` always goes
+    through ``resolve_url`` — but production's own snapshot helper guards it explicitly, and
+    matching that costs one clause.
+    """
+    database = getattr(getattr(engine, "url", None), "database", None)
+    return Path(database) if database and database != ":memory:" else None
+
+
+def _assert_template_is_migrated(path: Path) -> None:
+    """Fail LOUDLY, at build time, if the template isn't a real migrated database.
+
+    Without this the failure mode is silent and badly delayed: an un-checkpointed copy is
+    a perfectly valid, *empty*, WAL-header database, and `import_legacy_json` returns early
+    on a fresh `state_dir` — so `Persistence()` constructs fine and the blow-up surfaces
+    hundreds of tests later as an unrelated `no such table`.
+    """
+    # `closing`, not a bare `with`: sqlite3.Connection's context manager commits the
+    # transaction but does NOT close the connection, which leaks it (one ResourceWarning
+    # per xdist worker) — and the engine-disposal fixture can't reach a raw connection.
+    with closing(sqlite3.connect(path)) as conn:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        # An un-checkpointed copy has NO tables at all, so read the revision defensively —
+        # a bare OperationalError here would obscure what actually went wrong.
+        revision = (
+            conn.execute("SELECT version_num FROM alembic_version").fetchone()
+            if "alembic_version" in tables
+            else None
+        )
+    if not revision or "instances" not in tables:
+        raise RuntimeError(  # noqa: TRY003 — a fixture-build failure wants the detail inline
+            f"template database at {path} is not migrated "
+            f"(alembic_version={revision!r}, tables={sorted(tables)})"
+        )
+
+
+def _template_db_path() -> Path:
+    """Build (once per process) a migrated-to-head database and return its path."""
+    global _TEMPLATE_DB
+    if _TEMPLATE_DB is None:
+        root = Path(tempfile.mkdtemp(prefix="clauster-db-template-"))
+        # Registered BEFORE anything that can raise. `_assert_template_is_migrated` below
+        # raises on a bad template, and with the registration after it the temp dir would
+        # survive the session — the exact accumulation this PR exists to stop. Worse,
+        # `_TEMPLATE_DB` stays None on that path, so the next test re-enters here and
+        # re-migrates: one leaked dir and one full Alembic run per test thereafter, with the
+        # useful first traceback buried under thousands of identical ones.
+        atexit.register(shutil.rmtree, root, ignore_errors=True)
+        target = root / "template.db"
+        engine = db_engine.create_db_engine(root / "build")
+        try:
+            _REAL_UPGRADE(engine, root / "build", backup_before_migrate=False)
+            # `VACUUM INTO` — the same primitive `_snapshot_before_migrate` uses — writes a
+            # consistent, sidecar-free file BY CONSTRUCTION. Copying the live DB file instead
+            # would depend on `dispose()` having checkpointed the WAL: the engine runs in WAL
+            # mode, and before a checkpoint the whole schema lives in `clauster.db-wal` while
+            # the main file is a 4096-byte header. That happens to hold today, but it is a
+            # coupling to production-code internals this fixture doesn't own — and its failure
+            # is invisible (see `_assert_template_is_migrated`).
+            # Bound parameter for the target, matching `_snapshot_before_migrate` exactly —
+            # sqlite accepts any expression there, so this avoids hand-quoting a path into
+            # SQL text. The previous quote-doubling was never exercised (the path is a
+            # `mkdtemp` result), which is precisely what makes that kind of escaping easy to
+            # break later without noticing. Verified locally on sqlite 3.46.1.
+            with engine.connect() as conn:
+                conn.exec_driver_sql("VACUUM INTO ?", (str(target),))
+        finally:
+            db_engine.dispose_engine(engine)
+        _assert_template_is_migrated(target)
+        _TEMPLATE_DB = target
+    return _TEMPLATE_DB
+
+
+def _templated_upgrade(
+    engine: Engine, state_dir: Path, *, backup_before_migrate: bool = True
+) -> None:
+    """Seed a brand-new database from the template; otherwise run the real migration."""
+    path = _db_path_for(engine)
+    if path is None or (path.exists() and path.stat().st_size > 0):
+        _REAL_UPGRADE(engine, state_dir, backup_before_migrate=backup_before_migrate)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(_template_db_path(), path)
+
+
+@pytest.fixture(autouse=True)
+def _fast_migrations(request, monkeypatch):
+    """Swap `upgrade_to_head` for the template-copy fast path (opt out per test)."""
+    if request.node.get_closest_marker("real_migration"):
+        return
+    # Patch BOTH bindings: `persistence` imported the symbol by value at import time,
+    # so patching only the `bootstrap` module would leave the real one in use there.
+    monkeypatch.setattr(db_bootstrap, "upgrade_to_head", _templated_upgrade)
+    monkeypatch.setattr(db_persistence, "upgrade_to_head", _templated_upgrade)

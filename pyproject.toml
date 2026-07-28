@@ -187,8 +187,9 @@ asyncio_mode = "auto"
 # browser binary and would skew the coverage gate. Run it with `scripts/e2e.sh`
 # (which clears these addopts via `-o addopts=`). Keeping it out of the default run
 # leaves the required `tests` gate — and its cost — exactly as it was.
-addopts = "-n auto --timeout=90 --timeout-method=thread --cov=src/clauster --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=96 --ignore=tests/e2e"
+addopts = "-n auto --strict-markers --timeout=90 --timeout-method=thread --cov=src/clauster --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=96 --ignore=tests/e2e"
 markers = [
+    "real_migration: run the actual Alembic upgrade instead of the template-DB copy",
     "e2e: browser end-to-end test (agent-browser + real Chromium; opt-in, see scripts/e2e.sh)",
 ]
 
