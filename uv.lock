@@ -375,7 +375,7 @@ wheels = [
 
 [[package]]
 name = "clauster"
-version = "0.12.9"
+version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
