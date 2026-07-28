@@ -50,6 +50,10 @@ pointer.
   that had already shipped, and vice versa.
 - **Say what actually happened.** If tests fail, show the output. If a step was
   skipped, say so. Don't describe work as verified when it was only written.
+- **Changing a workflow?** `just check` does not lint `.github/workflows/`. Run both:
+  `uvx zizmor <file>.yml` (the security audit CI runs) and `actionlint <file>.yml`
+  (schema, expressions, and shellcheck over the embedded `run:` blocks — install it
+  separately, and it silently skips the shell linting if `shellcheck` isn't on PATH).
 - **When delegating to a subagent**, pass the same verification requirement
   explicitly — a sweep that trusts doc prose will report stale status as fact.
 
