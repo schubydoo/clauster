@@ -2138,6 +2138,7 @@ def test_resume_instance_vanishes_mid_op_404(write_config, tmp_path, monkeypatch
     # (non-hosted) instance, but the row vanishes before/while the runner resumes
     # it (concurrent stop/forget). runner.resume raises UnknownProject, which
     # _spawn_or_http maps to a defined 404 rather than letting it leak as a 500.
+    # Patches resume_detailed: that is the seam the route drives since #1145.
     from clauster.models import RemoteControlInstance
     from clauster.runner import UnknownProject
 
@@ -2149,7 +2150,7 @@ def test_resume_instance_vanishes_mid_op_404(write_config, tmp_path, monkeypatch
     async def _gone(_name):
         raise UnknownProject("no managed instance to resume: 'alpha'")
 
-    monkeypatch.setattr(client.app.state.runner, "resume", _gone)
+    monkeypatch.setattr(client.app.state.runner, "resume_detailed", _gone)
     r = client.post("/api/instances/alpha/resume")
     assert r.status_code == 404
     assert "no managed instance to resume" in r.json()["detail"]
@@ -2248,7 +2249,7 @@ def test_resume_failure_fires_reconnect_failed_notification(write_config, tmp_pa
     async def _boom(_name):
         raise SpawnError("bridge would not come back up")
 
-    monkeypatch.setattr(runner, "resume", _boom)
+    monkeypatch.setattr(runner, "resume_detailed", _boom)
     r = client.post("/api/instances/alpha/resume")
     assert r.status_code == 409  # the mapped HTTP error is unchanged
     assert len(notifier.calls) == 1
@@ -2274,7 +2275,7 @@ def test_resume_failure_no_notification_when_toggle_off(write_config, tmp_path, 
     async def _boom(_name):
         raise SpawnError("nope")
 
-    monkeypatch.setattr(runner, "resume", _boom)
+    monkeypatch.setattr(runner, "resume_detailed", _boom)
     assert client.post("/api/instances/alpha/resume").status_code == 409
     assert notifier.calls == []
 
@@ -2300,7 +2301,7 @@ def test_resume_non_spawn_failure_does_not_notify(write_config, tmp_path, monkey
     async def _gone(_name):
         raise UnknownProject("no managed instance to resume: 'alpha'")
 
-    monkeypatch.setattr(runner, "resume", _gone)
+    monkeypatch.setattr(runner, "resume_detailed", _gone)
     assert client.post("/api/instances/alpha/resume").status_code == 404
     assert notifier.calls == []
 

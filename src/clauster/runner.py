@@ -248,6 +248,14 @@ _READY_POLL_INTERVAL = 0.25
 # cold start skips it. And bound how long we wait for the poisoned idle bridge to stop.
 _POISON_GRACE = 4.0
 _POISON_STOP_TIMEOUT = 5.0
+
+# How long to wait for a force-killed process TREE to actually die. Distinct from
+# `_POISON_STOP_TIMEOUT` on purpose: that one is a GRACEFUL-stop grace period (how long
+# to let a bridge shut itself down), whereas this bounds a post-SIGKILL/TerminateProcess
+# death, which is sub-100ms unless the target is stuck in an uninterruptible kernel wait
+# — and 5s would not save that either. Kept separate so retuning the grace period can't
+# silently retune the reap.
+_TREE_REAP_WAIT = 2.0
 # #867 L4: nothing else prunes bridge-pointer.json, so a project accumulates a pointer that
 # outlives its (server-reaped) environment. At startup, clear clauster's OWN pointers that
 # are both non-live AND older than this — a live or recently-stopped-resumable session is
@@ -585,17 +593,25 @@ class SessionRunner:
         return self._instances.get(instance_id)
 
     def get_instance_for_project(self, project_name: str) -> RemoteControlInstance | None:
-        """Return the instance the project-keyed dashboard displays for this project.
+        """Resolve a bare project name to one instance: the LAST-registered match.
 
-        A project may hold one standard bridge plus N interactive (pty) sessions
-        (#777). The pre-#779 client folds ``GET /api/instances`` into a project-keyed
-        map (``map[project] = row``), so the LAST-registered row wins the project's
-        card — and its name-identity actions (Stop / Resume / Forget / QR send the
-        project name) must target exactly that displayed instance, in any status.
-        Preferring anything else (a live bridge, the oldest row) would act on a
-        bridge the operator cannot see. Callers that only need liveness use
-        :meth:`has_running_instance` instead (#778). Does not raise; ``None`` when
-        no instance matches.
+        This is the **CLI/MCP** name fallback (``clauster stop|logs|open <project>``,
+        via :meth:`resolve_bridge_id`) — a convenience for the surfaces where a human
+        types a project instead of an instance id. Last-registered wins so the name
+        lands on the most recently registered bridge rather than a long-dead one; a
+        caller that needs a specific bridge passes its ``instance_id``, and one that
+        only needs liveness uses :meth:`has_running_instance` (#778).
+
+        ⚠️ This is **not** "the bridge the dashboard shows". Until #1143 the client
+        folded ``GET /api/instances`` into a project-keyed map, so last-registered was
+        also what the operator saw, and this method existed to mirror it. The client
+        now keys rows by ``instance_id`` and picks a LIVE row over a stopped one, so
+        the two can differ: with a live bridge and a newer stopped row for one project,
+        the dashboard shows the live bridge while ``clauster stop <project>`` resolves
+        to the stopped row. Do not reintroduce a project-keyed fold to close that gap
+        (that WAS #1143) — narrow the name resolution instead.
+
+        Does not raise; ``None`` when no instance matches.
         """
         found: RemoteControlInstance | None = None
         for inst in self._instances.values():
@@ -639,11 +655,21 @@ class SessionRunner:
         an ambiguous prefix must never pick one. Callers that want to say *which* ids it
         could have meant read :meth:`bridge_id_candidates`.
 
-        With N instances per project the name fallback resolves via
-        :meth:`get_instance_for_project` (#778) to the instance the project-keyed
-        client actually DISPLAYS (its map folds last-registered-wins), so a name
-        action never targets a bridge the operator cannot see. Per-session
-        operations on a multi-session project must send the instance_id.
+        With N instances per project the bare-name fallback resolves via
+        :meth:`get_instance_for_project` (#778) to the LAST-REGISTERED match, in any
+        status. ⚠️ Until #1143 that was also the row the dashboard displayed, and this
+        docstring drew a safety conclusion from the coincidence — that a name action
+        could never target a bridge the operator cannot see. **That no longer holds.**
+        The client now keys rows by ``instance_id`` and prefers a live row, so with a
+        live bridge and a newer stopped row for one project the two disagree: the
+        dashboard shows the live bridge while a bare name resolves to the stopped row.
+        Do not close that gap by restoring a project-keyed client fold (that WAS
+        #1143) — narrow the name resolution instead.
+
+        This fallback is for the surfaces where a human types a project name rather
+        than an id: the CLI, the MCP tools, and the HTTP routes that still accept
+        either. Per-session operations on a multi-session project must send the
+        instance_id — the dashboard already does, refusing to act when it has none.
         """
         resolved, _ = self._resolve_bridge_ref(identity)
         return resolved
@@ -1750,7 +1776,26 @@ class SessionRunner:
         return SpawnOutcome(instance=instance, created=True, warnings=spawn_warnings)
 
     async def resume(self, instance_id: str) -> RemoteControlInstance:
+        """Re-spawn a stopped/crashed bridge; the instance only.
+
+        The thin wrapper over :meth:`resume_detailed`, mirroring
+        :meth:`spawn` / :meth:`spawn_detailed`. Callers that must tell "revived" from
+        "the cap handed back a DIFFERENT, already-live bridge" need the outcome, not the
+        instance — see :meth:`resume_detailed`.
+        """
+        return (await self.resume_detailed(instance_id)).instance
+
+    async def resume_detailed(self, instance_id: str) -> SpawnOutcome:
         """Re-spawn a stopped/crashed bridge, reconnecting to its prior session.
+
+        Returns the full :class:`SpawnOutcome` because a resume can legitimately
+        decline to revive anything: standard bridges are capped at one live per
+        project, and the cap is enforced by RETURNING the live bridge rather than
+        raising (#1145). Dropping ``created``/``reason`` here made the API answer a
+        declined resume with **200 and an instance that was never revived** — usually a
+        different bridge, though the cap and the pty already-live path can both hand back
+        the target itself — which the dashboard then reported as success. A silent failure
+        in the bridge lifecycle, the one thing this project's first invariant forbids.
 
         Re-running ``claude remote-control`` in the same cwd reconnects to the
         existing environment + session (the bridge-pointer.json the prior run
@@ -1777,7 +1822,7 @@ class SessionRunner:
         # → None so the fallback path (not the validator) runs on resume, exactly as it
         # did on first spawn where custom_name was None.
         carried_name = existing.label if existing.label != existing.project else None
-        return await self.spawn(
+        return await self.spawn_detailed(
             existing.project,
             spawn_mode=existing.spawn_mode,
             permission_mode=existing.permission_mode,
@@ -2657,6 +2702,37 @@ class SessionRunner:
             await asyncio.sleep(_READY_POLL_INTERVAL)
         else:
             try:
+                # On Windows `kill()` IS `terminate()` (both TerminateProcess) and neither
+                # touches descendants, so killing the pid we hold leaves the real bridge
+                # running whenever `claude` resolves to a `.cmd`/npm shim — the npm case is
+                # the NORMAL Windows install, so "never leave an idle orphan bridge behind"
+                # was exactly what this did there. Reap the tree first; the plain `kill()`
+                # still runs below and stays the only path on POSIX, where the pid we hold
+                # IS the bridge.
+                #
+                # Guarded on its own, NOT by the `except (ProcessLookupError, OSError)`
+                # below: psutil's error family (`NoSuchProcess`/`AccessDenied`/
+                # `ZombieProcess`) descends from `Exception`, not `OSError`, so that tuple
+                # cannot catch it. An escape here is the worst of the three reap sites — it
+                # would skip `kill()`, the `wait()`, AND `clear_pointer()`, leaving the
+                # poisoned pointer in place (the exact loop this method exists to break)
+                # and propagating out before `_persist()` writes the ERROR status.
+                #
+                # `wait_timeout` because the NEXT steps are gated on death: `proc.wait()`
+                # below only confirms the pid WE hold (the `.cmd` shim), while the pointer
+                # records the real bridge — a descendant. `kill()` is asynchronous, so
+                # without the wait `clear_pointer`'s liveness guard can still see that
+                # descendant alive, refuse, and leave the poisoned pointer for the next
+                # launch to reattach to — the exact loop this method exists to break.
+                # Affordable here (already off the loop in a thread), unlike the
+                # claustrum call site.
+                if procutil.is_windows():
+                    try:
+                        await asyncio.to_thread(
+                            procutil.force_kill_tree, proc.pid, wait_timeout=_TREE_REAP_WAIT
+                        )
+                    except Exception as exc:  # noqa: BLE001 — must not skip kill/clear_pointer
+                        _log.debug("tree kill of poisoned bridge %s failed: %s", proc.pid, exc)
                 proc.kill()  # never leave an idle orphan bridge behind
                 # Reap + confirm death BEFORE clearing: otherwise clear_pointer's liveness
                 # guard can still see the just-killed pid as alive and refuse (a poison loop).

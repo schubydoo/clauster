@@ -337,6 +337,37 @@ def _run_clone_streaming(
 
     def _terminate() -> None:
         timed_out.set()
+        # Reap the TREE on Windows, not just the process we hold. `terminate()` there kills
+        # only its argument, and `git clone` spawns helpers (`git-remote-https`) that inherit
+        # our stderr pipe — a surviving helper keeps that pipe open, so the read loop below
+        # blocks past the watchdog and the clone runs for as long as the CHILD wants rather
+        # than the timeout we configured. Measured against the fake-git stub (a `.cmd` shim →
+        # python): Linux honours the 1s timeout (1.01s), Windows paid the stub's full 3s sleep
+        # (3.12s). Best-effort and broadly guarded — a failed reap must still leave the plain
+        # `terminate()` to run, since this is a watchdog thread whose raise nobody observes.
+        #
+        # `poll() is None` is a PID-REUSE guard, not an optimisation. `Timer.cancel()` in the
+        # `finally` below genuinely loses its race sometimes, so this callback can fire after
+        # the clone finished and `proc.wait()` reaped the child. `proc.terminate()` is safe
+        # then (CPython short-circuits on `returncode is not None`), but `force_kill_tree`
+        # takes a BARE PID with no identity check and would bypass that — on POSIX, where
+        # `wait()` really does free the pid, that is a hard kill aimed at whatever recycled
+        # it. Windows happens to be safe anyway (the open handle blocks reuse, and a reap
+        # after the child exits can't reach the orphan regardless — verified on a VM), but
+        # relying on that would leave a trap for anyone who later drops the platform gate.
+        #
+        # ⚠️ For that reader: `poll()` NARROWS the window, it does not close it. `poll()`
+        # and `force_kill_tree(proc.pid)` are separate steps, and the main thread's
+        # `proc.wait()` can reap the child in between — freeing the pid before psutil
+        # looks it up. Closing it needs identity rather than a bare pid: pass an expected
+        # `create_time()` and bail on mismatch, the shape `_expected_epoch` /
+        # `jiffies_to_epoch` already use elsewhere in this module. Do that BEFORE dropping
+        # the `is_windows()` gate, not after.
+        if procutil.is_windows() and proc.poll() is None:
+            try:
+                procutil.force_kill_tree(proc.pid)
+            except Exception as exc:  # noqa: BLE001 — watchdog thread; never let this escape
+                _log.debug("clone watchdog: tree kill of %s failed: %s", proc.pid, exc)
         proc.terminate()
 
     watchdog = threading.Timer(timeout_seconds, _terminate)

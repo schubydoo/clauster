@@ -1018,15 +1018,110 @@ def test_dashboard_has_interrupted_status_logic(write_config):
 
 
 def test_dashboard_pty_bridge_is_resumable(write_config):
-    # Regression (true-resume reachability): a stopped pty bridge has no
-    # environment_id (the flag form leaves no env ghost), so isResumable() must
-    # also accept resume_mode === "pty". Otherwise the Resume button — the only
-    # path to POST /resume -> spawn(resume=True) -> `claude --continue` — never
-    # renders, and pty true-resume is unreachable from the UI (only "Start bridge"
-    # shows, which is a fresh session with no --continue).
-    resp = _client(write_config).get("/")
-    assert resp.status_code == 200
-    assert 'i.resume_mode === "pty"' in resp.text
+    # Regression (true-resume reachability): a stopped pty bridge must keep its Resume
+    # button — it is the only path to POST /resume -> spawn(resume=True) ->
+    # `claude --continue`. Without it only "Start bridge" shows, which is a fresh
+    # session with no --continue.
+    #
+    # This used to assert `i.resume_mode === "pty"` appeared in the page, because pty was
+    # carved out of an environment_id gate. #1145 deleted that gate outright, so the
+    # carve-out is gone too — pty rows are resumable now for the same reason every other
+    # ended row is. Assert the property (a status-only gate, which cannot exclude a pty
+    # row) rather than a string that could drift into an unrelated function and keep the
+    # test green while testing nothing.
+    #
+    # Anchored to isResumable's own body rather than searched page-wide: that return
+    # line is generic enough that some future `isEnded` helper could carry it verbatim
+    # while isResumable itself grew an early return excluding pty rows — the test would
+    # stay green while the thing it guards had broken. Slicing the function is the same
+    # drift the comment above warns about, applied to this assertion too.
+    page = _client(write_config).get("/").text
+    gate = page.split("isResumable(key) {", 1)[1].split("},", 1)[0]
+    assert 'return i.status === "stopped" || i.status === "crashed";' in gate
+
+
+def test_dashboard_flags_a_resume_the_cap_will_decline(write_config):
+    """Say a Resume cannot run BEFORE the click, not only after (#1145 follow-up).
+
+    Standard bridges are capped at one live per project and the cap RETURNS the live
+    bridge rather than raising, so a Resume against a stopped sibling revives nothing.
+    #1145 made the server report that honestly; this surfaces it up front.
+
+    This guard could not work before #1144: the project-keyed map structurally could not
+    hold a stopped row and its live sibling at the same time, so the predicate returned
+    null every time. It is only satisfiable now that rows key by instance_id.
+
+    The server's ``created === false`` handling stays in place regardless — a client-side
+    prediction must never be the only thing between the operator and a false success.
+    """
+    page = _client(write_config).get("/").text
+    assert "resumeBlockedReason(key) {" in page
+    # The reason is VISIBLE text, not a tooltip: a disabled control's title never fires
+    # on touch, and this is a phone-first product.
+    assert 'data-test="resume-blocked"' in page
+    # "/ resumable" in the group label means resumable NOW.
+    assert "this.endedBridges().some((i) => !this.resumeBlockedReason(i.rk))" in page
+
+    # NOTE on assertion style: the two substring pins below (`some(...)` above and the
+    # click short-circuit) are brittle BY DESIGN — a rename or reflow breaks them with no
+    # behaviour change, which is the point: this guard was deleted once for being
+    # unfireable, so a rewrite should force a re-read rather than pass silently. The
+    # load-bearing, property-based assertions are the `:disabled` absence (a whole class
+    # of markup) and the created===false backstop.
+
+    # a11y: the Resume control must stay FOCUSABLE (aria-disabled), never `disabled` —
+    # a disabled button leaves the tab order, so a keyboard or screen-reader user lands
+    # on Forget having never been told Resume existed, let alone why it cannot run.
+    button = page.split('data-test="resume-session"', 1)[1].split(">", 1)[0]
+    assert ":aria-disabled=" in button
+    assert ":aria-describedby=" in button
+    assert ":disabled=" not in button, "disabled removes the control from the tab order"
+
+    # The status note must not tell you to Resume while Resume is blocked: the two render
+    # side by side, so an unconditional " — Resume to continue." puts the opposite
+    # instruction next to the reason. Nothing else can catch this — the strings live in a
+    # Jinja template, so the coverage gate sees no change when they revert.
+    assert 'const tail = this.resumeBlockedReason(name) ? "." : " — Resume to continue.";' in page
+
+    # A blocked activation must be perceivable, not a silent no-op: `.btn.disabled` sets
+    # pointer-events:none, so Enter/Space is the only path that reaches the handler.
+    assert "refuseResume(key) {" in page
+    assert "refuseResume(i.rk) || resume(i.rk)" in button
+
+    # The server-side backstop is untouched: the prediction supplements it, never replaces it.
+    assert "if (body.created === false) {" in page
+
+
+def test_dashboard_resume_not_gated_on_environment_id(write_config):
+    """Resume must not require ``environment_id`` (#1145).
+
+    ``resume()`` never reads that field — it re-spawns in the same cwd and the
+    bridge-pointer.json drives the reconnection — and the field is not persisted, so a
+    card rebuilt from a DB row never carries one. Gating on it meant every stopped
+    Server Mode bridge lost its Resume button permanently at the first restart.
+
+    Resumable does not mean resumable *now*: standard bridges are capped at one live per
+    project and the cap RETURNS the live bridge instead of raising, so a Resume against a
+    stopped sibling is a silent no-op. That case must be explained, not offered.
+    """
+    page = _client(write_config).get("/").text
+    # The gate no longer mentions environment_id in either polarity.
+    assert "!!i.environment_id" not in page
+    assert "i.environment_id ||" not in page
+    # A declined resume (nothing revived — the cap returned the project's already-live
+    # bridge) must not be reported as success. The client reads `created`.
+    assert "if (body.created === false) {" in page
+    # ...and says which card it is about, at "warning" not "info": unlike start()'s
+    # idempotent branch, this means the requested action did not happen.
+    # ...unconditionally, so a decline that arrived without a `reason` still says
+    # something rather than silently snapping the card back to stopped.
+    assert 'this.toast(label + ": " + (body.reason || "nothing was resumed"), "warning");' in page
+    # The declined body is NOT absorbed. It shares the clicked row's project, so
+    # absorbing would write the other instance over that row's slot — the card would
+    # vanish and a running one appear in its place, reading as "the resume worked".
+    # _absorbRow therefore lives only in the else branch.
+    absorbed = page.index("this._absorbRow(body);", page.index("if (body.created === false) {"))
+    assert page.index("} else {", page.index("if (body.created === false) {")) < absorbed
 
 
 def test_dashboard_resume_controls_render(write_config):
@@ -1314,9 +1409,10 @@ def test_dashboard_multi_session_client_plumbing(write_config):
     spawn advisories (warnings[]) surface as toasts.
     """
     page = _client(write_config).get("/").text
-    # The fold: pty rows go to the flat id-keyed collection, never the project map.
+    # The fold: pty rows go to the flat id-keyed collection, standard rows to the
+    # rk-keyed map — neither is keyed by project (#1143).
     assert "ptySessions" in page
-    assert 'if (i.resume_mode === "pty") pty.push(i); else next[i.project] = i;' in page
+    assert 'if (i.resume_mode === "pty") pty.push(i); else next[i.rk] = i;' in page
     assert "_stamp(i) { i.rk = i.instance_id || i.project; return i; }" in page
     # Rows key by rk in both zones (the project name is not unique any more).
     assert page.count(':key="i.rk"') == 2  # Active + Recent bridge loops
@@ -1334,6 +1430,49 @@ def test_dashboard_multi_session_client_plumbing(write_config):
     # a stale project-keyed placeholder from the id index.
     assert "const pty = this.ptySessions.filter((s) => liveStatuses.includes(s.status));" in page
     assert "delete this._byId[body.project];" in page
+
+
+def test_dashboard_never_keys_bridge_rows_by_project(write_config):
+    """No SERVER row may be keyed by project name (#1143).
+
+    A project contributes several standard rows since #1109. On the common shape a
+    project-keyed map did not merely lose rows, it kept the wrong one: a pid-less
+    stopped row is carded in rediscover's third pass, after every live one, so the
+    RUNNING bridge was the row dropped and the dashboard reported "nothing running"
+    while a bridge was alive.
+
+    The one sanctioned project-keyed write is start()'s optimistic placeholder, whose
+    instance_id is not minted yet (`_stamp` falls its rk back to the project name) —
+    do not "fix" that one to satisfy the title.
+
+    Caveat on strength: the negative assertion below is textual, so an equivalent
+    spelling (`const k = i.project; next[k] = i`) would slip past it. It stops the
+    literal regression and a careless revert, not a determined rewrite. The predecessor
+    of this test pinned the buggy line *verbatim as correct*, which is why #1109 and
+    #1118 could invalidate its assumption without turning anything red — that is the
+    failure this test exists to not repeat.
+    """
+    page = _client(write_config).get("/").text
+    # The regression itself, and any equivalent reintroduction.
+    assert "next[i.project]" not in page
+    assert "this.instances[body.project] =" not in page
+    # The positive pin for the fold lives HERE too, not only in the neighbouring test:
+    # relaxing one assertion elsewhere must not leave the fold unguarded.
+    assert 'if (i.resume_mode === "pty") pty.push(i); else next[i.rk] = i;' in page
+    # Rows are absorbed under their own identity.
+    assert "this.instances[body.rk] = body;" in page
+    # "The standard bridge for this project" is answered by an explicit helper rather
+    # than by whichever row a map collapse happened to keep.
+    assert "standardFor(name) {" in page
+
+    # Deliberately NOT pinned here: the bodies of rowOf / runningCountFor / the
+    # stopping-preservation loop / the optimistic-placeholder guard. Asserting those
+    # verbatim pins SPELLING, not behaviour — a reflow or a rename turns them red with
+    # nothing changed, while the failure that actually produced #1143 was a line staying
+    # byte-identical as the invariant under it stopped holding. The negative assertions
+    # above are the durable half; the HTTP-level test in test_app_instances.py
+    # (test_instances_serves_every_standard_row_for_one_project) is what pins the
+    # property itself and would survive a client rewrite.
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the pty launch controls are POSIX-only")

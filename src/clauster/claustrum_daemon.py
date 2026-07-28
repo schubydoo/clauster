@@ -512,6 +512,40 @@ class ClaustrumDaemon:
         try:
             returncode = await asyncio.wait_for(proc.wait(), timeout=remaining)
         except TimeoutError as exc:
+            # The launcher is a `.cmd`/shim → python → detached-child chain on Windows, where
+            # `kill()` reaps only the process we hold. A launcher that timed out mid-detach
+            # would otherwise leave that chain running with our log file open. Best-effort:
+            # a failed reap must not mask the DaemonSpawnError this path exists to raise.
+            #
+            # ⚠️ Deliberately SYNCHRONOUS — do NOT "harmonise" this to `asyncio.to_thread`
+            # to match runner.py. `proc` here is an `asyncio.subprocess.Process`, and an
+            # await between the reap and `proc.kill()` lets the loop run the child watcher,
+            # which nulls the transport's `_proc`; the unguarded `kill()` below would then
+            # raise `ProcessLookupError` and skip `_unlink_token_handoff`, leaving the auth
+            # token on disk. With no await point that interleaving cannot happen. The psutil
+            # walk is one bulk snapshot (single-digit ms) on a path that only runs when a
+            # spawn already timed out, and this handler does synchronous FS work regardless.
+            #
+            # Semantic note: this also reaps a daemon the launcher DID detach before hanging
+            # (DETACHED_PROCESS doesn't erase the ppid link psutil walks), where previously it
+            # survived for a later `ensure()` to find. That is intended — we declared this
+            # launch failed, so we don't leave an unowned daemon serving from it.
+            #
+            # Read the blast radius literally: `force_kill_tree` walks `children(recursive=True)`,
+            # so this is "the daemon AND its hosted subtree", not just the daemon. A detached
+            # daemon has already spawned hosted agents (see `_spawn`'s env comment), it binds the
+            # SHARED socket as soon as it is up, `aclose()` treats it as designed to outlive our
+            # connection, and `self._lock` serialises `ensure()` in-process only — so another
+            # Clauster process could have connected in this window and loses its sessions too.
+            # Bounded by `spawn_timeout_seconds` and still the right call for a launch we have
+            # declared failed, but it is a wider reap than "we kill the daemon" suggests.
+            if procutil.is_windows():
+                try:
+                    procutil.force_kill_tree(proc.pid)
+                except Exception as tree_exc:  # noqa: BLE001 — never mask the spawn failure
+                    logger.debug(
+                        "claustrum: tree kill of launcher %s failed: %s", proc.pid, tree_exc
+                    )
             proc.kill()
             self._unlink_token_handoff(token_file)
             self._error = "claustrum -serve did not detach within the spawn timeout"

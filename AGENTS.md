@@ -56,28 +56,43 @@ CI gate; `scripts/e2e.sh` clears the addopts and runs it.
 
 ## Architecture
 
-App factory in `app.py`; entry point is `clauster.__main__:main` (`clauster run`).
-Key modules under `src/clauster/`:
+`app.py` is both the FastAPI app factory and where every route lives. The entry point is
+`clauster.__main__:main`, which owns argument parsing for all subcommands plus the hidden
+`__pty-keeper__` / `__recap-hook__` forms a frozen build re-invokes itself with.
 
-- **`runner.py`** — `SessionRunner`: spawn / stop / observe standard bridges.
-- **`pty_keeper.py`** — sidecar owning a true-resume (pty) bridge's PTY.
-- **`discovery.py` · `provisioning.py` · `trust.py`** — project discovery, create +
-  clone, workspace-trust writer.
-- **`bridge_log.py` · `logstream.py` · `redact.py`** — parse, tail, and redact the
-  bridge debug log for the WebSocket stream.
-- **`inspector.py`** — `claude agents --json` cross-check (liveness source).
-- **`supervisor.py`** — read/dispatch/stop for agent-view background sessions
-  (`claude --bg`); backs the background-agents panel and `/api/agents`.
-- **`claustrum_client.py` · `claustrum_daemon.py`** — async unix-socket NDJSON
-  JSON-RPC client, and connect-or-spawn lifecycle for the claustrum daemon.
-- **`hosted.py` · `hosted_state.py`** — hosted-channel engine (stream-json spawn,
-  control-plane routing, redact→ring→fan-out, fail-closed permission parking) and
-  its separate persistence keyed by `claustrum_process_id`.
-- **`auth.py`** — auth foundation; fails closed.
-- **`config.py` · `state.py` · `models.py`** — config load, `state.json`
-  persistence, domain models.
+**A standard spawn, end to end:** route in `app.py` → `runner.SessionRunner.spawn` →
+`trust.trust_directory` + `ensure_remote_control_enabled` (both must pass — fail closed) →
+subprocess → `bridge_log` parses the debug log → `logstream` tails it → `redact` →
+WebSocket. Read that path before changing any part of it.
 
-`templates/` (Jinja + jinja2-fragments) and `static/` render the Alpine/Tabler UI.
+Modules under `src/clauster/`, by subsystem:
+
+- **Bridge lifecycle** — `runner.py` (`SessionRunner`: spawn/stop/observe standard bridges) ·
+  `pty_keeper.py` (sidecar owning a true-resume bridge's PTY) · `inspector.py`
+  (`claude agents --json` liveness cross-check) · `supervisor.py` (`claude --bg` background
+  sessions, behind `/api/agents`) · `login_shepherd.py` (dashboard-driven `claude` login).
+- **Log → browser** — `bridge_log.py` · `logstream.py` · `redact.py`. Everything that
+  reaches the WebSocket passes through `redact`.
+- **Hosted channel** — `claustrum_client.py` (async unix-socket NDJSON JSON-RPC) ·
+  `claustrum_daemon.py` (connect-or-spawn daemon lifecycle) · `hosted.py` (stream-json
+  spawn, control-plane routing, redact→ring→fan-out, fail-closed permission parking) ·
+  `hosted_state.py`.
+- **Config · trust · auth** — `config.py` · `models.py` · `auth.py` (fails closed) ·
+  `trust.py` · `discovery.py` · `provisioning.py` (create + clone) · `config_editor.py`
+  (Tier-A allowlist editing) · ⚠️ `config_write.py` + `config_write_mcp.py` — the
+  **code-executing** write tier; read the invariants below before touching either.
+- **Ops & surfaces** — `ops.py` (`doctor`/`backup`/`restore`/`migrate`/`install-service`) ·
+  `usage.py` (cost + token accounting from a transcript JSONL) · `deps.py` (optional-extras
+  detection for the frozen binary) · `mcp_server.py` (`clauster mcp` stdio server) ·
+  `state.py`.
+
+**Two persistence stores, deliberately not one.** `state.json` (`state.py`) holds instances
+and their bridges; hosted sessions live in `hosted_state.py` keyed by
+`claustrum_process_id` so they can reattach across a clauster restart. Don't merge them.
+
+**The UI is served as HTML, not JSON.** `templates/` renders through `jinja2_fragments`
+(`Jinja2Blocks`, wired in `app.py`), so routes return Jinja *fragments* that Alpine swaps
+into the page; `static/` carries the vendored Tabler + Alpine assets.
 
 ---
 
@@ -117,6 +132,13 @@ Conventions live alongside the tests; the rules that matter most in-context:
   **Never remove, reorder, or run tests around that block, and never point a test at
   the real home directory.**
 - Coverage is gated at **96%**. New code needs tests in the same PR.
+- **Alembic is stubbed for a fresh database.** An autouse fixture swaps `upgrade_to_head`
+  for a copy of a once-per-worker template, so a test that asserts on migration
+  *side-effects* through `Persistence` — pre-migrate snapshots, `backups/`, Alembic call
+  counts — must be marked **`@pytest.mark.real_migration`** or it exercises the copy
+  instead. The failure mode is asymmetric: forgetting the marker doesn't error, it makes
+  the test pass **vacuously**. `--strict-markers` catches a typo'd marker; nothing catches
+  an absent one.
 - Use the existing fixtures rather than constructing app state by hand.
 - Tests must pass on Linux, macOS, and Windows — CI runs all three. Use
   `Path.as_posix()`, gate POSIX-only calls (`fcntl`, mode bits), and write
@@ -156,7 +178,7 @@ The branch ruleset enforces this; CI and review are the merge gate.
 | `ruff check` + `ruff format` | 99 cols, docstrings required |
 | Type check + docs lint | `just check` runs everything locally |
 | **Changeset** | Add one under `.changeset/`, or apply the `no-changelog` label if the PR genuinely has no user-facing effect (CI, refactor). Keep the body to **one tight line**. Use `major` for anything breaking — including a removed or renamed config key. |
-| **Code review** | [Greptile](https://www.greptile.com/) reviews every PR automatically. Its threads must be resolved before merge; unresolved threads block. Reply *and* resolve on the thread itself. |
+| **Code review** | [Greptile](https://www.greptile.com/) reviews every PR automatically. Its threads must be resolved before merge; unresolved threads block. Reply *and* resolve on the thread itself. ⚠️ Its free OSS tier caps at **100 reviews per billing period**, and when exhausted it posts a notice *in place of* a review — a `COMMENTED` review carrying **zero inline comments**. Check for inline comments, not for "Greptile reviewed". The maintainer can request a second opinion with `@claude review` (maintainer-only). ⚠️ "Advisory" refers to its review **state** — it submits as `COMMENT`, never `REQUEST_CHANGES`, so it cannot demand changes. Its **inline threads still block the merge** like any other: the ruleset sets `required_review_thread_resolution`, which is author-agnostic. Reply *and* resolve each one, exactly as for Greptile. |
 | Docs | If the change alters behavior, update `README.md`, `docs/`, and `clauster.yml.example` **in the same PR**. The published site gates on `uv run --extra docs mkdocs build --strict`, which `just check` now runs (also available alone as `just docs-build`). It catches what `lint-docs.sh` cannot: markdownlint checks Markdown *style*, not whether a link target resolves, so a link leaving the `docs/` tree (e.g. `../UPGRADING.md` — link the rendered `upgrading.md` instead) lints clean and still fails CI. |
 
 `Closes #N` goes in the PR **description**, never in a squash-merge commit body.

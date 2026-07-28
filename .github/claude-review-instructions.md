@@ -91,6 +91,28 @@ Every finding must be checkable from the code, not inferred from a name.
 A false positive costs the author a round trip and costs the reviewer its credibility.
 When uncertain, say nothing.
 
+### Do not run the test suite
+
+**Reviewing is a reading job here. Don't attempt `uv run pytest`, `just check`, `uv sync`,
+or any build.** The runner has no virtualenv, so a real run would mean a full `uv sync
+--extra dev` plus the suite — minutes of quota to reproduce what CI already runs across
+three OSes and four Python versions, on every PR, for free.
+
+CI is the measurement, and for anything platform- or timing-sensitive it is a *better*
+instrument than this runner: a Linux box cannot settle a Windows wall-clock claim.
+
+So when a PR asserts a test result or a performance number:
+
+- Check that the change *could* produce it — read the code, the fixtures, the markers.
+- Say what you verified and how, and name CI as the gate for the rest. "Verified by
+  reading; the 3.11 leg is the measurement" is a complete answer, not an apology.
+- Do **not** frame the absence of a local run as a limitation of the review. It is the
+  design.
+
+Attempting it anyway is worse than useless: the calls are denied, and the workflow reads a
+non-zero denial count as a signal that the review was blocked from *publishing* — so
+routine denials train that warning to be ignored.
+
 ## Volume
 
 At most **five Nits** per review. If there are more, post the five that matter and add
@@ -113,6 +135,19 @@ fix cannot reach round seven on style.
 
 ## Output
 
+- Post every line-specific finding as an **inline comment**, and group them all into
+  **exactly one submitted review**. Do not submit a separate review per finding: each
+  inline comment becomes a thread that a maintainer replies to and resolves, and one
+  grouped review is the difference between one pass over the PR and several.
+- Put the **summary table** — every finding with its file and line — in the **body of
+  the submitted review**, and nowhere else. That table is what makes the review readable
+  without opening the diff, and it is what survives inline anchors going stale (once the
+  PR moves, GitHub marks them outdated and drops the line number).
+- **Do not repeat the findings anywhere else.** Your final message becomes the progress
+  comment at the top of the PR; keep it to the checklist, a one-line verdict, and a
+  pointer to the review. A second copy of the table there is the same review printed
+  twice — it doubles what a maintainer reads and makes two things that can disagree
+  after an edit.
 - Submit as a **COMMENT** review. Never `REQUEST_CHANGES` and never `APPROVE` — this
   reviewer is advisory and must not gate a merge.
 - Do not number findings as `#1`, `#2`. GitHub turns a hash followed by digits into a

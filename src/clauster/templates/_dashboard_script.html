@@ -153,7 +153,10 @@
       // the component data-stack (no window fallback), so script-level consts referenced
       // from DIRECTIVES must be surfaced as component state under a scoped name.
       projectNames: PROJECT_NAMES,
-      instances: {},          // project -> its STANDARD bridge row (or an optimistic placeholder)
+      // rk -> a STANDARD bridge row (rk = instance_id), N per project (#1109/#1143). The
+      // one deliberate exception is start()'s optimistic placeholder, whose identity is
+      // not minted yet, so `_stamp` falls its rk back to the project name.
+      instances: {},
       ptySessions: [],        // interactive (pty) session rows, N per project (#779)
       _byId: {},              // rk -> row, across both collections (key-aware lookups)
       ptyPending: {},         // project -> true while a pty launch awaits its first row (#779)
@@ -729,14 +732,18 @@
       // for now — bg jobs are keyed by cwd, not project name).
       runningCountFor(name) {
         let n = 0;
-        const i = this.instances[name];
-        if (i && ["running", "starting", "stopping"].includes(i.status)) n++;
-        n += this.ptySessions.filter((s) => s.project === name && ["running", "starting", "stopping"].includes(s.status)).length;
+        // Count EVERY live standard row for the project, not "the" one (#1143). The spawn
+        // cap allows only one LIVE standard bridge per project, so this is about the row
+        // the old map surfaced: a stopped row could occupy the project's single slot and
+        // hide a live sibling, undercounting the badge to 0.
+        const live = ["running", "starting", "stopping"];
+        n += Object.values(this.instances).filter((i) => i.project === name && live.includes(i.status)).length;
+        n += this.ptySessions.filter((s) => s.project === name && live.includes(s.status)).length;
         n += this.hosted.filter((h) => h.project === name && ["running", "starting"].includes(h.status)).length;
         return n;
       },
-      // Bridge rows currently alive: each project's standard bridge PLUS every live
-      // interactive (pty) session — one row per instance, keyed by rk (#779).
+      // Bridge rows currently alive: every live standard bridge PLUS every live
+      // interactive (pty) session — one row per instance, keyed by rk (#779, #1143).
       activeBridges() {
         const live = ["running", "starting", "stopping"];
         return [...Object.values(this.instances), ...this.ptySessions].filter((i) => live.includes(i.status));
@@ -795,7 +802,10 @@
       // ended bridges are resumable by definition (isResumable), ended hosted only with a
       // claude_session_uuid, ended detached agents never. (#333 Option B)
       hasResumable() {
-        return this.endedBridges().length > 0
+        // "resumable" in the label must mean resumable NOW: a group whose every bridge is
+        // blocked by the one-live-standard-bridge cap offers no Resume that can do
+        // anything, so the label would promise an action none of the rows can perform.
+        return this.endedBridges().some((i) => !this.resumeBlockedReason(i.rk))
           || this.endedHosted().some((h) => h.claude_session_uuid);
       },
       // Status -> left-rail colour: the rail encodes liveness/attention, NOT mode (mode is
@@ -3231,18 +3241,28 @@
           if (this._authExpired(iRes) || this._authExpired(sRes) || this._authExpired(aRes) || this._authExpired(dRes) || this._authExpired(tRes)) return;
           if (iRes.ok) {
             const list = await iRes.json();
-            // Split the flat instance list (#779): the project-keyed map holds each
-            // project's single STANDARD bridge; interactive (pty) sessions are a flat
-            // id-keyed collection — a project map would clobber N sessions to one.
+            // Split the flat instance list (#779): interactive (pty) sessions are a flat
+            // id-keyed collection, standard bridges an rk-keyed map. BOTH key by identity,
+            // never by project (#1143): a project may contribute several standard rows
+            // (#1109), and a project-keyed map silently kept only the last of them.
+            // On the common shape that was not merely lossy but backwards: a pid-less
+            // stopped row is carded in rediscover's THIRD pass (runner.py ~4033), after
+            // every live one, so the running bridge was the row dropped and a project
+            // read "nothing running" while its bridge was alive. (For a stopped row that
+            // still carries a pid the loser is simply arbitrary — pass 1 cards those
+            // beside live rows in one loop over `_persisted`, which the store loads with
+            // no ORDER BY.) Either way the map was the wrong shape for the data.
             const next = {};
             const pty = [];
             for (const i of list) {
               this._stamp(i);
-              if (i.resume_mode === "pty") pty.push(i); else next[i.project] = i;
+              if (i.resume_mode === "pty") pty.push(i); else next[i.rk] = i;
             }
             // Preserve a local optimistic "stopping" until the server confirms it's gone.
-            for (const n of Object.keys(this.instances)) {
-              if (this.instances[n] && this.instances[n].status === "stopping" && !next[n]) next[n] = this.instances[n];
+            // Keyed by rk, so stopping ONE of a project's bridges can't hold a card open
+            // for a sibling that is genuinely gone.
+            for (const k of Object.keys(this.instances)) {
+              if (this.instances[k] && this.instances[k].status === "stopping" && !next[k]) next[k] = this.instances[k];
             }
             const byId = {};
             for (const i of Object.values(next)) byId[i.rk] = i;
@@ -3438,7 +3458,26 @@
       // sessions of one project can't collide; the key-aware helpers below resolve
       // either a project name (the standard bridge, project-row callers) or an rk.
       _stamp(i) { i.rk = i.instance_id || i.project; return i; },
-      rowOf(key) { return this._byId[key] || this.instances[key] || null; },
+      // The project row (Zone 1) and every name-keyed helper ask "the standard bridge for
+      // this project" — a question with several answers since #1109. Answer it explicitly
+      // rather than letting a map collapse decide (#1143): a LIVE bridge wins, else the
+      // most recently started row. Without the liveness preference a project whose newest
+      // row is stopped reads as stopped while an older bridge of the same project runs.
+      standardFor(name) {
+        // The pty predicate is redundant with the fold today, but it makes this helper
+        // correct on its own terms rather than on a caller's invariant.
+        const rows = Object.values(this.instances)
+          .filter((i) => i.project === name && i.resume_mode !== "pty");
+        if (!rows.length) return null;
+        const live = rows.find((i) => ["running", "starting", "stopping"].includes(i.status));
+        if (live) return live;
+        // `started_at` is absent on an optimistic placeholder and on a row rebuilt from a
+        // DB row that never recorded one; treat those as oldest so a real timestamp wins.
+        return rows.reduce((a, b) => ((b.started_at || "") > (a.started_at || "") ? b : a));
+      },
+      // Resolution order: exact rk (server rows + the optimistic placeholder, whose rk IS
+      // its project name), then the project-name fallback above.
+      rowOf(key) { return this._byId[key] || this.instances[key] || this.standardFor(key) || null; },
       labelOf(key) { return (this.rowOf(key) || {}).project || key; },
       // Replace/insert one fresh server row into the right collection (+ the id index),
       // so an action's response lands without waiting for the next poll.
@@ -3448,12 +3487,15 @@
           const at = this.ptySessions.findIndex((s) => s.instance_id === body.instance_id);
           if (at >= 0) this.ptySessions.splice(at, 1, body); else this.ptySessions.push(body);
         } else {
-          this.instances[body.project] = body;
+          this.instances[body.rk] = body;
           // A refresh during the in-flight launch may have indexed the optimistic
-          // project-keyed placeholder; drop it or rowOf(project) keeps returning the
-          // stale "starting" row until the next poll (rowOf falls back to the fresh
-          // this.instances[project] once the entry is gone).
+          // project-keyed placeholder; drop it from BOTH collections or rowOf(project)
+          // keeps returning the stale "starting" row until the next poll. The map entry
+          // matters now that rows are rk-keyed (#1143): the placeholder's key is the
+          // project name, so the fresh row lands beside it instead of replacing it, and
+          // rowOf's exact-key hit would keep preferring the stale one.
           delete this._byId[body.project];
+          if (body.rk !== body.project) delete this.instances[body.project];
         }
         this._byId[body.rk] = body;
         return body;
@@ -3482,8 +3524,18 @@
       // A one-line "why" + nudge for the two recoverable, you-didn't-end-it states.
       statusNote(name) {
         const s = this.displayStatus(name);
-        if (s === "interrupted") return "Ended without a Stop (host restart or external exit) — Resume to continue.";
-        if (s === "crashed") return "The bridge exited unexpectedly — Resume to continue.";
+        // Keep the CAUSE, drop the call to action when a Resume cannot run: this note and
+        // resumeBlockedReason render side by side, and "Resume to continue" next to
+        // "stop it first" told the operator to do the thing the neighbouring sentence
+        // says will not work — on exactly the row this pairing exists for (bridge A
+        // crashed, so you started B).
+        // Still terminate the sentence when blocked: the reason renders in the very next
+        // span with a 0.25rem gap, so an unpunctuated cause ran straight into it as one
+        // sentence — and a screen reader got no pause either, on the exact pairing this
+        // was written to make readable.
+        const tail = this.resumeBlockedReason(name) ? "." : " — Resume to continue.";
+        if (s === "interrupted") return "Ended without a Stop (host restart or external exit)" + tail;
+        if (s === "crashed") return "The bridge exited unexpectedly" + tail;
         return null;
       },
       isRunning(name) { return this.statusOf(name) === "running"; },
@@ -3519,15 +3571,67 @@
         return this.connectUrlMissing(name) ? "Preparing connect link…" : "";
       },
       errorOf(name) { return this.errors[name] || null; },
-      // A stopped/crashed bridge that still has an environment can reconnect to it —
-      // show "Resume" instead of "Start" and reuse its stored permission mode.
+      // A stopped/crashed bridge can be revived — show "Resume" instead of "Start" and
+      // reuse its stored permission mode.
+      //
+      // Deliberately NOT gated on `environment_id` (#1145). `resume()` does not read that
+      // field: it re-spawns `claude remote-control` in the same cwd and the reconnection
+      // is driven by the bridge-pointer.json the prior run left behind. Meanwhile
+      // `environment_id` is not persisted (it is not in the store's field set), so a card
+      // rebuilt from a DB row never has one — which made every stopped Server Mode bridge
+      // lose its Resume button the moment clauster restarted, permanently. pty rows only
+      // escaped because they were explicitly exempted from the same gate.
       isResumable(key) {
         const i = this.rowOf(key) || {};
-        // A pty (flag-form) bridge has no environment_id — true-resume works via
-        // `claude --continue`, not an environment reconnect — so treat a stopped pty
-        // instance as resumable too, else the Resume button (the only path to
-        // /resume → --continue) never renders and true-resume is unreachable.
-        return (i.status === "stopped" || i.status === "crashed") && (!!i.environment_id || i.resume_mode === "pty");
+        return i.status === "stopped" || i.status === "crashed";
+      },
+      // Resumable does not mean resumable RIGHT NOW. Standard bridges are capped at one
+      // live per project, and the cap is enforced by RETURNING the live bridge rather than
+      // raising — so a Resume against a stopped standard row while a sibling is live
+      // revives nothing. #1145 made the server say so; this says it BEFORE the click.
+      //
+      // ⚠️ This is a prediction, not the truth. The server's `created === false` answer
+      // (handled in resume()) is the authority and stays in place: a guard that can drift
+      // must never be the only thing standing between the operator and a false success.
+      //
+      // It could not work before #1143/#1144 — the project-keyed map structurally could not
+      // hold a stopped row and its live sibling at once, so this returned null every time.
+      // Now that rows key by instance_id it is satisfiable, which is why it lands here and
+      // not in #1147.
+      //
+      // "stopping" counts as live: that status is client-only, set optimistically before
+      // the DELETE returns, so the server row is still RUNNING and the cap still fires.
+      // Every other live set in this file reads the same three statuses.
+      resumeBlockedReason(key) {
+        const i = this.rowOf(key) || {};
+        if (i.resume_mode === "pty") return null;  // interactive sessions have no cap
+        // The sibling test below is NEGATIVE (`!== "pty"`) where the server's cap is
+        // positive (`=== "standard"`). Deliberate: `instances` also holds start()'s
+        // optimistic placeholder, which carries NO `resume_mode` at all, and a strict
+        // `=== "standard"` would miss it while a standard spawn is genuinely in flight.
+        // ⚠️ A third resume mode would land here AND in refresh()'s split and be counted
+        // as blocking — over-predicting, the unsafe direction. Revisit both if one is added.
+        const live = Object.values(this.instances).find(
+          (r) =>
+            r.project === i.project &&
+            r.rk !== i.rk &&
+            r.resume_mode !== "pty" &&
+            ["running", "starting", "stopping"].includes(r.status),
+        );
+        return live
+          ? "A Server Mode bridge is already running for this project — stop it first, or Forget this card."
+          : null;
+      },
+      // Refuse a blocked Resume *audibly*. `.btn.disabled` sets pointer-events:none, so a
+      // mouse click never reaches the handler and Enter/Space is the ONLY path that does —
+      // and returning the reason string silently made that path "the click did nothing",
+      // the failure this whole change removes. aria-describedby covers a screen-reader
+      // user who focuses the control; a sighted keyboard user got nothing. Truthy when it
+      // refused, so the caller reads `refuseResume(rk) || resume(rk)`.
+      refuseResume(key) {
+        const why = this.resumeBlockedReason(key);
+        if (why) this.toast(this.labelOf(key) + ": " + why, "warning");
+        return !!why;
       },
       resumeModeOf(key) { return (this.rowOf(key) || {}).resume_mode || ""; },
       // Plain-language effect of each permission mode, surfaced inline so it's visible
@@ -4332,14 +4436,23 @@
         // session is launched next to a live standard bridge, #779); a resumable
         // card hides the picker, so an untouched picker falls back to the stopped
         // standard bridge's recorded mode rather than the global default.
-        const existing = this.instances[name];
+        const existing = this.standardFor(name);
         const mode = this.resumeMode[name] || (existing && existing.resume_mode);
         const effective = mode || DEFAULT_RESUME_MODE;
         // Optimistic feedback: a standard launch owns the project card; an
         // interactive (pty) launch renders a pending stub row in the Active zone —
         // writing it into the project-keyed map would masquerade as a standard row.
         if (effective === "pty") this.ptyPending[name] = true;
-        else this.instances[name] = this._stamp({ project: name, status: "starting" });
+        else {
+          // Only when no standard row is already live for the project. Pre-#1143 the
+          // placeholder REPLACED the project's row; now it would sit beside it, so a
+          // re-click on a live Server Mode bridge would render a second "starting" card,
+          // read "2 running" in the badge, and let rowOf(project) resolve to the id-less
+          // placeholder (blanking the live bridge's metrics chip) until the POST returns.
+          if (!(existing && ["running", "starting"].includes(existing.status))) {
+            this.instances[name] = this._stamp({ project: name, status: "starting" });
+          }
+        }
         try {
           const reqBody = {
             project: name,
@@ -4411,8 +4524,35 @@
             if (row && prevStatus) row.status = prevStatus;
             this.toast(label + ": restart failed", "error");
           } else {
-            this._absorbRow(body);
-            if (body.status === "running") this.toast(label + ": running", "success");
+            // created===false means NOTHING was revived — the cap handed back the
+            // project's already-live bridge, or the target was already live. Reporting
+            // that as "<label>: running" was an affirmative false success (#1145).
+            //
+            // Do NOT _absorbRow it: for a standard row `body.project` equals the clicked
+            // row's project, so absorbing writes the OTHER instance over this row's slot
+            // — the clicked card vanishes from Recent and a running card appears in its
+            // place, which reads as "the resume worked", the very impression being fixed.
+            // Restore the row instead (it still holds the optimistic "starting" set
+            // before the POST) and let the trailing refresh() bring in server truth.
+            //
+            // Not "info" like start()'s idempotent branch: there, created===false means
+            // you asked for a bridge and have one. Here it means the action you asked for
+            // did not happen.
+            if (body.created === false) {
+              if (row && prevStatus) row.status = prevStatus;
+              // Fallback, not decoration: every decline path sets a reason today, but a
+              // future one that forgot would snap the card back to stopped with NO
+              // message — the same silence this branch exists to remove, minus the
+              // false success. The branch stays honest without trusting the server's
+              // phrasing to exist.
+              this.toast(label + ": " + (body.reason || "nothing was resumed"), "warning");
+            } else {
+              this._absorbRow(body);
+              // Advisories from the outcome (#778) — a same-dir pty resume raises the
+              // no-worktree advisory on every call, and dropping it here would lose it.
+              for (const w of body.warnings || []) this.toast(w, "warning");
+              if (body.status === "running") this.toast(label + ": running", "success");
+            }
           }
         } catch (e) {
           this.errors[label] = String(e);
@@ -4429,7 +4569,6 @@
             + "Clauster will take it over so you can Stop and observe it. Its prior "
             + "conversation isn't recoverable — a later Resume starts a fresh session.")) return;
         this.errors[name] = null;
-        const prev = this.instances[name];
         try {
           const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/adopt",
                                   { method: "POST" });
@@ -4454,7 +4593,8 @@
           }
         } catch (e) {
           this.errors[name] = String(e);
-          if (prev) this.instances[name] = prev; else delete this.instances[name];
+          // No rollback: nothing here removed a row (only the success path touches the
+          // map, via _absorbRow), and the unconditional refresh() below is authoritative.
           this.toast(name + ": adopt failed", "error");
         }
         await this.refresh();
