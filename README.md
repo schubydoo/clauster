@@ -53,21 +53,31 @@ dashboard password, writes a `clauster.yml`, and starts on it. Then click
 <table>
   <tr>
     <td width="50%" align="center">
-      <img src="https://raw.githubusercontent.com/schubydoo/clauster/main/docs/screenshots/dashboard-light.png" alt="Dashboard, light theme"><br>
-      <sub><b>Dark / light</b> — theme toggle persists across reloads</sub>
+      <img src="https://raw.githubusercontent.com/schubydoo/clauster/main/docs/screenshots/dashboard-light.png" alt="Dashboard in the light theme: an Active sessions zone listing two running sessions, above a list of four projects"><br>
+      <sub><b>Light theme</b> — running sessions on top, projects below</sub>
     </td>
     <td width="50%" align="center">
-      <img src="https://raw.githubusercontent.com/schubydoo/clauster/main/docs/screenshots/new-project-clone.png" alt="Create or clone a project"><br>
-      <sub><b>Create or clone</b> — SSRF-guarded, cloned code runs only on Start</sub>
+      <img src="https://raw.githubusercontent.com/schubydoo/clauster/main/docs/screenshots/dashboard-dark.png" alt="The same dashboard in the dark theme"><br>
+      <sub><b>Dark theme</b> — the toggle persists across reloads</sub>
     </td>
   </tr>
   <tr>
     <td width="50%" align="center">
-      <img src="https://raw.githubusercontent.com/schubydoo/clauster/main/docs/screenshots/login-dark.png" alt="Password login"><br>
+      <img src="https://raw.githubusercontent.com/schubydoo/clauster/main/docs/screenshots/launch-menu.png" alt="A project's launch menu, offering three ways to drive a session — in claude.ai or Desktop, in the background, or in the browser — plus a permission-mode picker"><br>
+      <sub><b>Launch menu</b> — pick how to drive it, and the permission mode</sub>
+    </td>
+    <td width="50%" align="center">
+      <img src="https://raw.githubusercontent.com/schubydoo/clauster/main/docs/screenshots/new-project-clone.png" alt="The new-project panel with the clone-from-git-URL option selected"><br>
+      <sub><b>Create or clone</b> — https/ssh only; cloning fetches files, runs nothing</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <img src="https://raw.githubusercontent.com/schubydoo/clauster/main/docs/screenshots/login-dark.png" alt="The Clauster password sign-in page"><br>
       <sub><b>Password login</b> — for non-loopback / networked deploys</sub>
     </td>
     <td width="50%" align="center" valign="middle">
-      <sub>Every action is reactive — cards insert, badges flip, and clone progress<br>
+      <sub>Every action is reactive — rows insert, badges flip, and clone progress<br>
       streams without a full-page reload. Self-hosted assets; no CDN, no trackers.</sub>
     </td>
   </tr>
