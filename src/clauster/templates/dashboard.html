@@ -1473,7 +1473,7 @@
             <div class="alert alert-danger py-2" x-show="configEditor.error" x-cloak x-text="configEditor.error"></div>
             <div class="alert alert-success py-2" data-test="cfg-saved" x-show="configEditor.saved" x-cloak>
               <div>Saved — restart Clauster to apply.
-                <a href="https://schubydoo.github.io/clauster/latest/operations/#restart" target="_blank" rel="noopener noreferrer"
+                <a href="https://schubydoo.github.io/clauster/operations/#restart" target="_blank" rel="noopener noreferrer"
                    class="alert-link">How do I restart?</a></div>
               {# The in-app restart re-execs in place (os.execv): bridges + hosted sessions
                  survive the swap and reattach, so a save-then-restart preserves running

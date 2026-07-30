@@ -31,6 +31,14 @@
     body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
            max-width: 40rem; margin: 4rem auto; padding: 0 1rem; line-height: 1.6; }
     code { background: #f4f4f4; padding: 0.1rem 0.3rem; border-radius: 3px; }
+    /* Two copy blocks, toggled by the class the script sets on <html> before the
+       body paints — so a genuine 404 never promises a redirect that the loop guard
+       has already declined to perform. Default (no JS) shows the "moved" copy: a
+       noscript visitor is far likelier to be following a stale pre-version link
+       than to have typed a bad path under /latest/. */
+    #missing { display: none; }
+    .not-found #moved { display: none; }
+    .not-found #missing { display: block; }
     @media (prefers-color-scheme: dark) {
       body { background: #1a1a1a; color: #e8e8e8; }
       code { background: #2c2c2c; }
@@ -47,9 +55,14 @@
       var first = rest.split("/")[0];
 
       // Already inside a version directory (or the bare root, which index.html
-      // owns) -> a real 404. Redirecting again would loop.
+      // owns) -> a real 404. Redirecting again would loop. Mark the document so the
+      // body shows "not found" rather than promising a redirect that never comes;
+      // setting it on <html> here (head, pre-paint) avoids a flash of wrong copy.
       if (first === "" || first === "latest" || first === "dev" ||
-          /^[0-9]+\.[0-9]+$/.test(first)) { return; }
+          /^[0-9]+\.[0-9]+$/.test(first)) {
+        document.documentElement.className = "not-found";
+        return;
+      }
 
       window.location.replace(
         BASE + "latest/" + rest + window.location.search + window.location.hash
@@ -58,15 +71,28 @@
   </script>
 </head>
 <body>
-  <h1>This page moved</h1>
-  <p>
-    The Clauster documentation is now versioned. Pages that used to live at the
-    site root are under <code>/latest/</code> (the newest release) or
-    <code>/dev/</code> (unreleased, built from <code>main</code>).
-  </p>
-  <p>
-    You should be redirected automatically. If not, try
-    <a href="/clauster/latest/">the latest documentation</a>.
-  </p>
+  <div id="moved">
+    <h1>This page moved</h1>
+    <p>
+      The Clauster documentation is now versioned. Pages that used to live at the
+      site root are under <code>/latest/</code> (the newest release) or
+      <code>/dev/</code> (unreleased, built from <code>main</code>).
+    </p>
+    <p>
+      You should be redirected automatically. If not, try
+      <a href="/clauster/latest/">the latest documentation</a>.
+    </p>
+  </div>
+  <div id="missing">
+    <h1>Page not found</h1>
+    <p>
+      This page does not exist in this version of the Clauster documentation. It may
+      have been added after this release, or removed in it.
+    </p>
+    <p>
+      Try <a href="/clauster/latest/">the latest documentation</a>, or use the version
+      selector in the site header to switch versions.
+    </p>
+  </div>
 </body>
 </html>

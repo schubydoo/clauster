@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <!--
     Custom `mike set-default` redirect stub for the site root
     (https://schubydoo.github.io/clauster/). mike's built-in template is a bare
@@ -11,7 +12,14 @@
     makes the bare root preview correctly.
 
     Wired in via .github/workflows/docs.yml: `mike set-default --push --template
-    mike/redirect.html latest`. `{{href}}` is substituted by mike.
+    mike/redirect.html latest`. mike renders this file as a Jinja template and
+    substitutes the href placeholder used in the noscript refresh and the script
+    below.
+
+    ⚠️ Do NOT write that placeholder literally anywhere in this comment. mike builds
+    a jinja2.Template over the WHOLE file and Jinja does not special-case HTML
+    comments, so it would be substituted here too — leaving a comment that documents
+    the placeholder by destroying it.
 
     URLs point at the `latest` alias, which always resolves to the newest
     release. There is deliberately no og:image — clauster does not build social
@@ -28,7 +36,10 @@
   <meta name="twitter:title" content="Clauster">
   <meta name="twitter:description" content="Self-hosted web UI for spawning and managing Claude Code remote-control bridges on a remote host.">
   <noscript>
-    <meta http-equiv="refresh" content="1; url={{href}}" />
+    <!-- Delay 0, not mike's default 1: a timed refresh of 1-20s is WCAG 2.2.1
+         failure F40, and 0 is the documented exemption (technique H76). It also
+         drops a pointless one-second stall for noscript users. -->
+    <meta http-equiv="refresh" content="0; url={{href}}" />
   </noscript>
   <script>
     window.location.replace(
