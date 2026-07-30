@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!--
+    Root 404 handler for the versioned (mike) docs site.
+
+    WHY THIS EXISTS. Before versioning, every page lived at the site root:
+    https://schubydoo.github.io/clauster/quickstart/. mike moves them under a
+    version directory (/latest/quickstart/), and `mike set-default` only writes a
+    root index.html — it rescues `/` and nothing beneath it. Every previously
+    published deep link would 404: README links we can rewrite, but also
+    bookmarks, Reddit posts, and search results we cannot.
+
+    GitHub Pages serves the repository-root 404.html for any path it cannot
+    resolve, so this stub forwards /<path> to /latest/<path>, preserving the
+    query string and fragment. The HTTP status stays 404 (Pages cannot rewrite
+    it); this rescues humans following a stale link, not crawlers.
+
+    NOT part of the MkDocs build. It is copied to the gh-pages root by the
+    "Preserve pre-version deep links" step in .github/workflows/docs.yml, because
+    anything inside docs/ would be built into each version directory instead.
+
+    LOOP GUARD. If the first path segment is already a version ("latest", "dev",
+    or an X.Y snapshot), the page is genuinely missing and we must NOT redirect —
+    otherwise /latest/nope/ would bounce to /latest/latest/nope/ and onward.
+  -->
+  <title>Page moved — Clauster docs</title>
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+           max-width: 40rem; margin: 4rem auto; padding: 0 1rem; line-height: 1.6; }
+    code { background: #f4f4f4; padding: 0.1rem 0.3rem; border-radius: 3px; }
+    /* Two copy blocks, toggled by the class the script sets on <html> before the
+       body paints — so a genuine 404 never promises a redirect that the loop guard
+       has already declined to perform. Default (no JS) shows the "moved" copy: a
+       noscript visitor is far likelier to be following a stale pre-version link
+       than to have typed a bad path under /latest/. */
+    #missing { display: none; }
+    .not-found #moved { display: none; }
+    .not-found #missing { display: block; }
+    @media (prefers-color-scheme: dark) {
+      body { background: #1a1a1a; color: #e8e8e8; }
+      code { background: #2c2c2c; }
+      a { color: #8ab4f8; }
+    }
+  </style>
+  <script>
+    (function () {
+      // ⚠️ COUPLED TO `site_url` IN mkdocs.yml — keep the two in step. Nothing
+      // enforces it, and the failure is silent rather than loud: after a repo rename
+      // or a move to a custom domain, the indexOf test below returns early, the
+      // handler does nothing, and every stale deep link quietly falls back to the
+      // static copy with no redirect. No test or lint would notice.
+      var BASE = "/clauster/";
+      var path = window.location.pathname;
+      if (path.indexOf(BASE) !== 0) { return; }
+
+      var rest = path.slice(BASE.length);
+      var first = rest.split("/")[0];
+
+      // Already inside a version directory (or the bare root, which index.html
+      // owns) -> a real 404. Redirecting again would loop. Mark the document so the
+      // body shows "not found" rather than promising a redirect that never comes;
+      // setting it on <html> here (head, pre-paint) avoids a flash of wrong copy.
+      if (first === "" || first === "latest" || first === "dev" ||
+          /^[0-9]+\.[0-9]+$/.test(first)) {
+        document.documentElement.className = "not-found";
+        return;
+      }
+
+      window.location.replace(
+        BASE + "latest/" + rest + window.location.search + window.location.hash
+      );
+    })();
+  </script>
+</head>
+<body>
+  <div id="moved">
+    <h1>This page moved</h1>
+    <p>
+      The Clauster documentation is now versioned. Pages that used to live at the
+      site root are under <code>/latest/</code> (the newest release) or
+      <code>/dev/</code> (unreleased, built from <code>main</code>).
+    </p>
+    <p>
+      <!-- Phrased as a conditional, because it must also be true with JavaScript
+           disabled. The redirect target is computed at runtime from the path, so
+           unlike mike/redirect.html there is no fixed href for a <noscript> meta
+           refresh to use — a no-JS visitor gets this copy and the link below is
+           their only route on. -->
+      If you are not redirected automatically, try
+      <a href="/clauster/latest/">the latest documentation</a>.
+    </p>
+  </div>
+  <div id="missing">
+    <h1>Page not found</h1>
+    <p>
+      This page does not exist in this version of the Clauster documentation. It may
+      have been added after this release, or removed in it.
+    </p>
+    <p>
+      Try <a href="/clauster/latest/">the latest documentation</a>, or use the version
+      selector in the site header to switch versions.
+    </p>
+  </div>
+</body>
+</html>
