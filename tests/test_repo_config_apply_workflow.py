@@ -7,7 +7,12 @@ import json
 import re
 from pathlib import Path
 
+import pytest
 import yaml
+
+# Static guard over a .github/** file: also run in the always-on `lint` job, because the
+# `tests` matrix is skipped on a `.github/**`-only PR (.github/actions/changed-code).
+pytestmark = pytest.mark.repo_meta
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "repo-config-apply.yml"

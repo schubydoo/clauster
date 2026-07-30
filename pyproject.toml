@@ -196,6 +196,12 @@ addopts = "-n auto --strict-markers --timeout=90 --timeout-method=thread --cov=s
 markers = [
     "real_migration: run the actual Alembic upgrade instead of the template-DB copy",
     "e2e: browser end-to-end test (agent-browser + real Chromium; opt-in, see scripts/e2e.sh)",
+    # Static guard over a repo-meta file (.github/**, rulesets, repo-config). These run in the
+    # always-on required `lint` job as well as the normal suite, because the `tests` matrix is
+    # SKIPPED on a `.github/**`-only PR (see .github/actions/changed-code) — which is exactly
+    # the PR these guards exist to police. Marking a new one is enforced by
+    # test_ci_change_filter.py::test_every_repo_meta_guard_is_marked.
+    "repo_meta: static guard over a repo-meta file; also run in the always-on lint job",
 ]
 
 [tool.coverage.run]

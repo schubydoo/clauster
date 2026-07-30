@@ -1,7 +1,8 @@
 name: "Classify changed files"
 description: >-
-  Output `code=true` unless a PR touches ONLY docs/meta files (so heavy jobs can
-  be skipped on docs-only PRs). Fail-safe: any unrecognised path, an empty diff,
+  Output `code=true` unless a PR touches ONLY docs/meta files — prose, images,
+  and `.github/**` repo automation — so the heavy jobs can be skipped on a
+  docs-only or CI-only PR. Fail-safe: any unrecognised path, an empty diff,
   or any non-PR event (push:main, schedule) resolves to code=true — we never skip
   on main/cron. Requires a prior `actions/checkout` with `fetch-depth: 0` (the
   three-dot diff needs the merge-base). Single source of truth shared by ci.yml,
@@ -35,16 +36,56 @@ runs:
           echo "Empty/failed diff → code=true (fail-safe toward running)."
           exit 0
         fi
+        # Files that are ALWAYS code, even though the allowlist below would
+        # otherwise excuse them. Two kinds of file qualify:
+        #   - the workflows that GATE on this classifier (`ci`, `security`) plus the
+        #     composite actions they call — editing one changes HOW the heavy jobs
+        #     are invoked;
+        #   - `lint.yml`, which HOSTS the `repo_meta` guards. On a `.github/**`-only
+        #     PR the matrix is skipped, so that step is the ONLY thing validating the
+        #     change. Without this entry a PR whose diff is just `lint.yml` would
+        #     classify code=false, skip the matrix, and run a `lint` job with the
+        #     guard step deleted — removing the whole bootstrap (including
+        #     `test_every_repo_meta_guard_is_marked`) via a green, CI-only PR, with
+        #     the guard against that executing nowhere.
+        # Either way the edit must still face the heavy jobs, or it merges
+        # unvalidated and only breaks later on main. This is the one self-reference
+        # the blanket `^\.github/` rule below cannot cover — keep it in sync if
+        # another workflow starts consuming `code` OR hosting a guard.
+        selfgating='^\.github/(workflows/(ci|lint|security)\.yml$|actions/)'
         # A path is non-code (docs/meta) IFF it matches this allowlist. Any file
         # outside it flips the whole PR to code=true — err toward running CI.
         # `\.md$` already covers .github/**/*.md (so no separate entry). `scratch/`
         # is gitignored and never appears in a committed diff, so it's omitted —
         # if anything there were ever force-committed it'd be treated as code
         # (scanned), not silently skipped.
-        noncode='(\.md$|^docs/|^mkdocs\.yml$|^LICENSE$|\.(png|jpe?g|gif|svg|ico)$|^\.github/(CODEOWNERS|FUNDING\.yml)$)'
+        #
+        # `^\.github/` (minus `selfgating`) covers the rest of the repo's
+        # automation — other workflows, issue/PR templates, rulesets, repo-config
+        # baselines, dependabot/renovate config. None of it changes what pytest,
+        # `uv build`, or the Docker image do, so the 3-OS matrix has nothing to
+        # prove on a CI-only PR. It subsumes the old CODEOWNERS/FUNDING entries.
+        # Measured on #1131 (two workflow files + two .md, zero src/ or tests/):
+        # 18 jobs / 2298 runner-seconds, of which 1987s (86%) was the test matrix
+        # plus the musl canary re-validating untouched code.
+        #
+        # WHAT STILL COVERS A `.github/**`-ONLY PR, so the trim is not a blind
+        # spot: `lint` (required, never filtered) runs yamllint over the workflow
+        # YAML AND `pytest -m repo_meta`, the static guards over .github/** —
+        # which is how a change HERE, or to osv-scanner.yml's paths filter, or to
+        # the rulesets, still gets validated despite the `tests` matrix skipping.
+        # CodeQL is never gated on this classifier, and `conventional PR title`
+        # always runs. Known thinner spot: zizmor's workflow audit skips on
+        # `synchronize` (pre-existing), so a fixup push to a workflow-only PR is
+        # audited on the next open/reopen/ready_for_review, not on that push.
+        noncode='(\.md$|^docs/|^mkdocs\.yml$|^LICENSE$|\.(png|jpe?g|gif|svg|ico)$|^\.github/|^\.greptile/)'
         code=false
         while IFS= read -r f; do
           [ -z "$f" ] && continue
+          if printf '%s\n' "$f" | grep -Eq "$selfgating"; then
+            code=true
+            break
+          fi
           if ! printf '%s\n' "$f" | grep -Eq "$noncode"; then
             code=true
             break
