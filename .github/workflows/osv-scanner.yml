@@ -20,6 +20,27 @@ on:
     # dependency-review on manifest CVEs, so a per-push rerun adds little; push:main
     # + the weekly cron remain the real gate.
     types: [opened, reopened, ready_for_review]
+    # Scoped to what this scan actually reads: the committed lockfiles listed in
+    # the header, the manifests they resolve from, and this workflow itself (so a
+    # change here is still validated on its own PR). A `paths:` filter is SAFE
+    # here — and only here — because NEITHER job below is a required status check:
+    # a PR that skips the whole workflow leaves no context stuck at "Expected —
+    # waiting for status", which is the #196 breakage that a paths-filtered
+    # REQUIRED check causes. (ci.yml / security.yml back required contexts and so
+    # must keep firing on every PR; they trim via an in-job conditional instead.)
+    # push:main + the weekly cron still scan everything, so nothing goes
+    # unscanned — this only stops re-scanning unchanged lockfiles on PRs that
+    # cannot have moved a dependency.
+    paths:
+      - "uv.lock"
+      - "pyproject.toml"
+      - "package.json"
+      - "package-lock.json"
+      - "tests/e2e/package.json"
+      - "tests/e2e/package-lock.json"
+      - "flake.lock"
+      - "flake.nix"
+      - ".github/workflows/osv-scanner.yml"
   schedule:
     - cron: "27 5 * * 1" # weekly full scan, Monday 05:27 UTC
   push:
