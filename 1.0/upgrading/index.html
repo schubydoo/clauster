@@ -1,0 +1,1942 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Self-hosted web UI for spawning and managing Claude Code remote-control bridges on a remote host.">
+      
+      
+      
+        <link rel="canonical" href="https://schubydoo.github.io/clauster/1.0/upgrading/">
+      
+      
+        <link rel="prev" href="../troubleshooting/">
+      
+      
+        <link rel="next" href="../changelog/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Upgrading - Clauster</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#upgrading-clauster" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+          <aside class="md-banner md-banner--warning">
+            <div class="md-banner__inner md-grid md-typeset">
+              
+  You are not reading the documentation for the latest release.
+  <a href="../..">
+    <strong>Go to the latest release.</strong>
+  </a>
+
+            </div>
+            <script>var el=document.querySelector("[data-md-component=outdated]"),base=new URL(".."),outdated=__md_get("__outdated",sessionStorage,base);!0===outdated&&el&&(el.hidden=!1)</script>
+          </aside>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="Clauster" class="md-header__button md-logo" aria-label="Clauster" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Clauster
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Upgrading
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/schubydoo/clauster" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    schubydoo/clauster
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="Clauster" class="md-nav__button md-logo" aria-label="Clauster" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    Clauster
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/schubydoo/clauster" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    schubydoo/clauster
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quickstart
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concepts
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Concepts
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../concepts/how-it-works/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    How it works
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../concepts/glossary/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Glossary
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture (contributors)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    How Clauster secures itself
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../privacy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Privacy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuring Clauster
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/config-editor/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The in-app config editor
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../networking/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Networking & exposing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI commands
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../public-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Public API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../mcp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MCP server
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/platforms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Platform support
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations runbook
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Upgrading
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Upgrading
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#012-10-a-bridges-id-in-clauster-mcp-is-now-its-instance-id" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        0.12 → 1.0: a bridge's id in clauster mcp is now its instance id
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#012-10-clauster-mcp-write-tools-default-off" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        0.12 → 1.0: clauster mcp write tools default off
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#012-10-the-dashboard-now-blocks-cross-site-requests-even-with-no-password" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        0.12 → 1.0: the dashboard now blocks cross-site requests even with no password
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#012-10-sqlite-only-database_url-removed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        0.12 → 1.0: SQLite-only; database_url removed
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#012-10-docker-image-is-now-alpine-based" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        0.12 → 1.0: Docker image is now Alpine-based
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#011-012-the-state-store-moves-to-sqlite" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        0.11 → 0.12: the state store moves to SQLite
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#upgrade-by-install-method" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrade, by install method
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pypi-install" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        PyPI install
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#docker-ghcr" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Docker / GHCR
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#from-source-editable-git-venv-local-development" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        From source (editable git + venv — local development)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#rolling-back" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rolling back
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Project
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../support/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Support
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security-policy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reporting a vulnerability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#012-10-a-bridges-id-in-clauster-mcp-is-now-its-instance-id" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        0.12 → 1.0: a bridge's id in clauster mcp is now its instance id
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#012-10-clauster-mcp-write-tools-default-off" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        0.12 → 1.0: clauster mcp write tools default off
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#012-10-the-dashboard-now-blocks-cross-site-requests-even-with-no-password" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        0.12 → 1.0: the dashboard now blocks cross-site requests even with no password
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#012-10-sqlite-only-database_url-removed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        0.12 → 1.0: SQLite-only; database_url removed
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#012-10-docker-image-is-now-alpine-based" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        0.12 → 1.0: Docker image is now Alpine-based
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#011-012-the-state-store-moves-to-sqlite" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        0.11 → 0.12: the state store moves to SQLite
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#upgrade-by-install-method" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrade, by install method
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pypi-install" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        PyPI install
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#docker-ghcr" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Docker / GHCR
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#from-source-editable-git-venv-local-development" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        From source (editable git + venv — local development)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#rolling-back" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rolling back
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<!-- markdownlint-disable MD041 -->
+<!-- Rendered copy of the canonical root UPGRADING.md (GitHub community-health
+     files must live at the repo root; this stub surfaces it on the site). -->
+<h1 id="upgrading-clauster">Upgrading Clauster<a class="headerlink" href="#upgrading-clauster" title="Permanent link">&para;</a></h1>
+<p>Clauster has <strong>no in-app self-update</strong> — by design. A web service that rewrites
+its own code and restarts itself is a security and operability footgun, so
+upgrades are an external operation: update the package, then restart. Run
+<code>clauster doctor</code> after upgrading to confirm config + environment are still sane
+(it also warns when your checkout is behind its upstream).</p>
+<blockquote>
+<p><strong>Not the same as the in-app "Restart Clauster" action.</strong> The config editor's
+<strong>Restart Clauster</strong> button (#483) re-execs the <em>currently installed</em> process in
+place (<code>os.execv</code> — same code, same PID) only to reload a <strong>config</strong> change. It
+never fetches, installs, or rewrites code, so the no-self-<strong>update</strong> stance above
+is unchanged: a version upgrade is still update-the-package-then-restart. The
+in-app restart simply spares you a shell for a config reload; the live-session
+caveat below applies to it exactly as to any restart (under a default
+<code>KillMode=control-group</code> unit a restart reaps the cgroup and takes live bridges
+with it; a <code>KillMode=process</code> unit — what <code>clauster install-service</code> writes — does
+not, so they survive).</p>
+</blockquote>
+<p>Always <strong>back up first</strong> — it's a few seconds and makes any upgrade reversible:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>clauster<span class="w"> </span>backup<span class="w"> </span>-c<span class="w"> </span>/path/to/clauster.yml<span class="w"> </span>-o<span class="w"> </span>./clauster-backups/<span class="w">   </span><span class="c1"># tar.gz of state_dir + config</span>
+</code></pre></div>
+<p>The on-disk <strong>database</strong> schema is migrated <strong>automatically and fail-closed</strong> on
+startup — clauster refuses to serve until the migration succeeds, so you never
+run a database migration by hand. (The separate <code>clauster migrate</code> command is a
+<em>legacy</em> helper that only upgrades an older flat-file <code>state.json</code>; on a 0.12+
+deployment it has nothing to do.)</p>
+<h2 id="012-10-a-bridges-id-in-clauster-mcp-is-now-its-instance-id">0.12 → 1.0: a bridge's <code>id</code> in <code>clauster mcp</code> is now its instance id<a class="headerlink" href="#012-10-a-bridges-id-in-clauster-mcp-is-now-its-instance-id" title="Permanent link">&para;</a></h2>
+<p><code>list_sessions</code> reported each bridge's <strong>project name</strong> as its <code>id</code>. A project can
+run several bridges at once — one standard (Server Mode) bridge plus any number of
+Interactive Sessions — so that id was not unique: every bridge on a project came
+back with the same one. As of 1.0 a bridge's <code>id</code> is its stable <strong>instance id</strong>, and
+the project name stays available as the separate <code>project</code> field.</p>
+<p>This matters if you consume <code>list_sessions</code> output. A working session's
+<code>parent_instance</code> now joins to exactly one bridge <code>id</code>, which it could not do
+before. If you keyed bridges by <code>id</code> and assumed it was the project name, read
+<code>project</code> instead.</p>
+<p><code>session_status</code> still accepts a <strong>project name</strong> for a bridge when that project
+runs exactly one. When it runs several, the name no longer identifies a single
+session, so instead of returning whichever bridge was registered first you get:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="p">{</span><span class="nt">&quot;found&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;myproject&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;ambiguous&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;&lt;bridge id&gt;&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;&lt;bridge id&gt;&quot;</span><span class="p">]}</span>
+</code></pre></div>
+<p>Retry with one of the returned ids. <code>stop_session</code> / <code>resume_session</code> accept either
+form, so they keep working — but note a project name that matches several bridges
+still resolves to the one the dashboard displays rather than reporting the
+ambiguity, so pass an <strong>instance id</strong> when you mean a specific bridge.</p>
+<h2 id="012-10-clauster-mcp-write-tools-default-off">0.12 → 1.0: <code>clauster mcp</code> write tools default off<a class="headerlink" href="#012-10-clauster-mcp-write-tools-default-off" title="Permanent link">&para;</a></h2>
+<p>The <a href="../mcp/"><code>clauster mcp</code></a> stdio server's <strong>write</strong> tools —
+<code>spawn_session</code>, <code>stop_session</code>, <code>resume_session</code> — shipped always-on in #950. As
+of 1.0 they are gated behind a new <strong><code>mcp.allow_writes</code></strong> config key that
+<strong>defaults off</strong>, so the stdio MCP surface is <strong>read-only by default</strong>
+(<code>list_sessions</code> / <code>session_status</code> only). The stdio transport is local-privileged
+and unauthenticated, so understating its capability — a banner/help that said
+"read-only" while the surface could start and stop bridges — was the security-
+relevant misstatement this closes (#1010).</p>
+<p>If an MCP client relied on driving the bridge lifecycle through <code>clauster mcp</code>,
+re-enable it explicitly:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="nt">mcp</span><span class="p">:</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="w">  </span><span class="nt">allow_writes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+<p>Like the <code>config_write</code> / <code>login_shepherd</code> gates, <code>mcp.allow_writes</code> is
+file/CLI-managed only (<strong>not</strong> web-editable). The read tools are unchanged.</p>
+<h2 id="012-10-the-dashboard-now-blocks-cross-site-requests-even-with-no-password">0.12 → 1.0: the dashboard now blocks cross-site requests even with no password<a class="headerlink" href="#012-10-the-dashboard-now-blocks-cross-site-requests-even-with-no-password" title="Permanent link">&para;</a></h2>
+<p><strong>What changed, in plain terms.</strong> A website you open in your browser can quietly send
+requests to programs running on your own computer — clauster included. Before 1.0, when
+clauster had no password set (the default), it didn't check <em>where</em> a request came from.
+So a malicious page you happened to visit could drive your dashboard (start/stop sessions,
+trust a folder, restart the service) or read your live session output, without you ever
+seeing it. As of 1.0 clauster checks the origin of every state-changing request and every
+live-view (WebSocket) connection and rejects any that came from somewhere else. (Requests
+with no origin at all — command-line tools, scripts, <code>curl</code> — are unaffected: only a
+browser attaches an origin, so there is nothing to spoof.)</p>
+<p><strong>Do you need to do anything?</strong> Check your config's <code>host:</code> setting first — that, not the
+address you browse, is what decides:</p>
+<ul>
+<li><strong><code>host:</code> is <code>127.0.0.1</code> or <code>localhost</code> (the default), and you browse it at that same
+  address and port.</strong> Nothing to do. You're simply safer.</li>
+<li><strong><code>host:</code> is loopback, but you reach it some <em>other</em> way</strong> — you need to list that
+  address (one line, below):</li>
+<li>a <strong>tunnel or reverse proxy</strong> in front of clauster (Cloudflare Tunnel, Tailscale
+    Serve, nginx/Caddy) — the address is the public hostname, not <code>localhost</code>;</li>
+<li>an <strong>SSH port-forward onto a different local port</strong>, e.g.
+    <code>ssh -L 9000:localhost:7621</code> → you browse <code>http://localhost:9000</code>, and the <em>port</em>
+    no longer matches. (Forwarding to the <em>same</em> port keeps working.)</li>
+<li><strong><code>host:</code> is anything else — <code>0.0.0.0</code>, a LAN IP, or Docker (the image binds <code>0.0.0.0</code>).</strong>
+  Then clauster trusts <strong>nothing</strong> automatically, and you must list the address you browse
+  to <strong>even if that address is <code>http://localhost:7621</code></strong>. This is the case most likely to
+  surprise you: the container is on <code>0.0.0.0</code> internally, so browsing it at <code>localhost</code>
+  still needs the entry.</li>
+</ul>
+<p>In the second and third cases your own buttons and live views are refused until you
+list the address you actually browse to:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="nt">auth</span><span class="p">:</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">  </span><span class="nt">allowed_origins</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;http://localhost:9000&quot;</span><span class="p p-Indicator">]</span><span class="w">   </span><span class="c1"># the address you type into the browser</span>
+</code></pre></div>
+<p>Use the address <strong>as it appears in your browser's URL bar</strong> — scheme, host, and port — not
+clauster's internal bind address. It fails loudly, never silently: a refused action, or a
+live view that won't connect, with <code>origin check failed</code> in the response.</p>
+<p>If clauster <strong>already has a password</strong>, nothing changes for you here — a
+non-loopback or proxied deployment has always needed <code>auth.allowed_origins</code>. This change
+only extends that same requirement to deployments running <em>without</em> a password, which
+previously skipped the check entirely. (And if you're reachable beyond your own machine,
+setting a password is worth doing regardless.)</p>
+<h2 id="012-10-sqlite-only-database_url-removed">0.12 → 1.0: SQLite-only; <code>database_url</code> removed<a class="headerlink" href="#012-10-sqlite-only-database_url-removed" title="Permanent link">&para;</a></h2>
+<p>1.0 commits to SQLite as the only persistence substrate (#796) — the
+never-really-supported <code>database_url</code> config key (a Postgres DSN escape hatch)
+is gone. A leftover <code>database_url</code> (the YAML key <strong>or</strong> the
+<code>CLAUSTER_DATABASE_URL[_FILE]</code> env override) is <strong>ignored with a logged
+warning</strong>, not rejected — your data goes to SQLite regardless. Remove the
+key/env to silence the warning. <code>clauster.db</code> under <code>state_dir</code> remains the only database;
+nothing about the schema, migrations, or <code>state_dir</code> layout changes.</p>
+<h2 id="012-10-docker-image-is-now-alpine-based">0.12 → 1.0: Docker image is now Alpine-based<a class="headerlink" href="#012-10-docker-image-is-now-alpine-based" title="Permanent link">&para;</a></h2>
+<p>The published container image moved from Debian-slim to an <strong>Alpine (musl)</strong> base — it's
+smaller and installs explicitly pinned, Renovate-tracked packages instead of an unpinned
+<code>apt upgrade</code>. Running the stock image (<code>docker run …</code>) is unchanged. Two setups <strong>are</strong>
+affected:</p>
+<ul>
+<li><strong>You build a derived image <code>FROM</code> the clauster image</strong>: use <code>apk</code> (not <code>apt</code>) to add
+  packages, and note that <strong><code>su-exec</code> replaces <code>gosu</code></strong> as the privilege-drop helper.</li>
+<li><strong>You mount the host <code>claude</code> binary into the container</strong> (the README /
+  <code>compose.yaml</code> pattern): a glibc build from your host <strong>no longer execs</strong> on the musl
+  base — launches fail with <code>exec /usr/local/bin/claude: no such file or directory</code> (or
+  <code>claude: not found</code> via a shell) even though the file is present; the kernel is
+  reporting the missing glibc loader, not the binary. Mount a <strong>musl</strong> build instead, or
+  build a derived image that installs one:
+  <code>apk add --no-cache bash curl &amp;&amp; curl -fsSL https://claude.ai/install.sh | bash</code>
+  (the installer needs <code>bash</code>; busybox <code>sh</code> can't run it).</li>
+</ul>
+<h2 id="011-012-the-state-store-moves-to-sqlite">0.11 → 0.12: the state store moves to SQLite<a class="headerlink" href="#011-012-the-state-store-moves-to-sqlite" title="Permanent link">&para;</a></h2>
+<p>0.12 is the first release with a <strong>database</strong>. State now lives in <code>clauster.db</code>
+(SQLite) under your <code>state_dir</code>, replacing the flat <code>state.json</code> /
+<code>hosted_state.json</code>. The upgrade is automatic — there is <strong>no manual step</strong>:</p>
+<ul>
+<li>On the <strong>first 0.12 start</strong>, clauster creates <code>clauster.db</code>, runs the schema
+  migration <strong>fail-closed</strong> (it won't serve if the migration fails), then
+  <strong>imports your existing <code>state.json</code> and <code>hosted_state.json</code> once</strong> and renames
+  them to <code>*.imported</code>. Later starts are idempotent — no re-import.</li>
+<li><strong>Do not run <code>clauster migrate</code> for this</strong> — it only touches the legacy flat
+  files, not the database. Just upgrade the package and restart.</li>
+<li><strong>Back up first</strong> (<code>clauster backup</code>): the database is now the live store, so a
+  pre-upgrade snapshot is your rollback.</li>
+</ul>
+<p><strong>If the migration fails, or you need to roll back to 0.11:</strong> the migration is
+fail-closed, so a failure leaves the service <em>down</em>, not half-migrated. The
+simplest recovery is to restore the pre-upgrade <code>clauster backup</code> tarball and
+reinstall the prior version. To revert by hand instead: stop clauster, delete
+<code>clauster.db</code>, rename <code>state.json.imported</code> / <code>hosted_state.json.imported</code> back
+(drop the <code>.imported</code> suffix), and reinstall the prior clauster version.</p>
+<h2 id="upgrade-by-install-method">Upgrade, by install method<a class="headerlink" href="#upgrade-by-install-method" title="Permanent link">&para;</a></h2>
+<p>Match how you installed (the same rows as the
+<a href="https://schubydoo.github.io/clauster/latest/installation/#which-install-method">installation decision table</a>),
+then restart however you run it — systemd unit, supervisor, container, terminal:</p>
+<table>
+<thead>
+<tr>
+<th>Installed via</th>
+<th>Upgrade with</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>uv</td>
+<td><code>uv tool upgrade clauster</code></td>
+</tr>
+<tr>
+<td>pip / pipx</td>
+<td><code>pip install -U clauster</code> / <code>pipx upgrade clauster</code></td>
+</tr>
+<tr>
+<td>Install script (Linux &amp; macOS)</td>
+<td>re-run the one-liner — it fetches and checksum-verifies the latest release</td>
+</tr>
+<tr>
+<td>Install script (Windows, PowerShell)</td>
+<td>re-run the one-liner</td>
+</tr>
+<tr>
+<td>Standalone binary</td>
+<td>download the next release, verify it against <code>SHA256SUMS</code>, replace the file</td>
+</tr>
+<tr>
+<td>Scoop</td>
+<td><code>scoop update clauster</code></td>
+</tr>
+<tr>
+<td>Homebrew</td>
+<td><code>brew update &amp;&amp; brew upgrade clauster</code></td>
+</tr>
+<tr>
+<td>Nix</td>
+<td><code>nix profile upgrade</code></td>
+</tr>
+<tr>
+<td>Docker / GHCR</td>
+<td>pull the new tag + recreate — see below</td>
+</tr>
+<tr>
+<td>From source</td>
+<td><code>git pull</code> + restart — see below</td>
+</tr>
+</tbody>
+</table>
+<h2 id="pypi-install">PyPI install<a class="headerlink" href="#pypi-install" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>pip<span class="w"> </span>install<span class="w"> </span>-U<span class="w"> </span>clauster<span class="w">      </span><span class="c1"># or: uv pip install -U clauster</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="c1"># then restart however you run it (systemd unit, supervisor, terminal, …)</span>
+</code></pre></div>
+<h2 id="docker-ghcr">Docker / GHCR<a class="headerlink" href="#docker-ghcr" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>docker<span class="w"> </span>pull<span class="w"> </span>ghcr.io/schubydoo/clauster:latest<span class="w">   </span><span class="c1"># or a pinned :vX.Y.Z tag</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>docker<span class="w"> </span>compose<span class="w"> </span>up<span class="w"> </span>-d<span class="w">                              </span><span class="c1"># recreate the container</span>
+</code></pre></div>
+<p>Your <code>state_dir</code> and config must be on a mounted volume so they survive the
+container swap (see the README's Docker section and <code>clauster.yml.example</code>).</p>
+<h2 id="from-source-editable-git-venv-local-development">From source (editable git + venv — local development)<a class="headerlink" href="#from-source-editable-git-venv-local-development" title="Permanent link">&para;</a></h2>
+<p>If you run clauster from a git checkout (an <strong>editable</strong> install, typically for
+local development), a <code>git pull</code> + restart is all it takes — no reinstall unless
+dependencies changed. (Production/dogfood deploys should follow the PyPI install
+path above, not an editable checkout.)</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="nb">cd</span><span class="w"> </span>/path/to/clauster
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>git<span class="w"> </span>fetch<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>git<span class="w"> </span>checkout<span class="w"> </span>main<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>git<span class="w"> </span>pull<span class="w">          </span><span class="c1"># pull the new code</span>
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>uv<span class="w"> </span>sync<span class="w"> </span>--extra<span class="w"> </span>dev<span class="w">   </span><span class="c1"># ONLY if pyproject/uv.lock changed (deps); otherwise skip</span>
+<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="c1"># clauster migrate -c /path/to/clauster.yml   # SKIP on 0.12+: the DB migrates automatically.</span>
+<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="c1">#                                              # Run ONLY to fold in a pre-0.12 flat-file state.json.</span>
+<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a>sudo<span class="w"> </span>systemctl<span class="w"> </span>restart<span class="w"> </span>clauster<span class="w">                     </span><span class="c1"># picks up the new code</span>
+</code></pre></div>
+<p><code>clauster doctor</code> will tell you whether the checkout is behind <code>origin</code> (its
+<code>version</code> check compares HEAD against the last-fetched upstream). It does <strong>not</strong>
+detect dependency drift, so re-run <code>uv sync --extra dev</code> whenever
+<code>pyproject.toml</code> / <code>uv.lock</code> changed (per the code block above). (The database
+migrates automatically on startup; <code>clauster migrate</code> is only for folding in a
+pre-0.12 flat-file <code>state.json</code>.)</p>
+<h2 id="rolling-back">Rolling back<a class="headerlink" href="#rolling-back" title="Permanent link">&para;</a></h2>
+<p>Any upgrade is reversible if you took the pre-upgrade backup:</p>
+<ol>
+<li>Stop Clauster.</li>
+<li>Restore the tarball: <code>clauster restore &lt;archive&gt; --state-dir ~/.clauster</code>
+   (point <code>--state-dir</code> at your configured <code>state_dir</code>; add
+   <code>--config-out /path/to/clauster.yml</code> to also write the config back, and
+   <code>--force</code> to overwrite a non-empty target).</li>
+<li>Reinstall the <strong>prior</strong> version (e.g. <code>uv tool install clauster==&lt;old&gt;</code>,
+   <code>pip install clauster==&lt;old&gt;</code>, pin <code>CLAUSTER_VERSION=&lt;old&gt;</code> when re-running
+   the install script, or run the older binary / image tag) and start it.</li>
+</ol>
+<p>Skipped the backup? If the upgrade ran a schema migration, Clauster snapshotted
+<code>clauster.db</code> first: the five most recent pre-migration copies live under
+<code>state_dir/backups/</code> as <code>pre-&lt;rev-before&gt;-&lt;rev-after&gt;-&lt;timestamp&gt;.db</code>
+(<code>db.backup_before_migrate</code>, on by default). Stop Clauster, copy the snapshot
+back over <code>state_dir/clauster.db</code>, <strong>delete any stale <code>clauster.db-wal</code> /
+<code>clauster.db-shm</code> sidecars</strong> (the snapshot is a self-contained <code>VACUUM INTO</code>
+copy; a leftover WAL belongs to the migrated database and must not be
+replayed), and start the matching <strong>older</strong> binary — a newer one would
+immediately re-run the same migration. This recovers the database only, not the rest of
+<code>state_dir</code> or your config.</p>
+<blockquote>
+<p><strong>Server Mode</strong> bridges are detached and survive a Clauster restart, so the
+upgrade only refreshes the manager and doesn't interrupt them.</p>
+<p><strong>Interactive Session bridges also survive a <code>systemctl restart</code></strong> — <em>as long as
+the unit uses <code>KillMode=process</code>, which is what <code>clauster install-service</code> writes
+by default</em>, so a clauster-managed install is already safe (the surviving keeper
+is reattached on startup). They're only reaped under systemd's <strong>default</strong>
+<code>KillMode=control-group</code>, which kills the whole service cgroup (<code>clauster doctor</code>
+flags that case; <code>sudo clauster install-service systemd --write</code> installs the
+<code>KillMode=process</code> unit). One caveat during a unit migration: the single restart
+that <em>applies</em> a new <code>KillMode=process</code> unit still runs under the old unit, so it
+reaps whatever bridges are live at that moment (transcript preserved; resume with
+<code>claude --continue</code>).</p>
+</blockquote>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; schubydoo — Apache-2.0
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.top", "navigation.instant", "navigation.tracking", "toc.follow", "content.code.copy", "search.suggest", "search.highlight"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
