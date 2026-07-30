@@ -45,6 +45,21 @@ jobs:
         run: uv run --no-sync ruff format --check .
       - name: pyright
         run: uv run --no-sync pyright src/clauster
+      # Repo-meta guards (`@pytest.mark.repo_meta`): static assertions over .github/**,
+      # the rulesets, and the repo-config baselines. They live in tests/ but must ALSO run
+      # here, because the `tests` matrix in ci.yml is skipped on a `.github/**`-only PR
+      # (.github/actions/changed-code) — precisely the PR these guards police, which would
+      # otherwise let a change to the CI filters merge with its own guard skipped. `lint` is
+      # a required check with no paths filter, so it runs on every PR unconditionally.
+      # `-o addopts=""` drops the repo-wide `--cov-fail-under=96` (a subset run can't meet it)
+      # and `-n auto` (worker startup dwarfs a handful of file reads). Clearing addopts also
+      # drops its `--ignore=tests/e2e`, so that has to be restored by hand — otherwise
+      # collection imports `tests/e2e/conftest.py`, which shadows `tests/conftest.py` on
+      # sys.path and every module importing a shared helper fails with an ImportError.
+      - name: repo-meta guards
+        run: >-
+          uv run --no-sync pytest -m repo_meta -o addopts="" --ignore=tests/e2e
+          -q -p no:cacheprovider
       # Blocking: a malformed changeset (a summary that wraps mid-sentence) renders a
       # truncated `###` heading in the GitHub release notes (v0.12.3 #560/#561). The
       # local pre-commit hook catches it pre-push; this enforces it on every PR.

@@ -59,6 +59,16 @@ runs:
         # Measured on #1131 (two workflow files + two .md, zero src/ or tests/):
         # 18 jobs / 2298 runner-seconds, of which 1987s (86%) was the test matrix
         # plus the musl canary re-validating untouched code.
+        #
+        # WHAT STILL COVERS A `.github/**`-ONLY PR, so the trim is not a blind
+        # spot: `lint` (required, never filtered) runs yamllint over the workflow
+        # YAML AND `pytest -m repo_meta`, the static guards over .github/** —
+        # which is how a change HERE, or to osv-scanner.yml's paths filter, or to
+        # the rulesets, still gets validated despite the `tests` matrix skipping.
+        # CodeQL is never gated on this classifier, and `conventional PR title`
+        # always runs. Known thinner spot: zizmor's workflow audit skips on
+        # `synchronize` (pre-existing), so a fixup push to a workflow-only PR is
+        # audited on the next open/reopen/ready_for_review, not on that push.
         noncode='(\.md$|^docs/|^mkdocs\.yml$|^LICENSE$|\.(png|jpe?g|gif|svg|ico)$|^\.github/|^\.greptile/)'
         code=false
         while IFS= read -r f; do
