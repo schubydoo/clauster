@@ -219,8 +219,13 @@ def test_osv_paths_filter_is_only_safe_because_it_gates_nothing_required():
     doc = yaml.safe_load(OSV.read_text(encoding="utf-8"))
     for key, job in doc["jobs"].items():
         name = job.get("name", key)
-        assert name not in required, (
-            f"{name} is a REQUIRED check but osv-scanner.yml is path-filtered — a PR that "
+        # Two shapes, because `scan-pr` is a reusable-workflow call (`uses:`) and GitHub
+        # reports those as "<key> / <inner job name>", never the bare key. An equality
+        # check alone would let a required `scan-pr / osv-scan` slip through and reopen
+        # the #196 trap this test exists to close.
+        clash = [r for r in required if r == name or r.startswith(f"{key} / ")]
+        assert not clash, (
+            f"{clash} is a REQUIRED check but osv-scanner.yml is path-filtered — a PR that "
             f"skips it would hang at 'Expected — waiting for status' (#196)"
         )
 
@@ -232,9 +237,18 @@ def test_every_repo_meta_guard_is_marked():
     # A test asserting on a `.github/**` file is skipped by the very filter it guards unless it
     # is marked `repo_meta` (which also runs it in the always-on `lint` job). Catch a new guard
     # that forgets the marker — the whole point of this module.
+    # rglob, not glob: a guard added under a subdirectory (tests/ci/test_x.py) would be
+    # invisible to a top-level glob — exactly the miss this test exists to catch. e2e is
+    # excluded because it is opt-in and never part of the default or lint run.
     unmarked = []
-    for path in sorted(TESTS.glob("test_*.py")):
+    for path in sorted(TESTS.rglob("test_*.py")):
+        if "e2e" in path.relative_to(TESTS).parts:
+            continue
         source = path.read_text(encoding="utf-8")
+        # ⚠️ Substring heuristic with a thin margin: `.github/` deliberately keeps the
+        # trailing slash so it does NOT match the `schubydoo.github.io/...` docs URL in
+        # tests/test_app.py (`.github.` there, not `.github/`). Widening this to
+        # `.github` would false-positive on that file.
         touches_meta = '".github"' in source or ".github/" in source
         marked = "pytest.mark.repo_meta" in source
         if touches_meta and not marked:
@@ -245,9 +259,43 @@ def test_every_repo_meta_guard_is_marked():
     )
 
 
+def test_the_guard_host_cannot_skip_its_own_validation():
+    # The other half of the bootstrap, and the subtler one. `lint.yml` HOSTS the
+    # `repo_meta` step, and on a `.github/**`-only PR that step is the only thing
+    # validating the change. It also matches the `^\.github/` non-code allowlist — so
+    # unless it is ALSO self-gating, a PR whose diff is just `lint.yml` classifies
+    # code=false, skips the matrix, and runs a `lint` job with the guard step deleted.
+    # The entire bootstrap could then be removed by a green, CI-only PR, with every
+    # guard against that executing nowhere.
+    #
+    # Derived from the workflow rather than hardcoded: whichever workflow hosts the
+    # marker must be self-gating, so this keeps holding if the step ever moves.
+    hosts = []
+    for path in sorted(WORKFLOWS.glob("*.y*ml")):
+        doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for job in (doc.get("jobs") or {}).values():
+            if any("-m repo_meta" in (s.get("run") or "") for s in (job.get("steps") or [])):
+                hosts.append(f".github/workflows/{path.name}")
+                break
+    assert hosts, "no workflow runs `pytest -m repo_meta` — the repo_meta bootstrap is gone"
+    for host in hosts:
+        assert _classify(host) == "code", (
+            f"{host} hosts the repo_meta guards but is not in `selfgating`, so a PR editing "
+            f"only that file would skip the matrix AND delete the step that replaces it"
+        )
+
+
 def test_the_lint_job_actually_runs_the_repo_meta_marker():
     # The marker only helps if the always-on required `lint` job selects on it.
-    lint = (WORKFLOWS / "lint.yml").read_text(encoding="utf-8")
-    assert "-m repo_meta" in lint, (
-        "lint.yml must run `pytest -m repo_meta` (see this module's header)"
+    #
+    # Parsed, not substring-searched: a plain `"-m repo_meta" in lint` passes on a
+    # lint.yml where the step has been commented out, or replaced by prose that
+    # happens to mention the marker. This guard is the load-bearing half of the
+    # bootstrap, so it has to be structural — and parsing also survives a rename of
+    # the step.
+    doc = yaml.safe_load((WORKFLOWS / "lint.yml").read_text(encoding="utf-8"))
+    runs = [step.get("run", "") for step in doc["jobs"]["lint"]["steps"]]
+    assert any("-m repo_meta" in run for run in runs), (
+        "a step in lint.yml's `lint` job must run `pytest -m repo_meta` — it is the only "
+        "thing validating a `.github/**`-only PR (see this module's header)"
     )

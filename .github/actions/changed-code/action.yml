@@ -37,13 +37,22 @@ runs:
           exit 0
         fi
         # Files that are ALWAYS code, even though the allowlist below would
-        # otherwise excuse them. These are the two workflows that GATE on this
-        # classifier plus the composite actions they call: editing one changes
-        # HOW the heavy jobs are invoked, so those jobs must still run or the
-        # edit merges unvalidated and only breaks later on main. This is the one
-        # self-reference the blanket `^\.github/` rule below cannot cover — keep
-        # it in sync if another workflow starts consuming `code`.
-        selfgating='^\.github/(workflows/(ci|security)\.yml$|actions/)'
+        # otherwise excuse them. Two kinds of file qualify:
+        #   - the workflows that GATE on this classifier (`ci`, `security`) plus the
+        #     composite actions they call — editing one changes HOW the heavy jobs
+        #     are invoked;
+        #   - `lint.yml`, which HOSTS the `repo_meta` guards. On a `.github/**`-only
+        #     PR the matrix is skipped, so that step is the ONLY thing validating the
+        #     change. Without this entry a PR whose diff is just `lint.yml` would
+        #     classify code=false, skip the matrix, and run a `lint` job with the
+        #     guard step deleted — removing the whole bootstrap (including
+        #     `test_every_repo_meta_guard_is_marked`) via a green, CI-only PR, with
+        #     the guard against that executing nowhere.
+        # Either way the edit must still face the heavy jobs, or it merges
+        # unvalidated and only breaks later on main. This is the one self-reference
+        # the blanket `^\.github/` rule below cannot cover — keep it in sync if
+        # another workflow starts consuming `code` OR hosting a guard.
+        selfgating='^\.github/(workflows/(ci|lint|security)\.yml$|actions/)'
         # A path is non-code (docs/meta) IFF it matches this allowlist. Any file
         # outside it flips the whole PR to code=true — err toward running CI.
         # `\.md$` already covers .github/**/*.md (so no separate entry). `scratch/`
