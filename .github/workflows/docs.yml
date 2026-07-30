@@ -82,8 +82,15 @@ jobs:
     # branch name (e.g. forks both on `main`/`patch-1`) don't cancel each other.
     # Deploy is a SEPARATE group (below) that never cancels — so this fast
     # cancellation can't kill a live gh-pages push.
+    # ⚠️ `github.event_name` is part of the key, not decoration. `deploy` is
+    # `needs: build`, and a workflow_dispatch from main — the ONLY way to move
+    # `latest` before the next release tag — resolves github.ref to refs/heads/main,
+    # i.e. the same group as an ordinary main push. With cancel-in-progress: true a
+    # merge landing mid-bootstrap would SIGKILL that build, skip deploy, and leave
+    # `latest` unmoved as a grey "cancelled" run. Splitting the deploy lane by
+    # ref_type protects the queue but not the job upstream of it.
     concurrency:
-      group: docs-build-${{ github.ref }}
+      group: docs-build-${{ github.ref }}-${{ github.event_name }}
       cancel-in-progress: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -124,15 +131,21 @@ jobs:
     # main deploy, where newest-wins is correct. A simultaneous main+tag push can
     # now collide on the gh-pages push instead, which fails LOUDLY and is
     # re-runnable — the right trade against a silent drop.
+    # (`event_name` for the same reason as the build job above: a manual deploy from
+    # main would otherwise sit in the same lane as main pushes, where a newly queued
+    # run cancels the pending one regardless of cancel-in-progress.)
     concurrency:
-      group: docs-deploy-${{ github.ref_type }}
+      group: docs-deploy-${{ github.ref_type }}-${{ github.event_name }}
       cancel-in-progress: false
     permissions:
       contents: write # mike commits and pushes the built site to gh-pages
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0 # mike needs the gh-pages history to update it
+          # Full history for the DEPLOY ref (mike's documented CI setup). gh-pages
+          # itself arrives via the explicit fetch in the next step, not from here —
+          # don't "optimize" this line on the assumption that it supplies gh-pages.
+          fetch-depth: 0
           persist-credentials: false
       - name: Set up uv + Python
         uses: ./.github/actions/setup
@@ -164,6 +177,21 @@ jobs:
             case "$1" in
               *[!0-9.]* | *.*.* | .* | *. | "") return 1 ;;
               *.*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          # Same discipline for a release tag's X.Y.Z. A glob like v[0-9]*.[0-9]*.[0-9]*
+          # looks strict but is not: the trailing `*` swallows anything, so `v1.0.0-rc1`
+          # passes and `${version%.*}` yields `1.0` — moving `latest` onto a release
+          # candidate and clobbering the real 1.0 snapshot. `v1.1.0-beta.2` would publish
+          # a directory literally named `1.1.0-beta`. The push trigger's glob does not
+          # help here, because the whole point of this guard is that workflow_dispatch
+          # is NOT constrained by it.
+          check_xyz() {
+            case "$1" in
+              *[!0-9.]* | *.*.*.* | .* | *. | "") return 1 ;;
+              *.*.*) return 0 ;;
               *) return 1 ;;
             esac
           }
@@ -211,10 +239,13 @@ jobs:
             # move `latest` onto it; from `v0.3.0` it would silently downgrade
             # `latest`. Re-check the shape here, where it actually binds.
             case "$REF_NAME" in
-              v[0-9]*.[0-9]*.[0-9]*) ;;
-              *) echo "::error::refusing to deploy from tag '$REF_NAME' (not vX.Y.Z)"; exit 1 ;;
+              v*) ;;
+              *) echo "::error::refusing to deploy from tag '$REF_NAME' (no 'v' prefix)"; exit 1 ;;
             esac
             version="${REF_NAME#v}"
+            if ! check_xyz "$version"; then
+              echo "::error::refusing to deploy from tag '$REF_NAME' (not vX.Y.Z)"; exit 1
+            fi
             uv run --no-sync mike deploy --push --update-aliases "${version%.*}" latest
             uv run --no-sync mike set-default --push --template mike/redirect.html latest
           else
