@@ -5,9 +5,14 @@ name: Docs
 #
 #   - push to main       -> rolling `dev` snapshot (unreleased docs), opt-in via the
 #                           selector, carrying Material's version-warning banner
-#   - release tag vX.Y.Z -> immutable `X.Y` snapshot, and moves the `latest` alias
+#   - release tag vX.Y.Z -> per-MINOR `X.Y` snapshot, and moves the `latest` alias
 #                           (the site default) onto it, so visitors land on the
-#                           version they can actually install
+#                           version they can actually install. Snapshots are keyed by
+#                           minor, so a patch release REBUILDS its line's directory
+#                           (v1.0.1 rewrites `1.0`) — `1.0` always shows the newest
+#                           1.0.x. That is deliberate: per-patch snapshots would add a
+#                           full copy of the site per patch and make the version
+#                           selector unusable.
 #   - pull requests      -> `mkdocs build --strict` only (link/config validation).
 #                           Never deploy: a docs change cannot reach the live site
 #                           without landing on main first.
@@ -229,17 +234,24 @@ jobs:
             # Use `mike alias` (NOT `mike deploy`): this only re-points the alias at
             # an already-published snapshot. `mike deploy $PROMOTE` would rebuild the
             # docs from the current checkout (main) into the $PROMOTE directory,
-            # clobbering the immutable release snapshot with main's content.
+            # clobbering that release's snapshot with main's content.
             if ! check_xy "$PROMOTE"; then
               echo "::error::promote_to_latest must be X.Y (e.g. 1.0), got '$PROMOTE'"; exit 1
             fi
             uv run --no-sync mike alias --push --update-aliases "$PROMOTE" latest
             uv run --no-sync mike set-default --push --template mike/redirect.html latest
           elif [ "$REF_TYPE" = "tag" ]; then
-            # Release vX.Y.Z -> immutable "X.Y" snapshot, and move `latest` (the site
-            # default) onto it: the newest release is what visitors land on. Assumes
-            # linear releases — a backport to an older line would wrongly claim
-            # `latest`; re-point manually via promote_to_latest if that ever happens.
+            # Release vX.Y.Z -> per-MINOR "X.Y" snapshot, and move `latest` (the site
+            # default) onto it: the newest release is what visitors land on.
+            #
+            # `${version%.*}` is what makes the snapshot per-minor: v1.0.1 deploys into
+            # `1.0`, REBUILDING it from the 1.0.1 tree. A patch therefore replaces its
+            # line's docs rather than adding a directory, so `1.0` always shows the
+            # newest 1.0.x — which is what a 1.0.x reader wants, and it matches the
+            # docs' own minor-granular "New in X.Y" convention.
+            #
+            # Assumes linear releases — a backport (1.0.2 shipping AFTER 1.1.0) would
+            # drag `latest` backwards onto `1.0`; re-point via promote_to_latest.
             #
             # The vX.Y.Z glob on the `push` trigger does NOT constrain a
             # workflow_dispatch, which accepts any tag. Without this guard a dispatch
