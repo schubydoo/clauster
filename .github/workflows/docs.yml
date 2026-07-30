@@ -1,24 +1,72 @@
 name: Docs
 
-# Build the mkdocs-material site (sources added in #176) and publish it to
-# GitHub Pages on every push to main. On PRs that touch the docs we run
-# `mkdocs build --strict` as a gate (broken links / nav fail the build) but do
-# NOT deploy — so a docs change can't reach the live site without landing on
-# main first.
+# Build the mkdocs-material site (sources added in #176) and publish it to GitHub
+# Pages via `mike`, which keeps a version selector on the `gh-pages` branch (#1084):
+#
+#   - push to main       -> rolling `dev` snapshot (unreleased docs), opt-in via the
+#                           selector, carrying Material's version-warning banner
+#   - release tag vX.Y.Z -> immutable `X.Y` snapshot, and moves the `latest` alias
+#                           (the site default) onto it, so visitors land on the
+#                           version they can actually install
+#   - pull requests      -> `mkdocs build --strict` only (link/config validation).
+#                           Never deploy: a docs change cannot reach the live site
+#                           without landing on main first.
+#
+# NO `paths:` FILTER ON PUSH — deliberate, and load-bearing twice over:
+#   1. A release tag's commit often touches no docs file at all. A paths filter
+#      applies to tag pushes too, so it would silently skip the X.Y snapshot for
+#      that release — the one deploy that matters most.
+#   2. Five root files are pulled into the site by mkdocs-include-markdown
+#      (CHANGELOG, CONTRIBUTING, SUPPORT, UPGRADING, SECURITY). The old filter
+#      listed only `docs/**` + `mkdocs.yml`, so a knope release writing CHANGELOG.md
+#      did NOT rebuild the site, and the published changelog stayed stale until an
+#      unrelated docs edit happened to trigger a build.
+# The cost is a `dev` redeploy on main pushes that changed nothing on the site.
+# That is cheap; a missing release snapshot is not.
+#
+# Action refs are pinned to full commit SHAs (repo Actions policy + Scorecard), and
+# the deploy job pushes via an explicit tokened remote rather than persisted
+# checkout credentials (zizmor `artipacked`).
 
 on:
   push:
     branches: [main]
-    paths:
-      - "docs/**"
-      - "mkdocs.yml"
-      - ".github/workflows/docs.yml"
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
   pull_request:
     paths:
       - "docs/**"
       - "mkdocs.yml"
+      - "mike/**"
       - ".github/workflows/docs.yml"
+      # The docs toolchain itself. Without these a Renovate bump of
+      # mkdocs-material/mike touches only pyproject.toml + uv.lock, the Docs build
+      # never runs on that PR, and — since "build docs (strict)" is not a required
+      # check — it merges unvalidated, with the main push then also deploying it.
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/actions/setup/**"
+      # Surfaced on the site by mkdocs-include-markdown — a change here changes a
+      # published page, so it must face the --strict gate.
+      - "CHANGELOG.md"
+      - "CONTRIBUTING.md"
+      - "SUPPORT.md"
+      - "UPGRADING.md"
+      - "SECURITY.md"
   workflow_dispatch:
+    inputs:
+      bootstrap_version:
+        description: >-
+          One-time: publish THIS ref's docs as version X.Y (e.g. 1.0) and make it
+          `latest`. Needed once, because no existing release tag carries this
+          workflow. Leave empty for a normal deploy.
+        required: false
+        default: ""
+      promote_to_latest:
+        description: >-
+          Point `latest`/default at an ALREADY-DEPLOYED version (X.Y, e.g. 1.0).
+          Fails if that version was never deployed — use bootstrap_version first.
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -30,10 +78,10 @@ jobs:
     timeout-minutes: 10
     # Per-ref build group: a newer push/PR-sync supersedes an in-flight build.
     # Use github.ref (refs/pull/<n>/merge on PRs — unique per PR) rather than
-    # github.head_ref (the source branch name), so two PRs that happen to share
-    # a branch name (e.g. forks both on `main`/`patch-1`) don't cancel each
-    # other. Deploy is a SEPARATE group (below) that never cancels — so this
-    # fast cancellation can't kill a live Pages upload.
+    # github.head_ref (the source branch name), so two PRs that happen to share a
+    # branch name (e.g. forks both on `main`/`patch-1`) don't cancel each other.
+    # Deploy is a SEPARATE group (below) that never cancels — so this fast
+    # cancellation can't kill a live gh-pages push.
     concurrency:
       group: docs-build-${{ github.ref }}
       cancel-in-progress: true
@@ -50,44 +98,164 @@ jobs:
         # --no-sync: use the env the setup action already synced (extras: docs);
         # don't let a `.python-version` drift rebuild it without the docs extra.
         run: uv run --no-sync mkdocs build --strict
-      # Only stage the artifact for deployment off main — PRs stop at the build
-      # gate above, and a workflow_dispatch from a feature branch must NOT stage
-      # that branch's docs (hence ref, not just != pull_request).
-      - name: Upload Pages artifact
-        if: github.ref == 'refs/heads/main'
-        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
-        with:
-          path: site
 
   deploy:
-    name: deploy to Pages
+    name: deploy to Pages (mike)
     needs: build
-    # Deploy ONLY main — `!= pull_request` would also be true for a
-    # workflow_dispatch off a feature branch, which would publish unreleased
-    # docs to the live site.
-    if: github.ref == 'refs/heads/main'
+    # Never on PRs (fork tokens are read-only anyway); same-repo only; and only for
+    # main or a release tag — otherwise a manual workflow_dispatch from a feature
+    # branch would fall through and overwrite `latest` with that branch's docs.
+    if: >-
+      github.event_name != 'pull_request'
+      && github.repository == 'schubydoo/clauster'
+      && (github.ref == 'refs/heads/main' || github.ref_type == 'tag')
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Dedicated, non-cancelling deploy group: serialize Pages deploys and never
-    # SIGKILL one mid-upload (which can strand Pages "in progress").
+    # Serialize gh-pages pushes (concurrent ones reject as non-fast-forward) without
+    # SIGKILLing one mid-push.
+    #
+    # ⚠️ KEYED BY ref_type ON PURPOSE. `cancel-in-progress: false` protects the
+    # RUNNING job, not a QUEUED one: GitHub keeps at most one pending run per group
+    # and cancels the previously pending one. A release produces exactly the burst
+    # that exploits this — release-prep merge (deploy A running), tag push (deploy B
+    # pending), packaging-bump merge (deploy C queues, B CANCELLED) — silently
+    # dropping the X.Y snapshot and leaving `latest` behind, shown only as a grey
+    # "cancelled" run. Separate lanes mean main-push churn can only evict another
+    # main deploy, where newest-wins is correct. A simultaneous main+tag push can
+    # now collide on the gh-pages push instead, which fails LOUDLY and is
+    # re-runnable — the right trade against a silent drop.
     concurrency:
-      group: pages
+      group: docs-deploy-${{ github.ref_type }}
       cancel-in-progress: false
     permissions:
-      pages: write # deploy to Pages
-      id-token: write # OIDC for the Pages deployment
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
+      contents: write # mike commits and pushes the built site to gh-pages
     steps:
-      # enablement:true turns Pages on (Source: GitHub Actions) the first time
-      # this runs, so no manual Settings step is needed. If the token isn't
-      # allowed to enable Pages, flip it once in Settings → Pages → Source:
-      # GitHub Actions, and this becomes a no-op.
-      - name: Configure Pages
-        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          enablement: true
-      - name: Deploy to GitHub Pages
-        id: deploy
-        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
+          fetch-depth: 0 # mike needs the gh-pages history to update it
+          persist-credentials: false
+      - name: Set up uv + Python
+        uses: ./.github/actions/setup
+        with:
+          python-version: "3.13"
+          extras: docs
+      - name: Configure git + push auth
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch origin gh-pages --depth=1 || true
+      - name: Deploy
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          PROMOTE: ${{ github.event.inputs.promote_to_latest }}
+          BOOTSTRAP: ${{ github.event.inputs.bootstrap_version }}
+        run: |
+          set -euo pipefail
+
+          # X.Y shape guard, shared by both dispatch inputs. The values only ever
+          # reach mike as a single quoted argv element (never eval/backticks), so
+          # this is about failing loudly on a typo — `1.0.0` or `latest` would
+          # otherwise become a real, wrongly-named version directory.
+          check_xy() {
+            case "$1" in
+              *[!0-9.]* | *.*.* | .* | *. | "") return 1 ;;
+              *.*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          if [ -n "${BOOTSTRAP:-}" ] && [ -n "${PROMOTE:-}" ]; then
+            echo "::error::Set bootstrap_version OR promote_to_latest, not both"; exit 1
+          fi
+
+          if [ -n "${BOOTSTRAP:-}" ]; then
+            # ONE-TIME BOOTSTRAP. `latest` is an alias, and `mike alias` refuses an
+            # identifier that was never deployed — so promote_to_latest cannot create
+            # the first version. Neither can a release tag: every tag up to and
+            # including v1.0.0 carries the OLD Pages-artifact workflow, so dispatching
+            # on that tag runs the old file, not this one. This input closes that gap
+            # by publishing the CURRENT ref's docs under an explicit X.Y.
+            #
+            # Run it from a ref whose docs match the release you are naming.
+            if ! check_xy "$BOOTSTRAP"; then
+              echo "::error::bootstrap_version must be X.Y (e.g. 1.0), got '$BOOTSTRAP'"; exit 1
+            fi
+            uv run --no-sync mike deploy --push --update-aliases "$BOOTSTRAP" latest
+            uv run --no-sync mike set-default --push --template mike/redirect.html latest
+          elif [ -n "${PROMOTE:-}" ]; then
+            # One-time migration / manual re-point: make an already-deployed release
+            # the site default under the `latest` alias.
+            #
+            # Use `mike alias` (NOT `mike deploy`): this only re-points the alias at
+            # an already-published snapshot. `mike deploy $PROMOTE` would rebuild the
+            # docs from the current checkout (main) into the $PROMOTE directory,
+            # clobbering the immutable release snapshot with main's content.
+            if ! check_xy "$PROMOTE"; then
+              echo "::error::promote_to_latest must be X.Y (e.g. 1.0), got '$PROMOTE'"; exit 1
+            fi
+            uv run --no-sync mike alias --push --update-aliases "$PROMOTE" latest
+            uv run --no-sync mike set-default --push --template mike/redirect.html latest
+          elif [ "$REF_TYPE" = "tag" ]; then
+            # Release vX.Y.Z -> immutable "X.Y" snapshot, and move `latest` (the site
+            # default) onto it: the newest release is what visitors land on. Assumes
+            # linear releases — a backport to an older line would wrongly claim
+            # `latest`; re-point manually via promote_to_latest if that ever happens.
+            #
+            # The vX.Y.Z glob on the `push` trigger does NOT constrain a
+            # workflow_dispatch, which accepts any tag. Without this guard a dispatch
+            # from tag `nightly` would deploy a version literally named "nightly" AND
+            # move `latest` onto it; from `v0.3.0` it would silently downgrade
+            # `latest`. Re-check the shape here, where it actually binds.
+            case "$REF_NAME" in
+              v[0-9]*.[0-9]*.[0-9]*) ;;
+              *) echo "::error::refusing to deploy from tag '$REF_NAME' (not vX.Y.Z)"; exit 1 ;;
+            esac
+            version="${REF_NAME#v}"
+            uv run --no-sync mike deploy --push --update-aliases "${version%.*}" latest
+            uv run --no-sync mike set-default --push --template mike/redirect.html latest
+          else
+            # Push to main -> rolling `dev` snapshot. Deliberately never touches
+            # `latest`/default, so unreleased changes are not what users see by
+            # default; Material's version-warning banner flags `dev` as ahead of the
+            # newest release.
+            uv run --no-sync mike deploy --push --update-aliases dev
+          fi
+      - name: Preserve pre-version deep links (root 404 fallback)
+        # Before versioning, every page lived at the site root. mike's set-default
+        # writes a root index.html, which rescues `/` and nothing beneath it — so
+        # already-published deep links (README, bookmarks, Reddit posts, search
+        # results) would 404. GitHub Pages serves the repo-root 404.html for any
+        # unresolved path, so mike/404.html forwards /<path> to /latest/<path>.
+        #
+        # Kept OUT of docs/ on purpose: anything under docs/ is built into each
+        # version directory (/latest/404.html), never the gh-pages root where Pages
+        # looks for it. Idempotent — commits only when the file actually changed.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          # Remove the clone on ANY exit: its .git/config holds a tokened remote URL.
+          # Runners are ephemeral, so this is defence in depth rather than a leak fix.
+          trap 'rm -rf "$tmp"' EXIT
+          # A fresh shallow clone of gh-pages rather than a worktree of the deploy
+          # checkout: this step then depends on nothing about that checkout's ref
+          # state (which mike has just rewritten), and the tokened remote stays
+          # confined to a temp directory that the trap above deletes.
+          git clone --depth=1 --branch gh-pages \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$tmp"
+          cp mike/404.html "$tmp/404.html"
+          git -C "$tmp" add 404.html
+          if git -C "$tmp" diff --cached --quiet; then
+            echo "root 404.html already current"
+          else
+            git -C "$tmp" \
+              -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -m "docs: sync root 404 deep-link fallback"
+            git -C "$tmp" push origin HEAD:gh-pages
+          fi

@@ -24,7 +24,7 @@ infrastructure**, not a multi-tenant service. Key considerations:
 
 - Loopback-only by default; binding to a network interface requires auth
   (password login or a trusted reverse proxy) — see the
-  [networking guide](https://schubydoo.github.io/clauster/networking/) for the
+  [networking guide](https://schubydoo.github.io/clauster/latest/networking/) for the
   full loopback / non-loopback auth matrix.
 - Starting a bridge, editing a project's `CLAUDE.md`, or cloning a repository
   runs code from the target directory on the host. Treat `projects_root` as
@@ -34,7 +34,7 @@ infrastructure**, not a multi-tenant service. Key considerations:
   confirmations, opt-in flags) but act on the operator's behalf.
 - Release artifacts (the GHCR image and the standalone binaries) are
   Sigstore-signed; verify them before running — see the
-  [installation guide](https://schubydoo.github.io/clauster/installation/) for the
+  [installation guide](https://schubydoo.github.io/clauster/latest/installation/) for the
   `cosign` / `gh attestation verify` flow.
 
 Reports that require already having shell/host access, or that amount to "the
@@ -57,7 +57,7 @@ The threat model above is backed by controls you can inspect in
 - **Keyless, token-free releases** — PyPI publishes via Trusted Publishing
   (OIDC; no long-lived API token exists to steal), and every binary and
   container image is Sigstore-signed with SLSA provenance — the
-  [installation guide](https://schubydoo.github.io/clauster/installation/)
+  [installation guide](https://schubydoo.github.io/clauster/latest/installation/)
   documents the `cosign` / `gh attestation verify` flow.
 - **Public scorecards** — OpenSSF Scorecard and Best Practices are tracked
   continuously (badges in the README's Project health section).

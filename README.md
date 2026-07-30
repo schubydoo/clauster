@@ -40,13 +40,13 @@ Open <http://127.0.0.1:7621> — run with no config and Clauster serves a
 loopback-only **first-run setup wizard** that asks for your projects folder and a
 dashboard password, writes a `clauster.yml`, and starts on it. Then click
 **Run Claude here** on a project. Full recipes (uv / pip, Docker, systemd, reverse proxy) →
-[Installation guide](https://schubydoo.github.io/clauster/installation/).
+[Installation guide](https://schubydoo.github.io/clauster/latest/installation/).
 
 > **Status: 1.0 — stable and actively developed.** Requires an Anthropic account
 > with Claude Code access. Loopback-only by default; password and
 > reverse-proxy auth are available for networked deployments (see
 > [Auth & networking](#auth--networking)). **No telemetry, ever** — see
-> [Privacy & data at rest](https://schubydoo.github.io/clauster/privacy/) for what Clauster keeps locally.
+> [Privacy & data at rest](https://schubydoo.github.io/clauster/latest/privacy/) for what Clauster keeps locally.
 > **Upgrading from 0.12?** 1.0 has five breaking changes — see
 > [UPGRADING.md](https://github.com/schubydoo/clauster/blob/main/UPGRADING.md).
 
@@ -107,17 +107,18 @@ start them, watch them, and pick them up from your phone.
 
 That is the short list, not the whole of it — every feature is documented in full on
 the **[documentation site](https://schubydoo.github.io/clauster/)**; start at the
-[Quickstart](https://schubydoo.github.io/clauster/quickstart/) or
-[How it works](https://schubydoo.github.io/clauster/concepts/how-it-works/).
+[Quickstart](https://schubydoo.github.io/clauster/latest/quickstart/) or
+[How it works](https://schubydoo.github.io/clauster/latest/concepts/how-it-works/).
 
 <!-- Convention (#995): keep this list SHORT and version-agnostic. A README that
      makes no version-specific claims cannot drift; the ~1,148-word feature catalogue
      this replaced was a second copy of the docs site and went stale whenever `main`
      moved ahead of the newest release. Per-feature detail belongs on the docs site,
-     which lives next to the code and is updated in the same PR. Note the site is
-     built from `main` on every push and is NOT versioned (no `mike`), so it too can
-     describe unreleased behaviour — the release notes for the newest tag are the
-     authority on what is actually in a given install. -->
+     which lives next to the code and is updated in the same PR. The site is versioned
+     via `mike` (#1084) and defaults to the newest release, so links from here land on
+     docs that match what a reader can install; unreleased docs are behind the `dev`
+     entry in the version selector. The release notes for a tag remain the authority
+     on what is actually in a given install. -->
 
 ## Install
 
@@ -139,7 +140,7 @@ Or pick another path — `uv tool install clauster` (recommended for a Python ho
 `pip`/`pipx`, [Scoop](https://scoop.sh) on Windows (`scoop bucket add clauster
 https://github.com/schubydoo/clauster && scoop install clauster`), or
 [Docker](#docker). Full recipes — including supply-chain verification — are in the
-[Installation guide](https://schubydoo.github.io/clauster/installation/). To hack
+[Installation guide](https://schubydoo.github.io/clauster/latest/installation/). To hack
 on Clauster itself, see [Contributing](#contributing) below.
 
 ### Uninstall
@@ -156,8 +157,8 @@ on Clauster itself, see [Contributing](#contributing) below.
   longer need it. Docker Compose users: run `docker compose down` from the directory
   containing `compose.yaml` (add `-v` to also delete named volumes).
 - Full purge: stop Clauster first, then remove your `state_dir` if you want local
-  state/config gone too. See [Privacy & data at rest](https://schubydoo.github.io/clauster/privacy/#how-to-purge)
-  and the [Installation guide](https://schubydoo.github.io/clauster/installation/).
+  state/config gone too. See [Privacy & data at rest](https://schubydoo.github.io/clauster/latest/privacy/#how-to-purge)
+  and the [Installation guide](https://schubydoo.github.io/clauster/latest/installation/).
 
 ## Contributing
 
@@ -173,7 +174,7 @@ of clicks — no terminal needed once it's started. Clauster *spawns* `claude` �
 inherits the host user's `claude` authentication, so `claude` must be logged in
 (interactive `claude` login **or** `ANTHROPIC_API_KEY` in the environment — either
 satisfies the check) before any bridge can connect. `clauster doctor` (step 2)
-confirms it; see the [Quickstart prerequisites](https://schubydoo.github.io/clauster/quickstart/) for the full
+confirms it; see the [Quickstart prerequisites](https://schubydoo.github.io/clauster/latest/quickstart/) for the full
 list.
 
 1. **Point Clauster at your code.** Set `projects_root` in `clauster.yml` to a
@@ -195,7 +196,7 @@ list.
 6. **Stop or resume.** **Stop** signals the bridge; **Resume** relaunches it (with
    `claude.resume_recap` or `claude.launch_mode: pty` it can carry the prior conversation
    forward — see the
-   [configuration guide](https://schubydoo.github.io/clauster/guides/configuration/)).
+   [configuration guide](https://schubydoo.github.io/clauster/latest/guides/configuration/)).
    For a deliberate fresh start,
    **Forget** the stopped session and launch again with **Run Claude here**.
 
@@ -218,7 +219,7 @@ before `docker run`:
   `~/.claude` credentials.
 
 Full run + [`compose.yaml`](https://github.com/schubydoo/clauster/blob/main/compose.yaml) recipes, volumes, and PUID/PGID
-mapping: [Installation → Docker](https://schubydoo.github.io/clauster/installation/#docker).
+mapping: [Installation → Docker](https://schubydoo.github.io/clauster/latest/installation/#docker).
 
 ## Auth & networking
 
@@ -237,7 +238,7 @@ origin and must set `auth.allowed_origins`.
 
 All settings live in `clauster.yml` —
 [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/clauster.yml.example) is a lean starter, and
-[`docs/reference/config.md`](https://schubydoo.github.io/clauster/reference/config/) is the exhaustive per-key reference. Any
+[`docs/reference/config.md`](https://schubydoo.github.io/clauster/latest/reference/config/) is the exhaustive per-key reference. Any
 scalar or list key is overridable by an environment variable of the form
 `CLAUSTER_<UPPER_SNAKE_PATH>` (lists take a comma-separated value). The schema is
 additive-only — old configs always validate against newer versions.
@@ -279,7 +280,7 @@ clauster start <project> | stop <instance>    # headless spawn/stop through the 
 ```
 
 Full per-command reference:
-[docs/reference/cli.md](https://schubydoo.github.io/clauster/reference/cli/).
+[docs/reference/cli.md](https://schubydoo.github.io/clauster/latest/reference/cli/).
 
 ## Roadmap
 
@@ -299,7 +300,7 @@ translation contributor appears).
 
 *Shipped:*
 
-- **Public API** — a documented, versioned [`/api/v1`](https://schubydoo.github.io/clauster/public-api/) surface with
+- **Public API** — a documented, versioned [`/api/v1`](https://schubydoo.github.io/clauster/latest/public-api/) surface with
   named Bearer tokens (distinct from the session cookie), managed via
   `clauster api-token issue|list|rotate|revoke`; an opt-in OpenAPI schema
   (`api.openapi_enabled`) is available for third-party dashboards.

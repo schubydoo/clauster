@@ -879,7 +879,7 @@ def test_dashboard_restart_note_says_sessions_survive(write_config):
     # #579: the link must point at a LIVE docs target (it previously rotted to a
     # nonexistent README #running anchor). Pin the stable operations#restart URL so a
     # silent rot fails the suite rather than shipping another dead help link.
-    assert "https://schubydoo.github.io/clauster/operations/#restart" in page
+    assert "https://schubydoo.github.io/clauster/latest/operations/#restart" in page
 
 
 def test_restart_handler_polls_healthz_then_reloads(write_config):

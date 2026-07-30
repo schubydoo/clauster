@@ -74,6 +74,16 @@ markdown_extensions:
   - pymdownx.tabbed:
       alternate_style: true
 
+extra:
+  version:
+    # Version selector, driven by `mike` (see .github/workflows/docs.yml, #1084).
+    # `latest` is an ALIAS onto the newest release snapshot, never a version in its
+    # own right — so the default resolves to what a visitor can actually install,
+    # and `dev` (built from main) stays opt-in behind the selector with Material's
+    # version-warning banner.
+    provider: mike
+    default: latest
+
 nav:
   - Home: index.md
   - Start here:

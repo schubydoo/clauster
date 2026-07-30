@@ -178,7 +178,7 @@ reinstall the prior version. To revert by hand instead: stop clauster, delete
 ## Upgrade, by install method
 
 Match how you installed (the same rows as the
-[installation decision table](https://schubydoo.github.io/clauster/installation/#which-install-method)),
+[installation decision table](https://schubydoo.github.io/clauster/latest/installation/#which-install-method)),
 then restart however you run it — systemd unit, supervisor, container, terminal:
 
 | Installed via | Upgrade with |

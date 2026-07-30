@@ -113,6 +113,11 @@ docs = [
     # Surfaces the root community-health files (UPGRADING, CHANGELOG, CONTRIBUTING,
     # SUPPORT, SECURITY) on the site while they stay canonical at the repo root.
     "mkdocs-include-markdown-plugin>=6.2",
+    # Versioned publishing (#1084): commits each built version to the `gh-pages`
+    # branch and drives the Material version selector. Only the Docs workflow's
+    # deploy job runs it — `mkdocs build --strict` and `just docs-build` do not,
+    # so a local build never touches gh-pages.
+    "mike>=2.1",
 ]
 notify = [
     # Outbound crash/lifecycle notifications (see notify.py + notifications.*).

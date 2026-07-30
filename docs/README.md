@@ -4,21 +4,27 @@ GitHub renders this file above the directory listing; MkDocs never sees it. That
 makes it the one place to say something to people browsing the repo that should
 *not* appear on the published site.
 
-**These pages track `main`.** So does the published site — it is rebuilt from `main`
-on every push and is not versioned, so both can describe behaviour that has not
-shipped yet. For a nicer rendering with search, read:
+**These pages track `main`, so they can describe behaviour that has not shipped yet.**
+The published site is versioned ([#1084][1084]) and does not have that problem — it
+defaults to the newest release:
 
-**<https://schubydoo.github.io/clauster/>**
+**<https://schubydoo.github.io/clauster/>** — the newest release (the `latest`
+alias). This is where to send anyone who asks for "the docs".
 
-For what is actually in the version you installed, the authority is the release
-notes for that tag — see [Releases][releases] and [CHANGELOG.md][changelog], not
-these pages. Behaviour that changed in an unreleased version is marked inline where
-we have caught it, with a `New in X.Y` / `Changed in X.Y` note (a convention adopted
-in [#995][995]; older pages predate it).
+**<https://schubydoo.github.io/clauster/dev/>** — the published rendering of *these*
+pages, rebuilt from `main`. Opt-in via the version selector, and it carries a banner
+saying it is ahead of the release.
+
+For what is actually in the version you installed, the release notes for that tag
+remain the authority — see [Releases][releases] and [CHANGELOG.md][changelog].
+Behaviour that changed in an unreleased version is marked inline where we have caught
+it, with a `New in X.Y` / `Changed in X.Y` note (a convention adopted in [#995][995];
+older pages predate it).
 
 [releases]: https://github.com/schubydoo/clauster/releases
 [changelog]: https://github.com/schubydoo/clauster/blob/main/CHANGELOG.md
 [995]: https://github.com/schubydoo/clauster/issues/995
+[1084]: https://github.com/schubydoo/clauster/issues/1084
 
 ---
 
