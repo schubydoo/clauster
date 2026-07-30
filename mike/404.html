@@ -47,6 +47,11 @@
   </style>
   <script>
     (function () {
+      // ⚠️ COUPLED TO `site_url` IN mkdocs.yml — keep the two in step. Nothing
+      // enforces it, and the failure is silent rather than loud: after a repo rename
+      // or a move to a custom domain, the indexOf test below returns early, the
+      // handler does nothing, and every stale deep link quietly falls back to the
+      // static copy with no redirect. No test or lint would notice.
       var BASE = "/clauster/";
       var path = window.location.pathname;
       if (path.indexOf(BASE) !== 0) { return; }
@@ -79,7 +84,12 @@
       <code>/dev/</code> (unreleased, built from <code>main</code>).
     </p>
     <p>
-      You should be redirected automatically. If not, try
+      <!-- Phrased as a conditional, because it must also be true with JavaScript
+           disabled. The redirect target is computed at runtime from the path, so
+           unlike mike/redirect.html there is no fixed href for a <noscript> meta
+           refresh to use — a no-JS visitor gets this copy and the link below is
+           their only route on. -->
+      If you are not redirected automatically, try
       <a href="/clauster/latest/">the latest documentation</a>.
     </p>
   </div>

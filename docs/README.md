@@ -12,8 +12,9 @@ defaults to the newest release:
 alias). This is where to send anyone who asks for "the docs".
 
 **<https://schubydoo.github.io/clauster/dev/>** — the published rendering of *these*
-pages, rebuilt from `main`. Opt-in via the version selector, and it carries a banner
-saying it is ahead of the release.
+pages, rebuilt from `main`. Opt-in via the version selector. Every version except the
+newest release carries a banner saying you are not reading the latest release, with a
+link back to it.
 
 For what is actually in the version you installed, the release notes for that tag
 remain the authority — see [Releases][releases] and [CHANGELOG.md][changelog].

@@ -131,6 +131,14 @@ jobs:
     # main deploy, where newest-wins is correct. A simultaneous main+tag push can
     # now collide on the gh-pages push instead, which fails LOUDLY and is
     # re-runnable — the right trade against a silent drop.
+    #
+    # ⚠️ RESIDUAL, deliberately not fixed: the key omits the ref NAME, so the same
+    # eviction still exists WITHIN the tag lane. Two release tags pushed close
+    # together give deploy A (v1.2.3) running, B (v1.2.4) pending, C queued -> B
+    # cancelled, and 1.2's snapshot is dropped. Adding github.ref would defeat the
+    # gh-pages serialization this group exists for, so there is no clean key-level
+    # fix. Recovery is to re-run the skipped tag's deploy (or dispatch
+    # promote_to_latest for it). Do not read the ref_type split as closing this.
     # (`event_name` for the same reason as the build job above: a manual deploy from
     # main would otherwise sit in the same lane as main pushes, where a newly queued
     # run cancels the pending one regardless of cancel-in-progress.)
@@ -255,16 +263,28 @@ jobs:
             # newest release.
             uv run --no-sync mike deploy --push --update-aliases dev
           fi
-      - name: Preserve pre-version deep links (root 404 fallback)
-        # Before versioning, every page lived at the site root. mike's set-default
-        # writes a root index.html, which rescues `/` and nothing beneath it — so
-        # already-published deep links (README, bookmarks, Reddit posts, search
-        # results) would 404. GitHub Pages serves the repo-root 404.html for any
-        # unresolved path, so mike/404.html forwards /<path> to /latest/<path>.
+      - name: Sync the gh-pages root (404 fallback + llms.txt)
+        # Two files that must live at the SITE ROOT, which mike never writes to
+        # beyond index.html and versions.json.
         #
-        # Kept OUT of docs/ on purpose: anything under docs/ is built into each
-        # version directory (/latest/404.html), never the gh-pages root where Pages
-        # looks for it. Idempotent — commits only when the file actually changed.
+        # 404.html — before versioning, every page lived at the root. mike's
+        # set-default writes a root index.html, which rescues `/` and nothing beneath
+        # it, so already-published deep links (README, bookmarks, forum posts, search
+        # results) would 404. Pages serves the repo-root 404.html for any unresolved
+        # path, so mike/404.html forwards /<path> to /latest/<path>. Kept OUT of docs/
+        # on purpose: anything under docs/ is built into each version directory
+        # (/latest/404.html), never the root where Pages looks for it.
+        #
+        # llms.txt — docs/llms.txt IS built into every version directory, and the
+        # format is defined around the well-known ROOT location. Versioning alone
+        # would 404 it there, and the 404.html rescue cannot help: it redirects with
+        # window.location.replace, and an llms.txt fetcher is exactly the non-JS
+        # client that comment warns about. Copied from the DEPLOYED latest/ inside the
+        # clone rather than from the checkout, so it always matches whatever `latest`
+        # currently resolves to — on a plain `dev` push latest/ is unchanged, so this
+        # correctly leaves the root copy alone instead of overwriting it with main's.
+        #
+        # Idempotent — commits only when a file actually changed.
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -281,12 +301,19 @@ jobs:
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$tmp"
           cp mike/404.html "$tmp/404.html"
           git -C "$tmp" add 404.html
+          if [ -f "$tmp/latest/llms.txt" ]; then
+            cp "$tmp/latest/llms.txt" "$tmp/llms.txt"
+            git -C "$tmp" add llms.txt
+          else
+            # Expected before the first bootstrap, when only dev/ exists.
+            echo "no latest/llms.txt yet — leaving the root copy alone"
+          fi
           if git -C "$tmp" diff --cached --quiet; then
-            echo "root 404.html already current"
+            echo "gh-pages root already current"
           else
             git -C "$tmp" \
               -c user.name="github-actions[bot]" \
               -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-              commit -m "docs: sync root 404 deep-link fallback"
+              commit -m "docs: sync gh-pages root (404 fallback + llms.txt)"
             git -C "$tmp" push origin HEAD:gh-pages
           fi

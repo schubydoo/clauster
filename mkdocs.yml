@@ -18,6 +18,11 @@ exclude_docs: |
 
 theme:
   name: material
+  # Supplies overrides/main.html, which populates the version-warning banner. The
+  # theme ships `{% block outdated %}` EMPTY and gates the banner on that block being
+  # non-empty, so without this directory `extra.version` gives a version selector and
+  # no banner at all (#1084).
+  custom_dir: overrides
   icon:
     repo: fontawesome/brands/github
   palette:

@@ -42,8 +42,8 @@ while. The [documentation site](https://schubydoo.github.io/clauster/) accounts 
 that: it defaults to the newest release, so what you read matches what you can
 install. Unreleased docs are published separately as
 [`dev`](https://schubydoo.github.io/clauster/dev/) — opt in from the version selector
-in the header, and it will warn you that you are ahead of the release. For exactly
-what changed in the version you installed, check the
+in the header. Any version other than the newest release carries a banner saying so,
+with a link back. For exactly what changed in the version you installed, check the
 [release notes](https://github.com/schubydoo/clauster/releases) for that tag.
 
 ## Other channels
