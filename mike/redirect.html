@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!--
+    Custom `mike set-default` redirect stub for the site root
+    (https://schubydoo.github.io/clauster/). mike's built-in template is a bare
+    "Redirecting" page with no metadata, so sharing the root URL previews as the
+    word "Redirecting" — social scrapers read this stub and do not follow the
+    JS/meta redirect to /latest/. Mirroring site_name + site_description here
+    makes the bare root preview correctly.
+
+    Wired in via .github/workflows/docs.yml: `mike set-default --push --template
+    mike/redirect.html latest`. mike renders this file as a Jinja template and
+    substitutes the href placeholder used in the noscript refresh and the script
+    below.
+
+    ⚠️ Do NOT write that placeholder literally anywhere in this comment. mike builds
+    a jinja2.Template over the WHOLE file and Jinja does not special-case HTML
+    comments, so it would be substituted here too — leaving a comment that documents
+    the placeholder by destroying it.
+
+    URLs point at the `latest` alias, which always resolves to the newest
+    release. There is deliberately no og:image — clauster does not build social
+    cards, and a link to a non-existent asset previews worse than none at all.
+  -->
+  <title>Clauster</title>
+  <link rel="canonical" href="https://schubydoo.github.io/clauster/latest/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Clauster">
+  <meta property="og:title" content="Clauster">
+  <meta property="og:description" content="Self-hosted web UI for spawning and managing Claude Code remote-control bridges on a remote host.">
+  <meta property="og:url" content="https://schubydoo.github.io/clauster/latest/">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="Clauster">
+  <meta name="twitter:description" content="Self-hosted web UI for spawning and managing Claude Code remote-control bridges on a remote host.">
+  <noscript>
+    <!-- Delay 0, not mike's default 1: a timed refresh of 1-20s is WCAG 2.2.1
+         failure F40, and 0 is the documented exemption (technique H76). It also
+         drops a pointless one-second stall for noscript users. -->
+    <meta http-equiv="refresh" content="0; url={{href}}" />
+  </noscript>
+  <script>
+    window.location.replace(
+      "{{href}}" + window.location.search + window.location.hash
+    );
+  </script>
+</head>
+<body>
+  Redirecting to <a href="{{href}}">{{href}}</a>…
+</body>
+</html>

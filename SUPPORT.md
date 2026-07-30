@@ -38,9 +38,12 @@ and hasn't shipped, say so on the issue — that is a perfectly good reason to c
 one.
 
 Because there is no fixed cadence, `main` can sit ahead of the newest release for a
-while — and the [documentation site](https://schubydoo.github.io/clauster/) is built
-from `main`, so it can describe behaviour you don't have yet. For what is in the
-version you installed, check the
+while. The [documentation site](https://schubydoo.github.io/clauster/) accounts for
+that: it defaults to the newest release, so what you read matches what you can
+install. Unreleased docs are published separately as
+[`dev`](https://schubydoo.github.io/clauster/dev/) — opt in from the version selector
+in the header. Any version other than the newest release carries a banner saying so,
+with a link back. For exactly what changed in the version you installed, check the
 [release notes](https://github.com/schubydoo/clauster/releases) for that tag.
 
 ## Other channels

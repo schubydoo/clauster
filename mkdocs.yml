@@ -18,6 +18,11 @@ exclude_docs: |
 
 theme:
   name: material
+  # Supplies overrides/main.html, which populates the version-warning banner. The
+  # theme ships `{% block outdated %}` EMPTY and gates the banner on that block being
+  # non-empty, so without this directory `extra.version` gives a version selector and
+  # no banner at all (#1084).
+  custom_dir: overrides
   icon:
     repo: fontawesome/brands/github
   palette:
@@ -73,6 +78,16 @@ markdown_extensions:
           format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.tabbed:
       alternate_style: true
+
+extra:
+  version:
+    # Version selector, driven by `mike` (see .github/workflows/docs.yml, #1084).
+    # `latest` is an ALIAS onto the newest release snapshot, never a version in its
+    # own right — so the default resolves to what a visitor can actually install,
+    # and `dev` (built from main) stays opt-in behind the selector with Material's
+    # version-warning banner.
+    provider: mike
+    default: latest
 
 nav:
   - Home: index.md

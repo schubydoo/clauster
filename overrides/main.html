@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+
+{#
+  Populates mkdocs-material's version-warning banner (#1084).
+
+  Without this file the banner does not exist. base.html wraps it in an
+  "if self.outdated()" test, and the theme's own `outdated` block is EMPTY, so that
+  test is false and the <aside> is never emitted — the data-md-component="outdated"
+  div renders empty and hidden, and partials/javascripts/outdated.html has nothing
+  to unhide. Overriding the block below (via `theme.custom_dir: overrides` in
+  mkdocs.yml) is what makes it real.
+
+  ⚠️ Use a JINJA comment here, not an HTML one, and do not write Jinja tag syntax
+  inside it. Jinja parses the whole file and does not special-case HTML comments, so
+  a literal block/endblock pair written in an HTML comment opens and closes real
+  blocks — it fails the build with "Unexpected end of template". (Same trap as
+  mike/redirect.html, where a commented placeholder was silently substituted.)
+  A Jinja comment also keeps these notes out of every rendered page.
+
+  WORDING IS DELIBERATELY DIRECTION-NEUTRAL. The banner fires on any version that is
+  not the `latest` alias — that is `dev` (ahead of the newest release) *and* every
+  superseded X.Y snapshot (behind it). Saying "ahead of the release" would be wrong
+  for a reader on 1.0 after 1.1 ships. Which version is being viewed is resolved
+  client-side from versions.json, so the template cannot tell the two cases apart.
+
+  "'../' ~ base_url" is Material's documented idiom for the site root, which mike's
+  root index.html then redirects to the default alias.
+#}
+{% block outdated %}
+  You are not reading the documentation for the latest release.
+  <a href="{{ '../' ~ base_url }}">
+    <strong>Go to the latest release.</strong>
+  </a>
+{% endblock %}

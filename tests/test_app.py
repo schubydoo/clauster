@@ -877,8 +877,20 @@ def test_dashboard_restart_note_says_sessions_survive(write_config):
     assert "will end" not in page
     assert "How do I restart?" in page  # the docs affordance
     # #579: the link must point at a LIVE docs target (it previously rotted to a
-    # nonexistent README #running anchor). Pin the stable operations#restart URL so a
-    # silent rot fails the suite rather than shipping another dead help link.
+    # nonexistent README #running anchor). Pin the operations#restart URL so a silent
+    # rot fails the suite rather than shipping another dead help link.
+    #
+    # DELIBERATELY UNVERSIONED, unlike the /latest/ links in README.md and SECURITY.md
+    # (#1084). This one is compiled into the dashboard, so a dead target cannot be
+    # fixed without cutting a release — it has to degrade gracefully. The unversioned
+    # form is correct in BOTH worlds: it resolves directly today, and once the site is
+    # versioned mike/404.html forwards it to /latest/operations/ with the #restart
+    # fragment preserved. A hard-coded /latest/ URL has no such fallback — 404.html's
+    # loop guard treats an already-versioned path as a genuine 404 — so it would ship
+    # dead for anyone whose install predates the alias existing.
+    #
+    # The real fix is to link the docs version matching the running build; until then
+    # prefer the form that cannot rot.
     assert "https://schubydoo.github.io/clauster/operations/#restart" in page
 
 
