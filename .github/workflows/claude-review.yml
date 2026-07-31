@@ -207,8 +207,37 @@ jobs:
           #
           # The documented surface is `mcp__github_inline_comment__` (anchors) and
           # `mcp__github_ci__` (below); grouping into one review goes through `gh pr review`.
+          #
+          # ⚠️ `--max-turns` is a REVIEW-QUALITY setting, not just a runaway guard. At 60 it
+          # was the binding limit on real PRs, not a safety net: runs on #1173 and #1177 both
+          # died with `"subtype": "error_max_turns"` partway through reading the diff, after
+          # ~8 minutes — publishing NOTHING but an error comment, so the PR showed a Claude
+          # comment that contained no review. Reading a multi-file diff costs many turns
+          # (chunked `Read`s plus `gh pr diff`), and this reviewer is also asked to fetch the
+          # rules file, anchor every finding inline, and submit one grouped review; 60 does
+          # not cover that on anything but a small change. 150 restores headroom while still
+          # binding inside `timeout-minutes: 30` — run 30604072480 recorded 61 turns in
+          # 471_269 ms = 7.7 s/turn, so 150 lands at ~19 min — which keeps the cap meaningful
+          # as a runaway guard rather than dead weight, with the job timeout as the hard
+          # backstop.
+          #
+          # ⚠️ Two things this does NOT buy, so nobody reads a guarantee into it.
+          # (1) Quota. That same run cost $4.6038 over 61 turns ≈ $0.075/turn, so the worst
+          #     case per review moves from ~$4.60 to ~$11 — against the personal subscription
+          #     quota that line 36 gives as the reason this job is maintainer-only. The trade
+          #     is still favourable (an exhausted run bills in full and publishes nothing, so
+          #     it is the most expensive outcome as well as the useless one), but the ceiling
+          #     did move.
+          # (2) Detection. "Fail if nothing was posted" does NOT catch an exhausted run:
+          #     the action posts its tracking comment EARLY, so AFTER > BEFORE holds and that
+          #     step concluded SUCCESS on run 30604072480 — the very run whose review was
+          #     empty. Only the action step's own non-zero exit turned that job red. Raising
+          #     the cap makes exhaustion rarer, never detectable; and at ~19 min against a
+          #     30 min timeout, a slow PR can now trip the JOB TIMEOUT instead, whose stub
+          #     comment looks identical. The durable fix is a `subtype`/`is_error` check on
+          #     the record that step already parses — tracked separately, not done here.
           claude_args: |
-            --max-turns 60
+            --max-turns 150
             --model claude-opus-5
             --add-dir pr-head
             --add-dir ${{ steps.rules.outputs.dir }}
