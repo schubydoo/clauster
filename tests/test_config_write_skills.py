@@ -1530,3 +1530,22 @@ def test_list_skills_reports_an_unlistable_member_tree(tmp_path, monkeypatch):
     assert listed[0]["description"] == "fine"  # frontmatter still read
     assert listed[0]["files"] == []
     assert "could not be listed" in listed[0]["files_error"]  # reported, not silent
+
+
+def test_list_skills_error_text_survives_an_errno_less_oserror(tmp_path, monkeypatch):
+    # `OSError.strerror` is only populated when the exception carries an errno, so a bare
+    # OSError rendered "could not be read: None" — telling a dashboard user no more than the
+    # silently-empty listing this arm replaces. The point of reporting is that it reports.
+    root = tmp_path / "skills"
+    (root / "s").mkdir(parents=True)
+    (root / "s" / "SKILL.md").write_text("---\nname: s\ndescription: fine\n---\nbody\n")
+
+    def _boom(self):
+        raise OSError("device fell off the bus")
+
+    monkeypatch.setattr(Path, "read_bytes", _boom)
+
+    listed = sk.list_skills(tmp_path)
+
+    assert "None" not in listed[0]["frontmatter_error"]
+    assert "device fell off the bus" in listed[0]["frontmatter_error"]

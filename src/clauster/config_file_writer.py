@@ -312,7 +312,10 @@ def delete_path(
         if verify is not None:
             current: bytes | None
             try:
-                current = target.read_bytes() if not target.is_dir() else None
+                # `is_symlink()` (lstat) FIRST: `is_dir()` and `read_bytes()` both FOLLOW a
+                # link, so testing them first would hand `verify` the bytes of a target
+                # outside the tree — the one thing the subagents surface exists to avoid.
+                current = None if target.is_symlink() or target.is_dir() else target.read_bytes()
             except OSError:
                 current = None
             verify(current)  # raises to abort the delete — still holding the lock

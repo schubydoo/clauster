@@ -123,13 +123,19 @@ def load_credentials(
 
     json_file = Path(claude_json_path).expanduser()
     try:
-        org = (json.loads(json_file.read_text(encoding="utf-8")).get("oauthAccount") or {}).get(
-            "organizationUuid"
-        )
+        parsed_json = json.loads(json_file.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, UnicodeDecodeError) as exc:
         raise CredentialsError(f"could not read {json_file}: {exc}") from exc
     except json.JSONDecodeError as exc:
         raise CredentialsError(f"{json_file} is not valid JSON: {exc}") from exc
+    # Same root type-check as the credentials file above — this second read had the identical
+    # unguarded `.get` chain, so the AttributeError simply moved one file over.
+    if not isinstance(parsed_json, dict):
+        raise CredentialsError(f"{json_file} is not a JSON object")
+    account = parsed_json.get("oauthAccount") or {}
+    if not isinstance(account, dict):
+        raise CredentialsError(f"oauthAccount in {json_file} is not a JSON object")
+    org = account.get("organizationUuid")
     if not org:
         raise CredentialsError(f"no oauthAccount.organizationUuid in {json_file}")
 

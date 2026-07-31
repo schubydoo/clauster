@@ -676,8 +676,15 @@ def _load_or_exit(config_path: str | None):
     schema-invalid (pydantic's ``ValueError``), and **syntactically malformed YAML**
     (``yaml.YAMLError``, which is NOT a ``ValueError`` and so needs naming separately).
     That last one is the likeliest first-run mistake — a stray tab, an unclosed quote —
-    and every CLI verb routes through here, so leaving it uncaught turned a typo into a
-    parser traceback instead of one line and exit 2.
+    so leaving it uncaught turned a typo into a parser traceback instead of one line and
+    exit 2.
+
+    ⚠️ Most verbs route through here, but NOT all: ``run`` (:func:`_run`), ``mcp``
+    (:func:`clauster.mcp_server.main`) and the ``install-service`` state-dir probe each
+    call :func:`~clauster.config.load_config` directly. They widened their own catches to
+    match rather than routing here, because each wants a different outcome — the wizard
+    fallback, a protocol-safe stderr message, and a best-effort default. Adding a verb
+    means picking one of the two, not assuming this one covers it.
     """
     try:
         return load_config(config_path)
@@ -971,7 +978,10 @@ def _install_service(
         # on PATH (state_dir=None) rather than erroring.
         try:
             state_dir = str(load_config(config_path).state_dir)
-        except (FileNotFoundError, ValueError):
+        except (FileNotFoundError, ValueError, yaml.YAMLError):
+            # yaml.YAMLError included or the "renders without a fully-valid config" promise
+            # above is false for the commonest way a config is invalid — it would skip the
+            # fallback and traceback instead.
             state_dir = None
     unit = ops.render_service_unit(kind, config_path=config_path, user=user, state_dir=state_dir)
     if write is False:
@@ -1491,7 +1501,11 @@ def _run(config_path: str | None) -> int:
         # First run: no clauster.yml exists yet. Serve the loopback setup wizard to write one,
         # then re-exec onto it (#978). A malformed EXISTING config still errors below.
         return _run_setup_wizard(config_path)
-    except ValueError as exc:
+    except (ValueError, yaml.YAMLError) as exc:
+        # `yaml.YAMLError` is NOT a `ValueError`, so it needs naming. It belongs on THIS arm,
+        # not the wizard one: a config that exists but does not parse is a broken config to
+        # report, not a missing one to replace — routing it to the wizard would offer to
+        # overwrite a file the operator merely typo'd.
         print(f"clauster: config error: {exc}", file=sys.stderr)
         return 2
 

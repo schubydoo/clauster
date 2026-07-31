@@ -1252,3 +1252,16 @@ def test_run_stdio_uses_real_stdin_reader(monkeypatch, cfg):
 
     asyncio.run(_drive())
     assert calls["served"] is True
+
+
+def test_mcp_main_reports_malformed_yaml_instead_of_tracebacking(tmp_path, capsys):
+    # `mcp` hands off to mcp_server.main, which has its own load_config guard and did not
+    # route through the widened `_load_or_exit`. A traceback here is doubly wrong: stdout
+    # is the MCP protocol channel and must carry nothing but protocol messages.
+    bad = tmp_path / "clauster.yml"
+    bad.write_text('claude:\n  binary: "unclosed\n  - [\n')
+
+    rc = mcp_server.main(["-c", str(bad)])
+
+    assert rc == 2
+    assert "config error" in capsys.readouterr().err

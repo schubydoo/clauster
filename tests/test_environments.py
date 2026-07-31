@@ -619,3 +619,28 @@ def test_anchor_health_is_unknown_for_a_non_object_credentials_file(tmp_path):
         "session_abc", credentials_path=cred, claude_json_path=tmp_path / "claude.json"
     )
     assert health is AnchorHealth.UNKNOWN
+
+
+def test_load_credentials_rejects_a_non_object_claude_json_root(tmp_path):
+    # Review catch: the root type-check landed on the credentials file only, and the SECOND
+    # read — of ~/.claude.json — kept the identical unguarded `.get` chain, so the
+    # AttributeError just moved one file over. The earlier test never reached it because it
+    # passed a claude.json path that does not exist, so every case raised at the first file.
+    cred = tmp_path / "creds.json"
+    cred.write_text(json.dumps({"claudeAiOauth": {"accessToken": "tok"}}))
+    claude_json = tmp_path / "claude.json"
+    for payload in ('"just-a-string"', "[]", "null", "42"):
+        claude_json.write_text(payload)
+        with pytest.raises(CredentialsError):
+            environments.load_credentials(cred, claude_json)
+
+
+def test_load_credentials_rejects_a_non_object_oauth_account(tmp_path):
+    # Same shape one level down: a non-empty non-dict `oauthAccount` raises from the second
+    # `.get`, which `or {}` cannot rescue because a non-empty string is truthy.
+    cred = tmp_path / "creds.json"
+    cred.write_text(json.dumps({"claudeAiOauth": {"accessToken": "tok"}}))
+    claude_json = tmp_path / "claude.json"
+    claude_json.write_text(json.dumps({"oauthAccount": "not-an-object"}))
+    with pytest.raises(CredentialsError):
+        environments.load_credentials(cred, claude_json)

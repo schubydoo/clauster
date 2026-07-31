@@ -348,7 +348,8 @@ def list_skills(base: Path) -> list[dict[str, Any]]:
                 # skills listing, so one bad skill hid every good one. Matches
                 # `supervisor.list_background_jobs`, which catches OSError per entry for
                 # exactly this reason. The entry is still surfaced, carrying its error.
-                item["frontmatter_error"] = f"{SKILL_FILENAME} could not be read: {exc.strerror}"
+                reason = exc.strerror or exc
+                item["frontmatter_error"] = f"{SKILL_FILENAME} could not be read: {reason}"
             else:
                 description = frontmatter.get("description")
                 # description is a validated non-empty str here, but guard anyway so a
@@ -380,7 +381,7 @@ def list_skills(base: Path) -> list[dict[str, Any]]:
             # `files: []` is indistinguishable from a genuinely empty skill, which would
             # make an unreadable directory look healthy.
             item["files"] = []
-            item["files_error"] = f"members could not be listed: {exc.strerror}"
+            item["files_error"] = f"members could not be listed: {exc.strerror or exc}"
         out.append(item)
     return out
 
