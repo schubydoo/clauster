@@ -52,9 +52,48 @@ jobs:
       contents: read
     uses: ./.github/workflows/build-binaries.yml
 
+  # --- Build the dists in a job with NO signing identity ----------------------
+  # ⚠️ Deliberately NOT part of the `release` job below. `uv build` executes the
+  # build backend and any build-time hooks in the dependency tree; the release job
+  # holds `id-token: write` for Sigstore keyless signing, so building there would
+  # put arbitrary code beside an OIDC identity that can sign artifacts in this
+  # repository's name. The dists cross as an artifact instead. Same reasoning as
+  # release.yml's pypi-build/pypi split.
+  #
+  # `needs: binaries` is for the GATE, not for data: it inherits the merged-release-PR
+  # condition above by skip-propagation rather than duplicating that expression, which
+  # would then be two places to keep in sync. `uv build` is seconds against a five-target
+  # binary matrix, so the serialisation costs effectively nothing.
+  dists:
+    needs: [binaries]
+    if: ${{ needs.binaries.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+          persist-credentials: false
+      - name: Set up uv (build)
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.0" # pinned uv (Renovate-tracked); skip the flaky "latest" fetch
+          enable-cache: false # a poisoned cache would taint what the release job signs
+      - name: Build sdist + wheel
+        run: uv build
+      - name: Upload dists for the release job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-dists
+          path: dist/
+          if-no-files-found: error # an empty upload would trip the fail-closed gate later
+
   # --- Sign + stage every asset, fail-closed, then publish via knope ----------
   release:
-    needs: [binaries]
+    needs: [binaries, dists]
     # Explicit (not just needs-skip-propagation): publish only if the binaries
     # actually built. Guards against a future edit that adds `if: always()`.
     if: ${{ needs.binaries.result == 'success' }}
@@ -94,13 +133,14 @@ jobs:
           ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Set up uv (build)
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      # Pull the dists built by the `dists` job. This job does NOT build — see the
+      # note on that job: it holds the Sigstore OIDC identity, so nothing here may
+      # execute the build backend or its hooks.
+      - name: Download the built dists
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          version: "0.12.0" # pinned uv (Renovate-tracked); skip the flaky "latest" fetch
-          enable-cache: false # this job can push; avoid the cache-poisoning vector
-      - name: Build sdist + wheel
-        run: uv build
+          name: release-dists
+          path: dist
       # Pull the binaries built by the `binaries` job into ./binaries (flattened):
       # each artifact carries the renamed binary + its .sha256.
       - name: Download the standalone binaries
