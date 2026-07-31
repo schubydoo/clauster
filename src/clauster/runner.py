@@ -2484,8 +2484,10 @@ class SessionRunner:
 
         After a Clauster restart we know the bridge pid + proc-start (from the
         pointer-walk) but not the timestamped ``--debug-file`` path, so the sidecar
-        can't be addressed directly. Glob the log dir for ``{name}-*.keeper.json``
-        and match on ``bridge_pid`` **and** ``bridge_proc_start`` — the latter is the
+        can't be addressed directly. Take this project's sidecars — anchored to the
+        ``<name>-<ms>-<seq>`` stem by :meth:`_keeper_sidecars_for`, so a sibling
+        ``app-staging``'s sidecar can never be read here as ``app``'s — and match on
+        ``bridge_pid`` **and** ``bridge_proc_start`` — the latter is the
         PID-reuse defense: a stale sidecar that merely recycled the pid is rejected,
         so stop()/poll_once can never reap an unrelated process tree. The keeper is
         alive iff the bridge is (it holds its terminal), already confirmed before this.
@@ -3065,10 +3067,14 @@ class SessionRunner:
         bridge, ``is_keeper_process`` for the keeper — so a pid the OS recycled onto an
         unrelated process does not refuse the forget. That matters most here: a persisted row
         can predate a reboot, and since forget never kills, a false "still live" would strand
-        the record with no operator path out. ⚠️ The bridge half additionally matches
-        ``bridge_proc_start``; the keeper half has no persisted start-time to compare, so
-        cmdline is its only reuse defense — a *different* live keeper recycled onto that exact
-        pid still reads as live.
+        the record with no operator path out. ⚠️ Read the reuse defense as cmdline-plus-
+        start-time **only where a start-time exists**. The bridge half matches
+        ``bridge_proc_start`` when the row carries one, but a row persisted with a null
+        ``bridge_proc_start`` (``adopt`` writes one whenever the pointer has no comparable
+        start time) makes ``_expected_epoch`` return None and ``is_live_process`` fall back to
+        cmdline+alive. The keeper half has no persisted start-time at all, so it is always in
+        that weaker mode. In both cases a *different* live process of the right shape recycled
+        onto that exact pid still reads as live; #1178 covers closing it for both halves.
         """
         # Determine project name before taking the lock (needed for per-project lock and
         # the pointer clear below). Fall back to the persisted record — a forgotten bridge

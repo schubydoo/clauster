@@ -565,8 +565,10 @@ def main(argv: list[str] | None = None) -> int:
 # alone, with no running runner.
 
 # A keeper sidecar is `<name>-<ms>-<seq>.keeper.json`; this reverses the stem to
-# the project name for display only — orphan classification uses the same
-# forward glob the runner uses (see find_orphan_keepers), never this parse.
+# the project name for display only — orphan classification uses a forward glob
+# (see find_orphan_keepers), never this parse. ⚠️ That glob is NOT the same as the
+# runner's any more: the runner anchors the stem, this side still matches by prefix.
+# find_orphan_keepers documents why they diverge and what it costs.
 _KEEPER_STEM_RE = re.compile(r"^(?P<name>.+)-\d+-\d+$")
 _KEEPER_SUFFIX = ".keeper.json"
 _KEEPER_START_TOLERANCE = 2.0  # PID-reuse guard slack, matching runner's bridge tolerance
@@ -651,12 +653,20 @@ def find_orphan_keepers(log_dir: Path, carded_projects: set[str]) -> list[Keeper
     filename reverse-parse, so a keeper cannot be mis-attributed to a project. A dead
     keeper is not an orphan (nothing to stop).
 
-    ⚠️ That glob is deliberately BROADER than the runner's, which now anchors the
-    ``<name>-<ms>-<seq>`` stem (``SessionRunner._keeper_sidecars_for``) so a sibling
-    project's keeper can never be adopted. Here the glob builds ``carded_files`` — the
-    PROTECTED set — so matching more means protecting more: a carded ``app`` also shields
-    ``app-staging``'s sidecars from reaping. The two diverge on purpose, because
-    over-matching is the safe direction on this side and the unsafe one on the runner's.
+    ⚠️ This glob is BROADER than the runner's, which now anchors the ``<name>-<ms>-<seq>``
+    stem (``SessionRunner._keeper_sidecars_for``) so a sibling project's keeper can never be
+    adopted. The divergence is currently unfixed here, not a design: over-matching is merely
+    the *less bad* direction on this side, because the glob builds ``carded_files`` — the
+    PROTECTED set — so a wrong match withholds a kill rather than causing one.
+
+    It is not free. Protecting more also HIDES more, and it hides exactly the case #301 is
+    for: with ``app`` carded and ``app-staging`` **removed**, the live keeper of the removed
+    project matches ``glob("app-*.keeper.json")``, lands in ``carded_files``, and is filtered
+    out of the result — so ``clauster keepers`` never lists it and ``--kill`` refuses it, for
+    as long as ``app`` stays carded. Before the runner was anchored, such a keeper was at
+    least reachable by being (wrongly) adopted as ``app``'s instance; it no longer is. The
+    real fix is to anchor here too and key the protected set by stem — its own change, since
+    it alters what this CLI will offer to kill.
     """
     carded_files: set[Path] = set()
     protected_names: set[str] = set()

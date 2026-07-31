@@ -825,7 +825,10 @@ async def test_forget_still_prunes_a_dead_persisted_only_row(runner_config, monk
     runner = _make_runner(runner_config)
     runner.persistence.state_store().save({"iid-ghost": _row("alpha", pid=4242, keeper_pid=7777)})
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
-    monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: None)
+    # `is_keeper_process`, not `proc_create_time` — the branch stopped calling the latter
+    # when the keeper gate became cmdline-gated, and a stub on it would leave the keeper
+    # half of this control decided by real psutil against whatever holds pid 7777.
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda pid: False)
 
     await runner.forget("iid-ghost")  # must not raise
 
@@ -866,7 +869,7 @@ async def test_forget_ignores_a_non_int_pid_on_a_persisted_only_row(runner_confi
         lambda *a, **k: pytest.fail("a non-int pid must never reach the liveness check"),
     )
     monkeypatch.setattr(
-        "clauster.runner.procutil.proc_create_time",
+        "clauster.runner.procutil.is_keeper_process",
         lambda pid: pytest.fail("a non-int keeper pid must never reach the liveness check"),
     )
 
