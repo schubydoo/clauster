@@ -21,6 +21,12 @@ on:
   # environment and never publishes. Launching from `v1.2.3` makes `github.ref`
   # `refs/tags/v1.2.3`, which the policy admits.
   #
+  # Measured, not assumed: dispatching nightly.yml (which refuses any ref but main,
+  # and so is a zero-side-effect probe) from the tag `v1.0.0` logged
+  # `Nightly publishes from main only; got refs/tags/v1.0.0 → skip.` — i.e. the run
+  # really does carry the tag ref. The environment policy was read from the API:
+  # `{"name": "v*", "type": "tag"}`.
+  #
   # Do NOT "fix" this by adding `main` to that policy: the tag-only rule is what
   # stops an arbitrary branch run from publishing to PyPI.
   #
