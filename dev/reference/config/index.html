@@ -2175,7 +2175,7 @@ row in the table above.</p>
 <td><code>max_bridges</code></td>
 <td>int | null</td>
 <td><code>null</code></td>
-<td>Best-effort clauster cap on concurrent remote-control bridges (standard/pty; ≥1) — NOT hosted/bg-agent sessions. A bridge spawn over the cap is refused (409); cross-project concurrent spawns may transiently overshoot by a few. Unset → no limit. Distinct from <code>capacity</code> (per-bridge sessions).</td>
+<td>Best-effort clauster cap on concurrent remote-control bridges (standard/pty; ≥1) — NOT hosted/bg-agent sessions. EVERY live bridge counts, including further bridges of the project being started: one project can hold a standard bridge and several interactive sessions at once, and all of them count. A bridge spawn over the cap is refused (409); cross-project concurrent spawns may transiently overshoot by a few. Unset → no limit. Distinct from <code>capacity</code> (per-bridge sessions).</td>
 </tr>
 </tbody>
 </table>
