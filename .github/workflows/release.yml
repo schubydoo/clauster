@@ -12,24 +12,37 @@ on:
       - "v*"
   # Manual fallback to (re)publish an existing tag — e.g. to recover a release
   # whose tag was pushed by GITHUB_TOKEN and therefore didn't trigger the
-  # push-tags run. Dispatch from the default branch and pass the tag.
+  # push-tags run.
+  #
+  # ⚠️ DISPATCH FROM THE TAG ITSELF (the "Use workflow from" picker lists tags as
+  # well as branches), NOT from a branch. The `pypi` environment's deployment
+  # policy admits `v*` TAGS only, and a dispatch run carries the ref you launched
+  # it from — not the `tag` input — so a run launched from `main` is refused at the
+  # environment and never publishes. Launching from `v1.2.3` makes `github.ref`
+  # `refs/tags/v1.2.3`, which the policy admits.
+  #
+  # Do NOT "fix" this by adding `main` to that policy: the tag-only rule is what
+  # stops an arbitrary branch run from publishing to PyPI.
+  #
+  # The `tag` input is therefore optional — `validate` falls back to
+  # `github.ref_name`, which is already the tag when you dispatch correctly. Pass it
+  # only to publish a DIFFERENT tag than the one you launched from, which the
+  # environment will refuse unless that ref is also a `v*` tag.
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to (re)publish, e.g. v0.1.1"
-        required: true
+        description: "Optional: tag to (re)publish. Leave blank to use the tag you launched from."
+        required: false
         type: string
 
-# ⚠️ A FAILED `docker-sign` IS A PUBLISH-VISIBLE FAILURE, not just a red job.
-# The image is pushed by `docker-build` and signed by a separate job (they are split
-# so the Dockerfile never runs beside the cosign OIDC identity). Nothing untags an
-# image whose signature never landed, so if `docker-sign` is cancelled, never picked
-# up, or blocked by a future `ghcr` protection rule, `:latest` and `:X.Y.Z` are live
-# and `cosign verify` rejects them — while README.md advertises release images as
-# cosign-signed. Recovery is a manual `cosign sign ghcr.io/<repo>@<digest>` against
-# the digest in the build job's log; re-running the workflow also works. The same
-# window existed before the split (push succeeded before sign inside one job); the
-# split widens it from one step to one job.
+# The GHCR image goes out in THREE jobs, in this order, and the order is the point:
+#   docker-build  pushes BY DIGEST — no tags, so nothing is pullable by name
+#   docker-sign   signs that digest (holds the OIDC token, builds nothing)
+#   docker-tag    adds `:latest` / `:X.Y.Z` only once the signature exists
+# So a tag a user can pull is never unsigned. If signing fails, no tag was ever
+# created and the untagged digest is unreachable by name — nothing to clean up.
+# Earlier shapes pushed the tags first and signed after, which left `:latest` live
+# and failing `cosign verify` for the length of a step, then of a job.
 
 permissions:
   contents: read
@@ -180,6 +193,7 @@ jobs:
     timeout-minutes: 30
     outputs:
       digest: ${{ steps.build.outputs.digest }}
+      tags: ${{ steps.tagset.outputs.tags }}
     # Deployment environment for the GHCR push — gives an audit trail of every
     # image publish and a place to attach protection (deployment ref policy,
     # optional required reviewer). The nightly `:edge` push uses the same `ghcr`
@@ -221,18 +235,36 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
             type=raw,value=latest
-      - name: Build and push (amd64 + arm64)
+      - name: Build and push BY DIGEST (amd64 + arm64)
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          # NO `tags:` — `push-by-digest` publishes the image under its `sha256:`
+          # name only, so nothing user-facing exists until `docker-tag` runs AFTER
+          # the signature. That is the whole point: a tag a user can pull is never
+          # unsigned, not even briefly.
+          outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
           labels: ${{ steps.meta.outputs.labels }}
           # Supply-chain provenance + SBOM attestations pushed with the image.
           provenance: true
           sbom: true
+      # Job outputs are single-line; metadata-action emits one tag per line. Flatten
+      # here rather than re-deriving the tags in the tag job, so the tag policy above
+      # stays the single source of truth.
+      - name: Flatten the tag set for the tag job
+        id: tagset
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          flat="$(printf '%s' "$TAGS" | tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//')"
+          if [ -z "$flat" ]; then
+            echo "::error::metadata-action produced no tags; refusing to continue" >&2
+            exit 1
+          fi
+          echo "tags=$flat" >> "$GITHUB_OUTPUT"
 
   docker-sign:
     name: Sign the GHCR image (cosign keyless)
@@ -276,3 +308,60 @@ jobs:
           # which is why the previous per-tag loop was signing the identical
           # `repo@digest` reference N times. Matches nightly.yml's image job.
           cosign sign --yes "${IMAGE}@${DIGEST}"
+
+  # Attach the user-facing tags LAST, once the signature exists. Splitting this out
+  # is what closes the window in which `:latest` was pullable but unsigned.
+  #
+  # This is safe because `imagetools create` is content-addressed: tagging an index
+  # that is already in the registry yields the SAME digest, so the signature made on
+  # that digest covers every tag. Measured, not assumed — a local registry test with
+  # a 2-platform build plus provenance and SBOM returned an identical digest before
+  # and after tagging, with all 4 manifests (2 platform + 2 attestation) intact. The
+  # verify loop below re-proves it on every release rather than trusting the note.
+  docker-tag:
+    name: Tag the signed GHCR image
+    needs: [docker-build, docker-sign]
+    if: ${{ needs.docker-sign.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: ghcr
+      url: https://github.com/${{ github.repository }}/pkgs/container/${{ github.event.repository.name }}
+    # No `contents: read` and no `id-token`: this job neither checks out nor signs.
+    permissions:
+      packages: write # write the tags to ghcr.io
+    steps:
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Tag the signed digest, then prove the tags resolve to it
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+          DIGEST: ${{ needs.docker-build.outputs.digest }}
+          TAGS: ${{ needs.docker-build.outputs.tags }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DIGEST}" ] || [ -z "${TAGS}" ]; then
+            echo "::error::missing digest or tag set from the build job; refusing to tag" >&2
+            exit 1
+          fi
+          args=()
+          for tag in ${TAGS}; do args+=(--tag "${tag}"); done
+          docker buildx imagetools create "${args[@]}" "${IMAGE}@${DIGEST}"
+          # FAIL CLOSED on the one assumption this design rests on. If a future buildx
+          # rebuilt the index instead of re-tagging it, the digest would move and the
+          # signature would cover nothing — silently. Assert it instead.
+          for tag in ${TAGS}; do
+            got="$(docker buildx imagetools inspect "${tag}" --format '{{.Manifest.Digest}}')"
+            if [ "${got}" != "${DIGEST}" ]; then
+              echo "::error::${tag} resolves to ${got}, not the signed ${DIGEST} —" \
+                   "the signature does NOT cover this tag" >&2
+              exit 1
+            fi
+            echo "verified ${tag} -> ${DIGEST}"
+          done
