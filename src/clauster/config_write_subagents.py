@@ -566,7 +566,14 @@ def _read_agent(root: Path, name: str, source: str) -> dict[str, Any]:
     target = _resolve(root, name)
     try:
         raw = target.read_bytes()
-    except FileNotFoundError as exc:
+    except OSError as exc:
+        # OSError, not just FileNotFoundError: a plain DIRECTORY named `<name>.md` raises
+        # IsADirectoryError, which is neither FileNotFoundError nor a ConfigWriteError — so
+        # it escaped the route's `except ConfigWriteError` as a 500. LIST already skips such
+        # an entry (it fails `is_file()`), so treating it as absent here is what makes LIST
+        # and GET agree about existence, which this module's docstring now states as a
+        # property. Any other read error (EACCES, ELOOP) fails closed the same way rather
+        # than surfacing a traceback.
         raise AgentNotFoundError(f"no subagent named {name!r}") from exc
     read_only = _is_read_only_file(target, raw)
     try:
@@ -576,6 +583,16 @@ def _read_agent(root: Path, name: str, source: str) -> dict[str, Any]:
     try:
         parsed, _body = parse_frontmatter(text)
         frontmatter = cw.redact_secrets(parsed)
+        # An `mcpServers` block is a map keyed by user-chosen SERVER NAMES, not config keys,
+        # so the name must not act as a secret hint — a server called `oauth-gw` would
+        # otherwise have its own `type`/`url` masked. Same reason config_write_mcp redacts
+        # per entry. Display-only here (PUT round-trips `content`, never `frontmatter`, so a
+        # sentinel is never written back), but a transport shown as `********` is misleading.
+        servers = parsed.get("mcpServers")
+        if isinstance(servers, dict):
+            frontmatter["mcpServers"] = {
+                name_: cw.redact_secrets(entry) for name_, entry in servers.items()
+            }
     except cw.InvalidCandidateError:
         # An unparsable frontmatter block still surfaces via `content` (so the
         # operator can see and fix it); the derived display field just degrades.

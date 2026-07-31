@@ -555,3 +555,24 @@ def test_secret_short_write_fails_closed(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "write", _short_write)
     with pytest.raises(OSError, match="short write creating"):
         auth.load_or_create_secret(tmp_path)
+
+
+def test_verify_proxy_hmac_non_ascii_signature_returns_false_not_raises() -> None:
+    # `sig` is parsed straight out of X-Proxy-Auth, and Starlette decodes header bytes as
+    # latin-1 — so a non-ASCII byte arrives here as a non-ASCII str and hmac.compare_digest
+    # raises TypeError on one. That 500'd instead of honouring this function's own
+    # "returns False on any malformation rather than raising". Same class as the setup
+    # wizard's token gate. Narrower reach (needs reverse_proxy.enabled + a trusted peer +
+    # require_hmac) and never a bypass — it raised rather than granting.
+    assert (
+        auth.verify_proxy_hmac(
+            secret="s3cret",
+            header_value="t=1700000000,v1=\u00e9",
+            remote_user="alice",
+            method="GET",
+            path="/api/projects",
+            window=300,
+            now=1700000000,
+        )
+        is False
+    )

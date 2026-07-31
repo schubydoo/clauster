@@ -1323,3 +1323,45 @@ def test_route_never_executes_hooks_command(write_config, tmp_path, projects_roo
         )
         assert resp.status_code == 200
     assert not marker.exists()
+
+
+def test_read_agent_treats_a_directory_as_absent_not_a_500(tmp_path: Path) -> None:
+    # A plain DIRECTORY named `<name>.md` raises IsADirectoryError, which is neither
+    # FileNotFoundError nor a ConfigWriteError — so it escaped the route's
+    # `except ConfigWriteError` as a 500. LIST already skips such an entry (it fails
+    # `is_file()`), so GET must agree it is absent; the module docstring states that
+    # agreement as a property.
+    root = tmp_path / "agents"
+    root.mkdir()
+    (root / "sneaky.md").mkdir()
+    with pytest.raises(sub.AgentNotFoundError):
+        sub._read_agent(root, "sneaky", "project")
+
+
+def test_read_agent_frontmatter_does_not_use_a_server_name_as_a_secret_hint(
+    tmp_path: Path,
+) -> None:
+    # A frontmatter `mcpServers` block is keyed by user-chosen server NAMES. With the
+    # widened subtree hint, a server called `oauth-gw` matched `_SECRET_KEY_RE` and masked
+    # its own `type`/`url`. Display-only (PUT round-trips `content`, never `frontmatter`),
+    # but a transport shown as `********` is simply misleading.
+    root = tmp_path / "agents"
+    root.mkdir()
+    (root / "my-agent.md").write_bytes(
+        b"---\n"
+        b"name: my-agent\n"
+        b"description: does a thing\n"
+        b"mcpServers:\n"
+        b"  oauth-gw:\n"
+        b"    type: http\n"
+        b"    url: https://example.invalid/\n"
+        b"    headers:\n"
+        b"      Authorization: Bearer sk-live-SECRET\n"
+        b"---\nbody\n"
+    )
+    doc = sub._read_agent(root, "my-agent", "project")
+    server = doc["frontmatter"]["mcpServers"]["oauth-gw"]
+
+    assert server["type"] == "http"  # structural field survives
+    assert server["url"] == "https://example.invalid/"
+    assert server["headers"]["Authorization"] == cw.REDACTION_SENTINEL  # secret still masked
