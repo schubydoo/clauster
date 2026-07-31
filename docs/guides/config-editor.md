@@ -186,10 +186,10 @@ The surface tabs:
 
 Two entries can look broken when they are not:
 
-- **A plugin-provided subagent is listed, but has no description and cannot be
-  edited or deleted.** A plugin owns that file, so Clauster refuses to change
-  it. Clauster also never reads the file the plugin points to, so it cannot show
-  what the subagent does. To change it, change the plugin.
+- **A plugin-provided subagent is listed, but cannot be edited or deleted.** A
+  plugin owns that file, so Clauster refuses to change it. To change it, change
+  the plugin. When the plugin supplies it as a symlink, Clauster never follows
+  the link, so the description is blank as well.
 - **A skill Clauster cannot read still appears, carrying an error in place of
   the missing information.** One unreadable skill never hides the others.
 

@@ -226,8 +226,10 @@ service](installation.md#run-as-a-systemd-service-linux).
 
 **What you see:** `doctor` fails the `config` row with one of three details —
 `no config found: ...`, `invalid config: ...`, or `config is not valid YAML: ...`
-— and any Clauster command exits `2` with a one-line `clauster: config error:`
-message.
+— and most other verbs exit `2` with a one-line `clauster: config error:`
+message. Three behave differently: `doctor` itself exits `1` with the table
+above, `clauster run` with no config at all opens the setup wizard rather than
+failing, and `install-service` still renders a unit using defaults.
 
 **Most likely cause:** no `clauster.yml` where Clauster looks for one, or a
 mistake inside it. The three details separate the cases, which is what tells you
@@ -237,7 +239,7 @@ where to look:
 | --- | --- | --- |
 | `no config found` | No file at any searched path | The search order |
 | `config is not valid YAML` | The file does not parse — a stray tab, an unclosed quote | A line and column |
-| `invalid config` | The file parses but a value is rejected | The offending key |
+| `invalid config` | The file parses but a value is rejected | The offending key — or, for a root that is not a mapping, only the file |
 
 ```sh
 clauster doctor -c /path/to/clauster.yml   # same file the service uses
@@ -444,7 +446,12 @@ tail ~/.clauster/claustrum/daemon.log      # what did the daemon last say?
 
 Start with `/healthz`: its `claustrum` block carries an `error` describing why
 the last start attempt failed — including the commonest case, the binary not
-being found. Before, that reason reached only the server log.
+being found.
+
+Authenticate that request on a deploy with `auth.enabled` — an unauthenticated
+caller gets liveness only, with no `claustrum` block at all. The block is also
+absent when `claustrum.enabled` is false. See
+[Health checks](operations.md#health-checks) for what `/healthz` returns to whom.
 
 **Mechanism:** [`claustrum` config
 reference](reference/config.md#claustrum-hosted-live-view-channel-claustrumconfig).
