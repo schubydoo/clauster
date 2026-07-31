@@ -25,12 +25,15 @@ field renders as a typed control (toggle, bounded number, text, or a select
 with human-readable option labels), with its raw YAML key shown as subtext so
 you can cross-reference the file.
 
-A bounded number carries its real range. Where a bound is **exclusive** — a
-timeout that must be *greater than* zero, not *at least* zero — the editor
-refuses the endpoint before saving and tells you so, rather than accepting it
-and returning a `422` from the full-config re-validation. The number input's
-own `min`/`max` are inclusive by definition, so that last step is what makes
-the control's answer match the server's.
+A bounded number carries its real range, and the editor checks that range
+before it sends the save. The input's `min`/`max` attributes only advertise
+the range and bound the spinner arrows — the save is a `fetch`, not a form
+submit, so a value you *type* is never enforced by the browser. The editor
+therefore compares it itself and refuses an out-of-range one with a message,
+rather than sending it and surfacing a `422` from the full-config
+re-validation. That covers **exclusive** bounds too: a timeout that must be
+*greater than* zero, not *at least* zero, is refused at zero — something
+`min="0"` alone cannot express.
 
 A switch whose feature needs an **optional dependency** that isn't installed
 (Direct Sessions → the `claustrum` binary, notifications → `apprise`, the live
