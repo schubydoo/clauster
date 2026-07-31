@@ -4,8 +4,9 @@ Builds the SQLite URL under ``state_dir``, builds a SQLAlchemy 2.0
 :class:`~sqlalchemy.engine.Engine`, and hands out a ``sessionmaker``. SQLite gets
 the durability/concurrency PRAGMAs the JSON store's atomic-write posture implied:
 write-ahead logging (concurrent reads during a write), enforced foreign keys (off
-by default in SQLite), and a busy-timeout so a brief writer overlap waits instead
-of raising ``database is locked``.
+by default in SQLite), a busy-timeout so a brief writer overlap waits instead of
+raising ``database is locked``, and ``synchronous=NORMAL`` (crash-durable under WAL
+without an fsync per commit).
 
 Clauster is SQLite-only (#796) — there is no remote-database substrate switch.
 """
@@ -60,8 +61,8 @@ def resolve_url(state_dir: Path) -> str:
 def create_db_engine(state_dir: Path) -> Engine:
     """Build the SQLite engine for ``state_dir``.
 
-    Registers a ``connect`` listener that sets WAL journaling, enforces foreign
-    keys, and arms the busy-timeout on every pooled connection.
+    Registers a ``connect`` listener that sets WAL journaling, enforces foreign keys,
+    arms the busy-timeout, and sets ``synchronous=NORMAL`` on every pooled connection.
     """
     url = resolve_url(state_dir)
     # SQLite can't create the parent directory for its file; ensure it exists and
@@ -94,7 +95,7 @@ def dispose_live_engines() -> None:
 
 
 def _arm_sqlite_pragmas(engine: Engine) -> None:
-    """Apply WAL / foreign-keys / busy-timeout to every new SQLite connection.
+    """Apply WAL / foreign-keys / busy-timeout / synchronous=NORMAL to each connection.
 
     Registered as a ``connect`` event so a fresh pooled connection always carries
     the PRAGMAs — they are per-connection in SQLite, not persisted on the file.
@@ -102,12 +103,14 @@ def _arm_sqlite_pragmas(engine: Engine) -> None:
 
     @event.listens_for(engine, "connect")
     def _set_sqlite_pragma(dbapi_connection: object, _record: object) -> None:
+        """Apply the durability/concurrency pragmas to each new SQLite connection."""
         cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
         try:
             # SQLite silently refuses WAL on some filesystems (network/overlay mounts)
             # and stays in rollback-journal mode while the statement still "succeeds".
             # Surface that downgrade — the synchronous=NORMAL durability posture below
-            # assumes WAL — rather than letting it pass unnoticed (fail-closed, loudly).
+            # assumes WAL — rather than letting it pass unnoticed. Best-effort: we warn
+            # and continue, the connection still gets synchronous=NORMAL.
             mode = cursor.execute("PRAGMA journal_mode=WAL").fetchone()
             if mode and str(mode[0]).lower() != "wal":
                 _log.warning(

@@ -144,9 +144,11 @@ def write_project_permissions(
 
     Ensures the ``<project>/.claude`` parent exists (so a first write to a project that
     has no ``.claude`` dir yet does not fail the atomic writer's ``mkstemp`` in a
-    missing directory), then runs the fail-closed Foundation pipeline. The candidate is
-    validated *before* the directory is created, so a bad shape (422) leaves the
-    filesystem untouched.
+    missing directory), then runs this surface's share of the Foundation pipeline —
+    structural validation, the stale-hash guard, and the locked atomic subtree write.
+    The capability gate, type-the-name confirm, and path containment are the route's,
+    upstream of here. The candidate is validated *before* the directory is created, so
+    a bad shape (422) leaves the filesystem untouched.
     """
     cw.validate_candidate(incoming, validate_permissions)
     path = cw.project_settings_path(project_dir)
@@ -164,8 +166,11 @@ def write_user_permissions(
 ) -> None:
     """Validate + write the user-scope ``~/.claude/settings.json`` ``permissions`` block.
 
-    Ensures the ``~/.claude`` parent exists, then runs the fail-closed Foundation
-    pipeline. Unlike the #688 user-scope MCP writer (which edits a ``~/.claude.json``
+    Ensures the ``~/.claude`` parent exists, then runs this surface's share of the
+    Foundation pipeline — structural validation, the stale-hash guard, and the locked
+    atomic subtree write; the capability gate, type-the-name confirm, and path
+    containment are the route's, upstream of here. Unlike the #688 user-scope MCP
+    writer (which edits a ``~/.claude.json``
     subtree), this writes a *separate real file* and so carries the same stale-hash
     guard as the project scope. The candidate is validated *before* the directory is
     created, so a bad shape (422) writes nothing.
@@ -185,9 +190,11 @@ def write_project_local_permissions(
 ) -> None:
     """Validate + write the local-scope ``.claude/settings.local.json`` ``permissions`` block.
 
-    Third (local) scope, sibling of the project/user writers above: same fail-closed
-    Foundation pipeline and stale-hash guard, targeting a *third* file that is you,
-    this project only. :func:`~clauster.config_write.ensure_gitignored` runs *before* the
+    Third (local) scope, sibling of the project/user writers above: the same share of the
+    Foundation pipeline (structural validation, stale-hash guard, locked atomic subtree
+    write), targeting a *third* file that is you, this project only. The capability gate,
+    type-the-name confirm, and path containment are the route's, upstream of here.
+    :func:`~clauster.config_write.ensure_gitignored` runs *before* the
     write (fail-closed: the write creates a secret-bearing ``.bak``), so
     ``settings.local.json`` and that backup are never accidentally committed (#766) —
     idempotent, so an already-gitignored file is a no-op there.
@@ -195,8 +202,6 @@ def write_project_local_permissions(
     cw.validate_candidate(incoming, validate_permissions)
     path = cw.project_local_settings_path(project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Ignore BEFORE writing, never after: the write creates a `.bak` holding the PREVIOUS
-    # values, so an ensure_gitignored that failed afterwards would leave that secret-bearing
-    # file trackable. Ignoring first is the fail-closed order (the call is idempotent).
+    # Ignore BEFORE writing (fail-closed order) — see `cw.ensure_gitignored` for why.
     cw.ensure_gitignored(project_dir, ".claude/settings.local.json", ignore_backup_sibling=True)
     cw.write_settings_subtree(path, PERMISSIONS_KEY, incoming, expected_hash)

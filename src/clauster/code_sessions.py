@@ -98,7 +98,7 @@ class CodeSessionsClient(_AnthropicHTTPClient):
         super().__init__(credentials, transport=transport or _CODE_TRANSPORT, base=base)
 
     def _headers(self) -> dict:
-        # This beta namespace additionally requires an anthropic-version header.
+        """Return the base headers plus the version header this beta namespace requires."""
         return {**super()._headers(), "anthropic-version": ANTHROPIC_VERSION}
 
     def anchor_health(self, cse_id: str) -> AnchorHealth:
@@ -141,8 +141,11 @@ def anchor_health_for_pointer(
 ) -> AnchorHealth:
     """Load credentials and classify a preserved anchor's health; fail-safe to ``UNKNOWN``.
 
-    Never raises: a missing/expired credential (``CredentialsError``) yields ``UNKNOWN`` so
-    the caller simply leaves the pointer alone and lets the launch proceed unchanged.
+    A missing/expired credential (``CredentialsError``) yields ``UNKNOWN`` so the caller
+    simply leaves the pointer alone and lets the launch proceed unchanged. That is the only
+    guarded failure — it is not a never-raises contract: a credentials file whose valid-JSON
+    root is not an object makes ``load_credentials`` raise ``AttributeError`` through this
+    function, and no caller wraps the call.
     """
     if not starter_session_id.startswith("session_"):
         # An unexpected id shape would mis-derive the cse id and 404 -> don't risk it.

@@ -7,8 +7,9 @@ the DB-backed stores round-trip the same ``dict[str, dict]`` the callers already
 * :class:`Project` — a project the runner has tracked (name is the natural key the
   ``state.json`` map was keyed by). Present so ``instances`` can carry a real
   foreign key, the seam the session-history table (#363) builds on.
-* :class:`Instance` — per-project bridge intent the startup pointer-walk can't
-  re-derive (``state.json`` ``instances`` map). One row per project.
+* :class:`Instance` — per-instance bridge intent the startup pointer-walk can't
+  re-derive (``state.json`` ``instances`` map). Keyed by ``instance_id``; N rows
+  per project since #777.
 * :class:`HostedSession` — a hosted-channel session keyed by its
   ``claustrum_process_id`` (``hosted_state.json`` ``sessions`` map).
 * :class:`SessionEvent` — the append-only session lifecycle / event history (#363):
@@ -84,8 +85,9 @@ class Project(Base, TimestampMixin):
 class Instance(Base, TimestampMixin):
     """Per-instance bridge intent — the ``state.json`` ``instances`` record (#777).
 
-    Holds only the fields the startup pointer-walk can't re-derive (instance_id,
-    label, the intentional-stop flag, and the spawn/permission/resume modes).
+    Holds only what the startup pointer-walk can't re-derive: instance_id, label, the
+    intentional-stop flag, the spawn/permission/resume modes, and the bridge/keeper
+    liveness identity (pid + proc_start, #1088/#1091).
 
     Since issue 777 the primary key is ``instance_id`` (a stable RFC 4122 UUID
     minted at spawn time), not ``project_name``.  This allows multiple rows per

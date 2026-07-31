@@ -167,7 +167,6 @@ class _ScreenTap:
 
 def _proc_start(pid: int) -> float | None:
     """Return the bridge's process start time for Clauster's PID-reuse defense, or None."""
-    # Imported lazily so the keeper still runs if procutil grows heavier deps.
     try:
         from clauster import procutil
 
@@ -314,8 +313,7 @@ def _run_keeper_conpty(
         return 72
     os.environ["PYWINPTY_BLOCK"] = "0"  # non-blocking read() so the loop can also poll liveness
 
-    # Build a pyte screen for URL reassembly whenever pyte is available (ConPTY fragments the
-    # URL regardless of size); the live-view tap stays gated on screen_sidecar in the drain.
+    # The live-view tap stays gated on screen_sidecar in the drain.
     # Screen setup must never take the keeper down: on failure the screen is simply absent
     # (raw-bytes scrape only) and, when a live view was requested, its sidecar explains why.
     screen: PtyScreen | None = None
@@ -453,6 +451,7 @@ def run_keeper(
         return 70
 
     def _acquire_ctty() -> None:  # pragma: no cover — runs in the forked child, pre-exec
+        """Lead a new session and claim the PTY slave as the child's controlling terminal."""
         # Make the bridge its own session leader FIRST: TIOCSCTTY only works for a
         # session leader with no controlling terminal. Without this setsid the
         # bridge stays in the launcher's session and never acquires the PTY as its
@@ -604,6 +603,7 @@ def _project_from_sidecar(filename: str) -> str | None:
 
 
 def _int_or_none(value: object) -> int | None:
+    """Return ``value`` when it is a genuine ``int``, rejecting ``bool`` and everything else."""
     # ``bool`` is a subclass of ``int``, so a corrupt sidecar carrying e.g.
     # ``"keeper_pid": true`` would otherwise resolve to PID 1. Exclude it,
     # matching the convention in procutil.py.
@@ -670,11 +670,12 @@ def find_orphan_keepers(log_dir: Path, carded_projects: set[str]) -> list[Keeper
 
 
 def stop_keeper(keeper_pid: int, *, expect_create_time: float | None = None) -> bool:
-    """Stop a keeper process (graceful reap, then force-kill its whole tree).
+    """Stop a keeper process: wait ~2s for it to exit on its own, then force-kill its tree.
 
-    Returns True once the process is gone. The reap loop is a no-op for a keeper
-    that is not the caller's child (the CLI is a separate process), so the force
-    path is what actually stops a detached orphan and its bridge subtree.
+    No stop signal is sent during the grace window — it only reaps an already-exited
+    child and polls. That reap is a no-op for a keeper that is not the caller's child
+    (the CLI is a separate process), so the force path is what actually stops a detached
+    orphan and its bridge subtree. Returns True once the process is gone.
 
     ``expect_create_time`` (the create-time captured when the keeper was
     classified) is a PID-reuse guard: if, after the grace window, the PID's

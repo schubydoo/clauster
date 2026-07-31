@@ -69,7 +69,8 @@ suspected-secrets model are both reasonable alternatives if the blanket mask
 above is too coarse in practice.
 
 **Scope-merge provenance (the novel part of #772).**
-:func:`compute_effective_settings` computes, for the union of (non-owned)
+:func:`_compute_effective_settings` (module-private on purpose) computes, for
+the union of (non-owned)
 top-level keys across the three scopes, the *effective* value and *which scope
 supplied it* -- following Claude Code's own precedence order (verified against
 https://docs.anthropic.com/en/docs/claude-code/settings, "How scopes interact",
@@ -229,13 +230,15 @@ def _locked_write_misc(path: Path, incoming: dict[str, Any], expected_hash: str 
     :data:`~clauster.config_write.REDACTION_SENTINEL` (an env var, or any other
     coincidentally secret-shaped key, the operator didn't touch) keeps the
     real stored value rather than overwriting it with the literal sentinel
-    string. Every key in :data:`OWNED_KEYS` is preserved byte-for-byte
-    untouched; the entire non-owned partition is replaced by the merged result
+    string. Every key in :data:`OWNED_KEYS` is carried through with its value
+    unchanged (the whole object is re-rendered, so byte layout and key order are
+    not preserved); the entire non-owned partition is replaced by the merged result
     (a full-replacement subtree write, not a key-by-key patch of unspecified
     keys the caller never mentioned).
     """
 
     def _mutate(current_bytes: bytes) -> dict[str, Any]:
+        """Check the expected hash, then swap in the merged non-owned partition."""
         if expected_hash is None:
             if current_bytes:
                 raise cw.StaleConfigWriteError(f"{path.name} already exists; a hash is required")
@@ -244,8 +247,8 @@ def _locked_write_misc(path: Path, incoming: dict[str, Any], expected_hash: str 
         current = cw.load_settings_json_obj(current_bytes)
         stored_misc = _misc_view(current)
         merged_misc = cw.merge_redacted(incoming, stored_misc)
-        # Replace the whole non-owned partition; every owned key stays exactly
-        # as it was (untouched key, untouched value, untouched position).
+        # Replace the whole non-owned partition; every owned key keeps its value
+        # (the file is re-rendered, so byte layout and key order are not preserved).
         for key in list(current):
             if key not in OWNED_KEYS:
                 del current[key]
@@ -256,7 +259,11 @@ def _locked_write_misc(path: Path, incoming: dict[str, Any], expected_hash: str 
 
 
 def read_project_settings(project_dir: Path) -> tuple[dict[str, Any], str]:
-    """Return ``(settings, content_hash)`` for a project's ``.claude/settings.json``."""
+    """Return ``(redacted_misc, content_hash)`` for a project's ``.claude/settings.json``.
+
+    The misc partition only (every :data:`OWNED_KEYS` member is dropped), with every
+    ``env`` value masked -- see :func:`_read_misc`.
+    """
     return _read_misc(cw.project_settings_path(project_dir))
 
 
@@ -278,7 +285,11 @@ def write_project_settings(
 
 
 def read_user_settings(settings_json: Path) -> tuple[dict[str, Any], str]:
-    """Return ``(settings, content_hash)`` for the user-scope ``~/.claude/settings.json``."""
+    """Return ``(redacted_misc, content_hash)`` for the user-scope ``~/.claude/settings.json``.
+
+    The misc partition only (every :data:`OWNED_KEYS` member is dropped), with every
+    ``env`` value masked -- see :func:`_read_misc`.
+    """
     return _read_misc(settings_json)
 
 
@@ -297,7 +308,11 @@ def write_user_settings(
 
 
 def read_project_local_settings(project_dir: Path) -> tuple[dict[str, Any], str]:
-    """Return ``(settings, content_hash)`` for a project's ``settings.local.json``."""
+    """Return ``(redacted_misc, content_hash)`` for a project's ``settings.local.json``.
+
+    The misc partition only (every :data:`OWNED_KEYS` member is dropped), with every
+    ``env`` value masked -- see :func:`_read_misc`.
+    """
     return _read_misc(cw.project_local_settings_path(project_dir))
 
 

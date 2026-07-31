@@ -57,6 +57,7 @@ _EXACT_PROC_START_TOLERANCE = 0.05
 
 
 def _clk_tck() -> int:
+    """Return the kernel clock-tick rate, defaulting to 100 where it is unavailable."""
     try:
         return os.sysconf("SC_CLK_TCK") or 100
     except (ValueError, AttributeError, OSError):
@@ -307,7 +308,8 @@ def is_keeper_process(pid: int) -> bool:
     (:func:`clauster.pty_keeper.iter_keepers`) and the hard-kill
     (:func:`clauster.pty_keeper.stop_keeper`) both require it, so a PID the original
     keeper left behind and the OS recycled onto an unrelated process is never listed as
-    a live orphan nor SIGKILLed (#301 / RUNOPS-1). Fails closed on any psutil error.
+    a live orphan nor SIGKILLed (#301 / RUNOPS-1). Returns ``False`` on a gone/denied/zombie
+    process; a non-positive ``pid`` raises psutil's ``ValueError`` (not caught here).
     """
     try:
         proc = psutil.Process(pid)
@@ -325,7 +327,8 @@ def is_bridge_process(pid: int) -> bool:
     working session is an unmanaged *bridge* or merely a hand-run ``claude`` sharing a
     project directory. The phantom-prune needs that distinction: its premise is "the bridge
     IS alive, just unmanaged", and deleting a resumable card because an operator opened a
-    terminal in the project would be wrong. Fails closed on any psutil error.
+    terminal in the project would be wrong. Returns ``False`` on a gone/denied/zombie
+    process; a non-positive ``pid`` raises psutil's ``ValueError`` (not caught here).
     """
     try:
         proc = psutil.Process(pid)
@@ -427,7 +430,10 @@ def force_kill_tree(pid: int, *, wait_timeout: float | None = None) -> None:
 
     The graceful-stop fallback: used when a bridge ignores SIGINT/CTRL_BREAK, or
     to reap a wrapper process (e.g. a Windows ``.cmd`` shim) that outlives the
-    bridge it launched. Safe on a dead/reused/absent PID.
+    bridge it launched. A dead or absent PID is a no-op.
+
+    It does **not** verify process identity: a REUSED pid is killed along with its whole
+    tree. Callers must gate on a create-time match themselves (see :func:`kill_if_match`).
 
     ``wait_timeout`` opts into waiting (bounded) for the reaped processes to actually
     die. Killing is ASYNCHRONOUS — SIGKILL is delivered, not awaited, and Windows

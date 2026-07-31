@@ -49,8 +49,8 @@ class KeyedJsonStore:
     A small, non-authoritative on-disk map: each concrete store sets the filename,
     the JSON inner-map key, the persisted-field whitelist, the current schema, and
     a logger. The shared behaviour is the tolerant fail-closed load (missing or
-    corrupt file degrades to ``{}``), the in-place migration of an older
-    ``schema_version`` (taking a one-time ``.bak`` before coercing), the
+    corrupt file degrades to ``{}``), the in-place coercion of any mismatched
+    ``schema_version``, older or newer (taking a one-time ``.bak`` first), the
     unknown-field drop, and the atomic write. Subclasses customize *only* the
     class attributes below, so the on-disk shape stays exactly per-store.
     """
@@ -68,9 +68,9 @@ class KeyedJsonStore:
     def load(self) -> dict[str, dict]:
         """Return ``{key: {persisted fields}}``.
 
-        Tolerates a missing or corrupt file (returns ``{}``) and migrates an
-        older ``schema_version`` (taking a ``.bak`` first). Unknown fields are
-        dropped.
+        Tolerates a missing or corrupt file (returns ``{}``) and coerces ANY
+        mismatched ``schema_version`` — older or newer — to the current one,
+        taking a one-time ``.bak`` first. Unknown fields are dropped.
         """
         try:
             raw = self._path.read_text(encoding="utf-8")
@@ -129,7 +129,7 @@ class StateStore(KeyedJsonStore):
     """Persists per-project bridge intent (label, stop flag, spawn/permission mode).
 
     Backed by a single ``state.json`` under the state dir; reads tolerate a
-    missing/corrupt file and migrate older schemas in place.
+    missing/corrupt file and coerce any mismatched schema in place.
     """
 
     FILENAME = "state.json"

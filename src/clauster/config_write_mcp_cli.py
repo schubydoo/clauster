@@ -177,17 +177,20 @@ def _run(
     into the child environment via :func:`clauster.procutil.child_env`, never
     appended to ``args``. ``stdin`` is closed (``DEVNULL``): a CLI that falls back to
     an interactive prompt must fail fast, not hang the request. Raises
-    :class:`McpCliError` if the binary can't even be spawned (missing binary,
-    timeout); a nonzero exit is returned to the caller to classify (see
-    :func:`_raise_for_failure`), since "already exists" / "not found" are expected,
-    handled outcomes, not this function's problem to interpret.
+    :class:`McpCliError` when the spawn itself fails (timeout, ``OSError`` from exec); a
+    ``claude`` binary missing from PATH raises
+    :class:`clauster.claude_cli.ClaudeNotFound` from
+    :func:`~clauster.claude_cli.resolve_binary` before any spawn and propagates unchanged.
+    A nonzero exit is returned to the caller to classify (see :func:`_raise_for_failure`),
+    since "already exists" / "not found" are expected, handled outcomes, not this
+    function's problem to interpret.
 
     **Never lets the argv leak into the error text.** ``TimeoutExpired.__str__``
     embeds the full command — including ``json.dumps(entry)``, which for an OAuth add
     could carry a header/env value — so the timeout branch builds its message from the
     *verb only* (``args[0]``) and the timeout seconds, never ``str(exc)``. The generic
-    spawn-failure branch (an ``OSError`` such as a missing/undexecutable binary) prints
-    only a redacted ``str(exc)`` (the binary path, not the argv) as defense in depth.
+    spawn-failure branch (an ``OSError`` such as a non-executable binary) prints only a
+    redacted ``str(exc)`` (the binary path, not the argv) as defense in depth.
     """
     verb = args[0] if args else ""
     resolved = claude_cli.resolve_binary(binary)

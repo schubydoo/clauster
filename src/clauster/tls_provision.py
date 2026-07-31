@@ -253,11 +253,12 @@ def _atomic_write(dest: Path, data: bytes, mode: int) -> None:
     """Write *data* to *dest* atomically, creating it with *mode* permissions.
 
     Uses a sibling temp file + rename so neither a partial write nor a crash
-    leaves a half-written file.  The private-key file (mode=0600) is never
-    world-readable, even transiently.  Key bytes are in *data* — the caller
-    must not echo them.
+    leaves a half-written file.  On POSIX the private-key file (mode=0600) is never
+    world-readable, even transiently; on Windows the mode bits are inert (no ``fchmod``)
+    and the key file inherits the ACL of its parent directory.  Key bytes are in *data*
+    — the caller must not echo them.
 
-    Permission correctness is defended three ways so a **pre-existing** temp file
+    Permission correctness is defended two ways so a **pre-existing** temp file
     (a crashed prior run whose perms drifted, or one pre-planted by a local user)
     can never leak the key through the wrong mode:
 

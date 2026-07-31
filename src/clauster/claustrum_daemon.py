@@ -88,7 +88,11 @@ _DAEMON_SENTINEL_ENV = frozenset(
 
 
 class DaemonSpawnError(ClaustrumError):
-    """The ``claustrum -serve`` launcher failed to start a usable daemon."""
+    """The claustrum daemon could not be started.
+
+    Raised both when the binary cannot be resolved at all and when the ``-serve``
+    launcher fails to hand off a usable daemon.
+    """
 
 
 # AF_UNIX ``sun_path`` is a fixed C buffer — 104 bytes on macOS/BSD, 108 on Linux; a longer
@@ -158,7 +162,11 @@ class ClaustrumDaemon:
 
     @property
     def socket_path(self) -> Path:
-        """The AF_UNIX socket path this daemon listens on."""
+        """The daemon's socket path — the AF_UNIX endpoint on POSIX.
+
+        On Windows the client instead dials the named pipe advertised in the ``rpc.pipe``
+        file beside this path.
+        """
         return self._socket
 
     def status(self) -> dict[str, Any]:
@@ -183,8 +191,9 @@ class ClaustrumDaemon:
         if a running daemon rejects the persisted token (Clauster must not spawn
         a second daemon over a healthy one), :class:`DaemonSpawnError` if the
         launcher fails, or :class:`DaemonUnreachable` if a freshly spawned daemon
-        never accepts a connection. On any failure :meth:`status` carries the
-        reason.
+        never accepts a connection. Most failure paths record the reason for
+        :meth:`status`; two do not — an unresolvable claustrum binary and a
+        launcher that exposes no stdin pipe raise with the reason only in the log.
         """
         async with self._lock:
             if self._client is not None:
@@ -200,7 +209,7 @@ class ClaustrumDaemon:
 
         Unlike :meth:`ensure` this never reconnects or spawns — it reports the
         current truth and clears a dead connection so the next :meth:`ensure`
-        recovers. (Background auto-reconnect without a caller is CL-6.)
+        recovers. There is no background reconnect task — recovery is caller-driven.
         """
         async with self._lock:
             if self._client is not None and not await self._is_alive(self._client):
@@ -513,9 +522,16 @@ class ClaustrumDaemon:
             returncode = await asyncio.wait_for(proc.wait(), timeout=remaining)
         except TimeoutError as exc:
             # The launcher is a `.cmd`/shim → python → detached-child chain on Windows, where
-            # `kill()` reaps only the process we hold. A launcher that timed out mid-detach
-            # would otherwise leave that chain running with our log file open. Best-effort:
-            # a failed reap must not mask the DaemonSpawnError this path exists to raise.
+            # `kill()` reaps only the process we hold, so a launcher that timed out mid-detach
+            # would leave that chain running with our log file open. Read the blast radius
+            # literally: `force_kill_tree` walks `children(recursive=True)`, so this also kills
+            # a daemon the launcher DID detach before hanging (DETACHED_PROCESS doesn't erase
+            # the ppid link psutil walks) AND its hosted subtree — and because that daemon binds
+            # the SHARED socket, another Clauster process that connected in this window loses its
+            # sessions too (`self._lock` serialises `ensure()` in-process only). Intended and
+            # bounded by `spawn_timeout_seconds`: we declared this launch failed, so we don't
+            # leave an unowned daemon serving from it. Best-effort — a failed reap must not mask
+            # the DaemonSpawnError this path exists to raise.
             #
             # ⚠️ Deliberately SYNCHRONOUS — do NOT "harmonise" this to `asyncio.to_thread`
             # to match runner.py. `proc` here is an `asyncio.subprocess.Process`, and an
@@ -525,20 +541,6 @@ class ClaustrumDaemon:
             # token on disk. With no await point that interleaving cannot happen. The psutil
             # walk is one bulk snapshot (single-digit ms) on a path that only runs when a
             # spawn already timed out, and this handler does synchronous FS work regardless.
-            #
-            # Semantic note: this also reaps a daemon the launcher DID detach before hanging
-            # (DETACHED_PROCESS doesn't erase the ppid link psutil walks), where previously it
-            # survived for a later `ensure()` to find. That is intended — we declared this
-            # launch failed, so we don't leave an unowned daemon serving from it.
-            #
-            # Read the blast radius literally: `force_kill_tree` walks `children(recursive=True)`,
-            # so this is "the daemon AND its hosted subtree", not just the daemon. A detached
-            # daemon has already spawned hosted agents (see `_spawn`'s env comment), it binds the
-            # SHARED socket as soon as it is up, `aclose()` treats it as designed to outlive our
-            # connection, and `self._lock` serialises `ensure()` in-process only — so another
-            # Clauster process could have connected in this window and loses its sessions too.
-            # Bounded by `spawn_timeout_seconds` and still the right call for a launch we have
-            # declared failed, but it is a wider reap than "we kill the daemon" suggests.
             if procutil.is_windows():
                 try:
                     procutil.force_kill_tree(proc.pid)

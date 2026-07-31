@@ -53,7 +53,11 @@ class CredentialsError(RuntimeError):
 
 
 class EnvironmentsAPIError(RuntimeError):
-    """The environments API returned a non-2xx status or an unusable body."""
+    """The environments API returned a 4xx/5xx status or an undecodable body.
+
+    Also raised locally with ``status=0`` when the transport refuses a non-https URL,
+    i.e. before any request is sent.
+    """
 
     def __init__(self, status: int, detail: str) -> None:
         """Build the error from the API HTTP status and detail text."""
@@ -84,7 +88,9 @@ def load_credentials(
     """Read the OAuth access token + org UUID from their single documented files.
 
     Parsed with the stdlib (do NOT assume ``jq`` is installed). Raises
-    ``CredentialsError`` on a missing file/field or an expired token.
+    ``CredentialsError`` on a missing file or field. Expiry is checked **only when the
+    caller supplies ``now_ms``** (ms epoch); with the default ``None`` an expired token is
+    returned unchecked — ``code_sessions.check_anchor_health`` calls it that way.
     """
     cred_file = Path(credentials_path).expanduser()
     try:
@@ -153,6 +159,7 @@ def https_transport(*, timeout: float = 30) -> Transport:
     """
 
     def _transport(method: str, url: str, headers: dict, body: bytes | None) -> tuple[int, bytes]:
+        """Refuse any non-https URL, then run the round-trip against its host."""
         parts = urlsplit(url)
         if parts.scheme != "https" or not parts.netloc:
             raise EnvironmentsAPIError(0, f"refusing non-https URL: {url!r}")
@@ -162,6 +169,7 @@ def https_transport(*, timeout: float = 30) -> Transport:
 
 
 def _https_roundtrip(method, parts, headers, body, timeout):  # pragma: no cover - live network I/O
+    """Run one certificate-verified HTTPS request, returning the status and raw body."""
     # Explicit verifying context checks cert chain + hostname (rule is a cross-version
     # audit nag; on py3.11+ with create_default_context() certs ARE verified) — never disable.
     # nosemgrep: python.lang.security.audit.httpsconnection-detected.httpsconnection-detected
@@ -197,6 +205,7 @@ class _AnthropicHTTPClient:
         self._base = base.rstrip("/")
 
     def _headers(self) -> dict:
+        """Return the auth, organization, beta, and content-type headers every call carries."""
         return {
             "Authorization": f"Bearer {self._cred.access_token}",
             "x-organization-uuid": self._cred.organization_uuid,
@@ -209,6 +218,7 @@ class EnvironmentsClient(_AnthropicHTTPClient):
     """Minimal client for the Anthropic environments API (list/archive/delete)."""
 
     def _request(self, method: str, path: str) -> dict:
+        """Send one API call and decode its JSON body, raising on 4xx/5xx or bad JSON."""
         status, raw = self._transport(method, self._base + path, self._headers(), None)
         if status >= 400:
             raise EnvironmentsAPIError(status, raw.decode("utf-8", "replace")[:500])
@@ -308,6 +318,7 @@ def find_ghosts(
 
 
 def _norm(directory: str) -> str:
+    """Return ``directory`` user-expanded and fully resolved, for comparison as a string."""
     return str(Path(directory).expanduser().resolve())
 
 

@@ -67,14 +67,10 @@ _INPROC_REGISTRY_LOCK = threading.Lock()
 _SECURED_DIRS: set[str] = set()
 _SECURED_DIRS_LOCK = threading.Lock()
 
-# Cross-PROCESS serialization of config/CLAUDE.md read-modify-writes (follow-up to #915).
-# Both the CLAUDE.md editor (`claude_md.write_claude_md`) and the config-write path
-# (`config_file_writer._locked`) take a `flock` on a lock file KEYED BY THE TARGET but
-# HELD IN THIS DIRECTORY (the deployment state dir), not beside the target — so two
-# clauster PROCESSES editing the same `<project>/CLAUDE.md` mutually exclude WITHOUT
-# littering the project dir with a visible `CLAUDE.md.lock`. `configure_lock_dir` is
-# called once in `create_app`; until then the flock is skipped (in-process lock still
-# holds) and a WARNING fires once so the degrade is never silent.
+# Cross-PROCESS serialization of config/CLAUDE.md read-modify-writes (#915; see the module
+# docstring for why the lock file lives here rather than beside the target).
+# `configure_lock_dir` is called once in `create_app`; until then the flock is skipped
+# (the in-process lock still holds) and a WARNING fires once so the degrade is never silent.
 _LOCK_DIR: Path | None = None
 _LOCK_DIR_LOCK = threading.Lock()
 _CROSS_PROCESS_UNCONFIGURED_WARNED = False

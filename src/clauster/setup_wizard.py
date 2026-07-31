@@ -10,8 +10,10 @@ Security envelope — two mutually exclusive modes, chosen by the bind host:
 
 * **Loopback (default).** There is no auth yet, so the server binds ``127.0.0.1``
   (``SETUP_HOST``) — only a local operator (or an SSH tunnel) can reach it; the loopback
-  bind is the boundary. The submit is **Origin-checked** against the loopback origin so a
-  cross-site page in the operator's browser cannot POST a password to ``localhost``.
+  bind is the boundary. The submit is **Origin-checked**: a *present* Origin must be a
+  loopback one, so a cross-site page in the operator's browser cannot POST a password to
+  ``localhost``. An absent Origin is allowed (a scripted local submit), as in the auth-off
+  app.
 * **Token-gated (non-loopback, opt-in).** A container publishes an external interface, so a
   loopback-bound wizard is unreachable (#1017): with ``CLAUSTER_SETUP_HOST`` set to a
   non-loopback address (the Docker image sets ``0.0.0.0``) the launcher binds there and mints
@@ -324,17 +326,25 @@ def create_setup_app(
     setup_lock = asyncio.Lock()  # serialize concurrent submits so last-writer-wins can't lock out
 
     def _token_ok(supplied: str | None) -> bool:
-        """Constant-time check of a supplied token against the expected one (token mode)."""
+        """Constant-time check of a supplied token against the expected one (token mode).
+
+        A missing value fails closed. A supplied value containing a non-ASCII character
+        does NOT return False — :func:`secrets.compare_digest` raises ``TypeError`` on it,
+        so the caller 500s rather than 403s on that input (no bypass, but the gate is not
+        total-on-str as the signature suggests).
+        """
         # setup_token is a str here (token_required is True). compare_digest avoids leaking
-        # the token length/prefix through timing; a missing value fails closed.
+        # the token length/prefix through timing.
         return supplied is not None and secrets.compare_digest(supplied, setup_token or "")
 
     @app.get("/healthz")
     async def healthz() -> dict:
+        """Report that this process is up and still serving the setup wizard."""
         return {"status": "setup"}
 
     @app.get("/", response_class=HTMLResponse)
     async def form(request: Request) -> Response:
+        """Render the setup form, or a 403 gate page when the setup token is required."""
         # Token mode: the page itself is gated, so a reachable non-loopback bind never even
         # renders the form to someone who didn't read the token from the server log. The token
         # is then embedded (below) so the same-origin submit can echo it as a header.
@@ -366,6 +376,7 @@ def create_setup_app(
 
     @app.post("/setup")
     async def submit(request: Request) -> Response:
+        """Apply the CSRF gate and validate the posted fields, then write the initial config."""
         # No auth exists yet, so the submit is CSRF-gated — one of two ways (module docstring):
         # * Token mode (non-loopback bind): require the one-time token as an ``X-Setup-Token``
         #   header. A custom header can't be set on a cross-origin request without a CORS
@@ -374,8 +385,9 @@ def create_setup_app(
         #   browser Origin is the operator's own LAN address, which can't be pre-allowlisted, so
         #   the header replaces the Origin check here.
         # * Loopback mode: a remote peer can't reach a loopback bind, so the only risk is a
-        #   cross-site page in the operator's browser POSTing to localhost — gate on a loopback
-        #   Origin.
+        #   cross-site page in the operator's browser POSTing to localhost — reject a *present*
+        #   Origin that isn't loopback. An ABSENT Origin passes (no browser omits it on a
+        #   cross-origin POST; a scripted local submit does), matching app.py's auth-off posture.
         if token_required:
             if not _token_ok(request.headers.get("x-setup-token")):
                 return JSONResponse({"detail": "setup token missing or invalid"}, status_code=403)

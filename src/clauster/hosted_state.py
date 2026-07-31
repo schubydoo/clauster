@@ -1,4 +1,9 @@
-"""Persistence for hosted-channel sessions (CL-6 — reattach across clauster restarts).
+"""Legacy JSON store for hosted-channel sessions (CL-6 — reattach across restarts).
+
+Superseded by the SQLite persistence layer (#362/#796): the live store is
+:class:`clauster.db.stores.HostedStateStore`, and this module's only consumer in
+``src/`` is :func:`clauster.db.bootstrap.import_legacy_json`, which reads the file
+once to migrate it. Kept for that one-way import; nothing writes through it now.
 
 A small, separate sibling of :mod:`clauster.state`: the bridge ``state.json`` is
 project-keyed (one record per project), but hosted sessions live in their own
@@ -46,12 +51,14 @@ _log = logging.getLogger("clauster.hosted_state")
 
 
 class HostedStateStore(KeyedJsonStore):
-    """Persists hosted-session records keyed by ``claustrum_process_id``.
+    """Legacy reader for ``hosted_state.json``, keyed by ``claustrum_process_id``.
 
     Backed by a single ``hosted_state.json`` under the state dir; reads tolerate a
     missing/corrupt file (degrade to ``{}``) and migrate older schemas in place.
     The record map is JSON-keyed ``"sessions"`` (vs the bridge store's
-    ``"instances"``), so older on-disk files keep loading unchanged.
+    ``"instances"``), so older on-disk files keep loading unchanged. Only
+    :func:`clauster.db.bootstrap.import_legacy_json` consumes it; the live store is
+    :class:`clauster.db.stores.HostedStateStore`.
     """
 
     FILENAME = "hosted_state.json"

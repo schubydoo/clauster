@@ -71,8 +71,11 @@ def _text_from_content(content: object) -> str:
 def extract_turns(transcript_path: str) -> list[tuple[str, str]]:
     """Return ``[(role, text), ...]`` for user/assistant turns, in file order.
 
-    Skips queue/attachment/meta rows, empty turns, and any turn that contains a
-    prior recap (the SENTINEL) to avoid compounding recaps across restarts.
+    Keeps only rows typed ``user``/``assistant`` that still have text once tool and
+    thinking blocks are dropped; any turn containing a prior recap (the SENTINEL) is
+    skipped too, to avoid compounding recaps across restarts. Queue/attachment/meta
+    rows are filtered only incidentally — by a foreign ``type`` or by having no text
+    block left — not by an explicit check.
     """
     turns: list[tuple[str, str]] = []
     try:
@@ -189,6 +192,7 @@ def compute_recap(transcript_path: str, session_id: str | None, max_chars: int) 
 
 
 def _max_chars() -> int:
+    """Return the recap size budget from the environment, ignoring unset/invalid/tiny values."""
     try:
         value = int(os.environ.get(ENV_MAX_CHARS, ""))
     except (ValueError, TypeError):

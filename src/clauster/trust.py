@@ -45,6 +45,7 @@ def trust_directory(path: Path, claude_json: Path = CLAUDE_JSON) -> None:
     resolved = str(path.resolve())
 
     def _set_trust(data: dict) -> None:
+        """Mark the resolved path trust-accepted, creating the projects entry if absent."""
         projects = data.get("projects")
         if not isinstance(projects, dict):
             projects = {}
@@ -68,13 +69,17 @@ _REMOTE_CONTROL_FLAGS = ("hasUsedRemoteControl", "remoteDialogSeen")
 def ensure_remote_control_enabled(claude_json: Path = CLAUDE_JSON) -> bool:
     """Atomically set the remote-control acknowledgment flags in ``claude_json``.
 
-    Returns True if the file was changed, False if the flags were already set (or the
-    file couldn't be read). Runs through the same shared locked, atomic temp+replace +
+    Returns True if a write landed — including when a missing or corrupt-JSON file is
+    (re)created from empty state — and False only when both flags were already set. An
+    existing file that genuinely cannot be read (e.g. ``PermissionError``) propagates its
+    ``OSError`` rather than returning False. Runs through the same shared locked, atomic
+    temp+replace +
     one-time ``.bak`` transaction as :func:`trust_directory`, since the ``claude`` CLI
     writes this file too. Idempotent.
     """
 
     def _set_flags(data: dict) -> bool | None:
+        """Set every remote-control ack flag, signalling no-write when all are already set."""
         if all(data.get(flag) is True for flag in _REMOTE_CONTROL_FLAGS):
             return False  # already acknowledged — signal "nothing to write"
         for flag in _REMOTE_CONTROL_FLAGS:

@@ -273,8 +273,7 @@ def _warn_if_ui_off_locks_out_auth(config: ClausterConfig, api_token_store: ApiT
     Deliberately **warns, never refuses to start** — the stricter fail-closed
     choice would also brick a deployment that flips `ui.enabled` off before
     minting a token, and there is no way to fix that short of hand-editing the
-    config back. This is a judgment call the PR body calls out explicitly for
-    the maintainer to reconsider; today it only logs.
+    config back.
 
     Fail-open on a token-store read error (a DB hiccup): the check degrades to
     "assume no named tokens" rather than raising, since this is advisory only —
@@ -379,20 +378,12 @@ def _csp_with_nonce(nonce: str | None) -> str:
     """Build the per-request Content-Security-Policy with nonce-gated script- and style-src.
 
     ``nonce`` is the per-request ``secrets.token_urlsafe(16)`` value generated in
-    the ``security_headers`` middleware. When present, script-src lists
-    ``'nonce-<nonce>'`` so the inline <script> blocks that carry the matching
-    ``nonce="..."`` attribute execute, and style-src lists the same nonce so the
-    inline <style> blocks (which also stamp ``nonce="..."``) apply.
-    ``'unsafe-inline'`` is dropped entirely from both (#442 for script-src, #533
-    for style-src): it is dead config once a nonce source is present, and dropping
-    it is what blocks an injected inline <script>/<style> lacking the per-request
-    nonce.
+    the ``security_headers`` middleware. The module comment above owns the #442/#533
+    rationale for the nonce gating and the dropped ``'unsafe-inline'``/``'unsafe-eval'``.
 
     Fail-closed: when ``nonce is None`` (a defensive degraded path that should not
     occur in normal request flow), both script-src and style-src still omit
     ``'unsafe-inline'`` — a degraded policy is *stricter*, never looser.
-    ``'unsafe-eval'`` is dropped (#533): the CSP-friendly Alpine build does not use
-    ``new Function()`` to evaluate directives.
     """
     nonce_src = f"'nonce-{nonce}' " if nonce else ""
     style_src = "style-src 'self'" + (f" 'nonce-{nonce}'" if nonce else "")
@@ -610,6 +601,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        """Start the poll loop and hosted daemon on startup; detach from both on shutdown.
+
+        Shutdown deliberately leaves the daemon, hosted sessions, and bridges running —
+        it only detaches, cancels the poll task, reaps the login shepherd, and disposes
+        the DB connection pool.
+        """
         await runner.start_poll_loop()  # rediscover running bridges + begin polling
         if config.claustrum.enabled:
             daemon = ClaustrumDaemon(config)
@@ -695,8 +692,8 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 "subtype": sanitize_line(subtype) if subtype else None,
             },
         )
-        # Notification channel (#541): the "come look" signal. Carries only the redacted
-        # subtype, never the prompt body. Fail-closed + fire-and-forget like the webhook.
+        # Notification channel (#541): the "come look" signal — fail-closed (unlike the
+        # fail-open webhook above), fire-and-forget.
         clean = sanitize_line(subtype) if subtype else None
         runner.notify_app_event(
             "permission-needed",
@@ -769,9 +766,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         """Render a friendly HTML 404 for browser navigation; keep JSON for the API.
 
         An unmatched route otherwise dead-ends a stale/mistyped URL on a bare
-        ``{"detail": "Not Found"}`` body with no way back. Only browser GETs to
-        non-API paths get the page; ``/api`` + ``/ws`` and JSON clients keep the
-        machine-readable error, so the API contract (and its tests) stay intact.
+        ``{"detail": "Not Found"}`` body with no way back. Only a 404 on a non-API path
+        from an ``Accept: text/html`` client gets the page (the method is not consulted);
+        ``/api`` + ``/ws`` and JSON clients keep the machine-readable error, so the API
+        contract (and its tests) stay intact.
         """
         wants_html = "text/html" in request.headers.get("accept", "")
         # Classify against the app-local path (root_path stripped, #812) — the same path
@@ -862,6 +860,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         return (user, False, False) if user else (None, False, False)
 
     def _origin_allowed(request: Request) -> bool:
+        """Return whether the request's Origin is allowlisted; an absent Origin is rejected."""
         # Origin only: Referer is spoofable/suppressible (Referrer-Policy, downgrades)
         # so it's not trusted for CSRF. Modern browsers always send Origin on a
         # state-changing fetch/XHR/form POST; its absence => reject.
@@ -871,6 +870,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         return auth.normalize_origin(origin) in _allowed_origins
 
     def _cookie_secure(request: Request) -> bool:
+        """Decide whether the session cookie gets the ``Secure`` flag for this request."""
         mode = config.auth.cookie_secure
         if mode != "auto":
             return mode == "always"
@@ -882,6 +882,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         return False
 
     def _throttle_key(request: Request) -> tuple[str | None, bool]:
+        """Return the login-throttle key and whether it is shared across users."""
         # Returns (key, shared). Behind a trusted reverse proxy every login shares the
         # proxy's socket IP, so a per-IP limiter becomes global (one attacker locks
         # everyone out). Key on the proxy-asserted user instead — but ONLY when the
@@ -922,6 +923,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         return ip, False
 
     def _is_public(path: str) -> bool:
+        """Return whether ``path`` is reachable without an authenticated session."""
         return path == "/healthz" or path == "/login" or path.startswith("/static/")
 
     def _metrics_token_ok(request: Request) -> bool:
@@ -937,6 +939,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.middleware("http")
     async def guard(request: Request, call_next):
+        """Apply the CSRF Origin gate to unsafe methods, and authenticate when auth is on.
+
+        Proxy-HMAC and Bearer credentials are exempt from the Origin check; with auth
+        off, only a *present* non-allowlisted Origin is rejected (an absent one passes).
+        """
         if not config.auth.enabled:
             # Auth off (the shipped loopback default) still enforces the CSRF Origin gate
             # on unsafe methods, so a cross-site page the operator visits can't drive the
@@ -1005,6 +1012,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     # headers land on this 404 too, same as every other response.
     @app.middleware("http")
     async def ui_guard(request: Request, call_next):
+        """Return 404 for the dashboard surfaces when ``ui.enabled`` is off."""
         # Match on the app-local path (root_path stripped) so the kill switch can't fail
         # OPEN behind a non-prefix-stripping proxy (#812).
         if not config.ui.enabled and _ui_guard_matches(request.method, _app_local_path(request)):
@@ -1022,9 +1030,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         Runs for all responses — including the auth guard's 401/403/redirect —
         so the headers are present even on rejected requests. The CSRF Origin
         gate is still the primary control; these are a belt-and-suspenders layer.
-        HSTS is emitted only when the connection is HTTPS (reusing the same
-        ``_cookie_secure`` detection the session cookie uses), so a plain-HTTP
-        LAN deployment never pins a browser to a scheme it can't serve.
+        HSTS follows the same ``_cookie_secure`` decision the session cookie's
+        ``Secure`` flag uses: under the default ``auth.cookie_secure: auto`` that
+        means an https scheme (or a trusted proxy's ``X-Forwarded-Proto``), so a
+        plain-HTTP LAN deployment never pins a browser to a scheme it can't serve.
+        The ``always`` / ``never`` overrides force it on or off regardless of scheme.
 
         The per-request CSP nonce is generated *before* ``call_next`` so the
         template render inside it can read ``request.state.csp_nonce`` and stamp
@@ -1065,12 +1075,14 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_form(request: Request) -> Response:
+        """Render the login page, redirecting an already-authenticated caller to the dashboard."""
         if (await _authenticate(request))[0]:
             return RedirectResponse(f"{_root}/", status_code=303)
         return _render(request, "login.html", {"error": None})
 
     @app.post("/login")
     async def login_submit(request: Request) -> Response:
+        """Verify the submitted password under the login throttle and open a session."""
         throttle_key, throttle_shared = _throttle_key(request)
         allowed, retry_after = _throttle.allowed(throttle_key, shared=throttle_shared)
         if not allowed:
@@ -1106,6 +1118,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.post("/logout")
     async def logout(request: Request) -> Response:
+        """Bump the session epoch so every issued cookie is revoked, then send back to login."""
         # Bump the server-side epoch so the cookie we just dropped — and any
         # copy of it elsewhere — is actually revoked, not merely cleared client
         # side. Single-user today, so this is "log out everywhere".
@@ -1181,12 +1194,14 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         return JSONResponse({"detail": "incorrect password"}, status_code=401)
 
     async def list_projects() -> list[Project]:
+        """Return the discovered projects through the same facade the CLI uses."""
         # Shared facade (#775): the CLI and this route go through the same
         # discover-then-stamp-bypass path, so the two can't drift.
         return await asyncio.to_thread(engine.list_projects)
 
     @app.get("/healthz")
     async def healthz(request: Request) -> dict:
+        """Report liveness — plus claude version and counts once the caller is authenticated."""
         # Unauthenticated callers get only liveness when auth is enabled — don't
         # leak claude version / running count on a public reverse-proxy deploy.
         if config.auth.enabled and (await _authenticate(request))[0] is None:
@@ -1249,11 +1264,14 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         }
 
     def _cached_bridge_samples() -> list[tuple[str, float, int]]:
-        """(project, cpu, rss) for each bridge in the server-side metrics cache (#354).
+        """(project, cpu, rss) for each PROJECT in the server-side metrics cache (#354).
 
-        Reads the runner's snapshot (refreshed off the request path by the metrics
-        task), so the scrape does no per-request sampling — O(1), consistent with the
-        per-project / batch endpoints. Empty when metrics are disabled (cache stays bare).
+        Per-bridge samples are folded and summed per project by
+        :meth:`~clauster.runner.SessionRunner.metrics_snapshots`, matching the
+        project-only gauge labels. Reads the runner's snapshot (refreshed off the request
+        path by the metrics task), so the scrape does no per-request sampling — consistent
+        with the per-project / batch endpoints. Empty when metrics are disabled (cache
+        stays bare).
         """
         return [
             (project, float(s.get("cpu_percent", 0.0)), int(s.get("rss_bytes", 0)))
@@ -1262,6 +1280,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/metrics")
     async def prometheus_metrics() -> Response:
+        """Render the Prometheus exposition, or 404 when the endpoint is disabled."""
         # Behind the auth guard unless observability.metrics_token_hash is set (then a
         # valid scrape token grants access without a session — see the guard).
         if not config.observability.prometheus_enabled:
@@ -1289,6 +1308,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/api/projects")
     async def api_projects() -> list[Project]:
+        """Return every discovered project."""
         return await list_projects()
 
     @app.get("/api/doctor")
@@ -1366,6 +1386,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         names = [p.name for p in await list_projects() if is_valid_project_name(p.name)]
 
         def _collect() -> dict[str, dict]:
+            """Read each project's last-used timestamp and rolled-up cost from history."""
             store = runner.persistence.session_history_store()
             meta = store.sortmeta_for_all(names)
             out: dict[str, dict] = {}
@@ -1446,6 +1467,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/api/projects/{name}/usage")
     async def api_project_usage(name: str) -> dict:
+        """Return the project's cost/token rollup, degrading to 503 if transcripts won't read."""
         # Read-only cost/token rollup for the dashboard badge. We validate the name
         # for path-component safety but deliberately skip a discovery scan: an
         # unknown-but-safe name simply has no transcripts and rolls up to zero.
@@ -1500,9 +1522,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         Bridge/agent sessions come from the runner's reconcile snapshot (keyed by
         sanitized cwd); hosted (claustrum) sessions run no ``agents --json`` session,
         so their captured session uuid is folded in by project name, status-filtered
-        to RUNNING/STARTING (``_instances`` is not pruned on session end). Both are
-        in-memory reads that never touch disk, so this liveness join can't fail a
-        transcript listing or tail — at worst a just-started/just-stopped session
+        to RUNNING/STARTING (``_instances`` is not pruned on session end). The hosted
+        half is a pure in-memory read; the runner half also does a little ``Path.resolve``
+        work on disk, each call of which is OSError-guarded — so this liveness join can't
+        fail a transcript listing or tail; at worst a just-started/just-stopped session
         flips a poll late. Shared by the list (#614 Part 1) and tail (#614 Part 2)
         routes so they agree on exactly which sessions are live.
         """
@@ -1520,7 +1543,8 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     async def api_project_transcripts(name: str) -> dict:
         """List a project's session transcripts for the read-only viewer (issue #431, #614).
 
-        Returns ``{project, sessions: [{session, mtime, turn_count, live}]}``,
+        Returns ``{project, sessions: [{session, mtime, turn_count, live, first_prompt,
+        first_ts, last_ts}]}``,
         live-first then newest-first (by mtime). ``session`` is the transcript filename
         stem (the per-session uuid); ``live`` is True when that session id maps to a
         currently-running bridge/agent or hosted session (#614). Mirrors
@@ -1530,20 +1554,24 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         the on-disk path to the browser. We deliberately skip a discovery scan (an
         unknown-but-safe name simply has no transcripts and lists empty).
 
-        The live set is computed before the off-thread walk from in-memory snapshots
-        (the runner's ``agents --json`` reconcile join + the hosted registry); both are
-        plain reads and never touch disk, so the liveness cross-reference can't fail the
-        listing — at worst a just-started/just-stopped session badges a poll late.
+        The live set is computed before the off-thread walk, mostly from in-memory
+        snapshots (the runner's ``agents --json`` reconcile join + the hosted registry);
+        the runner half also does a little OSError-guarded path resolution, so the
+        liveness cross-reference still can't fail the listing — at worst a
+        just-started/just-stopped session badges a poll late.
         """
         if not is_valid_project_name(name):
             raise HTTPException(status_code=422, detail="invalid project name")
 
         project_path = config.projects_root / name
-        # In-memory liveness join (see _live_session_uuids): never touches disk, so
-        # it can't fail the listing — at worst a session badges a poll late.
         live_uuids = _live_session_uuids(project_path, name)
 
         def _list() -> list[dict]:
+            """Build one summary entry per transcript file, skipping any that vanished.
+
+            Only a file removed mid-walk is skipped; any other read error propagates and
+            the caller turns it into a 503 for the whole listing.
+            """
             out: list[dict] = []
             for path in usage.transcript_paths_for(project_path):
                 try:
@@ -1574,9 +1602,8 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             out.sort(key=lambda s: (not s["live"], -s["mtime"]))
             return out
 
-        # An OSError walking transcripts must surface as a defined "couldn't read"
-        # 503, not a 500. Log the full error server-side (it can carry an absolute
-        # on-disk path) but return only the static prefix so the path never leaks.
+        # Log the full error server-side (it can carry an absolute on-disk path) but
+        # return only the static prefix so the path never leaks.
         try:
             sessions = await asyncio.to_thread(_list)
         except OSError as exc:
@@ -1632,6 +1659,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         needle = q.strip().casefold()
 
         def _read() -> dict:
+            """Resolve and read one session transcript, applying the filter and page order."""
             project_path = config.projects_root / name
             path = usage.resolve_session_transcript(project_path, session)
             if path is None:
@@ -1706,6 +1734,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         live = session in _live_session_uuids(project_path, name)
 
         def _tail() -> dict:
+            """Read the turns added since ``start`` and return them with the next offset."""
             path = usage.resolve_session_transcript(project_path, session)
             if path is None:
                 # Fail closed: unsafe or unknown session is a 404, never a path escape.
@@ -1731,10 +1760,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/api/projects/{name}/metrics")
     async def api_project_metrics(name: str) -> dict:
+        """Return the cached CPU/memory/disk sample for this project's running bridge."""
         # Live CPU/memory/disk for a project's running bridge (dashboard badge). Served
         # from the server-side snapshot the runner's metrics task refreshes every
-        # metrics.poll_seconds (#354), so the read is O(1) with no per-request thread —
-        # request cost no longer scales with the running-bridge count. A project with no
+        # metrics.poll_seconds (#354): a cheap in-memory fold of the cache, with no
+        # per-request thread or subprocess and no sampling cost. A project with no
         # current sample (off, just-started, or stopped) reports {running: false}.
         if not is_valid_project_name(name):
             raise HTTPException(status_code=422, detail="invalid project name")
@@ -1747,9 +1777,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/api/metrics")
     async def api_metrics_batch() -> dict:
-        # Batch counterpart to the per-project endpoint (#354): one O(1) read of every
-        # running bridge's cached sample, so a dashboard can refresh all badges in a
-        # single request instead of one per bridge.
+        """Return the cached metrics sample for every running bridge in one read."""
+        # Batch counterpart to the per-project endpoint (#354): one in-memory read of
+        # every running bridge's cached sample, so a dashboard can refresh all badges in
+        # a single request instead of one per bridge.
         if not config.metrics.enabled:
             return {}
         return {
@@ -1791,10 +1822,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/api/environments/ghosts")
     async def api_environment_ghosts() -> dict:
+        """List the ghost hosted environments, or 404 when the reaper UI is disabled."""
         if not config.reaper.ui_enabled:
             raise HTTPException(status_code=404, detail="reaper UI is disabled")
 
         def _work() -> dict:
+            """Gather the current ghost set and shape it for the response."""
             _client, envs, live, ghosts = _gather_ghosts()
             return {
                 "enabled": True,
@@ -1809,6 +1842,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.post("/api/environments/reap")
     async def api_environment_reap(body: dict) -> dict:
+        """Archive or delete the requested ghost environments behind a typed-confirm gate."""
         if not config.reaper.ui_enabled:
             raise HTTPException(status_code=404, detail="reaper UI is disabled")
         action = body.get("action")
@@ -1823,6 +1857,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             raise HTTPException(status_code=400, detail=f"confirmation text must be {expected!r}")
 
         def _work() -> dict:
+            """Re-derive the ghost set server-side and act only on ids still inside it."""
             client, _envs, _live, ghosts = _gather_ghosts()
             # Re-derive server-side: only ever act on ids that are CURRENTLY ghosts.
             # Anything else (a now-live bridge, the cloud Default, an unknown or stale
@@ -1855,6 +1890,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     # ----- login shepherd (#839): dashboard-driven `claude auth login` --------------
 
     def _require_login_shepherd(mode: object = None) -> None:
+        """Raise 404 unless the shepherd — and, for setup-token, its own opt-in — is enabled."""
         # Fail-closed invisible-surface gate, same shape as the reaper UI and
         # config-write: off by default, 404s (not 403) when disabled so a disabled
         # deployment exposes nothing about the feature's existence.
@@ -1878,6 +1914,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.post("/api/login-shepherd/start")
     async def api_login_shepherd_start(body: dict) -> dict:
+        """Start a `claude` login or setup-token flow; 409 when one is already active."""
         mode = body.get("mode")
         _require_login_shepherd(mode)
         if mode not in ("login", "setup-token"):
@@ -1891,6 +1928,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.post("/api/login-shepherd/code")
     async def api_login_shepherd_code(body: dict) -> dict:
+        """Submit the operator's pasted OAuth code to the active login flow."""
         _require_login_shepherd()
         code = body.get("code")
         if not isinstance(code, str) or not code.strip():
@@ -1902,10 +1940,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.post("/api/login-shepherd/status")
     async def api_login_shepherd_status() -> dict:
-        # Poll the eventual outcome after a `pending: true` submit (a slow verification).
-        # Returns the same shape: `pending: true` while still running, or the terminal
-        # result (which also reaps the completed flow). 409 once the flow is gone —
-        # the client's cue to stop polling.
+        """Poll the active flow's outcome, reaping it once it reaches a terminal result."""
+        # Poll the eventual outcome after a `pending: true` submit (a slow verification):
+        # same shape — `pending: true` while still running, else the terminal result. 409
+        # once the flow is gone — the client's cue to stop polling.
         _require_login_shepherd()
         try:
             return await asyncio.to_thread(app.state.login_shepherd.poll)
@@ -1914,6 +1952,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/api/login-shepherd/state")
     async def api_login_shepherd_state() -> dict:
+        """Report whether a flow is open, so the UI can rehydrate after a page reload."""
         # Rehydration read (#1078): the dashboard's login state is per-page-load, so after a
         # reload the client no longer knows a flow is open and never renders Cancel — while
         # the server still refuses /start with 409. This lets the component recover that view
@@ -1930,15 +1969,16 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.post("/api/login-shepherd/cancel")
     async def api_login_shepherd_cancel() -> dict:
+        """Cancel the active login flow, if one is running."""
         _require_login_shepherd()
         await asyncio.to_thread(app.state.login_shepherd.cancel)
         return {"ok": True}
 
     @app.get("/api/config-write/status")
     async def api_config_write_status() -> dict:
-        # Foundation surface for the code-executing config-write trust tier (#347/#687).
-        # NO concrete config-mutation endpoint exists yet — the children (#688-#691)
-        # attach their writers behind this same gate. The capability gate fail-closes:
+        """Report the config-write opt-in flags, or 404 when the capability is off."""
+        # Foundation surface for the code-executing config-write trust tier (#347/#687);
+        # the concrete writers (#688-#691) sit behind this same gate. It fail-closes:
         # when config_write.enabled is off this 404s (the surface is invisible, same as
         # the reaper), so a disabled deployment exposes nothing. The body reflects only
         # the two opt-in flags, never any config content.
@@ -1946,9 +1986,15 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         return config_write.capability_status(config)
 
     def _resolve_cw_project(name: object, *, require_exists: bool = False) -> Path:
-        # Project-scope config-write: validate-before-I/O path containment. A bad
-        # name or an escaping path is a 400 (PathEscapeError), never a write. The
-        # name is also the type-the-name confirm token (server-re-derived below).
+        """Resolve a project-scope config-write path, validating containment before any I/O.
+
+        A missing or non-string name is a 422 and an escaping one a 400; with
+        ``require_exists`` an absent project directory is a clean 404 rather than an
+        unhandled error inside the writer.
+        """
+        # Validate-before-I/O path containment: an escaping path raises PathEscapeError
+        # before any write. The name is also the type-the-name confirm token
+        # (server-re-derived below).
         # ``require_exists`` is set on the WRITE path only: a contained-but-absent
         # project dir would make the atomic writer's ``mkstemp(dir=path.parent)``
         # raise ``FileNotFoundError`` (an OSError outside the ConfigWriteError guard)
@@ -1965,10 +2011,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         return project_dir
 
     def _map_config_write_error(exc: config_write.ConfigWriteError) -> HTTPException:
-        # Map the Foundation's typed write failures to their fail-closed HTTP codes.
-        # InvalidCandidate ⇒ 422 (bad shape), Stale ⇒ 409 (external edit). Everything
-        # else — including PathEscapeError, which the route catches earlier as a 400
-        # before the writer is even reached — falls through to a 400.
+        """Map a typed config-write failure to its fail-closed HTTP status."""
+        # InvalidCandidate ⇒ 422 (bad shape); Stale/ServerExists ⇒ 409; ServerNotFound,
+        # AgentNotFound, PluginNotFound, MarketplaceNotFound ⇒ 404; ReadOnlyAgent ⇒ 403.
+        # Every other ConfigWriteError — including PathEscapeError, which the routes catch
+        # earlier as a 400 before the writer is even reached — falls through to a 400.
         if isinstance(exc, config_write.InvalidCandidateError):
             return HTTPException(status_code=422, detail=str(exc))
         if isinstance(exc, config_write.StaleConfigWriteError):
@@ -2043,10 +2090,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/api/config-write/mcp")
     async def api_config_write_mcp_read(scope: str = "project", project: str = "") -> dict:
-        # Read the (structurally redacted) MCP server map for a surface. Gated exactly
-        # like the status route: 404 when config-write is off, and 404 for user scope
-        # when allow_user_scope is off — the surface is invisible, never 403. Capability
-        # gate FIRST, before the scope-enum check, so a disabled surface 404s for ANY
+        """Return the structurally redacted MCP server map for a surface."""
+        # Gated exactly like the status route: 404 when config-write is off, and 404 for
+        # user scope when allow_user_scope is off — the surface is invisible, never 403.
+        # Capability gate FIRST, before the scope-enum check, so a disabled surface 404s for ANY
         # request (a bogus scope included) instead of leaking existence via a differing
         # 422 — the #819/#768 invisible-surface invariant.
         config_write.require_capability(config, scope)  # type: ignore[arg-type]
@@ -2230,6 +2277,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.put("/api/config-write/mcp")
     async def api_config_write_mcp_write(body: dict) -> dict:
+        """Replace the whole MCP server map for a surface."""
         return await _put_config_write(
             body,
             "servers",
@@ -2245,6 +2293,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.post("/api/config-write/mcp/server")
     async def api_config_write_mcp_server(body: dict) -> dict:
+        """Add, edit, or remove a single MCP server entry behind the config-write gate."""
         # CLI-driven add/remove/edit (#769) over the same Foundation gate the PUT
         # (whole-map) route uses. Order mirrors the Foundation docstring exactly:
         # capability (404, FIRST — a disabled surface 404s for ANY request, a bogus
@@ -2322,6 +2371,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         binary = config.claude.binary
 
         def _direct_write(target_entry: dict, target_op: str) -> None:
+            """Write one entry with this scope's direct, non-spawning writer."""
             # The #766 direct (non-spawning) writers, one per scope. Used for any entry
             # that must never reach the CLI's argv, and as the edit-rollback restore.
             if scope == "user":
@@ -2338,6 +2388,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 )
 
         def _snapshot_prior() -> dict | None:
+            """Read the current entry unredacted, in memory only, to enable an edit rollback."""
             # UNREDACTED single-entry read for the edit-rollback (in-memory, same request,
             # never serialized to a response/log — see config_write_mcp.snapshot_server_entry).
             return config_write_mcp.snapshot_server_entry(
@@ -2348,6 +2399,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             )
 
         def _work() -> None:
+            """Dispatch the add/edit/remove to the CLI or to the direct writer."""
             if op == "remove":
                 config_write_mcp_cli.cli_remove_server(binary, cli_cwd, name, scope)  # type: ignore[arg-type]
                 return
@@ -2377,6 +2429,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 prior = _snapshot_prior()
 
                 def _restore() -> bool:
+                    """Put the pre-edit entry back, reporting whether one actually existed."""
                     # Return whether a prior actually existed and was restored, so
                     # cli_edit_server reports "restored" only when that is true.
                     if prior is None:
@@ -2415,6 +2468,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/api/config-write/mcp/approvals")
     async def api_config_write_mcp_approvals_read(project: str = "") -> dict:
+        """Return the project's ``.mcp.json`` server approval lists."""
         # Project `.mcp.json` server approvals (#769) are inherently project-scope
         # only — local/user-scope servers carry no approval step, only a committed
         # .mcp.json server does — so this reads/writes at "project" scope alone,
@@ -2428,6 +2482,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.put("/api/config-write/mcp/approvals")
     async def api_config_write_mcp_approvals_write(body: dict) -> dict:
+        """Replace the project's enabled/disabled MCP approval lists."""
         config_write.require_capability(config, "project")
         project = body.get("project")
         config_write.require_confirm("project", project, body.get("confirm"))
@@ -2457,6 +2512,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.post("/api/config-write/mcp/reset-project-choices")
     async def api_config_write_mcp_reset_project_choices(body: dict) -> dict:
+        """Clear both of the project's approval lists via the CLI's reset verb."""
         # The one enable/disable-adjacent operation with a real CLI verb (#769) —
         # `claude mcp reset-project-choices` clears both approval lists for the
         # project at `cli_cwd`. Gated + confirmed like the approvals routes above.
@@ -2481,6 +2537,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         return {"project": project, "ok": True}
 
     def _user_settings_json() -> Path:
+        """Resolve the user-scope ``settings.json``, failing closed with a 404 without a runner."""
         # User-scope permission rules live in ~/.claude/settings.json (the settings
         # file), NOT ~/.claude.json. Derive it the same way the runner does internally
         # (beside the claude.json whose trusted-dirs we honor) so the two never diverge.
@@ -2497,9 +2554,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/api/config-write/permissions")
     async def api_config_write_permissions_read(scope: str = "project", project: str = "") -> dict:
-        # Read the permission-rules block for a surface. Gated exactly like the MCP/status
-        # routes: 404 when config-write is off, and 404 for user scope when allow_user_scope
-        # is off — the surface is invisible, never 403. A corrupt/non-object on-disk
+        """Return the permission-rules block for a surface, 404 when the surface is gated off."""
+        # Gated exactly like the MCP/status routes: 404 when config-write is off, and 404
+        # for user scope when allow_user_scope is off — the surface is invisible, never
+        # 403. A corrupt/non-object on-disk
         # settings.json raises InvalidCandidateError from _load_json_obj; map it through the
         # same helper as the PUT route so a hand-edited file is a clean 422, never a 500.
         # Capability gate FIRST, before the scope-enum check, so a disabled surface 404s
@@ -2547,6 +2605,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.put("/api/config-write/permissions")
     async def api_config_write_permissions_write(body: dict) -> dict:
+        """Replace the permission-rules block for a surface."""
         # bypassPermissions can never be set here: the validator rejects it as a
         # defaultMode (422), keeping it behind the footgun gate.
         return await _put_config_write(
@@ -2561,12 +2620,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/api/config-write/hooks")
     async def api_config_write_hooks_read(scope: str = "project", project: str = "") -> dict:
-        # Read the hooks block for a surface. Gated exactly like the permissions/MCP/status
-        # routes: 404 when config-write is off, and 404 for user scope when allow_user_scope
-        # is off — the surface is invisible, never 403. A corrupt/non-object on-disk
-        # settings.json raises InvalidCandidateError from _load_json_obj; map it through the
-        # same helper as the PUT route so a hand-edited file is a clean 422, never a 500.
-        # READ never runs a command — it only reflects the stored (inert) hook structure.
+        """Return the stored (inert) hooks block for a surface; reading never runs a command."""
+        # Gated exactly like the permissions/MCP/status routes: 404 when config-write is
+        # off, and 404 for user scope when allow_user_scope is off — the surface is
+        # invisible, never 403. A corrupt/non-object on-disk settings.json raises
+        # InvalidCandidateError from _load_json_obj; map it through the same helper as the
+        # PUT route so a hand-edited file is a clean 422, never a 500.
         # Capability gate FIRST, before the scope-enum check, so a disabled surface 404s
         # for ANY request (a bogus scope included), never a differing 422 (#819/#768).
         config_write.require_capability(config, scope)  # type: ignore[arg-type]
@@ -2602,6 +2661,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.put("/api/config-write/hooks")
     async def api_config_write_hooks_write(body: dict) -> dict:
+        """Replace the hooks block for a surface, storing commands as inert, unexecuted data."""
         # SECURITY: hooks are shell commands claude runs on lifecycle events. The
         # structural validator NEVER resolves, spawns, or shell-parses a command
         # string; it is stored as inert data and only runs inside a real claude
@@ -2619,18 +2679,15 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/api/config-write/claude-md")
     async def api_config_write_claude_md_read(scope: str = "project", project: str = "") -> dict:
-        # Read CLAUDE.md for a surface. Gated exactly like the permissions/hooks/MCP
-        # routes: 404 when config-write is off, and 404 for user scope when
-        # allow_user_scope is off — the surface is invisible, never 403. Content-tier:
-        # the returned text is RAW, never redacted (#768 threat-model decision) — this
-        # is the one config-write read route that deliberately skips secret masking.
+        """Return CLAUDE.md for a surface as raw text — content is never redacted (#768)."""
+        # Gated exactly like the permissions/hooks/MCP routes: 404 when config-write is
+        # off, and 404 for user scope when allow_user_scope is off — the surface is
+        # invisible, never 403. Content-tier: unlike the skills file route, this one
+        # returns free-form file text with no redacted companion field (#768 threat model).
         #
-        # The capability gate runs FIRST, BEFORE the scope-enum check: a disabled
-        # surface must 404 for ANY request (including a bogus scope), or a differing
-        # 422 would leak that the endpoint exists. A bogus scope never matches "user",
-        # so require_capability only trips the base `enabled` flag; when enabled, the
-        # enum check below then rejects it as a 422 (the surface is reachable, so the
-        # shape error is safe to reveal).
+        # Capability gate FIRST, before the scope-enum check, so a disabled surface 404s
+        # for ANY request (a bogus scope included), never a differing 422 that would leak
+        # that the endpoint exists (#819/#768).
         config_write.require_capability(config, scope)  # type: ignore[arg-type]
         if scope not in ("project", "user", "local"):
             raise HTTPException(
@@ -2676,6 +2733,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.put("/api/config-write/claude-md")
     async def api_config_write_claude_md_write(body: dict) -> dict:
+        """Replace CLAUDE.md for a surface behind the capability and type-the-name gates."""
         # CLAUDE.md is prompt-injection CONTENT, not executable config (#768 threat
         # model): the Foundation gate + type-the-name confirm still apply, but there
         # is no structural shape to validate beyond "a string under the size cap" and
@@ -2740,6 +2798,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/api/config-write/subagents")
     async def api_config_write_subagents_list(scope: str = "project", project: str = "") -> dict:
+        """List the subagents defined at user or project scope."""
         # Subagents have exactly two scopes (user/project) — unlike the JSON-subtree
         # surfaces and CLAUDE.md, there is no genuine local-scope directory Claude
         # Code itself reads (see the config_write_subagents module docstring).
@@ -2761,9 +2820,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     async def api_config_write_subagent_get(
         name: str, scope: str = "project", project: str = ""
     ) -> dict:
-        # Read one subagent's detail doc. A built-in name returns a synthetic,
-        # non-editable, 200-shaped doc (it really exists in Claude Code, just not as
-        # a file) — never a 404. A missing real file raises AgentNotFoundError,
+        """Return one subagent's detail doc; a built-in name yields a synthetic read-only doc."""
+        # The synthetic built-in doc is 200-shaped (it really exists in Claude Code,
+        # just not as a file) — never a 404. A missing real file raises AgentNotFoundError,
         # mapped to 404 below. `content` is raw/unredacted (the write round trip);
         # `frontmatter` is a derived, structurally redacted display field.
         config_write.require_capability(config, scope)  # type: ignore[arg-type]
@@ -2788,6 +2847,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.put("/api/config-write/subagents/{name}")
     async def api_config_write_subagent_put(name: str, body: dict) -> dict:
+        """Create or replace one subagent, refusing built-in and plugin-owned names."""
         # SECURITY: a subagent's frontmatter can carry `hooks`/`mcpServers`/`tools` —
         # each validated the same fail-closed, validate-never-execute way as the
         # dedicated surfaces (hooks reuses config_write_hooks.validate_hooks wholesale,
@@ -2851,10 +2911,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     async def api_config_write_subagent_delete(
         name: str, scope: str = "project", project: str = "", confirm: str = ""
     ) -> dict:
+        """Delete one subagent; built-in and plugin-owned names are refused, absent ones no-op."""
         # Same fail-closed gate order as the PUT route (capability -> scope-enum ->
-        # confirm -> read-only/path guards inside the deleter). A built-in or
-        # plugin-owned name is refused (403); a genuinely absent ordinary name
-        # deletes as a no-op (`deleted: false`), never an error.
+        # confirm -> read-only/path guards inside the deleter). A refusal is a 403; a
+        # genuinely absent ordinary name is `deleted: false`, never an error.
         config_write.require_capability(config, scope)  # type: ignore[arg-type]
         if scope not in ("project", "user"):
             raise HTTPException(status_code=422, detail="scope must be 'project' or 'user'")
@@ -2896,6 +2956,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         return {"scope": "project", "project": proj, "name": name, "deleted": existed}
 
     def _user_claude_json_guarded() -> Path:
+        """Resolve the user-scope ``~/.claude.json``, failing closed with 404 without a runner."""
         # Same fail-closed guard as _user_settings_json(): the user-scope skills
         # directory (~/.claude/skills/) needs a runner to resolve ~/.claude.json;
         # without one, fail closed with the 404-invisible shape rather than let a
@@ -2907,6 +2968,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/api/config-write/skills")
     async def api_config_write_skills_list(scope: str = "project", project: str = "") -> dict:
+        """List the skills defined at user or project scope."""
         # Skill DIRECTORY ops are User/Project scope ONLY -- Claude Code has no
         # "local" skills directory (config_write_skills' module docstring). Capability
         # gate FIRST, before the scope-enum check (#819 ordering fix): a disabled
@@ -2937,9 +2999,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         name: str = "",
         relative: str = config_write_skills.SKILL_FILENAME,
     ) -> dict:
-        # View a single file inside a skill directory (SKILL.md by default). Content
-        # is REDACTED (config_write_skills' module docstring -- the #813 INFO-1 gap
-        # this surface deliberately closes, unlike the CLAUDE.md content-tier route).
+        """Return one redacted file from inside a skill directory (``SKILL.md`` by default)."""
+        # Redaction closes the #813 INFO-1 gap here, unlike the CLAUDE.md content-tier
+        # route -- see config_write_skills' module docstring.
         config_write.require_capability(config, scope)  # type: ignore[arg-type]
         if scope not in ("project", "user"):
             raise HTTPException(
@@ -2984,6 +3046,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.put("/api/config-write/skills")
     async def api_config_write_skills_write(body: dict) -> dict:
+        """Create or replace a skill directory; any script body needs a second explicit confirm."""
         # SECURITY: a skill's supporting files (scripts/*) are uploaded, OPAQUE
         # content -- never parsed/resolved/executed here, only shape-checked
         # (config_write_skills.validate_script_body). Any file besides SKILL.md
@@ -3057,8 +3120,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.post("/api/config-write/skills/delete")
     async def api_config_write_skills_delete(body: dict) -> dict:
-        # Deletion needs the same type-the-name confirm as a write: irreversible, no
-        # undo store. Capability gate FIRST, before the scope-enum check.
+        """Delete a skill directory behind the same type-the-name confirm a write requires."""
+        # The confirm is because deletion is irreversible — no undo store. Capability
+        # gate FIRST, before the scope-enum check.
         scope = body.get("scope", "project")
         config_write.require_capability(config, scope)
         if scope not in ("project", "user"):
@@ -3109,6 +3173,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     async def api_config_write_skills_overrides_read(
         scope: str = "project", project: str = ""
     ) -> dict:
+        """Return the ``skillOverrides`` visibility map for a surface."""
         # skillOverrides is an ordinary settings.json key, so -- unlike the directory
         # ops above -- it gets all three scopes (user/project/local), exactly like
         # config_write_hooks' `hooks` key. Capability gate FIRST (#819 ordering fix).
@@ -3150,6 +3215,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.put("/api/config-write/skills/overrides")
     async def api_config_write_skills_overrides_write(body: dict) -> dict:
+        """Replace the ``skillOverrides`` map — inert visibility state, never executed."""
         # skillOverrides is inert visibility state (on/name-only/user-invocable-only/
         # off) -- never executed, unlike the skill directory writer above. Gate order
         # mirrors the CLAUDE.md/settings routes (capability -> scope-enum 422 ->
@@ -3231,6 +3297,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/api/config-write/settings")
     async def api_config_write_settings_read(scope: str = "project", project: str = "") -> dict:
+        """Return the settings.json keys no dedicated surface owns, with env values masked."""
         # Generic settings.json editor (#772): env/model/misc keys not owned by a
         # dedicated surface (permissions/hooks/plugin+MCP-enable stay on their own
         # routes). Gated exactly like the other config-write reads: 404 when
@@ -3282,6 +3349,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.put("/api/config-write/settings")
     async def api_config_write_settings_write(body: dict) -> dict:
+        """Replace those settings keys, keeping any env value the client resent as the mask."""
         # SECURITY: `env` is where operators keep secrets (#822 lesson) -- the
         # read path masks every env value unconditionally; a write that resends
         # the mask sentinel keeps the stored value (config_write.merge_redacted),
@@ -3349,6 +3417,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/api/config-write/settings/effective")
     async def api_config_write_settings_effective(project: str = "") -> dict:
+        """Return each setting's effective value plus the scope layer that supplied it."""
         # Scope-merge provenance (#772, the novel part): per-key effective value
         # + which scope layer supplied it, across every scope clauster manages.
         # Gated on "project" scope -- project/local are inherently per-project,
@@ -3382,8 +3451,8 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         return {"project": project, "effective": effective}
 
     def _plugin_cli_cwd(scope: str, project: str) -> Path:
-        # Resolve the directory `claude plugin ...` should be spawned from for a
-        # given scope. User scope has no project — an arbitrary safe directory the
+        """Resolve the directory ``claude plugin ...`` should be spawned from for this scope."""
+        # User scope has no project — an arbitrary safe directory the
         # CLI ignores (same choice config_write_mcp_cli makes for MCP user-scope
         # calls). Project/local scope MUST exist on disk (require_exists=True):
         # several verbs' output genuinely depends on this cwd (plugin `list`'s
@@ -3400,6 +3469,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/api/config-write/plugins")
     async def api_config_write_plugins_list(scope: str = "project", project: str = "") -> dict:
+        """List the installed plugins via the CLI — this state has no file to read directly."""
         # Installed plugins (#771) -- CLI-only (`claude plugin list --json`): cache
         # path / install timestamp / cwd-dependent `enabled` state have no
         # settings.json equivalent to read directly. Capability gate FIRST (#819).
@@ -3424,8 +3494,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/api/config-write/plugins/enabled")
     async def api_config_write_plugins_enabled(scope: str = "project", project: str = "") -> dict:
-        # Direct (non-spawning) read of the enable/disable map -- mirrors the MCP
-        # surface's "file read for display" doctrine; no secret ever lives here.
+        """Read the plugin enable/disable map straight from the settings file, no CLI spawn."""
+        # Mirrors the MCP surface's "file read for display" doctrine; no secret ever
+        # lives here.
         config_write.require_capability(config, scope)  # type: ignore[arg-type]
         if scope not in ("project", "user", "local"):
             raise HTTPException(
@@ -3449,6 +3520,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     async def api_config_write_plugin_details(
         plugin_id: str, scope: str = "project", project: str = ""
     ) -> dict:
+        """Return one plugin's component inventory and token-cost projection from the CLI."""
         # `claude plugin details <id>` -- CLI-only (component inventory + token
         # cost projection, not stored in settings.json). Capability gate FIRST.
         config_write.require_capability(config, scope)  # type: ignore[arg-type]
@@ -3471,6 +3543,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.post("/api/config-write/plugins/action")
     async def api_config_write_plugins_action(body: dict) -> dict:
+        """Enable, disable, install, uninstall, or update a plugin; install needs a 2nd confirm."""
         # Plugin enable/disable/install/uninstall/update (#771), the highest
         # blast-radius config-write child: `install` pulls new executable code
         # onto the host, so it carries a SECOND, stronger confirm on top of the
@@ -3521,6 +3594,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         binary = config.claude.binary
 
         def _work() -> None:
+            """Run the requested plugin verb through the CLI."""
             if op == "enable":
                 config_write_plugins.cli_enable_plugin(binary, cwd, plugin_id, scope)  # type: ignore[arg-type]
             elif op == "disable":
@@ -3574,6 +3648,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     async def api_config_write_marketplaces_list(
         scope: str = "project", project: str = ""
     ) -> dict:
+        """List the merged marketplace pool via the CLI."""
         # `claude plugin marketplace list --json` (#771) -- a single merged pool,
         # confirmed cwd-independent live, but still gated/routed through the
         # ordinary scope plumbing like every other route here.
@@ -3599,10 +3674,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     async def api_config_write_marketplaces_declared(
         scope: str = "project", project: str = ""
     ) -> dict:
+        """Read which marketplaces this scope declares — what the merged list cannot tell you."""
         # Direct (non-spawning) read of the PER-SCOPE `extraKnownMarketplaces`
-        # declaration -- the one thing the CLI's merged list view cannot tell you
-        # (which scope declared a given marketplace), needed to know where a
-        # remove/add would land.
+        # declaration -- needed to know where a remove/add would land.
         config_write.require_capability(config, scope)  # type: ignore[arg-type]
         if scope not in ("project", "user", "local"):
             raise HTTPException(
@@ -3624,6 +3698,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.post("/api/config-write/marketplaces/action")
     async def api_config_write_marketplaces_action(body: dict) -> dict:
+        """Add, remove, or update a marketplace behind the scope/confirm plumbing.
+
+        ``add``/``remove`` always state their scope explicitly; ``update`` takes none.
+        """
         # Marketplace add/remove/update (#771). `add`/`remove` are scoped
         # (--scope always explicit, never omitted -- omitting it on `remove`
         # would let the CLI reach into every scope, see config_write_plugins'
@@ -3687,6 +3765,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         binary = config.claude.binary
 
         def _work() -> None:
+            """Run the requested marketplace verb through the CLI."""
             if op == "add":
                 config_write_plugins.cli_marketplace_add(binary, cwd, source, scope)  # type: ignore[arg-type]
             elif op == "remove":
@@ -3731,6 +3810,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         return result
 
     async def _project_by_name(name: str) -> Project:
+        """Return the discovered project with this name, or 500 if provisioning lost it.
+
+        Reads through the discovery cache — the caller invalidates it first when it needs
+        a just-created project to be visible.
+        """
         for proj in await list_projects():
             if proj.name == name:
                 return proj
@@ -3738,6 +3822,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.post("/api/projects", status_code=201)
     async def api_create_project(body: dict) -> Project:
+        """Create a new project directory under ``projects_root``, optionally git-initialized."""
         name = body.get("name")
         if not isinstance(name, str) or not name:
             raise HTTPException(status_code=422, detail="body must include a 'name' string")
@@ -3762,11 +3847,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         loop = asyncio.get_running_loop()
 
         def _forward(line: str) -> None:
+            """Hand one git progress line to the job, hopping back onto the event loop."""
             loop.call_soon_threadsafe(clone_jobs.push_progress, job, line)
 
         def _register_proc(proc: subprocess.Popen[bytes]) -> None:
-            # Hand the worker's git process to the job so a cancel request can terminate
-            # it. Hop onto the loop: the job registry is mutated event-loop-only (#573).
+            """Register the worker's git process so a cancel request can terminate it."""
+            # Hop onto the loop: the job registry is mutated event-loop-only (#573).
             loop.call_soon_threadsafe(job.register_terminate, proc.terminate)
 
         try:
@@ -4067,7 +4153,8 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         """Tier-B config values + a content hash, behind config-write + step-up (#978).
 
         Mirrors ``GET /api/config`` but over :data:`~clauster.config_editor.TIER_B_FIELDS`
-        only — the operational-but-sensitive ``clone.*`` / ``webhooks.*`` scalars. No
+        only — the operational-but-sensitive ``clone.*`` / ``webhooks.*`` scalars plus
+        their non-secret list fields (allowed schemes/CIDRs, webhook events). No
         Tier-C secret/bind/auth value is ever surfaced (structural redaction, same as
         Tier-A). Values are read from disk so they stay consistent with the hash and
         reflect what the next restart will load.
@@ -4101,8 +4188,8 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         """Apply Tier-B config edits: capability + step-up gated, backup + atomic write (#978).
 
         Fail-closed order: capability (404 when off) → step-up (403 ``reauth_required``)
-        → external-edit hash guard (409) → re-validate against TIER_B **only** (a Tier-A
-        or Tier-C key is a 400, never a silent drop) → backup + atomic write. Does not
+        → re-validate against TIER_B **only** (a Tier-A or Tier-C key is a 400, never a
+        silent drop) → external-edit hash guard (409) → backup + atomic write. Does not
         live-reload; the response flags a restart is needed. Records an audit line with
         the touched key NAMES only (never values).
         """
@@ -4152,9 +4239,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         """Restart Clauster in place to apply a saved config change (#483).
 
         Re-exec mechanism (``os.execv``): uniform across systemd/launchd/terminal/
-        Docker, needs no unit change, keeps the same PID, and reloads config (read at
-        startup). Because the swap keeps the same PID and never stops the unit, child
-        processes are untouched: ``runner.shutdown()`` leaves bridges running and
+        Docker, needs no unit change, and reloads config (read at startup). The same-PID
+        guarantee is POSIX-only — on Windows execv is emulated as spawn-then-exit, so the
+        PID changes and a Shawl-managed service restarts on that exit (#914). The unit is
+        never stopped and child processes are untouched either way:
+        ``runner.shutdown()`` leaves bridges running and
         ``hosted.aclose()`` detaches (not stops) hosted sessions, so clauster-managed
         sessions (standard + pty bridges + browser/hosted) survive the swap and are
         reattached on startup (#663). Only in-flight HTTP/WS connections drop during the
@@ -4170,10 +4259,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             raise HTTPException(
                 status_code=503, detail="no live server to restart (not running under uvicorn)"
             )
-        # Flag the restart, then ask uvicorn to shut down gracefully. The flag is read
-        # in ``_run`` AFTER serve() returns: a clean shutdown that releases the socket,
-        # then the re-exec. `should_exit` only takes effect once this handler's response
-        # has flushed (uvicorn checks it in its main loop), so the 202 reaches the client.
+        # The flag is read in ``_run`` AFTER serve() returns. `should_exit` only takes
+        # effect once this handler's response has flushed (uvicorn checks it in its main
+        # loop), so the 202 reaches the client before the swap.
         app.state.restart_requested = True
         server.should_exit = True
         return {"restarting": True}
@@ -4197,11 +4285,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         pre-trusts the cwd, and fires `claude --bg [--rc <name>]`; returns the new
         job id. The bg-agents panel reflects its live state via `GET /api/agents`.
 
-        Body: ``{project, prompt?, rc_name?, model?, permission_mode?}``. A
-        ``rc_name`` opens the cloud door (a cloud-visible Remote Control session).
-        NOTE: stop/teardown is a later slice — a dispatched `--rc` session must
-        currently be stopped from the CLI (and a local stop only orphans the cloud
-        registration), so no dispatch control is wired into the UI yet.
+        Body: ``{project, prompt?, rc_name?, model?, permission_mode?}`` — ``prompt``
+        is required (422 otherwise) unless ``rc_name`` registers the session on
+        claude.ai (#1033). A ``rc_name`` opens the cloud door (a cloud-visible Remote
+        Control session); the job is later stopped via ``DELETE /api/agents/{job_id}``,
+        whose double-SIGINT path deregisters that cloud session, or restarted via
+        ``POST /api/agents/{job_id}/resume``.
         """
         raw_name = body.get("project")
         if not isinstance(raw_name, str):
@@ -4428,6 +4517,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         standard bridge instead of launching a second one; ``warnings`` carries
         non-blocking advisories (an interactive pty session launched without a
         worktree risks conflicting concurrent edits).
+
+        ``channel`` (default ``"remote-control"``) picks the subsystem: ``"hosted"``
+        short-circuits to the claustrum stream-json path (always 201, ``created``
+        True), and any other value is a 422. Only the remote-control branch can
+        return the 200/``created`` False singleton outcome.
         """
         project = body.get("project")
         if not isinstance(project, str) or not project:
@@ -4565,8 +4659,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/api/instances/{instance_id}")
     async def api_instance(instance_id: str) -> RemoteControlInstance:
-        # Accept the project name the current client sends as a bridge identity, or a
-        # raw instance_id / hosted id (#777; the #778 API split moves fully to ids).
+        """Return one bridge or hosted instance by id, or by the project name old clients send."""
+        # Also accepts a raw instance_id / hosted id (#777; the #778 API split moves
+        # fully to ids).
         resolved = runner.resolve_bridge_id(instance_id)
         instance = (
             runner.get_instance(resolved) if resolved is not None else None
@@ -4624,6 +4719,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.delete("/api/instances/{instance_id}")
     async def api_stop(instance_id: str) -> RemoteControlInstance:
+        """Stop the identified session, whether it is a hosted one or a managed bridge."""
         if app.state.hosted.get_instance(instance_id) is not None:
             # A live hosted session stops cleanly; one with no live session (an orphan
             # that survived a daemon restart, or an already-dead row) is killed/cleaned
@@ -4741,6 +4837,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.post("/api/projects/{name}/trust")
     async def api_trust(name: str) -> Project:
+        """Accept the workspace-trust dialog for a project and return its refreshed state."""
         try:
             return await runner.trust_project(name)
         except UnknownProject as exc:
@@ -4762,6 +4859,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         raise HTTPException(status_code=404, detail=f"project {name!r} not found")
 
     def _bridge_running(name: str) -> bool:
+        """Return whether ANY bridge or external session is running for ``name``."""
         # Any-RUNNING scan, not the canonical-instance resolver: with N instances per
         # project (#778) the canonical pick can transiently be a STARTING standard
         # bridge while a pty session is already RUNNING — this flag must not miss it.
@@ -4771,6 +4869,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/api/projects/{name}/claude-md")
     async def api_claude_md_get(name: str) -> ClaudeMdDoc:
+        """Return the project's CLAUDE.md, stamped with whether a bridge is running."""
         path = await _resolve_project_path(name)
         try:
             doc = await asyncio.to_thread(read_claude_md, path)
@@ -4781,6 +4880,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.put("/api/projects/{name}/claude-md")
     async def api_claude_md_put(name: str, body: dict) -> ClaudeMdDoc:
+        """Write the project's CLAUDE.md, honouring the optional stale-hash guard."""
         path = await _resolve_project_path(name)
         content = body.get("content")
         if not isinstance(content, str):
@@ -4824,7 +4924,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         return Response(content=buf.getvalue(), media_type="image/svg+xml")
 
     async def _ws_authorized(websocket: WebSocket) -> bool:
-        """Strict Origin check + session/proxy/token auth, BEFORE accepting (D12)."""
+        """Session/proxy/token auth, BEFORE accepting (D12).
+
+        The strict Origin allowlist applies to ambient (cookie/proxy) credentials only;
+        the Bearer-token path is exempt.
+        """
         user, _via_proxy, via_token = await _authenticate(websocket)
         if user is None:
             return False
@@ -4860,7 +4964,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.websocket("/ws/bridge-log/{instance_id}")
     async def ws_bridge_log(websocket: WebSocket, instance_id: str) -> None:
-        """Tail the bridge debug log — ANSI-stripped and ID-redacted (feature 6, D11)."""
+        """Tail the bridge debug log — ID-redacted, and ANSI-stripped by default (feature 6).
+
+        Redaction is unconditional; ANSI stripping follows ``logs.strip_ansi_in_stream``
+        (D11).
+        """
         if not await _ws_gate(websocket):
             await websocket.close(
                 code=1008
@@ -4882,6 +4990,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         offset = await asyncio.to_thread(logstream.initial_offset, path)
 
         async def _stream() -> None:
+            """Tail the bridge log from the opening offset, pushing each line to the socket."""
             carry = ""
             local_offset = offset
             while True:
@@ -4919,6 +5028,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         queue = session.subscribe(after_seq=after)
 
         async def _stream() -> None:
+            """Forward every queued hosted-session event to the socket."""
             while True:
                 await websocket.send_json(await queue.get())
 
@@ -4945,6 +5055,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         queue = job.subscribe()
 
         async def _stream() -> None:
+            """Send the current clone snapshot, then stream progress until the job ends."""
             if job.status != "running":
                 # Already finished (e.g. a reconnect after completion).
                 await websocket.send_json(job.terminal_event())
@@ -4992,6 +5103,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         sidecar = pty_screen.screen_sidecar_path(instance.bridge_debug_log_path)
 
         async def _stream() -> None:
+            """Poll the pty screen sidecar and push each newer frame to the socket."""
             last_seq = -1
             while True:
                 frame = await asyncio.to_thread(pty_screen.read_screen_sidecar, sidecar)
@@ -5090,6 +5202,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request) -> Response:
+        """Render the dashboard page."""
         return _render(request, "dashboard.html", await _dashboard_context())
 
     # Must run LAST: every /api/... route the public v1 surface aliases has to

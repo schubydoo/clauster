@@ -86,16 +86,20 @@ def sanitize_line(line: str, *, strip_ansi_seq: bool = True) -> str:
 
 
 def redact_for_disk(text: str) -> str:
-    r"""Redact a chunk of bridge-log text for the at-rest on-disk mirror.
+    r"""Redact a multi-line chunk of bridge/agent text for at-rest storage and other egress.
 
-    Used only when ``logs.redact_session_url`` is true: the bridge writes a verbatim
-    private parse-source (which Clauster still reads for readiness markers + the
-    session-URL deep-link recovery), and this produces the redacted copy that becomes
-    the public on-disk bridge log. Unlike :func:`sanitize_line` it works over a
-    multi-line chunk, but applies the same safety order — strip ANSI first so an
-    escape sequence can never split an ``env_/session_/cse_`` id (or a secret) past
-    the ``\b``-anchored regexes — so the persisted file never carries a bearer-
-    equivalent session/env identifier or an obvious secret.
+    Named for its original caller — the ``logs.redact_session_url`` on-disk mirror, where the
+    bridge writes a verbatim private parse-source (which Clauster still reads for readiness
+    markers + the session-URL deep-link recovery) and this produces the public copy. It is now
+    also the general chunk-at-a-time redactor for text leaving over the API/WS rather than
+    line-by-line (clone-job errors, ``instance.error_detail``, agent result text), so a change
+    here is NOT confined to the disk mirror.
+
+    Unlike :func:`sanitize_line` it works over a multi-line chunk, but applies the same safety
+    order — strip ANSI first so an escape sequence can never split an ``env_/session_/cse_`` id
+    (or a secret) past the ``\b``-anchored regexes — so the output never carries a
+    bearer-equivalent session/env identifier or a listed secret shape (the ``_SECRET_RES``
+    allow-list note above bounds what "secret" covers).
     """
     return redact_secrets(redact_ids(strip_ansi(text)))
 

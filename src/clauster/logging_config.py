@@ -2,10 +2,11 @@
 
 ``text`` (the default) keeps the human-readable single-line format; ``json`` emits
 one structured JSON object per record. Both modes **redact** the final output —
-session URLs and ``env_``/``session_``/``cse_`` ids and bearer tokens never reach the
-log, in either format — by running the same :mod:`clauster.redact` passes the
-WebSocket log stream uses. Configures the root logger so application *and*
-propagated server (uvicorn) records share the chosen format.
+``env_``/``session_``/``cse_`` ids, bare UUIDs, and listed token shapes are masked in
+either format — by running the same :mod:`clauster.redact` passes the WebSocket log
+stream uses; that module's shape allow-list bounds what "token" covers. Configures the
+root logger so application *and* propagated server (uvicorn) records share the chosen
+format.
 """
 
 from __future__ import annotations
@@ -66,7 +67,9 @@ def setup_logging(
 
     Idempotent: replaces any existing root handlers so a re-run (e.g. tests) doesn't
     stack duplicates. ``json`` selects :class:`JsonFormatter`; anything else uses the
-    human text format. Both formatters redact, so the mode can never leak a secret.
+    human text format. Both formatters run the same redaction passes, so neither mode can
+    leak an ``env_``/``session_``/``cse_`` id, a bare UUID, or a listed token shape (see
+    :mod:`clauster.redact` for what the shape allow-list does *not* catch).
     """
     handler = logging.StreamHandler()
     handler.setFormatter(

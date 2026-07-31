@@ -526,11 +526,12 @@ ENABLED_PLUGINS_KEY = "enabledPlugins"
 
 
 def _read_enabled_plugins(path: Path) -> dict[str, bool]:
-    """Return the raw ``enabledPlugins`` map from a settings file at ``path``.
+    """Return the ``enabledPlugins`` map from a settings file at ``path``.
 
-    Direct file read (no spawn) — mirrors the MCP surface's "file read for
-    display" doctrine. No secret ever lives in this map (plugin ids only), so
-    unlike the MCP server maps this needs no redaction.
+    Filtered to ``str`` -> ``bool`` entries (hence the declared return type); a
+    non-dict value yields ``{}``. Direct file read (no spawn) — mirrors the MCP
+    surface's "file read for display" doctrine. No secret ever lives in this map
+    (plugin ids only), so unlike the MCP server maps this needs no redaction.
     """
     try:
         raw = path.read_bytes()
@@ -615,8 +616,8 @@ def require_install_confirm(plugin_id: str, supplied: object) -> None:
     *where*: a confirm typed for installing ``a@market`` can never be replayed to
     silently install ``b@market`` instead. Raises :class:`fastapi.HTTPException`
     directly (400) — mirroring :func:`clauster.config_write.require_confirm`'s own
-    contract exactly, so the route calls both unwrapped, before any
-    ``ConfigWriteError``-catching try/except, and before any other validation.
+    contract exactly, so the route calls it unwrapped: after the base scope confirm
+    and the op/plugin-id shape + candidate checks, and before any CLI dispatch.
     """
     if not isinstance(supplied, str) or supplied != plugin_id:
         raise HTTPException(

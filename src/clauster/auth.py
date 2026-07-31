@@ -39,7 +39,7 @@ _SESSION_SALT = "clauster-session"
 # non-interchangeable — neither verifies in the other's slot.
 _ELEVATION_SALT = "clauster-elevation"
 # A real argon2id hash used to keep verify timing constant when no password is
-# configured / the attempt is empty — defends against a "no password set" oracle.
+# configured — defends against a "no password set" oracle.
 _DUMMY_HASH = PasswordHasher().hash("clauster-dummy-do-not-use")
 
 
@@ -77,9 +77,12 @@ def load_or_create_secret(state_dir: Path) -> bytes:
 
     Concurrent starts converge on the single ``O_EXCL`` winner's 32-byte secret and
     both the write and its parent-directory entry are ``fsync``-durable; a loser waits
-    out the winner's write (and refuses
-    a truncated key) rather than reading a half-written file and booting with a
-    different/short signing key.
+    out the winner's write (and refuses a truncated key) rather than reading a
+    half-written file and booting with a different/short signing key.
+
+    Never boots on a short signing key: raises ``ValueError`` when an env-supplied
+    secret is under 32 bytes, and ``RuntimeError`` (from :func:`_read_existing_secret`)
+    when an existing ``session.secret`` stays truncated or unreadable.
     """
     from_env = _session_secret_from_env()
     if from_env is not None:
@@ -220,9 +223,9 @@ def verify_token(presented: str | None, stored_hash: str | None) -> bool:
     """Constant-time check that ``presented`` matches the configured token hash.
 
     Fail-closed: returns False when no token is configured (``stored_hash`` is
-    None/empty) or none is presented, with no early-exit timing oracle. The
-    comparison is always run against a same-length hex digest via
-    ``hmac.compare_digest`` so a mismatch leaks nothing about the stored value.
+    None/empty) or none is presented. When both are present the digests are
+    compared with ``hmac.compare_digest``, so a mismatch leaks nothing about the
+    stored value.
     """
     if not presented or not stored_hash:
         return False

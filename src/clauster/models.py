@@ -108,8 +108,7 @@ class RemoteControlInstance(BaseModel):
     # stream-json `claude` on the claustrum daemon's pipes rather than a remote-control bridge.
     # All fields below are nullable/defaulted so existing remote-control state.json
     # rows load unchanged (additive-only schema). They are populated only when
-    # channel == "hosted". CL-4b wired spawn dispatch + endpoints; state.json
-    # persistence of these is CL-6 and the live-view UI is CL-4c.
+    # channel == "hosted"; they are persisted in hosted_state.json (CL-6), not state.json.
     channel: SessionChannel = "remote-control"
     claustrum_process_id: str | None = None  # client-chosen ULID for the daemon spawn
     agent_pid: int | None = None  # the agent's OS pid (claustrum CT-1 opt-in; None pre-CT-1)

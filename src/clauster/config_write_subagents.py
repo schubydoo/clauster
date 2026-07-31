@@ -51,11 +51,15 @@ paths classify a **symlink** on the *un-resolved* ``<agents>/<name>.md`` path �
 the symlink and reject its out-of-tree target as a
 :class:`~clauster.config_write.PathEscapeError` (400), so a plugin symlink would
 wrongly surface as a path-escape instead of the read-only status a plugin agent is
-promised: GET returns a content-less read-only ``200`` (the symlink target is **never
-followed/read** — no arbitrary-file read past the boundary), and write/delete raise
-:class:`ReadOnlyAgentError` (403). A genuinely escaping **non-symlink** input still
-fails closed as a path-escape via :func:`_resolve`. Listing uses
-:func:`_is_read_only_file` (which carries the same symlink signal) on the direntry.
+promised: GET returns a content-less read-only ``200`` without following the link, and
+write/delete raise :class:`ReadOnlyAgentError` (403) without reading the target. A
+genuinely escaping **non-symlink** input still fails closed as a path-escape via
+:func:`_resolve`. **Listing is the exception and does read past the boundary:**
+:func:`_list_agents` calls ``is_file()`` and ``read_bytes()`` on the direntry — both
+*follow* symlinks — before :func:`_is_read_only_file` classifies it, so a planted
+symlink's out-of-tree target is read and its frontmatter ``description`` reaches the
+listing (the entry is still marked plugin-owned and non-editable). The
+never-followed/never-read guarantee therefore holds for GET/PUT/DELETE only.
 
 **Filename safety.** The subagent ``name`` maps directly to ``<name>.md``; the name
 must match :data:`_NAME_RE` (Claude Code's own "lowercase letters, digits, and
@@ -127,7 +131,10 @@ _FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*\r?\n?", re.DO
 
 
 class AgentNotFoundError(cw.ConfigWriteError):
-    """No subagent file exists at the resolved name (→ 404; read/delete only)."""
+    """No subagent file exists at the resolved name (→ 404; raised by the read path only).
+
+    Delete does not use it: an absent ordinary name no-ops to ``False``.
+    """
 
 
 class ReadOnlyAgentError(cw.ConfigWriteError):
@@ -195,7 +202,7 @@ def _plugin_symlink_doc(name: str) -> dict[str, Any]:
     """Return the read-only detail doc for a plugin-provided **symlink** agent.
 
     A symlinked ``<agents>/<name>.md`` points at a plugin file *outside* the agents
-    dir, so its content is **never read** (following it would be an arbitrary-file
+    dir, so this read path **never reads it** (following it would be an arbitrary-file
     read past the containment boundary). Surfaced instead as a content-less
     read-only doc, the same shape the built-in synthetic doc uses: shown, marked
     plugin-owned, never editable.
@@ -457,6 +464,12 @@ def _list_agents(root: Path, source: str) -> list[dict[str, Any]]:
     is skipped outright — it was never written by this surface and can't be resolved
     by name through :func:`_resolve` either, so it is neither editable nor listable
     as a named resource.
+
+    Unlike the read/write/delete paths, this one does **not** classify a symlink first:
+    ``is_file()`` and ``read_bytes()`` both *follow* symlinks, so a planted symlink's
+    out-of-tree target IS read here and its frontmatter ``description`` reaches the
+    listing. The entry is still marked plugin-owned and non-editable, but the surface's
+    "the target is never followed/read" guarantee does not hold on this path.
     """
     out: list[dict[str, Any]] = []
     if not root.is_dir():
@@ -526,11 +539,8 @@ def _read_agent(root: Path, name: str, source: str) -> dict[str, Any]:
             "frontmatter": {},
             "hash": None,
         }
-    # Classify a plugin SYMLINK before the containment resolve: `_resolve` would
-    # follow it and reject the escaping target as a PathEscapeError (400), breaking
-    # the read-only-200 contract a plugin agent is promised. The un-resolved path is
-    # inside the agents dir; only its target is outside, and we deliberately never
-    # read that target (no arbitrary-file read past the boundary).
+    # Classify a plugin SYMLINK before the containment resolve (see _unresolved_target),
+    # and never read its target.
     candidate = _unresolved_target(root, name)
     if candidate.is_symlink():
         return _plugin_symlink_doc(name)
@@ -589,6 +599,13 @@ def _write_agent(root: Path, name: str, content: str, expected_hash: str | None)
     :class:`ReadOnlyAgentError` (403) *before* any content is validated or written —
     a plugin symlink is caught before :func:`_resolve` would mis-report it as a
     path-escape 400, and its target is never followed.
+
+    The stale-hash guard is **not** atomic with the write: ``current`` is read here, and
+    :func:`clauster.config_file_writer.write_file` is called without its ``verify=``
+    callback, so the comparison happens outside that function's per-target lock. Two
+    concurrent writes — or an external edit landing between the read and the replace —
+    can both pass the 409 guard and lost-update. (:mod:`clauster.claude_md`'s scoped
+    write passes ``verify=`` and does keep the guard in one critical section.)
     """
     if is_builtin_agent(name):
         raise ReadOnlyAgentError(f"{name!r} is a Claude Code built-in agent (read-only)")

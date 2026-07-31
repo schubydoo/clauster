@@ -47,7 +47,7 @@ if TYPE_CHECKING:
 
 
 class ClausterEngine(AbstractContextManager["ClausterEngine"]):
-    """Shared in-process facade over clauster's read/observe operations (#775)."""
+    """Shared in-process facade over clauster's reads and bridge start/stop/resume (#775)."""
 
     def __init__(self, config: ClausterConfig, *, runner: SessionRunner | None = None) -> None:
         """Wrap an existing ``runner`` (web app) or build one headless (CLI).

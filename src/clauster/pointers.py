@@ -76,7 +76,7 @@ def pointer_for_project(
 
 
 def is_live(pointer: BridgePointer) -> bool:
-    """Whether the pointer refers to a currently-running, trusted bridge."""
+    """Whether the pointer's pid is alive with a matching start time and bridge cmdline."""
     return procutil.is_live_bridge(pointer.pid, pointer.proc_start)
 
 
