@@ -292,13 +292,18 @@ def list_skills(base: Path) -> list[dict[str, Any]]:
     """Return a listing of every valid-named skill directory under ``base``'s skills root.
 
     Each entry: ``{"name", "has_skill_md", "files", "description"?, "disable_model_
-    invocation"?, "frontmatter_error"?}``. A skill whose ``SKILL.md`` fails structural
-    validation or is not UTF-8 is still listed (so a hand-edited/corrupt skill is visible,
-    not hidden) with ``frontmatter_error`` set instead of raising.
+    invocation"?, "frontmatter_error"?, "files_error"?}``. A skill whose ``SKILL.md`` fails
+    structural validation or is not UTF-8 is still listed (so a hand-edited/corrupt skill is
+    visible, not hidden) with ``frontmatter_error`` set instead of raising.
 
-    That per-skill tolerance covers parse errors only: an ``OSError`` — reading an
-    unreadable ``SKILL.md`` (EACCES/EIO), or enumerating members via ``resolve()``/
-    ``rglob()`` — is **not** caught and fails the whole listing, not just that skill.
+    That tolerance is **per skill, and covers I/O as well as parse errors**: an ``OSError``
+    from reading ``SKILL.md`` (EACCES/EIO/ELOOP, or a file pruned mid-listing) lands in
+    ``frontmatter_error``, and one from enumerating members via ``resolve()``/``rglob()``
+    lands in ``files_error`` with ``files`` empty. Neither fails the listing, so one bad
+    skill can no longer hide every good one — the same per-entry containment
+    :func:`~clauster.supervisor.list_background_jobs` uses. The errors are reported rather
+    than swallowed: an empty ``files`` alone would make an unreadable skill dir look
+    healthy.
 
     **Redaction (consistency with the file-body read view).** Both the surfaced
     ``description`` and any ``frontmatter_error`` fragment run through
@@ -313,7 +318,10 @@ def list_skills(base: Path) -> list[dict[str, Any]]:
         return []
     out: list[dict[str, Any]] = []
     for entry in sorted(skills_root.iterdir(), key=lambda p: p.name):
-        if not entry.is_dir() or entry.is_symlink() or not is_valid_skill_name(entry.name):
+        # `is_symlink()` FIRST (lstat, never follows); `is_dir()` follows, so testing it
+        # first stat'd a symlink's out-of-tree target before we rejected the entry anyway.
+        # Same hoist the subagents LIST path took — decision 7's sibling sweep.
+        if entry.is_symlink() or not entry.is_dir() or not is_valid_skill_name(entry.name):
             continue
         skill_md = entry / SKILL_FILENAME
         # A *symlinked* SKILL.md is refused, never followed — consistent with skipping
@@ -321,7 +329,7 @@ def list_skills(base: Path) -> list[dict[str, Any]]:
         # symlink-to-file), so a symlinked SKILL.md pointing out of the tree would
         # otherwise have its target content read; requiring a non-symlink regular file
         # closes that. A symlinked entrypoint reads as "no SKILL.md" (nothing surfaced).
-        has_skill_md = skill_md.is_file() and not skill_md.is_symlink()
+        has_skill_md = not skill_md.is_symlink() and skill_md.is_file()
         item: dict[str, Any] = {"name": entry.name, "has_skill_md": has_skill_md}
         if has_skill_md:
             try:
@@ -334,6 +342,14 @@ def list_skills(base: Path) -> list[dict[str, Any]]:
                 item["frontmatter_error"] = cw.redact_secret_lines(str(exc))
             except UnicodeDecodeError:
                 item["frontmatter_error"] = f"{SKILL_FILENAME} is not valid UTF-8"
+            except OSError as exc:
+                # Per ENTRY, never per listing: an unreadable SKILL.md (EACCES, ELOOP, or a
+                # file pruned between iterdir and read) used to propagate and fail the WHOLE
+                # skills listing, so one bad skill hid every good one. Matches
+                # `supervisor.list_background_jobs`, which catches OSError per entry for
+                # exactly this reason. The entry is still surfaced, carrying its error.
+                reason = exc.strerror or exc
+                item["frontmatter_error"] = f"{SKILL_FILENAME} could not be read: {reason}"
             else:
                 description = frontmatter.get("description")
                 # description is a validated non-empty str here, but guard anyway so a
@@ -352,12 +368,20 @@ def list_skills(base: Path) -> list[dict[str, Any]]:
         # its target's content. Keys are normalized to forward slashes (``as_posix``) so
         # the API returns ``scripts/x.sh`` on every OS — these are logical member keys,
         # not host filesystem paths.
-        entry_resolved = entry.resolve()
-        item["files"] = sorted(
-            p.relative_to(entry).as_posix()
-            for p in entry.rglob("*")
-            if p != skill_md and _is_contained_regular_file(p, entry_resolved)
-        )
+        try:
+            entry_resolved = entry.resolve()
+            item["files"] = sorted(
+                p.relative_to(entry).as_posix()
+                for p in entry.rglob("*")
+                if p != skill_md and _is_contained_regular_file(p, entry_resolved)
+            )
+        except OSError as exc:
+            # Same per-entry containment as the SKILL.md read above — an unreadable skill
+            # dir must not fail the whole listing. Reported, never silently empty: bare
+            # `files: []` is indistinguishable from a genuinely empty skill, which would
+            # make an unreadable directory look healthy.
+            item["files"] = []
+            item["files_error"] = f"members could not be listed: {exc.strerror or exc}"
         out.append(item)
     return out
 

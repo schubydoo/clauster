@@ -97,6 +97,8 @@ import sys
 from datetime import UTC, datetime
 from typing import IO, TYPE_CHECKING, Any
 
+import yaml
+
 from . import __version__
 from .config import ClausterConfig, load_config
 
@@ -841,7 +843,9 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         config = load_config(args.config)
-    except (FileNotFoundError, ValueError) as exc:
+    except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
+        # yaml.YAMLError is not a ValueError; without it a malformed config tracebacks out
+        # of the stdio server, where the traceback would also land on the wrong channel.
         print(f"clauster: config error: {exc}", file=sys.stderr)
         return 2
 

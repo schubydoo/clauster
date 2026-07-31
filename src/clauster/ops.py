@@ -23,6 +23,8 @@ from pathlib import Path, PurePosixPath
 from typing import Literal, TypedDict
 from xml.sax.saxutils import escape as _xml_escape
 
+import yaml
+
 from . import atomicio, claude_cli, config_write_mcp, deps, environments, procutil
 from .config import ClausterConfig, _missing_enforced_auth, load_config
 from .discovery import Project, _load_trusted_paths, trust_state_for
@@ -90,6 +92,12 @@ def run_doctor(
         config = None
     except ValueError as exc:
         checks.append(Check("config", FAIL, f"invalid config: {exc}"))
+        config = None
+    except yaml.YAMLError as exc:
+        # NOT a ValueError, so it needs its own arm. Without it `clauster doctor` — the
+        # one command whose whole job is diagnosing a broken config — was the command
+        # that tracebacked on the most common way to break one.
+        checks.append(Check("config", FAIL, f"config is not valid YAML: {exc}"))
         config = None
 
     if config is None:
@@ -1157,17 +1165,19 @@ def windows_service_commands(
     ``windows`` kind of :func:`render_service_unit` renders the SAME commands as an inspectable
     ``.bat``. Shawl's ``add`` does the ``sc create``; ``sc config … start= auto`` + ``sc start``
     finish it. A ``"`` is illegal in a Windows path and would break the mirrored ``.bat``
-    quoting, so the shawl / executable / working-dir paths are rejected here rather than run.
-    The **config path is not checked on this argv route** — only the ``.bat`` renderer validates
-    it — so a config path containing a ``"`` raises there and passes through here (harmless in
-    practice: these run as list-argv, never through a shell).
+    quoting, so **any interpolated path is rejected here** rather than run — the shawl,
+    executable and working-dir paths, and every element of ``cmd_args`` (which carries the
+    config path). Validating the same set the ``.bat`` renderer does is what keeps the two
+    routes genuinely mirrored: while ``cfg`` was omitted here, a config path containing a
+    ``"`` was accepted on this route and rejected by ``render_service_unit``, so the two
+    "identical" forms disagreed on the same input.
     """
     exe, launch = _service_launch_command(python)
     cfg = config_path or "/etc/clauster/clauster.yml"
     wd = workdir or str(Path(cfg).expanduser().parent)
     cmd_args = [*launch, "run", "-c", cfg]
     shawl_exe = _managed_shawl_path(state_dir)
-    for path in (shawl_exe, exe, wd):
+    for path in (shawl_exe, exe, wd, *cmd_args):
         _bat_quote_safe(path)  # validation only: raises on an illegal `"` in a path
     return [
         [shawl_exe, "add", "--name", "Clauster", "--cwd", wd, "--", exe, *cmd_args],

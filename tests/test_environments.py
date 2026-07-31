@@ -584,3 +584,63 @@ def test_https_transport_forwards_valid_url_to_roundtrip(monkeypatch):
     assert (status, body) == (200, b"{}")
     assert seen["method"] == "GET" and seen["netloc"] == "api.example.com"
     assert seen["path"] == "/v1/envs" and seen["query"] == "limit=1"
+
+
+def test_load_credentials_rejects_a_non_object_json_root(tmp_path):
+    # Valid JSON is not necessarily an object. A credentials file holding a bare string
+    # parsed fine and then raised AttributeError from `.get` — not a CredentialsError, so
+    # it escaped every caller's guard, including runner's spawn preflight, which calls the
+    # anchor check unwrapped and would fail the spawn outright.
+    cred = tmp_path / "creds.json"
+    for payload in ('"just-a-string"', "[]", "null", "42"):
+        cred.write_text(payload)
+        with pytest.raises(CredentialsError):
+            environments.load_credentials(cred, tmp_path / "claude.json")
+
+
+def test_load_credentials_rejects_a_non_object_oauth_block(tmp_path):
+    # Same shape one level down: `claudeAiOauth` itself must be an object before `.get`.
+    cred = tmp_path / "creds.json"
+    cred.write_text(json.dumps({"claudeAiOauth": "not-an-object"}))
+    with pytest.raises(CredentialsError):
+        environments.load_credentials(cred, tmp_path / "claude.json")
+
+
+def test_anchor_health_is_unknown_for_a_non_object_credentials_file(tmp_path):
+    # The caller-visible half: `anchor_health_for_pointer` documents a never-raises
+    # contract, and it only holds if load_credentials funnels every malformed shape into
+    # CredentialsError.
+    from clauster.code_sessions import AnchorHealth, anchor_health_for_pointer
+
+    cred = tmp_path / "creds.json"
+    cred.write_text('"just-a-string"')
+
+    health = anchor_health_for_pointer(
+        "session_abc", credentials_path=cred, claude_json_path=tmp_path / "claude.json"
+    )
+    assert health is AnchorHealth.UNKNOWN
+
+
+def test_load_credentials_rejects_a_non_object_claude_json_root(tmp_path):
+    # Review catch: the root type-check landed on the credentials file only, and the SECOND
+    # read — of ~/.claude.json — kept the identical unguarded `.get` chain, so the
+    # AttributeError just moved one file over. The earlier test never reached it because it
+    # passed a claude.json path that does not exist, so every case raised at the first file.
+    cred = tmp_path / "creds.json"
+    cred.write_text(json.dumps({"claudeAiOauth": {"accessToken": "tok"}}))
+    claude_json = tmp_path / "claude.json"
+    for payload in ('"just-a-string"', "[]", "null", "42"):
+        claude_json.write_text(payload)
+        with pytest.raises(CredentialsError):
+            environments.load_credentials(cred, claude_json)
+
+
+def test_load_credentials_rejects_a_non_object_oauth_account(tmp_path):
+    # Same shape one level down: a non-empty non-dict `oauthAccount` raises from the second
+    # `.get`, which `or {}` cannot rescue because a non-empty string is truthy.
+    cred = tmp_path / "creds.json"
+    cred.write_text(json.dumps({"claudeAiOauth": {"accessToken": "tok"}}))
+    claude_json = tmp_path / "claude.json"
+    claude_json.write_text(json.dumps({"oauthAccount": "not-an-object"}))
+    with pytest.raises(CredentialsError):
+        environments.load_credentials(cred, claude_json)

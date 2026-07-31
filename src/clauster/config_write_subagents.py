@@ -636,12 +636,14 @@ def _write_agent(root: Path, name: str, content: str, expected_hash: str | None)
     a plugin symlink is caught before :func:`_resolve` would mis-report it as a
     path-escape 400, and its target is never followed.
 
-    The stale-hash guard is **not** atomic with the write: ``current`` is read here, and
-    :func:`clauster.config_file_writer.write_file` is called without its ``verify=``
-    callback, so the comparison happens outside that function's per-target lock. Two
-    concurrent writes — or an external edit landing between the read and the replace —
-    can both pass the 409 guard and lost-update. (:mod:`clauster.claude_md`'s scoped
-    write passes ``verify=`` and does keep the guard in one critical section.)
+    The stale-hash guard IS atomic with the write: it runs as
+    :func:`clauster.config_file_writer.write_file`'s ``verify=`` callback, inside that
+    function's per-target lock, so the 409 comparison and the replace are one critical
+    section. Two concurrent writes can no longer both compare against the same old bytes
+    and have the second silently overwrite the first. (:mod:`clauster.claude_md`'s scoped
+    write is the sibling that always did this.) ⚠️ The read-only refusal above still runs
+    outside the lock, deliberately — it must precede content validation to keep the
+    documented 403-before-422 gate order — so it stays a best-effort pre-check.
     """
     if is_builtin_agent(name):
         raise ReadOnlyAgentError(f"{name!r} is a Claude Code built-in agent (read-only)")
@@ -660,13 +662,19 @@ def _write_agent(root: Path, name: str, content: str, expected_hash: str | None)
 
     cw.validate_candidate(content, lambda c: validate_agent_content(c, expected_name=name))
 
-    if expected_hash is None:
-        if found:
-            raise cw.StaleConfigWriteError(f"{name}.md already exists; a hash is required")
-    elif cw.hash_bytes(current) != expected_hash:
-        raise cw.StaleConfigWriteError(f"{name}.md changed on disk since it was loaded")
+    def _verify_unchanged(current_bytes: bytes | None) -> None:
+        """Reject the write when the on-disk bytes no longer match ``expected_hash``."""
+        # Runs INSIDE write_file's per-target lock, so the 409 check and the replace are one
+        # critical section. Read outside it (as this did), two concurrent PUTs could both
+        # compare against the same old bytes and the second would silently overwrite the
+        # first. Mirrors `claude_md`'s scoped write, the other read-modify-write here.
+        if expected_hash is None:
+            if current_bytes is not None:
+                raise cw.StaleConfigWriteError(f"{name}.md already exists; a hash is required")
+        elif cw.hash_bytes(current_bytes or b"") != expected_hash:
+            raise cw.StaleConfigWriteError(f"{name}.md changed on disk since it was loaded")
 
-    fw.write_file(root, f"{name}.md", content)
+    fw.write_file(root, f"{name}.md", content, verify=_verify_unchanged)
 
 
 def write_user_agent(
@@ -698,6 +706,12 @@ def _delete_agent(root: Path, name: str) -> bool:
     plugin-owned (marker) file is likewise refused. A genuinely absent, ordinary
     name returns ``False`` (idempotent, matches
     :func:`clauster.config_file_writer.delete_path`).
+
+    The plugin-owned refusal is re-checked as ``delete_path``'s ``verify=`` callback,
+    inside its per-target lock, so the decision and the unlink are one critical section.
+    The read before it decides whether the file MAY be deleted, which is the same
+    read-then-act shape as the write path's stale-hash guard: without the re-check, a file
+    that became plugin-owned between the two would be removed on a stale decision.
     """
     if is_builtin_agent(name):
         raise ReadOnlyAgentError(f"{name!r} is a Claude Code built-in agent (read-only)")
@@ -711,7 +725,18 @@ def _delete_agent(root: Path, name: str) -> bool:
         return False
     if _is_read_only_file(target, raw):
         raise ReadOnlyAgentError(f"{name!r} is a plugin-provided subagent (read-only)")
-    return fw.delete_path(root, f"{name}.md")
+
+    def _verify_still_deletable(current: bytes | None) -> None:
+        """Re-check the plugin-owned refusal against the bytes present under the lock."""
+        # The read above decides whether this file MAY be deleted, so it has the same
+        # read-then-act shape as the write path's stale-hash guard: without this, a file
+        # that became plugin-owned between the read and the unlink would be deleted on the
+        # strength of a stale decision. Re-running the check inside delete_path's lock
+        # makes the refusal and the removal one critical section.
+        if current is not None and _is_read_only_file(target, current):
+            raise ReadOnlyAgentError(f"{name!r} is a plugin-provided subagent (read-only)")
+
+    return fw.delete_path(root, f"{name}.md", verify=_verify_still_deletable)
 
 
 def delete_user_agent(claude_json: Path, name: str) -> bool:

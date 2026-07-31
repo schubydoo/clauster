@@ -1480,3 +1480,72 @@ def test_route_overrides_write_local_scope_bad_value_is_422(
             },
         )
         assert resp.status_code == 422
+
+
+def test_list_skills_survives_an_unreadable_skill_md(tmp_path, monkeypatch):
+    # Stated intent is "a single bad skill must never break the whole listing", but only
+    # parse errors were caught: an OSError from read_bytes propagated and failed the WHOLE
+    # listing, so one bad skill hid every good one. Matches supervisor.list_background_jobs,
+    # which catches OSError per entry for exactly this reason.
+    root = tmp_path / "skills"
+    (root / "good").mkdir(parents=True)
+    (root / "good" / "SKILL.md").write_text("---\nname: good\ndescription: fine\n---\nbody\n")
+    (root / "bad").mkdir(parents=True)
+    bad_md = root / "bad" / "SKILL.md"
+    bad_md.write_text("---\nname: bad\ndescription: x\n---\nbody\n")
+
+    real_read_bytes = Path.read_bytes
+
+    def _boom(self):
+        if self == bad_md:
+            raise PermissionError(13, "Permission denied")
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _boom)
+
+    listed = {s["name"]: s for s in sk.list_skills(tmp_path)}
+
+    assert set(listed) == {"good", "bad"}  # the whole listing survived
+    assert listed["good"]["description"] == "fine"  # the good skill is intact
+    assert "could not be read" in listed["bad"]["frontmatter_error"]  # reported, not silent
+
+
+def test_list_skills_reports_an_unlistable_member_tree(tmp_path, monkeypatch):
+    # The other OSError source the docstring names: enumerating members via resolve()/
+    # rglob(). It used to fail the whole listing too. Reported via `files_error` rather
+    # than a bare empty `files`, which would be indistinguishable from a skill that
+    # genuinely has no members — an unreadable directory would look healthy.
+    root = tmp_path / "skills"
+    (root / "s").mkdir(parents=True)
+    (root / "s" / "SKILL.md").write_text("---\nname: s\ndescription: fine\n---\nbody\n")
+
+    def _boom(self, pattern):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "rglob", _boom)
+
+    listed = sk.list_skills(tmp_path)
+
+    assert len(listed) == 1  # the listing survived
+    assert listed[0]["description"] == "fine"  # frontmatter still read
+    assert listed[0]["files"] == []
+    assert "could not be listed" in listed[0]["files_error"]  # reported, not silent
+
+
+def test_list_skills_error_text_survives_an_errno_less_oserror(tmp_path, monkeypatch):
+    # `OSError.strerror` is only populated when the exception carries an errno, so a bare
+    # OSError rendered "could not be read: None" — telling a dashboard user no more than the
+    # silently-empty listing this arm replaces. The point of reporting is that it reports.
+    root = tmp_path / "skills"
+    (root / "s").mkdir(parents=True)
+    (root / "s" / "SKILL.md").write_text("---\nname: s\ndescription: fine\n---\nbody\n")
+
+    def _boom(self):
+        raise OSError("device fell off the bus")
+
+    monkeypatch.setattr(Path, "read_bytes", _boom)
+
+    listed = sk.list_skills(tmp_path)
+
+    assert "None" not in listed[0]["frontmatter_error"]
+    assert "device fell off the bus" in listed[0]["frontmatter_error"]

@@ -282,7 +282,12 @@ def replace_tree(root: Path, relative: str, build: Callable[[Path], None]) -> Pa
     return target
 
 
-def delete_path(root: Path, relative: str) -> bool:
+def delete_path(
+    root: Path,
+    relative: str,
+    *,
+    verify: Callable[[bytes | None], None] | None = None,
+) -> bool:
     """Delete the file or directory tree at ``root/relative``; return whether it existed.
 
     Path-contained and flock-guarded like the writers above. Idempotent: a missing
@@ -292,11 +297,28 @@ def delete_path(root: Path, relative: str) -> bool:
     never a partially-``rmtree``'d tree visible at the live path) and then removed; a
     plain file is removed directly (a single ``unlink`` has no partial-delete state to
     guard against).
+
+    ``verify``, if given, is called INSIDE the per-target lock — only when the target
+    exists — with its current bytes (``None`` for a directory, symlink, or unreadable
+    file) and raising aborts the delete with nothing removed. Same contract and same
+    reason as :func:`write_file`'s ``verify``: a caller that reads the file to decide
+    whether it MAY delete it would otherwise judge bytes another writer can replace
+    before the unlink, and act on a decision that is already stale.
     """
     target = resolve_contained_path(root, relative)
     with _locked(target):
         if not target.exists() and not target.is_symlink():
             return False
+        if verify is not None:
+            current: bytes | None
+            try:
+                # `is_symlink()` (lstat) FIRST: `is_dir()` and `read_bytes()` both FOLLOW a
+                # link, so testing them first would hand `verify` the bytes of a target
+                # outside the tree — the one thing the subagents surface exists to avoid.
+                current = None if target.is_symlink() or target.is_dir() else target.read_bytes()
+            except OSError:
+                current = None
+            verify(current)  # raises to abort the delete — still holding the lock
         if target.is_dir() and not target.is_symlink():
             trash = target.parent / f".{target.name}.trash-{uuid.uuid4().hex}"
             os.replace(target, trash)

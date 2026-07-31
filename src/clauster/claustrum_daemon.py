@@ -191,9 +191,9 @@ class ClaustrumDaemon:
         if a running daemon rejects the persisted token (Clauster must not spawn
         a second daemon over a healthy one), :class:`DaemonSpawnError` if the
         launcher fails, or :class:`DaemonUnreachable` if a freshly spawned daemon
-        never accepts a connection. Most failure paths record the reason for
-        :meth:`status`; two do not — an unresolvable claustrum binary and a
-        launcher that exposes no stdin pipe raise with the reason only in the log.
+        never accepts a connection. **Every** failure path records the reason for
+        :meth:`status`, so ``/healthz`` can name what went wrong rather than reporting
+        ``running:false, error:null`` and leaving the cause in the lifespan log.
         """
         async with self._lock:
             if self._client is not None:
@@ -384,15 +384,17 @@ class ClaustrumDaemon:
         )
         if resolved is not None:
             return resolved
-        raise DaemonSpawnError(
-            f"claustrum binary not found: {self._cfg.binary!r} is not on PATH"
-            + (
-                " and no managed binary is installed — run `clauster deps install claustrum`"
-                if self._cfg.binary == default_binary
-                else " (an explicit claustrum.binary must resolve; the managed install is only a "
-                "fallback for the default)"
-            )
+        # Record the reason before raising, like every other DaemonSpawnError site: this is
+        # the MOST likely real failure (claustrum simply not installed), and without it
+        # `/healthz` reported `running:false, error:null` — the reason surviving only in the
+        # lifespan log, where a dashboard user never sees it.
+        self._error = f"claustrum binary not found: {self._cfg.binary!r} is not on PATH" + (
+            " and no managed binary is installed — run `clauster deps install claustrum`"
+            if self._cfg.binary == default_binary
+            else " (an explicit claustrum.binary must resolve; the managed install is only a "
+            "fallback for the default)"
         )
+        raise DaemonSpawnError(self._error)
 
     @staticmethod
     def _unlink_token_handoff(token_file: Path | None) -> None:
@@ -504,7 +506,8 @@ class ClaustrumDaemon:
             stdin = proc.stdin
             if stdin is None:
                 log_file.close()
-                raise DaemonSpawnError("claustrum launcher exposes no stdin pipe")
+                self._error = "claustrum launcher exposes no stdin pipe"
+                raise DaemonSpawnError(self._error)
             try:
                 stdin.write(token.encode("utf-8") + b"\n")
                 await stdin.drain()

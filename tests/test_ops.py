@@ -1685,3 +1685,43 @@ def test_check_binary_deps_surfaces_claustrum_shadow(monkeypatch, tmp_path):
     assert by["binary:claustrum"].status == OK
     assert by["binary:claustrum:shadow"].status == WARN
     assert "shadowed" in by["binary:claustrum:shadow"].detail
+
+
+def test_run_doctor_reports_malformed_yaml_instead_of_raising(tmp_path):
+    # doctor is the one command whose whole job is diagnosing a broken config, and it was
+    # the command that tracebacked on the most common way to break one — `yaml.YAMLError`
+    # is not a `ValueError`, so it missed the catch entirely.
+    bad = tmp_path / "clauster.yml"
+    bad.write_text('claude:\n  binary: "unclosed\n  - [\n')
+
+    checks, ok = ops_mod.run_doctor(str(bad), check_port=False)
+
+    assert ok is False
+    config_check = next(c for c in checks if c.name == "config")
+    assert config_check.status == ops_mod.FAIL
+    assert "YAML" in config_check.detail
+
+
+def test_windows_service_commands_rejects_a_quoted_config_path(tmp_path):
+    # The docstring promised "any interpolated path is rejected here too", but the loop
+    # covered shawl/exe/workdir and skipped `cfg`. The paired `.bat` renderer DID validate
+    # it, so the two forms the code calls identical disagreed on the same input.
+    with pytest.raises(ValueError):
+        ops_mod.windows_service_commands(
+            python=sys.executable,
+            config_path='C:\\bad"path\\clauster.yml',
+            workdir=str(tmp_path),
+            state_dir=str(tmp_path),
+        )
+
+
+def test_windows_service_commands_still_builds_for_a_clean_config_path(tmp_path):
+    # Control: widening the validation must not reject the ordinary case. `cmd_args` also
+    # carries "run" and "-c", so a too-eager check would break every install.
+    cmds = ops_mod.windows_service_commands(
+        python=sys.executable,
+        config_path=str(tmp_path / "clauster.yml"),
+        workdir=str(tmp_path),
+        state_dir=str(tmp_path),
+    )
+    assert cmds and cmds[0][1] == "add"

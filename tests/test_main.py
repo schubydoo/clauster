@@ -1260,3 +1260,55 @@ def test_install_service_windows_write_rollback_spawn_error_is_surfaced(monkeypa
     monkeypatch.setattr(cli.subprocess, "run", run)
     assert cli.main(["install-service", "windows", "--write"]) == 1
     assert "could not roll back" in capsys.readouterr().err
+
+
+def test_load_or_exit_rejects_malformed_yaml_cleanly(tmp_path, capsys):
+    # `yaml.YAMLError` is NOT a subclass of `ValueError`, so a syntactically broken config
+    # escaped the catch as a raw parser traceback — out of EVERY CLI verb, since they all
+    # route through here. A stray tab or unclosed quote is the likeliest first-run mistake,
+    # so it has to be one line and exit 2 like the other two failure shapes.
+    bad = tmp_path / "clauster.yml"
+    bad.write_text('server:\n  host: "unclosed\n   - broken: [\n')
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli._load_or_exit(str(bad))
+
+    assert excinfo.value.code == 2
+    assert "config error" in capsys.readouterr().err
+
+
+def _malformed_cfg(tmp_path):
+    """A clauster.yml that EXISTS but does not parse (the commonest first-run mistake)."""
+    bad = tmp_path / "clauster.yml"
+    bad.write_text('server:\n  host: "unclosed\n   - broken: [\n')
+    return str(bad)
+
+
+def test_run_verb_reports_malformed_yaml_instead_of_tracebacking(tmp_path, capsys):
+    # Review catch: `run` is the DEFAULT verb and the one a first-run user types, and it
+    # does NOT route through `_load_or_exit` — it calls load_config itself. So the fix that
+    # only widened `_load_or_exit` missed the exact scenario the finding is about.
+    rc = cli.main(["run", "-c", _malformed_cfg(tmp_path)])
+
+    assert rc == 2
+    assert "config error" in capsys.readouterr().err
+
+
+def test_run_does_not_offer_the_setup_wizard_for_a_malformed_config(tmp_path, monkeypatch):
+    # The YAMLError arm must sit with ValueError, NOT with FileNotFoundError: a config that
+    # exists but does not parse is a broken config to report, not a missing one to replace.
+    # Routing it to the wizard would offer to overwrite a file the operator merely typo'd.
+    monkeypatch.setattr(
+        cli, "_run_setup_wizard", lambda *a, **k: pytest.fail("wizard offered for a typo")
+    )
+    assert cli.main(["run", "-c", _malformed_cfg(tmp_path)]) == 2
+
+
+def test_install_service_still_renders_with_a_malformed_config(tmp_path, capsys):
+    # This site documents "install-service must still render without a fully-valid config,
+    # so a load failure falls back to a bare `shawl` on PATH rather than erroring" — a
+    # promise that was false for the commonest way a config is invalid.
+    rc = cli.main(["install-service", "windows", "-c", _malformed_cfg(tmp_path)])
+
+    assert rc == 0
+    assert capsys.readouterr().out.strip()  # a unit was actually rendered

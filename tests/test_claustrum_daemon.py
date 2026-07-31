@@ -191,6 +191,13 @@ async def test_binary_not_found(make_daemon):
         await daemon.ensure()
     assert "not found" in str(excinfo.value)
     assert daemon.client is None
+    # `status()` must carry the REASON, not just running:false. This is the most likely
+    # real failure (claustrum simply not installed), and it was one of two raise sites
+    # that never set `_error` — so /healthz reported `running:false, error:null` and the
+    # cause survived only in the lifespan log, where a dashboard user never sees it.
+    status = daemon.status()
+    assert status["running"] is False
+    assert status["error"] and "not found" in status["error"]
 
 
 async def test_resolve_binary_falls_back_to_managed_install(make_daemon, monkeypatch):
