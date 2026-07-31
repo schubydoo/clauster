@@ -257,9 +257,10 @@ def test_classify_and_constraints_cover_edge_annotations() -> None:
     assert _list_item_kind(list) == "str"
     # A multi-member union is NOT unwrapped (len != 1), so it falls through to the first arg.
     assert _list_item_kind(str | int) == "str"
-    # Lt maps to max; Ge to min; an unrecognized metadata item is simply skipped (loop tail).
+    # Lt maps to max AND exclusive_max; Ge to min alone (it IS inclusive); an unrecognized
+    # metadata item is simply skipped (loop tail).
     meta = _types.SimpleNamespace(metadata=[at.Lt(lt=5), at.Ge(ge=1), object()])
-    assert _constraints(meta) == {"max": 5, "min": 1}
+    assert _constraints(meta) == {"max": 5, "exclusive_max": 5, "min": 1}
 
 
 def test_tier_b_list_and_map_specs() -> None:
@@ -657,3 +658,73 @@ def test_validation_error_message_is_operator_friendly(write_config) -> None:
     assert "999.999.0.0/33" in msg
     for leaked in ("ClausterConfig", "pydantic.dev", "input_type", "[type="):
         assert leaked not in msg
+
+
+def test_exclusive_bounds_are_emitted_distinctly() -> None:
+    # `<input type=number>`'s min/max are INCLUSIVE by definition, so a `gt=0` field
+    # advertised min="0", the browser called 0 valid, and the save came back 422 — the
+    # control accepting exactly the value the server rejects. The distinct key is what lets
+    # the client tell "at least 0" from "more than 0".
+    import types as _types
+
+    import annotated_types as at
+
+    from clauster.config_editor import _constraints
+
+    gt = _types.SimpleNamespace(metadata=[at.Gt(gt=0)])
+    assert _constraints(gt) == {"min": 0, "exclusive_min": 0}
+    # Inclusive bounds must NOT gain the key, or every control would reject its own endpoint.
+    ge = _types.SimpleNamespace(metadata=[at.Ge(ge=0)])
+    assert _constraints(ge) == {"min": 0}
+    le = _types.SimpleNamespace(metadata=[at.Le(le=2.0)])
+    assert _constraints(le) == {"max": 2.0}
+
+
+def test_exclusive_bound_fields_carry_the_key_in_their_spec() -> None:
+    # End-to-end through the real model, not a hand-built namespace: the field the finding
+    # named must actually reach the dashboard with the key, and an inclusive neighbour must
+    # not. `startup_grace_seconds` is gt=0; `capacity` is ge=1.
+    from clauster.config_editor import field_specs
+
+    specs = field_specs()
+    assert specs["claude.startup_grace_seconds"]["exclusive_min"] == 0
+    assert "exclusive_min" not in specs["instance_defaults.capacity"]
+    # min stays alongside it — dropping it would leave the browser with no range at all.
+    assert specs["claude.startup_grace_seconds"]["min"] == 0
+
+
+def test_the_exclusive_endpoint_really_is_rejected_by_the_model() -> None:
+    # The differential that makes the rest meaningful: 0 must genuinely fail validation for
+    # a gt=0 field, or the control was right to offer it and there is nothing to fix.
+    import pytest as _pytest
+    from pydantic import ValidationError
+
+    from clauster.config import ClaudeConfig
+
+    with _pytest.raises(ValidationError):
+        ClaudeConfig(startup_grace_seconds=0)
+    assert ClaudeConfig(startup_grace_seconds=0.5).startup_grace_seconds == 0.5
+
+
+def test_both_save_paths_gate_on_the_exclusive_bound() -> None:
+    # There is no JS test harness for the dashboard, so this pins the wiring the only way
+    # available: BOTH save paths must consult the guard. The Tier-A editor and the Tier-B
+    # advanced panel are separate functions hitting separate endpoints, and fixing one and
+    # forgetting the other is exactly how this class of bug survives a review.
+    from pathlib import Path as _Path
+
+    import clauster
+
+    # encoding= is load-bearing, not tidiness: without it `read_text` uses
+    # locale.getpreferredencoding(False) — cp1252 on the Windows runner — and this file
+    # already contains a byte cp1252 leaves undefined (0x8f), so the decode RAISES there.
+    script = (_Path(clauster.__file__).parent / "templates" / "_dashboard_script.html").read_text(
+        encoding="utf-8"
+    )
+    assert script.count("_numericBoundError(") == 3  # 1 definition + 2 call sites
+    assert "this._numericBoundError(c.specs, edits)" in script  # Tier-A editor
+    assert "this._numericBoundError(a.specs, edits)" in script  # Tier-B advanced panel
+    # Both halves are checked, not just the exclusive one that motivated the helper: with no
+    # checkValidity() anywhere, a typed value violating a plain `ge`/`le` is sent too.
+    for key in ("exclusive_min", "exclusive_max", "spec.min", "spec.max"):
+        assert key in script
