@@ -384,6 +384,21 @@ def test_list_agents_lists_a_dangling_symlink_so_list_and_get_agree(tmp_path: Pa
     }
 
 
+def test_list_agents_skips_a_directory_named_like_an_agent(tmp_path: Path) -> None:
+    # A non-symlink `.md` entry that is not a regular file. The `is_file()` guard is not
+    # redundant with the `OSError` catch below it: a directory raises there, but a FIFO
+    # would BLOCK in read_bytes() forever waiting for a writer, with no exception to catch.
+    root = tmp_path / "agents"
+    root.mkdir()
+    (root / "notanagent.md").mkdir()
+    (root / "real.md").write_bytes(b"---\ndescription: a real local agent\n---\nbody\n")
+
+    entries = {e["name"]: e for e in sub._list_agents(root, "project")}
+
+    assert "notanagent" not in entries
+    assert "real" in entries  # the guard didn't cost a genuine agent
+
+
 def test_is_read_only_file_detects_plugin_marker() -> None:
     path = Path("agent.md")
     raw = b"---\nname: x\ndescription: ${CLAUDE_PLUGIN_ROOT}/thing\n---\nbody\n"
