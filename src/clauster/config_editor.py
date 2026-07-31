@@ -662,12 +662,25 @@ def _humanize(key: str) -> str:
 
 
 def _constraints(info: Any) -> dict[str, Any]:
-    """Extract numeric min/max bounds from a field's annotated-type metadata.
+    """Extract numeric bounds from a field's annotated-type metadata.
 
-    Note the bounds are emitted as INCLUSIVE ``min``/``max`` even for an exclusive
-    ``gt``/``lt``, so a control can offer the endpoint itself (e.g.
-    ``claude.startup_grace_seconds`` is ``gt=0`` yet advertises ``min: 0``) and the save
-    then 422s on re-validation.
+    An inclusive ``ge``/``le`` sets ``min``/``max``. An EXCLUSIVE ``gt``/``lt`` sets those
+    too **and** ``exclusive_min``/``exclusive_max``, because the two answer different
+    questions. ``min``/``max`` are what an ``<input type="number">`` can express, and HTML
+    defines them as inclusive; ``exclusive_*`` is the real contract, which the dashboard
+    checks before it sends a save. Emitting only the first is what made
+    ``claude.startup_grace_seconds`` (``gt=0``) advertise ``min: 0``, accept ``0``, and then
+    422 on re-validation — the control calling valid exactly the value the server rejects.
+
+    ⚠️ So ``min``/``max`` stay an APPROXIMATION for an exclusive bound: they keep the
+    spinner step and the browser's own range check sane, and are wrong by precisely the
+    endpoint — which is what ``exclusive_*`` exists to catch. Do not "simplify" by dropping
+    one of the pair. Dropping ``min`` would let the browser offer arbitrarily out-of-range
+    values; dropping ``exclusive_min`` restores the 422.
+
+    Today every exclusive bound in the model is ``gt=0`` on a **float** (``step="any"``),
+    so there is no next-representable value to pre-adjust ``min`` to — pre-adjusting is
+    only exact for integers, which is why the distinct key is the general answer.
     """
     out: dict[str, Any] = {}
     for meta in info.metadata:
@@ -675,10 +688,12 @@ def _constraints(info: Any) -> dict[str, Any]:
             out["min"] = meta.ge
         elif isinstance(meta, at.Gt):
             out["min"] = meta.gt
+            out["exclusive_min"] = meta.gt
         elif isinstance(meta, at.Le):
             out["max"] = meta.le
         elif isinstance(meta, at.Lt):
             out["max"] = meta.lt
+            out["exclusive_max"] = meta.lt
     return out
 
 

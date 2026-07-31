@@ -25,6 +25,13 @@ field renders as a typed control (toggle, bounded number, text, or a select
 with human-readable option labels), with its raw YAML key shown as subtext so
 you can cross-reference the file.
 
+A bounded number carries its real range. Where a bound is **exclusive** — a
+timeout that must be *greater than* zero, not *at least* zero — the editor
+refuses the endpoint before saving and tells you so, rather than accepting it
+and returning a `422` from the full-config re-validation. The number input's
+own `min`/`max` are inclusive by definition, so that last step is what makes
+the control's answer match the server's.
+
 A switch whose feature needs an **optional dependency** that isn't installed
 (Direct Sessions → the `claustrum` binary, notifications → `apprise`, the live
 terminal view → `pyte`) can't be turned on and shows a "Requires … — run
