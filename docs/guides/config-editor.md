@@ -184,6 +184,15 @@ The surface tabs:
 | Skills | Skills: list, a per-skill `SKILL.md` editor, create, delete. |
 | Plugins | Installed plugins (install / uninstall / enable / disable / update) and the marketplaces they come from (add / remove). |
 
+Two entries can look broken when they are not:
+
+- **A plugin-provided subagent is listed, but has no description and cannot be
+  edited or deleted.** A plugin owns that file, so Clauster refuses to change
+  it. Clauster also never reads the file the plugin points to, so it cannot show
+  what the subagent does. To change it, change the plugin.
+- **A skill Clauster cannot read still appears, carrying an error in place of
+  the missing information.** One unreadable skill never hides the others.
+
 ## Troubleshooting and limits
 
 | Symptom | Why | What to do |
@@ -194,6 +203,7 @@ The surface tabs:
 | Advanced settings ask for a password you don't have | Step-up re-auth requires a password even when login uses another mechanism | Set one with `clauster hash-password` |
 | No Advanced section / no wrench button | `config_write.enabled` is off (the whole surface 404s) | Enable it in `clauster.yml` — deliberately not web-editable |
 | A saved change has no effect | Saves never live-reload | Use **Restart Clauster** in the Configuration modal |
+| A subagent has no description and won't edit | A plugin owns it; Clauster never reads a plugin's target file | Change the plugin, not Clauster |
 
 Need to recover an earlier config? The five most recent pre-save snapshots
 sit next to the file as `clauster.yml.bak-*` — copy one back over
