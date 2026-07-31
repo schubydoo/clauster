@@ -1163,13 +1163,20 @@
         // endpoint would 403 forever — the panel shows a "needs a password" note instead.
         if (a.supported && a.passwordSet) this.advancedLoad();
       },
-      // Refuse a save that an exclusive bound would 422. HTML `min`/`max` are inclusive by
-      // definition, so a `gt=0` float renders min="0" and the browser calls 0 valid — the
-      // control accepting exactly the value the server rejects. The spec carries
-      // `exclusive_min`/`exclusive_max` for precisely this gap; check it here so the
-      // operator reads the real reason instead of a round-tripped 422. Returns "" when the
-      // edits are fine, so callers can `if (msg)`.
-      _exclusiveBoundError(specs, edits) {
+      // Refuse a save the server would 422 on a numeric bound, EXCLUSIVE or inclusive.
+      //
+      // The `min`/`max` attributes do not enforce anything here: the save is a fetch, not a
+      // form submit, and nothing in these templates calls checkValidity()/reportValidity()
+      // — so a TYPED out-of-range value goes out untouched. The attributes only bound the
+      // spinner arrows and set :invalid, which Tabler does not surface without
+      // .is-invalid/.was-validated. So both halves have to be checked here or the control
+      // keeps calling valid exactly what the server rejects: `gt=0` floats via the
+      // exclusive keys, and every `ge`/`le` int (e.g. clone.timeout_seconds, ge=1) via the
+      // inclusive ones. Returns "" when the edits are fine, so callers can `if (msg)`.
+      //
+      // Exclusive first, deliberately: a `gt=0` field carries BOTH keys, and
+      // "must be greater than 0" is the truthful message where "at least 0" would not be.
+      _numericBoundError(specs, edits) {
         for (const p in edits) {
           const spec = specs[p] || {};
           const v = edits[p];
@@ -1179,6 +1186,12 @@
           }
           if (spec.exclusive_max !== undefined && v >= spec.exclusive_max) {
             return (spec.label || p) + " must be less than " + spec.exclusive_max + ".";
+          }
+          if (spec.min !== undefined && v < spec.min) {
+            return (spec.label || p) + " must be at least " + spec.min + ".";
+          }
+          if (spec.max !== undefined && v > spec.max) {
+            return (spec.label || p) + " must be at most " + spec.max + ".";
           }
         }
         return "";
@@ -1197,7 +1210,7 @@
           if (v !== c.fields[p]) edits[p] = v;
         }
         if (Object.keys(edits).length === 0) { c.error = "No changes to save."; c.saved = false; return; }
-        const boundErr = this._exclusiveBoundError(c.specs, edits);
+        const boundErr = this._numericBoundError(c.specs, edits);
         if (boundErr) { c.error = boundErr; c.saved = false; return; }
         c.saving = true; c.error = ""; c.saved = false;
         try {
@@ -1475,7 +1488,7 @@
           this.revealFeedback('[data-test="adv-error"]');
           return;
         }
-        const advBoundErr = this._exclusiveBoundError(a.specs, edits);
+        const advBoundErr = this._numericBoundError(a.specs, edits);
         if (advBoundErr) {
           a.error = advBoundErr; a.saved = false;
           this.revealFeedback('[data-test="adv-error"]');

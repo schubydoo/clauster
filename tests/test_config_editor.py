@@ -715,7 +715,16 @@ def test_both_save_paths_gate_on_the_exclusive_bound() -> None:
 
     import clauster
 
-    script = (_Path(clauster.__file__).parent / "templates" / "_dashboard_script.html").read_text()
-    assert script.count("_exclusiveBoundError(") == 3  # 1 definition + 2 call sites
-    assert "this._exclusiveBoundError(c.specs, edits)" in script  # Tier-A editor
-    assert "this._exclusiveBoundError(a.specs, edits)" in script  # Tier-B advanced panel
+    # encoding= is load-bearing, not tidiness: without it `read_text` uses
+    # locale.getpreferredencoding(False) — cp1252 on the Windows runner — and this file
+    # already contains a byte cp1252 leaves undefined (0x8f), so the decode RAISES there.
+    script = (_Path(clauster.__file__).parent / "templates" / "_dashboard_script.html").read_text(
+        encoding="utf-8"
+    )
+    assert script.count("_numericBoundError(") == 3  # 1 definition + 2 call sites
+    assert "this._numericBoundError(c.specs, edits)" in script  # Tier-A editor
+    assert "this._numericBoundError(a.specs, edits)" in script  # Tier-B advanced panel
+    # Both halves are checked, not just the exclusive one that motivated the helper: with no
+    # checkValidity() anywhere, a typed value violating a plain `ge`/`le` is sent too.
+    for key in ("exclusive_min", "exclusive_max", "spec.min", "spec.max"):
+        assert key in script

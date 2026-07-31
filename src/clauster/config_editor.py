@@ -672,11 +672,14 @@ def _constraints(info: Any) -> dict[str, Any]:
     ``claude.startup_grace_seconds`` (``gt=0``) advertise ``min: 0``, accept ``0``, and then
     422 on re-validation — the control calling valid exactly the value the server rejects.
 
-    ⚠️ So ``min``/``max`` stay an APPROXIMATION for an exclusive bound: they keep the
-    spinner step and the browser's own range check sane, and are wrong by precisely the
-    endpoint — which is what ``exclusive_*`` exists to catch. Do not "simplify" by dropping
-    one of the pair. Dropping ``min`` would let the browser offer arbitrarily out-of-range
-    values; dropping ``exclusive_min`` restores the 422.
+    ⚠️ Neither key is ENFORCED by the browser. The dashboard saves with ``fetch``, not a
+    form submit, and never calls ``checkValidity()``, so ``min``/``max`` only bound the
+    spinner arrows and advertise the range — a typed out-of-range value is sent regardless.
+    The client-side gate (``_numericBoundError``) is what actually refuses one, and it reads
+    BOTH pairs: ``exclusive_*`` where the bound excludes its endpoint, ``min``/``max``
+    everywhere else. So do not "simplify" by dropping either — ``min``/``max`` is the only
+    bound most fields have, and ``exclusive_*`` is the only thing distinguishing "at least
+    0" from "more than 0".
 
     Today every exclusive bound in the model is ``gt=0`` on a **float** (``step="any"``),
     so there is no next-representable value to pre-adjust ``min`` to — pre-adjusting is
