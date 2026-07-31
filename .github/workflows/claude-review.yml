@@ -207,8 +207,21 @@ jobs:
           #
           # The documented surface is `mcp__github_inline_comment__` (anchors) and
           # `mcp__github_ci__` (below); grouping into one review goes through `gh pr review`.
+          #
+          # ⚠️ `--max-turns` is a REVIEW-QUALITY setting, not just a runaway guard. At 60 it
+          # was the binding limit on real PRs, not a safety net: runs on #1173 and #1177 both
+          # died with `"subtype": "error_max_turns"` partway through reading the diff, after
+          # ~8 minutes — publishing NOTHING but an error comment, so the PR showed a Claude
+          # comment that contained no review. Reading a multi-file diff costs many turns
+          # (chunked `Read`s plus `gh pr diff`), and this reviewer is also asked to fetch the
+          # rules file, anchor every finding inline, and submit one grouped review; 60 does
+          # not cover that on anything but a small change. 150 restores headroom while still
+          # binding well inside `timeout-minutes: 30` (measured ~8s/turn, so ~20 min), which
+          # keeps the cap meaningful as a runaway guard rather than dead weight — the job
+          # timeout remains the hard backstop, and the "Fail if nothing was posted" step
+          # below still catches a run that succeeds while publishing nothing.
           claude_args: |
-            --max-turns 60
+            --max-turns 150
             --model claude-opus-5
             --add-dir pr-head
             --add-dir ${{ steps.rules.outputs.dir }}
