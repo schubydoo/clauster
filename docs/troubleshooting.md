@@ -224,12 +224,20 @@ service](installation.md#run-as-a-systemd-service-linux).
 
 ### "no config found" / "invalid config"
 
-**What you see:** `doctor` fails the `config` row with `no config found: ...`
-or `invalid config: ...`; `clauster run` exits with a config validation error.
+**What you see:** `doctor` fails the `config` row with one of three details —
+`no config found: ...`, `invalid config: ...`, or `config is not valid YAML: ...`
+— and any Clauster command exits `2` with a one-line `clauster: config error:`
+message.
 
 **Most likely cause:** no `clauster.yml` where Clauster looks for one, or a
-YAML/typing mistake in it. The `invalid config` detail names the offending
-key.
+mistake inside it. The three details separate the cases, which is what tells you
+where to look:
+
+| Detail | What is wrong | Where the message points |
+| --- | --- | --- |
+| `no config found` | No file at any searched path | The search order |
+| `config is not valid YAML` | The file does not parse — a stray tab, an unclosed quote | A line and column |
+| `invalid config` | The file parses but a value is rejected | The offending key |
 
 ```sh
 clauster doctor -c /path/to/clauster.yml   # same file the service uses
@@ -429,9 +437,14 @@ API returns `hosted channel unavailable: claustrum daemon not connected`.
 it is an optional dependency), or its socket path is wrong.
 
 ```sh
+curl -s http://127.0.0.1:7621/healthz      # the claustrum block names the reason
 clauster deps list                         # is claustrum installed?
 tail ~/.clauster/claustrum/daemon.log      # what did the daemon last say?
 ```
+
+Start with `/healthz`: its `claustrum` block carries an `error` describing why
+the last start attempt failed — including the commonest case, the binary not
+being found. Before, that reason reached only the server log.
 
 **Mechanism:** [`claustrum` config
 reference](reference/config.md#claustrum-hosted-live-view-channel-claustrumconfig).
@@ -485,7 +498,7 @@ present in every run:
 
 | Row | OK means | A warn/fail usually means |
 | --- | --- | --- |
-| `config` | `clauster.yml` found and valid | `no config found: ...` / `invalid config: ...` |
+| `config` | `clauster.yml` found and valid | `no config found: ...` / `config is not valid YAML: ...` / `invalid config: ...` |
 | `claude` | binary found, version ≥ `min_version` | not on PATH, or too old — see above |
 | `claude-login` | usable `claude` credentials | not logged in — bridges will spawn then hang |
 | `projects_root` | the directory exists | wrong path in config |
