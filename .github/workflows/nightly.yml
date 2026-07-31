@@ -14,6 +14,12 @@ on:
     - cron: "41 5 * * *"
   workflow_dispatch:
 
+# ⚠️ A failed `image-sign` leaves `:edge` pushed but unsigned — same publish-visible
+# window release.yml documents at length, and for the same reason (build and cosign
+# are separate jobs on purpose). Lower stakes here: `:edge` is the rolling main build,
+# never `:latest`, and the next nightly overwrites it. Recovery is the same manual
+# `cosign sign ghcr.io/<repo>@<digest>`, or just let the next run replace it.
+
 permissions:
   contents: read
 
@@ -83,11 +89,17 @@ jobs:
     # Deployment environment for the GHCR push (audit trail; protection rules,
     # if any, are managed repo-side). Same name the release GHCR push uses.
     environment: ghcr
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    # No id-token here: `docker build` runs the Dockerfile, and that must not share
+    # a job with the cosign OIDC identity. The `image-sign` job below signs the
+    # digest this one pushes. Mirrors release.yml's docker-build/docker-sign split.
     permissions:
       contents: read
+      # See release.yml's docker-build: the provenance/SBOM here are BuildKit
+      # attestations pushed to the registry, so no `attestations: write` is needed
+      # (that scope only serves GitHub's attestations API, which needs an OIDC token).
       packages: write # push to ghcr.io
-      id-token: write # cosign keyless signing (OIDC)
-      attestations: write # build provenance / SBOM attestations
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -124,38 +136,57 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           provenance: true
           sbom: true
+
+  image-sign:
+    name: Sign the nightly image (cosign keyless)
+    needs: image
+    if: needs.image.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: ghcr # a signature is a registry publish; keep it in the same audit trail
+    # No `contents: read` — this job never checks the repository out. It signs a
+    # digest the build job already pushed, so nothing it runs comes from the repo.
+    permissions:
+      packages: write # cosign writes the signature back to ghcr.io
+      id-token: write # cosign keyless signing (OIDC)
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
       - name: Sign the image (keyless, by digest)
         env:
           IMAGE: ghcr.io/${{ github.repository }}
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ needs.image.outputs.digest }}
         run: |
           set -euo pipefail
+          if [ -z "${DIGEST}" ]; then
+            echo "::error::no image digest from the build job; refusing to sign" >&2
+            exit 1
+          fi
           # cosign signatures are keyed on the manifest DIGEST, not the tag —
           # both tags (edge, sha-<short>) point to the same digest, so a single
           # sign covers both.
           cosign sign --yes "${IMAGE}@${DIGEST}"
 
-  testpypi:
-    name: nightly dev build → TestPyPI
+  # Build the nightly dev dists in a job with NO id-token — `uv build` executes the
+  # build backend and its hooks, and the version stamp below rewrites source files
+  # before it. None of that may share a job with the TestPyPI OIDC identity. Same
+  # split as release.yml's pypi-build/pypi.
+  testpypi-build:
+    name: nightly dev build
     needs: gate
     if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Trusted Publishing to TestPyPI (OIDC) — no stored token. This needs a
-    # publisher configured on test.pypi.org FIRST (Account → Publishing → add a
-    # pending publisher): PyPI project `clauster`, owner `schubydoo`, repo
-    # `clauster`, workflow `nightly.yml`, environment `testpypi`. Until that
-    # exists the publish step 403s (there is nothing to add on our side).
-    environment:
-      name: testpypi
-      url: https://test.pypi.org/project/clauster/
     # Job-level permissions REPLACE the workflow default, so re-declare
-    # contents: read (checkout) alongside id-token: write (OIDC).
+    # contents: read for the checkout.
     permissions:
       contents: read
-      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -238,6 +269,32 @@ jobs:
           path: dist/
           retention-days: 14
           if-no-files-found: error
+
+  testpypi:
+    name: nightly dev build → TestPyPI
+    needs: testpypi-build
+    if: needs.testpypi-build.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Trusted Publishing to TestPyPI (OIDC) — no stored token. This needs a
+    # publisher configured on test.pypi.org FIRST (Account → Publishing → add a
+    # pending publisher): PyPI project `clauster`, owner `schubydoo`, repo
+    # `clauster`, workflow `nightly.yml`, environment `testpypi`. Until that
+    # exists the publish step 403s (there is nothing to add on our side).
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/clauster/
+    # No `contents: read` — this job never checks the repository out. It downloads
+    # the dists the build job produced and uploads them, so nothing it runs comes
+    # from the repository while the OIDC token is live.
+    permissions:
+      id-token: write
+    steps:
+      - name: Download the nightly dists
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nightly-dist
+          path: dist/
       - name: Publish to TestPyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
