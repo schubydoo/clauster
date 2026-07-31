@@ -1552,6 +1552,15 @@ at the top and a search box that filters by label, key, or description. Each
 field renders as a typed control (toggle, bounded number, text, or a select
 with human-readable option labels), with its raw YAML key shown as subtext so
 you can cross-reference the file.</p>
+<p>A bounded number carries its real range, and the editor checks that range
+before it sends the save. The input's <code>min</code>/<code>max</code> attributes only advertise
+the range and bound the spinner arrows — the save is a <code>fetch</code>, not a form
+submit, so a value you <em>type</em> is never enforced by the browser. The editor
+therefore compares it itself and refuses an out-of-range one with a message,
+rather than sending it and surfacing a <code>422</code> from the full-config
+re-validation. That covers <strong>exclusive</strong> bounds too: a timeout that must be
+<em>greater than</em> zero, not <em>at least</em> zero, is refused at zero — something
+<code>min="0"</code> alone cannot express.</p>
 <p>A switch whose feature needs an <strong>optional dependency</strong> that isn't installed
 (Direct Sessions → the <code>claustrum</code> binary, notifications → <code>apprise</code>, the live
 terminal view → <code>pyte</code>) can't be turned on and shows a "Requires … — run
