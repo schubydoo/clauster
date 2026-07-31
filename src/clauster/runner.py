@@ -3060,6 +3060,15 @@ class SessionRunner:
         ``rediscover`` deliberately leaves rows UNCARDED precisely when their bridge/keeper
         is live-but-untracked, which is the likeliest way to reach a persisted-only live
         row. Raises :class:`UnknownProject` when there's no such record at all.
+
+        Both liveness checks are cmdline-gated against PID reuse — ``is_live_bridge`` for the
+        bridge, ``is_keeper_process`` for the keeper — so a pid the OS recycled onto an
+        unrelated process does not refuse the forget. That matters most here: a persisted row
+        can predate a reboot, and since forget never kills, a false "still live" would strand
+        the record with no operator path out. ⚠️ The bridge half additionally matches
+        ``bridge_proc_start``; the keeper half has no persisted start-time to compare, so
+        cmdline is its only reuse defense — a *different* live keeper recycled onto that exact
+        pid still reads as live.
         """
         # Determine project name before taking the lock (needed for per-project lock and
         # the pointer clear below). Fall back to the persisted record — a forgotten bridge
@@ -3104,16 +3113,19 @@ class SessionRunner:
                     )
                 # Defense in depth: never drop a record whose process is actually alive even
                 # if the status lags a missed poll — that would orphan a live bridge/keeper.
+                # ⚠️ POLARITY: both predicates answer False/None on a psutil error, and here
+                # that ALLOWS the forget — the opposite of `stop_keeper`, where False means
+                # "don't kill". They fail safe there and permissive here, so read the answer
+                # as "not provably alive", and never "simplify" one call site to match the
+                # other's assumptions.
                 if instance.bridge_pid is not None and await asyncio.to_thread(
                     procutil.is_live_bridge, instance.bridge_pid, instance.bridge_proc_start
                 ):
                     raise InstanceStillLive(
                         f"{instance_id!r} still has a live bridge — Stop it first"
                     )
-                if (
-                    instance.keeper_pid is not None
-                    and await asyncio.to_thread(procutil.proc_create_time, instance.keeper_pid)
-                    is not None
+                if instance.keeper_pid is not None and await asyncio.to_thread(
+                    procutil.is_keeper_process, instance.keeper_pid
                 ):
                     raise InstanceStillLive(
                         f"{instance_id!r} still has a live keeper — Stop it first"
@@ -3137,10 +3149,8 @@ class SessionRunner:
                         f"{instance_id!r} still has a live bridge — Stop it first"
                     )
                 row_keeper_pid = _row_int(row.get("keeper_pid"))
-                if (
-                    row_keeper_pid is not None
-                    and await asyncio.to_thread(procutil.proc_create_time, row_keeper_pid)
-                    is not None
+                if row_keeper_pid is not None and await asyncio.to_thread(
+                    procutil.is_keeper_process, row_keeper_pid
                 ):
                     raise InstanceStillLive(
                         f"{instance_id!r} still has a live keeper — Stop it first"

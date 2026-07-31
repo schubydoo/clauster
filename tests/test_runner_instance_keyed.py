@@ -791,12 +791,31 @@ async def test_forget_refuses_a_persisted_only_row_with_a_live_keeper(runner_con
     runner = _make_runner(runner_config)
     runner.persistence.state_store().save({"iid-ghost": _row("alpha", pid=None, keeper_pid=7777)})
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
-    monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: 12345.0)
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda pid: True)
 
     with pytest.raises(InstanceStillLive):
         await runner.forget("iid-ghost")
 
     assert "iid-ghost" in runner.persistence.state_store().load()
+
+
+async def test_forget_is_not_stranded_by_a_recycled_keeper_pid(runner_config, monkeypatch):
+    # The reason the keeper gate is `is_keeper_process` and not `proc_create_time is not
+    # None`. The latter answers "is ANY process alive at this pid" — and a persisted-only row
+    # can predate a reboot, so its keeper_pid has a real chance of having been recycled onto
+    # something unrelated. Since forget never kills, a false "still live" strands the record
+    # with no operator path out short of editing the state DB. The cmdline gate is what tells
+    # our keeper apart from whatever else now holds that pid.
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save({"iid-ghost": _row("alpha", pid=None, keeper_pid=7777)})
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    # Alive, but NOT a keeper — exactly the recycled-pid shape.
+    monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: 12345.0)
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda pid: False)
+
+    await runner.forget("iid-ghost")  # must not be refused
+
+    assert "iid-ghost" not in runner.persistence.state_store().load()
 
 
 async def test_forget_still_prunes_a_dead_persisted_only_row(runner_config, monkeypatch):
