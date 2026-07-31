@@ -94,9 +94,11 @@ jobs:
   # --- Sign + stage every asset, fail-closed, then publish via knope ----------
   release:
     needs: [binaries, dists]
-    # Explicit (not just needs-skip-propagation): publish only if the binaries
-    # actually built. Guards against a future edit that adds `if: always()`.
-    if: ${{ needs.binaries.result == 'success' }}
+    # Explicit (not just needs-skip-propagation): publish only if BOTH inputs
+    # actually built — the binaries matrix and the dists. Guards against a future
+    # edit that adds `if: always()`, under which an unlisted dependency would go
+    # unchecked and this job would run with an empty dist/.
+    if: ${{ needs.binaries.result == 'success' && needs.dists.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

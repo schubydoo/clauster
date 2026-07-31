@@ -20,6 +20,17 @@ on:
         required: true
         type: string
 
+# ⚠️ A FAILED `docker-sign` IS A PUBLISH-VISIBLE FAILURE, not just a red job.
+# The image is pushed by `docker-build` and signed by a separate job (they are split
+# so the Dockerfile never runs beside the cosign OIDC identity). Nothing untags an
+# image whose signature never landed, so if `docker-sign` is cancelled, never picked
+# up, or blocked by a future `ghcr` protection rule, `:latest` and `:X.Y.Z` are live
+# and `cosign verify` rejects them — while README.md advertises release images as
+# cosign-signed. Recovery is a manual `cosign sign ghcr.io/<repo>@<digest>` against
+# the digest in the build job's log; re-running the workflow also works. The same
+# window existed before the split (push succeeded before sign inside one job); the
+# split widens it from one step to one job.
+
 permissions:
   contents: read
 
@@ -178,8 +189,12 @@ jobs:
       url: https://github.com/${{ github.repository }}/pkgs/container/${{ github.event.repository.name }}
     permissions:
       contents: read
+      # `packages: write` only. NOT `attestations: write`: the provenance/SBOM below
+      # are BuildKit attestations (`--attest type=provenance|sbom`) pushed to the
+      # registry as OCI manifests — they never call GitHub's attestations API, which
+      # is the only consumer of that scope and needs an OIDC token this job no longer
+      # has. `actions/attest` lives in knope-release.yml, which keeps both scopes.
       packages: write # push to ghcr.io
-      attestations: write # build provenance / SBOM attestations
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

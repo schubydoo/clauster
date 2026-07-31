@@ -14,6 +14,12 @@ on:
     - cron: "41 5 * * *"
   workflow_dispatch:
 
+# ⚠️ A failed `image-sign` leaves `:edge` pushed but unsigned — same publish-visible
+# window release.yml documents at length, and for the same reason (build and cosign
+# are separate jobs on purpose). Lower stakes here: `:edge` is the rolling main build,
+# never `:latest`, and the next nightly overwrites it. Recovery is the same manual
+# `cosign sign ghcr.io/<repo>@<digest>`, or just let the next run replace it.
+
 permissions:
   contents: read
 
@@ -90,8 +96,10 @@ jobs:
     # digest this one pushes. Mirrors release.yml's docker-build/docker-sign split.
     permissions:
       contents: read
+      # See release.yml's docker-build: the provenance/SBOM here are BuildKit
+      # attestations pushed to the registry, so no `attestations: write` is needed
+      # (that scope only serves GitHub's attestations API, which needs an OIDC token).
       packages: write # push to ghcr.io
-      attestations: write # build provenance / SBOM attestations
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
