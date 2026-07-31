@@ -676,6 +676,27 @@ def test_is_bridge_process_zombie_is_false(monkeypatch):
     assert procutil.is_bridge_process(1234) is True
 
 
+def test_keeper_and_bridge_predicates_fail_closed_on_a_negative_pid():
+    # Both docstrings promise "fails closed on ANY psutil error", but psutil raises
+    # ValueError — NOT the NoSuchProcess/AccessDenied/ZombieProcess the catch listed — for a
+    # non-positive pid. Several callers feed these a pid read straight out of a keeper
+    # sidecar, which is an on-disk file that can hold a negative value, so while it was
+    # uncaught it raised out of `rediscover`'s to_thread and failed LIFESPAN STARTUP rather
+    # than skipping one sidecar. Real psutil here, not a fake: the guarantee is about
+    # psutil's actual behaviour, and a fake would let the catch drift back out of sync.
+    with pytest.raises(ValueError):
+        psutil.Process(-1)  # the raise these two guards must absorb
+
+    assert procutil.is_keeper_process(-1) is False
+    assert procutil.is_bridge_process(-1) is False
+    # The other two in the family, which take the SAME untrusted on-disk ints. Hardening
+    # only the cmdline pair left these raising, and `forget`/`iter_keepers` reach them
+    # first — a shared guard has to be pinned at every call site, not the loudest one.
+    assert procutil.proc_create_time(-1) is None
+    assert procutil.is_live_bridge(-1, None) is False
+    assert procutil.is_live_process(-1, None) is False
+
+
 def test_bridge_ancestor_finds_the_bridge_above_an_sdk_worker(monkeypatch):
     # THE #1116 regression test, in the shape measured on the dogfood host: `agents --json`
     # reports a Server Mode session's pid as the SDK worker

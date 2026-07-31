@@ -17,7 +17,7 @@ import logging
 import pytest
 
 from clauster.models import InstanceStatus, RemoteControlInstance
-from clauster.runner import SessionRunner, _row_float, _row_int
+from clauster.runner import InstanceStillLive, SessionRunner, _row_float, _row_int
 
 pytestmark = pytest.mark.anyio
 
@@ -475,10 +475,13 @@ async def test_pid_less_rows_left_by_the_old_ratchet_are_recovered(runner_config
         assert runner.resolve_bridge_id(iid) == iid
 
 
-def _write_sidecar(runner, name: str, stamp: str, **fields) -> None:
+def _write_sidecar(runner, name: str, stamp: str, seq: int = 1, **fields) -> None:
+    # `<name>-<ms>-<seq>` is the shape `_unique_log_path` actually writes, and the sweeps
+    # anchor on both digit groups to reject a sibling project. A one-group stem is not a
+    # filename clauster can produce, so building one here would test nothing real.
     log_dir = runner._log_dir
     log_dir.mkdir(parents=True, exist_ok=True)
-    (log_dir / f"{name}-{stamp}.keeper.json").write_text(json.dumps(fields))
+    (log_dir / f"{name}-{stamp}-{seq}.keeper.json").write_text(json.dumps(fields))
 
 
 async def test_has_unclaimed_live_keeper_detects_only_a_live_unheld_keeper(
@@ -495,7 +498,7 @@ async def test_has_unclaimed_live_keeper_detects_only_a_live_unheld_keeper(
 
     # A non-dict sidecar is valid JSON but has no `.get` — it must be skipped, not raise
     # out of the sweep and take down startup.
-    (runner._log_dir / "alpha-1700000000009.keeper.json").write_text("[]")
+    (runner._log_dir / "alpha-1700000000009-1.keeper.json").write_text("[]")
 
     assert runner._has_unclaimed_live_keeper("alpha", set()) is False, "no usable sidecar yet"
 
@@ -707,6 +710,172 @@ async def test_a_sidecar_with_a_nonpositive_pid_is_skipped_not_fatal(runner_conf
     assert runner._has_unclaimed_live_keeper("alpha", set()) is True, (
         "a bad sidecar must not mask a good one"
     )
+
+
+async def test_a_sibling_projects_keeper_is_never_read_as_this_projects(
+    runner_config, monkeypatch
+):
+    # `glob(f"{name}-*.keeper.json")` was an UNANCHORED prefix match and PROJECT_NAME_RE
+    # allows `-`, so project `alpha` also read sibling `alpha-staging`'s sidecars. Nothing
+    # downstream re-pinned the candidate to a project, so a sibling's LIVE keeper could be
+    # adopted as alpha's RUNNING instance — and stop()/poll_once would then reap another
+    # project's bridge. `_latest_debug_log_for` has always anchored the `<name>-<ms>-<seq>`
+    # stem for exactly this reason; the four `.keeper.json` sites did not.
+    runner = _make_runner(runner_config)
+    _write_sidecar(
+        runner,
+        "alpha-staging",
+        "1700000000001",
+        state="ready",
+        keeper_pid=9999,
+        bridge_pid=4242,
+        bridge_proc_start=12345.0,
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda *a, **k: True)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+
+    assert runner._keeper_sidecars_for("alpha") == []
+    assert runner._has_unclaimed_live_keeper("alpha", set()) is False
+    assert runner._recover_keeper_pid("alpha", 4242, None) is None
+
+    # Differential control: the sibling is a real project with a real live keeper, so
+    # querying under its OWN name must still find it. Without this the assertions above
+    # would also pass if the anchor rejected everything.
+    assert len(runner._keeper_sidecars_for("alpha-staging")) == 1
+    assert runner._has_unclaimed_live_keeper("alpha-staging", set()) is True
+    assert runner._recover_keeper_pid("alpha-staging", 4242, None) == 9999
+
+
+def test_keeper_sidecars_are_anchored_to_the_real_spawn_stem(runner_config):
+    # The anchor is the same two-digit-group shape `_unique_log_path` writes
+    # (`<name>-<ms>-<seq>`), so a stem clauster could never have produced is not read as a
+    # sidecar of this project — nor are the `.log` / `.keeper.log` kin sharing that stem.
+    runner = _make_runner(runner_config)
+    runner._log_dir.mkdir(parents=True, exist_ok=True)
+    for name in (
+        "alpha-1700000000001-1.keeper.json",  # the real shape — the only match
+        "alpha-1700000000001.keeper.json",  # one digit group: not a name clauster writes
+        "alpha-staging-1700000000001-1.keeper.json",  # sibling project
+        "alphabet-1700000000001-1.keeper.json",  # prefix collision without a separator
+        "alpha-1700000000001-1.keeper.log",  # spawn-set kin, not the sidecar
+        "alpha-nope-1.keeper.json",  # non-numeric ms
+    ):
+        (runner._log_dir / name).write_text("{}")
+
+    assert [p.name for p in runner._keeper_sidecars_for("alpha")] == [
+        "alpha-1700000000001-1.keeper.json"
+    ]
+
+
+async def test_forget_refuses_a_persisted_only_row_with_a_live_bridge(runner_config, monkeypatch):
+    # All three liveness gates sat inside `if instance is not None`, so a row present only in
+    # _persisted was pruned with NO liveness check at all. That is not a corner case: it is
+    # the branch MOST likely to hold a live process, because rediscover deliberately leaves a
+    # row uncarded exactly when its bridge/keeper is alive but untracked. Forgetting it
+    # orphaned a live bridge and deleted the only record of it.
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save({"iid-ghost": _row("alpha", pid=4242)})
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+
+    assert runner.get_instance("iid-ghost") is None  # persisted only — never materialized
+
+    with pytest.raises(InstanceStillLive):
+        await runner.forget("iid-ghost")
+
+    assert "iid-ghost" in runner.persistence.state_store().load()  # refusal kept the row
+
+
+async def test_forget_refuses_a_persisted_only_row_with_a_live_keeper(runner_config, monkeypatch):
+    # The keeper half of the same gate: a pty row can have no bridge pid and still own a live
+    # keeper holding the terminal.
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save({"iid-ghost": _row("alpha", pid=None, keeper_pid=7777)})
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda pid: True)
+
+    with pytest.raises(InstanceStillLive):
+        await runner.forget("iid-ghost")
+
+    assert "iid-ghost" in runner.persistence.state_store().load()
+
+
+async def test_forget_is_not_stranded_by_a_recycled_keeper_pid(runner_config, monkeypatch):
+    # The reason the keeper gate is `is_keeper_process` and not `proc_create_time is not
+    # None`. The latter answers "is ANY process alive at this pid" — and a persisted-only row
+    # can predate a reboot, so its keeper_pid has a real chance of having been recycled onto
+    # something unrelated. Since forget never kills, a false "still live" strands the record
+    # with no operator path out short of editing the state DB. The cmdline gate is what tells
+    # our keeper apart from whatever else now holds that pid.
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save({"iid-ghost": _row("alpha", pid=None, keeper_pid=7777)})
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    # Alive, but NOT a keeper — exactly the recycled-pid shape.
+    monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: 12345.0)
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda pid: False)
+
+    await runner.forget("iid-ghost")  # must not be refused
+
+    assert "iid-ghost" not in runner.persistence.state_store().load()
+
+
+async def test_forget_still_prunes_a_dead_persisted_only_row(runner_config, monkeypatch):
+    # The control that keeps the gate honest: tightening forget must not break its actual
+    # job. A persisted-only row whose processes are gone is exactly what forget exists to
+    # clear, and it must still go.
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save({"iid-ghost": _row("alpha", pid=4242, keeper_pid=7777)})
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    # `is_keeper_process`, not `proc_create_time` — the branch stopped calling the latter
+    # when the keeper gate became cmdline-gated, and a stub on it would leave the keeper
+    # half of this control decided by real psutil against whatever holds pid 7777.
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda pid: False)
+
+    await runner.forget("iid-ghost")  # must not raise
+
+    assert "iid-ghost" not in runner.persistence.state_store().load()
+
+
+async def test_forget_is_not_stranded_by_a_negative_pid_on_a_persisted_only_row(runner_config):
+    # Review catch on this branch. `_row_int` admits ANY non-bool int, negatives included,
+    # and the new gate hands that straight to psutil — which raises ValueError, not
+    # NoSuchProcess, below zero. Hardening only `is_keeper_process`/`is_bridge_process` left
+    # `is_live_bridge` and `proc_create_time` raising, and those are the two this branch
+    # actually calls: the row would 500 on every forget and could never be removed by any
+    # supported path. Reachable without hand-editing, because `_apply_pty_info` folds a
+    # sidecar's pid with no `> 0` gate and the pid columns are persisted.
+    # Real procutil here on purpose — a stub would not reproduce psutil's raise.
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save(
+        {"iid-ghost": _row("alpha", pid=-1, keeper_pid=-2)},
+    )
+
+    await runner.forget("iid-ghost")  # must not raise ValueError
+
+    assert "iid-ghost" not in runner.persistence.state_store().load()
+
+
+async def test_forget_ignores_a_non_int_pid_on_a_persisted_only_row(runner_config, monkeypatch):
+    # The new gate reads pids straight off a persisted row, so it has to tolerate junk there:
+    # `_row_int` degrades a non-int to None instead of letting it reach psutil, which would
+    # raise out of forget and make the row unforgettable. A string is what actually exercises
+    # that — a bool cannot reach this branch, because the store coerces `true` to `1` on
+    # round-trip (probed, not assumed), so `_row_int`'s bool arm guards the in-memory path.
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save(
+        {"iid-ghost": {"project_name": "alpha", "bridge_pid": "one", "keeper_pid": "seven"}}
+    )
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge",
+        lambda *a, **k: pytest.fail("a non-int pid must never reach the liveness check"),
+    )
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_keeper_process",
+        lambda pid: pytest.fail("a non-int keeper pid must never reach the liveness check"),
+    )
+
+    await runner.forget("iid-ghost")
+
+    assert "iid-ghost" not in runner.persistence.state_store().load()
 
 
 async def test_a_sweep_that_raises_blocks_that_project_instead_of_killing_startup(
@@ -1086,12 +1255,12 @@ async def test_reattached_pty_bridge_keeps_its_connect_link(runner_config, monke
     runner = _make_runner(runner_config)
     runner.persistence.state_store().save({"iid-a": _row("alpha", pid=8801)})
     runner._log_dir.mkdir(parents=True, exist_ok=True)
-    (runner._log_dir / "alpha-333.keeper.json").write_text(
+    (runner._log_dir / "alpha-333-1.keeper.json").write_text(
         json.dumps(
             {"bridge_pid": 9999, "state": "ready", "connect_url": "https://claude.ai/code/OTHER"}
         )
     )
-    (runner._log_dir / "alpha-222.keeper.json").write_text(
+    (runner._log_dir / "alpha-222-1.keeper.json").write_text(
         json.dumps(
             {
                 "bridge_pid": 8801,
@@ -1159,7 +1328,7 @@ async def test_pty_sidecar_without_a_session_id_still_yields_the_url(runner_conf
     runner = _make_runner(runner_config)
     runner.persistence.state_store().save({"iid-a": _row("alpha", pid=8601)})
     runner._log_dir.mkdir(parents=True, exist_ok=True)
-    (runner._log_dir / "alpha-444.keeper.json").write_text(
+    (runner._log_dir / "alpha-444-1.keeper.json").write_text(
         json.dumps(
             {
                 "bridge_pid": 8601,
@@ -1185,7 +1354,7 @@ async def test_pty_sidecar_without_a_url_still_yields_the_session(runner_config,
     runner = _make_runner(runner_config)
     runner.persistence.state_store().save({"iid-a": _row("alpha", pid=8501)})
     runner._log_dir.mkdir(parents=True, exist_ok=True)
-    (runner._log_dir / "alpha-555.keeper.json").write_text(
+    (runner._log_dir / "alpha-555-1.keeper.json").write_text(
         json.dumps({"bridge_pid": 8501, "state": "ready", "session_id": "session_ONLY"})
     )
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
@@ -1734,10 +1903,10 @@ async def test_pty_sidecar_must_be_ready_and_pid_correlated(runner_config, monke
     runner = _make_runner(runner_config)
     runner.persistence.state_store().save({"iid-a": _row("alpha", pid=8401, proc_start=500.0)})
     runner._log_dir.mkdir(parents=True, exist_ok=True)
-    (runner._log_dir / "alpha-900.keeper.json").write_text(
+    (runner._log_dir / "alpha-900-1.keeper.json").write_text(
         json.dumps({"bridge_pid": 8401, "state": "starting", "connect_url": "u-notready"})
     )
-    (runner._log_dir / "alpha-800.keeper.json").write_text(
+    (runner._log_dir / "alpha-800-1.keeper.json").write_text(
         json.dumps(
             {
                 "bridge_pid": 8401,
