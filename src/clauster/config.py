@@ -284,9 +284,12 @@ class InstanceDefaults(BaseModel):
         default=None,
         ge=1,
         description="Best-effort clauster cap on concurrent remote-control bridges "
-        "(standard/pty; ≥1) — NOT hosted/bg-agent sessions. A bridge spawn over the cap is "
-        "refused (409); cross-project concurrent spawns may transiently overshoot by a few. "
-        "Unset → no limit. Distinct from `capacity` (per-bridge sessions).",
+        "(standard/pty; ≥1) — NOT hosted/bg-agent sessions. EVERY live bridge counts, "
+        "including further bridges of the project being started: one project can hold a "
+        "standard bridge and several interactive sessions at once, and all of them count. "
+        "A bridge spawn over the cap is refused (409); cross-project concurrent spawns may "
+        "transiently overshoot by a few. Unset → no limit. Distinct from `capacity` "
+        "(per-bridge sessions).",
     )
 
 

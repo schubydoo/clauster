@@ -1133,6 +1133,42 @@ async def test_spawn_trust_true_capacity_full_does_not_trust(runner_config, tmp_
     assert not is_trusted(proj.path, empty_trust)  # cap rejection → no trust side effect
 
 
+async def test_max_bridges_counts_this_projects_own_live_bridge_on_the_other_axis(
+    runner_config, monkeypatch
+):
+    # The tally filtered `inst.project != name`, reasoning that past the idempotency
+    # early-return this project cannot already be live. That holds per MODE, not per project:
+    # a live pty session does NOT block a standard spawn — the code says so outright, "the
+    # two modes are independent axes" — so a project's own interactive sessions contributed
+    # 0 to the cap. One project could run unbounded sessions against a cap it never
+    # registered against, while the config field promised a refusal that never came.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, claude_json = runner_config
+    config = config.model_copy(deep=True)
+    config.instance_defaults.max_bridges = 1
+    runner = SessionRunner(config, claude_json=claude_json)
+    _seed(runner, "alpha", mode="pty", status=InstanceStatus.RUNNING)
+
+    # Standard spawn at the SAME project: not idempotent with the pty session, so it would
+    # really launch a second bridge — and that is the one the cap has to refuse.
+    with pytest.raises(CapacityExceeded):
+        await runner.spawn("alpha", spawn_mode="same-dir")
+
+
+async def test_max_bridges_ignores_a_stopped_same_project_bridge(runner_config, monkeypatch):
+    # The control for the test above: counting same-project bridges must not degrade into
+    # counting DEAD ones, or a project could never restart a bridge it had once stopped.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, claude_json = runner_config
+    config = config.model_copy(deep=True)
+    config.instance_defaults.max_bridges = 1
+    runner = SessionRunner(config, claude_json=claude_json)
+    _seed(runner, "alpha", mode="pty", status=InstanceStatus.STOPPED)
+
+    inst = await runner.spawn("alpha", spawn_mode="same-dir")  # STOPPED counts for nothing
+    await runner.stop(inst.instance_id)
+
+
 async def test_spawn_crash_is_error(runner_config, monkeypatch):
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "crash")
     runner = _make_runner(runner_config)

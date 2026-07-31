@@ -152,11 +152,10 @@ class PermissionModeNotAllowed(SpawnError):
 class CapacityExceeded(SpawnError):
     """A new bridge would exceed instance_defaults.max_bridges (clauster-enforced cap).
 
-    ⚠️ The tally counts only live bridges of OTHER projects — every STARTING/RUNNING
-    bridge of the project being spawned is excluded. That holds for the standard path
-    (capped at one per project by an earlier idempotent early-return) but not for pty,
-    where N sessions per project are allowed, so a project's own live pty sessions
-    contribute nothing to the count and the cap under-enforces for them.
+    The tally counts EVERY STARTING/RUNNING bridge, including the spawning project's own
+    on the other mode axis — N pty sessions per project are allowed, and a live pty session
+    does not block a standard spawn, so excluding same-project bridges let one project run
+    unbounded sessions against a cap it never registered against.
     """
 
 
@@ -1658,16 +1657,19 @@ class SessionRunner:
         # anchor is healthy/indeterminate.
         await self._clear_pointer_if_anchor_poisoned(proj.path)
 
-        # Enforce the optional clauster-side concurrent-bridge cap. Past the idempotency
-        # early-return, this project is NOT currently live, so every live instance is a
-        # different bridge. Fail closed BEFORE any per-spawn side effect (file/process).
+        # Enforce the optional clauster-side concurrent-bridge cap: EVERY live bridge counts,
+        # this project's included. The per-mode idempotency early-returns above already sent
+        # back any live bridge this spawn would duplicate, so nothing reaching here is the
+        # instance being spawned — but the same project can legitimately hold a live bridge on
+        # the OTHER axis (a live pty session does not block a standard spawn, and vice versa),
+        # and skipping those made a project with an interactive session contribute 0 to the
+        # cap. Fail closed BEFORE any per-spawn side effect (file/process).
         max_bridges = defaults.max_bridges
         if max_bridges is not None:
             live = sum(
                 1
                 for inst in self._instances.values()
-                if inst.project != name
-                and inst.status in (InstanceStatus.STARTING, InstanceStatus.RUNNING)
+                if inst.status in (InstanceStatus.STARTING, InstanceStatus.RUNNING)
             )
             if live >= max_bridges:
                 raise CapacityExceeded(
@@ -1988,6 +1990,28 @@ class SessionRunner:
         if not matches:
             return None
         return max(matches, key=lambda t: (t[0], t[1]))[2]
+
+    def _keeper_sidecars_for(self, name: str) -> list[Path]:
+        """Keeper sidecars belonging to *name* exactly — the anchored form of the bare glob.
+
+        ``glob(f"{name}-*.keeper.json")`` is an UNANCHORED prefix match, and
+        ``PROJECT_NAME_RE`` allows ``-`` (``discovery.py``), so for project ``app`` it also
+        returns sibling ``app-staging``'s sidecars. Nothing downstream re-pins a candidate to
+        this project, so a sibling's live keeper could be adopted as *this* project's RUNNING
+        instance — and stop()/poll_once would then reap another project's bridge. Anchor the
+        stem exactly as :meth:`_latest_debug_log_for` does, on the two trailing digit groups
+        of ``<name>-<ms>-<seq>`` (``_unique_log_path``); that rejects siblings while keeping
+        this project's whole set, and only ``.keeper.json`` matches (never its ``.log`` /
+        ``.keeper.log`` / ``.screen.json`` spawn-set kin).
+
+        Returned in glob order — each caller applies the ordering it wants. Whatever
+        ``Path.glob`` does with a missing or unreadable log dir is unchanged, since this is
+        the same call filtered (measured on 3.13: it yields nothing rather than raising).
+        """
+        stem_re = re.compile(rf"{re.escape(name)}-(\d+)-(\d+)\.keeper\.json")
+        return [
+            p for p in self._log_dir.glob(f"{name}-*.keeper.json") if stem_re.fullmatch(p.name)
+        ]
 
     def _prune_logs(self, protected: set[str]) -> None:
         """Apply the ``logs.retention_*`` policy to the bridge-log dir (best-effort).
@@ -2473,7 +2497,7 @@ class SessionRunner:
         """
         if bridge_pid is None:
             return None
-        for sidecar in sorted(self._log_dir.glob(f"{name}-*.keeper.json")):
+        for sidecar in sorted(self._keeper_sidecars_for(name)):
             info = self._read_sidecar(sidecar)
             if info is None or info.get("bridge_pid") != bridge_pid:
                 continue
@@ -3027,14 +3051,15 @@ class SessionRunner:
         rebuilds a STOPPED card from it) — then re-persists so ``state.json`` no longer
         carries it.
 
-        Fail closed on a record that is still in the IN-MEMORY registry: STARTING/RUNNING,
-        or a lagging status whose bridge/keeper process is still alive, is refused with
-        :class:`InstanceStillLive` — it must be Stopped first; forget never kills a
-        process. ⚠️ That gate does not cover a record present only in ``_persisted``
-        (the supported not-yet-materialized path): such a row is pruned with no liveness
-        check, even though ``rediscover`` deliberately leaves rows UNCARDED precisely when
-        their bridge/keeper is live-but-untracked. Raises :class:`UnknownProject` when
-        there's no such record at all.
+        Fail closed on a record that is still live — STARTING/RUNNING, or a lagging status
+        whose bridge/keeper process is still alive — refused with
+        :class:`InstanceStillLive`; it must be Stopped first, and forget never kills a
+        process. The gate covers a record present only in ``_persisted`` (the supported
+        not-yet-materialized path) as well as one in the in-memory registry, reading that
+        row's own ``bridge_pid``/``keeper_pid``. That branch is not hypothetical:
+        ``rediscover`` deliberately leaves rows UNCARDED precisely when their bridge/keeper
+        is live-but-untracked, which is the likeliest way to reach a persisted-only live
+        row. Raises :class:`UnknownProject` when there's no such record at all.
         """
         # Determine project name before taking the lock (needed for per-project lock and
         # the pointer clear below). Fall back to the persisted record — a forgotten bridge
@@ -3095,6 +3120,31 @@ class SessionRunner:
                     )
                 self._instances.pop(instance_id, None)
                 self._procs.pop(instance_id, None)
+            else:
+                # Same fail-closed gate for a row that exists ONLY in _persisted. There is no
+                # status to consult, so the row's own pids are the whole check — and this is
+                # the branch most likely to hold a LIVE bridge, because rediscover leaves a
+                # row uncarded exactly when its bridge/keeper is alive but untracked. Pruning
+                # it unchecked would orphan that process with its record gone.
+                row = self._persisted.get(instance_id) or {}
+                row_bridge_pid = _row_int(row.get("bridge_pid"))
+                if row_bridge_pid is not None and await asyncio.to_thread(
+                    procutil.is_live_bridge,
+                    row_bridge_pid,
+                    _row_float(row.get("bridge_proc_start")),
+                ):
+                    raise InstanceStillLive(
+                        f"{instance_id!r} still has a live bridge — Stop it first"
+                    )
+                row_keeper_pid = _row_int(row.get("keeper_pid"))
+                if (
+                    row_keeper_pid is not None
+                    and await asyncio.to_thread(procutil.proc_create_time, row_keeper_pid)
+                    is not None
+                ):
+                    raise InstanceStillLive(
+                        f"{instance_id!r} still has a live keeper — Stop it first"
+                    )
             # Rebuild as a NEW dict rather than .pop() in place: _persist aliases _persisted
             # and _last_saved to the same object, so mutating _persisted would also mutate the
             # dedup baseline and _persist would skip the write (leaving the row on disk).
@@ -3389,22 +3439,20 @@ class SessionRunner:
         ``held_keepers`` is passed in rather than read from ``_instances`` because this
         runs in a worker thread; see :meth:`_modes_with_an_unclaimed_live_bridge`.
 
-        The sweep is an UNANCHORED prefix glob (``{name}-*.keeper.json``) and
-        ``PROJECT_NAME_RE`` allows ``-``, so for project ``app`` a live keeper of sibling
-        ``app-staging`` also answers True — unlike :meth:`_latest_debug_log_for`, which
-        anchors the ``<name>-<ms>-<seq>`` stem. The error direction is the safe one (it
-        over-blocks, hiding cards), but the honest reading of the answer is "a live keeper
-        whose stem has this project as a prefix".
+        The sweep is anchored to THIS project's ``<name>-<ms>-<seq>`` stem
+        (:meth:`_keeper_sidecars_for`), so a live keeper of sibling ``app-staging`` no
+        longer answers True for ``app``. The answer now reads exactly as it says: "a live
+        keeper of this project is unaccounted for".
         """
-        for sidecar in self._log_dir.glob(f"{name}-*.keeper.json"):
+        for sidecar in self._keeper_sidecars_for(name):
             info = self._read_sidecar(sidecar)
             if not info or info.get("state") != "ready":
                 continue
             keeper_pid = info.get("keeper_pid")
             bridge_pid = info.get("bridge_pid")
-            # `> 0` as well as int-not-bool: psutil raises ValueError (NOT the NoSuchProcess
-            # its callers catch) for a negative pid, and a sidecar is an on-disk file that
-            # can hold one.
+            # `> 0` as well as int-not-bool: a sidecar is an on-disk file that can hold a
+            # negative pid. `is_keeper_process` now also catches the `ValueError` psutil
+            # raises for one, so this is defense in depth rather than the only guard.
             if (
                 not isinstance(keeper_pid, int)
                 or isinstance(keeper_pid, bool)
@@ -3448,32 +3496,32 @@ class SessionRunner:
         sidecar in the ``"ready"`` state reattaches; a bridge still mid-startup falls
         back to STOPPED (the orphan-keeper sweep can reap a genuinely stuck one).
 
-        ⚠️ Two gaps in the sweep as written. The glob is an UNANCHORED prefix match
-        (``{name}-*.keeper.json``) and ``PROJECT_NAME_RE`` allows ``-``, so for project
-        ``app`` it also reads sibling ``app-staging``'s sidecars — nothing else here pins
-        the candidate to this project, and :meth:`_latest_debug_log_for` anchors the
-        ``<name>-<ms>-<seq>`` stem precisely to avoid that. And the pid gate below checks
-        int-not-bool but NOT ``> 0``, so a sidecar holding a negative pid raises
-        ``ValueError`` out of ``is_keeper_process`` (which only catches the psutil
-        process errors) instead of being skipped — :meth:`_has_unclaimed_live_keeper`
-        guards that case, this does not.
+        The sweep reads only sidecars whose stem anchors to THIS project
+        (:meth:`_keeper_sidecars_for`), so a sibling ``app-staging`` keeper can never be
+        adopted as ``app``'s instance. A sidecar holding a non-positive pid is skipped
+        rather than raising: the gate below checks ``> 0``, and ``is_keeper_process``
+        fails closed on psutil's ``ValueError`` besides.
         """
         if not saved:
             return None
         spawn_mode, permission_mode, resume_mode = self._saved_modes(saved)
         if resume_mode != "pty":
             return None
-        for sidecar in sorted(self._log_dir.glob(f"{name}-*.keeper.json"), reverse=True):
+        for sidecar in sorted(self._keeper_sidecars_for(name), reverse=True):
             info = self._read_sidecar(sidecar)
             if not info or info.get("state") != "ready":
                 continue
             keeper_pid = info.get("keeper_pid")
             bridge_pid = info.get("bridge_pid")
+            # `> 0` as well as int-not-bool, mirroring `_has_unclaimed_live_keeper`: a
+            # sidecar is an on-disk file that can hold a negative pid.
             if not (
                 isinstance(keeper_pid, int)
                 and not isinstance(keeper_pid, bool)
+                and keeper_pid > 0
                 and isinstance(bridge_pid, int)
                 and not isinstance(bridge_pid, bool)
+                and bridge_pid > 0
             ):
                 continue
             ps = info.get("bridge_proc_start")
@@ -3822,7 +3870,7 @@ class SessionRunner:
         "preparing connect link" state, which is honest, rather than a wrong link.
         """
         if resume_mode == "pty":
-            for sidecar in sorted(self._log_dir.glob(f"{proj.name}-*.keeper.json"), reverse=True):
+            for sidecar in sorted(self._keeper_sidecars_for(proj.name), reverse=True):
                 info = self._read_sidecar(sidecar)
                 if not info or info.get("bridge_pid") != pid:
                     continue

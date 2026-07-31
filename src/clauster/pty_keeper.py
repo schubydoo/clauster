@@ -647,10 +647,16 @@ def iter_keepers(log_dir: Path) -> list[KeeperInfo]:
 def find_orphan_keepers(log_dir: Path, carded_projects: set[str]) -> list[KeeperInfo]:
     """Return live keepers whose sidecar belongs to no current project card (#301).
 
-    Classification uses the same forward glob the runner uses to attach a keeper
-    to a project (``<project>-*.keeper.json``), so it can't mis-attribute a
-    keeper via an ambiguous filename reverse-parse. A dead keeper is not an
-    orphan (nothing to stop).
+    Classification is a forward glob (``<project>-*.keeper.json``), never an ambiguous
+    filename reverse-parse, so a keeper cannot be mis-attributed to a project. A dead
+    keeper is not an orphan (nothing to stop).
+
+    ⚠️ That glob is deliberately BROADER than the runner's, which now anchors the
+    ``<name>-<ms>-<seq>`` stem (``SessionRunner._keeper_sidecars_for``) so a sibling
+    project's keeper can never be adopted. Here the glob builds ``carded_files`` — the
+    PROTECTED set — so matching more means protecting more: a carded ``app`` also shields
+    ``app-staging``'s sidecars from reaping. The two diverge on purpose, because
+    over-matching is the safe direction on this side and the unsafe one on the runner's.
     """
     carded_files: set[Path] = set()
     protected_names: set[str] = set()

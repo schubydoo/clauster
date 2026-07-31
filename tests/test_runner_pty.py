@@ -941,12 +941,12 @@ async def test_rediscover_recovers_keeper_pid_from_sidecar(runner_config, monkey
     # for the pointer's "1000").
     log_dir = config.state_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    (log_dir / "alpha-1700000000000.keeper.json").write_text(
+    (log_dir / "alpha-1700000000000-1.keeper.json").write_text(
         json.dumps({"keeper_pid": 9999, "bridge_pid": 4242, "bridge_proc_start": 12345.0})
     )
     # A stale sidecar that RECYCLED the same pid but has a different proc-start must
     # be rejected (PID-reuse defense), even though its bridge_pid matches.
-    (log_dir / "alpha-1699999999999.keeper.json").write_text(
+    (log_dir / "alpha-1699999999999-1.keeper.json").write_text(
         json.dumps({"keeper_pid": 1111, "bridge_pid": 4242, "bridge_proc_start": 88888.0})
     )
     runner = SessionRunner(config, claude_json=claude_json)
