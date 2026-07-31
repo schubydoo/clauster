@@ -125,6 +125,48 @@ def test_project_write_then_read_round_trip(tmp_path: Path) -> None:
     assert servers == {"srv": {"command": "/bin/foo"}}
 
 
+def test_secret_shaped_server_name_does_not_break_reads_or_writes(tmp_path: Path) -> None:
+    # A server NAME is a user-chosen identifier, not a config key — but `_SECRET_KEY_RE`
+    # matches `oauth`, `github-token`, `vault-secrets`, `auth0`, and `_SERVER_NAME_RE`
+    # admits all of them. Redacting the whole map at once made such a name mark its own
+    # entry secret, masking the structural `type` to the sentinel; `_entry_transport` then
+    # rejects that as an unknown transport, so EVERY add/edit/remove of EVERY server in the
+    # scope 422s — with the value the operator must retype shown as `********`.
+    # Redacting per entry keeps the name out of the hint chain.
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "oauth-gw": {
+                        "type": "http",
+                        "url": "https://example.invalid/",
+                        "headers": {"Authorization": "Bearer sk-live-SECRET"},
+                    },
+                    "plain-fs": {"command": "/bin/fs"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    servers, h = mcp.read_project_servers(tmp_path)
+
+    # Structural fields survive, so the entry still validates...
+    assert servers["oauth-gw"]["type"] == "http"
+    assert mcp._entry_transport(servers["oauth-gw"]) == "http"
+    # ...while a secret INSIDE the entry is still masked.
+    assert servers["oauth-gw"]["headers"]["Authorization"] == cw.REDACTION_SENTINEL
+    assert "sk-live-SECRET" not in json.dumps(servers)
+
+    # And an unrelated server can still be edited without the whole scope 422ing.
+    mcp.write_project_servers(
+        tmp_path, {**servers, "plain-fs": {"command": "/bin/fs2"}}, expected_hash=h
+    )
+    out = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
+    assert out["mcpServers"]["plain-fs"]["command"] == "/bin/fs2"
+    # merge_redacted restored the real secret rather than writing the sentinel back.
+    assert out["mcpServers"]["oauth-gw"]["headers"]["Authorization"] == "Bearer sk-live-SECRET"
+
+
 def test_project_write_preserves_sibling_keys(tmp_path: Path) -> None:
     (tmp_path / ".mcp.json").write_text(
         json.dumps({"mcpServers": {"a": {"command": "x"}}, "other": 1}),

@@ -201,6 +201,23 @@ def validate_mcp_servers(candidate: Any) -> None:
         _validate_server_entry(name, entry)
 
 
+def _redact_server_map(servers: dict[str, Any]) -> dict[str, Any]:
+    """Redact each server ENTRY independently, never using the server name as a hint.
+
+    :func:`~clauster.config_write.redact_secrets` treats a secret-shaped key as marking its
+    whole subtree secret. That is right for config keys and wrong for this map: the keys here
+    are user-chosen server NAMES, so a server called ``oauth-gw`` or ``github-token`` would
+    have its own ``type``/``url`` masked to the sentinel. Those are structural fields, and
+    :func:`_entry_transport` rejects the sentinel as an unknown transport — which would 422
+    every add/edit/remove of every server in the scope, with the value the operator needs to
+    retype displayed as ``********``.
+
+    Redacting per entry keeps the name out of the hint chain while leaving everything inside
+    an entry (``env``, ``headers``, a nested ``{"auth": {"value": ...}}``) fully masked.
+    """
+    return {name: cw.redact_secrets(entry) for name, entry in servers.items()}
+
+
 def read_project_servers(project_dir: Path) -> tuple[dict[str, Any], str]:
     """Return ``(redacted_servers, content_hash)`` for a project's ``.mcp.json``.
 
@@ -218,7 +235,7 @@ def read_project_servers(project_dir: Path) -> tuple[dict[str, Any], str]:
     data = cw.load_settings_json_obj(raw)
     servers = data.get(MCP_SERVERS_KEY)
     servers = servers if isinstance(servers, dict) else {}
-    return cw.redact_secrets(servers), cw.hash_bytes(raw)
+    return _redact_server_map(servers), cw.hash_bytes(raw)
 
 
 def read_user_servers(claude_json: Path) -> dict[str, Any]:
@@ -235,7 +252,7 @@ def read_user_servers(claude_json: Path) -> dict[str, Any]:
     data = cw.load_settings_json_obj(raw)
     servers = data.get(MCP_SERVERS_KEY)
     servers = servers if isinstance(servers, dict) else {}
-    return cw.redact_secrets(servers)
+    return _redact_server_map(servers)
 
 
 def write_project_servers(
@@ -296,7 +313,7 @@ def read_project_local_servers(claude_json: Path, project_dir: Path) -> dict[str
     """
     servers = cw.read_nested_subtree(claude_json, PROJECTS_KEY, str(project_dir), MCP_SERVERS_KEY)
     servers = servers if isinstance(servers, dict) else {}
-    return cw.redact_secrets(servers)
+    return _redact_server_map(servers)
 
 
 def write_project_local_servers(

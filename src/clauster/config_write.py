@@ -435,16 +435,23 @@ def redact_secrets(data: Any, _key: str = "") -> Any:
     non-secret scalars pass through unchanged. Mirrors ``config_editor.editable_values``
     (read only what's safe to surface).
 
-    Hint scope: a dict key is the secret-hint for its own scalar leaf and for the elements
-    of a list value, but a **nested dict re-derives the hint from its own keys** — a secret
-    at ``{"auth": {"value": "sk-live-…"}}`` is therefore returned unmasked here. Use
-    :func:`_mask_json_values` where values must never surface regardless of key.
+    Hint scope: a secret-shaped key marks its **whole subtree** secret. The hint reaches its
+    own scalar leaf, the elements of a list value, and every value nested beneath it at any
+    depth — so ``{"auth": {"value": "sk-live-…"}}`` is masked. Masking is deliberately wider
+    than the key that triggered it: over-masking costs a resend, under-masking leaks.
     """
     if isinstance(data, dict):
-        return {
-            k: (REDACTION_SENTINEL if _is_secretish(str(k), v) else redact_secrets(v, str(k)))
-            for k, v in data.items()
-        }
+        out: dict[Any, Any] = {}
+        for k, v in data.items():
+            # Inherit the ancestor's hint unless this key introduces its own. Re-deriving the
+            # hint purely from the child's keys is what let a nested secret through: a dict
+            # value never satisfies _is_secretish (it only matches non-empty str), so the
+            # parent's "this subtree is secret" signal was dropped at every dict boundary.
+            # {"auth": {"value": "sk-live-…"}} is not exotic — it is how a lot of MCP server
+            # configs and settings blobs are written.
+            hint = str(k) if _SECRET_KEY_RE.search(str(k)) else _key
+            out[k] = REDACTION_SENTINEL if _is_secretish(hint, v) else redact_secrets(v, hint)
+        return out
     if isinstance(data, list):
         return [redact_secrets(v, _key) for v in data]
     if _is_secretish(_key, data):

@@ -54,12 +54,15 @@ wrongly surface as a path-escape instead of the read-only status a plugin agent 
 promised: GET returns a content-less read-only ``200`` without following the link, and
 write/delete raise :class:`ReadOnlyAgentError` (403) without reading the target. A
 genuinely escaping **non-symlink** input still fails closed as a path-escape via
-:func:`_resolve`. **Listing is the exception and does read past the boundary:**
-:func:`_list_agents` calls ``is_file()`` and ``read_bytes()`` on the direntry — both
-*follow* symlinks — before :func:`_is_read_only_file` classifies it, so a planted
-symlink's out-of-tree target is read and its frontmatter ``description`` reaches the
-listing (the entry is still marked plugin-owned and non-editable). The
-never-followed/never-read guarantee therefore holds for GET/PUT/DELETE only.
+:func:`_resolve`. **Listing follows the same ordering:** :func:`_list_agents` tests
+``is_symlink()`` on the direntry **before ``is_file()``**, not merely before
+``read_bytes()`` — both of those follow symlinks, so an ``is_file()`` test alone would
+still *stat* the target. It emits a plugin-owned, non-editable entry with
+``description: None`` without anything touching the link's target, so the
+never-followed/never-read guarantee holds on **all four** paths: LIST, GET, PUT and
+DELETE. Ordering it this way also keeps LIST and GET agreeing about existence: a
+dangling or directory symlink fails ``is_file()``, and classifying first stops it
+vanishing from the listing while :func:`_read_agent` still reports it present.
 
 **Filename safety.** The subagent ``name`` maps directly to ``<name>.md``; the name
 must match :data:`_NAME_RE` (Claude Code's own "lowercase letters, digits, and
@@ -202,10 +205,11 @@ def _plugin_symlink_doc(name: str) -> dict[str, Any]:
     """Return the read-only detail doc for a plugin-provided **symlink** agent.
 
     A symlinked ``<agents>/<name>.md`` points at a plugin file *outside* the agents
-    dir, so this read path **never reads it** (following it would be an arbitrary-file
-    read past the containment boundary). Surfaced instead as a content-less
-    read-only doc, the same shape the built-in synthetic doc uses: shown, marked
-    plugin-owned, never editable.
+    dir, so it is **never read** (following it would be an arbitrary-file read past the
+    containment boundary). Surfaced instead as a content-less read-only doc, the same
+    shape the built-in synthetic doc uses: shown, marked plugin-owned, never editable.
+    :func:`_list_agents` withholds the target's ``description`` for the same reason, so
+    this holds on the listing path too — not just this one.
     """
     return {
         "name": name,
@@ -465,20 +469,35 @@ def _list_agents(root: Path, source: str) -> list[dict[str, Any]]:
     by name through :func:`_resolve` either, so it is neither editable nor listable
     as a named resource.
 
-    Unlike the read/write/delete paths, this one does **not** classify a symlink first:
-    ``is_file()`` and ``read_bytes()`` both *follow* symlinks, so a planted symlink's
-    out-of-tree target IS read here and its frontmatter ``description`` reaches the
-    listing. The entry is still marked plugin-owned and non-editable, but the surface's
-    "the target is never followed/read" guarantee does not hold on this path.
+    Like the read/write/delete paths, this one classifies a symlink **before anything stats
+    the target** — ahead of ``is_file()``, not merely ahead of the read, since both it and
+    ``read_bytes()`` follow symlinks. Any symlink (in-tree or out) is reported as
+    plugin-owned and non-editable with ``description: None``, matching what GET returns for
+    one. A dangling or directory symlink therefore still lists, rather than vanishing from
+    LIST while GET reports it as present.
     """
     out: list[dict[str, Any]] = []
     if not root.is_dir():
         return out
     for entry in sorted(root.iterdir(), key=lambda p: p.name):
-        if entry.suffix != ".md" or not entry.is_file():
+        if entry.suffix != ".md":
             continue
         name = entry.stem
         if not is_valid_agent_name(name):
+            continue
+        # Classify the symlink BEFORE ANYTHING TOUCHES THE TARGET — ahead of `is_file()`, not
+        # just ahead of the read. `is_file()` and `read_bytes()` both FOLLOW symlinks, so an
+        # `is_file()` test still stats the target: it leaks whether an out-of-tree path exists
+        # and is a regular file, and it silently drops a dangling or directory symlink from the
+        # listing while `_read_agent` still returns a read-only 200 for it — LIST and GET
+        # disagreeing about whether an agent exists. `iterdir`/`.suffix`/`.stem` never stat, and
+        # `is_symlink()` uses lstat, so nothing above this line follows the link.
+        # `_is_read_only_file` treats any symlink as read-only anyway, so this only moves the
+        # decision earlier; it withholds a description that should never have been read.
+        if entry.is_symlink():
+            out.append({"name": name, "source": "plugin", "editable": False, "description": None})
+            continue
+        if not entry.is_file():
             continue
         try:
             raw = entry.read_bytes()
@@ -547,7 +566,14 @@ def _read_agent(root: Path, name: str, source: str) -> dict[str, Any]:
     target = _resolve(root, name)
     try:
         raw = target.read_bytes()
-    except FileNotFoundError as exc:
+    except OSError as exc:
+        # OSError, not just FileNotFoundError: a plain DIRECTORY named `<name>.md` raises
+        # IsADirectoryError, which is neither FileNotFoundError nor a ConfigWriteError — so
+        # it escaped the route's `except ConfigWriteError` as a 500. LIST already skips such
+        # an entry (it fails `is_file()`), so treating it as absent here is what makes LIST
+        # and GET agree about existence, which this module's docstring now states as a
+        # property. Any other read error (EACCES, ELOOP) fails closed the same way rather
+        # than surfacing a traceback.
         raise AgentNotFoundError(f"no subagent named {name!r}") from exc
     read_only = _is_read_only_file(target, raw)
     try:
@@ -557,6 +583,16 @@ def _read_agent(root: Path, name: str, source: str) -> dict[str, Any]:
     try:
         parsed, _body = parse_frontmatter(text)
         frontmatter = cw.redact_secrets(parsed)
+        # An `mcpServers` block is a map keyed by user-chosen SERVER NAMES, not config keys,
+        # so the name must not act as a secret hint — a server called `oauth-gw` would
+        # otherwise have its own `type`/`url` masked. Same reason config_write_mcp redacts
+        # per entry. Display-only here (PUT round-trips `content`, never `frontmatter`, so a
+        # sentinel is never written back), but a transport shown as `********` is misleading.
+        servers = parsed.get("mcpServers")
+        if isinstance(servers, dict):
+            frontmatter["mcpServers"] = {
+                name_: cw.redact_secrets(entry) for name_, entry in servers.items()
+            }
     except cw.InvalidCandidateError:
         # An unparsable frontmatter block still surfaces via `content` (so the
         # operator can see and fix it); the derived display field just degrades.

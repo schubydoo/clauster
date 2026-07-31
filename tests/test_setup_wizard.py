@@ -259,6 +259,32 @@ def test_token_mode_get_with_wrong_token_is_403(tmp_path):
     assert client.get("/", params={"token": "nope"}).status_code == 403
 
 
+def test_token_mode_non_ascii_token_is_403_not_500(tmp_path):
+    # secrets.compare_digest raises TypeError on a non-ASCII str, so `?token=%C3%A9` used to
+    # escape as a 500 — an unhandled raise on attacker-controlled input, on the ONE surface
+    # with no auth in front of it (the first-run wizard binds non-loopback in the Docker
+    # image and gates a config writer). Never a bypass; it 500'd rather than granting. The
+    # gate must be total on str: every input returns a bool.
+    client, _, _ = _token_app(tmp_path)
+    assert client.get("/", params={"token": "é"}).status_code == 403
+
+
+def test_token_mode_non_ascii_submit_header_is_403_not_500(tmp_path):
+    # The same gate fronts the POST CSRF check, so both entry points are affected.
+    # The header value is sent as latin-1 BYTES on purpose: HTTP headers are latin-1 on the
+    # wire and httpx refuses to encode a non-ASCII str, but Starlette decodes the bytes back
+    # to a non-ASCII str — so this is reachable by any client that isn't httpx, which is
+    # exactly the shape that matters for an unauthenticated surface.
+    client, projects, write_path = _token_app(tmp_path)
+    res = client.post(
+        "/setup",
+        headers={b"x-setup-token": "é".encode("latin-1")},
+        json=_valid_payload(projects),
+    )
+    assert res.status_code == 403
+    assert not write_path.exists()  # nothing written
+
+
 def test_token_mode_get_with_token_renders_form_carrying_token(tmp_path):
     client, _, _ = _token_app(tmp_path)
     res = client.get("/", params={"token": _TOKEN})

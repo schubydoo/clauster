@@ -328,14 +328,23 @@ def create_setup_app(
     def _token_ok(supplied: str | None) -> bool:
         """Constant-time check of a supplied token against the expected one (token mode).
 
-        A missing value fails closed. A supplied value containing a non-ASCII character
-        does NOT return False — :func:`secrets.compare_digest` raises ``TypeError`` on it,
-        so the caller 500s rather than 403s on that input (no bypass, but the gate is not
-        total-on-str as the signature suggests).
+        Total on ``str``: every input returns a bool, never raises. A missing value fails
+        closed, and so does a non-ASCII one — the token is ASCII by construction, so a
+        non-ASCII candidate cannot be correct.
         """
         # setup_token is a str here (token_required is True). compare_digest avoids leaking
         # the token length/prefix through timing.
-        return supplied is not None and secrets.compare_digest(supplied, setup_token or "")
+        #
+        # isascii() is checked FIRST because compare_digest raises TypeError on a non-ASCII
+        # str, and this gate fronts the unauthenticated first-run wizard — an unhandled
+        # raise there is a 500 on attacker-controlled input (it was: `?token=%C3%A9`).
+        # Short-circuiting is safe: it leaks only whether the input was ASCII, never any
+        # part of the token, so the constant-time property that matters is preserved.
+        return (
+            supplied is not None
+            and supplied.isascii()
+            and secrets.compare_digest(supplied, setup_token or "")
+        )
 
     @app.get("/healthz")
     async def healthz() -> dict:

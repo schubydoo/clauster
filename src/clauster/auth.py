@@ -431,6 +431,15 @@ def verify_proxy_hmac(
     current = int(time.time()) if now is None else now
     if abs(current - t) > window:
         return False
+    # `sig` comes straight off the X-Proxy-Auth header, and Starlette decodes header bytes as
+    # latin-1 — so a non-ASCII byte reaches this as a non-ASCII str, and compare_digest raises
+    # TypeError on one. That contradicted this function's own "returns False on any
+    # malformation rather than raising" and 500'd instead. `expected` is a hexdigest, so it is
+    # ASCII by construction and a non-ASCII candidate can never be correct; rejecting it here
+    # leaks only ASCII-ness, never any part of the signature. Same defect class as the setup
+    # wizard's token gate, which this PR closes.
+    if not sig.isascii():
+        return False
     msg = f"{remote_user}:{t}:{method}:{path}".encode()
     expected = hmac.new(secret.encode(), msg, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, sig)

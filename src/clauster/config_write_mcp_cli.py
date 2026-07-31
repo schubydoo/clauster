@@ -136,8 +136,9 @@ def entry_needs_direct_write(entry: dict[str, Any]) -> bool:
       catches anywhere else (e.g. a ``scheme://user@host`` ``url``, a ``${VAR}``).
 
     Errs firmly toward True: key-name-based redaction
-    (:func:`clauster.config_write.redact_secrets`) can only spot a secret by its KEY
-    (``token``/``secret``/…), so a real secret under a benign key
+    (:func:`clauster.config_write.redact_secrets`) can only spot a secret by a KEY
+    (``token``/``secret``/… -- its own, or an ancestor's, since a credential-shaped
+    key marks its whole subtree), so a real secret under a benign key
     (``{"DEPLOY_KEY": "AKIA…"}``, ``{"GH_PAT": "ghp_…"}``,
     ``{"X-Custom": "Bearer sk-…"}``) — or a token in a ``url`` query/fragment or an
     ``args`` element — would slip past a key-only check and land in argv. Treating

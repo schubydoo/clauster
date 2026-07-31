@@ -31,9 +31,10 @@ true secret-bearing shape (see the redaction decision below).
 
 **Redaction decision (#772, applying the #822 lesson) -- flagged for maintainer
 review.** :func:`~clauster.config_write.redact_secrets` only masks a value whose
-*key* looks credential-shaped (``token``/``secret``/``password``/``api[-_]key``/
-``auth``/``credential``/``bearer``), or whose value looks like a ``${...}``
-interpolation or a credential-bearing URL -- it does **not** detect a real
+*key* -- or an **ancestor** key, since a credential-shaped key marks its whole
+subtree -- looks credential-shaped (``token``/``secret``/``password``/
+``api[-_]key``/``auth``/``credential``/``bearer``), or whose value looks like a
+``${...}`` interpolation or a credential-bearing URL -- it does **not** detect a real
 secret stored under a benign-looking key such as ``DEPLOY_KEY`` (no ``token``/
 ``secret``/... substring, and the regex requires an ``api`` prefix before
 ``key`` -- a bare ``key`` never matches). ``env`` is *exactly* where operators

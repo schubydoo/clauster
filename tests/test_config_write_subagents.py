@@ -326,6 +326,79 @@ def test_is_read_only_file_detects_symlink(tmp_path: Path) -> None:
     assert sub._is_read_only_file(link, real.read_bytes())
 
 
+def test_list_agents_never_reads_a_symlink_target(tmp_path: Path) -> None:
+    # The module docstring promises a plugin symlink's target is NEVER followed/read.
+    # GET/PUT/DELETE honoured that; LIST did not — `is_file()` and `read_bytes()` both
+    # FOLLOW symlinks, and both ran before `_is_read_only_file` ever tested `is_symlink()`,
+    # so the out-of-tree target's frontmatter `description` reached the listing. Bounded
+    # (a description, not full content) but it is a stated containment boundary.
+    outside = tmp_path.parent / "outside-of-tree.md"
+    outside.write_bytes(b"---\ndescription: LEAKED-FROM-OUTSIDE-THE-TREE\n---\nbody\n")
+    root = tmp_path / "agents"
+    root.mkdir()
+    try:
+        (root / "evil.md").symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks unavailable on this platform/host")
+
+    entries = {e["name"]: e for e in sub._list_agents(root, "project")}
+
+    assert entries["evil"]["description"] is None  # the target was never read
+    assert entries["evil"]["source"] == "plugin"  # still surfaced, still plugin-owned
+    assert entries["evil"]["editable"] is False
+
+
+def test_list_agents_still_reads_a_real_local_agent(tmp_path: Path) -> None:
+    # The symlink guard must not cost a genuine agent its description.
+    root = tmp_path / "agents"
+    root.mkdir()
+    (root / "real.md").write_bytes(b"---\ndescription: a real local agent\n---\nbody\n")
+
+    entries = {e["name"]: e for e in sub._list_agents(root, "project")}
+
+    assert entries["real"]["description"] == "a real local agent"
+    assert entries["real"]["editable"] is True
+
+
+def test_list_agents_lists_a_dangling_symlink_so_list_and_get_agree(tmp_path: Path) -> None:
+    # `is_file()` follows symlinks, so testing it BEFORE `is_symlink()` silently dropped a
+    # dangling (or directory) symlink from the listing — while `_read_agent` still classifies
+    # `is_symlink()` on the unresolved path and returns a read-only 200 for it. LIST and GET
+    # would then disagree about whether the agent exists. Classifying first also means nothing
+    # stats the target, so the listing leaks no information about an out-of-tree path.
+    root = tmp_path / "agents"
+    root.mkdir()
+    try:
+        (root / "dangling.md").symlink_to(tmp_path / "does-not-exist.md")
+    except OSError:
+        pytest.skip("symlinks unavailable on this platform/host")
+
+    entries = {e["name"]: e for e in sub._list_agents(root, "project")}
+
+    assert "dangling" in entries  # present, not silently dropped
+    assert entries["dangling"] == {
+        "name": "dangling",
+        "source": "plugin",
+        "editable": False,
+        "description": None,
+    }
+
+
+def test_list_agents_skips_a_directory_named_like_an_agent(tmp_path: Path) -> None:
+    # A non-symlink `.md` entry that is not a regular file. The `is_file()` guard is not
+    # redundant with the `OSError` catch below it: a directory raises there, but a FIFO
+    # would BLOCK in read_bytes() forever waiting for a writer, with no exception to catch.
+    root = tmp_path / "agents"
+    root.mkdir()
+    (root / "notanagent.md").mkdir()
+    (root / "real.md").write_bytes(b"---\ndescription: a real local agent\n---\nbody\n")
+
+    entries = {e["name"]: e for e in sub._list_agents(root, "project")}
+
+    assert "notanagent" not in entries
+    assert "real" in entries  # the guard didn't cost a genuine agent
+
+
 def test_is_read_only_file_detects_plugin_marker() -> None:
     path = Path("agent.md")
     raw = b"---\nname: x\ndescription: ${CLAUDE_PLUGIN_ROOT}/thing\n---\nbody\n"
@@ -1265,3 +1338,45 @@ def test_route_never_executes_hooks_command(write_config, tmp_path, projects_roo
         )
         assert resp.status_code == 200
     assert not marker.exists()
+
+
+def test_read_agent_treats_a_directory_as_absent_not_a_500(tmp_path: Path) -> None:
+    # A plain DIRECTORY named `<name>.md` raises IsADirectoryError, which is neither
+    # FileNotFoundError nor a ConfigWriteError — so it escaped the route's
+    # `except ConfigWriteError` as a 500. LIST already skips such an entry (it fails
+    # `is_file()`), so GET must agree it is absent; the module docstring states that
+    # agreement as a property.
+    root = tmp_path / "agents"
+    root.mkdir()
+    (root / "sneaky.md").mkdir()
+    with pytest.raises(sub.AgentNotFoundError):
+        sub._read_agent(root, "sneaky", "project")
+
+
+def test_read_agent_frontmatter_does_not_use_a_server_name_as_a_secret_hint(
+    tmp_path: Path,
+) -> None:
+    # A frontmatter `mcpServers` block is keyed by user-chosen server NAMES. With the
+    # widened subtree hint, a server called `oauth-gw` matched `_SECRET_KEY_RE` and masked
+    # its own `type`/`url`. Display-only (PUT round-trips `content`, never `frontmatter`),
+    # but a transport shown as `********` is simply misleading.
+    root = tmp_path / "agents"
+    root.mkdir()
+    (root / "my-agent.md").write_bytes(
+        b"---\n"
+        b"name: my-agent\n"
+        b"description: does a thing\n"
+        b"mcpServers:\n"
+        b"  oauth-gw:\n"
+        b"    type: http\n"
+        b"    url: https://example.invalid/\n"
+        b"    headers:\n"
+        b"      Authorization: Bearer sk-live-SECRET\n"
+        b"---\nbody\n"
+    )
+    doc = sub._read_agent(root, "my-agent", "project")
+    server = doc["frontmatter"]["mcpServers"]["oauth-gw"]
+
+    assert server["type"] == "http"  # structural field survives
+    assert server["url"] == "https://example.invalid/"
+    assert server["headers"]["Authorization"] == cw.REDACTION_SENTINEL  # secret still masked
