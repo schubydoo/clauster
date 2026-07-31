@@ -54,12 +54,11 @@ wrongly surface as a path-escape instead of the read-only status a plugin agent 
 promised: GET returns a content-less read-only ``200`` without following the link, and
 write/delete raise :class:`ReadOnlyAgentError` (403) without reading the target. A
 genuinely escaping **non-symlink** input still fails closed as a path-escape via
-:func:`_resolve`. **Listing is the exception and does read past the boundary:**
-:func:`_list_agents` calls ``is_file()`` and ``read_bytes()`` on the direntry — both
-*follow* symlinks — before :func:`_is_read_only_file` classifies it, so a planted
-symlink's out-of-tree target is read and its frontmatter ``description`` reaches the
-listing (the entry is still marked plugin-owned and non-editable). The
-never-followed/never-read guarantee therefore holds for GET/PUT/DELETE only.
+:func:`_resolve`. **Listing follows the same ordering:** :func:`_list_agents` tests
+``is_symlink()`` on the direntry *before* ``read_bytes()`` — both ``is_file()`` and
+``read_bytes()`` follow symlinks — and emits a plugin-owned, non-editable entry with
+``description: None`` without ever opening the target. The never-followed/never-read
+guarantee therefore holds on **all four** paths: LIST, GET, PUT and DELETE.
 
 **Filename safety.** The subagent ``name`` maps directly to ``<name>.md``; the name
 must match :data:`_NAME_RE` (Claude Code's own "lowercase letters, digits, and
@@ -202,10 +201,11 @@ def _plugin_symlink_doc(name: str) -> dict[str, Any]:
     """Return the read-only detail doc for a plugin-provided **symlink** agent.
 
     A symlinked ``<agents>/<name>.md`` points at a plugin file *outside* the agents
-    dir, so this read path **never reads it** (following it would be an arbitrary-file
-    read past the containment boundary). Surfaced instead as a content-less
-    read-only doc, the same shape the built-in synthetic doc uses: shown, marked
-    plugin-owned, never editable.
+    dir, so it is **never read** (following it would be an arbitrary-file read past the
+    containment boundary). Surfaced instead as a content-less read-only doc, the same
+    shape the built-in synthetic doc uses: shown, marked plugin-owned, never editable.
+    :func:`_list_agents` withholds the target's ``description`` for the same reason, so
+    this holds on the listing path too — not just this one.
     """
     return {
         "name": name,
@@ -465,11 +465,11 @@ def _list_agents(root: Path, source: str) -> list[dict[str, Any]]:
     by name through :func:`_resolve` either, so it is neither editable nor listable
     as a named resource.
 
-    Unlike the read/write/delete paths, this one does **not** classify a symlink first:
-    ``is_file()`` and ``read_bytes()`` both *follow* symlinks, so a planted symlink's
-    out-of-tree target IS read here and its frontmatter ``description`` reaches the
-    listing. The entry is still marked plugin-owned and non-editable, but the surface's
-    "the target is never followed/read" guarantee does not hold on this path.
+    Like the read/write/delete paths, this one classifies a symlink **before** reading:
+    ``is_file()`` and ``read_bytes()`` both *follow* symlinks, so a planted symlink is
+    reported as plugin-owned and non-editable with ``description: None``, and its target
+    is never opened. The surface's "the target is never followed/read" guarantee holds on
+    every path.
     """
     out: list[dict[str, Any]] = []
     if not root.is_dir():
@@ -479,6 +479,17 @@ def _list_agents(root: Path, source: str) -> list[dict[str, Any]]:
             continue
         name = entry.stem
         if not is_valid_agent_name(name):
+            continue
+        # Classify the symlink BEFORE any read. `is_file()` and `read_bytes()` both FOLLOW
+        # symlinks, so reading first pulls an out-of-tree target's bytes into this listing
+        # and surfaces its frontmatter `description` — the arbitrary-file read this surface's
+        # contract says never happens. GET/PUT/DELETE already classify first; this path did
+        # not, which made LIST the one hole in a stated containment boundary.
+        # `_is_read_only_file` treats a symlink as read-only anyway, so this only moves the
+        # decision earlier — it does not change how a symlink is reported, beyond withholding
+        # the description it should never have read.
+        if entry.is_symlink():
+            out.append({"name": name, "source": "plugin", "editable": False, "description": None})
             continue
         try:
             raw = entry.read_bytes()

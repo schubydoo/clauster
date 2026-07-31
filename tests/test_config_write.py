@@ -247,6 +247,28 @@ def test_redact_recurses_into_lists() -> None:
     assert red["nested"][0]["password"] == cw.REDACTION_SENTINEL
 
 
+def test_redact_secret_hint_reaches_nested_dicts() -> None:
+    # A nested dict used to re-derive the hint from its OWN keys, dropping the parent's
+    # "this subtree is secret" signal — so {"auth": {"value": "..."}} came back unmasked.
+    # That is not an exotic shape; it is how a lot of MCP server configs are written, and
+    # this is the code-executing config-write tier, where under-masking leaks.
+    for label, data in (
+        ("one level", {"auth": {"value": "sk-live-AAA"}}),
+        ("under api_key", {"api_key": {"inner": "sk-live-AAA"}}),
+        ("three deep", {"auth": {"a": {"b": "sk-live-AAA"}}}),
+        ("list inside", {"auth": {"v": ["sk-live-AAA"]}}),
+    ):
+        red = cw.redact_secrets(data)
+        assert "sk-live-AAA" not in json.dumps(red), label
+
+
+def test_redact_does_not_over_mask_outside_a_secret_subtree() -> None:
+    # The hint must not bleed sideways: widening it to nested dicts should mask everything
+    # UNDER a secret-shaped key and nothing else.
+    red = cw.redact_secrets({"name": "hello", "port": 8080, "nested": {"k": "plain"}})
+    assert red == {"name": "hello", "port": 8080, "nested": {"k": "plain"}}
+
+
 def test_redact_top_level_scalar_masked_by_key_hint() -> None:
     # A scalar redacted directly (not via a dict) under a secret-shaped key.
     assert cw.redact_secrets("sk-live", "api_token") == cw.REDACTION_SENTINEL

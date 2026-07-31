@@ -326,6 +326,40 @@ def test_is_read_only_file_detects_symlink(tmp_path: Path) -> None:
     assert sub._is_read_only_file(link, real.read_bytes())
 
 
+def test_list_agents_never_reads_a_symlink_target(tmp_path: Path) -> None:
+    # The module docstring promises a plugin symlink's target is NEVER followed/read.
+    # GET/PUT/DELETE honoured that; LIST did not — `is_file()` and `read_bytes()` both
+    # FOLLOW symlinks, and both ran before `_is_read_only_file` ever tested `is_symlink()`,
+    # so the out-of-tree target's frontmatter `description` reached the listing. Bounded
+    # (a description, not full content) but it is a stated containment boundary.
+    outside = tmp_path.parent / "outside-of-tree.md"
+    outside.write_bytes(b"---\ndescription: LEAKED-FROM-OUTSIDE-THE-TREE\n---\nbody\n")
+    root = tmp_path / "agents"
+    root.mkdir()
+    try:
+        (root / "evil.md").symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks unavailable on this platform/host")
+
+    entries = {e["name"]: e for e in sub._list_agents(root, "project")}
+
+    assert entries["evil"]["description"] is None  # the target was never read
+    assert entries["evil"]["source"] == "plugin"  # still surfaced, still plugin-owned
+    assert entries["evil"]["editable"] is False
+
+
+def test_list_agents_still_reads_a_real_local_agent(tmp_path: Path) -> None:
+    # The symlink guard must not cost a genuine agent its description.
+    root = tmp_path / "agents"
+    root.mkdir()
+    (root / "real.md").write_bytes(b"---\ndescription: a real local agent\n---\nbody\n")
+
+    entries = {e["name"]: e for e in sub._list_agents(root, "project")}
+
+    assert entries["real"]["description"] == "a real local agent"
+    assert entries["real"]["editable"] is True
+
+
 def test_is_read_only_file_detects_plugin_marker() -> None:
     path = Path("agent.md")
     raw = b"---\nname: x\ndescription: ${CLAUDE_PLUGIN_ROOT}/thing\n---\nbody\n"
