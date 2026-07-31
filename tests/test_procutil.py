@@ -697,18 +697,6 @@ def test_keeper_and_bridge_predicates_fail_closed_on_a_negative_pid():
     assert procutil.is_live_process(-1, None) is False
 
 
-def test_predicates_treat_pid_zero_as_absent_not_an_error():
-    # psutil raises NoSuchProcess (not ValueError) for 0, so it takes the other arm of the
-    # same except-tuple. Pinned because the docstrings now name both cases by exception.
-    with pytest.raises(psutil.NoSuchProcess):
-        psutil.Process(0)
-
-    assert procutil.is_keeper_process(0) is False
-    assert procutil.is_bridge_process(0) is False
-    assert procutil.proc_create_time(0) is None
-    assert procutil.is_live_bridge(0, None) is False
-
-
 def test_bridge_ancestor_finds_the_bridge_above_an_sdk_worker(monkeypatch):
     # THE #1116 regression test, in the shape measured on the dogfood host: `agents --json`
     # reports a Server Mode session's pid as the SDK worker

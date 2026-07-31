@@ -184,7 +184,7 @@ def is_keeper_cmdline(cmdline: list[str]) -> bool:
 def proc_create_time(pid: int) -> float | None:
     """Epoch create-time of a live, non-zombie PID, else None.
 
-    Fails closed on a non-positive pid too (psutil raises ``ValueError``, not
+    Fails closed on a negative pid too (psutil raises ``ValueError``, not
     ``NoSuchProcess``), because callers feed this pids read out of keeper sidecars and
     persisted rows — untrusted on-disk ints. See :func:`is_keeper_process`; the whole
     predicate family absorbs that raise on the same terms, so no caller has to pre-gate.
@@ -319,14 +319,19 @@ def is_keeper_process(pid: int) -> bool:
     keeper left behind and the OS recycled onto an unrelated process is never listed as
     a live orphan nor SIGKILLed (#301 / RUNOPS-1).
 
-    **Fails closed on gone / denied / zombie / non-positive pid** — the last via the
-    ``ValueError`` psutil raises for a negative pid (``0`` raises ``NoSuchProcess``, also
-    caught). That case matters because several callers feed this a pid read straight out of
-    a keeper sidecar, which is an on-disk file that can hold a negative value; while it was
-    uncaught, such a sidecar raised out of ``rediscover``'s ``to_thread`` and failed lifespan
-    startup rather than being skipped. "Not a keeper" is the right answer for a pid that
-    cannot name a process at all. :func:`proc_create_time`, :func:`is_live_process` and
-    :func:`is_bridge_process` absorb the same raise, so no caller has to pre-gate a pid.
+    **Fails closed on gone / denied / zombie / negative pid** — the last via the
+    ``ValueError`` psutil raises below zero, which it does on every platform because it
+    validates the argument before any OS call. That matters because several callers feed
+    this a pid read straight out of a keeper sidecar, which is an on-disk file that can
+    hold a negative value; while it was uncaught, such a sidecar raised out of
+    ``rediscover``'s ``to_thread`` and failed lifespan startup rather than being skipped.
+    "Not a keeper" is the right answer for a pid that cannot name a process at all.
+    :func:`proc_create_time`, :func:`is_live_process` and :func:`is_bridge_process` absorb
+    the same raise, so no caller has to pre-gate a pid.
+
+    ⚠️ Pid ``0`` is deliberately NOT characterised here: it is absent on Linux but a real
+    kernel process on macOS and Windows, so which arm of the catch it takes is platform
+    specific. The cmdline gate answers it either way; nothing should depend on the route.
     """
     try:
         proc = psutil.Process(pid)
@@ -346,9 +351,10 @@ def is_bridge_process(pid: int) -> bool:
     IS alive, just unmanaged", and deleting a resumable card because an operator opened a
     terminal in the project would be wrong.
 
-    **Fails closed on gone / denied / zombie / non-positive pid**, on exactly the same terms
-    as :func:`is_keeper_process`. The two share a shape and move together; leaving one
-    uncaught would put the same startup-failure edge back on the phantom-prune path.
+    **Fails closed on gone / denied / zombie / negative pid**, on exactly the same terms
+    as :func:`is_keeper_process` (including its note on pid ``0``). The two share a shape and
+    move together; leaving one uncaught would put the same startup-failure edge back on the
+    phantom-prune path.
     """
     try:
         proc = psutil.Process(pid)
