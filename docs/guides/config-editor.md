@@ -184,6 +184,20 @@ The surface tabs:
 | Skills | Skills: list, a per-skill `SKILL.md` editor, create, delete. |
 | Plugins | Installed plugins (install / uninstall / enable / disable / update) and the marketplaces they come from (add / remove). |
 
+Three entries can look broken when they are not. The **Source** badge on each
+row tells the first two apart:
+
+- **A built-in subagent is listed with no description, and cannot be edited or
+  deleted.** Claude Code compiles `general-purpose`, `explore` and `plan` into
+  the CLI, so there is no file anywhere to edit. Every install shows these
+  three, at both scopes, before you add anything of your own.
+- **A plugin-provided subagent is listed, but cannot be edited or deleted.** A
+  plugin owns that file, so Clauster refuses to change it. To change it, change
+  the plugin. When the plugin supplies it as a symlink, Clauster never follows
+  the link, so the description is blank as well.
+- **A skill Clauster cannot read still appears, carrying an error in place of
+  the missing information.** One unreadable skill never hides the others.
+
 ## Troubleshooting and limits
 
 | Symptom | Why | What to do |
@@ -194,6 +208,7 @@ The surface tabs:
 | Advanced settings ask for a password you don't have | Step-up re-auth requires a password even when login uses another mechanism | Set one with `clauster hash-password` |
 | No Advanced section / no wrench button | `config_write.enabled` is off (the whole surface 404s) | Enable it in `clauster.yml` — deliberately not web-editable |
 | A saved change has no effect | Saves never live-reload | Use **Restart Clauster** in the Configuration modal |
+| A subagent has no description and won't edit | It is built-in, or a plugin owns it — the **Source** badge says which | Built-in: nothing to do, there is no file. Plugin: change the plugin, not Clauster |
 
 Need to recover an earlier config? The five most recent pre-save snapshots
 sit next to the file as `clauster.yml.bak-*` — copy one back over
