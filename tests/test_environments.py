@@ -584,3 +584,38 @@ def test_https_transport_forwards_valid_url_to_roundtrip(monkeypatch):
     assert (status, body) == (200, b"{}")
     assert seen["method"] == "GET" and seen["netloc"] == "api.example.com"
     assert seen["path"] == "/v1/envs" and seen["query"] == "limit=1"
+
+
+def test_load_credentials_rejects_a_non_object_json_root(tmp_path):
+    # Valid JSON is not necessarily an object. A credentials file holding a bare string
+    # parsed fine and then raised AttributeError from `.get` — not a CredentialsError, so
+    # it escaped every caller's guard, including runner's spawn preflight, which calls the
+    # anchor check unwrapped and would fail the spawn outright.
+    cred = tmp_path / "creds.json"
+    for payload in ('"just-a-string"', "[]", "null", "42"):
+        cred.write_text(payload)
+        with pytest.raises(CredentialsError):
+            environments.load_credentials(cred, tmp_path / "claude.json")
+
+
+def test_load_credentials_rejects_a_non_object_oauth_block(tmp_path):
+    # Same shape one level down: `claudeAiOauth` itself must be an object before `.get`.
+    cred = tmp_path / "creds.json"
+    cred.write_text(json.dumps({"claudeAiOauth": "not-an-object"}))
+    with pytest.raises(CredentialsError):
+        environments.load_credentials(cred, tmp_path / "claude.json")
+
+
+def test_anchor_health_is_unknown_for_a_non_object_credentials_file(tmp_path):
+    # The caller-visible half: `anchor_health_for_pointer` documents a never-raises
+    # contract, and it only holds if load_credentials funnels every malformed shape into
+    # CredentialsError.
+    from clauster.code_sessions import AnchorHealth, anchor_health_for_pointer
+
+    cred = tmp_path / "creds.json"
+    cred.write_text('"just-a-string"')
+
+    health = anchor_health_for_pointer(
+        "session_abc", credentials_path=cred, claude_json_path=tmp_path / "claude.json"
+    )
+    assert health is AnchorHealth.UNKNOWN

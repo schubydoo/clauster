@@ -87,18 +87,32 @@ def load_credentials(
 ) -> Credentials:
     """Read the OAuth access token + org UUID from their single documented files.
 
-    Parsed with the stdlib (do NOT assume ``jq`` is installed). Raises
-    ``CredentialsError`` on a missing file or field. Expiry is checked **only when the
-    caller supplies ``now_ms``** (ms epoch); with the default ``None`` an expired token is
-    returned unchecked — ``code_sessions.check_anchor_health`` calls it that way.
+    Parsed with the stdlib (do NOT assume ``jq`` is installed). Raises ``CredentialsError``
+    — and **only** ``CredentialsError`` — for every malformed-input shape: a missing file,
+    unreadable bytes, invalid JSON, a valid-JSON root that is not an object, and a missing
+    field. Callers guard on that one type, so a shape that escaped it (a credentials file
+    holding a bare string, list or ``null``) surfaced as an ``AttributeError`` from ``.get``
+    and blocked a spawn. Expiry is checked **only when the caller supplies ``now_ms``**
+    (ms epoch); with the default ``None`` an expired token is returned unchecked —
+    ``code_sessions.check_anchor_health`` calls it that way.
     """
     cred_file = Path(credentials_path).expanduser()
     try:
-        oauth = json.loads(cred_file.read_text(encoding="utf-8")).get("claudeAiOauth") or {}
+        parsed = json.loads(cred_file.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, UnicodeDecodeError) as exc:
         raise CredentialsError(f"could not read {cred_file}: {exc}") from exc
     except json.JSONDecodeError as exc:
         raise CredentialsError(f"{cred_file} is not valid JSON: {exc}") from exc
+    # Type-check the ROOT before `.get`. Valid JSON is not necessarily an object — a file
+    # holding `"str"`, `[]` or `null` parses fine and then raises AttributeError from
+    # `.get`, which is not a CredentialsError, so it escaped every caller's guard. That
+    # reached `runner`'s spawn preflight unwrapped and would fail a spawn the docstrings
+    # promise it can never block.
+    if not isinstance(parsed, dict):
+        raise CredentialsError(f"{cred_file} is not a JSON object")
+    oauth = parsed.get("claudeAiOauth") or {}
+    if not isinstance(oauth, dict):
+        raise CredentialsError(f"claudeAiOauth in {cred_file} is not a JSON object")
 
     token = oauth.get("accessToken")
     if not token:

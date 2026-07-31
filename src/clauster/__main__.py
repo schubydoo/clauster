@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from .reconcile import Decision, Finding
 
 import uvicorn
+import yaml
 
 from . import __version__, claude_cli, deps, environments, ops, pty_keeper, usage
 from .app import create_app
@@ -671,13 +672,16 @@ def _doctor(config_path: str | None) -> int:
 def _load_or_exit(config_path: str | None):
     """Load the config, exiting 2 with a one-line message on a missing or rejected config.
 
-    Only ``FileNotFoundError`` and ``ValueError`` (validation) are caught. A config whose
-    YAML does not parse raises ``yaml.YAMLError``, which is not a ``ValueError``, so it
-    still escapes as a traceback rather than the clean exit 2.
+    "Rejected" covers all three ways a config fails: absent (``FileNotFoundError``),
+    schema-invalid (pydantic's ``ValueError``), and **syntactically malformed YAML**
+    (``yaml.YAMLError``, which is NOT a ``ValueError`` and so needs naming separately).
+    That last one is the likeliest first-run mistake — a stray tab, an unclosed quote —
+    and every CLI verb routes through here, so leaving it uncaught turned a typo into a
+    parser traceback instead of one line and exit 2.
     """
     try:
         return load_config(config_path)
-    except (FileNotFoundError, ValueError) as exc:
+    except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
         print(f"clauster: config error: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
 

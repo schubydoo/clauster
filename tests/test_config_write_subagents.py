@@ -1380,3 +1380,101 @@ def test_read_agent_frontmatter_does_not_use_a_server_name_as_a_secret_hint(
     assert server["type"] == "http"  # structural field survives
     assert server["url"] == "https://example.invalid/"
     assert server["headers"]["Authorization"] == cw.REDACTION_SENTINEL  # secret still masked
+
+
+def test_write_agent_runs_its_stale_hash_guard_inside_the_write_lock(tmp_path, monkeypatch):
+    # The 409 guard read the file, compared, and THEN called write_file with no `verify=`,
+    # so the comparison sat outside that function's per-target lock: two concurrent PUTs
+    # could both pass and the second would silently overwrite the first. `claude_md`'s
+    # scoped write is the sibling that always passed `verify=`; this is the only other
+    # read-modify-write on this surface.
+    root = tmp_path / "agents"
+    root.mkdir()
+    target = root / "a.md"
+    original = b"---\nname: a\ndescription: original\n---\nbody\n"
+    target.write_bytes(original)
+
+    captured = {}
+    real_write_file = sub.fw.write_file
+
+    def _capture(root_, relative, content, *, verify=None, **kw):
+        captured["verify"] = verify
+        return real_write_file(root_, relative, content, verify=verify, **kw)
+
+    monkeypatch.setattr(sub.fw, "write_file", _capture)
+
+    sub._write_agent(
+        root, "a", "---\nname: a\ndescription: updated\n---\nbody\n", cw.hash_bytes(original)
+    )
+
+    verify = captured["verify"]
+    assert verify is not None, "the guard must be handed to write_file, not run before it"
+    # And it is a REAL guard, not a no-op passed to satisfy the signature: bytes that no
+    # longer match the expected hash must abort the write from inside the lock.
+    with pytest.raises(cw.StaleConfigWriteError):
+        verify(b"someone else wrote this")
+    verify(original)  # the matching bytes still pass
+
+
+def test_delete_agent_rechecks_the_readonly_refusal_under_the_lock(tmp_path, monkeypatch):
+    # Same read-then-act shape as the write path: the read decides whether the file MAY be
+    # deleted, so a file that became plugin-owned between the read and the unlink would be
+    # removed on a stale decision. The re-check runs as delete_path's `verify=`.
+    root = tmp_path / "agents"
+    root.mkdir()
+    (root / "a.md").write_bytes(b"---\nname: a\ndescription: ordinary\n---\nbody\n")
+
+    captured = {}
+    real_delete_path = sub.fw.delete_path
+
+    def _capture(root_, relative, *, verify=None, **kw):
+        captured["verify"] = verify
+        return real_delete_path(root_, relative, verify=verify, **kw)
+
+    monkeypatch.setattr(sub.fw, "delete_path", _capture)
+
+    assert sub._delete_agent(root, "a") is True
+
+    verify = captured["verify"]
+    assert verify is not None
+    # A plugin-marker body appearing under the lock must abort the delete.
+    with pytest.raises(sub.ReadOnlyAgentError):
+        verify(b"---\nname: a\ndescription: ${CLAUDE_PLUGIN_ROOT}/x\n---\nbody\n")
+
+
+def test_delete_path_verify_can_abort_a_delete(tmp_path):
+    # The new writer primitive, on its own terms: raising from `verify` leaves the file.
+    target = tmp_path / "f.txt"
+    target.write_text("keep me")
+
+    def _refuse(current):
+        raise cw.StaleConfigWriteError("nope")
+
+    with pytest.raises(cw.StaleConfigWriteError):
+        sub.fw.delete_path(tmp_path, "f.txt", verify=_refuse)
+
+    assert target.read_text() == "keep me"  # nothing removed
+    assert sub.fw.delete_path(tmp_path, "f.txt") is True  # and it still deletes normally
+
+
+def test_delete_path_verify_gets_none_when_the_bytes_are_unreadable(tmp_path, monkeypatch):
+    # `verify` is documented to receive None for a target it cannot read, so a callback
+    # written against `bytes | None` is never handed a surprise exception instead. The read
+    # must not be able to fail the delete on its own — that would make an EACCES file
+    # undeletable through this surface.
+    target = tmp_path / "f.txt"
+    target.write_text("x")
+
+    def _boom(self):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "read_bytes", _boom)
+
+    seen = {}
+
+    def _record(current):
+        seen["current"] = current
+
+    assert sub.fw.delete_path(tmp_path, "f.txt", verify=_record) is True
+    assert seen["current"] is None
+    assert not target.exists()

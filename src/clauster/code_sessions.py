@@ -142,10 +142,11 @@ def anchor_health_for_pointer(
     """Load credentials and classify a preserved anchor's health; fail-safe to ``UNKNOWN``.
 
     A missing/expired credential (``CredentialsError``) yields ``UNKNOWN`` so the caller
-    simply leaves the pointer alone and lets the launch proceed unchanged. That is the only
-    guarded failure — it is not a never-raises contract: a credentials file whose valid-JSON
-    root is not an object makes ``load_credentials`` raise ``AttributeError`` through this
-    function, and no caller wraps the call.
+    simply leaves the pointer alone and lets the launch proceed unchanged. ``CredentialsError``
+    now genuinely covers every malformed-credentials shape — including a valid-JSON root that
+    is not an object, which used to escape as ``AttributeError`` — so this really is the
+    never-raises contract its callers assume. That matters because ``runner``'s spawn
+    preflight calls it unwrapped: anything escaping here fails a spawn outright.
     """
     if not starter_session_id.startswith("session_"):
         # An unexpected id shape would mis-derive the cse id and 404 -> don't risk it.

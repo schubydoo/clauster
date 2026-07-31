@@ -1260,3 +1260,18 @@ def test_install_service_windows_write_rollback_spawn_error_is_surfaced(monkeypa
     monkeypatch.setattr(cli.subprocess, "run", run)
     assert cli.main(["install-service", "windows", "--write"]) == 1
     assert "could not roll back" in capsys.readouterr().err
+
+
+def test_load_or_exit_rejects_malformed_yaml_cleanly(tmp_path, capsys):
+    # `yaml.YAMLError` is NOT a subclass of `ValueError`, so a syntactically broken config
+    # escaped the catch as a raw parser traceback — out of EVERY CLI verb, since they all
+    # route through here. A stray tab or unclosed quote is the likeliest first-run mistake,
+    # so it has to be one line and exit 2 like the other two failure shapes.
+    bad = tmp_path / "clauster.yml"
+    bad.write_text('server:\n  host: "unclosed\n   - broken: [\n')
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli._load_or_exit(str(bad))
+
+    assert excinfo.value.code == 2
+    assert "config error" in capsys.readouterr().err
