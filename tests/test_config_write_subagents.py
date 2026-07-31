@@ -360,6 +360,30 @@ def test_list_agents_still_reads_a_real_local_agent(tmp_path: Path) -> None:
     assert entries["real"]["editable"] is True
 
 
+def test_list_agents_lists_a_dangling_symlink_so_list_and_get_agree(tmp_path: Path) -> None:
+    # `is_file()` follows symlinks, so testing it BEFORE `is_symlink()` silently dropped a
+    # dangling (or directory) symlink from the listing — while `_read_agent` still classifies
+    # `is_symlink()` on the unresolved path and returns a read-only 200 for it. LIST and GET
+    # would then disagree about whether the agent exists. Classifying first also means nothing
+    # stats the target, so the listing leaks no information about an out-of-tree path.
+    root = tmp_path / "agents"
+    root.mkdir()
+    try:
+        (root / "dangling.md").symlink_to(tmp_path / "does-not-exist.md")
+    except OSError:
+        pytest.skip("symlinks unavailable on this platform/host")
+
+    entries = {e["name"]: e for e in sub._list_agents(root, "project")}
+
+    assert "dangling" in entries  # present, not silently dropped
+    assert entries["dangling"] == {
+        "name": "dangling",
+        "source": "plugin",
+        "editable": False,
+        "description": None,
+    }
+
+
 def test_is_read_only_file_detects_plugin_marker() -> None:
     path = Path("agent.md")
     raw = b"---\nname: x\ndescription: ${CLAUDE_PLUGIN_ROOT}/thing\n---\nbody\n"

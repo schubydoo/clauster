@@ -55,10 +55,14 @@ promised: GET returns a content-less read-only ``200`` without following the lin
 write/delete raise :class:`ReadOnlyAgentError` (403) without reading the target. A
 genuinely escaping **non-symlink** input still fails closed as a path-escape via
 :func:`_resolve`. **Listing follows the same ordering:** :func:`_list_agents` tests
-``is_symlink()`` on the direntry *before* ``read_bytes()`` — both ``is_file()`` and
-``read_bytes()`` follow symlinks — and emits a plugin-owned, non-editable entry with
-``description: None`` without ever opening the target. The never-followed/never-read
-guarantee therefore holds on **all four** paths: LIST, GET, PUT and DELETE.
+``is_symlink()`` on the direntry **before ``is_file()``**, not merely before
+``read_bytes()`` — both of those follow symlinks, so an ``is_file()`` test alone would
+still *stat* the target. It emits a plugin-owned, non-editable entry with
+``description: None`` without anything touching the link's target, so the
+never-followed/never-read guarantee holds on **all four** paths: LIST, GET, PUT and
+DELETE. Ordering it this way also keeps LIST and GET agreeing about existence: a
+dangling or directory symlink fails ``is_file()``, and classifying first stops it
+vanishing from the listing while :func:`_read_agent` still reports it present.
 
 **Filename safety.** The subagent ``name`` maps directly to ``<name>.md``; the name
 must match :data:`_NAME_RE` (Claude Code's own "lowercase letters, digits, and
@@ -465,31 +469,35 @@ def _list_agents(root: Path, source: str) -> list[dict[str, Any]]:
     by name through :func:`_resolve` either, so it is neither editable nor listable
     as a named resource.
 
-    Like the read/write/delete paths, this one classifies a symlink **before** reading:
-    ``is_file()`` and ``read_bytes()`` both *follow* symlinks, so a planted symlink is
-    reported as plugin-owned and non-editable with ``description: None``, and its target
-    is never opened. The surface's "the target is never followed/read" guarantee holds on
-    every path.
+    Like the read/write/delete paths, this one classifies a symlink **before anything stats
+    the target** — ahead of ``is_file()``, not merely ahead of the read, since both it and
+    ``read_bytes()`` follow symlinks. Any symlink (in-tree or out) is reported as
+    plugin-owned and non-editable with ``description: None``, matching what GET returns for
+    one. A dangling or directory symlink therefore still lists, rather than vanishing from
+    LIST while GET reports it as present.
     """
     out: list[dict[str, Any]] = []
     if not root.is_dir():
         return out
     for entry in sorted(root.iterdir(), key=lambda p: p.name):
-        if entry.suffix != ".md" or not entry.is_file():
+        if entry.suffix != ".md":
             continue
         name = entry.stem
         if not is_valid_agent_name(name):
             continue
-        # Classify the symlink BEFORE any read. `is_file()` and `read_bytes()` both FOLLOW
-        # symlinks, so reading first pulls an out-of-tree target's bytes into this listing
-        # and surfaces its frontmatter `description` — the arbitrary-file read this surface's
-        # contract says never happens. GET/PUT/DELETE already classify first; this path did
-        # not, which made LIST the one hole in a stated containment boundary.
-        # `_is_read_only_file` treats a symlink as read-only anyway, so this only moves the
-        # decision earlier — it does not change how a symlink is reported, beyond withholding
-        # the description it should never have read.
+        # Classify the symlink BEFORE ANYTHING TOUCHES THE TARGET — ahead of `is_file()`, not
+        # just ahead of the read. `is_file()` and `read_bytes()` both FOLLOW symlinks, so an
+        # `is_file()` test still stats the target: it leaks whether an out-of-tree path exists
+        # and is a regular file, and it silently drops a dangling or directory symlink from the
+        # listing while `_read_agent` still returns a read-only 200 for it — LIST and GET
+        # disagreeing about whether an agent exists. `iterdir`/`.suffix`/`.stem` never stat, and
+        # `is_symlink()` uses lstat, so nothing above this line follows the link.
+        # `_is_read_only_file` treats any symlink as read-only anyway, so this only moves the
+        # decision earlier; it withholds a description that should never have been read.
         if entry.is_symlink():
             out.append({"name": name, "source": "plugin", "editable": False, "description": None})
+            continue
+        if not entry.is_file():
             continue
         try:
             raw = entry.read_bytes()
