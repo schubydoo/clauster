@@ -206,6 +206,24 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Prove the digest really is signed BEFORE making it pullable
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+          DIGEST: ${{ needs.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # `needs.image-sign.result == 'success'` says a job finished; it does not say a
+          # signature exists on THIS digest. That is the one fact the three-job order
+          # exists to guarantee, so observe it against the registry instead of inferring
+          # it from job status. Read-only — no id-token, no extra permission.
+          cosign verify \
+            --certificate-identity-regexp \
+              "^https://github.com/${GITHUB_REPOSITORY}/\.github/workflows/nightly\.yml@" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${IMAGE}@${DIGEST}" > /dev/null
+          echo "signature verified for ${IMAGE}@${DIGEST}"
       - name: Tag the signed digest, then prove the tags resolve to it
         env:
           IMAGE: ghcr.io/${{ github.repository }}
@@ -223,7 +241,8 @@ jobs:
           for tag in ${TAGS}; do
             got="$(docker buildx imagetools inspect "${tag}" --format '{{.Manifest.Digest}}')"
             if [ "${got}" != "${DIGEST}" ]; then
-              echo "::error::${tag} resolves to ${got}, not the signed ${DIGEST}" >&2
+              echo "::error::${tag} resolves to ${got}, not the signed ${DIGEST}." \
+                   "The tags are ALREADY LIVE. Sign ${got} and re-run, or delete the tags." >&2
               exit 1
             fi
             echo "verified ${tag} -> ${DIGEST}"

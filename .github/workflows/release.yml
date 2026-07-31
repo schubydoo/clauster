@@ -31,9 +31,17 @@ on:
   # stops an arbitrary branch run from publishing to PyPI.
   #
   # The `tag` input is therefore optional — `validate` falls back to
-  # `github.ref_name`, which is already the tag when you dispatch correctly. Pass it
-  # only to publish a DIFFERENT tag than the one you launched from, which the
-  # environment will refuse unless that ref is also a `v*` tag.
+  # `github.ref_name`, which is already the tag when you dispatch correctly. Passing a
+  # tag that DIFFERS from the launched ref is refused by `validate`: the image tags
+  # come from `github.ref` while the code comes from the resolved tag, so the mixed
+  # form would ship one version's build under another version's number.
+  #
+  # ⚠️ Re-publishing an OLDER tag walks the floating tags BACKWARDS. `type=raw,
+  # value=latest` carries no `enable=` condition, so a dispatch of `v1.0.0` after
+  # `v1.1.0` shipped re-points `:latest`, `:1` and `:1.0` at the older build — with a
+  # valid signature on it. Pre-existing, and not what "(re)publish an existing tag"
+  # sounds like: gating `latest` on the dispatched tag being the newest is the real
+  # fix and wants its own change.
   workflow_dispatch:
     inputs:
       tag:
@@ -84,8 +92,22 @@ jobs:
         env:
           # Indirect through env to keep the ref out of the shell line (zizmor).
           RESOLVED_TAG: ${{ inputs.tag || github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          # Refuse a MIXED dispatch. The CODE comes from the tag resolved here; the image
+          # TAGS come from `github.ref` (metadata-action's semver patterns read the ref, not
+          # this input). If the two disagree, one version's build ships under another
+          # version's number — signed, which is exactly what makes it look authoritative.
+          # There is no legitimate use for the mixed form: the environment requires a `v*`
+          # tag ref anyway, so you can always launch FROM the tag you mean to publish.
+          if [ -n "${INPUT_TAG:-}" ] && [ "${INPUT_TAG}" != "${REF_NAME}" ]; then
+            echo "::error::Refusing: launched from '${REF_NAME}' but the tag input is" \
+                 "'${INPUT_TAG}'. Launch the run FROM the tag you want to publish and" \
+                 "leave the input blank."
+            exit 1
+          fi
           tag="$RESOLVED_TAG"
           # Strip CR/LF: $tag (user-controlled inputs.tag) is echoed into the
           # ::error:: annotations below, where a stray newline could smuggle a
@@ -345,6 +367,24 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Prove the digest really is signed BEFORE making it pullable
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+          DIGEST: ${{ needs.docker-build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # `needs.docker-sign.result == 'success'` says a job finished; it does not say a
+          # signature exists on THIS digest. That is the one fact the three-job order
+          # exists to guarantee, so observe it against the registry instead of inferring
+          # it from job status. Read-only — no id-token, no extra permission.
+          cosign verify \
+            --certificate-identity-regexp \
+              "^https://github.com/${GITHUB_REPOSITORY}/\.github/workflows/release\.yml@" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${IMAGE}@${DIGEST}" > /dev/null
+          echo "signature verified for ${IMAGE}@${DIGEST}"
       - name: Tag the signed digest, then prove the tags resolve to it
         env:
           IMAGE: ghcr.io/${{ github.repository }}
@@ -359,14 +399,16 @@ jobs:
           args=()
           for tag in ${TAGS}; do args+=(--tag "${tag}"); done
           docker buildx imagetools create "${args[@]}" "${IMAGE}@${DIGEST}"
-          # FAIL CLOSED on the one assumption this design rests on. If a future buildx
-          # rebuilt the index instead of re-tagging it, the digest would move and the
-          # signature would cover nothing — silently. Assert it instead.
+          # DETECTION, not prevention — be precise about which. `imagetools create` above
+          # has already published every tag, so if the digest ever did move, the
+          # mis-pointing tags are live and public until someone reacts. This loop makes
+          # that loud instead of silent, which is the trade: the assumption was measured
+          # (see this job's header) and the failure mode would otherwise be invisible.
           for tag in ${TAGS}; do
             got="$(docker buildx imagetools inspect "${tag}" --format '{{.Manifest.Digest}}')"
             if [ "${got}" != "${DIGEST}" ]; then
-              echo "::error::${tag} resolves to ${got}, not the signed ${DIGEST} —" \
-                   "the signature does NOT cover this tag" >&2
+              echo "::error::${tag} resolves to ${got}, not the signed ${DIGEST}." \
+                   "The tags are ALREADY LIVE. Sign ${got} and re-run, or delete the tags." >&2
               exit 1
             fi
             echo "verified ${tag} -> ${DIGEST}"
