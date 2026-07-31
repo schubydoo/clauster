@@ -216,10 +216,26 @@ jobs:
           # (chunked `Read`s plus `gh pr diff`), and this reviewer is also asked to fetch the
           # rules file, anchor every finding inline, and submit one grouped review; 60 does
           # not cover that on anything but a small change. 150 restores headroom while still
-          # binding well inside `timeout-minutes: 30` (measured ~8s/turn, so ~20 min), which
-          # keeps the cap meaningful as a runaway guard rather than dead weight — the job
-          # timeout remains the hard backstop, and the "Fail if nothing was posted" step
-          # below still catches a run that succeeds while publishing nothing.
+          # binding inside `timeout-minutes: 30` — run 30604072480 recorded 61 turns in
+          # 471_269 ms = 7.7 s/turn, so 150 lands at ~19 min — which keeps the cap meaningful
+          # as a runaway guard rather than dead weight, with the job timeout as the hard
+          # backstop.
+          #
+          # ⚠️ Two things this does NOT buy, so nobody reads a guarantee into it.
+          # (1) Quota. That same run cost $4.6038 over 61 turns ≈ $0.075/turn, so the worst
+          #     case per review moves from ~$4.60 to ~$11 — against the personal subscription
+          #     quota that line 36 gives as the reason this job is maintainer-only. The trade
+          #     is still favourable (an exhausted run bills in full and publishes nothing, so
+          #     it is the most expensive outcome as well as the useless one), but the ceiling
+          #     did move.
+          # (2) Detection. "Fail if nothing was posted" does NOT catch an exhausted run:
+          #     the action posts its tracking comment EARLY, so AFTER > BEFORE holds and that
+          #     step concluded SUCCESS on run 30604072480 — the very run whose review was
+          #     empty. Only the action step's own non-zero exit turned that job red. Raising
+          #     the cap makes exhaustion rarer, never detectable; and at ~19 min against a
+          #     30 min timeout, a slow PR can now trip the JOB TIMEOUT instead, whose stub
+          #     comment looks identical. The durable fix is a `subtype`/`is_error` check on
+          #     the record that step already parses — tracked separately, not done here.
           claude_args: |
             --max-turns 150
             --model claude-opus-5
