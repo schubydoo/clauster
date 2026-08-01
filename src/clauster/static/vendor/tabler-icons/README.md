@@ -14,8 +14,8 @@ elements, and reference them with `<svg class="ico"><use href="#ic-<name>"/></sv
 Inlining (vs. an external `<use href="file.svg#id">`) keeps `currentColor`
 theming bulletproof and avoids an extra request.
 
-- **Version:** 3.45.0 (pinned in `../versions.txt`, Renovate-tracked via npm `@tabler/icons`)
-- **Source:** `icons/outline/*.svg` from <https://github.com/tabler/tabler-icons> at tag `v3.45.0`
+- **Version:** 3.46.0 (pinned in `../versions.txt`, Renovate-tracked via npm `@tabler/icons`)
+- **Source:** `icons/outline/*.svg` from <https://github.com/tabler/tabler-icons> at tag `v3.46.0`
 - Tabler's `outline` SVGs already use `stroke="currentColor"`; the stroke **weight**
   comes from the `.ico` CSS class (1.5), not the symbol. Each `<symbol>` records its
   Tabler icon name in a `<!-- ti <name> -->` comment.
