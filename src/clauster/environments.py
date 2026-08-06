@@ -4,7 +4,7 @@ Lists / archives the server-side bridge environments (``env_<ULID>``) that no
 longer back a live bridge — the ghosts that clutter the claude.ai/code "New
 session" selector after a bridge dies or a host restarts.
 
-Safety, by construction (see memory `reference-clauster-env-api`):
+Safety, by construction:
   - credentials come from ONE documented file each (never a multi-location scan)
     and the token is masked in any log/repr;
   - a *cloud* environment (``config.type == "cloud"``, the "Default") is NEVER a
