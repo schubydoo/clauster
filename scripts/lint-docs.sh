@@ -8,6 +8,9 @@
 #                       local node_modules with `npx --no-install` (no network
 #                       fetch, no unverified download).
 #   yamllint          — Python tool, installed as a dev dependency (uv run).
+#   private refs     — no tracked file may cite the agent memory store (a private,
+#                       gitignored per-host directory). Such a pointer is dead on
+#                       arrival for every contributor; see the block below.
 #   config reference  — gen_config_reference.py --check fails if the tables in
 #                       docs/reference/config.md or docs/guides/config-editor.md
 #                       drifted from the config models. The
@@ -39,5 +42,25 @@ uv run yamllint .
 
 echo "==> config reference (gen_config_reference.py --check)"
 uv run python scripts/gen_config_reference.py --check
+
+echo "==> no references to the private agent memory store"
+# Agents carry a per-host, gitignored memory store (~/.claude/projects/*/memory/)
+# whose notes are named `project-*` / `reference-*` / `feedback-*` and cross-linked
+# with [[wiki-links]]. Citing one from a tracked file leaves a pointer no
+# contributor — and no future agent on another host — can follow. Two have shipped
+# this way already (a test comment, a module docstring), so this is a real gate and
+# not a hypothetical one. Put the fact in the file, or cite a PR/issue instead.
+#
+# tests/fixtures/ is exempt: those are captured `claude` transcripts, verbatim
+# third-party payloads we must not edit to satisfy a linter.
+# shellcheck disable=SC2016  # the regex is literal; backticks must NOT be substituted
+private_ref_re='(\[\[[a-z0-9]+([_-][a-z0-9]+)+\]\]|`(project|reference|feedback)[_-][a-z0-9]+([_-][a-z0-9]+){2,}`)'
+if hits=$(git ls-files -z ':!scripts/lint-docs.sh' ':!tests/fixtures' \
+    | xargs -0 grep -nEI "$private_ref_re" 2>/dev/null); then
+  echo "ERROR: tracked file(s) cite the private agent memory store:" >&2
+  echo "$hits" >&2
+  echo "Inline the fact, or cite a PR/issue number instead." >&2
+  exit 1
+fi
 
 echo "==> docs lint OK"

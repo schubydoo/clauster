@@ -1627,8 +1627,8 @@ def test_status_route_still_running_then_terminal(tmp_path: Path, monkeypatch) -
         # Reap the TREE, not just the process we hold — "the provider finished" means the
         # whole process group ended, not only the wrapper. A bare `terminate()` kills just
         # the Windows `claude.cmd` shim and orphans its python child onto our stdout pipe,
-        # costing a flat 5s reader-join here (8.03s Windows vs 1.41s Linux). See
-        # `project_clauster_windows_support` for why `_teardown` can't clean that up itself.
+        # costing a flat 5s reader-join here (8.03s Windows vs 1.41s Linux). `_teardown`
+        # can't clean that up itself — see PR #1127 for the full trace.
         proc = app.state.login_shepherd._flow.proc  # noqa: SLF001 - provider "finished"
         procutil.force_kill_tree(proc.pid)
         proc.wait(timeout=5)
