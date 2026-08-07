@@ -107,7 +107,9 @@ os.environ.pop("CLAUSTER_CONFIG", None)
 os.environ.pop("CLAUSTER_STATE_DIR", None)
 atexit.register(lambda: shutil.rmtree(_SESSION_HOME, ignore_errors=True))
 
-# ⚠️ BELOW the pin on purpose — `# noqa: E402` is the cost of keeping the invariant above.
+# ⚠️ BELOW the pin on purpose — a `noqa: E402` on each is the cost of the invariant above.
+# (The hash is omitted from that token deliberately: ruff scans every comment for it and
+# reads a mention in prose as a real, malformed directive.)
 # These are the only module-level `clauster` imports in this file; every other one is
 # function-local for exactly this reason. Nothing they pull in resolves `~` at import today
 # (verified: `clauster.db.*` reaches 13 clauster modules and none of them is `discovery`,
