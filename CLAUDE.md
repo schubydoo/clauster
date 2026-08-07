@@ -36,8 +36,6 @@ pointer.
 
 ## Working in this repo
 
-- **Prefer the dedicated file/search tools over shell equivalents.** Read/Edit/Grep
-  rather than `cat`/`sed`/`grep`, so edits stay tracked.
 - **Run `just check` before proposing a PR** — it runs the local test, coverage,
   ruff, type, docs-lint, and docs-site-build (`mkdocs build --strict`) gates. CI
   additionally runs the 3-OS matrix, package build, and platform smoke jobs.
