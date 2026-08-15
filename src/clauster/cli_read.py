@@ -40,10 +40,11 @@ def ambiguous_id_message(engine: ClausterEngine, identity: str) -> str | None:
     candidates = engine.bridge_id_candidates(identity)
     if not candidates:
         return None
-    return (
-        f"clauster: ambiguous instance id {identity!r} — matches "
-        f"{', '.join(candidates)}; use more characters"
-    )
+    # Project-name ambiguity (#1150): none of the candidate ids starts with the identity.
+    # Telling the operator to "use more characters" would be wrong here — they need an id.
+    is_prefix_ambiguity = any(c.startswith(identity) for c in candidates)
+    hint = "use more characters" if is_prefix_ambiguity else "use an instance id directly"
+    return f"clauster: ambiguous {identity!r} — matches {', '.join(candidates)}; {hint}"
 
 
 def _print_json(obj: Any) -> None:

@@ -734,9 +734,16 @@ class SessionRunner:
         """
         if identity in self._instances:
             return identity, []
-        inst = self.get_instance_for_project(identity)
-        if inst is not None:
-            return inst.instance_id, []
+        project_matches = sorted(
+            iid for iid, inst in self._instances.items() if inst.project == identity
+        )
+        if len(project_matches) == 1:
+            return project_matches[0], []
+        if len(project_matches) > 1:
+            # Multiple instances share this project name (#1150). Refuse rather than silently
+            # picking one — the wrong choice is unrecoverable. Callers see (None, candidates)
+            # exactly as they do for an ambiguous id prefix (#1099).
+            return None, project_matches
         if identity in self._discovered():
             # Names a real project that simply has no bridge. `_discovered()` is cached
             # (short TTL + mtime-invalidated) and already runs on every poll_once, so this

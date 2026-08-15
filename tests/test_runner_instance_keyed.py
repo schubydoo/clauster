@@ -1981,3 +1981,49 @@ async def test_adoption_cancellation_propagates(runner_config, monkeypatch):
     monkeypatch.setattr(runner, "_adopt_rows_from_store", _cancelled)
     with pytest.raises(asyncio.CancelledError):
         await runner.poll_once()
+
+
+# ---------------------------------------------------------------------------
+# Bug 1150 — stop reports success while stopping nothing
+# ---------------------------------------------------------------------------
+
+
+async def test_resolve_bridge_id_refuses_ambiguous_project_name(runner_config, monkeypatch):
+    # #1150. A project with a live bridge (iid-live) and a later-stopped row (iid-dead).
+    # resolve_bridge_id used to silently return iid-dead (last-registered wins), so
+    # `clauster stop alpha` reported success without touching the live bridge.
+    # The fix: two matches for the same project name → (None, candidates), identical to
+    # the ambiguous id-prefix behaviour (#1099). The caller then surfaces a 409 / error.
+    runner = _make_runner(runner_config)
+    _stub_connect(monkeypatch)
+    runner.persistence.state_store().save(
+        {
+            "iid-live": _row("alpha", pid=5001),
+            "iid-dead": _row("alpha", pid=5002, intentional_stop=True),
+        }
+    )
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None: pid == 5001
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda *a, **k: True)
+
+    await runner.rediscover(persist=False)
+
+    # The bare project name must now refuse, not guess.
+    assert runner.resolve_bridge_id("alpha") is None
+    candidates = runner.bridge_id_candidates("alpha")
+    assert set(candidates) == {"iid-live", "iid-dead"}, f"unexpected candidates: {candidates}"
+
+
+async def test_resolve_bridge_id_resolves_unambiguous_project_name(runner_config, monkeypatch):
+    # Unambiguous case: exactly one instance for a project — still resolves normally.
+    runner = _make_runner(runner_config)
+    _stub_connect(monkeypatch)
+    runner.persistence.state_store().save({"iid-only": _row("alpha", pid=5001)})
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda *a, **k: True)
+
+    await runner.rediscover(persist=False)
+
+    assert runner.resolve_bridge_id("alpha") == "iid-only"
+    assert runner.bridge_id_candidates("alpha") == []

@@ -534,12 +534,11 @@ def _unresolved_bridge(
     """
     candidates = runner.bridge_id_candidates(instance_id)
     if candidates:
+        is_prefix_ambiguity = any(c.startswith(instance_id) for c in candidates)
+        hint = "use more characters" if is_prefix_ambiguity else "use an instance id directly"
         return HTTPException(
             status_code=409,
-            detail=(
-                f"ambiguous instance id {instance_id!r} — matches "
-                f"{', '.join(candidates)}; use more characters"
-            ),
+            detail=(f"ambiguous {instance_id!r} — matches {', '.join(candidates)}; {hint}"),
         )
     return HTTPException(status_code=404, detail=not_found_detail)
 
