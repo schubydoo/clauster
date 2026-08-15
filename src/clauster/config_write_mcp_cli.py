@@ -34,8 +34,9 @@ memory or docs alone, per #769:
   values (and a token-bearing ``url`` or stdio ``args``) have **no** such escape hatch
   in the upstream CLI (``-e`` and ``add-json``'s JSON argument are both ordinary argv),
   so :func:`entry_needs_direct_write` routes any entry carrying an inline ``env`` or
-  ``headers`` value — a ``url`` whose userinfo, query, or **fragment** could carry a
-  credential (``user:pass@host``, ``?api_key=…``, ``#api_key=…``) or that
+  ``headers`` value — a ``url`` that is not provably bare (any userinfo, query,
+  **fragment**, or **path segment** could carry a credential: ``user:pass@host``,
+  ``?api_key=…``, ``#api_key=…``, ``/mcp/sk-live-…/sse``) or that
   :func:`urllib.parse.urlsplit` cannot parse (fail-closed), or a non-empty stdio
   ``args`` list — away from this module entirely, into
   :mod:`clauster.config_write_mcp`'s direct (non-spawning) writers instead. The
@@ -48,12 +49,16 @@ memory or docs alone, per #769:
   the CLI's cosmetic ``"args": []`` normalization. See that module's "#769 additions"
   docstring for the reconciliation with the design doc's "hybrid" strategy.
 
-  **Uncovered residual (conscious boundary):** a secret embedded in the ``url`` *path*
-  (``https://host/mcp/sk-live-…/sse``) is **not** routed off the CLI — every legitimate
-  hosted-MCP ``url`` has a path (``/v1``, ``/sse``, ``/mcp``), so treating every
-  path-bearing ``url`` as secret-shaped would push essentially every remote server onto
-  the direct writer. Closing that gap needs a broader allowlist redesign and is a
-  documented follow-up, not this guard.
+  **Path-embedded credentials — closed (#1074).** A secret in the ``url`` *path*
+  (``https://host/mcp/sk-live-…/sse``) once reached the CLI argv because only the
+  query/userinfo/fragment were inspected. :func:`entry_needs_direct_write` now applies a
+  **field allowlist**: a ``url`` is CLI-eligible only when it is provably bare
+  (``scheme://host[:port]`` — no path segment, query, fragment, or userinfo; see
+  :func:`_url_is_bare`), so every path-bearing ``url`` routes to the direct writer. The
+  cost is that a legitimate path-only ``url`` also skips the CLI (harmless — equivalent
+  on-disk state); the one CLI-only capability, an OAuth ``client_secret`` via
+  ``MCP_CLIENT_SECRET``, still works for a bare ``url``, and the route returns a clear 422
+  for a path-bearing OAuth ``url``.
 
 Every spawn here is validate-before-spawn: the binary is resolved to an absolute
 path (:func:`clauster.claude_cli.resolve_binary`), argv is always a list (never
@@ -97,27 +102,35 @@ def _has_nonempty_value(block: Any) -> bool:
     return isinstance(block, dict) and any(isinstance(v, str) and v for v in block.values())
 
 
-def _url_carries_credential(url: str) -> bool:
-    """Whether ``url`` carries a credential that must not reach ``add-json``'s argv.
+def _url_is_bare(url: str) -> bool:
+    """Whether ``url`` is provably ``scheme://host[:port]`` only — safe to reach argv.
 
-    Fails **closed** (CWE-214): an MCP ``url`` reaches ``claude mcp add-json`` as an
-    ordinary argv token, so a secret smuggled into its userinfo (``user[:pass]@host``),
-    query string (``?api_key=…``), or **fragment** (``#api_key=…``) would be visible via
-    ``ps`` / ``/proc/<pid>/cmdline``. Any of those components — or a ``url`` so malformed
-    that :func:`urllib.parse.urlsplit` raises ``ValueError`` — is treated as
-    credential-bearing so the entry routes to the direct file writer instead.
+    The field-allowlist half of :func:`entry_needs_direct_write` (#1074). An MCP ``url``
+    reaches ``claude mcp add-json`` as an ordinary argv token (``ps`` / ``/proc/<pid>/
+    cmdline``-visible), so ANY component that could hide a credential makes it unsafe for
+    the CLI: userinfo (``user[:pass]@host``), query (``?api_key=…``), fragment
+    (``#api_key=…``), **or a path segment** (``/mcp/sk-live-…/sse``). Rather than ask the
+    undecidable "does this value look secret?" — a credential path segment is
+    indistinguishable from a benign ``/v1``/``/sse`` without the key-name/shape heuristic
+    this module deliberately avoids — this asks the decidable question "is the shape
+    provably safe?": a ``url`` is bare **only** when it carries nothing but a scheme, host,
+    and optional port. A url :func:`urllib.parse.urlsplit` cannot parse is treated as not
+    bare (fail closed).
 
-    Deliberately does **not** flag a secret embedded in the ``url`` *path*
-    (``https://host/mcp/sk-live-…/sse``): every legitimate hosted-MCP ``url`` has a path
-    (``/v1``, ``/sse``, ``/mcp``), so routing all path-bearing urls off the CLI would push
-    essentially every remote server onto the direct writer. That needs a broader allowlist
-    redesign and is a documented follow-up — the path case is a known uncovered residual.
+    Closes the path-embedded-credential residual (#1074): before, a secret in the ``url``
+    path still reached argv because only query/userinfo/fragment were inspected. The cost
+    is that a legitimate path-only ``url`` (``https://host/sse``) also skips the CLI —
+    harmless, the direct writer produces equivalent on-disk state. The one CLI-only
+    capability (deliver an OAuth ``client_secret`` via ``MCP_CLIENT_SECRET``) still works
+    for a bare ``url``; a path-bearing OAuth ``url`` takes the route's documented 422.
     """
     try:
         parts = urlsplit(url)
     except ValueError:
-        return True  # unparseable -> fail closed, keep it off the CLI
-    return bool(parts.query or parts.username or parts.password or parts.fragment)
+        return False  # unparseable -> not provably safe, keep it off the CLI
+    return not (
+        parts.path.strip("/") or parts.query or parts.fragment or parts.username or parts.password
+    )
 
 
 def entry_needs_direct_write(entry: dict[str, Any]) -> bool:
@@ -128,32 +141,32 @@ def entry_needs_direct_write(entry: dict[str, Any]) -> bool:
 
     * any non-empty ``env`` value (stdio or remote), **or**
     * any non-empty ``headers`` value (remote), **or**
-    * a ``url`` whose userinfo, query, or **fragment** could carry a credential, or that
-      cannot be parsed at all (see :func:`_url_carries_credential`), **or**
+    * a ``url`` that is not provably bare — anything beyond ``scheme://host[:port]``: a
+      path segment, query, fragment, or userinfo, or a ``url`` that cannot be parsed at
+      all (see :func:`_url_is_bare`), **or**
     * a non-empty stdio ``args`` list (a token can hide as ``["--api-key", "sk-…"]``),
       **or**
     * a token-bearing / interpolated value the Foundation's structural detector
       catches anywhere else (e.g. a ``scheme://user@host`` ``url``, a ``${VAR}``).
 
-    Errs firmly toward True: key-name-based redaction
-    (:func:`clauster.config_write.redact_secrets`) can only spot a secret by a KEY
-    (``token``/``secret``/… -- its own, or an ancestor's, since a credential-shaped
-    key marks its whole subtree), so a real secret under a benign key
-    (``{"DEPLOY_KEY": "AKIA…"}``, ``{"GH_PAT": "ghp_…"}``,
-    ``{"X-Custom": "Bearer sk-…"}``) — or a token in a ``url`` query/fragment or an
-    ``args`` element — would slip past a key-only check and land in argv. Treating
-    *every* such shape as must-not-touch-the-CLI closes that gap — the CLI ``add-json``
-    path is thereby reserved for entries with no ``env``/``headers``, a credential-free
-    ``url``, and no ``args`` (plus the OAuth ``--client-secret`` case, whose secret rides
-    ``MCP_CLIENT_SECRET`` in the child env, not argv). The cost is only that a genuinely
-    non-secret ``env``/``url``/``args`` also skips the CLI — harmless, since the direct
-    writer produces equivalent file state. A secret in the ``url`` *path* stays uncovered
-    (see :func:`_url_carries_credential` for that conscious boundary).
+    This is a **field allowlist** (#1074), not a "does this look secret?" scan: the CLI
+    ``add-json`` path is reached only when every field is provably safe to serialize onto
+    argv — no ``env``/``headers``, no ``args``, and a bare ``url`` (scheme+host+port). That
+    is decidable and does not degrade as new URL shapes appear, unlike key-name-based
+    redaction (:func:`clauster.config_write.redact_secrets`), which can only spot a secret
+    by a KEY (``token``/``secret``/… — its own, or an ancestor's, since a credential-shaped
+    key marks its whole subtree) and so misses a real secret under a benign key
+    (``{"DEPLOY_KEY": "AKIA…"}``, ``{"GH_PAT": "ghp_…"}``, ``{"X-Custom": "Bearer sk-…"}``),
+    a token in a ``url`` query/fragment/**path** (``/mcp/sk-live-…/sse``), or an ``args``
+    element. The OAuth ``--client-secret`` case still uses the CLI (its secret rides
+    ``MCP_CLIENT_SECRET`` in the child env, not argv) for a bare ``url``. The cost is only
+    that a genuinely non-secret ``env``/``url``/``args`` also skips the CLI — harmless,
+    since the direct writer produces equivalent file state.
     """
     if _has_nonempty_value(entry.get("env")) or _has_nonempty_value(entry.get("headers")):
         return True
     url = entry.get("url")
-    if isinstance(url, str) and url and _url_carries_credential(url):
+    if isinstance(url, str) and url and not _url_is_bare(url):
         return True
     args = entry.get("args")
     if isinstance(args, list) and args:

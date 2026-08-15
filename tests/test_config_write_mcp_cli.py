@@ -107,12 +107,13 @@ def test_entry_needs_direct_write_detects_secretish_header() -> None:
 
 
 def test_entry_needs_direct_write_false_for_clean_entry() -> None:
-    # A stdio entry with no args, and a remote url with only a path (no userinfo/query/
-    # fragment), carry nothing that could land a secret on argv -> the CLI path is fine.
+    # A stdio entry with no args, and a remote entry with a provably BARE url (scheme +
+    # host only — no path segment, userinfo, query, or fragment), carry nothing that could
+    # land a secret on argv -> the CLI path is fine (#1074 field allowlist).
     assert not mcp_cli.entry_needs_direct_write({"command": "x"})
-    assert not mcp_cli.entry_needs_direct_write(
-        {"type": "http", "url": "https://mcp.vendor.com/v1"}
-    )
+    assert not mcp_cli.entry_needs_direct_write({"type": "http", "url": "https://mcp.vendor.com"})
+    # A trailing-slash root path is still bare (no segment to hide a credential in).
+    assert not mcp_cli.entry_needs_direct_write({"type": "http", "url": "https://mcp.vendor.com/"})
 
 
 def test_entry_needs_direct_write_true_for_url_query_credential() -> None:
@@ -154,14 +155,22 @@ def test_entry_needs_direct_write_true_for_nonempty_args() -> None:
     assert mcp_cli.entry_needs_direct_write(entry)
 
 
-def test_entry_needs_direct_write_false_for_path_only_url_is_conscious_boundary() -> None:
-    # SCOPE BOUNDARY: a secret in the url PATH is a KNOWN uncovered residual. Every hosted
-    # MCP url has a path, so routing all path-bearing urls off the CLI needs a broader
-    # allowlist redesign (follow-up). This asserts the deliberate non-coverage so a future
-    # change here is a conscious one, not an accident.
-    assert not mcp_cli.entry_needs_direct_write(
-        {"type": "http", "url": "https://mcp.vendor.com/mcp/sk-live-inpath/sse"}
-    )
+def test_entry_needs_direct_write_true_for_url_path_credential() -> None:
+    # #1074 REGRESSION: a credential embedded in the url PATH (`/mcp/sk-live-…/sse`) reaches
+    # `add-json` as an ordinary argv token (ps/proc-visible) and redact_secrets misses it
+    # (no `@`, benign-looking segments). The field allowlist now routes ANY non-bare url —
+    # every path-bearing url included — to the direct writer, closing the residual.
+    entry = {"type": "http", "url": "https://mcp.vendor.com/mcp/sk-live-inpath/sse"}
+    assert cw.redact_secrets(entry) == entry  # redaction heuristic misses it
+    assert mcp_cli.entry_needs_direct_write(entry)  # but the allowlist routes it away
+
+
+def test_entry_needs_direct_write_true_for_benign_path_url() -> None:
+    # A perfectly benign path-only url (`/sse`, `/v1`) is ALSO routed off the CLI now: the
+    # allowlist proves safety by shape, and a path segment is never provably credential-free
+    # (indistinguishable from a secret segment without a heuristic). Over-routing is
+    # harmless — the direct writer yields equivalent file state (#1074).
+    assert mcp_cli.entry_needs_direct_write({"type": "http", "url": "https://mcp.vendor.com/sse"})
 
 
 def test_entry_needs_direct_write_true_for_interpolation_placeholder() -> None:
@@ -224,7 +233,7 @@ def test_cli_add_server_client_secret_via_env_never_argv(tmp_path: Path) -> None
         str(FAKE_CLAUDE),
         tmp_path,
         "remote",
-        {"type": "http", "url": "https://x/mcp"},
+        {"type": "http", "url": "https://x"},
         "local",
         client_secret="sk-oauth-secret",
         run=run,
@@ -499,8 +508,8 @@ def test_run_timeout_message_never_leaks_argv(tmp_path: Path) -> None:
     # which for an OAuth add could carry a secret). The raised message must be built from
     # the verb only, never str(exc). Prove it: a secret-shaped value in the entry (routed
     # here only because we call cli_add_server directly with a client_secret) must not
-    # appear in the error text.
-    entry = {"type": "http", "url": "https://x/mcp"}
+    # appear in the error text. A bare url keeps the entry CLI-eligible (#1074).
+    entry = {"type": "http", "url": "https://x"}
 
     def run(argv, **_kwargs):
         raise subprocess.TimeoutExpired(cmd=argv, timeout=30)
@@ -517,7 +526,7 @@ def test_run_timeout_message_never_leaks_argv(tmp_path: Path) -> None:
         )
     msg = str(exc_info.value)
     assert "sk-oauth-should-not-leak" not in msg
-    assert "https://x/mcp" not in msg  # the argv (entry JSON) is not in the message
+    assert "https://x" not in msg  # the argv (entry JSON) is not in the message
     assert "add-json" in msg  # but the verb is
     assert "timed out" in msg
 
@@ -817,11 +826,9 @@ def test_route_server_add_audits_redacted_argv(
     # the shared config_audit.log. Proves (1) the argv sink set by the route propagates into
     # the worker-thread `_run` across asyncio.to_thread (the reason it's a contextvar), and
     # (2) the serialized entry is recorded SHAPE-ONLY — every value masked, keys kept — so a
-    # secret the key/line heuristics miss never lands in the durable audit log, even though
-    # the real CLI still receives it. The entry here hides its secret in the url PATH — the
-    # F4-uncovered residual that DOES still reach the live CLI argv (see the
-    # entry_needs_direct_write boundary) — exactly the case where the audit's shape-only
-    # masking is the log's last line of defense.
+    # value the key/line heuristics miss never lands in the durable audit log, even though
+    # the real CLI still receives it. The entry here is a bare-url remote (the only remote
+    # shape that stays CLI-eligible after the #1074 allowlist), and even its host is masked.
     monkeypatch.setenv("FAKE_CLAUDE_MCP_STDOUT", "Added http MCP server srv to project config")
     with _client(write_config, tmp_path, _ON) as c:
         resp = c.post(
@@ -834,7 +841,7 @@ def test_route_server_add_audits_redacted_argv(
                 "name": "srv",
                 "entry": {
                     "type": "http",
-                    "url": "https://mcp.vendor.com/mcp/sk-live-SHOULD-NOT-LEAK/sse",
+                    "url": "https://mcp.vendor.com",
                 },
             },
         )
@@ -852,7 +859,7 @@ def test_route_server_add_audits_redacted_argv(
             "project",
         ]
     ]
-    assert "sk-live-SHOULD-NOT-LEAK" not in raw  # the secret never lands in the audit log
+    assert "mcp.vendor.com" not in raw  # even the host is masked shape-only in the audit log
     assert "files" in entry  # the changed-file fingerprints ride alongside (see test_config_audit)
 
 
@@ -959,7 +966,9 @@ def test_route_server_remote_client_secret_via_env(
                 "confirm": "alpha (local)",
                 "op": "add",
                 "name": "remote",
-                "entry": {"type": "http", "url": "https://x/mcp"},
+                # A bare url (scheme+host) is the remote shape the CLI can still carry, so
+                # an OAuth client_secret is deliverable via MCP_CLIENT_SECRET (#1074).
+                "entry": {"type": "http", "url": "https://x"},
                 "client_secret": "sk-oauth-secret",  # noqa: S106 - test literal, not real
             },
         )
@@ -1086,6 +1095,9 @@ def test_route_server_local_scope_add_with_secret_bypasses_cli(
         {"type": "http", "url": "https://mcp.vendor.com/v1?api_key=sk-live-query"},
         {"type": "http", "url": "https://mcp.vendor.com/v1#api_key=sk-live-frag"},
         {"command": "node", "args": ["--api-key", "sk-live-args"]},
+        # #1074: a secret in the url PATH — closed by the field allowlist, so this too
+        # routes to the direct writer and never lands in the CLI argv.
+        {"type": "http", "url": "https://mcp.vendor.com/mcp/sk-live-inpath/sse"},
     ],
 )
 def test_route_server_benign_keyed_secret_never_reaches_cli_argv(
@@ -1309,6 +1321,9 @@ def test_route_server_bad_client_secret_type_is_422(write_config, tmp_path, proj
         {"type": "http", "url": "https://mcp.example.com/v1#frag"},
         {"command": "x", "args": ["--flag"]},
         {"command": "x", "env": {"TOKEN": "sk-live"}},
+        # #1074: a path-bearing url now takes the direct writer too, so a client_secret for
+        # it can no longer be delivered — the route refuses rather than silently drop it.
+        {"type": "http", "url": "https://mcp.example.com/v1"},
     ],
 )
 def test_route_server_client_secret_with_direct_write_entry_is_422(
