@@ -1898,8 +1898,8 @@ running — they are read-only and never write the running service's shared stat
 <div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>clauster projects                  # list discoverable projects (git / trust / bypass)
 <a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>clauster status                    # list bridge instances and their status
 <a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>clauster sessions                  # list live working sessions (claude agents)
-<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>clauster logs &lt;instance&gt; [-f]      # tail a bridge&#39;s redacted log (--follow to stream)
-<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>clauster open &lt;instance&gt;           # print a bridge&#39;s connect URL (--launch opens a browser)
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>clauster logs &lt;instance&gt; [-f]      # tail a bridge's redacted log (--follow to stream)
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>clauster open &lt;instance&gt;           # print a bridge's connect URL (--launch opens a browser)
 </code></pre></div>
 <p><code>&lt;instance&gt;</code> accepts a full instance id, a <strong>unique prefix</strong> of one, or a project name.
 The prefix form is why <code>clauster status</code> truncates the INSTANCE column to 8 characters —
@@ -1907,7 +1907,7 @@ what it prints is directly usable. A prefix matching <strong>several</strong> br
 the candidates are listed, rather than one being picked
 (<a href="https://github.com/schubydoo/clauster/issues/1099">#1099</a>):</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="gp">$ </span>clauster<span class="w"> </span>logs<span class="w"> </span>f2c456fd
-<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="go">clauster: ambiguous instance id &#39;f2c456fd&#39; — matches f2c456fd-aaaa-…, f2c456fd-bbbb-…; use more characters</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="go">clauster: ambiguous instance id 'f2c456fd' — matches f2c456fd-aaaa-…, f2c456fd-bbbb-…; use more characters</span>
 </code></pre></div>
 <p>Both <strong>exact</strong> forms outrank a prefix — a full instance id first, then a project name —
 and <strong>a name that is one of your projects is never read as a prefix</strong>, even when that

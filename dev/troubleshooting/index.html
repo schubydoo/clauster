@@ -2447,7 +2447,7 @@ port-forward onto a <em>different</em> local port has the same effect on a loopb
 bind.</p>
 <p><strong>Fix:</strong> list the address exactly as it appears in the browser's URL bar:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="nt">auth</span><span class="p">:</span>
-<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">  </span><span class="nt">allowed_origins</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;http://localhost:7621&quot;</span><span class="p p-Indicator">]</span><span class="w">   </span><span class="c1"># scheme + host + port</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">  </span><span class="nt">allowed_origins</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">"http://localhost:7621"</span><span class="p p-Indicator">]</span><span class="w">   </span><span class="c1"># scheme + host + port</span>
 </code></pre></div>
 <p>This applies whether or not a password is set — the origin allowlist is a
 cross-site defence, not an authentication method, so it is enforced even when
@@ -2490,7 +2490,7 @@ Clauster fails closed rather than serving a login form nobody can pass.</p>
 <h3 id="refusing-non-loopback-host-without-enforced-auth-it-refuses-to-start">"refusing non-loopback host ... without enforced auth" — it refuses to start<a class="headerlink" href="#refusing-non-loopback-host-without-enforced-auth-it-refuses-to-start" title="Permanent link">&para;</a></h3>
 <p><strong>What you see:</strong> startup aborts (or <code>doctor</code> fails the <code>auth</code> row with
 <code>non-loopback host &lt;x&gt; without enforced auth</code>):</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>refusing non-loopback host=&#39;0.0.0.0&#39; without enforced auth. Set auth.enabled:
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>refusing non-loopback host='0.0.0.0' without enforced auth. Set auth.enabled:
 <a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>true together with auth.password_required (+ a hash from `clauster
 <a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>hash-password`), auth.reverse_proxy.enabled, or auth.api_token_hash (from
 <a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>`clauster hash-token`) — or, to opt out on a trusted LAN,
@@ -2585,7 +2585,7 @@ database</a> and
 within <code>startup_grace_seconds</code> — most often a <code>claude</code> login problem (the
 bridge starts, then hangs unauthenticated).</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>clauster<span class="w"> </span>doctor<span class="w">                          </span><span class="c1"># read the claude-login row</span>
-<a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>tail<span class="w"> </span>~/.clauster/logs/&lt;label&gt;-*.log<span class="w">      </span><span class="c1"># the bridge&#39;s own account of it</span>
+<a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>tail<span class="w"> </span>~/.clauster/logs/&lt;label&gt;-*.log<span class="w">      </span><span class="c1"># the bridge's own account of it</span>
 </code></pre></div>
 <p><strong>Mechanism:</strong> <a href="../operations/#reading-the-bridge-debug-log">Reading the bridge debug
 log</a> · <a href="../architecture/#bridge-lifecycle">Bridge

@@ -1459,8 +1459,8 @@ uppercased and joined with underscores. For example:</p>
 <p><strong>List keys take a comma-separated value</strong>, which is how container tooling
 usually passes lists. Surrounding spaces are trimmed and blank entries dropped,
 so a trailing comma is harmless:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nv">CLAUSTER_AUTH_ALLOWED_ORIGINS</span><span class="o">=</span><span class="s1">&#39;https://clauster.example.com,http://localhost:7621&#39;</span>
-<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="nv">CLAUSTER_CLONE_ALLOWED_SCHEMES</span><span class="o">=</span><span class="s1">&#39;https,ssh&#39;</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nv">CLAUSTER_AUTH_ALLOWED_ORIGINS</span><span class="o">=</span><span class="s1">'https://clauster.example.com,http://localhost:7621'</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="nv">CLAUSTER_CLONE_ALLOWED_SCHEMES</span><span class="o">=</span><span class="s1">'https,ssh'</span>
 </code></pre></div>
 <p>A <strong>newline</strong> separates as well, so the <code>*_FILE</code> form below can be written one
 entry per line. An <strong>empty</strong> value means an empty list — it does <em>not</em> fall
@@ -1520,7 +1520,7 @@ unknown per-project keys are ignored.</p>
 <a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="nt">auth</span><span class="p">:</span>
 <a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
 <a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="w">  </span><span class="nt">password_required</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
-<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="w">  </span><span class="nt">password_hash</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;$argon2id$v=19$...&quot;</span><span class="w">   </span><span class="c1"># from `clauster hash-password`</span>
+<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="w">  </span><span class="nt">password_hash</span><span class="p">:</span><span class="w"> </span><span class="s">"$argon2id$v=19$..."</span><span class="w">   </span><span class="c1"># from `clauster hash-password`</span>
 <a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a><span class="w">  </span><span class="nt">cookie_secure</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">always</span><span class="w">                 </span><span class="c1"># if no TLS-terminating proxy</span>
 </code></pre></div>
 

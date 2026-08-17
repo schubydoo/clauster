@@ -1647,7 +1647,7 @@ before. If you keyed bridges by <code>id</code> and assumed it was the project n
 <p><code>session_status</code> still accepts a <strong>project name</strong> for a bridge when that project
 runs exactly one. When it runs several, the name no longer identifies a single
 session, so instead of returning whichever bridge was registered first you get:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="p">{</span><span class="nt">&quot;found&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;myproject&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;ambiguous&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;&lt;bridge id&gt;&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;&lt;bridge id&gt;&quot;</span><span class="p">]}</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="p">{</span><span class="nt">"found"</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nt">"id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"myproject"</span><span class="p">,</span><span class="w"> </span><span class="nt">"ambiguous"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"&lt;bridge id&gt;"</span><span class="p">,</span><span class="w"> </span><span class="s2">"&lt;bridge id&gt;"</span><span class="p">]}</span>
 </code></pre></div>
 <p>Retry with one of the returned ids. <code>stop_session</code> / <code>resume_session</code> accept either
 form, so they keep working — but note a project name that matches several bridges
@@ -1700,7 +1700,7 @@ address you browse, is what decides:</p>
 <p>In the second and third cases your own buttons and live views are refused until you
 list the address you actually browse to:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="nt">auth</span><span class="p">:</span>
-<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">  </span><span class="nt">allowed_origins</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;http://localhost:9000&quot;</span><span class="p p-Indicator">]</span><span class="w">   </span><span class="c1"># the address you type into the browser</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">  </span><span class="nt">allowed_origins</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">"http://localhost:9000"</span><span class="p p-Indicator">]</span><span class="w">   </span><span class="c1"># the address you type into the browser</span>
 </code></pre></div>
 <p>Use the address <strong>as it appears in your browser's URL bar</strong> — scheme, host, and port — not
 clauster's internal bind address. It fails loudly, never silently: a refused action, or a
