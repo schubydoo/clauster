@@ -431,10 +431,18 @@ jobs:
         with:
           persist-credentials: false
       - name: pytest on alpine musl
+        env:
+          # Kept byte-identical to the Dockerfile's `FROM alpine:` pin — the two
+          # must never diverge, or this canary validates a different Alpine than
+          # we ship. Hoisted out of the run-script so a Renovate custom manager
+          # can see it; a `#` comment inside `run: |` is shell text, not an
+          # annotation.
+          # renovate: datasource=docker depName=alpine versioning=docker
+          ALPINE_MUSL_IMAGE: "alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
         run: |
           set -euo pipefail
           docker run --rm -v "$PWD":/src:ro \
-            alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b \
+            "$ALPINE_MUSL_IMAGE" \
             sh -euc '
             apk add --no-cache uv python3 git >/dev/null
             cp -a /src /work && cd /work
