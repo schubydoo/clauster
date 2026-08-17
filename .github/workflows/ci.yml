@@ -434,9 +434,10 @@ jobs:
         env:
           # Kept byte-identical to the Dockerfile's `FROM alpine:` pin — the two
           # must never diverge, or this canary validates a different Alpine than
-          # we ship. Hoisted out of the run-script so a Renovate custom manager
-          # can see it; a `#` comment inside `run: |` is shell text, not an
-          # annotation.
+          # we ship. Hoisted out of the `run:` script into a step `env:` so the
+          # annotation below sits on a mapping key a Renovate custom manager can
+          # match cleanly (the manager itself lives in the shared renovate-config
+          # preset, keyed to the `ALPINE_MUSL_IMAGE` name + this annotation).
           # renovate: datasource=docker depName=alpine versioning=docker
           ALPINE_MUSL_IMAGE: "alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
         run: |
