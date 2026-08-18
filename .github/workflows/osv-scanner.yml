@@ -67,64 +67,25 @@ jobs:
       contents: read # checkout + read the lockfiles
       actions: read # read run metadata for the SARIF upload
 
-  # Full scan on a schedule, on pushes to main, and on manual dispatch.
-  # Full scan on a schedule, on pushes to main, and on manual dispatch. Run via the pinned
-  # OSV-Scanner BINARY rather than the reusable full-scan workflow: that workflow references a
-  # conditional actions/download-artifact@<tag> internally, which the repo's require-SHA-pin
-  # policy rejects at action-resolution time (it never runs, but still must resolve). The binary
-  # is pinned by version + verified by sha256 and the SARIF upload is SHA-pinned, so this stays
-  # policy- and Scorecard-clean. Revert to the reusable workflow once upstream SHA-pins that
-  # action in a release — tracked on the project board.
+  # Full scan on a schedule, on pushes to main, and on manual dispatch, via the OSV-Scanner
+  # reusable full-scan workflow (SHA-pinned, like scan-pr above). This previously ran the
+  # pinned OSV-Scanner binary directly because the reusable workflow referenced a conditional
+  # actions/download-artifact@<tag> internally, which the repo's require-SHA-pin policy rejects
+  # transitively at action-resolution time (it never runs, but still must resolve). Upstream
+  # SHA-pinned that action in v2.5.0 (download-artifact@3e5f45b2 # v8.0.1), so every `uses:` in
+  # the reusable workflow now resolves to a full-length SHA and the workaround is no longer
+  # needed (#326). This holds per-release, not forever: if a Renovate bump ever fails at
+  # action-resolution time, upstream re-tagged an internal action — re-check that every `uses:`
+  # in `osv-scanner-reusable.yml` is SHA-pinned before pinning the binary back. The reusable
+  # full-scan defaults to `-r ./` — the same recursive lockfile scan the binary ran — and
+  # report-only via `fail-on-vuln: false`.
   scan-scheduled:
-    name: full scan (pinned binary)
+    name: full scan
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@6e4298ebc4db23e847df9b2e2de2939d6f066c67 # v2.5.1
+    with:
+      fail-on-vuln: false # report-only signal for now; flip to blocking once tuned
     permissions:
       security-events: write # upload the SARIF to Security > Code scanning
       contents: read # checkout + read the lockfiles
-      actions: read # codeql-action/upload-sarif reads run metadata
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install OSV-Scanner (pinned release, checksum-verified)
-        env:
-          GH_TOKEN: ${{ github.token }}
-          # renovate: datasource=github-releases depName=google/osv-scanner
-          OSV_VERSION: "v2.3.8"
-          # Bump together with OSV_VERSION: sha256 of osv-scanner_linux_amd64 from the release's
-          # osv-scanner_SHA256SUMS. Renovate bumps the version; the sha256sum -c below then fails
-          # the job until this is updated to match — a deliberate fail-loud, never a silent skip.
-          OSV_SHA256: "bc98e15319ed0d515e3f9235287ba53cdc5535d576d24fd573978ecfe9ab92dc"
-        run: |
-          set -euo pipefail
-          gh release download "$OSV_VERSION" --repo google/osv-scanner \
-            --pattern osv-scanner_linux_amd64 --output osv-scanner
-          echo "${OSV_SHA256}  osv-scanner" | sha256sum -c -
-          chmod +x osv-scanner
-      - name: Scan committed lockfiles (report-only)
-        run: |
-          set -euo pipefail
-          set +e
-          ./osv-scanner scan source -r --format sarif --output-file results.sarif .
-          echo "OSV_EXIT=$?" >> "$GITHUB_ENV"
-          exit 0 # never fail here — upload the SARIF first, then surface a real error below
-      - name: Upload SARIF to code scanning
-        # Upload whenever a SARIF exists — including a partial one written before a scanner error,
-        # for triage. hashFiles() guards the no-file case (e.g. an earlier step failed) so this is
-        # a clean no-op rather than an error.
-        if: ${{ hashFiles('results.sarif') != '' }}
-        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
-        with:
-          sarif_file: results.sarif
-          category: osv-scanner
-      - name: Surface a real scanner error
-        if: ${{ always() }}
-        run: |
-          # 0 = no vulns, 1 = vulns found (report-only — surfaces in the SARIF, not a failure).
-          # Anything else is a real osv-scanner error: fail the job AFTER the SARIF upload above.
-          if [ "${OSV_EXIT:-0}" -gt 1 ]; then
-            echo "::error::osv-scanner failed (exit ${OSV_EXIT})"
-            exit "${OSV_EXIT}"
-          fi
+      actions: read # read run metadata for the SARIF upload
