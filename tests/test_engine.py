@@ -27,6 +27,7 @@ class _FakePersistence:
 
 class _FakeRunner:
     candidates: list[str] = []
+    candidates_kind: str | None = "prefix"
     """Minimal SessionRunner stand-in — no DB, just the methods the facade calls."""
 
     def __init__(
@@ -55,6 +56,10 @@ class _FakeRunner:
 
     def bridge_id_candidates(self, identity: str) -> list[str]:
         return list(self.candidates)
+
+    def bridge_id_ambiguity(self, identity: str) -> tuple[list[str], str | None]:
+        cands = list(self.candidates)
+        return cands, (self.candidates_kind if cands else None)
 
     def get_instance(self, instance_id: str) -> RemoteControlInstance | None:
         return self._instances.get(instance_id)
@@ -101,6 +106,22 @@ def test_bridge_id_candidates_passes_through_to_the_runner(tmp_path, projects_ro
         assert engine.bridge_id_candidates("f2c456fd") == ["f2c456fd-aaaa", "f2c456fd-bbbb"]
     finally:
         runner.candidates = []
+
+
+def test_bridge_id_ambiguity_passes_through_to_the_runner(tmp_path, projects_root):
+    # #1150: the facade carries the resolver's ambiguity KIND ("prefix" vs "project") out
+    # to the CLI/HTTP callers so they word the retry hint from the verdict rather than
+    # re-deriving it from the candidate strings (which misfires for a hex-ish project name).
+    runner = _FakeRunner(claude_json=tmp_path / "claude.json")
+    engine = _engine(tmp_path, projects_root, runner)
+    assert engine.bridge_id_ambiguity("nope") == ([], None)
+    runner.candidates = ["f2c456fd-aaaa", "a1b2c3d4"]
+    runner.candidates_kind = "project"
+    try:
+        assert engine.bridge_id_ambiguity("myproj") == (["f2c456fd-aaaa", "a1b2c3d4"], "project")
+    finally:
+        runner.candidates = []
+        runner.candidates_kind = "prefix"
 
 
 # -- list_projects: discovery + the bypass stamp -------------------------------

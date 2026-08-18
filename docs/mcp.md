@@ -159,12 +159,13 @@ permission mode, or an untrusted directory come back as an `isError` result.
 Stop, or resume into its prior conversation, the bridge named by an `id` — an
 instance id, a **unique prefix** of one, or a project name as returned by
 `list_sessions` — resolved exactly like the dashboard's DELETE / resume routes.
-A project name that matches **several** bridges resolves to the
-one the dashboard displays, so pass an instance id to target a specific bridge.
+A project name that matches **several** instances is refused, not guessed: the reply
+is `false` with an `ambiguous` list of the candidate ids. Pass a specific instance id
+to target one bridge — a project name can't be narrowed the way a prefix can.
 
 | Argument | Type | Description |
 | --- | --- | --- |
-| `id` | string (required) | The bridge to stop / resume: a project name, a full instance id, or a unique prefix of one. A prefix matching **several** bridges is refused, not guessed — see below. |
+| `id` | string (required) | The bridge to stop / resume: a project name, a full instance id, or a unique prefix of one. A reference matching **several** bridges — a prefix, or a project name with more than one instance — is refused, not guessed — see below. |
 
 `stop_session` returns `{"stopped": <bool>, ...}`; `resume_session` returns
 `{"resumed": <bool>, ...}` — the boolean is `false` (with the id echoed back) when
