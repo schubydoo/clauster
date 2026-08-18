@@ -7,10 +7,12 @@
 # in — provide it at runtime (mount it onto PATH, or build a derived image that
 # installs it) along with ~/.claude credentials and your projects dir.
 #
-# OS packages are EXPLICITLY PINNED (no unpinned `upgrade`), each ARG carrying a
-# `# renovate:` comment so Renovate tracks it. NB: Alpine keeps only the latest
-# version of each package, so a pinned build 404s once a newer -rN publishes,
-# until Renovate's (auto-merged) bump lands. Reseed a pin's value with:
+# OS packages are pinned to a PATCH version (no `-rN` revision), each ARG carrying
+# a `# renovate:` comment so Renovate tracks the version via repology. The apk
+# specs use the fuzzy operator (`=~`), so any Alpine package revision (-rN) of that
+# version installs: an Alpine -rN rebuild no longer 404s the build, and Renovate —
+# which only ever sees the -rN-stripped version through repology — bumps the patch
+# cleanly (e.g. 3.14.7 -> 3.14.8). Reseed a pin's value with:
 #   docker run --rm alpine:3.24.1 sh -c 'apk update >/dev/null && apk policy <pkg>'
 # On an Alpine MINOR bump (3.24 -> 3.25), also update every `depName=alpine_3_24/…`
 # suffix below to the new release, or Renovate resolves pins against the wrong
@@ -20,13 +22,13 @@
 FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS builder
 
 # renovate: datasource=repology depName=alpine_3_24/uv versioning=loose
-ARG UV_VERSION=0.11.19-r0
+ARG UV_VERSION=0.11.19
 # renovate: datasource=repology depName=alpine_3_24/python3 versioning=loose
-ARG PYTHON3_VERSION=3.14.7-r0
+ARG PYTHON3_VERSION=3.14.7
 # System python3 is the interpreter uv builds the venv against; it must exist at
 # the same path in runtime (the copied venv points back at /usr/bin/python3). All
 # native deps ship musllinux wheels, so uv installs binaries — no compiler needed.
-RUN apk add --no-cache uv="${UV_VERSION}" python3="${PYTHON3_VERSION}"
+RUN apk add --no-cache uv="~${UV_VERSION}" python3="~${PYTHON3_VERSION}"
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
@@ -50,18 +52,18 @@ FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6ee
 # shadow — groupmod/usermod/useradd/groupadd for the PUID/PGID remap (busybox lacks them).
 # su-exec — musl-native privilege-drop in the entrypoint (replaces gosu; no Go CVE surface).
 # renovate: datasource=repology depName=alpine_3_24/python3 versioning=loose
-ARG PYTHON3_VERSION=3.14.7-r0
+ARG PYTHON3_VERSION=3.14.7
 # renovate: datasource=repology depName=alpine_3_24/git versioning=loose
-ARG GIT_VERSION=2.54.0-r0
+ARG GIT_VERSION=2.54.0
 # renovate: datasource=repology depName=alpine_3_24/shadow versioning=loose
-ARG SHADOW_VERSION=4.18.0-r1
+ARG SHADOW_VERSION=4.18.0
 # renovate: datasource=repology depName=alpine_3_24/su-exec versioning=loose
-ARG SU_EXEC_VERSION=0.3-r0
+ARG SU_EXEC_VERSION=0.3
 RUN apk add --no-cache \
-        python3="${PYTHON3_VERSION}" \
-        git="${GIT_VERSION}" \
-        shadow="${SHADOW_VERSION}" \
-        su-exec="${SU_EXEC_VERSION}"
+        python3="~${PYTHON3_VERSION}" \
+        git="~${GIT_VERSION}" \
+        shadow="~${SHADOW_VERSION}" \
+        su-exec="~${SU_EXEC_VERSION}"
 
 # Default identity; remappable to the host's PUID/PGID at runtime.
 RUN groupadd -g 1000 clauster \
