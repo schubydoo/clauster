@@ -44,6 +44,9 @@ class _FakeRunner:
         self.spawn_calls: list[tuple[str, dict]] = []
         self.stopped: list[str] = []
         self.resumed: list[str] = []
+        # When set, resume_detailed returns this outcome instead of a created=True one —
+        # lets a test drive the standard-singleton-cap decline (#1148).
+        self.resume_detailed_outcome = None
         self.trusted: list[str] = []
 
     def list_instances(self) -> list[RemoteControlInstance]:
@@ -80,8 +83,15 @@ class _FakeRunner:
         return self._instances[instance_id]
 
     async def resume(self, instance_id: str) -> RemoteControlInstance:
+        return (await self.resume_detailed(instance_id)).instance
+
+    async def resume_detailed(self, instance_id: str):
+        from clauster.runner import SpawnOutcome
+
         self.resumed.append(instance_id)
-        return self._instances[instance_id]
+        if self.resume_detailed_outcome is not None:
+            return self.resume_detailed_outcome
+        return SpawnOutcome(instance=self._instances[instance_id], created=True)
 
     async def trust_project(self, name: str) -> None:
         self.trusted.append(name)
@@ -255,6 +265,34 @@ def test_resume_unknown_identity_returns_none_without_delegating(tmp_path, proje
 
     assert asyncio.run(engine.resume("nope")) is None
     assert runner.resumed == []  # never called runner.resume for an unresolved id
+
+
+def test_resume_detailed_returns_the_full_outcome(tmp_path, projects_root):
+    # #1148: resume_detailed threads the standard-singleton cap's decline (created=False
+    # with a reason) instead of collapsing it to the instance, so the MCP tool can report
+    # `resumed: false` rather than a resume that never happened.
+    from clauster.runner import SpawnOutcome
+
+    inst = RemoteControlInstance(instance_id="i1", project="alpha", label="alpha")
+    runner = _FakeRunner(claude_json=tmp_path / "claude.json", instances=[inst])
+    runner.resume_detailed_outcome = SpawnOutcome(
+        instance=inst, created=False, reason="a live standard bridge already exists"
+    )
+    engine = _engine(tmp_path, projects_root, runner)
+
+    outcome = asyncio.run(engine.resume_detailed("i1"))
+    assert outcome.created is False
+    assert outcome.reason == "a live standard bridge already exists"
+    assert outcome.instance is inst
+    assert runner.resumed == ["i1"]
+
+
+def test_resume_detailed_unknown_identity_returns_none_without_delegating(tmp_path, projects_root):
+    runner = _FakeRunner(claude_json=tmp_path / "claude.json")
+    engine = _engine(tmp_path, projects_root, runner)
+
+    assert asyncio.run(engine.resume_detailed("nope")) is None
+    assert runner.resumed == []
 
 
 # -- connect_url: session link, else composer link, else None ------------------

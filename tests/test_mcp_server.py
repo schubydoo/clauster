@@ -352,7 +352,7 @@ class _FakeEngine:
     hydrated_before_op = None
     start_result = None
     stop_result = None
-    resume_result = None
+    resume_detailed_result = None
     raise_with = None
 
     def __init__(self, config, **kwargs):
@@ -382,11 +382,11 @@ class _FakeEngine:
             raise type(self).raise_with
         return type(self).stop_result
 
-    async def resume(self, identity):
-        type(self).calls = {"op": "resume", "identity": identity}
+    async def resume_detailed(self, identity):
+        type(self).calls = {"op": "resume_detailed", "identity": identity}
         if type(self).raise_with is not None:
             raise type(self).raise_with
-        return type(self).resume_result
+        return type(self).resume_detailed_result
 
 
 @pytest.fixture
@@ -396,7 +396,7 @@ def fake_engine(monkeypatch):
 
     _FakeEngine.start_result = None
     _FakeEngine.stop_result = None
-    _FakeEngine.resume_result = None
+    _FakeEngine.resume_detailed_result = None
     _FakeEngine.raise_with = None
     monkeypatch.setattr(engine_mod, "ClausterEngine", _FakeEngine)
     return _FakeEngine
@@ -511,7 +511,7 @@ def test_stop_session_reports_an_ambiguous_prefix_instead_of_not_stopped(server,
 
 
 def test_resume_session_reports_an_ambiguous_prefix(server, fake_engine):
-    fake_engine.resume_result = None
+    fake_engine.resume_detailed_result = None
     fake_engine.candidates = ["f2c456fd-aaaa", "f2c456fd-bbbb"]
     body = _payload(_call(server, "resume_session", {"id": "f2c456fd"}))
     assert body["resumed"] is False
@@ -520,15 +520,62 @@ def test_resume_session_reports_an_ambiguous_prefix(server, fake_engine):
 
 
 def test_resume_session_reports_resumed(server, fake_engine):
-    fake_engine.resume_result = _bridge("alpha", status="running")
+    from clauster.runner import SpawnOutcome
+
+    fake_engine.resume_detailed_result = SpawnOutcome(
+        instance=_bridge("alpha", status="running"), created=True
+    )
     body = _payload(_call(server, "resume_session", {"id": "alpha"}))
     assert body["resumed"] is True
     assert body["session"]["project"] == "alpha"
-    assert fake_engine.calls == {"op": "resume", "identity": "alpha"}
+    # Every reply echoes the requested id and carries a warnings list, matching the
+    # HTTP resume route and the other write tools (#1215 review).
+    assert body["id"] == "alpha"
+    assert body["warnings"] == []
+    assert "reason" not in body
+    assert fake_engine.calls == {"op": "resume_detailed", "identity": "alpha"}
+
+
+def test_resume_session_forwards_outcome_warnings(server, fake_engine):
+    # #1215: a pty resume without a worktree emits a concurrent-edits advisory on the
+    # created=True outcome. The tool must forward it, like spawn_session and the HTTP
+    # resume route do, rather than silently dropping it.
+    from clauster.runner import SpawnOutcome
+
+    fake_engine.resume_detailed_result = SpawnOutcome(
+        instance=_bridge("alpha", status="running"),
+        created=True,
+        warnings=["resuming without a worktree risks conflicting concurrent edits"],
+    )
+    body = _payload(_call(server, "resume_session", {"id": "alpha"}))
+    assert body["resumed"] is True
+    assert body["warnings"] == ["resuming without a worktree risks conflicting concurrent edits"]
+
+
+def test_resume_session_declined_cap_reports_not_resumed_with_reason(server, fake_engine):
+    # #1148: the standard-singleton cap declines a resume by handing back a DIFFERENT
+    # already-live bridge with created=False rather than raising. The tool must report
+    # `resumed: false` (not the old `resumed: true`) so an agent does not act on a
+    # session it never revived, and must name why with `reason`.
+    from clauster.runner import SpawnOutcome
+
+    fake_engine.resume_detailed_result = SpawnOutcome(
+        instance=_bridge("alpha", status="running"),
+        created=False,
+        reason="a live standard bridge already exists for this project",
+    )
+    body = _payload(_call(server, "resume_session", {"id": "alpha"}))
+    assert body["resumed"] is False
+    assert body["reason"] == "a live standard bridge already exists for this project"
+    # The live bridge is still surfaced so the caller can see what is running.
+    assert body["session"]["project"] == "alpha"
+    # The declined reply also echoes the requested id — the one resumed: false shape
+    # that previously omitted it, leaving only a *different* bridge's id (#1215 review).
+    assert body["id"] == "alpha"
 
 
 def test_resume_session_unknown_id_reports_not_resumed(server, fake_engine):
-    fake_engine.resume_result = None
+    fake_engine.resume_detailed_result = None
     body = _payload(_call(server, "resume_session", {"id": "ghost"}))
     assert body == {"resumed": False, "id": "ghost"}
 

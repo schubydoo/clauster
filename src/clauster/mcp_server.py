@@ -417,8 +417,13 @@ _WRITE_TOOLS: list[dict[str, Any]] = [
             "Resume a stopped/crashed bridge into its prior conversation, reusing its "
             "stored spawn/permission/resume modes. id is a project name, a full instance "
             "id, or a UNIQUE prefix of one (as returned by list_sessions). Returns "
-            "resumed: false when none matches; a reference matching several bridges — an "
-            "id prefix, or a project name with more than one instance — is REFUSED with "
+            "resumed: false when nothing was revived — no bridge matched, or the "
+            "project's one-live-standard-bridge cap handed back the already-live bridge "
+            "instead of reviving the target (reason says which; session is that live "
+            "bridge, NOT necessarily the one you named). Every reply echoes the id you "
+            "asked for as id, so you can compare it against session.id to tell whether "
+            "the live bridge is the one you named. A reference matching several bridges — "
+            "an id prefix, or a project name with more than one instance — is REFUSED with "
             "an 'ambiguous' list of the full ids rather than guessing. Bridge channel "
             "only — hosted-session resume is not exposed here."
         ),
@@ -578,11 +583,26 @@ async def _tool_resume_session(config: ClausterConfig, args: dict[str, Any]) -> 
     wanted = _require_id("resume_session", args)
     with ClausterEngine(config) as engine:
         await engine.hydrate()
-        inst = await engine.resume(wanted)
-        ambiguous = engine.bridge_id_candidates(wanted) if inst is None else []  # see stop (#1099)
-    if inst is None:
+        outcome = await engine.resume_detailed(wanted)
+        # An ambiguous id prefix resolves to nothing rather than guessing (#1099).
+        ambiguous = engine.bridge_id_candidates(wanted) if outcome is None else []  # see stop
+    if outcome is None:
         return {"resumed": False, "id": wanted, **({"ambiguous": ambiguous} if ambiguous else {})}
-    return {"resumed": True, "session": _summarize_instance(inst, kind="bridge")}
+    body: dict[str, Any] = {
+        "resumed": outcome.created,
+        "id": wanted,
+        "warnings": list(outcome.warnings),
+        "session": _summarize_instance(outcome.instance, kind="bridge"),
+    }
+    # #1148: a standard bridge is capped at one live per project, and the cap declines a
+    # resume by HANDING BACK the already-live bridge (usually a different instance_id;
+    # the pty path can hand back the target itself) rather than raising. Answering that
+    # with `resumed: true` told the agent it revived the session it asked for — it never
+    # did, and it then addresses a bridge it never chose. Read `created`, and name why
+    # with `reason`, exactly as `POST /api/instances/{id}/resume` does (#1145).
+    if not outcome.created and outcome.reason:
+        body["reason"] = outcome.reason
+    return body
 
 
 _READ_TOOL_HANDLERS = {

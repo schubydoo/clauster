@@ -221,11 +221,34 @@ class ClausterEngine(AbstractContextManager["ClausterEngine"]):
         must :meth:`hydrate` first so the registry is populated for the resolve.
         Bridge-scoped like the rest of the engine — hosted-session resume stays behind
         the app's hosted manager, not this facade.
+
+        Returns the instance only. A caller that must tell a genuine revive from the
+        standard-singleton cap handing back a DIFFERENT already-live bridge needs
+        :meth:`resume_detailed` — reporting the latter as success is #1148.
+        """
+        outcome = await self.resume_detailed(identity)
+        return outcome.instance if outcome is not None else None
+
+    async def resume_detailed(self, identity: str) -> SpawnOutcome | None:
+        """Resume the bridge resolved from ``identity``; the full outcome, or ``None``.
+
+        The detailed mirror of :meth:`resume`, and the headless twin of what
+        ``POST /api/instances/{id}/resume`` returns (#1145): a
+        :class:`~clauster.runner.SpawnOutcome` whose ``created`` is False — with
+        ``reason`` — when nothing was revived, because a standard bridge is capped at
+        one live per project and the cap is enforced by RETURNING the already-live
+        bridge rather than raising. Dropping that here made the MCP ``resume_session``
+        tool answer a declined resume with ``resumed: true`` and a bridge it never
+        revived, which an agent then acts on (#1148).
+
+        ``None`` when the id is unknown or an ambiguous prefix — the ambiguous case
+        never picks a bridge; use :meth:`bridge_id_candidates` to name the ids to retry
+        with, exactly as :meth:`stop`/:meth:`resume` do.
         """
         resolved = self._runner.resolve_bridge_id(identity)
         if resolved is None:
             return None
-        return await self._runner.resume(resolved)
+        return await self._runner.resume_detailed(resolved)
 
     # -- connect url / logs ---------------------------------------------------
 
