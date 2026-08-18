@@ -676,11 +676,12 @@ class SessionRunner:
         an ambiguous prefix must never pick one. Callers that want to say *which* ids it
         could have meant read :meth:`bridge_id_candidates`.
 
-        With N instances per project the bare-name fallback resolves via
-        :meth:`get_instance_for_project` (#778) to the LAST-REGISTERED match, in any
-        status — which since #1143 is **not** necessarily the row the dashboard shows. See
-        that method's ⚠️ note for the divergence and why the fix is to narrow the name
-        resolution, never to restore a project-keyed client fold.
+        A bare project name resolves only when it names exactly one instance. With two
+        or more instances sharing the name it refuses — returning ``None`` here and the
+        candidate ids via :meth:`bridge_id_candidates`, exactly as an ambiguous id prefix
+        does (#1150) — rather than falling through to the LAST-REGISTERED match, which
+        since #1143 need not be the row the dashboard shows. Narrowing the name resolution
+        this way, never restoring a project-keyed client fold, is the fix.
 
         This fallback is for the surfaces where a human types a project name rather
         than an id: the CLI, the MCP tools, and the HTTP routes that still accept
