@@ -1785,15 +1785,28 @@ to target one bridge — a project name can't be narrowed the way a prefix can.<
 </tbody>
 </table>
 <p><code>stop_session</code> returns <code>{"stopped": &lt;bool&gt;, ...}</code>; <code>resume_session</code> returns
-<code>{"resumed": &lt;bool&gt;, ...}</code> — the boolean is <code>false</code> (with the id echoed back) when
-no managed bridge matches.</p>
+<code>{"resumed": &lt;bool&gt;, "id": &lt;requested id&gt;, ...}</code>. For <code>stop_session</code> the boolean is
+<code>false</code> (with the requested <code>id</code> echoed back) when no managed bridge matches. For
+<code>resume_session</code> a <code>false</code> means nothing was revived, and it has <strong>two</strong> shapes:</p>
+<ul>
+<li><strong>No bridge matched</strong> — the reply carries the requested <code>id</code> (and, for an ambiguous
+  prefix, <code>ambiguous</code>), with no <code>session</code>.</li>
+<li><strong>The one-live-standard-bridge cap declined</strong> — the target was not revived because a
+  live standard bridge already exists for the project. The reply carries <code>reason</code> and a
+  <code>session</code> for that already-live bridge, which is <strong>NOT necessarily the one you named</strong>.
+  Compare the echoed <code>id</code> against <code>session.id</code> to tell them apart, or simply read
+  <code>resumed</code>. This mirrors <code>POST /api/instances/{id}/resume</code>, whose body reports the same
+  decline via <code>created: false</code> + <code>reason</code>.</li>
+</ul>
 <p>An <strong>ambiguous prefix</strong> is refused rather than resolved to an arbitrary bridge, and
 the reply carries the candidates so a caller can retry with a longer one:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="p">{</span><span class="nt">"stopped"</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nt">"id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"f2c456fd"</span><span class="p">,</span><span class="w"> </span><span class="nt">"ambiguous"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"f2c456fd-aaaa-…"</span><span class="p">,</span><span class="w"> </span><span class="s2">"f2c456fd-bbbb-…"</span><span class="p">]}</span>
 </code></pre></div>
 <p>Check for <code>ambiguous</code> before treating a <code>false</code> as "the bridge is already stopped" —
-without it the two are indistinguishable, and the bridge is in fact still running.
-(Prefix matching arrived in
+without it the two are indistinguishable, and the bridge is in fact still running. For
+<code>resume_session</code>, likewise read <code>resumed</code> (and <code>reason</code>) rather than inferring a revive
+from getting a <code>session</code> back — a declined cap still returns the live bridge. (Prefix
+matching arrived in
 <a href="https://github.com/schubydoo/clauster/issues/1099">#1099</a>; before that these tools
 advertised prefixes but matched only in full.)</p>
 <p>Both are <strong>bridge channel only</strong>; hosted-session
