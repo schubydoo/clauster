@@ -1692,13 +1692,17 @@ a unique prefix. A segment naming one of your projects is <strong>never</strong>
 prefix — if that project has no instance the reply is <strong>404</strong>, never another project's
 bridge. This matters only for a hex-ish project name (<code>cafe</code>, <code>deadbeef</code>) that happens to
 prefix an unrelated instance's UUID; the id stays reachable by typing one more character.</p>
-<p>A prefix matching <strong>several</strong> instances is refused with <strong>409</strong> rather than resolved to
+<p>A reference matching <strong>several</strong> bridges is refused with <strong>409</strong> rather than resolved to
 an arbitrary one — acting on the wrong live session is unrecoverable — and the <code>detail</code>
 names the candidates:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="p">{</span><span class="nt">"detail"</span><span class="p">:</span><span class="w"> </span><span class="s2">"ambiguous instance id 'f2c456fd' — matches f2c456fd-aaaa-…, f2c456fd-bbbb-…; use more characters"</span><span class="p">}</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="p">{</span><span class="nt">"detail"</span><span class="p">:</span><span class="w"> </span><span class="s2">"ambiguous 'f2c456fd' — matches f2c456fd-aaaa-…, f2c456fd-bbbb-…; use more characters"</span><span class="p">}</span>
 </code></pre></div>
-<p>An id matching nothing is still <strong>404</strong>. Only input that previously 404'd can reach the
-409, since prefixes did not resolve before #1099.</p>
+<p>Two shapes reach the 409: an id <strong>prefix</strong> matching several bridges (#1099), and a bare
+<strong>project name</strong> matching several instances (#1150) — the latter ends the hint with <code>use
+an instance id directly</code>, since a fixed name can't be narrowed. An id matching nothing is
+still <strong>404</strong>. A prefix that used to 404 now 409s; a bare project name with two instances
+used to return <strong>200</strong> (silently picking the last-registered row) and now 409s
+deliberately.</p>
 <h2 id="authenticating">Authenticating<a class="headerlink" href="#authenticating" title="Permanent link">&para;</a></h2>
 <p>Every <code>/api/v1</code> request needs the same credential any other <code>/api/*</code> route
 needs whenever <code>auth.enabled</code> is set: a session cookie, trusted-reverse-proxy

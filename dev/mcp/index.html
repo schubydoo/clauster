@@ -1765,8 +1765,9 @@ permission mode, or an untrusted directory come back as an <code>isError</code> 
 <p>Stop, or resume into its prior conversation, the bridge named by an <code>id</code> — an
 instance id, a <strong>unique prefix</strong> of one, or a project name as returned by
 <code>list_sessions</code> — resolved exactly like the dashboard's DELETE / resume routes.
-A project name that matches <strong>several</strong> bridges resolves to the
-one the dashboard displays, so pass an instance id to target a specific bridge.</p>
+A project name that matches <strong>several</strong> instances is refused, not guessed: the reply
+is <code>false</code> with an <code>ambiguous</code> list of the candidate ids. Pass a specific instance id
+to target one bridge — a project name can't be narrowed the way a prefix can.</p>
 <table>
 <thead>
 <tr>
@@ -1779,7 +1780,7 @@ one the dashboard displays, so pass an instance id to target a specific bridge.<
 <tr>
 <td><code>id</code></td>
 <td>string (required)</td>
-<td>The bridge to stop / resume: a project name, a full instance id, or a unique prefix of one. A prefix matching <strong>several</strong> bridges is refused, not guessed — see below.</td>
+<td>The bridge to stop / resume: a project name, a full instance id, or a unique prefix of one. A reference matching <strong>several</strong> bridges — a prefix, or a project name with more than one instance — is refused, not guessed — see below.</td>
 </tr>
 </tbody>
 </table>
