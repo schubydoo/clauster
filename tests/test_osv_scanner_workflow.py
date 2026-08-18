@@ -81,15 +81,15 @@ def test_scheduled_scan_uses_the_reusable_full_scan_workflow():
     # The scheduled/full scan rides the reusable FULL-scan workflow (SHA-pinned), reverted from
     # the pinned-binary workaround once upstream v2.5.0 SHA-pinned its internal download-artifact
     # so every transitive `uses:` resolves to a full SHA and the require-SHA policy no longer
-    # blocks it (#326). Match the call-shape by prefix, and ensure it is the full-scan reusable
-    # (`osv-scanner-reusable.yml@`), NOT the PR-diff one (`osv-scanner-reusable-pr.yml@`).
-    full = [
-        r
-        for r in _all_uses(_doc())
-        if r.startswith("google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@")
-    ]
-    assert full, "scheduled scan must call the reusable full-scan workflow"
-    assert all(_is_pinned(r) for r in full)  # locally re-assert the SHA pin the revert relies on
+    # blocks it (#326). Anchor to the `scan-scheduled` job itself — a sweep over all jobs would
+    # still pass if the ref were ever attached to `scan-pr` and the scheduled scan repointed. The
+    # trailing `.yml@` excludes the PR-diff reusable (`osv-scanner-reusable-pr.yml@`).
+    full_scan = "google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@"
+    ref = _doc()["jobs"].get("scan-scheduled", {}).get("uses", "")
+    assert ref.startswith(full_scan), "scan-scheduled must call the reusable full-scan workflow"
+    # Re-assert OUR pin locally; the require-SHA property the revert depends on is upstream's
+    # transitive pins, which no test in this repo can observe.
+    assert _is_pinned(ref)
 
 
 def test_osv_permissions_are_minimal():
