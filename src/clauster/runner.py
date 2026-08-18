@@ -616,21 +616,21 @@ class SessionRunner:
     def get_instance_for_project(self, project_name: str) -> RemoteControlInstance | None:
         """Resolve a bare project name to one instance: the LAST-registered match.
 
-        This is the **CLI/MCP** name fallback (``clauster stop|logs|open <project>``,
-        via :meth:`resolve_bridge_id`) — a convenience for the surfaces where a human
-        types a project instead of an instance id. Last-registered wins so the name
-        lands on the most recently registered bridge rather than a long-dead one; a
-        caller that needs a specific bridge passes its ``instance_id``, and one that
-        only needs liveness uses :meth:`has_running_instance` (#778).
+        Existence probe for the adopt path (``_reattach_from_persisted``): "is this
+        project already managed, in any status?" A caller that only needs liveness uses
+        :meth:`has_running_instance` (#778), and one that needs a specific bridge passes
+        its ``instance_id``. Last-registered wins so the single row it returns is the most
+        recently registered rather than a long-dead one.
 
-        ⚠️ This is **not** "the bridge the dashboard shows". Until #1143 the client
-        folded ``GET /api/instances`` into a project-keyed map, so last-registered was
-        also what the operator saw, and this method existed to mirror it. The client
-        now keys rows by ``instance_id`` and picks a LIVE row over a stopped one, so
-        the two can differ: with a live bridge and a newer stopped row for one project,
-        the dashboard shows the live bridge while ``clauster stop <project>`` resolves
-        to the stopped row. Do not reintroduce a project-keyed fold to close that gap
-        (that WAS #1143) — narrow the name resolution instead.
+        ⚠️ This is **not** a name-to-bridge resolver, and no longer the CLI/MCP fallback.
+        Until #1150 :meth:`resolve_bridge_id` fell through to it, so ``clauster stop
+        <project>`` on a project with a live bridge and a newer stopped row could land on
+        the stopped row. #1150 closed that divergence by making the name **refuse**
+        (returning candidates) when it matches several instances, so ``resolve_bridge_id``
+        no longer calls this — the last-registered pick survives only as the adopt-path
+        existence check above. Do not reintroduce it as a resolver, and do not reintroduce
+        a project-keyed client fold to "match the dashboard" (that WAS #1143); the resolve
+        path is the narrow one now.
 
         Does not raise; ``None`` when no instance matches.
         """
@@ -688,7 +688,7 @@ class SessionRunner:
         either. Per-session operations on a multi-session project must send the
         instance_id — the dashboard already does, refusing to act when it has none.
         """
-        resolved, _ = self._resolve_bridge_ref(identity)
+        resolved, _, _ = self._resolve_bridge_ref(identity)
         return resolved
 
     def bridge_id_candidates(self, identity: str) -> list[str]:
@@ -698,15 +698,34 @@ class SessionRunner:
         non-empty list means exactly "refused because it was ambiguous", and a caller can
         branch on that alone without re-deriving the resolution.
         """
-        _, candidates = self._resolve_bridge_ref(identity)
+        _, candidates, _ = self._resolve_bridge_ref(identity)
         return candidates
 
-    def _resolve_bridge_ref(self, identity: str) -> tuple[str | None, list[str]]:
-        """Resolve ``identity`` to ``(instance_id_or_None, ambiguous_candidates)``.
+    def bridge_id_ambiguity(self, identity: str) -> tuple[list[str], str | None]:
+        """Return ``(candidates, kind)`` for an AMBIGUOUS ``identity`` (#1099, #1150).
 
-        Single source of truth for :meth:`resolve_bridge_id` and
-        :meth:`bridge_id_candidates`, so the two can never disagree about whether a
-        given identity was ambiguous.
+        ``kind`` is ``"prefix"`` (an id prefix matched several bridges) or ``"project"`` (a
+        bare project name matched several instances); it is ``None`` whenever ``candidates``
+        is empty. Callers that word a retry hint read ``kind`` from here rather than
+        re-deriving it from the candidate strings, which misclassifies a hex-ish project
+        name that happens to prefix its own instance id.
+        """
+        _, candidates, kind = self._resolve_bridge_ref(identity)
+        return candidates, kind
+
+    def _resolve_bridge_ref(self, identity: str) -> tuple[str | None, list[str], str | None]:
+        """Resolve ``identity`` to ``(instance_id_or_None, candidates, ambiguity_kind)``.
+
+        Single source of truth for :meth:`resolve_bridge_id`,
+        :meth:`bridge_id_candidates`, and :meth:`bridge_id_ambiguity`, so the callers can
+        never disagree about whether a given identity was ambiguous or *why*.
+
+        ``ambiguity_kind`` is ``"prefix"`` when an id prefix matched several bridges
+        (#1099), ``"project"`` when a bare project name matched several instances (#1150),
+        and ``None`` otherwise. It is carried out from here rather than re-derived from the
+        candidate strings by each caller: an instance id can itself be hex-ish and prefix a
+        sibling's id, so ``any(c.startswith(identity))`` misclassifies a project match as a
+        prefix one and prints the wrong retry hint.
 
         Order is exact id, then exact project name, then unique id prefix. **Both exact
         forms beat a prefix**, because a prefix is an abbreviation and an exact match is
@@ -734,31 +753,32 @@ class SessionRunner:
         the prefix reading is still available there by typing one more character.
         """
         if identity in self._instances:
-            return identity, []
+            return identity, [], None
         project_matches = sorted(
             iid for iid, inst in self._instances.items() if inst.project == identity
         )
         if len(project_matches) == 1:
-            return project_matches[0], []
+            return project_matches[0], [], None
         if len(project_matches) > 1:
             # Multiple instances share this project name (#1150). Refuse rather than silently
             # picking one — the wrong choice is unrecoverable. Callers see (None, candidates)
-            # exactly as they do for an ambiguous id prefix (#1099).
-            return None, project_matches
+            # exactly as they do for an ambiguous id prefix (#1099); the "project" kind tells
+            # them the operator must retry with an id, not a longer string.
+            return None, project_matches, "project"
         if identity in self._discovered():
             # Names a real project that simply has no bridge. `_discovered()` is cached
             # (short TTL + mtime-invalidated) and already runs on every poll_once, so this
             # costs a dict lookup on the common path.
-            return None, []
+            return None, [], None
         if identity:
             # `if identity` guards the empty string, which prefixes EVERYTHING: without
             # it, "" would read as ambiguous-across-all rather than simply unknown.
             matches = sorted(iid for iid in self._instances if iid.startswith(identity))
             if len(matches) == 1:
-                return matches[0], []
+                return matches[0], [], None
             if matches:
-                return None, matches
-        return None, []
+                return None, matches, "prefix"
+        return None, [], None
 
     @staticmethod
     def _can_own_sessions(inst: RemoteControlInstance) -> bool:

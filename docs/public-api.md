@@ -52,16 +52,20 @@ prefix — if that project has no instance the reply is **404**, never another p
 bridge. This matters only for a hex-ish project name (`cafe`, `deadbeef`) that happens to
 prefix an unrelated instance's UUID; the id stays reachable by typing one more character.
 
-A prefix matching **several** instances is refused with **409** rather than resolved to
+A reference matching **several** bridges is refused with **409** rather than resolved to
 an arbitrary one — acting on the wrong live session is unrecoverable — and the `detail`
 names the candidates:
 
 ```json
-{"detail": "ambiguous instance id 'f2c456fd' — matches f2c456fd-aaaa-…, f2c456fd-bbbb-…; use more characters"}
+{"detail": "ambiguous 'f2c456fd' — matches f2c456fd-aaaa-…, f2c456fd-bbbb-…; use more characters"}
 ```
 
-An id matching nothing is still **404**. Only input that previously 404'd can reach the
-409, since prefixes did not resolve before #1099.
+Two shapes reach the 409: an id **prefix** matching several bridges (#1099), and a bare
+**project name** matching several instances (#1150) — the latter ends the hint with `use
+an instance id directly`, since a fixed name can't be narrowed. An id matching nothing is
+still **404**. A prefix that used to 404 now 409s; a bare project name with two instances
+used to return **200** (silently picking the last-registered row) and now 409s
+deliberately.
 
 ## Authenticating
 

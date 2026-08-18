@@ -73,7 +73,7 @@ from .discovery import (
     invalidate_discovery_cache,
     is_valid_project_name,
 )
-from .engine import ClausterEngine
+from .engine import ClausterEngine, ambiguity_hint
 from .hosted import HostedManager, HostedSessionError
 from .models import (
     BackgroundJob,
@@ -519,23 +519,26 @@ def _reap_ws_task(task: asyncio.Task) -> None:
 def _unresolved_bridge(
     runner: SessionRunner, instance_id: str, not_found_detail: str
 ) -> HTTPException:
-    """Build the error for a bridge reference that didn't resolve (#1099).
+    """Build the error for a bridge reference that didn't resolve (#1099, #1150).
 
-    ``409`` when an id **prefix** was ambiguous, ``404`` when nothing matched at all.
-    They are genuinely different answers: "no such bridge" versus "several, say which" —
-    and the operator can act on the second only if told the candidates. Mirrors the
-    ``ambiguous`` reply ``session_status`` already returns on the MCP side.
+    ``409`` when the reference was ambiguous, ``404`` when nothing matched at all. They are
+    genuinely different answers: "no such bridge" versus "several, say which" — and the
+    operator can act on the second only if told the candidates. Mirrors the ``ambiguous``
+    reply ``session_status`` already returns on the MCP side.
 
-    Introducing a 409 here regresses nothing: prefixes did not resolve before this
-    change, so every request that can reach it used to 404. The caller passes the whole
-    ``not_found_detail`` rather than a fragment so each route keeps its existing 404
-    wording byte-for-byte — the sites were never consistent about quoting the id, and
-    normalizing that here would be an unrelated visible change riding along.
+    Two shapes reach the 409: an id **prefix** matching several bridges (#1099), and a bare
+    **project name** matching several instances (#1150). The first regresses nothing —
+    prefixes never resolved before, so that input used to 404. The second is a deliberate
+    change: ``DELETE /api/instances/alpha`` with two ``alpha`` rows used to return 200 by
+    silently picking the last-registered one, and now refuses rather than act on the row
+    the operator did not mean. The caller passes the whole ``not_found_detail`` rather than
+    a fragment so each route keeps its existing 404 wording byte-for-byte — the sites were
+    never consistent about quoting the id, and normalizing that here would be an unrelated
+    visible change riding along.
     """
-    candidates = runner.bridge_id_candidates(instance_id)
+    candidates, kind = runner.bridge_id_ambiguity(instance_id)
     if candidates:
-        is_prefix_ambiguity = any(c.startswith(instance_id) for c in candidates)
-        hint = "use more characters" if is_prefix_ambiguity else "use an instance id directly"
+        hint = ambiguity_hint(kind)
         return HTTPException(
             status_code=409,
             detail=(f"ambiguous {instance_id!r} — matches {', '.join(candidates)}; {hint}"),

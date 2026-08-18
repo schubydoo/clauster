@@ -2057,6 +2057,31 @@ def test_route_refuses_an_ambiguous_id_prefix_with_409(write_config, tmp_path):
     assert client.app.state.runner.get_instance(b) is not None
 
 
+def test_route_refuses_an_ambiguous_project_name_with_409(write_config, tmp_path):
+    # #1150. A bare project name matching several instances refuses exactly like an
+    # ambiguous prefix — but the hint differs: the candidate ids do NOT prefix the name,
+    # so the operator can't "use more characters" and is told to pass an instance id.
+    # (One start → stop → start cycle reaches this two-row state.)
+    from clauster.models import InstanceStatus, RemoteControlInstance
+
+    client = _client(write_config, tmp_path)
+    a = "f2c456fd-aaaa-0000-0000-000000000000"
+    b = "a1b2c3d4-bbbb-0000-0000-000000000000"
+    for iid, status in ((a, InstanceStatus.RUNNING), (b, InstanceStatus.STOPPED)):
+        client.app.state.runner._instances[iid] = RemoteControlInstance(
+            instance_id=iid, project="alpha", label="alpha", status=status
+        )
+    r = client.delete("/api/instances/alpha")
+    assert r.status_code == 409
+    detail = r.json()["detail"]
+    assert a in detail and b in detail, "the candidate ids must be named, not just refused"
+    assert "use an instance id directly" in detail, "project-name hint, not the prefix one"
+    assert "use more characters" not in detail
+    # Both bridges untouched — refusing must never act on one.
+    assert client.app.state.runner.get_instance(a) is not None
+    assert client.app.state.runner.get_instance(b) is not None
+
+
 def test_forget_refuses_an_ambiguous_id_prefix_with_409(write_config, tmp_path):
     # forget falls back to the raw identity (`resolve_bridge_id(...) or instance_id`) so a
     # purely-persisted record still reaches runner.forget's own lookup. Without an explicit

@@ -46,6 +46,17 @@ if TYPE_CHECKING:
     from .runner import SpawnOutcome
 
 
+def ambiguity_hint(kind: str | None) -> str:
+    """Map a bridge-ambiguity ``kind`` to the operator's retry advice.
+
+    ``"prefix"`` (#1099) → lengthen the abbreviation; ``"project"`` (#1150) or any other
+    value → the operator cannot lengthen a fixed project name, so point them at an
+    instance id. Kept beside :meth:`ClausterEngine.bridge_id_ambiguity` so the CLI 2-exit
+    path and the HTTP 409 word the hint identically from the same verdict.
+    """
+    return "use more characters" if kind == "prefix" else "use an instance id directly"
+
+
 class ClausterEngine(AbstractContextManager["ClausterEngine"]):
     """Shared in-process facade over clauster's reads and bridge start/stop/resume (#775)."""
 
@@ -123,6 +134,15 @@ class ClausterEngine(AbstractContextManager["ClausterEngine"]):
         retry with instead of a bare "not found".
         """
         return self._runner.bridge_id_candidates(identity)
+
+    def bridge_id_ambiguity(self, identity: str) -> tuple[list[str], str | None]:
+        """Return ``(candidates, kind)`` for an AMBIGUOUS ``identity`` (#1099, #1150).
+
+        ``kind`` (``"prefix"`` / ``"project"`` / ``None``) lets a caller word the retry
+        hint from the resolver's own verdict rather than re-deriving it from the candidate
+        strings — see :func:`ambiguity_hint`.
+        """
+        return self._runner.bridge_id_ambiguity(identity)
 
     # -- write: spawn / stop --------------------------------------------------
 

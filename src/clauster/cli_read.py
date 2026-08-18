@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .engine import ClausterEngine
+from .engine import ClausterEngine, ambiguity_hint
 
 if TYPE_CHECKING:
     from .config import ClausterConfig
@@ -37,13 +37,13 @@ def ambiguous_id_message(engine: ClausterEngine, identity: str) -> str | None:
     Lives here rather than in each command because ``cli_write``'s ``stop`` needs the
     identical wording; a second copy would drift the moment either is reworded.
     """
-    candidates = engine.bridge_id_candidates(identity)
+    candidates, kind = engine.bridge_id_ambiguity(identity)
     if not candidates:
         return None
-    # Project-name ambiguity (#1150): none of the candidate ids starts with the identity.
-    # Telling the operator to "use more characters" would be wrong here — they need an id.
-    is_prefix_ambiguity = any(c.startswith(identity) for c in candidates)
-    hint = "use more characters" if is_prefix_ambiguity else "use an instance id directly"
+    # #1150: the resolver tells us WHY it refused ("prefix" vs "project") so the hint is
+    # exact — re-deriving it here with `startswith` would misfire when a hex-ish project
+    # name happens to prefix its own instance id (there is no longer string to type).
+    hint = ambiguity_hint(kind)
     return f"clauster: ambiguous {identity!r} — matches {', '.join(candidates)}; {hint}"
 
 

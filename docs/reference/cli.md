@@ -215,13 +215,21 @@ clauster open <instance>           # print a bridge's connect URL (--launch open
 
 `<instance>` accepts a full instance id, a **unique prefix** of one, or a project name.
 The prefix form is why `clauster status` truncates the INSTANCE column to 8 characters —
-what it prints is directly usable. A prefix matching **several** bridges is refused and
-the candidates are listed, rather than one being picked
-([#1099](https://github.com/schubydoo/clauster/issues/1099)):
+what it prints is directly usable. A reference matching **several** bridges is refused and
+the candidates are listed, rather than one being picked — either an id **prefix** matching
+more than one bridge
+([#1099](https://github.com/schubydoo/clauster/issues/1099)), or a bare **project name**
+matching more than one instance
+([#1150](https://github.com/schubydoo/clauster/issues/1150)). A project reaches the
+two-instance state after one ordinary start → stop → start cycle (the stopped row lingers
+until `forget`), so every by-name surface — the `logs`, `open`, and `stop` commands, and
+the status / QR HTTP routes — refuses that name until you pass an instance id:
 
 ```console
 $ clauster logs f2c456fd
-clauster: ambiguous instance id 'f2c456fd' — matches f2c456fd-aaaa-…, f2c456fd-bbbb-…; use more characters
+clauster: ambiguous 'f2c456fd' — matches f2c456fd-aaaa-…, f2c456fd-bbbb-…; use more characters
+$ clauster logs myproj    # two instances share this project name
+clauster: ambiguous 'myproj' — matches f2c456fd-aaaa-…, a1b2c3d4-…; use an instance id directly
 ```
 
 Both **exact** forms outrank a prefix — a full instance id first, then a project name —
@@ -262,7 +270,8 @@ clauster stop  <instance> [--json]        # stop a bridge by id / unique prefix 
 ```
 
 `<instance>` resolves the same way as for the read commands above — full id, unique
-prefix, or project name — and an ambiguous prefix is refused with the candidates listed.
+prefix, or project name — and an ambiguous reference (a prefix, or a project name with
+more than one instance) is refused with the candidates listed.
 
 `--mode` picks the bridge mode with no hidden coercion (the two modes are not
 interchangeable); `--trust` accepts the workspace-trust dialog before starting

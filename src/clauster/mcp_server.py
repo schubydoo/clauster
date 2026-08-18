@@ -389,10 +389,11 @@ _WRITE_TOOLS: list[dict[str, Any]] = [
         "description": (
             "Stop the bridge named by an id (a project name, a full instance id, or a "
             "UNIQUE prefix of one, as returned by list_sessions). Returns stopped: false "
-            "when no managed bridge matches. A prefix matching several bridges is "
-            "REFUSED, not guessed: the reply is stopped: false with an 'ambiguous' list "
-            "of the full ids — retry with a longer prefix rather than treating the "
-            "bridge as already stopped."
+            "when no managed bridge matches. A reference matching several bridges — an "
+            "id prefix, or a project name with more than one instance — is REFUSED, not "
+            "guessed: the reply is stopped: false with an 'ambiguous' list of the full "
+            "ids. Retry with a specific instance id rather than treating the bridge as "
+            "already stopped."
         ),
         "inputSchema": {
             "type": "object",
@@ -416,9 +417,10 @@ _WRITE_TOOLS: list[dict[str, Any]] = [
             "Resume a stopped/crashed bridge into its prior conversation, reusing its "
             "stored spawn/permission/resume modes. id is a project name, a full instance "
             "id, or a UNIQUE prefix of one (as returned by list_sessions). Returns "
-            "resumed: false when none matches; a prefix matching several bridges is "
-            "REFUSED with an 'ambiguous' list of the full ids rather than guessing. "
-            "Bridge channel only — hosted-session resume is not exposed here."
+            "resumed: false when none matches; a reference matching several bridges — an "
+            "id prefix, or a project name with more than one instance — is REFUSED with "
+            "an 'ambiguous' list of the full ids rather than guessing. Bridge channel "
+            "only — hosted-session resume is not exposed here."
         ),
         "inputSchema": {
             "type": "object",

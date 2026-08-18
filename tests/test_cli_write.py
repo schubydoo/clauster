@@ -35,7 +35,13 @@ class _FakeEngine:
         """Ambiguous-prefix candidates (#1099); empty unless a test sets ``candidates``."""
         return list(self.candidates)
 
+    def bridge_id_ambiguity(self, identity: str) -> tuple[list[str], str | None]:
+        """``(candidates, kind)`` (#1099/#1150); ``kind`` defaults to a prefix ambiguity."""
+        cands = list(self.candidates)
+        return cands, (self.candidates_kind if cands else None)
+
     candidates: list[str] = []
+    candidates_kind: str | None = "prefix"
 
     outcome: SpawnOutcome | None = None
     stop_result: RemoteControlInstance | None = None
@@ -216,6 +222,25 @@ def test_stop_names_the_candidates_for_an_ambiguous_prefix(cfg, capsys):
         assert "no managed instance" not in err, "the misleading not-found wording remained"
     finally:
         _FakeEngine.candidates = []
+
+
+def test_stop_hint_for_an_ambiguous_project_name_says_use_an_id(cfg, capsys):
+    # #1150. A bare project name matching several instances is refused like an ambiguous
+    # prefix, but the retry advice differs: a project name is a fixed string, so "use more
+    # characters" would be wrong — the operator must pass an instance id. The resolver
+    # reports the "project" kind so the wording is exact, not re-derived from the strings.
+    _FakeEngine.stop_result = None
+    _FakeEngine.candidates = ["f2c456fd-aaaa-…", "a1b2c3d4-…"]
+    _FakeEngine.candidates_kind = "project"
+    try:
+        assert main(["stop", "-c", cfg, "myproj"]) == 2
+        err = capsys.readouterr().err
+        assert "ambiguous 'myproj'" in err
+        assert "use an instance id directly" in err
+        assert "use more characters" not in err, "prefix wording is wrong for a project name"
+    finally:
+        _FakeEngine.candidates = []
+        _FakeEngine.candidates_kind = "prefix"
 
 
 def test_stop_unknown_identity_exit_2(cfg, capsys):

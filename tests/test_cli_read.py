@@ -31,7 +31,13 @@ class _FakeEngine:
         """Ambiguous-prefix candidates (#1099); empty unless a test sets ``candidates``."""
         return list(self.candidates)
 
+    def bridge_id_ambiguity(self, identity: str) -> tuple[list[str], str | None]:
+        """``(candidates, kind)`` (#1099/#1150); ``kind`` defaults to a prefix ambiguity."""
+        cands = list(self.candidates)
+        return cands, (self.candidates_kind if cands else None)
+
     candidates: list[str] = []
+    candidates_kind: str | None = "prefix"
 
     projects: list[Project] = []
     instances: list[RemoteControlInstance] = []
