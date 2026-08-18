@@ -420,10 +420,12 @@ _WRITE_TOOLS: list[dict[str, Any]] = [
             "resumed: false when nothing was revived — no bridge matched, or the "
             "project's one-live-standard-bridge cap handed back the already-live bridge "
             "instead of reviving the target (reason says which; session is that live "
-            "bridge, NOT necessarily the one you named). A reference matching several "
-            "bridges — an id prefix, or a project name with more than one instance — is "
-            "REFUSED with an 'ambiguous' list of the full ids rather than guessing. Bridge "
-            "channel only — hosted-session resume is not exposed here."
+            "bridge, NOT necessarily the one you named). Every reply echoes the id you "
+            "asked for as id, so you can compare it against session.id to tell whether "
+            "the live bridge is the one you named. A reference matching several bridges — "
+            "an id prefix, or a project name with more than one instance — is REFUSED with "
+            "an 'ambiguous' list of the full ids rather than guessing. Bridge channel "
+            "only — hosted-session resume is not exposed here."
         ),
         "inputSchema": {
             "type": "object",
@@ -588,6 +590,8 @@ async def _tool_resume_session(config: ClausterConfig, args: dict[str, Any]) -> 
         return {"resumed": False, "id": wanted, **({"ambiguous": ambiguous} if ambiguous else {})}
     body: dict[str, Any] = {
         "resumed": outcome.created,
+        "id": wanted,
+        "warnings": list(outcome.warnings),
         "session": _summarize_instance(outcome.instance, kind="bridge"),
     }
     # #1148: a standard bridge is capped at one live per project, and the cap declines a

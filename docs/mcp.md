@@ -168,8 +168,18 @@ to target one bridge — a project name can't be narrowed the way a prefix can.
 | `id` | string (required) | The bridge to stop / resume: a project name, a full instance id, or a unique prefix of one. A reference matching **several** bridges — a prefix, or a project name with more than one instance — is refused, not guessed — see below. |
 
 `stop_session` returns `{"stopped": <bool>, ...}`; `resume_session` returns
-`{"resumed": <bool>, ...}` — the boolean is `false` (with the id echoed back) when
-no managed bridge matches.
+`{"resumed": <bool>, "id": <requested id>, ...}`. For `stop_session` the boolean is
+`false` (with the requested `id` echoed back) when no managed bridge matches. For
+`resume_session` a `false` means nothing was revived, and it has **two** shapes:
+
+- **No bridge matched** — the reply carries the requested `id` (and, for an ambiguous
+  prefix, `ambiguous`), with no `session`.
+- **The one-live-standard-bridge cap declined** — the target was not revived because a
+  live standard bridge already exists for the project. The reply carries `reason` and a
+  `session` for that already-live bridge, which is **NOT necessarily the one you named**.
+  Compare the echoed `id` against `session.id` to tell them apart, or simply read
+  `resumed`. This mirrors `POST /api/instances/{id}/resume`, whose body reports the same
+  decline via `created: false` + `reason`.
 
 An **ambiguous prefix** is refused rather than resolved to an arbitrary bridge, and
 the reply carries the candidates so a caller can retry with a longer one:
@@ -179,8 +189,10 @@ the reply carries the candidates so a caller can retry with a longer one:
 ```
 
 Check for `ambiguous` before treating a `false` as "the bridge is already stopped" —
-without it the two are indistinguishable, and the bridge is in fact still running.
-(Prefix matching arrived in
+without it the two are indistinguishable, and the bridge is in fact still running. For
+`resume_session`, likewise read `resumed` (and `reason`) rather than inferring a revive
+from getting a `session` back — a declined cap still returns the live bridge. (Prefix
+matching arrived in
 [#1099](https://github.com/schubydoo/clauster/issues/1099); before that these tools
 advertised prefixes but matched only in full.)
 

@@ -528,8 +528,28 @@ def test_resume_session_reports_resumed(server, fake_engine):
     body = _payload(_call(server, "resume_session", {"id": "alpha"}))
     assert body["resumed"] is True
     assert body["session"]["project"] == "alpha"
+    # Every reply echoes the requested id and carries a warnings list, matching the
+    # HTTP resume route and the other write tools (#1215 review).
+    assert body["id"] == "alpha"
+    assert body["warnings"] == []
     assert "reason" not in body
     assert fake_engine.calls == {"op": "resume_detailed", "identity": "alpha"}
+
+
+def test_resume_session_forwards_outcome_warnings(server, fake_engine):
+    # #1215: a pty resume without a worktree emits a concurrent-edits advisory on the
+    # created=True outcome. The tool must forward it, like spawn_session and the HTTP
+    # resume route do, rather than silently dropping it.
+    from clauster.runner import SpawnOutcome
+
+    fake_engine.resume_detailed_result = SpawnOutcome(
+        instance=_bridge("alpha", status="running"),
+        created=True,
+        warnings=["resuming without a worktree risks conflicting concurrent edits"],
+    )
+    body = _payload(_call(server, "resume_session", {"id": "alpha"}))
+    assert body["resumed"] is True
+    assert body["warnings"] == ["resuming without a worktree risks conflicting concurrent edits"]
 
 
 def test_resume_session_declined_cap_reports_not_resumed_with_reason(server, fake_engine):
@@ -549,6 +569,9 @@ def test_resume_session_declined_cap_reports_not_resumed_with_reason(server, fak
     assert body["reason"] == "a live standard bridge already exists for this project"
     # The live bridge is still surfaced so the caller can see what is running.
     assert body["session"]["project"] == "alpha"
+    # The declined reply also echoes the requested id — the one resumed: false shape
+    # that previously omitted it, leaving only a *different* bridge's id (#1215 review).
+    assert body["id"] == "alpha"
 
 
 def test_resume_session_unknown_id_reports_not_resumed(server, fake_engine):
