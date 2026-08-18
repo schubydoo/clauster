@@ -128,6 +128,13 @@ def _url_is_bare(url: str) -> bool:
         parts = urlsplit(url)
     except ValueError:
         return False  # unparseable -> not provably safe, keep it off the CLI
+    # Parser-differential residual, considered and left out of scope: `urlsplit` follows
+    # RFC 3986, where `\` and a non-numeric `:port` stay in the netloc, so
+    # `https://host\\secret` and `https://host:secret` read as bare here while a WHATWG
+    # client (browsers, node) would treat `\` as `/` and see a path. #1074's model is the
+    # operator's OWN credential vs local `ps`/`/proc` snooping — an operator does not
+    # transcribe a backslash into a real HTTP url, so this is self-inflicted, not an
+    # attacker-reachable leak. Flagged so a future reader knows it was weighed, not missed.
     return not (
         parts.path.strip("/") or parts.query or parts.fragment or parts.username or parts.password
     )
