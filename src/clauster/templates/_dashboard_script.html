@@ -4696,10 +4696,12 @@
           const res = await fetch(ROOT + "/api/projects/trust-all", { method: "POST" });
           if (res.ok) {
             const projects = await res.json();
-            // Flip badges from the authoritative response, then refresh readiness with a
-            // SINGLE batched call — not one loadPreflight per project; that fan-out is
-            // exactly what loadAllPreflight replaced — so every per-row trust check clears.
-            for (const p of projects) this.trustState[p.name] = p.trust_state;
+            // REPLACE trustState from the authoritative discovered set (the route returns
+            // every current project), not a merge — a merge would leave a stale untrusted
+            // key for a project removed/renamed on disk mid-session, pinning the banner
+            // with a count no click can clear. Then refresh readiness with a SINGLE batched
+            // call (loadAllPreflight replaced the per-project fan-out) so trust checks clear.
+            this.trustState = Object.fromEntries(projects.map((p) => [p.name, p.trust_state]));
             this.loadAllPreflight();
             this.toast("trusted all projects", "success");
           } else {
