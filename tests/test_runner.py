@@ -1097,6 +1097,23 @@ async def test_spawn_trust_true_trusts_untrusted_dir_then_spawns(
     assert is_trusted(proj.path, empty_trust)  # trust was written as part of the spawn
 
 
+async def test_trust_all_projects_trusts_then_second_call_is_noop(runner_config, tmp_path):
+    # trust_all_projects (#1224): the first call grants each discovered project its own
+    # key (all become trusted); the second finds nothing untrusted and is a no-op that
+    # still returns the full list — covering both branches, incl. the one that skips the
+    # cache invalidation.
+    config, _ = runner_config
+    untrusted = tmp_path / "untrusted.json"
+    untrusted.write_text("{}")
+    runner = SessionRunner(config, claude_json=untrusted)
+    first = await runner.trust_all_projects()
+    assert first and all(p.trust_state.value == "trusted" for p in first)
+    assert "alpha" in {p.name for p in first}  # the git repo got its own key
+    second = await runner.trust_all_projects()  # nothing left untrusted -> no-op branch
+    assert all(p.trust_state.value == "trusted" for p in second)
+    assert {p.name for p in second} == {p.name for p in first}
+
+
 async def test_spawn_trust_true_invalid_option_does_not_trust(
     runner_config, tmp_path, monkeypatch
 ):

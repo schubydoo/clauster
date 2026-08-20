@@ -1036,6 +1036,30 @@
         </div>
       </div>
 
+      <!-- Bulk trust reconciliation (#1224). Claude Code 2.1.232 stopped honoring a
+           parent grant for nested git repos, so projects trusted only via a projects-root
+           grant now read untrusted and each needs its own. Offer a one-click "Trust all"
+           while any remain untrusted; it fails closed (still untrusted) on error. -->
+      {# x-show lives on this OUTER wrapper (no d-* display utility) so Alpine's inline
+         display:none actually hides it; the d-flex layout sits on the inner alert. #}
+      {# role="status" (polite live region) so a banner that appears mid-session — a newly
+         discovered untrusted project surfacing on a poll — is announced (WCAG 4.1.3). Its
+         text carries the count; removal on success is silent and the toast covers that. #}
+      <div class="mb-3" data-test="trust-all-banner" x-show="anyUntrusted()" x-cloak
+           role="status" aria-live="polite">
+        <div class="alert alert-warning d-flex align-items-center mb-0">
+          <svg class="ico me-2 text-warning" aria-hidden="true"><use href="#ic-alert"/></svg>
+          <span class="me-auto"><strong x-text="untrustedCount()"></strong>
+            <span x-text="untrustedCount() === 1 ? 'project needs' : 'projects need'"></span>
+            trust before a session can launch here.</span>
+          <button type="button" class="btn btn-sm btn-warning" data-test="trust-all-go"
+                  @click="trustAll()" :disabled="trustingAll">
+            <span class="spinner-border spinner-border-sm me-1" x-show="trustingAll" x-cloak></span>
+            Trust all
+          </button>
+        </div>
+      </div>
+
       <!-- New project (create / clone) -->
       <div class="mb-3" x-show="np.open" x-cloak>
         <div class="card">

@@ -351,13 +351,20 @@ def test_write_untrusted_project_refused(tmp_path):
 def _client(write_config, tmp_path) -> TestClient:
     # state_dir is dot-prefixed so discovery never scans it as a project.
     cfg = load_config(write_config(f"state_dir: {tmp_path}/.state\n"))
-    # CLAUDE.md writes are trust-gated; trust projects_root so edits are allowed.
+    # CLAUDE.md writes are trust-gated; trust each project's OWN path so edits are
+    # allowed. Claude Code 2.1.232+ (#1224) no longer honors a parent grant for a
+    # nested git repo (e.g. the `alpha` fixture), so trusting projects_root alone
+    # would leave alpha untrusted and 403 the write.
     claude_json = tmp_path / "claude.json"
-    claude_json.write_text(
-        json.dumps(
-            {"projects": {str(cfg.projects_root.resolve()): {"hasTrustDialogAccepted": True}}}
-        )
+    trusted = {str(cfg.projects_root.resolve()): {"hasTrustDialogAccepted": True}}
+    trusted.update(
+        {
+            str(c.resolve()): {"hasTrustDialogAccepted": True}
+            for c in cfg.projects_root.iterdir()
+            if c.is_dir()
+        }
     )
+    claude_json.write_text(json.dumps({"projects": trusted}))
     runner = SessionRunner(cfg, claude_json=claude_json)
     return TestClient(create_app(cfg, runner=runner))
 

@@ -346,14 +346,25 @@ async def fake_claustrum() -> AsyncIterator[Callable[..., Awaitable]]:
 
 @pytest.fixture
 def runner_config(tmp_path: Path, projects_root: Path):
-    """A ClausterConfig wired to the fake binary, a tmp state_dir, and a trusted
-    projects_root (so spawn isn't blocked on trust by default)."""
+    """A ClausterConfig wired to the fake binary, a tmp state_dir, and trusted
+    projects (so spawn isn't blocked on trust by default).
+
+    Grants an own trust key to the projects_root AND each project under it: Claude
+    Code 2.1.232+ (#1224) no longer honors a parent grant for nested git repos, so a
+    git-repo project needs its own key to clear the spawn trust gate.
+    """
     from clauster.config import ClausterConfig
 
     claude_json = tmp_path / "claude.json"
-    claude_json.write_text(
-        json.dumps({"projects": {str(projects_root.resolve()): {"hasTrustDialogAccepted": True}}})
+    projects = {str(projects_root.resolve()): {"hasTrustDialogAccepted": True}}
+    projects.update(
+        {
+            str(c.resolve()): {"hasTrustDialogAccepted": True}
+            for c in projects_root.iterdir()
+            if c.is_dir()
+        }
     )
+    claude_json.write_text(json.dumps({"projects": projects}))
     config = ClausterConfig(
         projects_root=projects_root,
         state_dir=tmp_path / "state",

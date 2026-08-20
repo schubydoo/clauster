@@ -71,6 +71,7 @@ from .models import (
     InstanceStatus,
     Project,
     RemoteControlInstance,
+    TrustState,
     WorkingSession,
 )
 from .notify import Notifier
@@ -1156,6 +1157,27 @@ class SessionRunner:
         invalidate_discovery_cache()
         # Re-read so the returned Project reflects the new trust state.
         return self._discovered().get(name, proj)
+
+    async def trust_all_projects(self) -> list[Project]:
+        """Trust every currently-untrusted discovered project; return the refreshed list.
+
+        Claude Code 2.1.232+ stopped covering nested git repos with a parent grant
+        (#1224), so a projects_root that once trusted everything now leaves each repo
+        untrusted and needing its own key. This grants an own
+        ``hasTrustDialogAccepted`` key to each discovered project that is not already
+        trusted — the operator's "trust all discovered projects" action — then re-reads
+        so the returned list reflects the new state. Idempotent: an already-trusted
+        project is skipped. Any ``OSError`` propagates (the route maps it to 500) rather
+        than silently trusting a partial set.
+        """
+        untrusted = [
+            p for p in self._discovered().values() if p.trust_state is not TrustState.TRUSTED
+        ]
+        for proj in untrusted:
+            await asyncio.to_thread(trust_directory, proj.path, self._claude_json)
+        if untrusted:
+            invalidate_discovery_cache()
+        return list(self._discovered().values())
 
     # ----- spawn ----------------------------------------------------------
 

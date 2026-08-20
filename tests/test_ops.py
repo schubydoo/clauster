@@ -82,6 +82,42 @@ def test_doctor_all_ok(write_config, tmp_path):
     assert by["config"].status == OK
 
 
+def test_doctor_workspace_trust_reports_per_repo_coverage(write_config, tmp_path, monkeypatch):
+    # #1224: the workspace-trust check reports how many DISCOVERED PROJECTS are trusted
+    # (per-repo), not the now-meaningless projects_root state. Two of three trusted -> WARN.
+    from clauster.models import Project, TrustState
+
+    projs = [
+        Project(name="a", path=Path("/p/a"), trust_state=TrustState.TRUSTED),
+        Project(name="b", path=Path("/p/b"), trust_state=TrustState.TRUSTED),
+        Project(name="c", path=Path("/p/c"), trust_state=TrustState.UNTRUSTED),
+    ]
+    monkeypatch.setattr(ops_mod, "discover_projects", lambda *a, **k: projs)
+    wt = {c.name: c for c in run_doctor(_cfg_file(write_config, tmp_path))[0]}["workspace-trust"]
+    assert wt.status == WARN
+    assert wt.detail == "2/3 discovered projects trusted"
+
+
+def test_doctor_workspace_trust_ok_when_all_trusted(write_config, tmp_path, monkeypatch):
+    from clauster.models import Project, TrustState
+
+    monkeypatch.setattr(
+        ops_mod,
+        "discover_projects",
+        lambda *a, **k: [Project(name="a", path=Path("/p/a"), trust_state=TrustState.TRUSTED)],
+    )
+    wt = {c.name: c for c in run_doctor(_cfg_file(write_config, tmp_path))[0]}["workspace-trust"]
+    assert wt.status == OK
+    assert wt.detail == "1/1 discovered projects trusted"
+
+
+def test_doctor_workspace_trust_no_projects(write_config, tmp_path, monkeypatch):
+    monkeypatch.setattr(ops_mod, "discover_projects", lambda *a, **k: [])
+    wt = {c.name: c for c in run_doctor(_cfg_file(write_config, tmp_path))[0]}["workspace-trust"]
+    assert wt.status == OK
+    assert wt.detail == "no projects discovered"
+
+
 def test_doctor_missing_config_does_not_crash():
     checks, ok = run_doctor("/no/such/clauster.yml")
     assert ok is False

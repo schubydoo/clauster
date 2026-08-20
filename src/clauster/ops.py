@@ -27,7 +27,7 @@ import yaml
 
 from . import atomicio, claude_cli, config_write_mcp, deps, environments, procutil
 from .config import ClausterConfig, _missing_enforced_auth, load_config
-from .discovery import Project, _load_trusted_paths, trust_state_for
+from .discovery import Project, discover_projects
 from .state import CURRENT_SCHEMA, StateStore
 
 # ----- doctor -----------------------------------------------------------
@@ -145,13 +145,19 @@ def run_doctor(
     # auth sanity
     checks.append(_check_auth(config))
 
-    # workspace trust (informational)
-    trusted = trust_state_for(pr, _load_trusted_paths(claude_cli_json()))
+    # workspace trust — per-repo since Claude Code 2.1.232 (#1224): a parent grant no
+    # longer covers nested git repos, so report how many discovered projects are trusted
+    # rather than the now-misleading projects_root state.
+    projects = discover_projects(pr, claude_cli_json())
+    trusted_n = sum(1 for p in projects if p.trust_state.value == "trusted")
+    total = len(projects)
     checks.append(
         Check(
             "workspace-trust",
-            OK if trusted.value == "trusted" else WARN,
-            f"projects_root is {trusted.value}",
+            OK if trusted_n == total else WARN,
+            f"{trusted_n}/{total} discovered projects trusted"
+            if total
+            else "no projects discovered",
         )
     )
 

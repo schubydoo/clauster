@@ -419,6 +419,39 @@ def test_trust_endpoint_read_failure_returns_500(runner_config, monkeypatch):
         assert "could not update trust state" in resp.json()["detail"]
 
 
+def test_trust_all_endpoint_trusts_every_untrusted_project(runner_config, tmp_path):
+    # Bulk reconcile (#1224): with nothing trusted, POST /trust-all grants each discovered
+    # project its OWN key and returns them all trusted — including the git repo `alpha`,
+    # which a projects_root grant alone would no longer cover.
+    config, _ = runner_config
+    untrusted = tmp_path / "untrusted.json"
+    untrusted.write_text("{}")
+    runner = SessionRunner(config, claude_json=untrusted)
+    with TestClient(create_app(config, runner=runner)) as client:
+        resp = client.post("/api/projects/trust-all")
+        assert resp.status_code == 200
+        by_name = {p["name"]: p for p in resp.json()}
+        assert by_name["alpha"]["trust_state"] == "trusted"  # git repo, own key written
+        assert all(p["trust_state"] == "trusted" for p in resp.json())
+
+
+def test_trust_all_endpoint_write_failure_returns_500(runner_config, tmp_path, monkeypatch):
+    # A write failure surfaces as 500 rather than silently trusting a partial set.
+    config, _ = runner_config
+    untrusted = tmp_path / "untrusted.json"
+    untrusted.write_text("{}")
+    runner = SessionRunner(config, claude_json=untrusted)
+
+    def boom(*args, **kwargs):
+        raise PermissionError("simulated: cannot write claude.json")
+
+    monkeypatch.setattr("clauster.runner.trust_directory", boom)
+    with TestClient(create_app(config, runner=runner)) as client:
+        resp = client.post("/api/projects/trust-all")
+        assert resp.status_code == 500
+        assert "could not update trust state" in resp.json()["detail"]
+
+
 # -- external-session adoption endpoints (FE-4b, #330) -----------------------
 
 

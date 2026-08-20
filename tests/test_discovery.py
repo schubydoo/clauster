@@ -58,13 +58,42 @@ def test_untrusted_when_no_ancestor(tmp_path):
     assert trust_state_for(target, set()) is TrustState.UNTRUSTED
 
 
-def test_discover_sets_trust_from_claude_json(projects_root, tmp_path):
+def test_git_repo_does_not_inherit_ancestor_trust(tmp_path):
+    # A git repo (has .git) is NOT trusted by an ancestor grant — it needs its own key
+    # (Claude Code 2.1.232+, #1224). Contrast test_trust_inherits_down_tree, whose child
+    # is a plain dir and DOES inherit.
+    root = tmp_path / "projects"
+    repo = root / "repo"
+    (repo / ".git").mkdir(parents=True)
+    assert trust_state_for(repo, {root}) is TrustState.UNTRUSTED  # ancestor grant ignored
+    assert trust_state_for(repo, {repo}) is TrustState.TRUSTED  # own key trusts
+
+
+def test_discover_git_repo_needs_own_trust_key(projects_root, tmp_path):
+    # Claude Code 2.1.232+ (#1224): a git repo is trusted only by its OWN key; a
+    # non-repo dir still inherits from a trusted ancestor. Trusting only the
+    # projects_root therefore trusts the non-git projects (beta, gamma) but NOT the
+    # git repo (alpha) — matching what the CLI honors at spawn, so the badge can't
+    # fail open (green over a dir the CLI rejects).
     claude_json = tmp_path / ".claude.json"
     claude_json.write_text(
         json.dumps({"projects": {str(projects_root): {"hasTrustDialogAccepted": True}}})
     )
-    projects = discover_projects(projects_root, claude_json=claude_json)
-    assert all(p.trust_state is TrustState.TRUSTED for p in projects)
+    by_name = {p.name: p for p in discover_projects(projects_root, claude_json=claude_json)}
+    assert by_name["alpha"].trust_state is TrustState.UNTRUSTED  # git repo, no own key
+    assert by_name["beta"].trust_state is TrustState.TRUSTED  # non-repo inherits
+    assert by_name["gamma"].trust_state is TrustState.TRUSTED  # non-repo inherits
+
+
+def test_discover_git_repo_trusted_by_own_key(projects_root, tmp_path):
+    # Granting the git repo its OWN key trusts it — exactly what the CLI now requires (#1224).
+    claude_json = tmp_path / ".claude.json"
+    alpha = projects_root / "alpha"
+    claude_json.write_text(
+        json.dumps({"projects": {str(alpha): {"hasTrustDialogAccepted": True}}})
+    )
+    by_name = {p.name: p for p in discover_projects(projects_root, claude_json=claude_json)}
+    assert by_name["alpha"].trust_state is TrustState.TRUSTED
 
 
 def test_load_trusted_paths_non_utf8_returns_empty(tmp_path):
@@ -161,8 +190,10 @@ def test_cache_invalidates_on_claude_json_trust_change(projects_root, tmp_path):
     claude_json.write_text("{}")
     before = cache.get(projects_root, claude_json)
     assert all(p.trust_state is TrustState.UNTRUSTED for p in before)
+    # Grant each discovered project its OWN key so the flip holds under the per-repo
+    # rule (#1224) — a git repo would not be trusted by a projects_root grant alone.
     claude_json.write_text(
-        json.dumps({"projects": {str(projects_root): {"hasTrustDialogAccepted": True}}})
+        json.dumps({"projects": {str(p.path): {"hasTrustDialogAccepted": True} for p in before}})
     )
     future = os.stat(claude_json).st_mtime + 10
     os.utime(claude_json, (future, future))

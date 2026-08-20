@@ -1198,6 +1198,20 @@ def test_trust_on_start_guards(write_config):
     assert "Directory trusted" in txt  # the trusted-shield tooltip
 
 
+def test_bulk_trust_all_banner_and_handler_present(write_config):
+    # #1224 reconciliation: after Claude Code 2.1.232 dropped nested-repo trust inheritance,
+    # a projects-root grant no longer covers the git repos under it. A dashboard-level
+    # "Trust all" banner (shown only while any project is untrusted) plus its handler let
+    # the operator grant every discovered repo its own trust key at once — without the
+    # per-row standalone button that trust-on-start deliberately replaced.
+    txt = _client(write_config).get("/").text
+    assert 'data-test="trust-all-banner"' in txt
+    assert 'x-show="anyUntrusted()"' in txt  # banner hidden when everything is trusted
+    assert "async trustAll()" in txt  # the bulk handler
+    assert "/api/projects/trust-all" in txt  # posts to the bulk route
+    assert "Trust directory" not in txt  # still no per-row standalone trust button
+
+
 def test_dashboard_renders_resume_mode_picker(write_config):
     # Redesign: the Mode picker now lives in the launch popover's "More options"
     # disclosure (Desktop launch, #686). Its JS wiring is platform-independent

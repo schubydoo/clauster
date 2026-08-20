@@ -330,10 +330,13 @@ installed per-user or via nvm-managed node.
 **What you see:** a bridge spawns but sits waiting on Claude's workspace-trust
 prompt instead of becoming ready.
 
-**Most likely cause:** the project directory is not trusted and Clauster's
-trust pre-write did not cover it (for example, the project lives outside
-`projects_root`). Trust is ancestor-inheriting: trusting `projects_root`
-covers every project under it.
+**Most likely cause:** the git repository needs its **own** trust grant. Since
+Claude Code 2.1.232 a parent directory's grant no longer covers nested git repos,
+so trusting `projects_root` does not trust the repos under it (a non-repo directory
+still inherits from a trusted ancestor).
+
+**Fix:** launch it once via **Trust & start** (which trusts, then spawns), or click
+**Trust all** on the dashboard to grant every discovered project its own key at once.
 
 **Mechanism:** [Security — workspace trust](security.md#workspace-trust).
 
@@ -516,7 +519,7 @@ present in every run:
 | `version` | build up to date | upstream has a newer release / stale checkout |
 | `systemd` | `KillMode=process` (bridges survive a restart) | a restart would kill live pty bridges |
 | `node-toolchain` | node resolvable for npx MCP servers | nvm-only node invisible to bridges |
-| `workspace-trust` | `projects_root is trusted` | an untrusted root — spawns will stall on the trust prompt (see above) |
+| `workspace-trust` | `N/M discovered projects trusted` (OK when all are) | any untrusted discovered project — a session there will stall on the trust prompt (see above) |
 
 The rest belong to two **prefixed families** that grow as optional pieces are
 added, so read the prefix rather than expecting this page to enumerate them:

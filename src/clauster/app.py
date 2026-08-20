@@ -4851,6 +4851,21 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 status_code=500, detail=f"could not update trust state: {exc}"
             ) from exc
 
+    @app.post("/api/projects/trust-all")
+    async def api_trust_all() -> list[Project]:
+        """Trust every currently-untrusted discovered project; return the refreshed list.
+
+        For reconciling installs after Claude Code 2.1.232 dropped nested-repo trust
+        inheritance (#1224): one parent grant no longer covers the git repos under it, so
+        this grants each discovered project its own trust key in a single action.
+        """
+        try:
+            return await runner.trust_all_projects()
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500, detail=f"could not update trust state: {exc}"
+            ) from exc
+
     async def _resolve_project_path(name: str) -> Path:
         """Map a project name to its path, refusing unknown/unsafe names (traversal)."""
         if not is_valid_project_name(name):
