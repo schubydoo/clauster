@@ -96,19 +96,25 @@ def test_find_orphan_keepers_tolerates_glob_error(tmp_path, monkeypatch):
     assert pty_keeper.find_orphan_keepers(tmp_path, {"alpha"}) == []
 
 
-def test_find_orphan_keepers_carded_glob_error_protects_by_name(tmp_path, monkeypatch):
-    # iter_keepers succeeds (a live keeper for carded "alpha"), but alpha's per-project
-    # glob raises → the carded keeper must still NOT surface as an orphan (fail-closed).
-    _sidecar(tmp_path, "alpha", keeper_pid=os.getpid())
-    real_glob = pty_keeper.Path.glob
+def test_find_orphan_keepers_anchors_on_stem_not_prefix(tmp_path):
+    # #1181: protection keys on the parsed <name> stem, not an unanchored "app-*" prefix.
+    # With "app" carded and its sibling "app-staging" removed, the removed project's live
+    # keeper must surface as the orphan it is — the old glob("app-*") hid it (and --kill
+    # refused it) for as long as "app" stayed carded.
+    _sidecar(tmp_path, "app", keeper_pid=os.getpid())  # carded, live → protected
+    _sidecar(tmp_path, "app-staging", keeper_pid=os.getpid(), seq=1)  # removed, live → orphan
+    orphans = pty_keeper.find_orphan_keepers(tmp_path, carded_projects={"app"})
+    assert [o.project for o in orphans] == ["app-staging"]
 
-    def _selective(self, pattern):
-        if pattern.startswith("alpha-"):
-            raise OSError("simulated unreadable")
-        return real_glob(self, pattern)
 
-    monkeypatch.setattr(pty_keeper.Path, "glob", _selective)
-    assert pty_keeper.find_orphan_keepers(tmp_path, {"alpha"}) == []
+def test_find_orphan_keepers_unparsable_name_is_orphan(tmp_path):
+    # A sidecar whose filename doesn't parse to a <name>-<ms>-<seq> stem (project is None)
+    # belongs to no card, so a live one is an orphan — same result the old glob gave it.
+    (tmp_path / "weirdname.keeper.json").write_text(
+        json.dumps({"keeper_pid": os.getpid(), "state": "ready"}), encoding="utf-8"
+    )
+    orphans = pty_keeper.find_orphan_keepers(tmp_path, carded_projects={"app"})
+    assert [o.project for o in orphans] == [None]
 
 
 # ----- stop ----------------------------------------------------------------
