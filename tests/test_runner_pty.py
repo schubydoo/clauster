@@ -552,6 +552,23 @@ def test_apply_pty_info_ready_without_url_is_running(runner_config) -> None:
     assert inst.url is None  # no deep link captured on a URL-less resume (expected)
 
 
+def test_apply_pty_info_rejects_bool_bridge_pid(runner_config) -> None:
+    # `bool` is a subclass of `int`; a sidecar carrying "bridge_pid": true must not
+    # persist pid 1 (alive on every host -> a row that reads live forever). Same guard
+    # as _row_int / procutil / pty_keeper (#1182).
+    from clauster.models import RemoteControlInstance
+
+    runner, _ = _pty_runner(runner_config)
+    inst = RemoteControlInstance(project="alpha", label="alpha")
+    runner._apply_pty_info(
+        inst,
+        {"bridge_pid": True, "bridge_proc_start": 123.0, "state": "ready"},
+        _FakeProc(alive=True),
+    )
+    assert inst.bridge_pid is None  # bool rejected, not folded to pid 1
+    assert inst.bridge_proc_start is None  # gated behind a valid bridge_pid
+
+
 def test_await_ready_pty_returns_on_ready_without_url(runner_config, tmp_path) -> None:
     runner, _ = _pty_runner(runner_config)
     sidecar = tmp_path / "sc.json"
