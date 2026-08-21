@@ -27,7 +27,7 @@ jobs:
     if: >-
       ${{ github.event.pull_request.head.repo.full_name == github.repository
           && github.head_ref != 'release' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     timeout-minutes: 5
     steps:
       # Mint a clauster-ci App token (≥5,000 REST req/hr) so this check's GitHub

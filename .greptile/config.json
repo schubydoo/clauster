@@ -1,6 +1,7 @@
 {
   "strictness": 1,
   "fileChangeLimit": 100,
+  "disabledLabels": ["skip-review"],
   "triggerOnUpdates": true,
   "statusCheck": true,
   "statusCommentsEnabled": true,

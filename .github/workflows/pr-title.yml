@@ -29,7 +29,7 @@ concurrency:
 jobs:
   validate:
     name: conventional PR title
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     timeout-minutes: 5
     permissions:
       pull-requests: read
