@@ -87,8 +87,9 @@ never hit this.
 
 `claude.node_from_nvm` (**on by default**) fixes it: at each bridge spawn,
 Clauster resolves nvm's `default` node version (`nvm which default`, same
-resolution nvm itself uses) and appends its bin dir to the bridge `PATH`, after
-`path_append`. It tracks nvm's current default across node upgrades — no shim
+resolution nvm itself uses) and **prepends** its bin dir to the bridge `PATH`, before
+the base `PATH` — so nvm's node wins over a distro `node` already on `PATH`, and takes
+precedence over a `node` in `path_append` too (#1018). It tracks nvm's current default across node upgrades — no shim
 script to maintain — and is a no-op (never blocks a spawn) when nvm or a `default`
 alias isn't found. POSIX-only (nvm is a bash function); see the `node_from_nvm`
 row in the table above.
