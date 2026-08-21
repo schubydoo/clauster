@@ -62,8 +62,19 @@ permissions:
   contents: read
 
 concurrency:
-  # Releases must NOT be cancelled mid-flight.
-  group: ${{ github.workflow }}-${{ inputs.tag || github.ref }}
+  # Serialize ALL release runs with ONE global group (not per-tag): a re-publish of an
+  # older tag must not run concurrently with a newer release. The floating-tag
+  # eligibility (docker-build) is computed minutes before it is applied (docker-tag), so
+  # overlapping runs let the older run decide eligibility BEFORE the newer release exists
+  # and then apply a stale tag set — walking :latest / :MAJOR back onto the older signed
+  # digest, the exact regression this workflow guards against (#1188). Queuing is safe
+  # for a low-frequency release process. cancel-in-progress stays false: an in-flight
+  # release is never interrupted mid-publish; a second run waits rather than cancelling it.
+  # (GitHub keeps only ONE pending run per group, so if a THIRD run piles up it cancels the
+  # already-PENDING one — never the in-flight publish; recover any skipped version with the
+  # workflow_dispatch republish above. Needs three releases stacked at once — not a
+  # low-frequency-release concern.)
+  group: ${{ github.workflow }}
   cancel-in-progress: false
 
 jobs:
