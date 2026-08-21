@@ -2043,11 +2043,22 @@ account-security boundary — the fronting IdP/IAP above is. See
 </ul>
 <h2 id="workspace-trust">Workspace trust<a class="headerlink" href="#workspace-trust" title="Permanent link">&para;</a></h2>
 <p>A bridge <strong>refuses to spawn in an untrusted directory</strong>. Trust lives in
-<code>~/.claude.json</code> under
-<code>projects[&lt;resolved-abs-path&gt;].hasTrustDialogAccepted</code> and inherits down a tree.
-Clauster offers an explicit <strong>"Trust this directory"</strong> action that sets the flag
-for exactly one project key; trusted directories show a green shield and start
-with no prompt.</p>
+<code>~/.claude.json</code> under <code>projects[&lt;resolved-abs-path&gt;].hasTrustDialogAccepted</code>. A
+<strong>git repository requires its own</strong> trust grant: Claude Code 2.1.232 stopped
+honoring a parent directory's grant for nested git repos, so a projects-root grant
+no longer cascades to the repos under it. A non-repo directory still inherits from a
+trusted ancestor. Clauster mirrors this exactly, so the dashboard never shows a repo
+as trusted that the CLI would reject at spawn — it fails <strong>closed</strong>.</p>
+<p>Two trust actions, both setting the flag for the project's own key:</p>
+<ul>
+<li><strong>Trust &amp; start</strong> — launching a session in an untrusted directory shows a
+  confirm dialog (with a safety checkbox) that trusts the directory, then spawns.</li>
+<li><strong>Trust all</strong> — a dashboard banner, shown while any discovered project is
+  untrusted, grants every discovered project its own key at once. It exists to
+  reconcile an install after the 2.1.232 change, where repos trusted only via a
+  parent grant now read untrusted.</li>
+</ul>
+<p>Trusted directories show a green shield and start with no prompt.</p>
 <p>The <code>claude</code> CLI writes the same file concurrently, so the trust writer
 (<code>trust.py</code>) guards it with two layers:</p>
 <ul>

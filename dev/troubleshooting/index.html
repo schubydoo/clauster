@@ -2622,10 +2622,12 @@ installed per-user or via nvm-managed node.</p>
 <h3 id="the-trust-prompt-keeps-blocking-the-spawn">The trust prompt keeps blocking the spawn<a class="headerlink" href="#the-trust-prompt-keeps-blocking-the-spawn" title="Permanent link">&para;</a></h3>
 <p><strong>What you see:</strong> a bridge spawns but sits waiting on Claude's workspace-trust
 prompt instead of becoming ready.</p>
-<p><strong>Most likely cause:</strong> the project directory is not trusted and Clauster's
-trust pre-write did not cover it (for example, the project lives outside
-<code>projects_root</code>). Trust is ancestor-inheriting: trusting <code>projects_root</code>
-covers every project under it.</p>
+<p><strong>Most likely cause:</strong> the git repository needs its <strong>own</strong> trust grant. Since
+Claude Code 2.1.232 a parent directory's grant no longer covers nested git repos,
+so trusting <code>projects_root</code> does not trust the repos under it (a non-repo directory
+still inherits from a trusted ancestor).</p>
+<p><strong>Fix:</strong> launch it once via <strong>Trust &amp; start</strong> (which trusts, then spawns), or click
+<strong>Trust all</strong> on the dashboard to grant every discovered project its own key at once.</p>
 <p><strong>Mechanism:</strong> <a href="../security/#workspace-trust">Security — workspace trust</a>.</p>
 <h2 id="claude-itself-is-the-problem">Claude itself is the problem<a class="headerlink" href="#claude-itself-is-the-problem" title="Permanent link">&para;</a></h2>
 <h3 id="not-logged-in-access-token-has-expired-re-authenticate-with-claude">"not logged in" / "access token has expired; re-authenticate with <code>claude</code>"<a class="headerlink" href="#not-logged-in-access-token-has-expired-re-authenticate-with-claude" title="Permanent link">&para;</a></h3>
@@ -2811,8 +2813,8 @@ present in every run:</p>
 </tr>
 <tr>
 <td><code>workspace-trust</code></td>
-<td><code>projects_root is trusted</code></td>
-<td>an untrusted root — spawns will stall on the trust prompt (see above)</td>
+<td><code>N/M discovered projects trusted</code> (OK when all are)</td>
+<td>any untrusted discovered project — a session there will stall on the trust prompt (see above)</td>
 </tr>
 </tbody>
 </table>

@@ -1868,8 +1868,8 @@ panel uses, from the CLI:</p>
 </tr>
 <tr>
 <td><code>workspace-trust</code></td>
-<td>Whether <code>projects_root</code> has accepted Claude's workspace-trust dialog.</td>
-<td><strong>WARN</strong> if untrusted — advisory, recoverable from the UI (trust-on-start).</td>
+<td>How many discovered projects are trusted (reports <code>N/M discovered projects trusted</code>). Per-repo since Claude Code 2.1.232 — a git repo needs its own grant, so a <code>projects_root</code> grant no longer covers nested repos.</td>
+<td><strong>WARN</strong> if any discovered project is untrusted — advisory, recoverable from the UI (Trust &amp; start, or Trust all).</td>
 </tr>
 <tr>
 <td><code>version</code></td>
