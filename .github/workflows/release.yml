@@ -36,12 +36,12 @@ on:
   # come from `github.ref` while the code comes from the resolved tag, so the mixed
   # form would ship one version's build under another version's number.
   #
-  # ⚠️ Re-publishing an OLDER tag walks the floating tags BACKWARDS. `type=raw,
-  # value=latest` carries no `enable=` condition, so a dispatch of `v1.0.0` after
-  # `v1.1.0` shipped re-points `:latest`, `:1` and `:1.0` at the older build — with a
-  # valid signature on it. Pre-existing, and not what "(re)publish an existing tag"
-  # sounds like: gating `latest` on the dispatched tag being the newest is the real
-  # fix and wants its own change.
+  # Re-publishing an OLDER tag no longer walks the floating tags backwards (#1188):
+  # the `docker-build` job's `Floating-tag eligibility` step gates `:latest`, `:MAJOR`
+  # and `:MAJOR.MINOR` on the dispatched version being the newest for that scope, so a
+  # dispatch of `v1.0.0` after `v1.1.0` shipped publishes only the immutable `:1.0.0`
+  # and leaves the floats pointed at the newer build. The immutable `:X.Y.Z` tag is
+  # always published.
   workflow_dispatch:
     inputs:
       tag:
@@ -62,8 +62,19 @@ permissions:
   contents: read
 
 concurrency:
-  # Releases must NOT be cancelled mid-flight.
-  group: ${{ github.workflow }}-${{ inputs.tag || github.ref }}
+  # Serialize ALL release runs with ONE global group (not per-tag): a re-publish of an
+  # older tag must not run concurrently with a newer release. The floating-tag
+  # eligibility (docker-build) is computed minutes before it is applied (docker-tag), so
+  # overlapping runs let the older run decide eligibility BEFORE the newer release exists
+  # and then apply a stale tag set — walking :latest / :MAJOR back onto the older signed
+  # digest, the exact regression this workflow guards against (#1188). Queuing is safe
+  # for a low-frequency release process. cancel-in-progress stays false: an in-flight
+  # release is never interrupted mid-publish; a second run waits rather than cancelling it.
+  # (GitHub keeps only ONE pending run per group, so if a THIRD run piles up it cancels the
+  # already-PENDING one — never the in-flight publish; recover any skipped version with the
+  # workflow_dispatch republish above. Needs three releases stacked at once — not a
+  # low-frequency-release concern.)
+  group: ${{ github.workflow }}
   cancel-in-progress: false
 
 jobs:
@@ -252,17 +263,61 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # #1188: a manual (re)publish of an OLDER tag must not walk :latest / :MAJOR /
+      # :MAJOR.MINOR backwards onto an older (validly signed) image. Decide, per float
+      # scope, whether the version being published is the newest; the metadata step
+      # below gates each floating tag on the matching flag. The immutable :X.Y.Z tag is
+      # never gated. A pre-release never moves a float. Fails CLOSED: a releases-API
+      # error aborts the job (set -e) rather than defaulting a float on.
+      - name: Floating-tag eligibility
+        id: floats
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          this="${REF_NAME#v}"
+          if printf '%s' "$this" | grep -q '-'; then
+            echo "pre-release ${REF_NAME} -> no floating tags move"
+            { echo "overall=false"; echo "major=false"; echo "minor=false"; } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Existing FINAL (non-prerelease, non-draft) release versions. Captured into a
+          # var first so a gh failure trips set -e (fail closed). `--paginate --jq` filters
+          # per page, so the concatenated output stays newline-delimited tag names.
+          tags_raw="$(gh api --paginate --jq '.[] | select(.prerelease == false and .draft == false) | .tag_name' "repos/${REPO}/releases")"
+          # ...plus the version being published, added explicitly so the compare never
+          # races this release's own appearance in the API.
+          mapfile -t versions < <(printf '%s\n' "$tags_raw" | sed 's/^v//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' || true)
+          versions+=("$this")
+          major="${this%%.*}"        # e.g. 1
+          minor="${this%.*}"         # e.g. 1.0
+          newest_overall="$(printf '%s\n' "${versions[@]}" | sort -V | tail -1)"
+          # Escape dots so the scope filters match a literal version prefix, not any-char.
+          newest_major="$(printf '%s\n' "${versions[@]}" | grep -E "^${major//./\\.}\." | sort -V | tail -1)"
+          newest_minor="$(printf '%s\n' "${versions[@]}" | grep -E "^${minor//./\\.}\." | sort -V | tail -1)"
+          is() { if [ "$this" = "$1" ]; then echo true; else echo false; fi; }
+          {
+            echo "overall=$(is "$newest_overall")"
+            echo "major=$(is "$newest_major")"
+            echo "minor=$(is "$newest_minor")"
+          } >> "$GITHUB_OUTPUT"
+          echo "publishing ${this}: newest_overall=${newest_overall} newest_major=${newest_major} newest_minor=${newest_minor}"
       - name: Image metadata (tags + labels)
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/${{ github.repository }}
           # Tag is refs/tags/vX.Y.Z on a push; semver patterns strip the leading v.
+          # The immutable :X.Y.Z tag is always emitted; the three FLOATING tags are
+          # gated by the `floats` step so a re-published older tag can't move them
+          # backwards (#1188).
           tags: |
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=raw,value=latest
+            type=semver,pattern={{major}}.{{minor}},enable=${{ steps.floats.outputs.minor }}
+            type=semver,pattern={{major}},enable=${{ steps.floats.outputs.major }}
+            type=raw,value=latest,enable=${{ steps.floats.outputs.overall }}
       - name: Build and push BY DIGEST (amd64 + arm64)
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
