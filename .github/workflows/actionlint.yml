@@ -1,0 +1,54 @@
+name: Actionlint
+
+# Lints GitHub Actions workflows: YAML schema, `${{ }}` expression types, and — via
+# shellcheck — the shell in every `run:` block. Adopting a gate, not a cleanup:
+# actionlint v1.7.12 was measured at 0 findings across all workflows (#1170). zizmor
+# already covers Actions *security*; this covers shell/expression *correctness*, which
+# nothing else did (69 run: blocks across the workflows were unchecked).
+#
+# Runs on EVERY pull request (no `paths:` filter) and on push to main. Deliberately NOT
+# paths-filtered: actionlint over the tree takes ~seconds, and a paths-filtered check
+# that is ALSO a required status hangs a non-workflow PR at "Expected — waiting for
+# status" (#196; see the same reasoning in osv-scanner.yml). Always-on keeps it safe to
+# mark required.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: actionlint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actionlint:
+    name: actionlint
+    # ubuntu-latest ships shellcheck; actionlint lints run: blocks only when it is on PATH.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install + run actionlint (version + checksum pinned)
+        env:
+          ACTIONLINT_VERSION: "1.7.12"
+          # sha256 of actionlint_1.7.12_linux_amd64.tar.gz (from the release's signed
+          # checksums.txt). Renovate can bump the pair; a moved artifact fails the -c.
+          ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+        run: |
+          set -euo pipefail
+          url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL "$url" -o actionlint.tar.gz
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum -c -
+          tar -xzf actionlint.tar.gz actionlint
+          # The shellcheck binary is preinstalled on ubuntu-latest; fail loudly if that
+          # ever changes, so this never silently lints LESS than it appears to. (Comment
+          # kept from starting with the word shellcheck: that reads as a shellcheck
+          # directive and errors SC1072/SC1073.)
+          shellcheck --version >/dev/null || { echo "::error::shellcheck missing — run: blocks would go unlinted"; exit 1; }
+          ./actionlint -color
