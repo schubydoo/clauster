@@ -70,7 +70,7 @@ It prints one line per check and exits non-zero if any check **fails**. Checks:
 | `state_dir` | `state_dir` is writable (or creatable under an existing ancestor). | **FAIL** if not writable. |
 | `git` | `git` is on `PATH` (needed for `create --git-init` and clone). | **WARN** if absent. |
 | `auth` | Auth is internally consistent and enforced for the bind (the same rule that refuses to start). | **FAIL** for a non-loopback bind without enforced auth. |
-| `workspace-trust` | Whether `projects_root` has accepted Claude's workspace-trust dialog. | **WARN** if untrusted — advisory, recoverable from the UI (trust-on-start). |
+| `workspace-trust` | How many discovered projects are trusted (reports `N/M discovered projects trusted`). Per-repo since Claude Code 2.1.232 — a git repo needs its own grant, so a `projects_root` grant no longer covers nested repos. | **WARN** if any discovered project is untrusted — advisory, recoverable from the UI (Trust & start, or Trust all). |
 | `version` | For a from-source checkout, whether `HEAD` is behind its last-fetched upstream. | **WARN** if behind; absent for PyPI/Docker installs. |
 | `node-toolchain` | On an nvm host, whether nvm's default `node` is reachable on a spawned bridge's `PATH`. | **WARN** if missing or not on the bridge `PATH` — advisory; only present on POSIX nvm hosts. |
 | `port` | (CLI only) whether the listen port is free to bind. | **WARN** if already in use. |

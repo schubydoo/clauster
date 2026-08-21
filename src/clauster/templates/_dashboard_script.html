@@ -383,6 +383,7 @@
       metrics: {},        // project name -> live CPU/mem/disk sample (null when not running)
       trustState: {},     // project name -> 'trusted' | 'untrusted' (reactive; no reload on trust)
       trusting: {},       // project name -> bool (trust request in flight)
+      trustingAll: false, // bulk "Trust all" request in flight (#1224)
       toasts: [],
       _toastSeq: 0,
       _logSeq: 0,          // monotonic token per opened log tail (retire check; see openLogs)
@@ -4678,6 +4679,37 @@
           }
         } catch (e) { this.errors[name] = String(e); this.toast(name + ": trust failed", "error"); }
         this.trusting[name] = false;
+      },
+      // Bulk trust (#1224): whether ANY known project is untrusted, and how many, drive
+      // the "Trust all" reconciliation banner. trustState holds every project (seeded from
+      // the server INITIAL_TRUST and kept fresh on refresh), so an undefined value never
+      // masquerades as trusted.
+      anyUntrusted() {
+        return Object.values(this.trustState).some((s) => s !== "trusted");
+      },
+      untrustedCount() {
+        return Object.values(this.trustState).filter((s) => s !== "trusted").length;
+      },
+      async trustAll() {
+        this.trustingAll = true;
+        try {
+          const res = await fetch(ROOT + "/api/projects/trust-all", { method: "POST" });
+          if (res.ok) {
+            const projects = await res.json();
+            // REPLACE trustState from the authoritative discovered set (the route returns
+            // every current project), not a merge — a merge would leave a stale untrusted
+            // key for a project removed/renamed on disk mid-session, pinning the banner
+            // with a count no click can clear. Then refresh readiness with a SINGLE batched
+            // call (loadAllPreflight replaced the per-project fan-out) so trust checks clear.
+            this.trustState = Object.fromEntries(projects.map((p) => [p.name, p.trust_state]));
+            this.loadAllPreflight();
+            this.toast("trusted all projects", "success");
+          } else {
+            const b = await res.json().catch(() => ({}));
+            this.toast(b.detail || "trust all failed", "error");
+          }
+        } catch (e) { this.toast(String(e), "error"); }
+        this.trustingAll = false;
       },
       // --- hosted live-view sessions (claustrum stream-json channel) ---
       hostedStatusBadge(status) {

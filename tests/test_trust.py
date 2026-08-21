@@ -55,6 +55,31 @@ def test_trust_directory_creates_backup_once(tmp_path: Path):
     assert json.loads(backup.read_text()) == {"projects": {}}  # pre-modification snapshot
 
 
+def test_is_trusted_git_repo_requires_own_key(tmp_path: Path):
+    # is_trusted drives the spawn gate (runner._spawn_locked). Under Claude Code
+    # 2.1.232+ (#1224) a git repo is NOT trusted by an ancestor grant — only its own
+    # key — so the gate fails closed rather than passing a spawn the CLI then rejects.
+    cj = tmp_path / "claude.json"
+    repo = tmp_path / "projects" / "repo"
+    (repo / ".git").mkdir(parents=True)
+
+    cj.write_text(json.dumps({"projects": {str(repo.parent): {"hasTrustDialogAccepted": True}}}))
+    assert trust.is_trusted(repo, cj) is False  # ancestor grant no longer counts
+
+    trust.trust_directory(repo, cj)  # grant the repo its own key
+    assert trust.is_trusted(repo, cj) is True
+
+
+def test_is_trusted_non_git_dir_inherits(tmp_path: Path):
+    # A non-repo directory still inherits trust from a trusted ancestor (#1224 keeps
+    # the CLI's non-git behaviour), so the gate lets it through.
+    cj = tmp_path / "claude.json"
+    plain = tmp_path / "projects" / "plain"
+    plain.mkdir(parents=True)
+    cj.write_text(json.dumps({"projects": {str(plain.parent): {"hasTrustDialogAccepted": True}}}))
+    assert trust.is_trusted(plain, cj) is True
+
+
 def test_trust_directory_idempotent_and_is_trusted(tmp_path: Path):
     cj = tmp_path / "claude.json"
     cj.write_text("{}")

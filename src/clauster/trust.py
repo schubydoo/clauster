@@ -1,9 +1,11 @@
 """Workspace-trust writer (spec §11 RESOLVED + guardrail).
 
 A bridge refuses to spawn in an untrusted directory. Trust lives in
-``~/.claude.json`` under ``projects[<resolved-abs-path>].hasTrustDialogAccepted``
-and inherits down a tree. Clauster offers an explicit "Trust this directory"
-action that sets the flag for exactly one project key.
+``~/.claude.json`` under ``projects[<resolved-abs-path>].hasTrustDialogAccepted``.
+A git repository needs its OWN key — Claude Code 2.1.232+ no longer honors a parent
+grant for nested repos — while a non-repo directory still inherits from a trusted
+ancestor (see :func:`clauster.discovery._trust_state_against_resolved`). Clauster's
+trust actions each set the flag for exactly one project key.
 
 The ``claude`` CLI writes this same file concurrently. The hardened locked
 read-modify-write that guards it — advisory ``flock`` + atomic replace + one-time

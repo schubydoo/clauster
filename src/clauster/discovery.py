@@ -54,7 +54,9 @@ def is_valid_project_name(name: str) -> bool:
 def _load_trusted_paths(claude_json: Path) -> set[Path]:
     """Return the set of paths with hasTrustDialogAccepted: true in ~/.claude.json.
 
-    Trust inherits *down* a tree, so the caller walks ancestors against this set.
+    Trust inherits *down* a tree for non-repo directories, so the caller walks
+    ancestors against this set — but a git repository requires its own key
+    (Claude Code 2.1.232+); see :func:`_trust_state_against_resolved`.
     """
     try:
         data = json.loads(claude_json.read_text(encoding="utf-8"))
@@ -76,12 +78,25 @@ def _load_trusted_paths(claude_json: Path) -> set[Path]:
     return trusted
 
 
-def _trust_state_against_resolved(candidate: Path, resolved_trusted: set[Path]) -> TrustState:
+def _trust_state_against_resolved(
+    candidate: Path, resolved_trusted: set[Path], *, is_git_repo: bool
+) -> TrustState:
     """Trust state for an already-``resolve()``-d path against pre-resolved trusted paths.
 
     The trusted set is resolved once by the caller so a discovery scan does not
     re-``resolve()`` the whole set per project (``O(N×M)`` syscalls otherwise).
+
+    A **git repository** is trusted only by its OWN ``hasTrustDialogAccepted`` key:
+    Claude Code 2.1.232 stopped honoring a parent grant for nested git repos, so an
+    ancestor grant is no longer trust for one (mirrors the CLI, confirmed against a
+    live trust prompt 2026-08-20). A non-repo directory still inherits from a trusted
+    ancestor. Counting an ancestor grant as trust for a git repo would fail **open** —
+    a green badge over a directory the CLI rejects at spawn with "Workspace not
+    trusted" (#1224). ``is_git_repo`` is keyword-only and required so every caller
+    states it explicitly rather than defaulting into the wrong rule.
     """
+    if is_git_repo:
+        return TrustState.TRUSTED if candidate in resolved_trusted else TrustState.UNTRUSTED
     for ancestor in (candidate, *candidate.parents):
         if ancestor in resolved_trusted:
             return TrustState.TRUSTED
@@ -89,8 +104,17 @@ def _trust_state_against_resolved(candidate: Path, resolved_trusted: set[Path]) 
 
 
 def trust_state_for(path: Path, trusted: set[Path]) -> TrustState:
-    """Trusted if the path or any ancestor has accepted the trust dialog."""
-    return _trust_state_against_resolved(path.resolve(), {p.resolve() for p in trusted})
+    """Trust state for ``path``: a git repo needs its own key, a non-repo inherits.
+
+    A git repository is trusted only by its own accepted trust dialog (Claude Code
+    2.1.232+); a non-repo directory inherits from any trusted ancestor. See
+    :func:`_trust_state_against_resolved`.
+    """
+    return _trust_state_against_resolved(
+        path.resolve(),
+        {p.resolve() for p in trusted},
+        is_git_repo=(path / ".git").exists(),
+    )
 
 
 def discover_projects(projects_root: Path, claude_json: Path = CLAUDE_JSON) -> list[Project]:
@@ -103,14 +127,17 @@ def discover_projects(projects_root: Path, claude_json: Path = CLAUDE_JSON) -> l
             continue
         if not is_valid_project_name(entry.name):
             continue
+        is_git_repo = (entry / ".git").exists()
         projects.append(
             Project(
                 name=entry.name,
                 path=entry,
-                is_git_repo=(entry / ".git").exists(),
+                is_git_repo=is_git_repo,
                 has_claude_md=(entry / "CLAUDE.md").is_file(),
                 has_claude_dir=(entry / ".claude").is_dir(),
-                trust_state=_trust_state_against_resolved(entry.resolve(), resolved_trusted),
+                trust_state=_trust_state_against_resolved(
+                    entry.resolve(), resolved_trusted, is_git_repo=is_git_repo
+                ),
             )
         )
     return projects
