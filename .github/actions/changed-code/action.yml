@@ -78,7 +78,10 @@ runs:
         # always runs. Known thinner spot: zizmor's workflow audit skips on
         # `synchronize` (pre-existing), so a fixup push to a workflow-only PR is
         # audited on the next open/reopen/ready_for_review, not on that push.
-        noncode='(\.md$|^docs/|^mkdocs\.yml$|^LICENSE$|\.(png|jpe?g|gif|svg|ico)$|^\.github/|^\.greptile/)'
+        # `.pre-commit-config.yaml` is repo automation at the root (outside `.github/`):
+        # changing it alters no runtime behaviour, so pytest / `uv build` / the Docker image
+        # have nothing to prove. yamllint (in the always-on `lint` job) still validates it.
+        noncode='(\.md$|^docs/|^mkdocs\.yml$|^LICENSE$|\.(png|jpe?g|gif|svg|ico)$|^\.github/|^\.greptile/|^\.pre-commit-config\.ya?ml$)'
         code=false
         while IFS= read -r f; do
           [ -z "$f" ] && continue
