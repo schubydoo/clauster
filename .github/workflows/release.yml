@@ -398,12 +398,23 @@ jobs:
           fi
           args=()
           for tag in ${TAGS}; do args+=(--tag "${tag}"); done
+          # #1189: PREVENTION — predict the index digest before publishing. `--dry-run`
+          # prints the OCI index JSON but publishes nothing; an index's digest IS the
+          # sha256 of those bytes, so hashing them predicts what `create` would push. `$(...)`
+          # strips the trailing newline and `printf '%s'` re-emits it without one, so the
+          # hashed bytes match what buildx hashed. Refuse if it wouldn't be the signed digest.
+          dry="$(docker buildx imagetools create --dry-run "${args[@]}" "${IMAGE}@${DIGEST}")"
+          predicted="sha256:$(printf '%s' "${dry}" | sha256sum | cut -d' ' -f1)"
+          if [ "${predicted}" != "${DIGEST}" ]; then
+            echo "::error::would publish ${predicted}, not the signed ${DIGEST}; nothing published" >&2
+            exit 1
+          fi
           docker buildx imagetools create "${args[@]}" "${IMAGE}@${DIGEST}"
-          # DETECTION, not prevention — be precise about which. `imagetools create` above
-          # has already published every tag, so if the digest ever did move, the
-          # mis-pointing tags are live and public until someone reacts. This loop makes
-          # that loud instead of silent, which is the trade: the assumption was measured
-          # (see this job's header) and the failure mode would otherwise be invisible.
+          # Layered DETECTION behind the prediction above. The predict step relies on the
+          # dry-run JSON being byte-identical to what `create` pushes — a buildx
+          # implementation detail, not a guarantee — so this loop re-proves the published
+          # tags resolve to the signed digest. If buildx ever diverges, the tags are
+          # already public here, so this makes a moved digest loud instead of silent.
           for tag in ${TAGS}; do
             got="$(docker buildx imagetools inspect "${tag}" --format '{{.Manifest.Digest}}')"
             if [ "${got}" != "${DIGEST}" ]; then

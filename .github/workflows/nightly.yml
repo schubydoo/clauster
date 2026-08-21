@@ -237,7 +237,20 @@ jobs:
           fi
           args=()
           for tag in ${TAGS}; do args+=(--tag "${tag}"); done
+          # #1189: PREVENTION — predict the index digest before publishing. `--dry-run`
+          # prints the OCI index JSON but publishes nothing; an index's digest IS the
+          # sha256 of those bytes, so hashing them predicts what `create` would push. `$(...)`
+          # strips the trailing newline and `printf '%s'` re-emits it without one, so the
+          # hashed bytes match what buildx hashed. Refuse if it wouldn't be the signed digest.
+          dry="$(docker buildx imagetools create --dry-run "${args[@]}" "${IMAGE}@${DIGEST}")"
+          predicted="sha256:$(printf '%s' "${dry}" | sha256sum | cut -d' ' -f1)"
+          if [ "${predicted}" != "${DIGEST}" ]; then
+            echo "::error::would publish ${predicted}, not the signed ${DIGEST}; nothing published" >&2
+            exit 1
+          fi
           docker buildx imagetools create "${args[@]}" "${IMAGE}@${DIGEST}"
+          # Layered DETECTION behind the prediction above (the dry-run bytes matching the
+          # pushed bytes is a buildx detail, not a guarantee) — re-prove the tags resolve.
           for tag in ${TAGS}; do
             got="$(docker buildx imagetools inspect "${tag}" --format '{{.Manifest.Digest}}')"
             if [ "${got}" != "${DIGEST}" ]; then
