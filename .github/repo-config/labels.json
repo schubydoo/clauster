@@ -10,6 +10,7 @@
   { "name": "dependencies", "color": "ededed", "description": "Renovate-opened dependency update PRs (and the dashboard issue)" },
   { "name": "vendored-assets", "color": "ededed", "description": "Renovate heads-up to re-vendor self-hosted front-end assets (manual dist update)" },
   { "name": "no-changelog", "color": "ededed", "description": "Skip the changeset/changelog requirement (CI / refactor / tests / docs)" },
+  { "name": "skip-review", "color": "ededed", "description": "Greptile skips reviewing this PR (.greptile/config.json disabledLabels) — conserves the OSS review cap" },
   { "name": "tracked", "color": "fa68de", "description": "Tracked as an issue on the GitHub Project board (open work)" },
   { "name": "needs-repro", "color": "FBCA04", "description": "Confirmed-enough to track, but needs a deterministic reproduction before a fix" },
   { "name": "no-autoupdate", "color": "fbca04", "description": "PR auto-update skips this PR: hold it behind main; rebase manually" }
