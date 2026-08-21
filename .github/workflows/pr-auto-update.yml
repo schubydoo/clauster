@@ -50,7 +50,7 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ secrets.CLAUSTER_CI_APP_ID }}
+          client-id: ${{ secrets.CLAUSTER_CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
           # Exactly what the merges API needs: contents:write to push the merge
           # commit, pull_requests:read to list the open PRs.
@@ -70,7 +70,7 @@ jobs:
         run: |
           echo "::error::clauster-ci App token mint produced an empty token; \
           refusing to proceed (a merge commit pushed with GITHUB_TOKEN would not \
-          re-trigger PR CI). Check the CLAUSTER_CI_APP_ID / CLAUSTER_CI_APP_PRIVATE_KEY \
+          re-trigger PR CI). Check the CLAUSTER_CI_APP_CLIENT_ID / CLAUSTER_CI_APP_PRIVATE_KEY \
           secrets and that the clauster-ci App is installed on this repo."
           exit 1
       - name: Update open PRs targeting the default branch

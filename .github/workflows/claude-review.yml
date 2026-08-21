@@ -281,10 +281,28 @@ jobs:
             if [ -z "$RESULT" ]; then
               echo "::warning::execution log present but no result record parsed — denial count unknown. Re-run with '@claude review debug' to capture the log as an artifact."
             else
-              D=$(printf '%s' "$RESULT" | jq -r '.permission_denials_count // "?"' 2>/dev/null || echo "?")
+              # #1180 Part 1: an errored/exhausted run (e.g. subtype=error_max_turns) still
+              # posts the action's early tracking comment, so the AFTER>BEFORE check below
+              # passes on a run that never actually reviewed. Detect it from the result
+              # record's own error fields — independent of whatever number the turn cap holds.
+              IS_ERR=$(printf '%s' "$RESULT" | jq -r '.is_error // false' 2>/dev/null || echo "false")
+              SUBTYPE=$(printf '%s' "$RESULT" | jq -r '.subtype // ""' 2>/dev/null || echo "")
+              if [ "$IS_ERR" = "true" ] || [ "${SUBTYPE#error}" != "$SUBTYPE" ]; then
+                echo "::error::the review did not complete (is_error=$IS_ERR subtype='${SUBTYPE:-none}') — it hit the turn cap, timed out, or errored. The tracking comment it left is NOT a review; re-run with '@claude review'."
+                exit 1
+              fi
+              # #1180 Part 2: the SAVED log carries denials as a `permission_denials` ARRAY,
+              # not the `permission_denials_count` scalar the console print shows — reading
+              # the scalar returned "?" while 12 denials went unreported. Prefer the array's
+              # length, fall back to the scalar, and say "?" only when NEITHER field exists
+              # (has() tells an absent field apart from a genuine zero).
+              D=$(printf '%s' "$RESULT" | jq -r '
+                if has("permission_denials") then (.permission_denials | length)
+                elif has("permission_denials_count") then .permission_denials_count
+                else "?" end' 2>/dev/null || echo "?")
               case "$D" in
                 0) : ;;  # the only silent path: parsed, and genuinely zero
-                "?") echo "::warning::result record parsed but has no permission_denials_count — the log format may have changed upstream" ;;
+                "?") echo "::warning::result record parsed but carries neither permission_denials nor permission_denials_count — the log format may have changed upstream" ;;
                 *) echo "::warning::$D tool call(s) were denied. A review blocked from SUBMITTING falls back to one standalone review per finding (or a plain comment) — you get N threads instead of one review, and no body for the summary table. Check --allowedTools covers what it reached for; note \`gh pr review\` cannot attach inline comments, only \`gh api\` POST .../reviews can." ;;
               esac
             fi
