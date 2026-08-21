@@ -36,6 +36,7 @@ jobs:
           persist-credentials: false
       - name: Install + run actionlint (version + checksum pinned)
         env:
+          # renovate: datasource=github-releases depName=rhysd/actionlint
           ACTIONLINT_VERSION: "1.7.12"
           # sha256 of actionlint_1.7.12_linux_amd64.tar.gz (from the release's signed
           # checksums.txt). Renovate can bump the pair; a moved artifact fails the -c.
