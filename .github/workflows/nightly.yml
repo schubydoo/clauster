@@ -118,6 +118,7 @@ jobs:
           # Bump both deliberately and re-validate the prediction; keep every buildx step on
           # the same versions.
           version: v0.36.1
+          # renovate: datasource=docker depName=moby/buildkit versioning=docker
           driver-opts: image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
           # No binary cache in a publish pipeline: nothing for a poisoned cache to swap in,
           # and the pinned tools are fetched deterministically each run (zizmor).
@@ -224,6 +225,7 @@ jobs:
           # Bump both deliberately and re-validate the prediction; keep every buildx step on
           # the same versions.
           version: v0.36.1
+          # renovate: datasource=docker depName=moby/buildkit versioning=docker
           driver-opts: image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
           # No binary cache in a publish pipeline: nothing for a poisoned cache to swap in,
           # and the pinned tools are fetched deterministically each run (zizmor).
