@@ -564,11 +564,12 @@ def main(argv: list[str] | None = None) -> int:
 # (the `clauster keepers` CLI) list and stop such orphans from the sidecar files
 # alone, with no running runner.
 
-# A keeper sidecar is `<name>-<ms>-<seq>.keeper.json`; this reverses the stem to
-# the project name for display only — orphan classification uses a forward glob
-# (see find_orphan_keepers), never this parse. ⚠️ That glob is NOT the same as the
-# runner's any more: the runner anchors the stem, this side still matches by prefix.
-# find_orphan_keepers documents why they diverge and what it costs.
+# A keeper sidecar is `<name>-<ms>-<seq>.keeper.json`; this reverses the stem to the
+# project name, used for display AND for orphan classification (find_orphan_keepers
+# protects a keeper when its parsed name is a current card). The greedy `.+` strips
+# exactly the two trailing numeric groups, so it recovers the original name even when
+# the name contains `-` or trailing digits — the exact inverse of the runner's anchored
+# `_keeper_sidecars_for` glob, so the two sides classify a keeper identically (#1181).
 _KEEPER_STEM_RE = re.compile(r"^(?P<name>.+)-\d+-\d+$")
 _KEEPER_SUFFIX = ".keeper.json"
 _KEEPER_START_TOLERANCE = 2.0  # PID-reuse guard slack, matching runner's bridge tolerance
@@ -649,40 +650,24 @@ def iter_keepers(log_dir: Path) -> list[KeeperInfo]:
 def find_orphan_keepers(log_dir: Path, carded_projects: set[str]) -> list[KeeperInfo]:
     """Return live keepers whose sidecar belongs to no current project card (#301).
 
-    Classification is a forward glob (``<project>-*.keeper.json``), never an ambiguous
-    filename reverse-parse, so a keeper cannot be mis-attributed to a project. A dead
-    keeper is not an orphan (nothing to stop).
+    A keeper is protected when its parsed project name (the ``<name>`` of the
+    ``<name>-<ms>-<seq>.keeper.json`` stem, via :func:`_project_from_sidecar`) is a current
+    card. That anchored match is exact: the numeric ``-<ms>-<seq>`` suffix can't span a ``-``
+    in the name, so a carded ``app`` protects only ``app``'s keepers, never a sibling
+    ``app-staging``'s. A dead keeper is not an orphan (nothing to stop).
 
-    ⚠️ This glob is BROADER than the runner's, which now anchors the ``<name>-<ms>-<seq>``
-    stem (``SessionRunner._keeper_sidecars_for``) so a sibling project's keeper can never be
-    adopted. The divergence is currently unfixed here, not a design: over-matching is merely
-    the *less bad* direction on this side, because the glob builds ``carded_files`` — the
-    PROTECTED set — so a wrong match withholds a kill rather than causing one.
+    Anchoring here matches the runner's ``<name>-<ms>-<seq>`` stem
+    (``SessionRunner._keeper_sidecars_for``), closing the divergence #1177 introduced (#1181).
+    The old unanchored ``glob("<project>-*.keeper.json")`` over-protected: with ``app`` carded
+    and ``app-staging`` **removed**, the removed project's live keeper matched ``app-*`` and was
+    filtered out — so ``clauster keepers`` never listed it and ``--kill`` refused it for as long
+    as ``app`` stayed carded, hiding exactly the orphan #301 exists to surface. It is now listed
+    and killable.
 
-    It is not free. Protecting more also HIDES more, and it hides exactly the case #301 is
-    for: with ``app`` carded and ``app-staging`` **removed**, the live keeper of the removed
-    project matches ``glob("app-*.keeper.json")``, lands in ``carded_files``, and is filtered
-    out of the result — so ``clauster keepers`` never lists it and ``--kill`` refuses it, for
-    as long as ``app`` stays carded. Before the runner was anchored, such a keeper was at
-    least reachable by being (wrongly) adopted as ``app``'s instance; it no longer is. The
-    real fix is to anchor here too and key the protected set by stem — its own change, since
-    it alters what this CLI will offer to kill.
+    A keeper whose filename doesn't parse (``project is None``) belongs to no card and so is
+    an orphan — the same result the old glob gave it.
     """
-    carded_files: set[Path] = set()
-    protected_names: set[str] = set()
-    for project in carded_projects:
-        try:
-            carded_files.update(log_dir.glob(f"{project}-*{_KEEPER_SUFFIX}"))
-        except OSError:
-            # Can't enumerate this project's sidecars — protect it by parsed name
-            # instead, so a live carded keeper can never surface as an orphan. This
-            # over-protects (a name parse is approximate), never under-protects.
-            protected_names.add(project)
-    return [
-        k
-        for k in iter_keepers(log_dir)
-        if k.alive and k.sidecar not in carded_files and k.project not in protected_names
-    ]
+    return [k for k in iter_keepers(log_dir) if k.alive and k.project not in carded_projects]
 
 
 def stop_keeper(keeper_pid: int, *, expect_create_time: float | None = None) -> bool:
