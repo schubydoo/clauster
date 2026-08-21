@@ -760,7 +760,14 @@
       endedAgents() { return this.agents.filter((j) => !this.agentLive(j)); },
       // Stopped/crashed bridges that can be reconnected (Resume) — surfaced in Recent.
       endedBridges() {
-        return [...Object.values(this.instances), ...this.ptySessions].filter((i) => this.isResumable(i.rk));
+        // #1149: an ERROR row (e.g. a resume/spawn that failed at `_popen` — binary moved,
+        // PATH gone) is neither "running" nor resumable-stopped, so without the `error`
+        // clause it renders in NO zone and vanishes, taking its error_detail with it. Treat
+        // error as ended so the card stays on screen with its failure — parity with
+        // endedHosted(), which already includes "error".
+        return [...Object.values(this.instances), ...this.ptySessions].filter(
+          (i) => this.isResumable(i.rk) || i.status === "error"
+        );
       },
       hasLive() { return this.liveHosted().length + this.activeBridges().length + this.liveAgents().length + this.externalSessionsFlat().length + this.ptyPendingNames().length > 0; },
       // #357: only offer filter chips for session types actually present, so a chip can

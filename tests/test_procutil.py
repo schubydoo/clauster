@@ -461,6 +461,26 @@ def test_bridge_env_overlay_appends_path_in_order(monkeypatch):
     assert overlay["PATH"] == os.pathsep.join(["/usr/bin", local_bin, "/opt/tools"])
 
 
+def test_bridge_env_overlay_prepends_before_base_and_appends_after(monkeypatch):
+    # #1018: prepend dirs sit BEFORE the base PATH (so they win resolution — nvm's node
+    # over a distro /usr/bin/node), append dirs AFTER (gap-fill). ~ is expanded in both.
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("HOME", "/home/u")
+    overlay = procutil.bridge_env_overlay(
+        path_append=["/opt/tools"], path_prepend=["~/.nvm/v24/bin"]
+    )
+    nvm = os.path.expanduser("~/.nvm/v24/bin")
+    assert overlay["PATH"] == os.pathsep.join([nvm, "/usr/bin", "/opt/tools"])
+
+
+def test_bridge_env_overlay_prepend_respects_operator_path(monkeypatch):
+    # A prepend still sits before an operator-supplied env['PATH'] base (which replaces
+    # the inherited PATH), never silently discarding it.
+    monkeypatch.setenv("PATH", "/usr/bin")
+    overlay = procutil.bridge_env_overlay(env={"PATH": "/custom/bin"}, path_prepend=["/nvm/bin"])
+    assert overlay["PATH"] == os.pathsep.join(["/nvm/bin", "/custom/bin"])
+
+
 def test_bridge_env_overlay_handles_empty_inherited_path(monkeypatch):
     monkeypatch.delenv("PATH", raising=False)
     overlay = procutil.bridge_env_overlay(path_append=["/opt/tools"])

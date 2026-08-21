@@ -91,20 +91,21 @@ def test_popen_leaves_path_untouched_without_path_append(runner_config, monkeypa
     assert env["PATH"] == "/usr/bin"  # inherited PATH passes through unchanged
 
 
-def test_popen_appends_resolved_nvm_bin_dir_after_path_append(
+def test_popen_prepends_resolved_nvm_bin_dir_before_base_path(
     runner_config, monkeypatch, tmp_path
 ):
-    # #792: claude.node_from_nvm=True appends the RESOLVED nvm default node bin dir,
-    # last (after path_append) — never overriding an operator-supplied entry.
+    # #1018: claude.node_from_nvm=True PREPENDS the resolved nvm default node bin dir,
+    # BEFORE the inherited PATH, so nvm's node wins over a distro node already on PATH
+    # (e.g. /usr/bin/node). Operator path_append entries still append after the base.
     monkeypatch.setenv("PATH", "/usr/bin")
     monkeypatch.setattr(
-        procutil, "resolve_nvm_default_node_bin_dir", lambda: "/home/u/.nvm/versions/node/v20/bin"
+        procutil, "resolve_nvm_default_node_bin_dir", lambda: "/home/u/.nvm/versions/node/v24/bin"
     )
     runner = _runner_with_env(runner_config, path_append=["/opt/tools"], node_from_nvm=True)
     env = _capture_env("popen", runner, monkeypatch, tmp_path)
     assert env is not None
     assert env["PATH"] == os.pathsep.join(
-        ["/usr/bin", "/opt/tools", "/home/u/.nvm/versions/node/v20/bin"]
+        ["/home/u/.nvm/versions/node/v24/bin", "/usr/bin", "/opt/tools"]
     )
 
 
@@ -134,17 +135,18 @@ def test_popen_node_from_nvm_no_op_when_unresolvable(runner_config, monkeypatch,
     assert env["PATH"] == os.pathsep.join(["/usr/bin", "/opt/tools"])
 
 
-def test_popen_keeper_appends_resolved_nvm_bin_dir(runner_config, monkeypatch, tmp_path):
+def test_popen_keeper_prepends_resolved_nvm_bin_dir(runner_config, monkeypatch, tmp_path):
     # The pty spawn path (_popen_keeper) goes through the same _bridge_env_overlay, so
-    # the pty bridge gets the same nvm-resolved PATH as the standard bridge.
+    # the pty bridge gets the same nvm-resolved PATH as the standard bridge — nvm's node
+    # dir prepended before the inherited PATH so it wins over a distro node (#1018).
     monkeypatch.setenv("PATH", "/usr/bin")
     monkeypatch.setattr(
-        procutil, "resolve_nvm_default_node_bin_dir", lambda: "/home/u/.nvm/versions/node/v20/bin"
+        procutil, "resolve_nvm_default_node_bin_dir", lambda: "/home/u/.nvm/versions/node/v24/bin"
     )
     runner = _runner_with_env(runner_config, node_from_nvm=True)
     env = _capture_env("keeper", runner, monkeypatch, tmp_path)
     assert env is not None
-    assert env["PATH"] == os.pathsep.join(["/usr/bin", "/home/u/.nvm/versions/node/v20/bin"])
+    assert env["PATH"] == os.pathsep.join(["/home/u/.nvm/versions/node/v24/bin", "/usr/bin"])
 
 
 def test_nvm_bin_dir_resolved_once_and_cached(runner_config, monkeypatch):

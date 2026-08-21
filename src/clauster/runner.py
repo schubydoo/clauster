@@ -2246,24 +2246,30 @@ class SessionRunner:
         Returns an ``extra`` mapping for :func:`procutil.child_env`, merging the
         operator's ``claude.env`` and a ``PATH`` extended by ``claude.path_append``
         (plus, when ``claude.node_from_nvm`` is on, nvm's resolved ``default`` node
-        bin dir appended last — see :func:`procutil.resolve_nvm_default_node_bin_dir`
-        and issue #792) with any caller ``extra`` (e.g. resume-recap flags). Passing
+        bin dir *prepended* so it wins over a distro node — see
+        :func:`procutil.resolve_nvm_default_node_bin_dir` and issues #792 / #1018)
+        with any caller ``extra`` (e.g. resume-recap flags). Passing
         it through ``child_env`` re-scrubs Clauster secrets, so config can never
         re-introduce a scrubbed credential name.
         """
         claude = self._config.claude
         path_append = list(claude.path_append)
+        path_prepend: list[str] = []
         if claude.node_from_nvm:
             # Process-memoized (procutil.cached_…): the resolver shells bash (up to its
             # timeout on a slow $NVM_DIR), so the spawn path and the doctor panel share ONE
             # probe rather than re-shelling per spawn/request (#792, Greptile #803/#859).
             nvm_bin_dir = procutil.cached_nvm_default_node_bin_dir()
             if nvm_bin_dir:
-                # Appended last, like path_append itself: never overrides a dir
-                # already on PATH (e.g. an operator-supplied path_append entry, or
-                # an already-resolvable node), only fills a gap.
-                path_append.append(nvm_bin_dir)
-        return procutil.bridge_env_overlay(path_append=path_append, env=claude.env, extra=extra)
+                # PREPEND, not append (#1018): appending landed nvm's dir AFTER the
+                # inherited service PATH, so a distro `/usr/bin/node` earlier on PATH
+                # shadowed nvm's `default` node — reintroducing the exact resolution
+                # failure node_from_nvm exists to fix, now with a WRONG node. The whole
+                # point of the knob is to use nvm's node, so it must win.
+                path_prepend.append(nvm_bin_dir)
+        return procutil.bridge_env_overlay(
+            path_append=path_append, path_prepend=path_prepend, env=claude.env, extra=extra
+        )
 
     def _popen(
         self,
@@ -2429,6 +2435,56 @@ class SessionRunner:
         if instance.spawn_mode != "worktree":
             return None
         return f"clauster-{instance.instance_id[:8]}"
+
+    def _unlock_pty_worktree(self, instance: RemoteControlInstance) -> None:
+        """Release the git lock on a stopped pty session's worktree (#1089).
+
+        Claude Code creates a ``spawn_mode="worktree"`` interactive session's worktree via
+        ``--worktree <name>`` and LOCKS it (lock reason ``claude session …``); it does not
+        release the lock on the SIGINT-driven stop. ``git worktree remove`` then refuses it
+        (``cannot remove a locked working tree``, naming a now-dead pid), so the operator has
+        to discover ``git worktree unlock`` before any cleanup. Clauster knows the session
+        ended, so it releases the lock here — the lock only guards against a *live* session,
+        and once stopped it protects nothing. The worktree and its branch are left in place:
+        they may hold uncommitted work, and a resume reuses them.
+
+        Best-effort: a non-worktree session, an unknown project, a missing/renamed or
+        already-unlocked worktree, or a missing ``git`` all no-op. Any failure is logged,
+        never raised, so it can never fail the stop.
+        """
+        name = self._pty_worktree_name(instance)
+        if name is None:
+            return
+        # Fail-safe: this runs inside stop() AFTER the process is already down, so it must
+        # NEVER raise — `_resolve_project` can raise `UnknownProject` OR an `OSError`/
+        # `RuntimeError` from project discovery / path resolution, and git can fail to spawn;
+        # any of those escaping would abort a COMPLETED stop before its handle cleanup,
+        # lifecycle emit, and API/MCP/CLI response (#1089 Greptile P1). One broad guard so no
+        # exception class can leak out of this best-effort cleanup.
+        try:
+            proj = self._resolve_project(instance.project)
+            worktree = proj.path / pointers.WORKTREE_SUBDIR / name
+            res = subprocess.run(
+                ["git", "-C", str(proj.path), "worktree", "unlock", str(worktree)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=procutil.child_env(),
+                check=False,
+            )
+            if res.returncode != 0:
+                # Non-zero is expected + harmless when the worktree was already unlocked or is
+                # gone ("not locked" / "is not a working tree"); logged for the genuine-error case.
+                _log.debug(
+                    "worktree unlock for %s non-zero (%s): %s",
+                    instance.instance_id,
+                    res.returncode,
+                    res.stderr.strip(),
+                )
+        except Exception as exc:  # noqa: BLE001 — best-effort cleanup must never fail the stop
+            _log.debug(
+                "worktree unlock for %s failed (best-effort): %s", instance.instance_id, exc
+            )
 
     @staticmethod
     def _keeper_launch_cmd(
@@ -3075,6 +3131,7 @@ class SessionRunner:
                 if keeper_pid is not None:
                     await asyncio.to_thread(self._cleanup_keeper, keeper_pid)
                 instance.status = InstanceStatus.STOPPED
+                await asyncio.to_thread(self._unlock_pty_worktree, instance)  # #1089
                 self._procs.pop(instance_id, None)  # release dead Popen handle; resume re-adds it
                 self._emit_lifecycle("stop", instance)
                 return instance
@@ -3089,6 +3146,7 @@ class SessionRunner:
             if keeper_pid is not None:  # pragma: skip-on-win
                 await asyncio.to_thread(self._cleanup_keeper, keeper_pid)
             instance.status = InstanceStatus.STOPPED
+            await asyncio.to_thread(self._unlock_pty_worktree, instance)  # #1089
             self._procs.pop(instance_id, None)  # release dead Popen handle; resume re-adds it
             self._emit_lifecycle("stop", instance)
             return instance

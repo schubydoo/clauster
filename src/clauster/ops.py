@@ -25,7 +25,7 @@ from xml.sax.saxutils import escape as _xml_escape
 
 import yaml
 
-from . import atomicio, claude_cli, config_write_mcp, deps, environments, procutil
+from . import atomicio, claude_cli, config_write_mcp, deps, environments, procutil, pty_screen
 from .config import ClausterConfig, _missing_enforced_auth, load_config
 from .discovery import Project, discover_projects
 from .state import CURRENT_SCHEMA, StateStore
@@ -183,9 +183,12 @@ def run_doctor(
     # optional-extras presence (#904): OK when importable, WARN when missing. Never FAIL —
     # extras are optional and a FAIL would flip doctor's exit code for a dormant feature.
     # Put any side-installed extras on sys.path first (frozen-only, idempotent with `_run`) so the
-    # probes reflect what the server will actually import — otherwise doctor reports a managed-dir
-    # install as "unavailable" even though the frozen binary loads it on the next start (#933).
+    # probes reflect what the server will actually import — otherwise doctor reports a side-load as
+    # "unavailable" even though the frozen binary loads it on the next start. Cover BOTH documented
+    # side-load paths: the managed <state_dir>/deps dir (#933) and pyte's CLAUSTER_PYTE_PATH env
+    # var (#702), so `find_spec("pyte")` sees the env-var copy too instead of a false WARN (#1193).
     deps.add_deps_dir_to_sys_path(config.state_dir)
+    pty_screen._maybe_add_external_pyte_path()
     checks.extend(_check_extras(config))
     checks.extend(_check_binary_deps(config))
 
