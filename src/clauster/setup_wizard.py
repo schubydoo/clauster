@@ -358,7 +358,9 @@ def create_setup_app(
         # renders the form to someone who didn't read the token from the server log. The token
         # is then embedded (below) so the same-origin submit can echo it as a header.
         if token_required and not _token_ok(request.query_params.get("token")):
-            return HTMLResponse(_SETUP_GATE_HTML, status_code=403)
+            gate = HTMLResponse(_SETUP_GATE_HTML, status_code=403)
+            gate.headers["Cache-Control"] = "no-store"
+            return gate
         nonce = secrets.token_urlsafe(16)
         resp = templates.TemplateResponse(
             request,
@@ -381,6 +383,10 @@ def create_setup_app(
         resp.headers["X-Content-Type-Options"] = "nosniff"
         resp.headers["X-Frame-Options"] = "DENY"
         resp.headers["Referrer-Policy"] = "same-origin"
+        # Never cache: the page embeds a per-request CSP nonce and (in token mode) the
+        # one-time setup token, so a cached or bfcached copy would leak the token and
+        # replay a stale nonce.
+        resp.headers["Cache-Control"] = "no-store"
         return resp
 
     @app.post("/setup")

@@ -492,6 +492,12 @@ _STATIC_DIR = _PKG_DIR / "static"
 # One year in seconds — the conventional far-future max-age for fingerprinted assets.
 _IMMUTABLE_CACHE = "public, max-age=31536000, immutable"
 
+# Every rendered HTML page carries a per-request CSP nonce and reflects live auth/session
+# state, so it must never be served from the browser cache or bfcache: a cached copy would
+# replay a stale nonce and could survive a deploy/hot-swap as an outdated render. `no-store`
+# also makes the page bfcache-ineligible in Chrome, so a backgrounded tab reloads fresh.
+_NO_STORE_CACHE = "no-store"
+
 
 class _ImmutableStaticFiles(StaticFiles):
     """StaticFiles that marks assets cacheable-forever (#353).
@@ -754,7 +760,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         """
         ctx = dict(context or {})
         ctx["csp_nonce"] = getattr(request.state, "csp_nonce", None)
-        return templates.TemplateResponse(request, name, ctx, **kwargs)
+        response = templates.TemplateResponse(request, name, ctx, **kwargs)
+        # The per-request nonce above (and the live session state each page reflects) must
+        # never be reused from cache — see _NO_STORE_CACHE.
+        response.headers["Cache-Control"] = _NO_STORE_CACHE
+        return response
 
     # Compress responses over the threshold — the ~665KB uncompressed Tabler/Alpine
     # bundle and the JSON poll responses both shrink ~4-5x for remote/proxied clients

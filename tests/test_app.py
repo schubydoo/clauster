@@ -74,6 +74,17 @@ def test_dashboard_renders(write_config):
     assert "alpha" in resp.text
 
 
+def test_rendered_html_is_not_cacheable(write_config):
+    # Every _render'd page carries a per-request CSP nonce and live session state, so it
+    # must be no-store: a cached/bfcached copy would replay a stale nonce and could survive
+    # a deploy/hot-swap as an outdated render. The dashboard and the HTML 404 both apply.
+    client = _client(write_config)
+    assert client.get("/").headers["cache-control"] == "no-store"
+    missing = client.get("/no-such-page", headers={"accept": "text/html"})
+    assert missing.status_code == 404
+    assert missing.headers["cache-control"] == "no-store"
+
+
 def test_dashboard_phone_overflow_fixes_present(write_config):
     # #1159: on a phone, session action clusters must WRAP (not scroll the page sideways) and
     # the launch popover must be viewport-pinned + height-bounded below the sm breakpoint (not
