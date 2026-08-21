@@ -1898,16 +1898,24 @@ running — they are read-only and never write the running service's shared stat
 <div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>clauster projects                  # list discoverable projects (git / trust / bypass)
 <a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>clauster status                    # list bridge instances and their status
 <a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>clauster sessions                  # list live working sessions (claude agents)
-<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>clauster logs &lt;instance&gt; [-f]      # tail a bridge&#39;s redacted log (--follow to stream)
-<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>clauster open &lt;instance&gt;           # print a bridge&#39;s connect URL (--launch opens a browser)
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>clauster logs &lt;instance&gt; [-f]      # tail a bridge's redacted log (--follow to stream)
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>clauster open &lt;instance&gt;           # print a bridge's connect URL (--launch opens a browser)
 </code></pre></div>
 <p><code>&lt;instance&gt;</code> accepts a full instance id, a <strong>unique prefix</strong> of one, or a project name.
 The prefix form is why <code>clauster status</code> truncates the INSTANCE column to 8 characters —
-what it prints is directly usable. A prefix matching <strong>several</strong> bridges is refused and
-the candidates are listed, rather than one being picked
-(<a href="https://github.com/schubydoo/clauster/issues/1099">#1099</a>):</p>
+what it prints is directly usable. A reference matching <strong>several</strong> bridges is refused and
+the candidates are listed, rather than one being picked — either an id <strong>prefix</strong> matching
+more than one bridge
+(<a href="https://github.com/schubydoo/clauster/issues/1099">#1099</a>), or a bare <strong>project name</strong>
+matching more than one instance
+(<a href="https://github.com/schubydoo/clauster/issues/1150">#1150</a>). A project reaches the
+two-instance state after one ordinary start → stop → start cycle (the stopped row lingers
+until <code>forget</code>), so every by-name surface — the <code>logs</code>, <code>open</code>, and <code>stop</code> commands, and
+the status / QR HTTP routes — refuses that name until you pass an instance id:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="gp">$ </span>clauster<span class="w"> </span>logs<span class="w"> </span>f2c456fd
-<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="go">clauster: ambiguous instance id &#39;f2c456fd&#39; — matches f2c456fd-aaaa-…, f2c456fd-bbbb-…; use more characters</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="go">clauster: ambiguous 'f2c456fd' — matches f2c456fd-aaaa-…, f2c456fd-bbbb-…; use more characters</span>
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="gp">$ </span>clauster<span class="w"> </span>logs<span class="w"> </span>myproj<span class="w">    </span><span class="c1"># two instances share this project name</span>
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="go">clauster: ambiguous 'myproj' — matches f2c456fd-aaaa-…, a1b2c3d4-…; use an instance id directly</span>
 </code></pre></div>
 <p>Both <strong>exact</strong> forms outrank a prefix — a full instance id first, then a project name —
 and <strong>a name that is one of your projects is never read as a prefix</strong>, even when that
@@ -1941,7 +1949,8 @@ fully serialized.)</p>
 <a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>clauster stop  &lt;instance&gt; [--json]        # stop a bridge by id / unique prefix / identity
 </code></pre></div>
 <p><code>&lt;instance&gt;</code> resolves the same way as for the read commands above — full id, unique
-prefix, or project name — and an ambiguous prefix is refused with the candidates listed.</p>
+prefix, or project name — and an ambiguous reference (a prefix, or a project name with
+more than one instance) is refused with the candidates listed.</p>
 <p><code>--mode</code> picks the bridge mode with no hidden coercion (the two modes are not
 interchangeable); <code>--trust</code> accepts the workspace-trust dialog before starting
 (otherwise an untrusted directory is refused). Sending a conversation turn to a

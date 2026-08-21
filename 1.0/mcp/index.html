@@ -1646,10 +1646,10 @@ unresolved config.</p>
 <p>Point your client at the command. For example, an entry in a Claude Desktop /
 Claude Code MCP config:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="p">{</span>
-<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="w">  </span><span class="nt">&quot;mcpServers&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
-<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="w">    </span><span class="nt">&quot;clauster&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
-<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="w">      </span><span class="nt">&quot;command&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;clauster&quot;</span><span class="p">,</span>
-<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="w">      </span><span class="nt">&quot;args&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;mcp&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;-c&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;/path/to/clauster.yml&quot;</span><span class="p">]</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="w">  </span><span class="nt">"mcpServers"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="w">    </span><span class="nt">"clauster"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="w">      </span><span class="nt">"command"</span><span class="p">:</span><span class="w"> </span><span class="s2">"clauster"</span><span class="p">,</span>
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="w">      </span><span class="nt">"args"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"mcp"</span><span class="p">,</span><span class="w"> </span><span class="s2">"-c"</span><span class="p">,</span><span class="w"> </span><span class="s2">"/path/to/clauster.yml"</span><span class="p">]</span>
 <a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="w">    </span><span class="p">}</span>
 <a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="w">  </span><span class="p">}</span>
 <a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="p">}</span>
@@ -1765,8 +1765,9 @@ permission mode, or an untrusted directory come back as an <code>isError</code> 
 <p>Stop, or resume into its prior conversation, the bridge named by an <code>id</code> — an
 instance id, a <strong>unique prefix</strong> of one, or a project name as returned by
 <code>list_sessions</code> — resolved exactly like the dashboard's DELETE / resume routes.
-A project name that matches <strong>several</strong> bridges resolves to the
-one the dashboard displays, so pass an instance id to target a specific bridge.</p>
+A project name that matches <strong>several</strong> instances is refused, not guessed: the reply
+is <code>false</code> with an <code>ambiguous</code> list of the candidate ids. Pass a specific instance id
+to target one bridge — a project name can't be narrowed the way a prefix can.</p>
 <table>
 <thead>
 <tr>
@@ -1779,20 +1780,33 @@ one the dashboard displays, so pass an instance id to target a specific bridge.<
 <tr>
 <td><code>id</code></td>
 <td>string (required)</td>
-<td>The bridge to stop / resume: a project name, a full instance id, or a unique prefix of one. A prefix matching <strong>several</strong> bridges is refused, not guessed — see below.</td>
+<td>The bridge to stop / resume: a project name, a full instance id, or a unique prefix of one. A reference matching <strong>several</strong> bridges — a prefix, or a project name with more than one instance — is refused, not guessed — see below.</td>
 </tr>
 </tbody>
 </table>
 <p><code>stop_session</code> returns <code>{"stopped": &lt;bool&gt;, ...}</code>; <code>resume_session</code> returns
-<code>{"resumed": &lt;bool&gt;, ...}</code> — the boolean is <code>false</code> (with the id echoed back) when
-no managed bridge matches.</p>
+<code>{"resumed": &lt;bool&gt;, "id": &lt;requested id&gt;, ...}</code>. For <code>stop_session</code> the boolean is
+<code>false</code> (with the requested <code>id</code> echoed back) when no managed bridge matches. For
+<code>resume_session</code> a <code>false</code> means nothing was revived, and it has <strong>two</strong> shapes:</p>
+<ul>
+<li><strong>No bridge matched</strong> — the reply carries the requested <code>id</code> (and, for an ambiguous
+  prefix, <code>ambiguous</code>), with no <code>session</code>.</li>
+<li><strong>The one-live-standard-bridge cap declined</strong> — the target was not revived because a
+  live standard bridge already exists for the project. The reply carries <code>reason</code> and a
+  <code>session</code> for that already-live bridge, which is <strong>NOT necessarily the one you named</strong>.
+  Compare the echoed <code>id</code> against <code>session.id</code> to tell them apart, or simply read
+  <code>resumed</code>. This mirrors <code>POST /api/instances/{id}/resume</code>, whose body reports the same
+  decline via <code>created: false</code> + <code>reason</code>.</li>
+</ul>
 <p>An <strong>ambiguous prefix</strong> is refused rather than resolved to an arbitrary bridge, and
 the reply carries the candidates so a caller can retry with a longer one:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="p">{</span><span class="nt">&quot;stopped&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;f2c456fd&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;ambiguous&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;f2c456fd-aaaa-…&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;f2c456fd-bbbb-…&quot;</span><span class="p">]}</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="p">{</span><span class="nt">"stopped"</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nt">"id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"f2c456fd"</span><span class="p">,</span><span class="w"> </span><span class="nt">"ambiguous"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"f2c456fd-aaaa-…"</span><span class="p">,</span><span class="w"> </span><span class="s2">"f2c456fd-bbbb-…"</span><span class="p">]}</span>
 </code></pre></div>
 <p>Check for <code>ambiguous</code> before treating a <code>false</code> as "the bridge is already stopped" —
-without it the two are indistinguishable, and the bridge is in fact still running.
-(Prefix matching arrived in
+without it the two are indistinguishable, and the bridge is in fact still running. For
+<code>resume_session</code>, likewise read <code>resumed</code> (and <code>reason</code>) rather than inferring a revive
+from getting a <code>session</code> back — a declined cap still returns the live bridge. (Prefix
+matching arrived in
 <a href="https://github.com/schubydoo/clauster/issues/1099">#1099</a>; before that these tools
 advertised prefixes but matched only in full.)</p>
 <p>Both are <strong>bridge channel only</strong>; hosted-session

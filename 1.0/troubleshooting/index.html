@@ -2447,7 +2447,7 @@ port-forward onto a <em>different</em> local port has the same effect on a loopb
 bind.</p>
 <p><strong>Fix:</strong> list the address exactly as it appears in the browser's URL bar:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="nt">auth</span><span class="p">:</span>
-<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">  </span><span class="nt">allowed_origins</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;http://localhost:7621&quot;</span><span class="p p-Indicator">]</span><span class="w">   </span><span class="c1"># scheme + host + port</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">  </span><span class="nt">allowed_origins</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">"http://localhost:7621"</span><span class="p p-Indicator">]</span><span class="w">   </span><span class="c1"># scheme + host + port</span>
 </code></pre></div>
 <p>This applies whether or not a password is set — the origin allowlist is a
 cross-site defence, not an authentication method, so it is enforced even when
@@ -2490,7 +2490,7 @@ Clauster fails closed rather than serving a login form nobody can pass.</p>
 <h3 id="refusing-non-loopback-host-without-enforced-auth-it-refuses-to-start">"refusing non-loopback host ... without enforced auth" — it refuses to start<a class="headerlink" href="#refusing-non-loopback-host-without-enforced-auth-it-refuses-to-start" title="Permanent link">&para;</a></h3>
 <p><strong>What you see:</strong> startup aborts (or <code>doctor</code> fails the <code>auth</code> row with
 <code>non-loopback host &lt;x&gt; without enforced auth</code>):</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>refusing non-loopback host=&#39;0.0.0.0&#39; without enforced auth. Set auth.enabled:
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>refusing non-loopback host='0.0.0.0' without enforced auth. Set auth.enabled:
 <a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>true together with auth.password_required (+ a hash from `clauster
 <a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>hash-password`), auth.reverse_proxy.enabled, or auth.api_token_hash (from
 <a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>`clauster hash-token`) — or, to opt out on a trusted LAN,
@@ -2526,11 +2526,41 @@ user under systemd) does not own the state directory (default <code>~/.clauster<
 <p><strong>Mechanism:</strong> <a href="../installation/#run-as-a-systemd-service-linux">Run as a systemd
 service</a>.</p>
 <h3 id="no-config-found-invalid-config">"no config found" / "invalid config"<a class="headerlink" href="#no-config-found-invalid-config" title="Permanent link">&para;</a></h3>
-<p><strong>What you see:</strong> <code>doctor</code> fails the <code>config</code> row with <code>no config found: ...</code>
-or <code>invalid config: ...</code>; <code>clauster run</code> exits with a config validation error.</p>
+<p><strong>What you see:</strong> <code>doctor</code> fails the <code>config</code> row with one of three details —
+<code>no config found: ...</code>, <code>invalid config: ...</code>, or <code>config is not valid YAML: ...</code>
+— and most other verbs exit <code>2</code> with a one-line <code>clauster: config error:</code>
+message. Three behave differently: <code>doctor</code> itself exits <code>1</code> with the table
+above, <code>clauster run</code> with no config at all opens the setup wizard rather than
+failing, and <code>install-service</code> still renders a unit using defaults.</p>
 <p><strong>Most likely cause:</strong> no <code>clauster.yml</code> where Clauster looks for one, or a
-YAML/typing mistake in it. The <code>invalid config</code> detail names the offending
-key.</p>
+mistake inside it. The three details separate the cases, which is what tells you
+where to look:</p>
+<table>
+<thead>
+<tr>
+<th>Detail</th>
+<th>What is wrong</th>
+<th>Where the message points</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>no config found</code></td>
+<td>No file at any searched path</td>
+<td>The search order</td>
+</tr>
+<tr>
+<td><code>config is not valid YAML</code></td>
+<td>The file does not parse — a stray tab, an unclosed quote</td>
+<td>A line and column</td>
+</tr>
+<tr>
+<td><code>invalid config</code></td>
+<td>The file parses but a value is rejected</td>
+<td>The offending key — or, for a root that is not a mapping, only the file</td>
+</tr>
+</tbody>
+</table>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a>clauster<span class="w"> </span>doctor<span class="w"> </span>-c<span class="w"> </span>/path/to/clauster.yml<span class="w">   </span><span class="c1"># same file the service uses</span>
 </code></pre></div>
 <p><strong>Mechanism:</strong> <a href="../guides/configuration/#loading-overrides">Configuration — loading &amp;
@@ -2555,7 +2585,7 @@ database</a> and
 within <code>startup_grace_seconds</code> — most often a <code>claude</code> login problem (the
 bridge starts, then hangs unauthenticated).</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>clauster<span class="w"> </span>doctor<span class="w">                          </span><span class="c1"># read the claude-login row</span>
-<a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>tail<span class="w"> </span>~/.clauster/logs/&lt;label&gt;-*.log<span class="w">      </span><span class="c1"># the bridge&#39;s own account of it</span>
+<a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>tail<span class="w"> </span>~/.clauster/logs/&lt;label&gt;-*.log<span class="w">      </span><span class="c1"># the bridge's own account of it</span>
 </code></pre></div>
 <p><strong>Mechanism:</strong> <a href="../operations/#reading-the-bridge-debug-log">Reading the bridge debug
 log</a> · <a href="../architecture/#bridge-lifecycle">Bridge
@@ -2592,10 +2622,12 @@ installed per-user or via nvm-managed node.</p>
 <h3 id="the-trust-prompt-keeps-blocking-the-spawn">The trust prompt keeps blocking the spawn<a class="headerlink" href="#the-trust-prompt-keeps-blocking-the-spawn" title="Permanent link">&para;</a></h3>
 <p><strong>What you see:</strong> a bridge spawns but sits waiting on Claude's workspace-trust
 prompt instead of becoming ready.</p>
-<p><strong>Most likely cause:</strong> the project directory is not trusted and Clauster's
-trust pre-write did not cover it (for example, the project lives outside
-<code>projects_root</code>). Trust is ancestor-inheriting: trusting <code>projects_root</code>
-covers every project under it.</p>
+<p><strong>Most likely cause:</strong> the git repository needs its <strong>own</strong> trust grant. Since
+Claude Code 2.1.232 a parent directory's grant no longer covers nested git repos,
+so trusting <code>projects_root</code> does not trust the repos under it (a non-repo directory
+still inherits from a trusted ancestor).</p>
+<p><strong>Fix:</strong> launch it once via <strong>Trust &amp; start</strong> (which trusts, then spawns), or click
+<strong>Trust all</strong> on the dashboard to grant every discovered project its own key at once.</p>
 <p><strong>Mechanism:</strong> <a href="../security/#workspace-trust">Security — workspace trust</a>.</p>
 <h2 id="claude-itself-is-the-problem">Claude itself is the problem<a class="headerlink" href="#claude-itself-is-the-problem" title="Permanent link">&para;</a></h2>
 <h3 id="not-logged-in-access-token-has-expired-re-authenticate-with-claude">"not logged in" / "access token has expired; re-authenticate with <code>claude</code>"<a class="headerlink" href="#not-logged-in-access-token-has-expired-re-authenticate-with-claude" title="Permanent link">&para;</a></h3>
@@ -2668,9 +2700,17 @@ instead is cleaned up with:</p>
 API returns <code>hosted channel unavailable: claustrum daemon not connected</code>.</p>
 <p><strong>Most likely cause:</strong> the claustrum daemon is not running (or not installed —
 it is an optional dependency), or its socket path is wrong.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>clauster<span class="w"> </span>deps<span class="w"> </span>list<span class="w">                         </span><span class="c1"># is claustrum installed?</span>
-<a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a>tail<span class="w"> </span>~/.clauster/claustrum/daemon.log<span class="w">      </span><span class="c1"># what did the daemon last say?</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:7621/healthz<span class="w">      </span><span class="c1"># the claustrum block names the reason</span>
+<a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a>clauster<span class="w"> </span>deps<span class="w"> </span>list<span class="w">                         </span><span class="c1"># is claustrum installed?</span>
+<a id="__codelineno-15-3" name="__codelineno-15-3" href="#__codelineno-15-3"></a>tail<span class="w"> </span>~/.clauster/claustrum/daemon.log<span class="w">      </span><span class="c1"># what did the daemon last say?</span>
 </code></pre></div>
+<p>Start with <code>/healthz</code>: its <code>claustrum</code> block carries an <code>error</code> describing why
+the last start attempt failed — including the commonest case, the binary not
+being found.</p>
+<p>Authenticate that request on a deploy with <code>auth.enabled</code> — an unauthenticated
+caller gets liveness only, with no <code>claustrum</code> block at all. The block is also
+absent when <code>claustrum.enabled</code> is false. See
+<a href="../operations/#health-checks">Health checks</a> for what <code>/healthz</code> returns to whom.</p>
 <p><strong>Mechanism:</strong> <a href="../reference/config/#claustrum-hosted-live-view-channel-claustrumconfig"><code>claustrum</code> config
 reference</a>.</p>
 <h3 id="claustrum-daemon-unavailable-at-startup">"claustrum daemon unavailable at startup"<a class="headerlink" href="#claustrum-daemon-unavailable-at-startup" title="Permanent link">&para;</a></h3>
@@ -2719,7 +2759,7 @@ present in every run:</p>
 <tr>
 <td><code>config</code></td>
 <td><code>clauster.yml</code> found and valid</td>
-<td><code>no config found: ...</code> / <code>invalid config: ...</code></td>
+<td><code>no config found: ...</code> / <code>config is not valid YAML: ...</code> / <code>invalid config: ...</code></td>
 </tr>
 <tr>
 <td><code>claude</code></td>
@@ -2773,8 +2813,8 @@ present in every run:</p>
 </tr>
 <tr>
 <td><code>workspace-trust</code></td>
-<td><code>projects_root is trusted</code></td>
-<td>an untrusted root — spawns will stall on the trust prompt (see above)</td>
+<td><code>N/M discovered projects trusted</code> (OK when all are)</td>
+<td>any untrusted discovered project — a session there will stall on the trust prompt (see above)</td>
 </tr>
 </tbody>
 </table>

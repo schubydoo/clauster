@@ -1552,6 +1552,15 @@ at the top and a search box that filters by label, key, or description. Each
 field renders as a typed control (toggle, bounded number, text, or a select
 with human-readable option labels), with its raw YAML key shown as subtext so
 you can cross-reference the file.</p>
+<p>A bounded number carries its real range, and the editor checks that range
+before it sends the save. The input's <code>min</code>/<code>max</code> attributes only advertise
+the range and bound the spinner arrows — the save is a <code>fetch</code>, not a form
+submit, so a value you <em>type</em> is never enforced by the browser. The editor
+therefore compares it itself and refuses an out-of-range one with a message,
+rather than sending it and surfacing a <code>422</code> from the full-config
+re-validation. That covers <strong>exclusive</strong> bounds too: a timeout that must be
+<em>greater than</em> zero, not <em>at least</em> zero, is refused at zero — something
+<code>min="0"</code> alone cannot express.</p>
 <p>A switch whose feature needs an <strong>optional dependency</strong> that isn't installed
 (Direct Sessions → the <code>claustrum</code> binary, notifications → <code>apprise</code>, the live
 terminal view → <code>pyte</code>) can't be turned on and shows a "Requires … — run
@@ -1772,6 +1781,20 @@ on; the User scope additionally requires <code>config_write.allow_user_scope</co
 </tr>
 </tbody>
 </table>
+<p>Three entries can look broken when they are not. The <strong>Source</strong> badge on each
+row tells the first two apart:</p>
+<ul>
+<li><strong>A built-in subagent is listed with no description, and cannot be edited or
+  deleted.</strong> Claude Code compiles <code>general-purpose</code>, <code>explore</code> and <code>plan</code> into
+  the CLI, so there is no file anywhere to edit. Every install shows these
+  three, at both scopes, before you add anything of your own.</li>
+<li><strong>A plugin-provided subagent is listed, but cannot be edited or deleted.</strong> A
+  plugin owns that file, so Clauster refuses to change it. To change it, change
+  the plugin. When the plugin supplies it as a symlink, Clauster never follows
+  the link, so the description is blank as well.</li>
+<li><strong>A skill Clauster cannot read still appears, carrying an error in place of
+  the missing information.</strong> One unreadable skill never hides the others.</li>
+</ul>
 <h2 id="troubleshooting-and-limits">Troubleshooting and limits<a class="headerlink" href="#troubleshooting-and-limits" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -1811,6 +1834,11 @@ on; the User scope additionally requires <code>config_write.allow_user_scope</co
 <td>A saved change has no effect</td>
 <td>Saves never live-reload</td>
 <td>Use <strong>Restart Clauster</strong> in the Configuration modal</td>
+</tr>
+<tr>
+<td>A subagent has no description and won't edit</td>
+<td>It is built-in, or a plugin owns it — the <strong>Source</strong> badge says which</td>
+<td>Built-in: nothing to do, there is no file. Plugin: change the plugin, not Clauster</td>
 </tr>
 </tbody>
 </table>
