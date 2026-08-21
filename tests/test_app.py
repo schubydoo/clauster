@@ -76,13 +76,25 @@ def test_dashboard_renders(write_config):
 
 def test_dashboard_phone_overflow_fixes_present(write_config):
     # #1159: on a phone, session action clusters must WRAP (not scroll the page sideways) and
-    # the launch popover must be viewport-pinned below the sm breakpoint (not clip off the left
-    # edge). Both are nonce'd CSS in dashboard.html; assert they render.
-    html = _client(write_config).get("/").text
-    assert ".sess-row .ms-auto.d-flex.gap-1 { flex-wrap: wrap; min-width: 0; }" in html
-    assert "@media (max-width: 575.98px)" in html
-    assert ".launch-pop { position: fixed;" in html  # popover viewport-pinned on phones
-    assert "max-height: calc(100dvh - 1rem); overflow-y: auto;" in html  # bounded + own scroll
+    # the launch popover must be viewport-pinned + height-bounded below the sm breakpoint (not
+    # clip off the left edge, and not leak the fixed positioning to desktop). Assert against the
+    # APPLIED CSS (_inline_css strips comments, #1097) so a commented-out rule can't pass, and
+    # scope the popover fix to the media query so moving it OUT (which would break desktop) or
+    # commenting it can't stay green.
+    css = _inline_css(_client(write_config).get("/").text)
+    # Part 1: session action clusters wrap instead of overflowing the page sideways.
+    assert ".sess-row .ms-auto.d-flex.gap-1 { flex-wrap: wrap; min-width: 0; }" in css
+    # Part 2: the launch popover is `position: fixed` + `max-height`/`overflow-y` bounded, and
+    # that rule lives INSIDE the phone media query — the regex fails if it's moved out of it.
+    # `[^}]` (not `.*?`) so no `}` is crossed: the bridge from `@media {` to `.launch-pop {`
+    # proves the media block hasn't closed, and the rule closes on its OWN brace — else a rule
+    # moved out of the query would still match a `}}` downstream (e.g. prefers-reduced-motion).
+    assert re.search(
+        r"@media \(max-width: 575\.98px\) \{[^}]*?"
+        r"\.launch-pop \{ position: fixed;[^}]*?"
+        r"max-height: calc\(100dvh - 1rem\); overflow-y: auto;[^}]*\}",
+        css,
+    ), "launch-pop must be position:fixed + height-bounded INSIDE the sm-breakpoint media query"
 
 
 def test_dashboard_error_bridge_stays_visible_with_detail(write_config):
