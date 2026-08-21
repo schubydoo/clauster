@@ -2585,8 +2585,8 @@ class SessionRunner:
     ) -> None:
         """Fold the keeper sidecar into the instance (the pty analogue of `_apply_markers`)."""
         prev_status = instance.status
-        bp = info.get("bridge_pid")
-        if isinstance(bp, int):
+        bp = _row_int(info.get("bridge_pid"))
+        if bp is not None:
             instance.bridge_pid = bp
             ps = info.get("bridge_proc_start")
             if isinstance(ps, (int, float)) and not isinstance(ps, bool):
