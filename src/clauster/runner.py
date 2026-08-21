@@ -2246,24 +2246,30 @@ class SessionRunner:
         Returns an ``extra`` mapping for :func:`procutil.child_env`, merging the
         operator's ``claude.env`` and a ``PATH`` extended by ``claude.path_append``
         (plus, when ``claude.node_from_nvm`` is on, nvm's resolved ``default`` node
-        bin dir appended last — see :func:`procutil.resolve_nvm_default_node_bin_dir`
-        and issue #792) with any caller ``extra`` (e.g. resume-recap flags). Passing
+        bin dir *prepended* so it wins over a distro node — see
+        :func:`procutil.resolve_nvm_default_node_bin_dir` and issues #792 / #1018)
+        with any caller ``extra`` (e.g. resume-recap flags). Passing
         it through ``child_env`` re-scrubs Clauster secrets, so config can never
         re-introduce a scrubbed credential name.
         """
         claude = self._config.claude
         path_append = list(claude.path_append)
+        path_prepend: list[str] = []
         if claude.node_from_nvm:
             # Process-memoized (procutil.cached_…): the resolver shells bash (up to its
             # timeout on a slow $NVM_DIR), so the spawn path and the doctor panel share ONE
             # probe rather than re-shelling per spawn/request (#792, Greptile #803/#859).
             nvm_bin_dir = procutil.cached_nvm_default_node_bin_dir()
             if nvm_bin_dir:
-                # Appended last, like path_append itself: never overrides a dir
-                # already on PATH (e.g. an operator-supplied path_append entry, or
-                # an already-resolvable node), only fills a gap.
-                path_append.append(nvm_bin_dir)
-        return procutil.bridge_env_overlay(path_append=path_append, env=claude.env, extra=extra)
+                # PREPEND, not append (#1018): appending landed nvm's dir AFTER the
+                # inherited service PATH, so a distro `/usr/bin/node` earlier on PATH
+                # shadowed nvm's `default` node — reintroducing the exact resolution
+                # failure node_from_nvm exists to fix, now with a WRONG node. The whole
+                # point of the knob is to use nvm's node, so it must win.
+                path_prepend.append(nvm_bin_dir)
+        return procutil.bridge_env_overlay(
+            path_append=path_append, path_prepend=path_prepend, env=claude.env, extra=extra
+        )
 
     def _popen(
         self,

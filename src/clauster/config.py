@@ -199,8 +199,8 @@ class ClaudeConfig(BaseModel):
     )
     node_from_nvm: bool = Field(
         default=True,
-        description="Resolve nvm's `default` node version at each bridge spawn and append "
-        "its bin dir to the bridge subprocess `PATH` (after `path_append`). Puts `node`/"
+        description="Resolve nvm's `default` node version at each bridge spawn and prepend "
+        "its bin dir to the bridge subprocess `PATH` (before the base PATH). Puts `node`/"
         "`npx`/`npm` AND any nvm-global CLI (e.g. `agent-browser`) — all of which live in "
         "that one bin dir — on the raw process `PATH`, so they resolve in EVERY spawn "
         "context, not just `bash -c`: dash/`sh -c`, direct `execvp` (how Claude Code "
@@ -209,8 +209,10 @@ class ClaudeConfig(BaseModel):
         "servers (e.g. codecov, context7) showing `✘ Failed to connect` under a systemd "
         "deployment. On by default and fail-safe: a no-op (never raises) when nvm, its "
         "`default` alias, or POSIX `bash` aren't available — spawn is never blocked by "
-        "this, and the resolved dir is appended last so it never shadows a `path_append` "
-        "entry. POSIX-only (nvm is a bash function); ignored on Windows. Set to `false` "
+        "this. Prepended (not appended, #1018) so nvm's node WINS over a distro `node` "
+        "already on the base `PATH` (e.g. `/usr/bin/node`) — so it also takes precedence "
+        "over a `node` in `path_append`. POSIX-only (nvm is a bash function); ignored on "
+        "Windows. Set to `false` "
         "to opt out (e.g. you pin node another way).",
     )
     env: dict[str, str] = Field(
