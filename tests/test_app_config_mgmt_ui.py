@@ -196,6 +196,16 @@ def test_mcp_surface_present_when_enabled(write_config):
     assert 'data-test="cm-mcp-reset-go"' in html
 
 
+def test_mcp_delete_confirm_suppresses_approvals_confirms(write_config):
+    # #1043: the delete confirm and the approvals save/reset confirms both bind the
+    # scope token, so two identical "Type <scope>" inputs could stack with no signal
+    # which action fires. Only one may show at a time — both approvals confirms are
+    # gated off while a delete is armed (configMgmt.mcp.deletingName).
+    html = _html(write_config, _ON)
+    assert "configMgmtMcpApprovalsDirty() && !configMgmt.mcp.deletingName" in html
+    assert '<details x-show="!configMgmt.mcp.deletingName"' in html
+
+
 def test_mcp_approval_link_gated_on_config_write_on_both_render_paths(write_config):
     # #837: the "Resolve in Server approvals" link inside the per-project readiness
     # detail jumps into the Server-approvals panel — which 404s when config-write is
