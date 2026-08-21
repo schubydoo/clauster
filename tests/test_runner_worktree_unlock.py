@@ -92,3 +92,50 @@ async def test_stop_unlocks_the_worktree(runner_config, monkeypatch):
     await runner.stop(inst.instance_id)
     assert calls == [inst.instance_id]
     assert inst.status is InstanceStatus.STOPPED
+
+
+def test_unlock_pty_worktree_swallows_resolve_error(runner_config, monkeypatch):
+    # #1089 Greptile P1: `_resolve_project` can raise an OSError/RuntimeError from project
+    # discovery / path resolution, not only UnknownProject. This runs inside stop() AFTER the
+    # process is already down, so it must swallow ANY exception — a leak would abort a
+    # completed stop before its handle cleanup / lifecycle emit / API response.
+    runner = _runner(runner_config)
+
+    def _boom(_name):
+        raise OSError("discovery scan failed")
+
+    monkeypatch.setattr(runner, "_resolve_project", _boom)
+    inst = RemoteControlInstance(
+        project="proj", label="proj", spawn_mode="worktree", resume_mode="pty"
+    )
+    runner._unlock_pty_worktree(inst)  # must NOT raise
+
+
+async def test_stop_unlocks_worktree_via_live_bridge_branch(runner_config, monkeypatch):
+    # Wiring for the OTHER stop() branch: a still-live bridge is signalled + awaited and the
+    # keeper wound down before the worktree is unlocked. Stub the process ops so no real
+    # bridge/keeper is needed (keeper_pid stays None → _cleanup_keeper is skipped).
+    from clauster import procutil
+
+    runner = _runner(runner_config)
+    inst = RemoteControlInstance(
+        project="alpha",
+        label="alpha",
+        spawn_mode="worktree",
+        resume_mode="pty",
+        status=InstanceStatus.RUNNING,
+    )
+    inst.bridge_pid = 4321
+    runner._instances[inst.instance_id] = inst
+    monkeypatch.setattr(procutil, "is_live_bridge", lambda *a, **k: True)
+    monkeypatch.setattr(runner, "_signal_stop", lambda *a, **k: None)
+
+    async def _noop_exit(*a, **k):
+        return None
+
+    monkeypatch.setattr(runner, "_await_exit", _noop_exit)
+    calls: list[str] = []
+    monkeypatch.setattr(runner, "_unlock_pty_worktree", lambda i: calls.append(i.instance_id))
+    await runner.stop(inst.instance_id)
+    assert calls == [inst.instance_id]  # reached the unlock on the live-bridge stop path
+    assert inst.status is InstanceStatus.STOPPED

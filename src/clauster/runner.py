@@ -2455,12 +2455,15 @@ class SessionRunner:
         name = self._pty_worktree_name(instance)
         if name is None:
             return
+        # Fail-safe: this runs inside stop() AFTER the process is already down, so it must
+        # NEVER raise — `_resolve_project` can raise `UnknownProject` OR an `OSError`/
+        # `RuntimeError` from project discovery / path resolution, and git can fail to spawn;
+        # any of those escaping would abort a COMPLETED stop before its handle cleanup,
+        # lifecycle emit, and API/MCP/CLI response (#1089 Greptile P1). One broad guard so no
+        # exception class can leak out of this best-effort cleanup.
         try:
             proj = self._resolve_project(instance.project)
-        except UnknownProject:
-            return
-        worktree = proj.path / pointers.WORKTREE_SUBDIR / name
-        try:
+            worktree = proj.path / pointers.WORKTREE_SUBDIR / name
             res = subprocess.run(
                 ["git", "-C", str(proj.path), "worktree", "unlock", str(worktree)],
                 capture_output=True,
@@ -2469,19 +2472,18 @@ class SessionRunner:
                 env=procutil.child_env(),
                 check=False,
             )
-        except (OSError, subprocess.SubprocessError) as exc:
+            if res.returncode != 0:
+                # Non-zero is expected + harmless when the worktree was already unlocked or is
+                # gone ("not locked" / "is not a working tree"); logged for the genuine-error case.
+                _log.debug(
+                    "worktree unlock for %s non-zero (%s): %s",
+                    instance.instance_id,
+                    res.returncode,
+                    res.stderr.strip(),
+                )
+        except Exception as exc:  # noqa: BLE001 — best-effort cleanup must never fail the stop
             _log.debug(
                 "worktree unlock for %s failed (best-effort): %s", instance.instance_id, exc
-            )
-            return
-        if res.returncode != 0:
-            # Non-zero is expected + harmless when the worktree was already unlocked or is
-            # gone ("not locked" / "is not a working tree"); logged for the genuine-error case.
-            _log.debug(
-                "worktree unlock for %s non-zero (%s): %s",
-                instance.instance_id,
-                res.returncode,
-                res.stderr.strip(),
             )
 
     @staticmethod
