@@ -119,6 +119,9 @@ def test_classifier_treats_github_automation_as_non_code():
     assert _classify("mkdocs.yml") == "noncode"
     assert _classify(".github/CODEOWNERS") == "noncode"
     assert _classify(".github/FUNDING.yml") == "noncode"
+    # Root-level repo automation the matrix never validates (pre-commit runs no CI job).
+    assert _classify(".pre-commit-config.yaml") == "noncode"
+    assert _classify(".pre-commit-config.yml") == "noncode"
 
 
 def test_classifier_still_classifies_real_code_as_code():
@@ -172,6 +175,7 @@ def test_python_re_agrees_with_the_ere_the_action_actually_runs():
         ".github/actions/setup/action.yml",
         ".github/CODEOWNERS",
         ".greptile/config.json",
+        ".pre-commit-config.yaml",
         "src/clauster/app.py",
         "docs/index.md",
         "README.md",
