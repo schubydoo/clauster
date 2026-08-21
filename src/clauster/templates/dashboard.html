@@ -2246,8 +2246,10 @@
                       </template>
                     </tbody>
                   </table>
+                  <!-- Hide the approvals-save confirm while a delete is armed, so only one
+                       scope-token "Type <scope>" input is ever visible at a time (#1043). -->
                   <div class="d-flex gap-2 align-items-center flex-wrap mb-2"
-                       x-show="configMgmtMcpApprovalsDirty()" x-cloak>
+                       x-show="configMgmtMcpApprovalsDirty() && !configMgmt.mcp.deletingName" x-cloak>
                     <input type="text" class="form-control form-control-sm cm-input-cap" data-test="cm-mcp-approvals-confirm"
                            aria-label="Type the confirmation token to save approval choices"
                            {{ NO_AUTOFILL }} spellcheck="false" x-model="configMgmt.mcp.approvals.confirm"
@@ -2257,7 +2259,7 @@
                       <span x-text="configMgmt.mcp.approvals.busy ? 'Saving…' : 'Save approvals'">Save approvals</span>
                     </button>
                   </div>
-                  <details>
+                  <details x-show="!configMgmt.mcp.deletingName" x-cloak>
                     <summary class="small text-secondary">Reset all approval choices</summary>
                     <div class="d-flex gap-2 align-items-center flex-wrap mt-2">
                       <input type="text" class="form-control form-control-sm cm-input-cap" data-test="cm-mcp-reset-confirm"
