@@ -2087,7 +2087,7 @@ nested under <code>auth</code>).</p>
 <td><code>node_from_nvm</code></td>
 <td>bool</td>
 <td><code>true</code></td>
-<td>Resolve nvm's <code>default</code> node version at each bridge spawn and append its bin dir to the bridge subprocess <code>PATH</code> (after <code>path_append</code>). Puts <code>node</code>/<code>npx</code>/<code>npm</code> AND any nvm-global CLI (e.g. <code>agent-browser</code>) — all of which live in that one bin dir — on the raw process <code>PATH</code>, so they resolve in EVERY spawn context, not just <code>bash -c</code>: dash/<code>sh -c</code>, direct <code>execvp</code> (how Claude Code spawns MCP stdio servers), and subagents all inherit it, unlike a <code>BASH_ENV</code> nvm-init which only non-interactive bash sources. Fixes <code>npx</code>/<code>node</code>-based MCP servers (e.g. codecov, context7) showing <code>✘ Failed to connect</code> under a systemd deployment. On by default and fail-safe: a no-op (never raises) when nvm, its <code>default</code> alias, or POSIX <code>bash</code> aren't available — spawn is never blocked by this, and the resolved dir is appended last so it never shadows a <code>path_append</code> entry. POSIX-only (nvm is a bash function); ignored on Windows. Set to <code>false</code> to opt out (e.g. you pin node another way).</td>
+<td>Resolve nvm's <code>default</code> node version at each bridge spawn and prepend its bin dir to the bridge subprocess <code>PATH</code> (before the base PATH). Puts <code>node</code>/<code>npx</code>/<code>npm</code> AND any nvm-global CLI (e.g. <code>agent-browser</code>) — all of which live in that one bin dir — on the raw process <code>PATH</code>, so they resolve in EVERY spawn context, not just <code>bash -c</code>: dash/<code>sh -c</code>, direct <code>execvp</code> (how Claude Code spawns MCP stdio servers), and subagents all inherit it, unlike a <code>BASH_ENV</code> nvm-init which only non-interactive bash sources. Fixes <code>npx</code>/<code>node</code>-based MCP servers (e.g. codecov, context7) showing <code>✘ Failed to connect</code> under a systemd deployment. On by default and fail-safe: a no-op (never raises) when nvm, its <code>default</code> alias, or POSIX <code>bash</code> aren't available — spawn is never blocked by this. Prepended (not appended, #1018) so nvm's node WINS over a distro <code>node</code> already on the base <code>PATH</code> (e.g. <code>/usr/bin/node</code>) — so it also takes precedence over a <code>node</code> in <code>path_append</code>. POSIX-only (nvm is a bash function); ignored on Windows. Set to <code>false</code> to opt out (e.g. you pin node another way).</td>
 </tr>
 </tbody>
 </table>
@@ -2124,8 +2124,9 @@ matters — and nvm's bin dir is version-specific, so it's never baked into a st
 never hit this.</p>
 <p><code>claude.node_from_nvm</code> (<strong>on by default</strong>) fixes it: at each bridge spawn,
 Clauster resolves nvm's <code>default</code> node version (<code>nvm which default</code>, same
-resolution nvm itself uses) and appends its bin dir to the bridge <code>PATH</code>, after
-<code>path_append</code>. It tracks nvm's current default across node upgrades — no shim
+resolution nvm itself uses) and <strong>prepends</strong> its bin dir to the bridge <code>PATH</code>, before
+the base <code>PATH</code> — so nvm's node wins over a distro <code>node</code> already on <code>PATH</code>, and takes
+precedence over a <code>node</code> in <code>path_append</code> too (#1018). It tracks nvm's current default across node upgrades — no shim
 script to maintain — and is a no-op (never blocks a spawn) when nvm or a <code>default</code>
 alias isn't found. POSIX-only (nvm is a bash function); see the <code>node_from_nvm</code>
 row in the table above.</p>
