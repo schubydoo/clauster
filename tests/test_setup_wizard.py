@@ -55,6 +55,17 @@ def test_get_renders_form_with_csp(tmp_path):
     assert res.headers["X-Frame-Options"] == "DENY"
 
 
+def test_setup_pages_are_not_cacheable(tmp_path):
+    # The form embeds a per-request CSP nonce and (in token mode) the one-time setup token,
+    # so neither the form nor the 403 gate may be cached/bfcached.
+    _, client, _, _ = _app_and_paths(tmp_path)
+    assert client.get("/").headers["cache-control"] == "no-store"
+    token_client, _, _ = _token_app(tmp_path)
+    gate = token_client.get("/")
+    assert gate.status_code == 403
+    assert gate.headers["cache-control"] == "no-store"
+
+
 def test_setup_form_opts_non_credential_inputs_out_of_autofill(tmp_path):
     # #1036: EVERY non-password setup input opts out of autofill (per field); the two password
     # fields do NOT (a manager should still offer to save the new password).
