@@ -2430,6 +2430,54 @@ class SessionRunner:
             return None
         return f"clauster-{instance.instance_id[:8]}"
 
+    def _unlock_pty_worktree(self, instance: RemoteControlInstance) -> None:
+        """Release the git lock on a stopped pty session's worktree (#1089).
+
+        Claude Code creates a ``spawn_mode="worktree"`` interactive session's worktree via
+        ``--worktree <name>`` and LOCKS it (lock reason ``claude session …``); it does not
+        release the lock on the SIGINT-driven stop. ``git worktree remove`` then refuses it
+        (``cannot remove a locked working tree``, naming a now-dead pid), so the operator has
+        to discover ``git worktree unlock`` before any cleanup. Clauster knows the session
+        ended, so it releases the lock here — the lock only guards against a *live* session,
+        and once stopped it protects nothing. The worktree and its branch are left in place:
+        they may hold uncommitted work, and a resume reuses them.
+
+        Best-effort: a non-worktree session, an unknown project, a missing/renamed or
+        already-unlocked worktree, or a missing ``git`` all no-op. Any failure is logged,
+        never raised, so it can never fail the stop.
+        """
+        name = self._pty_worktree_name(instance)
+        if name is None:
+            return
+        try:
+            proj = self._resolve_project(instance.project)
+        except UnknownProject:
+            return
+        worktree = proj.path / pointers.WORKTREE_SUBDIR / name
+        try:
+            res = subprocess.run(
+                ["git", "-C", str(proj.path), "worktree", "unlock", str(worktree)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=procutil.child_env(),
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            _log.debug(
+                "worktree unlock for %s failed (best-effort): %s", instance.instance_id, exc
+            )
+            return
+        if res.returncode != 0:
+            # Non-zero is expected + harmless when the worktree was already unlocked or is
+            # gone ("not locked" / "is not a working tree"); logged for the genuine-error case.
+            _log.debug(
+                "worktree unlock for %s non-zero (%s): %s",
+                instance.instance_id,
+                res.returncode,
+                res.stderr.strip(),
+            )
+
     @staticmethod
     def _keeper_launch_cmd(
         sidecar: Path, cwd: Path, bridge_argv: list[str], screen_sidecar: Path | None = None
@@ -3075,6 +3123,7 @@ class SessionRunner:
                 if keeper_pid is not None:
                     await asyncio.to_thread(self._cleanup_keeper, keeper_pid)
                 instance.status = InstanceStatus.STOPPED
+                await asyncio.to_thread(self._unlock_pty_worktree, instance)  # #1089
                 self._procs.pop(instance_id, None)  # release dead Popen handle; resume re-adds it
                 self._emit_lifecycle("stop", instance)
                 return instance
@@ -3089,6 +3138,7 @@ class SessionRunner:
             if keeper_pid is not None:  # pragma: skip-on-win
                 await asyncio.to_thread(self._cleanup_keeper, keeper_pid)
             instance.status = InstanceStatus.STOPPED
+            await asyncio.to_thread(self._unlock_pty_worktree, instance)  # #1089
             self._procs.pop(instance_id, None)  # release dead Popen handle; resume re-adds it
             self._emit_lifecycle("stop", instance)
             return instance
