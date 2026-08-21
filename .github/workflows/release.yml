@@ -257,6 +257,17 @@ jobs:
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
       - name: Set up Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        with:
+          # Pin the Buildx CLI so #1189's digest prediction (imagetools create --dry-run, a
+          # buildx-CLI op) is stable run-to-run: an unpinned upgrade could change the dry-run
+          # OCI-index bytes and make predicted != DIGEST, fail-closed-rejecting a valid
+          # release. Bump deliberately (re-validate the prediction); keep build + tag on the
+          # same version. NB the build-side DIGEST is serialized by BuildKit, which this does
+          # NOT pin — the post-publish detection loop is the backstop if that ever drifts.
+          version: v0.36.1
+          # No binary cache in a publish pipeline: nothing for a poisoned cache to swap in,
+          # and the pinned version is fetched deterministically each run (zizmor).
+          cache-binary: false
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -416,6 +427,17 @@ jobs:
     steps:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        with:
+          # Pin the Buildx CLI so #1189's digest prediction (imagetools create --dry-run, a
+          # buildx-CLI op) is stable run-to-run: an unpinned upgrade could change the dry-run
+          # OCI-index bytes and make predicted != DIGEST, fail-closed-rejecting a valid
+          # release. Bump deliberately (re-validate the prediction); keep build + tag on the
+          # same version. NB the build-side DIGEST is serialized by BuildKit, which this does
+          # NOT pin — the post-publish detection loop is the backstop if that ever drifts.
+          version: v0.36.1
+          # No binary cache in a publish pipeline: nothing for a poisoned cache to swap in,
+          # and the pinned version is fetched deterministically each run (zizmor).
+          cache-binary: false
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -453,12 +475,23 @@ jobs:
           fi
           args=()
           for tag in ${TAGS}; do args+=(--tag "${tag}"); done
+          # #1189: PREVENTION — predict the index digest before publishing. `--dry-run`
+          # prints the OCI index JSON but publishes nothing; an index's digest IS the
+          # sha256 of those bytes, so hashing them predicts what `create` would push. `$(...)`
+          # strips the trailing newline and `printf '%s'` re-emits it without one, so the
+          # hashed bytes match what buildx hashed. Refuse if it wouldn't be the signed digest.
+          dry="$(docker buildx imagetools create --dry-run "${args[@]}" "${IMAGE}@${DIGEST}")"
+          predicted="sha256:$(printf '%s' "${dry}" | sha256sum | cut -d' ' -f1)"
+          if [ "${predicted}" != "${DIGEST}" ]; then
+            echo "::error::would publish ${predicted}, not the signed ${DIGEST}; nothing published" >&2
+            exit 1
+          fi
           docker buildx imagetools create "${args[@]}" "${IMAGE}@${DIGEST}"
-          # DETECTION, not prevention — be precise about which. `imagetools create` above
-          # has already published every tag, so if the digest ever did move, the
-          # mis-pointing tags are live and public until someone reacts. This loop makes
-          # that loud instead of silent, which is the trade: the assumption was measured
-          # (see this job's header) and the failure mode would otherwise be invisible.
+          # Layered DETECTION behind the prediction above. The predict step relies on the
+          # dry-run JSON being byte-identical to what `create` pushes — a buildx
+          # implementation detail, not a guarantee — so this loop re-proves the published
+          # tags resolve to the signed digest. If buildx ever diverges, the tags are
+          # already public here, so this makes a moved digest loud instead of silent.
           for tag in ${TAGS}; do
             got="$(docker buildx imagetools inspect "${tag}" --format '{{.Manifest.Digest}}')"
             if [ "${got}" != "${DIGEST}" ]; then
