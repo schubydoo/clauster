@@ -233,6 +233,23 @@ def test_doctor_adds_managed_deps_dir_before_probing(write_config, tmp_path, mon
     assert order == [f"add:{load_config(cfg).state_dir}", "probe"]
 
 
+def test_doctor_adds_external_pyte_path_before_probing(write_config, tmp_path, monkeypatch):
+    # doctor must also apply the CLAUSTER_PYTE_PATH shim (pty_screen._maybe_add_external_pyte_path,
+    # frozen-only) BEFORE the extra probes, so a pyte side-loaded via the env var isn't misreported
+    # as unavailable — the env-var analogue of the managed-deps fix (#933), fixed in #1193.
+    cfg = _cfg_file(write_config, tmp_path)
+    order: list[str] = []
+    real_check = ops_mod._check_extras
+    monkeypatch.setattr(
+        ops_mod.pty_screen, "_maybe_add_external_pyte_path", lambda: order.append("pyte-path")
+    )
+    monkeypatch.setattr(
+        ops_mod, "_check_extras", lambda cfg: order.append("probe") or real_check(cfg)
+    )
+    run_doctor(cfg, check_port=False)
+    assert order == ["pyte-path", "probe"]
+
+
 def test_doctor_includes_extra_rows_never_failing(write_config, tmp_path):
     checks, ok = run_doctor(_cfg_file(write_config, tmp_path))
     extra_rows = [c for c in checks if c.name.startswith("extra:")]

@@ -624,18 +624,22 @@ def bridge_env_overlay(
     path_append: list[str] | None = None,
     env: dict[str, str] | None = None,
     *,
+    path_prepend: list[str] | None = None,
     extra: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Build the env overlay for a bridge subprocess from operator-config knobs.
 
     Returns an ``extra`` mapping to hand :func:`child_env`: the operator's
     ``env`` map, any caller ``extra`` (e.g. resume-recap flags), and — when
-    ``path_append`` is set — a merged ``PATH`` = base ``PATH`` followed by the
-    ``~``-expanded append directories joined with ``os.pathsep``. The base is the
-    operator's own ``env['PATH']`` when they set one, otherwise the inherited
-    service ``PATH`` — so ``path_append`` appends to (never silently discards) an
-    explicit operator override. Appending (never replacing) keeps the base service
-    toolchain resolvable.
+    ``path_prepend`` and/or ``path_append`` is set — a merged ``PATH`` =
+    ``~``-expanded prepend dirs, then the base ``PATH``, then the ``~``-expanded
+    append dirs, joined with ``os.pathsep``. The base is the operator's own
+    ``env['PATH']`` when they set one, otherwise the inherited service ``PATH`` —
+    so appends never silently discard an explicit operator override. **Prepend**
+    dirs sit BEFORE the base so they WIN name resolution (``node_from_nvm`` uses it
+    so nvm's node beats a distro ``/usr/bin/node``, #1018); **append** dirs sit
+    after so they only fill a gap. Neither replaces the base, keeping the base
+    service toolchain resolvable.
 
     Returning only the overlay (not the full env) lets the result flow through
     :func:`child_env`, which scrubs Clauster secrets one more time — so an
@@ -647,14 +651,16 @@ def bridge_env_overlay(
         overlay.update(env)
     if extra:
         overlay.update(extra)
-    if path_append:
-        expanded = [os.path.expanduser(p) for p in path_append if p]
-        if expanded:
-            # Prefer an operator-supplied env['PATH'] as the base (popped so it
-            # isn't left stale), else the inherited service PATH.
-            inherited = overlay.pop("PATH", os.environ.get("PATH", ""))
-            parts = ([inherited] if inherited else []) + expanded
-            overlay["PATH"] = os.pathsep.join(parts)
+    prepend = [os.path.expanduser(p) for p in (path_prepend or []) if p]
+    append = [os.path.expanduser(p) for p in (path_append or []) if p]
+    if prepend or append:
+        # Prefer an operator-supplied env['PATH'] as the base (popped so it
+        # isn't left stale), else the inherited service PATH. Prepend dirs go
+        # BEFORE the base so they WIN name resolution (e.g. node_from_nvm's node,
+        # #1018); append dirs go after so they only fill a gap.
+        inherited = overlay.pop("PATH", os.environ.get("PATH", ""))
+        parts = prepend + ([inherited] if inherited else []) + append
+        overlay["PATH"] = os.pathsep.join(parts)
     return overlay
 
 
