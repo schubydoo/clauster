@@ -97,6 +97,25 @@
     .launch-anchor { position: relative; display: inline-block; }
     .launch-pop { position: absolute; z-index: 40; right: 0; left: auto; margin-top: .35rem;
                   width: min(360px, 92vw); box-shadow: 0 .5rem 1.25rem rgba(0,0,0,.3); }
+    /* #1159: at phone widths the right-anchored popover hangs off the LEFT edge when the Run
+       button sits mid-row (e.g. left: -24px at 390px). Pin it to the viewport with small side
+       margins so the whole launch menu stays on screen; desktop keeps the anchored overlay.
+       Bound the height too and give it its own scroll: a fixed element does NOT extend the
+       page's scroll region, so an unbounded tall popover (the Run button, or an expanded
+       trust/bypass gate) would sit below the fold and be unreachable. Pin the top and cap the
+       height at the viewport so every control — including the confirm buttons — stays reachable
+       by scrolling the popover itself. `dvh` (with a `vh` fallback) keeps the mobile URL bar
+       from inflating the cap. z-index above the sticky navbar so it isn't overlapped. */
+    @media (max-width: 575.98px) {
+      .launch-pop { position: fixed; left: .5rem; right: .5rem; width: auto;
+                    top: .5rem; bottom: auto; max-height: calc(100vh - 1rem);
+                    max-height: calc(100dvh - 1rem); overflow-y: auto; z-index: 1090; }
+    }
+    /* #1159: session action-button clusters (Open in Claude / Logs / Live terminal / Transcript
+       / Stop) must WRAP on a narrow viewport instead of forcing the whole page to scroll
+       sideways (the row is ~462px, clipping Stop off a phone). min-width:0 lets the flex item
+       shrink below its content so flex-wrap engages; a no-op on desktop where they fit one line. */
+    .sess-row .ms-auto.d-flex.gap-1 { flex-wrap: wrap; min-width: 0; }
     /* #1114: the launch popover's two free-text fields are <textarea> so a password
        manager never scans them as login inputs. They must still LOOK and behave like the
        single-line inputs they replaced: no drag-resize, no vertical scrollbar, and
