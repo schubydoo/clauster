@@ -74,6 +74,17 @@ def test_dashboard_renders(write_config):
     assert "alpha" in resp.text
 
 
+def test_dashboard_phone_overflow_fixes_present(write_config):
+    # #1159: on a phone, session action clusters must WRAP (not scroll the page sideways) and
+    # the launch popover must be viewport-pinned below the sm breakpoint (not clip off the left
+    # edge). Both are nonce'd CSS in dashboard.html; assert they render.
+    html = _client(write_config).get("/").text
+    assert ".sess-row .ms-auto.d-flex.gap-1 { flex-wrap: wrap; min-width: 0; }" in html
+    assert "@media (max-width: 575.98px)" in html
+    assert ".launch-pop { position: fixed;" in html  # popover viewport-pinned on phones
+    assert "max-height: calc(100dvh - 1rem); overflow-y: auto;" in html  # bounded + own scroll
+
+
 def test_dashboard_non_credential_inputs_opt_out_of_autofill(write_config):
     # #1036: EVERY non-password dashboard input/textarea opts out of password-manager autofill,
     # and no credential field does — audited per field, not just page-wide.
