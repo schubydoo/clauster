@@ -74,6 +74,17 @@ def test_dashboard_renders(write_config):
     assert "alpha" in resp.text
 
 
+def test_dashboard_error_bridge_stays_visible_with_detail(write_config):
+    # #1149: an ERROR-status bridge is neither running nor resumable-stopped, so it used to
+    # render in no dashboard zone and vanish with its error_detail. endedBridges() now treats
+    # error as ended (parity with endedHosted), and the Recent-zone card surfaces its
+    # error_detail. Both are client-side Alpine, so assert the wiring in the rendered page.
+    html = _client(write_config).get("/").text
+    assert 'i.status === "error"' in html  # endedBridges() includes error rows
+    assert 'data-test="bridge-error-detail"' in html
+    assert "displayStatus(i.rk) === 'error' && detailOf(i.rk)" in html
+
+
 def test_dashboard_non_credential_inputs_opt_out_of_autofill(write_config):
     # #1036: EVERY non-password dashboard input/textarea opts out of password-manager autofill,
     # and no credential field does — audited per field, not just page-wide.

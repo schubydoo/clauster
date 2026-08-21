@@ -960,6 +960,11 @@
                 <div class="d-flex align-items-center flex-wrap gap-1">
                   {{ desktop_row_head("Stopped") }}
                   <span class="text-secondary small ms-1" x-show="statusNote(i.rk)" x-cloak x-text="statusNote(i.rk)"></span>
+                  {# #1149: keep a failed bridge's cause on screen — an ERROR row would
+                     otherwise render nowhere. error_detail is backend-redacted (runner). #}
+                  <span class="text-danger small ms-1" data-test="bridge-error-detail"
+                        x-show="displayStatus(i.rk) === 'error' && detailOf(i.rk)" x-cloak
+                        x-text="detailOf(i.rk)"></span>
                   {# Why Resume can't run, as VISIBLE text: a disabled control's tooltip
                      never fires on touch, and this is a phone-first product. Carries an id
                      so the button can point at it with aria-describedby. #}
