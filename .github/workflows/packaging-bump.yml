@@ -57,12 +57,12 @@ jobs:
       # App token (NOT the default GITHUB_TOKEN): a PR opened by the default token
       # would not trigger downstream CI, and the default token can't push a branch
       # under branch protection. Re-minted per job (cheap). Requires secrets
-      # CLAUSTER_CI_APP_ID + CLAUSTER_CI_APP_PRIVATE_KEY.
+      # CLAUSTER_CI_APP_CLIENT_ID + CLAUSTER_CI_APP_PRIVATE_KEY.
       - name: Mint GitHub App token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ secrets.CLAUSTER_CI_APP_ID }}
+          client-id: ${{ secrets.CLAUSTER_CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
           permission-contents: write
           permission-pull-requests: write
@@ -76,7 +76,7 @@ jobs:
         if: ${{ steps.app-token.outputs.token == '' }}
         run: |
           echo "::error::clauster-ci App token mint produced an empty token; \
-          refusing to proceed. Check the CLAUSTER_CI_APP_ID / \
+          refusing to proceed. Check the CLAUSTER_CI_APP_CLIENT_ID / \
           CLAUSTER_CI_APP_PRIVATE_KEY secrets and the clauster-ci App installation."
           exit 1
 
