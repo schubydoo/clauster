@@ -80,3 +80,16 @@ repos:
         language: system
         pass_filenames: false
         files: '^\.changeset/.+\.md$'
+
+      - id: actionlint
+        name: actionlint (workflow lint)
+        # #1170: lints .github/workflows shell + expressions. The CI "Actionlint" job
+        # is the enforcing gate; this catches the same locally BEFORE push. Unlike the
+        # hooks above, actionlint + shellcheck are NOT uv/npm-managed — install them on
+        # PATH yourself (e.g. `brew install actionlint shellcheck`, or your distro's
+        # packages). Without shellcheck, actionlint still checks syntax/expressions but
+        # skips the run: shell linting. Runs over all workflows when any one changes.
+        entry: actionlint
+        language: system
+        pass_filenames: false
+        files: '^\.github/workflows/.+\.ya?ml$'
