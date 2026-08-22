@@ -13,7 +13,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # Prefer the version-pinned agent-browser from tests/e2e/package-lock.json over an
-# ambient global install: 0.27.3 regressed `check` on the trust-gate checkbox (see
+# ambient global install: the CLI version is load-bearing for this suite (see
 # tests/e2e/package.json), so the lockfile version is the verified-green one. CI
 # preinstalls it the same way (e2e.yml: npm ci + node_modules/.bin on PATH); locally
 # this installs it on demand, falling back to a global agent-browser only when npm
@@ -42,4 +42,12 @@ if [ -z "${AGENT_BROWSER_EXECUTABLE_PATH:-}" ]; then
   agent-browser install
 fi
 
-exec uv run pytest tests/e2e -o addopts="" -m e2e "$@"
+# --reruns: the leg runs on a 2-core CI runner that starves agent-browser, so a
+# fill/click can stochastically not register (#947) and a downstream wait times out —
+# a different few tests each run, cleared by a fresh re-run. Re-run a failed test up to
+# three times (fresh server + browser each time) before reporting red — the flakiest
+# interaction (opening a launch/menu popover) can miss a couple of consecutive attempts
+# under contention. This leg opts in here; the
+# required suite never reruns, so a real regression there is never masked. `"$@"` comes
+# last so a caller can override (e.g. --reruns 0) or add -k.
+exec uv run pytest tests/e2e -o addopts="" -m e2e --reruns 3 --reruns-delay 3 "$@"
