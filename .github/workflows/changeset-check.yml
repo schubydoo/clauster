@@ -12,9 +12,8 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
 
-permissions:
-  contents: read
-  pull-requests: write # post/update the advisory sticky comment
+# No token needed at the workflow level; the single job grants itself the minimum.
+permissions: {}
 
 concurrency:
   group: changeset-check-${{ github.event.pull_request.number }}
@@ -22,6 +21,10 @@ concurrency:
 
 jobs:
   changeset:
+    name: Changeset advisory
+    permissions:
+      contents: read
+      pull-requests: write # post/update the advisory sticky comment
     # Same-repo PRs only (fork PRs get a read-only token and can't comment), and
     # never on knope's own release PR (it deletes changesets as it prepares).
     if: >-
