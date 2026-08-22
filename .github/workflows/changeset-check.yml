@@ -62,8 +62,13 @@ jobs:
             const marker = '<!-- changeset-check -->';
             try {
               const labels = (pr.labels || []).map(l => l.name);
-              if (labels.includes('no-changelog')) {
-                core.info('no-changelog label set; skipping.');
+              // `no-changelog` is the manual opt-out (CI / refactor / tests). The
+              // `dependencies` label — which Renovate's base preset stamps on every
+              // dep-bump PR — opts those out too: clauster is changesets-only and
+              // Renovate can't author a fragment, so a dep bump ships with no changelog
+              // entry by design and rides the next release. Nagging it is pure noise.
+              if (labels.includes('no-changelog') || labels.includes('dependencies')) {
+                core.info('no-changelog/dependencies label set; skipping.');
                 return;
               }
               const files = await github.paginate(github.rest.pulls.listFiles, {
