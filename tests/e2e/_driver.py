@@ -48,6 +48,17 @@ if not _DIALOG_SCRIPT.exists():  # pragma: no cover - guards a broken/partial ch
 _DEFAULT_TIMEOUT_MS = 5_000
 _POLL_INTERVAL_S = 0.2
 
+# A single agent-browser ``fill`` can silently no-op under 2-core CI contention with a
+# newer Chrome: the clear runs but the typed text never registers, leaving the field
+# empty and — for an ``x-model`` field — its Alpine model stale, so a Save that gates on
+# a *changed* value stays disabled and a downstream ``expect_*`` times out with no hint.
+# Seen with Chrome 151 (issue 947, worked around by pinning Chrome) and again on the
+# Chrome 152 bump. Every ``fill`` target in the suite is an ``<input>``/``<textarea>``,
+# so :meth:`fill` verifies against the element's own value and re-issues within this
+# window instead of trusting one dispatch. Bounded so a browser-normalized value (a
+# number/masked field) still falls through to the caller's assertion, never hangs here.
+_FILL_VERIFY_TIMEOUT_MS = 4_000
+
 
 class AgentBrowser:
     """Drive one ``agent-browser`` session for the lifetime of a single test."""
@@ -193,8 +204,22 @@ class AgentBrowser:
         self._run("find", "role", role, "click", name, check=True)
 
     def fill(self, selector: str, text: str) -> None:
-        """Clear ``selector`` and type ``text`` into it."""
-        self._run("fill", selector, text, check=True)
+        """Clear ``selector``, type ``text``, and re-issue until the value lands.
+
+        See :data:`_FILL_VERIFY_TIMEOUT_MS`: a lone agent-browser ``fill`` can silently
+        no-op under CI contention, so verify against the element's own value and retry
+        within a bounded window. Falls through after the window so a value the browser
+        legitimately normalizes still proceeds to the caller's own assertion rather than
+        hanging here. ``get_value`` strips its output, so compare against stripped text —
+        callers must not depend on significant leading/trailing whitespace in ``text``.
+        """
+        want = text.strip()
+        deadline = time.monotonic() + _FILL_VERIFY_TIMEOUT_MS / 1000
+        while True:
+            self._run("fill", selector, text, check=True)
+            if self.get_value(selector) == want or time.monotonic() >= deadline:
+                return
+            time.sleep(_POLL_INTERVAL_S)
 
     def check(self, selector: str) -> None:
         """Check the checkbox matching ``selector``."""

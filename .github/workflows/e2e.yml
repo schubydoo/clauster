@@ -62,9 +62,10 @@ jobs:
       - name: Install agent-browser CLI
         # Pinned + integrity-checked via tests/e2e/package-lock.json (`npm ci`),
         # instead of an unpinned `npm i -g` (the global install Scorecard flags as
-        # Pinned-Dependencies). 0.27.3 regressed `check` on the trust-gate checkbox
-        # (8 failures in CI, 5 locally); 0.27.1 is the verified-green version the
-        # suite was developed against. Bump deliberately (lockfile) + re-verify.
+        # Pinned-Dependencies). Held at 0.27.1: 0.27.3 regressed `check` on the trust-gate
+        # checkbox, and 0.34.0 was empirically WORSE on this 2-core runner (its
+        # click/set-viewport commands error under contention, #947). Bump deliberately
+        # (lockfile) + re-verify on CI, not just locally.
         # Put node_modules/.bin on PATH so `agent-browser` resolves for later steps
         # and scripts/e2e.sh without a global install.
         working-directory: tests/e2e
@@ -78,11 +79,17 @@ jobs:
       # agent-browser at it with AGENT_BROWSER_EXECUTABLE_PATH (scripts/e2e.sh then skips
       # its own latest-Chromium download). A version bump is a Renovate PR that re-runs
       # this e2e leg, so a new Chrome is verified green before it can land.
+      # The #947 destabilization (a fill/click silently not registering under 2-core
+      # contention) is absorbed in two layers so the pin can track current Chrome instead
+      # of freezing behind it: _driver.py's self-verifying fill (re-issues until the value
+      # lands) fixes the fill class deterministically, and scripts/e2e.sh's --reruns
+      # retries a test that hits the residual stochastic click/CLI-transient class. This
+      # is the Chrome 152 line the suite was verified on (agent-browser 0.27.1).
       - name: Install pinned Chrome-for-Testing
         working-directory: tests/e2e
         env:
           # renovate: datasource=custom.chrome-for-testing depName=chrome-for-testing
-          CHROME_VERSION: "150.0.7871.124"
+          CHROME_VERSION: "152.0.7977.54"
         run: |
           exe=$(node_modules/.bin/browsers install "chrome@${CHROME_VERSION}" --path "$RUNNER_TEMP/cft" | awk 'END{print $NF}')
           test -x "$exe"

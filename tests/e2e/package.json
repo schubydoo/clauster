@@ -2,7 +2,7 @@
   "name": "clauster-e2e-tooling",
   "version": "0.0.0",
   "private": true,
-  "description": "Dev-only Node tooling for the Clauster E2E suite. Not published — pins the agent-browser CLI with an integrity-checked lockfile (npm ci) instead of an unpinned `npm i -g` global install (OpenSSF Scorecard Pinned-Dependencies). 0.27.3 regressed the trust-gate `check`; 0.27.1 is the verified-green version — bump deliberately + re-verify.",
+  "description": "Dev-only Node tooling for the Clauster E2E suite. Not published — pins the agent-browser CLI with an integrity-checked lockfile (npm ci) instead of an unpinned `npm i -g` global install (OpenSSF Scorecard Pinned-Dependencies). Held at 0.27.1: 0.27.3 regressed the trust-gate `check`, and 0.34.0 was empirically WORSE on the 2-core CI runner (its click/set-viewport commands error under contention). The #947 flake is instead absorbed by the driver's self-verifying fill + the e2e leg's --reruns (scripts/e2e.sh). Bump deliberately + re-verify on CI, not just locally.",
   "license": "Apache-2.0",
   "dependencies": {
     "@puppeteer/browsers": "3.0.6",

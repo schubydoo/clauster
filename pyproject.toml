@@ -67,6 +67,14 @@ dev = [
     # offending test with an all-thread traceback instead, so a hang fails fast and
     # points at itself.
     "pytest-timeout>=2.3",
+    # Rerun a failed test a bounded couple of times before reporting red. Used ONLY by
+    # the opt-in browser-e2e leg (scripts/e2e.sh passes --reruns); the required suite
+    # never reruns, so this can never mask a real regression there. The e2e leg runs on
+    # a 2-core CI runner that starves agent-browser, so a fill/click can stochastically
+    # not register (#947) and a downstream wait times out — a different few tests each
+    # run, cleared by a fresh re-run. The driver's self-verifying fill fixes the fill
+    # class deterministically; --reruns absorbs the residual click/CLI-transient class.
+    "pytest-rerunfailures>=14",
     # httpx2 (pydantic's httpx 2.x line, #888): Starlette 1.3+ deprecates plain httpx with
     # its TestClient and auto-uses httpx2 when installed (`import httpx2 as httpx`), so this
     # silences the StarletteDeprecationWarning and moves the test client to the intended
