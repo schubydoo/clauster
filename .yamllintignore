@@ -1,0 +1,2 @@
+# yamllint exemptions for tracked-but-tool-managed YAML (not gitignored).
+.github/settings.yml

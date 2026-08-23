@@ -1,0 +1,177 @@
+# $schema: https://noirbizarre.github.io/gh-settings/schema/v1/settings.json
+#
+# SPIKE (evaluation) — declarative repo governance via the `gh settings` CLI extension,
+# proposed as a replacement for the hand-rolled repo-config system (labels.json +
+# settings.json + repo-config-apply.yml/repo-config-drift.yml). This file was produced by
+# `gh settings export`, then trimmed to the resources REPO_CONFIG_TOKEN can manage
+# (Administration + Issues: write → repository, topics, rulesets, labels). It reflects the
+# repo's CURRENT live state, so `gh settings plan` reports NO changes and a `sync` is a
+# no-op. The plan/sync workflows pass `--only repository,topics,labels,rulesets` to match.
+# Additive by default — nothing is deleted unless a section is marked `prune: true`.
+# (gh-settings can ALSO manage environments/variables/pages/actions/autolinks — see the
+# note at the bottom; they need broader token scope and are out of this spike.)
+#
+# ⚠️ SECURITY-CRITICAL: the `rulesets:` section (branch protection + the required checks +
+# tag protection) GATES the repo. Writes happen ONLY via workflow_dispatch
+# (gh-settings-sync.yml, ref-gated to main) with REPO_CONFIG_TOKEN; PRs and manual dispatch
+# only `plan` (read-only preview).
+version: 1
+repository:
+  description: Your homelab's Claude Code launchpad. Self-hosted web UI that spawns & manages remote-control bridges on a remote host from any browser or phone — start/stop, spawn & permission modes, CLAUDE.md editor, git clone, live log tail, cost tracking. Loopback by default; password/reverse-proxy auth. No telemetry.
+  homepage: https://schubydoo.github.io/clauster/
+  private: false
+  has_issues: true
+  has_wiki: false
+  has_projects: true
+  has_discussions: false
+  is_template: false
+  web_commit_signoff_required: false
+  allow_merge_commit: false
+  allow_squash_merge: true
+  allow_rebase_merge: false
+  allow_auto_merge: true
+  allow_update_branch: true
+  delete_branch_on_merge: true
+  squash_merge_commit_title: PR_TITLE
+  squash_merge_commit_message: PR_BODY
+  merge_commit_title: MERGE_MESSAGE
+  merge_commit_message: PR_TITLE
+  default_branch: main
+  security:
+    secret_scanning: true
+    secret_scanning_push_protection: true
+    dependabot_security_updates: true
+    secret_scanning_validity_checks: false
+topics:
+- anthropic
+- claude
+- claude-code
+- developer-tools
+- dispatcher
+- docker
+- fastapi
+- homelab
+- nas
+- python
+- remote-control
+- scoop-bucket
+- self-hosted
+labels:
+- name: binary-dep
+  color: ededed
+  description: Hand-pinned binary/engine bump (Shawl/BuildKit/actionlint); manual sha refresh, never auto-merged
+- name: breaking
+  color: b60205
+  description: Backwards-incompatible change
+- name: bug
+  color: d73a4a
+  description: Something isn't working
+- name: dependencies
+  color: ededed
+  description: Renovate-opened dependency update PRs (and the dashboard issue)
+- name: documentation
+  color: 0075ca
+  description: Improvements or additions to documentation
+- name: enhancement
+  color: a2eeef
+  description: New feature or request
+- name: frontend
+  color: ededed
+- name: good first issue
+  color: 7057ff
+  description: Good for newcomers
+- name: help wanted
+  color: '008672'
+  description: Extra attention is needed
+- name: needs-repro
+  color: fbca04
+  description: Confirmed-enough to track, but needs a deterministic reproduction before a fix
+- name: no-autoupdate
+  color: fbca04
+  description: 'PR auto-update skips this PR: hold it behind main; rebase manually'
+- name: no-changelog
+  color: ededed
+  description: Skip the changeset/changelog requirement (CI / refactor / tests / docs)
+- name: question
+  color: d876e3
+  description: Further information is requested
+- name: security
+  color: d93f0b
+  description: Security-related — Renovate vulnerability alerts use this
+- name: skip-review
+  color: ededed
+  description: Greptile skips this PR (.greptile config disabledLabels); conserves the OSS review cap
+- name: tracked
+  color: fa68de
+  description: Tracked as an issue on the GitHub Project board (open work)
+- name: vendored
+  color: ededed
+- name: vendored-assets
+  color: ededed
+  description: Renovate heads-up to re-vendor self-hosted front-end assets (manual dist update)
+rulesets:
+- name: main
+  target: branch
+  enforcement: active
+  conditions:
+    ref_name:
+      include:
+      - ~DEFAULT_BRANCH
+      exclude: []
+  rules:
+  - type: deletion
+  - type: non_fast_forward
+  - type: required_linear_history
+  - type: pull_request
+    parameters:
+      allowed_merge_methods:
+      - squash
+      dismiss_stale_reviews_on_push: true
+      require_code_owner_review: false
+      require_extra_approval_for_unattributed_changes: true
+      require_last_push_approval: false
+      required_approving_review_count: 0
+      required_review_thread_resolution: true
+      required_reviewers: []
+  - type: required_status_checks
+    parameters:
+      do_not_enforce_on_create: false
+      required_status_checks:
+      - context: ci required checks passed
+        integration_id: 15368
+      - context: security required checks passed
+        integration_id: 15368
+      - context: conventional PR title
+        integration_id: 15368
+      - context: lint
+        integration_id: 15368
+      strict_required_status_checks_policy: true
+  - type: code_scanning
+    parameters:
+      code_scanning_tools:
+      - alerts_threshold: errors
+        security_alerts_threshold: high_or_higher
+        tool: CodeQL
+- name: protect-version-tags
+  target: tag
+  enforcement: active
+  conditions:
+    ref_name:
+      include:
+      - refs/tags/v*
+      exclude: []
+  rules:
+  - type: deletion
+  - type: non_fast_forward
+
+# ---------------------------------------------------------------------------------------
+# OUT OF SCOPE for this spike (present in the full `gh settings export`, removed here):
+#   environments:  (ghcr, github-pages, pypi{reviewer: schubydoo}, testpypi)
+#   variables:     (AUTO_UPDATE, CI_CAP_PARALLEL)
+#   pages:         (gh-pages, https_enforced)
+#   actions:       (allowed_actions, sha_pinning_required, default_workflow_permissions, …)
+#   autolinks:     (none defined)
+# These need SEPARATE fine-grained token permissions (Variables / Environments / Pages)
+# that REPO_CONFIG_TOKEN (Administration + Issues) does not carry — a plan/sync over them
+# 403s. To manage them as code too, broaden REPO_CONFIG_TOKEN and add the sections back
+# (re-export with `gh settings export`), then widen the `--only` list in both workflows.

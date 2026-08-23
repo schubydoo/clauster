@@ -8,7 +8,11 @@ extends: default
 
 # Skip gitignored local-only YAML (clauster.yml, .playwright-mcp/, scratch/, …);
 # yamllint, unlike markdownlint-cli2, does not honour .gitignore on its own.
-ignore-from-file: .gitignore
+# .yamllintignore adds tracked-but-tool-managed files (.github/settings.yml is written
+# by `gh settings export` in its own indentation style — don't churn it to our rules).
+ignore-from-file:
+  - .gitignore
+  - .yamllintignore
 
 rules:
   # GitHub Actions pins actions as `uses: owner/action@<sha> # vX.Y.Z` with a

@@ -1,0 +1,76 @@
+name: gh-settings plan
+
+# READ-ONLY preview of repo-governance drift via `gh settings plan` (SPIKE — evaluating a
+# replacement for repo-config-drift.yml). Advisory + NON-required: it never gates a merge.
+# `plan` writes nothing; the write half is gh-settings-sync.yml (workflow_dispatch only).
+#
+# ⚠️ Trigger surface is deliberately MAINTAINER-INITIATED ONLY — same-repo PRs (forks get
+# no secrets AND are gated out below) + manual dispatch. NO push/schedule: this job feeds
+# the admin-WRITE REPO_CONFIG_TOKEN to a third-party binary (`gh settings` — a precompiled
+# release asset with NO checksum verification, so `--pin` locks the tag but not the bytes),
+# and must never run unattended on an automatic trigger. BEFORE ADOPTING, switch this job to
+# a read-only token (an `Administration: read` App-token mint, as repo-config-drift.yml does)
+# so the write token is reserved for the ref-gated, dispatch-only sync.
+on:
+  pull_request:
+    paths:
+      - ".github/settings.yml"
+      - ".github/workflows/gh-settings-plan.yml"
+  workflow_dispatch:
+
+# The default token needs nothing beyond checkout; every settings read goes through
+# REPO_CONFIG_TOKEN below.
+permissions:
+  contents: read
+
+concurrency:
+  group: gh-settings-plan-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    name: gh settings plan
+    # Same-repo only: the admin REPO_CONFIG_TOKEN must never be exposed to a fork PR. Forks
+    # get no secrets regardless; this also skips the whole job for them.
+    if: >-
+      ${{ github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install gh settings (pinned)
+        env:
+          GH_TOKEN: ${{ github.token }} # extension install only reads a public release
+        run: gh extension install noirbizarre/gh-settings --pin 0.3.0
+      - name: Plan
+        # REPO_CONFIG_TOKEN carries Administration + Issues; the default GITHUB_TOKEN cannot
+        # read most settings. `plan` exits 2 when drift exists — this is an ADVISORY job, so
+        # treat that as informational (never fail the run).
+        env:
+          GH_TOKEN: ${{ secrets.REPO_CONFIG_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "> REPO_CONFIG_TOKEN not set — cannot plan (needs Administration: read)." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # --only scopes to what REPO_CONFIG_TOKEN can manage (Administration+Issues);
+          # environments/variables/pages need separate perms it lacks and would 403.
+          set +e
+          out=$(gh settings plan --only repository,topics,labels,rulesets -R "$REPO" 2>&1); rc=$?
+          set -e
+          {
+            echo '## gh settings plan'
+            echo '~~~'
+            echo "$out"
+            echo '~~~'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # rc 0 = up to date, 2 = drift — both advisory (this non-required job never fails).
+          # Any OTHER code is a real error (auth/network/tool): surface it so a broken plan
+          # can't pass silently green (an over-scoped token once did exactly that).
+          if [ "$rc" != "0" ] && [ "$rc" != "2" ]; then
+            echo "::warning::gh settings plan exited $rc — preview did not complete (see job summary)."
+          fi

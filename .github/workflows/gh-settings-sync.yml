@@ -1,0 +1,58 @@
+name: gh-settings sync
+
+# WRITE / reconcile half — applies .github/settings.yml to the repo via `gh settings sync`
+# (SPIKE — evaluating a replacement for repo-config-apply.yml). workflow_dispatch ONLY: a
+# write workflow must never be reachable from an automatic or untrusted trigger. Uses the
+# admin REPO_CONFIG_TOKEN (Administration + Issues: write). `--no-prune` is passed as a hard
+# override so a sync can NEVER delete a label/topic/ruleset during the spike, regardless of
+# the config; preview with gh-settings-plan.yml (or `gh settings plan` locally) first.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read # checkout only — the write goes through REPO_CONFIG_TOKEN
+
+concurrency:
+  group: gh-settings-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: gh settings sync
+    # ⚠️ workflow_dispatch runs from ANY ref the dispatcher selects, and this job applies
+    # that ref's settings.yml with the admin token — so an unreviewed branch could WEAKEN
+    # the rulesets/actions posture (--no-prune only blocks deletion, not weakening). Hard-
+    # gate to the default branch, and pin the checkout to main, so a sync can only ever
+    # apply the reviewed main settings.yml.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Install gh settings (pinned)
+        # ⚠️ `--pin` locks the release TAG, not the downloaded binary's bytes (a gh
+        # extension pulls a release asset with no checksum/attestation verification). This
+        # binary is then run with the admin-WRITE token below — its trust rests entirely on
+        # upstream. Acceptable here only because this job is maintainer-dispatch + ref-gated
+        # to main; revisit if a signed/checksummed release becomes available.
+        env:
+          GH_TOKEN: ${{ github.token }} # extension install only reads a public release
+        run: gh extension install noirbizarre/gh-settings --pin 0.3.0
+      - name: Sync
+        env:
+          GH_TOKEN: ${{ secrets.REPO_CONFIG_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::REPO_CONFIG_TOKEN is not set — cannot sync. Provision a scoped App" \
+                 "token / fine-grained PAT (Administration: write + Issues: write)."
+            exit 1
+          fi
+          # --only scopes to what REPO_CONFIG_TOKEN can manage (Administration+Issues);
+          # environments/variables/pages need separate perms it lacks (see settings.yml).
+          echo "## Plan (pre-sync)" >> "$GITHUB_STEP_SUMMARY"
+          gh settings plan --only repository,topics,labels,rulesets -R "$REPO" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          gh settings sync --yes --no-prune --only repository,topics,labels,rulesets -R "$REPO"
