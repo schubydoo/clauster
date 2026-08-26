@@ -313,7 +313,7 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
-          version: "0.12.5" # pinned uv (Renovate-tracked); skip the flaky "latest" fetch
+          version: "0.12.6" # pinned uv (Renovate-tracked); skip the flaky "latest" fetch
           # No cache in a publishing job (zizmor cache-poisoning): a cache
           # restored from a lower-privilege context could taint the artifact
           # this OIDC step ships. A once-a-night build gains little from a cache.
