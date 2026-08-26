@@ -75,7 +75,7 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
-          version: "0.12.5" # pinned uv (Renovate-tracked); skip the flaky "latest" fetch
+          version: "0.12.6" # pinned uv (Renovate-tracked); skip the flaky "latest" fetch
           enable-cache: true
       - name: Set up Python + build env
         run: |
