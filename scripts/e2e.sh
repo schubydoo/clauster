@@ -42,8 +42,8 @@ if [ -z "${AGENT_BROWSER_EXECUTABLE_PATH:-}" ]; then
   agent-browser install
 fi
 
-# --reruns: the leg runs on a 2-core CI runner that starves agent-browser, so a
-# fill/click can stochastically not register (#947) and a downstream wait times out —
+# --reruns: the leg runs on a shared 4-vCPU CI runner where a CPU-starved headless Chrome
+# can let a fill/click stochastically not register (#947) and a downstream wait time out —
 # a different few tests each run, cleared by a fresh re-run. Re-run a failed test up to
 # three times (fresh server + browser each time) before reporting red — the flakiest
 # interaction (opening a launch/menu popover) can miss a couple of consecutive attempts

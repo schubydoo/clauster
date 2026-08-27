@@ -5597,6 +5597,31 @@
   // CSP evaluator and the page would render nothing. This inline script runs before the
   // deferred alpine.csp.min.js, so the listener is registered in time for alpine:init.
   document.addEventListener("alpine:init", () => {
+    // Alpine core (verified in the vendored 3.15.12) applies every non-first x-show toggle
+    // asynchronously through Element.prototype._x_toggleAndCascadeWithTransitions: show on
+    // the next animation frame, hide via microtask + next frame with a parent→child
+    // cascade keyed on a per-element `_x_hidePromise`. Two hides racing one show inside a
+    // SINGLE frame lose the final hide — the second hide's frame callback finds the promise
+    // its earlier twin already consumed and silently no-ops, the interleaved show lands
+    // last, and the directive's `value === oldValue` guard then never re-evaluates. The
+    // element stays VISIBLE with data that says hidden until its value flips true again.
+    // adopt() produces exactly that sequence (optimistic hide → the trailing refresh()
+    // re-shows while the server hasn't re-attributed yet → the next poll hides), and a
+    // CPU-starved headless Chrome (frames seconds apart) sees it for ANY pair of updates —
+    // the e2e "Manage button never retires" flake that exhausted its reruns (#947 lineage).
+    // Replace the cascade with last-value-wins: coalesce the flips within a frame and apply
+    // only the latest on the next frame (setTimeout while hidden — Alpine's own choice), so
+    // the DOM always converges to the current value. Show keeps its one-frame delay, which
+    // is what stops an @click.outside popover from closing on the click that opened it.
+    // Safe here because nothing on this page uses x-transition — the cascade's child-first
+    // ordering only matters for animated hides. Regression: tests/e2e/test_alpine_xshow_e2e.py.
+    window.Element.prototype._x_toggleAndCascadeWithTransitions = function (el, value, show, hide) {
+      el._x_wantShown = value;
+      if (el._x_toggleQueued) return;
+      el._x_toggleQueued = true;
+      const tick = document.visibilityState === "visible" ? requestAnimationFrame : setTimeout;
+      tick(() => { el._x_toggleQueued = false; el._x_wantShown ? show() : hide(); });
+    };
     Alpine.data("dashboard", dashboard);
     Alpine.data("projectRow", projectRow);
     Alpine.data("reaper", reaper);
