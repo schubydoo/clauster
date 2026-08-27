@@ -5605,17 +5605,23 @@
     // its earlier twin already consumed and silently no-ops, the interleaved show lands
     // last, and the directive's `value === oldValue` guard then never re-evaluates. The
     // element stays VISIBLE with data that says hidden until its value flips true again.
-    // adopt() produces exactly that sequence (optimistic hide → the trailing refresh()
-    // re-shows while the server hasn't re-attributed yet → the next poll hides), and a
-    // CPU-starved headless Chrome (frames seconds apart) sees it for ANY pair of updates —
-    // the e2e "Manage button never retires" flake that exhausted its reruns (#947 lineage).
-    // Replace the cascade with last-value-wins: coalesce the flips within a frame and apply
-    // only the latest on the next frame (setTimeout while hidden — Alpine's own choice), so
-    // the DOM always converges to the current value. Show keeps its one-frame delay, which
-    // is what stops an @click.outside popover from closing on the click that opened it.
-    // Safe here because nothing on this page uses x-transition — the cascade's child-first
-    // ordering only matters for animated hides. Regression: tests/e2e/test_alpine_xshow_e2e.py.
+    // It takes three flips with a microtask boundary between them (the flips must be
+    // separate reactive flushes, not one synchronous block). adopt() produces exactly
+    // that (optimistic hide → the trailing refresh() re-shows while the server hasn't
+    // re-attributed yet → the next poll hides), and a CPU-starved headless Chrome (frames
+    // seconds apart) sees it for any such triple — the e2e "Manage button never retires"
+    // flake that exhausted its reruns (#947 lineage), reproduced locally with the same
+    // signature: correct data, no display:none. Replace the cascade with last-value-wins:
+    // coalesce the flips within a frame and apply only the latest on the next frame
+    // (setTimeout while hidden — Alpine's own choice), so the DOM always converges to the
+    // current value. Show keeps its one-frame delay, which is what stops an @click.outside
+    // popover from closing on the click that opened it. Nothing on this page uses
+    // x-transition — the cascade's child-first ordering only matters for animated hides —
+    // so an element that ever gains one is handed back to Alpine's original untouched.
+    // Regression: tests/e2e/test_alpine_xshow_e2e.py.
+    const alpineToggle = window.Element.prototype._x_toggleAndCascadeWithTransitions;
     window.Element.prototype._x_toggleAndCascadeWithTransitions = function (el, value, show, hide) {
+      if (el._x_transition) return alpineToggle.call(this, el, value, show, hide);
       el._x_wantShown = value;
       if (el._x_toggleQueued) return;
       el._x_toggleQueued = true;
