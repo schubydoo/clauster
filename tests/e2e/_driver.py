@@ -48,7 +48,7 @@ if not _DIALOG_SCRIPT.exists():  # pragma: no cover - guards a broken/partial ch
 _DEFAULT_TIMEOUT_MS = 5_000
 _POLL_INTERVAL_S = 0.2
 
-# A single agent-browser ``fill`` can silently no-op under 2-core CI contention with a
+# A single agent-browser ``fill`` can silently no-op under CI CPU contention with a
 # newer Chrome: the clear runs but the typed text never registers, leaving the field
 # empty and — for an ``x-model`` field — its Alpine model stale, so a Save that gates on
 # a *changed* value stays disabled and a downstream ``expect_*`` times out with no hint.
@@ -58,6 +58,16 @@ _POLL_INTERVAL_S = 0.2
 # window instead of trusting one dispatch. Bounded so a browser-normalized value (a
 # number/masked field) still falls through to the caller's assertion, never hangs here.
 _FILL_VERIFY_TIMEOUT_MS = 4_000
+
+# ``agent-browser click`` does not check actionability: a target inside a still-hidden
+# container (a non-first ``x-show`` applies on the NEXT animation frame, seconds away on a
+# CPU-starved runner) returns "✓ Done" and the CDP click lands on whatever is under that
+# point instead — a modal backdrop, whose mousedown+mouseup+click-self CLOSES the modal
+# (the transcript-viewer flake), or nothing at all (a launch popover / overflow menu that
+# never opens). ``get count``/``expect_count`` see hidden DOM, so they don't gate this.
+# :meth:`click` therefore waits for the target to be visible first, and fails closed with
+# the selector in the message rather than dispatching a click it knows will misfire.
+_CLICK_VISIBLE_TIMEOUT_MS = 5_000
 
 
 class AgentBrowser:
@@ -191,7 +201,18 @@ class AgentBrowser:
     # ----- interactions ---------------------------------------------------
 
     def click(self, selector: str) -> None:
-        """Click the element matching ``selector``."""
+        """Click the element matching ``selector`` once it is visible.
+
+        Playwright-style actionability, bounded by :data:`_CLICK_VISIBLE_TIMEOUT_MS`:
+        agent-browser happily "clicks" a hidden element (the click lands elsewhere), so
+        a target that never becomes visible is an assertion failure here, not a
+        mis-aimed click whose fallout surfaces as an unrelated timeout downstream.
+        """
+        self._poll(
+            lambda: self.is_visible(selector),
+            _CLICK_VISIBLE_TIMEOUT_MS,
+            f"{selector} visible (before click)",
+        )
         self._run("click", selector, check=True)
 
     def click_role(self, role: str, name: str) -> None:
