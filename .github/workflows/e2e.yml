@@ -62,10 +62,9 @@ jobs:
       - name: Install agent-browser CLI
         # Pinned + integrity-checked via tests/e2e/package-lock.json (`npm ci`),
         # instead of an unpinned `npm i -g` (the global install Scorecard flags as
-        # Pinned-Dependencies). Held at 0.27.1: 0.27.3 regressed `check` on the trust-gate
-        # checkbox, and 0.34.0 was empirically WORSE on this shared 4-vCPU runner (its
-        # click/set-viewport commands error under contention, #947). Bump deliberately
-        # (lockfile) + re-verify on CI, not just locally.
+        # Pinned-Dependencies). Pinned exactly and NOT Renovate-tracked — bump the lockfile
+        # deliberately + re-verify on CI, not just locally (see tests/e2e/package.json for
+        # the version history and the two driver-side guards newer versions need).
         # Put node_modules/.bin on PATH so `agent-browser` resolves for later steps
         # and scripts/e2e.sh without a global install.
         working-directory: tests/e2e
@@ -85,7 +84,7 @@ jobs:
       # of freezing behind it: _driver.py's self-verifying fill (re-issues until the value
       # lands) fixes the fill class deterministically, and scripts/e2e.sh's --reruns
       # retries a test that hits the residual stochastic click/CLI-transient class. This
-      # is the Chrome 152 line the suite was verified on (agent-browser 0.27.1).
+      # is the Chrome 152 line the suite was verified on (agent-browser 0.35.1).
       - name: Install pinned Chrome-for-Testing
         working-directory: tests/e2e
         env:

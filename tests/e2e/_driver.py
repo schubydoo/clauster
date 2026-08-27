@@ -69,6 +69,17 @@ _FILL_VERIFY_TIMEOUT_MS = 4_000
 # the selector in the message rather than dispatching a click it knows will misfire.
 _CLICK_VISIBLE_TIMEOUT_MS = 5_000
 
+# agent-browser ≥ 0.34 races its own daemon startup: the FIRST command after a
+# ``close --all`` (the previous test's teardown) can exit 1 with
+# ``✗ Could not configure browser: Failed to connect: No such file or directory`` while
+# the freshly spawned daemon's socket is not there yet — measured at 4 of 84 tests under
+# CPU contention, always on the session's opening ``set viewport``. 0.27.x hid it behind
+# the ~150 ms settle sleep 0.27.2 removed. Retry only that exact error, only on the
+# session's first command, with a short bounded backoff; anything else surfaces as-is.
+_DAEMON_CONNECT_RETRIES = 5
+_DAEMON_CONNECT_RETRY_S = 0.5
+_DAEMON_CONNECT_ERROR = "Failed to connect"
+
 
 class AgentBrowser:
     """Drive one ``agent-browser`` session for the lifetime of a single test."""
@@ -123,10 +134,26 @@ class AgentBrowser:
         below the fold gets ``elementFromPoint() == null`` and the click silently
         lands nowhere — the popover's submit button is the one that bites.
         """
-        self._run("set", "viewport", "1280", "2000", check=True)
+        self._first_command("set", "viewport", "1280", "2000")
         self._run("open", url, check=True)
         # Best-effort settle; the expect_* pollers absorb any residual async render.
         self._run("wait", "--load", "networkidle")
+
+    def _first_command(self, *args: str) -> None:
+        """Run the session's opening command, absorbing the daemon-startup race.
+
+        See :data:`_DAEMON_CONNECT_RETRIES`. Only the connect error is retried; the final
+        attempt runs with ``check=True`` so a persistent failure raises with its real
+        stderr instead of being masked by the retry loop.
+        """
+        for _ in range(_DAEMON_CONNECT_RETRIES):
+            res = self._run(*args)
+            if res.returncode == 0:
+                return
+            if _DAEMON_CONNECT_ERROR not in (res.stderr or ""):
+                break
+            time.sleep(_DAEMON_CONNECT_RETRY_S)
+        self._run(*args, check=True)
 
     def reload(self) -> None:
         """Reload the current page."""

@@ -52,9 +52,21 @@ def open_desktop_launch(browser: AgentBrowser, project: str) -> None:
     browser.check(f'[data-project="{project}"] input[name="lm-{project}"][value="desktop"]')
 
 
-def click_run(browser: AgentBrowser, project: str) -> None:
-    """Click the popover's primary Run button (closes the popover on a clean launch)."""
+def click_run(browser: AgentBrowser, project: str, *, expect_close: bool = True) -> None:
+    """Click the popover's primary Run button and, on a clean launch, wait for it to close.
+
+    ``launchRunAndClose`` closes the popover only when the spawn POST has resolved, which
+    for a slow bridge is well AFTER the dashboard's poll already shows the new row — so a
+    caller that gates on the row and then clicks "Run Claude here" again finds the popover
+    still open and toggles it CLOSED. That window is invisible with a ~150 ms-per-command
+    CLI and reliably hit with a ~1 ms one (agent-browser ≥ 0.27.2). Waiting for the close
+    here makes the contract explicit instead of timing-dependent. ``expect_close=False``
+    is for a launch that opens a gate INSIDE the popover (trust / bypass / MCP), which by
+    design keeps it open.
+    """
     browser.click(f'[data-project="{project}"] [data-test="launch-run-go"]')
+    if expect_close:
+        browser.expect_hidden(f'[data-project="{project}"] .launch-pop', timeout_ms=STATUS_TIMEOUT)
 
 
 def trust_and_start(browser: AgentBrowser, project: str, *, run_first: bool = True) -> None:
@@ -66,7 +78,7 @@ def trust_and_start(browser: AgentBrowser, project: str, *, run_first: bool = Tr
     gate half.
     """
     if run_first:
-        click_run(browser, project)
+        click_run(browser, project, expect_close=False)  # the trust gate keeps it open
     trust = f'[data-project="{project}"] [data-test="trust-confirm"]'
     trust_start = f"{trust} button.btn-warning"
     browser.expect_visible(trust_start)
