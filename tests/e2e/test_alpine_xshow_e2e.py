@@ -20,7 +20,6 @@ that batched the flips into one toggle could not turn the race case vacuously gr
 
 from __future__ import annotations
 
-import time
 from typing import TYPE_CHECKING
 
 import pytest
@@ -36,6 +35,8 @@ _ROOT = "Alpine.$data(document.querySelector('[x-data^=\"dashboard\"]'))"
 _EXT = "{alpha:[{pid:1,cwd:'/x',kind:'interactive',state:'running',started_at:0,local_uuid:'u'}]}"
 _BTN = '[data-project="alpha"] [data-test="adopt-btn"]'
 _IND = '[data-project="alpha"] [data-test="external-indicator"]'
+# Headroom for the deferred (next-frame) toggle to land on a CPU-starved runner.
+_SETTLE_TIMEOUT_MS = 10_000
 
 
 @pytest.mark.parametrize(
@@ -77,8 +78,12 @@ def test_xshow_hide_show_hide_in_one_frame_ends_hidden(
         "d.externalSessions=ext;d.adoptableProjects=['alpha'];await tick();"
         "d.externalSessions={};d.adoptableProjects=[];await tick();return 'ok'})()"
     )
-    # Give the deferred toggle (next animation frame) ample time to land.
-    time.sleep(1.5)
+    # The last toggle applies on a future animation frame — seconds away on a contended
+    # runner — so wait for the hidden state rather than sleeping a fixed span. Without the
+    # fix the stuck-visible state is permanent, so this wait still discriminates: it times
+    # out instead of passing.
+    browser.expect_hidden(_BTN, timeout_ms=_SETTLE_TIMEOUT_MS)
+    browser.expect_hidden(_IND, timeout_ms=_SETTLE_TIMEOUT_MS)
     state = browser.eval_json(
         "(function(){const d=" + _ROOT + ";return {"
         "adopt:Array.from(d.adoptableProjects),ext:Object.keys(d.externalSessions),"
