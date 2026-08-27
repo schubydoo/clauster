@@ -75,9 +75,13 @@ def test_transcript_modal_lists_session_and_renders_turns(
     browser.expect_count('[data-test="transcript-session"]', 1, timeout_ms=STATUS_TIMEOUT)
     browser.click('[data-test="transcript-session"]')
     browser.expect_count('[data-test="transcript-turn"]', 2, timeout_ms=STATUS_TIMEOUT)
-    modal_text = browser.get_text('[data-test="transcript-modal"]')
-    assert "hello from e2e" in modal_text
-    assert "hi back from the fixture" in modal_text
+    # The turns exist in the DOM as soon as the fetch lands, but the turns view is an
+    # x-show whose reveal applies on a later animation frame — seconds away on a starved
+    # runner — so wait for the VISIBLE text rather than reading it once (get_text is
+    # innerText: it returns the still-shown picker until that frame arrives).
+    modal = '[data-test="transcript-modal"]'
+    browser.expect_text(modal, "hello from e2e", timeout_ms=STATUS_TIMEOUT)
+    browser.expect_text(modal, "hi back from the fixture", timeout_ms=STATUS_TIMEOUT)
 
 
 def test_transcript_modal_shows_empty_state_without_transcripts(

@@ -63,7 +63,7 @@ jobs:
         # Pinned + integrity-checked via tests/e2e/package-lock.json (`npm ci`),
         # instead of an unpinned `npm i -g` (the global install Scorecard flags as
         # Pinned-Dependencies). Held at 0.27.1: 0.27.3 regressed `check` on the trust-gate
-        # checkbox, and 0.34.0 was empirically WORSE on this 2-core runner (its
+        # checkbox, and 0.34.0 was empirically WORSE on this shared 4-vCPU runner (its
         # click/set-viewport commands error under contention, #947). Bump deliberately
         # (lockfile) + re-verify on CI, not just locally.
         # Put node_modules/.bin on PATH so `agent-browser` resolves for later steps
@@ -74,13 +74,14 @@ jobs:
           echo "$PWD/node_modules/.bin" >> "$GITHUB_PATH"
       # Pin the Chrome-for-Testing build this leg runs against. `agent-browser install`
       # fetches the LATEST Chrome, so a new Chrome-for-Testing release can silently
-      # destabilize the (non-required) 2-core leg — Chrome 151 did, see #947. Install an
+      # destabilize the (non-required) leg — Chrome 151 did, see #947. Install an
       # explicit, Renovate-tracked build via the pinned @puppeteer/browsers CLI and point
       # agent-browser at it with AGENT_BROWSER_EXECUTABLE_PATH (scripts/e2e.sh then skips
       # its own latest-Chromium download). A version bump is a Renovate PR that re-runs
       # this e2e leg, so a new Chrome is verified green before it can land.
-      # The #947 destabilization (a fill/click silently not registering under 2-core
-      # contention) is absorbed in two layers so the pin can track current Chrome instead
+      # The #947 destabilization (a fill/click silently not registering under CPU
+      # contention — `ubuntu-latest` is a shared 4-vCPU runner for this public repo) is
+      # absorbed in two layers so the pin can track current Chrome instead
       # of freezing behind it: _driver.py's self-verifying fill (re-issues until the value
       # lands) fixes the fill class deterministically, and scripts/e2e.sh's --reruns
       # retries a test that hits the residual stochastic click/CLI-transient class. This
