@@ -15,7 +15,8 @@ node_modules/
 
 # --- Local tooling (not part of the project) ---
 # CLAUDE.md and AGENTS.md are committed; CLAUDE.local.md holds per-machine notes.
-.claude/
+/.claude/
+/.worktreeinclude
 .serena/
 .vscode/settings.json
 CLAUDE.local.md
