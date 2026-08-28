@@ -21,8 +21,6 @@
 # ----- builder: resolve the locked deps into a self-contained venv -----------
 FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS builder
 
-# renovate: datasource=repology depName=alpine_3_24/openssl versioning=loose
-ARG OPENSSL_VERSION=3.5.8
 # renovate: datasource=repology depName=alpine_3_24/uv versioning=loose
 ARG UV_VERSION=0.11.19
 # renovate: datasource=repology depName=alpine_3_24/python3 versioning=loose
