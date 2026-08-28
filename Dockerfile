@@ -30,7 +30,7 @@ ARG PYTHON3_VERSION=3.14.7
 # System python3 is the interpreter uv builds the venv against; it must exist at
 # the same path in runtime (the copied venv points back at /usr/bin/python3). All
 # native deps ship musllinux wheels, so uv installs binaries — no compiler needed.
-RUN apk add --no-cache uv="~${UV_VERSION}" python3="~${PYTHON3_VERSION}" openssl="~${OPENSSL_VERSION}"
+RUN apk add --no-cache uv="~${UV_VERSION}" python3="~${PYTHON3_VERSION}"
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
