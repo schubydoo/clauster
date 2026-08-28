@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.2 (2026-08-28)
+
+[Compare with 1.0.1](https://github.com/schubydoo/clauster/compare/v1.0.1...v1.0.2)
+
+### Fixes
+
+- Fix dashboard elements that could stay visible after a rapid hide→show→hide (an Alpine.js `x-show` cascade race under load) — the root of the e2e "Manage button never retires" flake. ([#1270](https://github.com/schubydoo/clauster/pull/1270))
+
 ## 1.0.1 (2026-08-21)
 
 [Compare with 1.0.0](https://github.com/schubydoo/clauster/compare/v1.0.0...v1.0.1)
