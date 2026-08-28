@@ -21,6 +21,8 @@
 # ----- builder: resolve the locked deps into a self-contained venv -----------
 FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS builder
 
+# renovate: datasource=repology depName=alpine_3_24/openssl versioning=loose
+ARG OPENSSL_VERSION=3.5.8
 # renovate: datasource=repology depName=alpine_3_24/uv versioning=loose
 ARG UV_VERSION=0.11.19
 # renovate: datasource=repology depName=alpine_3_24/python3 versioning=loose
@@ -28,7 +30,7 @@ ARG PYTHON3_VERSION=3.14.7
 # System python3 is the interpreter uv builds the venv against; it must exist at
 # the same path in runtime (the copied venv points back at /usr/bin/python3). All
 # native deps ship musllinux wheels, so uv installs binaries — no compiler needed.
-RUN apk add --no-cache uv="~${UV_VERSION}" python3="~${PYTHON3_VERSION}"
+RUN apk add --no-cache uv="~${UV_VERSION}" python3="~${PYTHON3_VERSION}" openssl="~${OPENSSL_VERSION}"
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
@@ -47,10 +49,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # ----- runtime ---------------------------------------------------------------
 FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS runtime
 
+# openssl - for CVE mitigation
 # python3 — runs the copied venv (same version as builder).
 # git — provisioning (create --git-init / clone).
 # shadow — groupmod/usermod/useradd/groupadd for the PUID/PGID remap (busybox lacks them).
 # su-exec — musl-native privilege-drop in the entrypoint (replaces gosu; no Go CVE surface).
+# renovate: datasource=repology depName=alpine_3_24/openssl versioning=loose
+ARG OPENSSL_VERSION=3.5.8
 # renovate: datasource=repology depName=alpine_3_24/python3 versioning=loose
 ARG PYTHON3_VERSION=3.14.7
 # renovate: datasource=repology depName=alpine_3_24/git versioning=loose
@@ -60,6 +65,7 @@ ARG SHADOW_VERSION=4.18.0
 # renovate: datasource=repology depName=alpine_3_24/su-exec versioning=loose
 ARG SU_EXEC_VERSION=0.3
 RUN apk add --no-cache \
+        openssl="~${OPENSSL_VERSION}" \
         python3="~${PYTHON3_VERSION}" \
         git="~${GIT_VERSION}" \
         shadow="~${SHADOW_VERSION}" \
