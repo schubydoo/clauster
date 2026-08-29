@@ -29,6 +29,13 @@ run a database migration by hand. (The separate `clauster migrate` command is a
 *legacy* helper that only upgrades an older flat-file `state.json`; on a 0.12+
 deployment it has nothing to do.)
 
+## After 1.0.2: leftover `<file>.lock` sidecars are left in place
+
+1.0.2 and earlier took the JSON write lock on a `<file>.lock` beside the target, so
+a 0-byte sidecar may still sit in a project tree; newer versions neither create nor
+delete them — remove them by hand, per [workspace
+trust](docs/security.md#workspace-trust).
+
 ## 0.12 → 1.0: a bridge's `id` in `clauster mcp` is now its instance id
 
 `list_sessions` reported each bridge's **project name** as its `id`. A project can
