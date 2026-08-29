@@ -248,7 +248,7 @@ appearing twice in pieces.
 
 ### Reading a stopped or crashed bridge's log
 
-`logs` reads a **stopped or crashed** bridge too, which is when you most want it — a card
+`logs` reads a **stopped, crashed, or errored** bridge too, which is when you most want it — a card
 reading "Crashed — The bridge exited unexpectedly" is an invitation to go look. The persisted
 instance record carries no log path, so for a bridge that is no longer running the file is
 re-derived from the log dir: the newest `<project>-<ms>-<seq>.log` Clauster wrote for **that
