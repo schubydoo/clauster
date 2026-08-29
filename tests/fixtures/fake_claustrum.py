@@ -370,6 +370,13 @@ class FakeClaustrum:
             line = (json.dumps(frame, separators=(",", ":")) + "\n").encode("utf-8")
             writer.write(line)
         await writer.drain()
+        # An EMPTY buffer answers firstSeq 0, matching the real daemon: claustrum's
+        # process.go only assigns firstSeq/lastSeq when the buffer is non-empty, and the
+        # fields are not omitempty, so Go's zero value goes on the wire. That is not a
+        # missed gap — eviction happens only on append and always keeps the frame just
+        # added, so a process that emitted anything since the client detached has a
+        # non-empty buffer and a truthful firstSeq. Empty means nothing was emitted.
+        # (Verified against claustrum main; the v1.10 reattach handler is identical.)
         first_seq = proc.frames[0]["seq"] if proc.frames else 0
         await self._reply(
             writer,

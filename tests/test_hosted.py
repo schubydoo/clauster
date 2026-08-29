@@ -1411,9 +1411,14 @@ async def _emit_frames(fake, process_id, count):
     return seq
 
 
+def _gap_events(session):
+    """The `gap` markers currently in a session's ring, in order."""
+    return [e for e in session._ring if e["type"] == "gap"]
+
+
 async def test_reattach_reports_an_evicted_replay_range(fake_claustrum):
     # #1175: the daemon's capped replay buffer evicted frames past our cursor. The
-    # range must be latched and announced as a leading gap marker, not skipped.
+    # range must be announced as a leading gap marker, not skipped.
     fake = await fake_claustrum()
     await _emit_frames(fake, _PID, 5)  # seqs 1..5
     fake.evict_through(_PID, 3)  # only 4 and 5 survive → firstSeq 4
@@ -1421,7 +1426,6 @@ async def test_reattach_reports_an_evicted_replay_range(fake_claustrum):
         session = HostedSession(client, _PID, _BIN)
         result = await session.reattach(1)  # our persisted cursor was seq 1
         assert result["firstSeq"] == 4
-        assert session.replay_gap == (2, 3)  # frames 2..3 are gone, and we say so
         queue = session.subscribe()
         gap = await _drain(queue)
         # The marker LEADS the surviving replay, so a watcher sees the break in
@@ -1443,7 +1447,6 @@ async def test_reattach_with_a_complete_replay_reports_no_gap(fake_claustrum):
         session = HostedSession(client, _PID, _BIN)
         result = await session.reattach(1)
         assert result["firstSeq"] == 1
-        assert session.replay_gap is None
         queue = session.subscribe()
         first = await _drain(queue)
         assert first["type"] == "frame"  # no gap marker ahead of the replay
@@ -1477,7 +1480,54 @@ async def test_reattach_ignores_a_non_int_first_seq(fake_claustrum, monkeypatch)
         monkeypatch.setattr(client, "reattach", _bogus)
         session = HostedSession(client, _PID, _BIN)
         await session.reattach(0)
-        assert session.replay_gap is None
+        assert not _gap_events(session)  # nothing reported
+        await session.detach()
+
+
+async def test_reattach_ignores_a_bool_first_seq(fake_claustrum, monkeypatch):
+    # bool subclasses int: a daemon answering `true` must not be read as seq 1.
+    fake = await fake_claustrum()
+    await _emit_frames(fake, _PID, 2)
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        real = client.reattach
+
+        async def _bool_first(process_id, from_seq=0):
+            return {**(await real(process_id, from_seq)), "firstSeq": True}
+
+        monkeypatch.setattr(client, "reattach", _bool_first)
+        session = HostedSession(client, _PID, _BIN)
+        await session.reattach(0)
+        assert not _gap_events(session)
+        await session.detach()
+
+
+async def test_reattach_to_an_empty_replay_buffer_reports_no_gap(fake_claustrum):
+    # An empty buffer puts firstSeq 0 on the wire (claustrum assigns it only when the
+    # buffer is non-empty). That is genuinely "nothing was emitted", not a missed gap:
+    # eviction only ever happens on append and always keeps the frame just added.
+    fake = await fake_claustrum()
+    await _emit_frames(fake, _PID, 3)
+    fake.evict_through(_PID, 3)  # total eviction — nothing survives
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        session = HostedSession(client, _PID, _BIN)
+        result = await session.reattach(3)  # our cursor already covered all three
+        assert result["firstSeq"] == 0
+        assert not _gap_events(session)
+        await session.detach()
+
+
+async def test_a_reported_gap_always_advances_the_cursor_past_the_hole(fake_claustrum):
+    # Whenever a gap is reported, firstSeq itself is a surviving frame above the
+    # cursor, so the replay carries it and daemon_last_seq moves past the hole — the
+    # same range can never be re-reported, wider, on the next restart.
+    fake = await fake_claustrum()
+    await _emit_frames(fake, _PID, 5)
+    fake.evict_through(_PID, 3)  # firstSeq 4, frames 2..3 evicted
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        session = HostedSession(client, _PID, _BIN)
+        await session.reattach(1)
+        assert len(_gap_events(session)) == 1
+        await wait_until(lambda: session.daemon_last_seq == 5)  # well past the hole
         await session.detach()
 
 
@@ -1492,7 +1542,6 @@ async def test_manager_reattach_all_surfaces_an_evicted_range(fake_claustrum, tm
         mgr = HostedManager(store)
         await mgr.reattach_all(client)
         session = mgr.session(pid)
-        assert session.replay_gap == (2, 3)
         assert (await _drain(session.subscribe()))["type"] == "gap"
         await mgr.aclose()
 

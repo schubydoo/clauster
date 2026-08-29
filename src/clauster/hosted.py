@@ -112,6 +112,18 @@ def build_hosted_argv(
     return argv
 
 
+def _as_seq(value: Any) -> int | None:
+    """Return ``value`` as a daemon frame seq, or ``None`` when it isn't one.
+
+    ``bool`` is rejected explicitly: it subclasses ``int``, so a daemon answering
+    ``true`` would otherwise be read as seq 1 and silently bound a gap window.
+    Seqs arrive as untrusted JSON, so every read goes through here.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
 class HostedSessionError(ClaustrumError):
     """Raised when a hosted-session operation is invalid for the current state."""
 
@@ -177,10 +189,6 @@ class HostedSession:
         # Highest *daemon* frame seq drained — the reattach replay cursor across
         # clauster restarts (distinct from _event_seq, the clauster-side ring seq).
         self.daemon_last_seq = 0
-        # Inclusive (first, last) daemon seq range the daemon had already evicted when
-        # we reattached — None when the replay was complete. Latched by reattach (#1175)
-        # so callers can report the hole; the frames themselves are unrecoverable.
-        self.replay_gap: tuple[int, int] | None = None
         self._ring: deque[Mapping[str, Any]] = deque(maxlen=ring_size)
         self._event_seq = 0
         # Subscriber list: the DEPTH-bound (per-subscriber queue) is bounded above by
@@ -280,8 +288,21 @@ class HostedSession:
             self._stream, self._source = None, None
             self.status = InstanceStatus.CRASHED
             return result
-        # Report an evicted replay range BEFORE the cursor moves and before the pump
-        # starts, so the marker sits ahead of the surviving frames in the ring (#1175).
+        # ⚠️ ORDERING — the marker must sit ahead of the surviving frames in the ring,
+        # so it is emitted before the pump starts. If you are resolving a merge
+        # conflict here against #1045's transcript rehydration, the required order is:
+        #     rehydrated history  ->  gap marker  ->  replayed frames
+        # Restored history is OLDER than this hole, so it goes FIRST. Do not let a
+        # three-way merge decide it: both hunks anchor on the daemon_last_seq line
+        # below and will compose silently in the WRONG order. See the matching note
+        # in #1045's reattach.
+        #
+        # When both have landed, REWORD this marker for a session that rehydrated —
+        # do not suppress it. The transcript restores conversation *turns* only, so
+        # stderr and control-plane frames inside the evicted range are still gone;
+        # dropping the marker would claim a completeness we don't have. "Output lost"
+        # sitting directly above a restored conversation is merely misleading, which
+        # is a wording fix, not a reason to go silent.
         self._note_replay_gap(result.get("firstSeq"), from_seq)
         self.daemon_last_seq = max(self.daemon_last_seq, from_seq)
         # If not running, the exit frame (seq > from_seq) replays through the pump,
@@ -455,29 +476,46 @@ class HostedSession:
         ``from_seq + 1 .. firstSeq - 1`` no longer exist anywhere — not on the
         daemon, and never on us.
 
-        Those frames are unrecoverable, and the cursor still has to move over them
-        for the surviving replay to be delivered exactly once (refusing to advance
-        would re-replay the whole buffer on every subsequent restart, duplicating
-        the transcript). So the invariant this keeps is the fail-closed-*visibly*
-        one: the hole is never silent. It is latched on :attr:`replay_gap`, logged
-        with its exact range, and emitted into the ring as a ``gap`` marker — which
-        the caller has ordered ahead of the replayed frames, so a watcher sees the
-        break in position rather than a seamless transcript.
+        Those frames are unrecoverable, so the hole is reported rather than absorbed:
+        it is logged with its exact range and emitted into the ring as a ``gap``
+        marker, which the caller orders ahead of the replayed frames so a watcher
+        sees the break in position rather than a seamless transcript.
 
-        ``first_seq`` is untrusted daemon-supplied JSON, so it is ``isinstance``-
-        checked here; a non-int (or an in-range value) means no gap to report.
+        **Why the cursor may still advance over it.** Whenever a gap is reported,
+        ``firstSeq`` itself is a surviving frame above ``from_seq``, so the replay
+        delivers at least that frame and the pump advances
+        :attr:`daemon_last_seq` past the hole — the same range is therefore never
+        re-reported on the next restart. Refusing to advance would instead re-replay
+        the whole surviving buffer every restart and duplicate the transcript. What
+        this fix changes is only that the advance is no longer *silent*.
+
+        **Why an empty buffer is genuinely not a gap.** Verified against the
+        claustrum daemon's source (``process.go`` reattach, current main; the v1.10
+        cut's handler is byte-identical, its change surface being the
+        ``server.version`` removal): ``firstSeq``/``lastSeq`` are only assigned when
+        the buffer is non-empty, so an empty buffer puts ``firstSeq: 0`` on the wire
+        (the fields are not ``omitempty``). That reads as "no gap" here — correctly,
+        because eviction happens only on *append* and always keeps the frame just
+        added. A process that emitted anything since our detach therefore has a
+        non-empty buffer and a truthful ``firstSeq``; an empty buffer means nothing
+        was emitted, so there is nothing to have lost. The fake daemon models this
+        (``FakeClaustrum._m_process_reattach``) — don't "fix" either side to report a
+        gap for an empty buffer.
+
+        ``first_seq`` is untrusted daemon-supplied JSON, so it goes through
+        :func:`_as_seq`; a non-int (or an in-range value) means no gap to report.
         """
-        if not isinstance(first_seq, int) or first_seq <= from_seq + 1:
+        first = _as_seq(first_seq)
+        if first is None or first <= from_seq + 1:
             return
-        self.replay_gap = (from_seq + 1, first_seq - 1)
         logger.warning(
             "hosted: daemon replay buffer evicted frames %d-%d for process %s; "
             "that output is lost and cannot be replayed",
-            self.replay_gap[0],
-            self.replay_gap[1],
+            from_seq + 1,
+            first - 1,
             self._process_id,
         )
-        gap: GapRangeEvent = {"type": "gap", "from_seq": from_seq, "to_seq": first_seq}
+        gap: GapRangeEvent = {"type": "gap", "from_seq": from_seq, "to_seq": first}
         self._emit(gap)
 
     async def _pump(self) -> None:
