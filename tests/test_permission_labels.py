@@ -92,9 +92,11 @@ def test_no_bypass_option_without_ceiling(write_config) -> None:
 
 def test_perm_tooltip_ends_cleanly(write_config) -> None:
     # The effect tooltip joins modes with " · " and must end cleanly. When bypass is
-    # filtered out (the common no-ceiling case) the trailing item is dontAsk, whose
-    # effect already ends in a period — so the tooltip must end with that effect string
-    # verbatim: no dangling " · " separator AND no doubled-up trailing period.
+    # filtered out (the common no-ceiling case) the trailing item is whichever mode the
+    # canonical map lists last, whose effect already ends in a period — so the tooltip
+    # must end with that effect string verbatim: no dangling " · " separator AND no
+    # doubled-up trailing period. Derived from the map (not a hardcoded mode) so adding
+    # a label re-anchors the assertion instead of failing on a stale name.
     import re
 
     row = _client(write_config).get("/api/projects/alpha/row").text
@@ -102,7 +104,8 @@ def test_perm_tooltip_ends_cleanly(write_config) -> None:
     assert m is not None
     tooltip = m.group(0)
     assert ' · "' not in tooltip  # no dangling separator before the closing quote
-    last_effect = PERMISSION_LABELS["dontAsk"]["effect"]
+    last_mode = [mode for mode in PERMISSION_LABELS if mode != "bypassPermissions"][-1]
+    last_effect = PERMISSION_LABELS[last_mode]["effect"]
     assert last_effect.endswith(".")  # the effect supplies its own period
     assert tooltip.endswith(f'{last_effect}"')  # ends with the effect itself — no extra "."
     assert ".." not in tooltip  # no doubled period anywhere

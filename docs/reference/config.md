@@ -101,7 +101,7 @@ row in the table above.
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `spawn_mode` | `same-dir` \| `worktree` \| `session` | `same-dir` | Default spawn mode for new **bridge** sessions (the standard / pty launch flow) — where the session's working directory lives. `worktree` requires a git repo; `session` runs in a fresh sandbox. Bridge launches only — hosted (browser) sessions ignore this. |
-| `permission_mode` | `default` \| `plan` \| `acceptEdits` \| `auto` \| `dontAsk` \| `bypassPermissions` | `default` | Default permission mode for new bridges. |
+| `permission_mode` | `default` \| `plan` \| `acceptEdits` \| `auto` \| `dontAsk` \| `bypassPermissions` \| `inherit` | `default` | Default permission mode for new bridges. `inherit` is a Clauster sentinel, not a claude mode: it passes **no** `--permission-mode` flag, so the session starts in whatever mode it would pick on its own. It is never more permissive than that default and can never grant `bypassPermissions`. |
 | `verbose` | bool | `false` | Pass `--verbose` to spawned standard `claude remote-control` bridges for detailed connection/session logs — every spawn mode (same-dir/worktree/session). The pty (flag-form) bridge is never passed --verbose. Off by default. |
 | `session_name_prefix` | str \| null | `null` | Optional prefix for auto-generated Remote Control session names (maps to `claude remote-control --remote-control-session-name-prefix`); applies to the standard multi-session bridge only. Unset → claude's default (the hostname). |
 | `capacity` | int | `32` | Max concurrent sessions a single standard bridge runs in `same-dir`/`worktree` spawn mode (≥1); passed to `claude remote-control --capacity`. Ignored for `session` spawn mode and the pty bridge (both single-session). |
@@ -111,6 +111,16 @@ row in the table above.
 Permission modes: `default`, `plan`, `acceptEdits`, `auto`, `dontAsk`,
 `bypassPermissions`. `bypassPermissions` is footgun-gated — see
 `projects.<name>.allow_bypass_permissions` below.
+
+`inherit` is a seventh choice and not a claude mode at all: Clauster passes **no**
+`--permission-mode` flag, so the session starts in whatever mode it would pick on its
+own. Use it when the flag's spawn-time effect is unwanted — claude bakes
+`--permission-mode` into the session's initial system prompt, which reaching the same
+mode later at runtime does not do. It can never be more permissive than the session's
+own default and can never grant `bypassPermissions`; the footgun gate above is
+unaffected. It applies to every launch channel (standard bridge, Interactive Session,
+browser/hosted, and background runs) and is opt-in — the shipped default stays
+`default`.
 
 ## `projects` — per-project map (`ProjectConfig`)
 

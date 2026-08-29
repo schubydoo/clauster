@@ -40,6 +40,7 @@ import time
 from pathlib import Path
 
 from .claude_cli import resolve_binary
+from .config import INHERIT_PERMISSION_MODE
 from .models import BackgroundJob
 from .procutil import child_env, jiffies_to_epoch, proc_create_time
 from .redact import redact_for_disk
@@ -259,6 +260,11 @@ def build_dispatch_argv(
     trailing positional (the session's initial instruction) and may be omitted.
     ``resume`` is a prior session's full UUID — ``--bg --resume <uuid>`` continues
     that conversation in a new bg job inheriting its transcript (#336).
+
+    ``permission_mode`` of :data:`~clauster.config.INHERIT_PERMISSION_MODE` emits **no**
+    ``--permission-mode`` (#1231): the dashboard's per-project picker feeds both the
+    bridge launch and this background dispatch, so the sentinel has to be honored here
+    too rather than handed to ``claude`` as a bogus mode string.
     """
     argv = [binary, "--bg"]
     if resume:
@@ -267,7 +273,7 @@ def build_dispatch_argv(
         argv += ["--rc", rc_name]
     if model:
         argv += ["--model", model]
-    if permission_mode:
+    if permission_mode and permission_mode != INHERIT_PERMISSION_MODE:
         argv += ["--permission-mode", permission_mode]
     if prompt:
         # `--` end-of-options separator (verified honored by `claude --bg`): a

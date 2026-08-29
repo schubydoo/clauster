@@ -318,6 +318,14 @@ def test_build_dispatch_argv_bare_and_full():
     ]
 
 
+def test_build_dispatch_argv_omits_permission_mode_for_inherit():
+    # #1231: the dashboard's per-project picker feeds both the bridge launch and this
+    # background dispatch, so the sentinel must drop the flag here too rather than hand
+    # `claude --bg` a mode string it does not know.
+    argv = supervisor.build_dispatch_argv("/abs/claude", permission_mode="inherit", prompt="go")
+    assert argv == ["/abs/claude", "--bg", "--", "go"]
+
+
 def test_build_dispatch_argv_dash_prompt_is_positional_after_separator():
     # a prompt that looks like a flag lands after `--`, so claude can't parse it as one
     assert supervisor.build_dispatch_argv("/abs/claude", prompt="--dangerously-skip") == [

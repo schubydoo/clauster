@@ -1926,11 +1926,13 @@
         if (!c.error && !this._permissionsRowsFromText()) c.permissions.mode = "raw";
       },
       // The recognized defaultMode options = the canonical labels minus the footgun-
-      // gated bypassPermissions (mirrors the backend's RECOGNIZED_MODES) — never a
-      // hand-listed copy. {value, label} so the <select> renders friendly text.
+      // gated bypassPermissions AND the "inherit" launch sentinel (#1231), which means
+      // "pass no --permission-mode flag" and is not a value claude's settings.json
+      // accepts. Mirrors the backend's RECOGNIZED_MODES — never a hand-listed copy.
+      // {value, label} so the <select> renders friendly text.
       configMgmtPermissionModeOptions() {
         return Object.keys(PERMISSION_LABELS)
-          .filter((m) => m !== "bypassPermissions")
+          .filter((m) => m !== "bypassPermissions" && m !== "inherit")
           .map((m) => ({ value: m, label: (PERMISSION_LABELS[m] && PERMISSION_LABELS[m].long) || m }));
       },
       // Canonicalize a permissions-shaped object into the saved JSON: non-empty rules

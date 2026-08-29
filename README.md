@@ -89,8 +89,9 @@ A self-hosted dashboard for the `claude` sessions running on your own machine �
 start them, watch them, and pick them up from your phone.
 
 - **Projects & bridges** — a card per directory under `projects_root`; start, stop
-  and resume bridges, choose the spawn and permission mode, and open any session in
-  Claude by deep link or QR code.
+  and resume bridges, choose the spawn and permission mode (including **No forced
+  mode**, which passes no `--permission-mode` flag so the session starts in its own
+  default), and open any session in Claude by deep link or QR code.
 - **Visibility** — live bridge-log tail over a WebSocket, a read-only transcript
   viewer, and per-project cost and token totals.
 - **In-app editing** — edit a project's Claude Code config surfaces and an allowlist
