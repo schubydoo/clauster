@@ -1131,6 +1131,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#after-102-leftover-filelock-sidecars-are-left-in-place" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        After 1.0.2: leftover &lt;file&gt;.lock sidecars are left in place
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#012-10-a-bridges-id-in-clauster-mcp-is-now-its-instance-id" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1465,6 +1476,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#after-102-leftover-filelock-sidecars-are-left-in-place" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        After 1.0.2: leftover &lt;file&gt;.lock sidecars are left in place
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#012-10-a-bridges-id-in-clauster-mcp-is-now-its-instance-id" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1634,6 +1656,11 @@ startup — clauster refuses to serve until the migration succeeds, so you never
 run a database migration by hand. (The separate <code>clauster migrate</code> command is a
 <em>legacy</em> helper that only upgrades an older flat-file <code>state.json</code>; on a 0.12+
 deployment it has nothing to do.)</p>
+<h2 id="after-102-leftover-filelock-sidecars-are-left-in-place">After 1.0.2: leftover <code>&lt;file&gt;.lock</code> sidecars are left in place<a class="headerlink" href="#after-102-leftover-filelock-sidecars-are-left-in-place" title="Permanent link">&para;</a></h2>
+<p>1.0.2 and earlier took the JSON write lock on a <code>&lt;file&gt;.lock</code> beside the target, so
+a 0-byte sidecar may still sit in a project tree; newer versions neither create nor
+delete them — remove them by hand, per <a href="../security/#workspace-trust">workspace
+trust</a>.</p>
 <h2 id="012-10-a-bridges-id-in-clauster-mcp-is-now-its-instance-id">0.12 → 1.0: a bridge's <code>id</code> in <code>clauster mcp</code> is now its instance id<a class="headerlink" href="#012-10-a-bridges-id-in-clauster-mcp-is-now-its-instance-id" title="Permanent link">&para;</a></h2>
 <p><code>list_sessions</code> reported each bridge's <strong>project name</strong> as its <code>id</code>. A project can
 run several bridges at once — one standard (Server Mode) bridge plus any number of

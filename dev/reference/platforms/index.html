@@ -1536,10 +1536,14 @@ Bracketed numbers point at the <a href="#notes">notes</a> below.</p>
    <code>disk_read_bps</code> / <code>disk_write_bps</code> fields are blank there.</li>
 <li>An in-process lock serializes clauster's own concurrent writers on every
    OS; POSIX additionally takes an advisory <code>fcntl.flock</code>, which also guards
-   <em>other</em> clauster processes — the config/<code>CLAUDE.md</code> writers, and since
+   <em>other</em> clauster processes — the config/<code>CLAUDE.md</code> writers, the
+   <code>~/.claude.json</code> and project-JSON writers (since
+   <a href="https://github.com/schubydoo/clauster/issues/1171">#1171</a> these share the same
+   lock file rather than a sidecar beside the target), and since
    <a href="https://github.com/schubydoo/clauster/issues/949">#949</a> the per-project
    spawn/stop/forget/adopt sections, so a headless CLI/MCP writer serializes
-   against the live server. Cross-clauster-process serialization therefore
+   against the live server. Every one of those lock files lives under
+   <code>&lt;state_dir&gt;/locks/</code>. Cross-clauster-process serialization therefore
    needs the POSIX flock; a single clauster process is fully covered
    everywhere. Neither lock coordinates with the <code>claude</code> CLI (which takes no
    lock) — that's covered by the atomic <code>os.replace</code> (no torn files) plus the

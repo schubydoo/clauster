@@ -2064,14 +2064,27 @@ as trusted that the CLI would reject at spawn — it fails <strong>closed</stron
 <ul>
 <li><strong>Atomic replace</strong> (temp file + <code>os.replace</code>) so no reader ever sees a
   half-written file, and every key Clauster doesn't touch is preserved.</li>
-<li><strong>An advisory <code>flock</code></strong> held across the whole read-modify-write (via a sidecar
-  <code>&lt;file&gt;.lock</code>, never the target itself — <code>os.replace</code> swaps the inode). This
-  serializes Clauster's own concurrent writers and shrinks the window against
-  the CLI to the gap between the read-under-lock and the replace. POSIX only; on
-  platforms without <code>fcntl</code> it degrades to a best-effort no-op (the atomic
-  replace still prevents a torn file).</li>
+<li><strong>An advisory <code>flock</code></strong> held across the whole read-modify-write, taken on a lock
+  file under <code>&lt;state_dir&gt;/locks/</code> keyed by the target's real path — never the
+  target itself (<code>os.replace</code> swaps the inode) and never a <code>&lt;file&gt;.lock</code> sidecar
+  beside it, which for a project <code>.claude/settings.json</code> would land inside your
+  git-tracked tree. This serializes Clauster's own concurrent writers and shrinks
+  the window against the CLI to the gap between the read-under-lock and the
+  replace. POSIX only; on platforms without <code>fcntl</code> it degrades to a best-effort
+  no-op (the atomic replace still prevents a torn file). Because the lock file is
+  keyed under one deployment's <code>state_dir</code>, the cross-process guarantee covers a
+  single Clauster deployment — the same scope as the config and <code>CLAUDE.md</code>
+  writers, which share this lock.</li>
 </ul>
 <p>A one-time <code>.bak</code> is taken before the first modification.</p>
+<blockquote>
+<p><strong>Upgrading from 1.0.2 or earlier?</strong> Those versions wrote the sidecar beside the
+target, so you may still have a 0-byte <code>settings.json.lock</code> / <code>.mcp.json.lock</code> /
+<code>.claude.json.lock</code> on disk. Clauster no longer creates or uses them and
+deliberately does not delete them — a file inside your project is yours, and
+unlinking a lock file is the very race the pattern avoids. Remove them by hand
+(and, if you committed one, <code>git rm</code> it) once no older Clauster is running.</p>
+</blockquote>
 <h2 id="auto-enable-remote-control">Auto-enable remote control<a class="headerlink" href="#auto-enable-remote-control" title="Permanent link">&para;</a></h2>
 <p>Before the first spawn, Clauster marks remote control acknowledged
 (<code>hasUsedRemoteControl</code> / <code>remoteDialogSeen</code>) in the runtime user's
