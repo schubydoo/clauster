@@ -198,6 +198,37 @@ row tells the first two apart:
 - **A skill Clauster cannot read still appears, carrying an error in place of
   the missing information.** One unreadable skill never hides the others.
 
+### MCP: why a server URL must be a bare origin
+
+Clauster writes MCP servers in one of two ways: by driving `claude mcp add-json`,
+or by writing the config file directly. The CLI takes the whole server definition
+as an ordinary command-line argument, and command lines are readable by **any**
+local process (`ps`, `/proc/<pid>/cmdline`) for as long as the command runs. So
+Clauster only uses the CLI for definitions it can *prove* carry no credential.
+
+A remote server's `url` qualifies only when it is a **bare origin** —
+`scheme://host` or `scheme://host:port`, with `http`, `https`, `ws` or `wss`, and
+nothing else. A path (`/sse`, `/mcp/…`), a query string, a fragment, a
+`user:pass@` prefix, or a non-numeric port all disqualify it, because a
+credential can hide in any of them and a token-bearing path segment looks exactly
+like a harmless `/v1`. Everything else — and every definition with `env`,
+`headers`, or `args` — is written directly to the config file instead.
+
+**This is invisible in normal use.** The direct writer stores the same file
+content, reports the same "already exists" conflict, and needs no subprocess, so
+a server with a path in its URL is added exactly as before.
+
+**The one caveat: OAuth client secrets.** An OAuth `client_secret` can only be
+delivered by the CLI, which reads it from `MCP_CLIENT_SECRET` in the child
+process's environment rather than the command line. Claude Code offers that flag
+only on `claude mcp add` and `claude mcp add-json` — both of which put the server
+URL on the command line — so there is no way to deliver the secret while keeping
+a non-bare URL out of it. Supplying a `client_secret` alongside a URL with a
+path, query, fragment, or userinfo is therefore **refused** (`422`) rather than
+saved with the secret quietly dropped. Either use a bare-origin URL, or put the
+credential in the server's `env` or `headers`, which are written directly and
+never reach a command line at all.
+
 ## Troubleshooting and limits
 
 | Symptom | Why | What to do |
@@ -208,6 +239,7 @@ row tells the first two apart:
 | Advanced settings ask for a password you don't have | Step-up re-auth requires a password even when login uses another mechanism | Set one with `clauster hash-password` |
 | No Advanced section / no wrench button | `config_write.enabled` is off (the whole surface 404s) | Enable it in `clauster.yml` — deliberately not web-editable |
 | A saved change has no effect | Saves never live-reload | Use **Restart Clauster** in the Configuration modal |
+| MCP save refused: `client_secret` cannot be stored (`422`) | An OAuth client secret only reaches Claude Code through the CLI, which would also put the server URL on a world-readable command line | Use a bare-origin URL, or move the credential into the server's `env` / `headers`; see [why a server URL must be a bare origin](#mcp-why-a-server-url-must-be-a-bare-origin) |
 | A subagent has no description and won't edit | It is built-in, or a plugin owns it — the **Source** badge says which | Built-in: nothing to do, there is no file. Plugin: change the plugin, not Clauster |
 
 Need to recover an earlier config? The five most recent pre-save snapshots

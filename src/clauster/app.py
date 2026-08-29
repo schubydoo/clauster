@@ -2357,11 +2357,14 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 status_code=422, detail="'client_secret' must be a string when present"
             )
         # An OAuth client-secret is only deliverable through the CLI (which passes it via
-        # MCP_CLIENT_SECRET in the child env). An entry that must bypass the CLI — inline
-        # env/headers, or a url carrying a query/userinfo/fragment — takes the direct
-        # writer, which has nowhere to put it. Refuse rather than write the entry and
-        # silently drop the secret: the operator would believe it was stored and only
-        # discover otherwise when the server fails to authenticate.
+        # MCP_CLIENT_SECRET in the child env), and `--client-secret` exists only on
+        # `add`/`add-json` — both of which take the server url as an ordinary argv token.
+        # So there is no CLI channel that delivers the secret while keeping the url off
+        # argv. An entry that must bypass the CLI — inline env/headers, or a url that is
+        # not a provably bare origin (#1074) — takes the direct writer, which has nowhere
+        # to put the secret. Refuse rather than write the entry and silently drop it: the
+        # operator would believe it was stored and only discover otherwise when the server
+        # fails to authenticate. The message never echoes the entry or the url back.
         if client_secret is not None and entry is not None:
             if config_write_mcp_cli.entry_needs_direct_write(entry):
                 raise HTTPException(
@@ -2369,10 +2372,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                     detail=(
                         "'client_secret' cannot be stored for this entry: it carries a "
                         "value that must be kept off the CLI's argv (inline env/headers, "
-                        "or a url with a query string, userinfo, or fragment), so it is "
-                        "written directly to the config file, which has no way to deliver "
-                        "the secret. Put the credential in the entry's 'env' or 'headers' "
-                        "instead."
+                        "non-empty args, or a url that is not a bare 'scheme://host[:port]' "
+                        "origin — a path, query string, fragment, or userinfo could hide a "
+                        "credential), so it is written directly to the config file, which "
+                        "has no way to deliver the secret. Use a bare-origin url, or put "
+                        "the credential in the entry's 'env' or 'headers' instead."
                     ),
                 )
 
