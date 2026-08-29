@@ -925,8 +925,9 @@ class ObservabilityConfig(BaseModel):
 
     ``prometheus_enabled`` gates a text-format ``/metrics`` endpoint that exposes
     point-in-time gauges from live runner state (build info, bridge counts by status,
-    project count, per-bridge cpu/rss, a crash counter, hosted/claustrum gauges). Off
-    by default — opt in explicitly. When off, ``/metrics`` returns 404.
+    project count, per-project cpu/rss summed across that project's live bridges, a
+    crash counter, hosted/claustrum gauges). Off by default — opt in explicitly. When
+    off, ``/metrics`` returns 404.
 
     The endpoint stays **behind** the auth guard UNLESS ``metrics_token_hash`` is set:
     a request carrying a valid scrape token is then admitted to ``/metrics`` alone with
@@ -936,8 +937,9 @@ class ObservabilityConfig(BaseModel):
     prometheus_enabled: bool = Field(
         default=False,
         description="Gate a text-format `/metrics` endpoint (build info, bridge counts "
-        "by status, project count, per-bridge cpu/rss, crash counter, hosted/claustrum "
-        "gauges). Off by default; when off, `/metrics` returns 404. The endpoint stays "
+        "by status, project count, per-project cpu/rss summed across that project's live "
+        "bridges, crash counter, hosted/claustrum gauges). Off by default; when off, "
+        "`/metrics` returns 404. The endpoint stays "
         "**behind** the auth guard unless `metrics_token_hash` is set.",
     )
     metrics_token_hash: str | None = Field(

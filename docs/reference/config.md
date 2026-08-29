@@ -418,7 +418,7 @@ auth guard. See [Networking](../networking.md) for scraping behind auth.
 <!-- BEGIN GEN: observability -->
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `prometheus_enabled` | bool | `false` | Gate a text-format `/metrics` endpoint (build info, bridge counts by status, project count, per-bridge cpu/rss, crash counter, hosted/claustrum gauges). Off by default; when off, `/metrics` returns 404. The endpoint stays **behind** the auth guard unless `metrics_token_hash` is set. |
+| `prometheus_enabled` | bool | `false` | Gate a text-format `/metrics` endpoint (build info, bridge counts by status, project count, per-project cpu/rss summed across that project's live bridges, crash counter, hosted/claustrum gauges). Off by default; when off, `/metrics` returns 404. The endpoint stays **behind** the auth guard unless `metrics_token_hash` is set. |
 | `metrics_token_hash` | str \| null | `null` | SHA-256 hash of an optional bearer token that lets a scraper (e.g. Prometheus) reach `/metrics` without a browser session — the scraper presents the raw token as `Authorization: Bearer <token>`. When set, a valid token OR a normal session grants access; when unset, `/metrics` stays behind the auth guard. Only the hash is stored (parity with `auth.api_token_hash`); the raw token is shown once by `clauster hash-metrics-token`. Supply via `CLAUSTER_OBSERVABILITY_METRICS_TOKEN_HASH_FILE` to keep it out of the config file. |
 <!-- END GEN: observability -->
 

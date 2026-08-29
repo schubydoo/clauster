@@ -34,9 +34,10 @@ def render_metrics(
     Exposes ``clauster_build_info`` (info gauge), ``clauster_bridges`` (a gauge per
     :class:`InstanceStatus`), ``clauster_projects`` (discovered-project count), and —
     when supplied — ``clauster_bridge_crashes_total`` (a per-project *counter*, so a
-    crash that resumes between scrapes still leaves a trace), per-bridge
+    crash that resumes between scrapes still leaves a trace), per-project
     ``clauster_bridge_cpu_percent`` / ``clauster_bridge_rss_bytes`` gauges (from
-    ``bridge_samples`` ``(project, cpu, rss)`` triples), ``clauster_hosted_sessions``,
+    ``bridge_samples`` ``(project, cpu, rss)`` triples, already summed across the
+    project's live bridges), ``clauster_hosted_sessions``,
     and ``clauster_claustrum_up``. All values derive from the supplied live state.
     """
     counts: dict[InstanceStatus, int] = {status: 0 for status in InstanceStatus}
@@ -70,12 +71,18 @@ def render_metrics(
             lines.append(f'clauster_bridge_crashes_total{{project="{label}"}} {n}')
 
     if bridge_samples:
-        lines.append("# HELP clauster_bridge_cpu_percent Per-bridge process-tree CPU percent.")
+        lines.append(
+            "# HELP clauster_bridge_cpu_percent Per-project process-tree CPU percent, "
+            "summed across the project's live bridges."
+        )
         lines.append("# TYPE clauster_bridge_cpu_percent gauge")
         for project, cpu, _rss in sorted(bridge_samples):
             label = _escape_label_value(project)
             lines.append(f'clauster_bridge_cpu_percent{{project="{label}"}} {cpu}')
-        lines.append("# HELP clauster_bridge_rss_bytes Per-bridge process-tree resident memory.")
+        lines.append(
+            "# HELP clauster_bridge_rss_bytes Per-project process-tree resident memory, "
+            "summed across the project's live bridges."
+        )
         lines.append("# TYPE clauster_bridge_rss_bytes gauge")
         for project, _cpu, rss in sorted(bridge_samples):
             label = _escape_label_value(project)
