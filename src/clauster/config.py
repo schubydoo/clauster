@@ -896,9 +896,9 @@ class MetricsConfig(BaseModel):
     enabled: bool = Field(
         default=True,
         description="Show the per-session resource metrics line — live CPU, memory, and disk "
-        "I/O for each running bridge. When `false`, the line is hidden and Clauster skips the "
-        "work behind it entirely: no `/api/projects/{name}/metrics` polling from the browser "
-        "and no server-side resource sampling.",
+        "I/O for each running bridge, each row reporting its own bridge. When `false`, the "
+        "line is hidden and Clauster skips the work behind it entirely: no `/api/metrics` "
+        "polling from the browser and no server-side resource sampling.",
     )
     normalize_cpu: bool = Field(
         default=False,

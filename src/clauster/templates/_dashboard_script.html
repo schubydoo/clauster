@@ -380,7 +380,7 @@
       sortMeta: {},       // project name -> {last_used: iso|null, cost_usd: float|null}; Zone 1 sort (lazy)
       preflight: {},      // project name -> per-project preflight result ({ok, checks}); lazy-loaded
       preflightOpen: {},  // project name -> true while its preflight-warning detail is expanded
-      metrics: {},        // row key (instance_id) -> live CPU/mem/disk sample (null when not running)
+      metrics: {},        // row key (instance_id) -> live CPU/mem/disk sample (key dropped when not running)
       trustState: {},     // project name -> 'trusted' | 'untrusted' (reactive; no reload on trust)
       trusting: {},       // project name -> bool (trust request in flight)
       trustingAll: false, // bulk "Trust all" request in flight (#1224)
@@ -3925,7 +3925,13 @@
         // bridge's badge in a single round trip instead of one fetch per bridge. The
         // response is a map keyed by INSTANCE ID — the row key `i.rk` (#1090) — carrying
         // only the running ones; merge each through the Alpine proxy so the badges
-        // repaint, then null out any sample whose bridge is no longer running.
+        // repaint, then DROP any sample whose bridge is no longer running. Dropped, not
+        // nulled: keys used to be a project's fixed, small name set, but every spawn
+        // mints a fresh instance id, so a nulled key would accumulate one dead reactive
+        // property per bridge ever started on a dashboard left open for days — and this
+        // loop re-walks all of them each poll. `Object.keys` snapshots to an array, so
+        // deleting inside it is safe, and the readers below treat an absent key exactly
+        // as they treated a null one.
         if (!METRICS_ENABLED) return;
         let batch;
         try {
@@ -3938,7 +3944,7 @@
           if (m && m.running) this.metrics[rk] = m;
         }
         for (const rk of Object.keys(this.metrics)) {
-          if (!batch[rk]) this.metrics[rk] = null;  // batch only carries running bridges
+          if (!batch[rk]) delete this.metrics[rk];  // batch only carries running bridges
         }
       },
       // Takes a ROW KEY (`i.rk`), never a project name (#1090): the sample belongs to one
@@ -3953,7 +3959,12 @@
         if (METRICS_SHOW_DISK && m.disk_read_bps != null) s += " · ⬇" + rate(m.disk_read_bps) + " ⬆" + rate(m.disk_write_bps);
         return s;
       },
+      // Same guards as metricsLabel, deliberately duplicated rather than assumed: today
+      // only x-show keeps a stopped bridge's tooltip off-screen, so a future caller that
+      // binds :title on its own would otherwise describe a bridge that is no longer live.
       metricsTitle(rk) {
+        if (!METRICS_ENABLED) return "";
+        if (this.statusOf(rk) !== "running") return "";
         const m = this.metrics[rk];
         if (!m || !m.running) return "";
         const cpuNote = m.cpu_normalized
