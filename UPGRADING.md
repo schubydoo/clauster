@@ -29,6 +29,25 @@ run a database migration by hand. (The separate `clauster migrate` command is a
 *legacy* helper that only upgrades an older flat-file `state.json`; on a 0.12+
 deployment it has nothing to do.)
 
+## 1.x → 2.0: an MCP server URL on the CLI path must be a bare origin
+
+Adding a remote MCP server through the config editor used to hand every URL to
+`claude mcp add-json`, whose command line any local process can read. A URL is now
+routed there only when it is a bare `scheme://host[:port]` origin; everything else
+is written directly to the config file, which is invisible in normal use.
+
+What changes for you: a save that previously **succeeded** can now come back as a
+`422`. That happens when an OAuth `client_secret` is supplied alongside a URL that
+is not a bare origin — a path, query, fragment, userinfo, or non-numeric port. The
+secret can only be delivered by the CLI, which would put that URL on the readable
+command line, so the save is refused instead of quietly dropping the secret. The
+error points you at the two safe routes: a bare-origin URL, or the credential in
+the server's `env` / `headers`.
+
+Full reasoning, including which URL shapes qualify:
+[why a server URL must be a bare
+origin](docs/guides/config-editor.md#mcp-why-a-server-url-must-be-a-bare-origin).
+
 ## 0.12 → 1.0: a bridge's `id` in `clauster mcp` is now its instance id
 
 `list_sessions` reported each bridge's **project name** as its `id`. A project can
