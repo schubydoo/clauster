@@ -997,8 +997,9 @@ class SessionRunner:
         re-derives it from the sidecar, correlated to the bridge's own pair
         (:meth:`_recover_keeper_pid`), and :meth:`stop` force-kills that tree — so a stale
         keeper pid is the one value here that could reap a stranger's processes. It stays
-        on ``_persist_subset``'s own ``inst.keeper_pid`` passthrough, which means a
-        stop()-ed card's row keeps its keeper pid while a REBUILT card's row drops it.
+        on ``_persist_subset``'s own ``inst.keeper_pid`` passthrough (with its paired
+        ``keeper_proc_start``, #1178), which means a stop()-ed card's row keeps both while
+        a REBUILT card's row drops both.
         """
         if inst.bridge_pid is not None:
             return {
@@ -1043,7 +1044,11 @@ class SessionRunner:
                 # card's pair is carried from its ROW rather than from the card, which
                 # holds None by design — see `_persisted_liveness` (#1115).
                 **self._persisted_liveness(inst),
+                # Always as a PAIR (#1178), never the pid alone: a keeper pid with a stale
+                # or absent start time is what lets a DIFFERENT live keeper on that pid
+                # answer for this one. Both are set and cleared together on the instance.
                 "keeper_pid": inst.keeper_pid,
+                "keeper_proc_start": inst.keeper_proc_start,
             }
             for inst in self._instances.values()
             # #951 rounds 2+3: a dead card (STOPPED/CRASHED/ERROR) whose row this
@@ -2719,6 +2724,28 @@ class SessionRunner:
             return None
         return None
 
+    def _recover_keeper_identity(
+        self, name: str, bridge_pid: int | None, bridge_proc_start: float | None
+    ) -> tuple[int | None, float | None]:
+        """Return the ``(keeper_pid, keeper_proc_start)`` PAIR for this bridge (#1178).
+
+        Thin wrapper over :meth:`_recover_keeper_pid` that snapshots the pid's create-time
+        at the moment of classification — the same "captured when the keeper was
+        classified" value :func:`clauster.pty_keeper.stop_keeper` documents for its
+        ``expect_create_time`` guard.
+
+        Callers must publish **both or neither**. A keeper pid carrying the *previous*
+        generation's start time is worse than carrying none: the comparison then fails for
+        a keeper that is genuinely alive, and :meth:`forget` would drop the record of a
+        running process — the exact failure the pair exists to prevent. ``None`` for the
+        start time (psutil error, or a keeper that exited between the two reads) is the
+        honest unknown and degrades to the cmdline-only gate.
+        """
+        keeper_pid = self._recover_keeper_pid(name, bridge_pid, bridge_proc_start)
+        if keeper_pid is None:
+            return None, None
+        return keeper_pid, procutil.proc_create_time(keeper_pid)
+
     def _await_ready_pty(self, sidecar: Path, proc: subprocess.Popen) -> dict:
         """Block until the keeper publishes a connect URL, the keeper exits, or timeout."""
         deadline = time.monotonic() + _READY_TIMEOUT
@@ -2805,6 +2832,12 @@ class SessionRunner:
             return instance
         self._procs[instance.instance_id] = proc
         instance.keeper_pid = proc.pid
+        # Snapshot the keeper's create-time with its pid (#1178) so a later `forget` can
+        # tell THIS keeper from another one that inherited the pid. Read immediately after
+        # the spawn, while the process is certainly still ours; None (an already-exited
+        # keeper, or a psutil error) degrades to the cmdline-only gate rather than pairing
+        # the pid with a start time that isn't its own.
+        instance.keeper_proc_start = await asyncio.to_thread(procutil.proc_create_time, proc.pid)
         info = await asyncio.to_thread(self._await_ready_pty, sidecar, proc)
         self._apply_pty_info(instance, info, proc)
         await asyncio.to_thread(self._flush_redacted_mirror, instance)
@@ -3267,18 +3300,22 @@ class SessionRunner:
         is live-but-untracked, which is the likeliest way to reach a persisted-only live
         row. Raises :class:`UnknownProject` when there's no such record at all.
 
-        Both liveness checks are cmdline-gated against PID reuse — ``is_live_bridge`` for the
-        bridge, ``is_keeper_process`` for the keeper — so a pid the OS recycled onto an
-        unrelated process does not refuse the forget. That matters most here: a persisted row
+        Both liveness checks are gated on the ``(pid, create-time)`` PAIR against PID reuse —
+        ``is_live_bridge`` for the bridge, ``is_live_keeper`` for the keeper (#1178) — so a
+        pid the OS recycled onto an unrelated process, *or onto a different live process of
+        the same shape*, does not refuse the forget. That matters most here: a persisted row
         can predate a reboot, and since forget never kills, a false "still live" would strand
-        the record with no operator path out. ⚠️ Read the reuse defense as cmdline-plus-
-        start-time **only where a start-time exists**. The bridge half matches
-        ``bridge_proc_start`` when the row carries one, but a row persisted with a null
-        ``bridge_proc_start`` (``adopt`` writes one whenever the pointer has no comparable
-        start time) makes ``_expected_epoch`` return None and ``is_live_process`` fall back to
-        cmdline+alive. The keeper half has no persisted start-time at all, so it is always in
-        that weaker mode. In both cases a *different* live process of the right shape recycled
-        onto that exact pid still reads as live; #1178 covers closing it for both halves.
+        the record with no operator path out short of hand-editing the state database.
+
+        ⚠️ The pair check is only as strong as the stored start-time. Where one is absent —
+        a row persisted with a null ``bridge_proc_start`` (``adopt`` writes one whenever the
+        pointer has no comparable start time), or a ``keeper_pid`` written by a pre-#1178
+        build with no ``keeper_proc_start`` — ``_expected_epoch`` returns None and
+        ``is_live_process`` degrades to cmdline+alive, exactly as it behaved before. That
+        degrade is deliberate and is the safe direction for an upgrade: an old row keeps
+        working instead of reporting its live keeper as dead. Such a row still reads as live
+        if a *different* process of the right shape holds that exact pid; it re-acquires the
+        full defense the next time the instance is spawned or reattached.
         """
         # Determine project name before taking the lock (needed for per-project lock and
         # the pointer clear below). Fall back to the persisted record — a forgotten bridge
@@ -3335,7 +3372,7 @@ class SessionRunner:
                         f"{instance_id!r} still has a live bridge — Stop it first"
                     )
                 if instance.keeper_pid is not None and await asyncio.to_thread(
-                    procutil.is_keeper_process, instance.keeper_pid
+                    procutil.is_live_keeper, instance.keeper_pid, instance.keeper_proc_start
                 ):
                     raise InstanceStillLive(
                         f"{instance_id!r} still has a live keeper — Stop it first"
@@ -3360,7 +3397,9 @@ class SessionRunner:
                     )
                 row_keeper_pid = _row_int(row.get("keeper_pid"))
                 if row_keeper_pid is not None and await asyncio.to_thread(
-                    procutil.is_keeper_process, row_keeper_pid
+                    procutil.is_live_keeper,
+                    row_keeper_pid,
+                    _row_float(row.get("keeper_proc_start")),
                 ):
                     raise InstanceStillLive(
                         f"{instance_id!r} still has a live keeper — Stop it first"
@@ -3814,6 +3853,10 @@ class SessionRunner:
                 status=InstanceStatus.RUNNING,
                 intentional_stop=False,
                 keeper_pid=keeper_pid,
+                # Snapshotted here, right after `is_keeper_process` classified this pid as
+                # a keeper, so the pid is carried as a PAIR from the moment we adopt it
+                # (#1178). The sidecar itself records no create-time.
+                keeper_proc_start=procutil.proc_create_time(keeper_pid),
                 bridge_pid=bridge_pid,
                 bridge_proc_start=bridge_proc_start,
                 bridge_debug_log_path=log_path,
@@ -3947,10 +3990,10 @@ class SessionRunner:
         # for that project behind up to three globs of the bridge-log dir, per resynced
         # row, per tick, for no correctness gain. What must be inside the lock is the
         # re-check plus the mutation, and that block contains no ``await`` at all.
-        keeper_pid = (
-            await asyncio.to_thread(self._recover_keeper_pid, inst.project, pid, proc_start)
+        keeper_pid, keeper_proc_start = (
+            await asyncio.to_thread(self._recover_keeper_identity, inst.project, pid, proc_start)
             if inst.resume_mode == "pty"
-            else None
+            else (None, None)
         )
         connect = await asyncio.to_thread(
             self._connect_facts_for, proj, inst.resume_mode, pid, proc_start
@@ -3979,7 +4022,10 @@ class SessionRunner:
                 # revert the operator's Stop to RUNNING, permanently.
                 return
             current.bridge_pid, current.bridge_proc_start = pair
-            current.keeper_pid = keeper_pid
+            # Both halves of the keeper pair, together (#1178): leaving the old
+            # `keeper_proc_start` beside a NEW `keeper_pid` would make the live keeper of
+            # the generation we just adopted read as gone.
+            current.keeper_pid, current.keeper_proc_start = keeper_pid, keeper_proc_start
             current.intentional_stop = bool(saved.get("intentional_stop"))
             current.url = connect.get("url")
             current.environment_id = connect.get("environment_id")
@@ -4061,10 +4107,10 @@ class SessionRunner:
             # alone only proves "some keeper", not "OUR keeper" — and `stop()` hands
             # `keeper_pid` to `_cleanup_keeper`, which force-kills the whole tree. A recycled
             # pid landing on another instance's keeper would reap a stranger's processes.
-            keeper_pid = (
-                await asyncio.to_thread(self._recover_keeper_pid, proj.name, pid, proc_start)
+            keeper_pid, keeper_proc_start = (
+                await asyncio.to_thread(self._recover_keeper_identity, proj.name, pid, proc_start)
                 if resume_mode == "pty"
-                else None
+                else (None, None)
             )
             log_path = await asyncio.to_thread(self._latest_debug_log_for, proj.name)
             # The row carries identity and liveness but NOT the connect facts — those live in
@@ -4103,6 +4149,7 @@ class SessionRunner:
                 bridge_pid=pid,
                 bridge_proc_start=proc_start,
                 keeper_pid=keeper_pid,
+                keeper_proc_start=keeper_proc_start,
                 bridge_debug_log_path=log_path,
                 bridge_raw_log_path=(
                     self._raw_log_path_for(log_path) if log_path is not None else None

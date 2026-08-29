@@ -76,6 +76,10 @@ _INSTANCE_FIELDS = (
     # Set only when the pty worktree name is NOT derivable from this row's instance_id
     # (#1241); ``_present`` drops the NULL for every ordinary row, which derives it.
     "worktree_name",
+    # Paired with ``keeper_pid`` the way ``bridge_proc_start`` is with ``bridge_pid``
+    # (#1178). A row from a pre-#1178 build simply omits it and the keeper gate degrades
+    # to cmdline-only — the behaviour that shipped before the column existed.
+    "keeper_proc_start",
 )
 # The mutable-payload subset: ``project_name`` is the non-null FK, set explicitly in
 # _sync (guarded so a record that omits it can't blank an existing row's parent), so

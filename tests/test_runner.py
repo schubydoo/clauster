@@ -675,9 +675,11 @@ async def test_forget_refuses_when_keeper_process_still_live(runner_config, monk
     inst.status = InstanceStatus.STOPPED
     inst.bridge_pid = None  # skip the bridge check, exercise the keeper branch
     inst.keeper_pid = 4242
-    # Cmdline-gated now, not bare "any process alive at this pid": a recycled pid must not
-    # strand a record, since forget never kills and there'd be no way out.
-    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda pid: True)
+    inst.keeper_proc_start = 12345.0
+    # Gated on the (pid, create-time) PAIR now, not bare "any process alive at this pid" nor
+    # cmdline alone: a recycled pid must not strand a record, since forget never kills and
+    # there'd be no way out.
+    monkeypatch.setattr("clauster.runner.procutil.is_live_keeper", lambda pid, start: True)
     try:
         with pytest.raises(InstanceStillLive):
             await runner.forget(inst.instance_id)

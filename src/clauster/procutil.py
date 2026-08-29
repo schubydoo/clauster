@@ -352,6 +352,25 @@ def is_keeper_process(pid: int) -> bool:
         return False
 
 
+def is_live_keeper(pid: int, proc_start: str | float | None, *, tolerance: float = 2.0) -> bool:
+    """Whether ``pid`` is a trustworthy, currently-running ``clauster.pty_keeper`` (#1178).
+
+    The keeper counterpart of :func:`is_live_bridge`, and the same wrapper over
+    :func:`is_live_process` — alive, non-zombie, start-time matches, AND a keeper
+    cmdline. :func:`is_keeper_process` answers only "is this pid *a* keeper", which
+    rules out a recycled pid running something else but NOT a *different* live keeper
+    that happens to hold that pid; on a host running many interactive sessions those
+    are exactly the pids most likely to be reused by another keeper.
+
+    ``proc_start is None`` degrades to :func:`is_keeper_process`'s cmdline+alive
+    answer, deliberately: a row written before ``keeper_proc_start`` was persisted has
+    no start-time to compare, and treating unknown as a mismatch would report a live
+    keeper as dead — which for ``forget`` means pruning the record of a running
+    process, the very failure the check exists to prevent.
+    """
+    return is_live_process(pid, proc_start, tolerance=tolerance, require_cmdline=is_keeper_cmdline)
+
+
 def is_bridge_process(pid: int) -> bool:
     """Whether ``pid`` is a live, non-zombie ``claude`` **bridge** process (#1096).
 
