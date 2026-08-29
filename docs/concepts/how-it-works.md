@@ -118,7 +118,7 @@ restarting Clauster does not take your sessions down:
 | --- | --- |
 | Server Mode bridge | Keeps running; Clauster re-derives its status and the dashboard reattaches. |
 | Interactive Session bridge | Keeps running — the PTY keeper, not Clauster, owns its terminal, and the keeper outlives the restart. |
-| Direct Session | The claustrum daemon keeps running (it outlives Clauster) and, by default, keeps its `claude` children alive too; Clauster reconnects and reattaches the sessions recorded in `clauster.db`. |
+| Direct Session | The claustrum daemon keeps running (it outlives Clauster) and, by default, keeps its `claude` children alive too; Clauster reconnects and reattaches the sessions recorded in `clauster.db`. The live view is restored too — see below. |
 | The database | `clauster.db` is stable across restarts; schema migrations run automatically on startup. |
 
 Restarting a *bridge* is a different question: a Server Mode bridge comes back
@@ -126,6 +126,21 @@ with a fresh, empty context (the opt-in `claude.resume_recap` hook can recap
 the prior transcript), while an Interactive Session genuinely restores the
 prior conversation — see
 [The two bridge modes](../index.md#the-two-bridge-modes).
+
+### A Direct Session's view after a restart
+
+A Direct Session's conversation is streamed live and held in Clauster's memory,
+so a restart used to leave the reattached session's View pane empty even though
+the agent itself was still there. On reattach Clauster now rebuilds the pane
+from `claude`'s own transcript on disk, marked with a `· restored N turns from
+transcript ·` line, and the live stream continues underneath it. The transcript
+is only ever **read** — Clauster never writes to it — and the restored turns go
+through the same [redaction](../security.md#log-redaction) as the live stream.
+
+Two limits are worth knowing. Only the newest 200 turns are restored, so a very
+long conversation comes back trimmed. And a session Clauster never saw a
+`session_id` for — one that died before its first frame — has no transcript to
+find, so its pane stays empty.
 
 !!! warning "systemd can undo all of this"
     The survival table assumes nothing reaps the child processes. Under a

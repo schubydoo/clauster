@@ -86,6 +86,12 @@ _DEFAULT_QUEUE_MAXSIZE = _DEFAULT_RING_SIZE + 1
 # How long stop() waits for a clean exit after SIGINT before escalating to KILL.
 _STOP_GRACE_SECONDS = 5.0
 
+# Newest transcript turns a reattach restores into the ring (#1045). A conversation's
+# on-disk JSONL grows without bound and the ring holds _DEFAULT_RING_SIZE events for
+# everything, so the restored history is capped rather than replayed whole — enough to
+# recognise the conversation, never an unbounded read into the ring.
+_REHYDRATE_MAX_TURNS = 200
+
 
 def build_hosted_argv(
     claude_binary: str,
@@ -189,6 +195,11 @@ class HostedSession:
         # Highest *daemon* frame seq drained — the reattach replay cursor across
         # clauster restarts (distinct from _event_seq, the clauster-side ring seq).
         self.daemon_last_seq = 0
+        # Daemon seq through which replayed DATA frames are already represented by
+        # transcript history this session rehydrated on reattach (#1045). Frames at or
+        # below it are dropped so the seam can't double-render a turn; 0 suppresses
+        # nothing, which is the state of every session that did not rehydrate.
+        self._rehydrated_through = 0
         self._ring: deque[Mapping[str, Any]] = deque(maxlen=ring_size)
         self._event_seq = 0
         # Subscriber list: the DEPTH-bound (per-subscriber queue) is bounded above by
@@ -254,7 +265,9 @@ class HostedSession:
         self.status = InstanceStatus.RUNNING
         self._pump_task = asyncio.create_task(self._pump())
 
-    async def reattach(self, from_seq: int = 0) -> dict[str, Any]:
+    async def reattach(
+        self, from_seq: int = 0, *, history: list[dict[str, Any]] | None = None
+    ) -> dict[str, Any]:
         """Reattach to an already-running daemon process, replaying frames past ``from_seq``.
 
         Used on clauster restart (CL-6): the agent kept running on the daemon while
@@ -269,6 +282,11 @@ class HostedSession:
         The opposite direction — the daemon's capped replay buffer having *evicted*
         frames past ``from_seq`` — is reported rather than absorbed: see
         :meth:`_note_replay_gap` (#1175).
+        ``history`` is the session's prior conversation read from claude's on-disk
+        transcript (already redacted); when supplied it is restored into the ring
+        before the pump starts, so a reattached session's view shows the conversation
+        it had before the restart instead of an empty pane (#1045). See
+        :meth:`_rehydrate` for how the seam with the daemon replay is kept clean.
         """
         if self._pump_task is not None:
             raise HostedSessionError("hosted session already started")
@@ -288,21 +306,15 @@ class HostedSession:
             self._stream, self._source = None, None
             self.status = InstanceStatus.CRASHED
             return result
-        # ⚠️ ORDERING — the marker must sit ahead of the surviving frames in the ring,
-        # so it is emitted before the pump starts. If you are resolving a merge
-        # conflict here against #1045's transcript rehydration, the required order is:
-        #     rehydrated history  ->  gap marker  ->  replayed frames
-        # Restored history is OLDER than this hole, so it goes FIRST. Do not let a
-        # three-way merge decide it: both hunks anchor on the daemon_last_seq line
-        # below and will compose silently in the WRONG order. See the matching note
-        # in #1045's reattach.
-        #
-        # When both have landed, REWORD this marker for a session that rehydrated —
-        # do not suppress it. The transcript restores conversation *turns* only, so
-        # stderr and control-plane frames inside the evicted range are still gone;
-        # dropping the marker would claim a completeness we don't have. "Output lost"
-        # sitting directly above a restored conversation is merely misleading, which
-        # is a wording fix, not a reason to go silent.
+        # RING ORDER — history -> gap marker -> replayed frames, all before the pump
+        # starts. Restored history is the OLDEST content; the gap sits between it and
+        # the surviving tail. The marker is deliberately NOT suppressed for a session
+        # that rehydrated: the transcript restores conversation *turns* only, so
+        # stderr and control-plane frames inside the evicted range are still gone —
+        # dropping the marker would claim a completeness we don't have (the docs state
+        # this composition where the restore is described).
+        if history:
+            self._rehydrate(history, result.get("lastSeq"))
         gap_first = self._note_replay_gap(result.get("firstSeq"), from_seq)
         # SYNCHRONOUS with the report (review catch): the evicted range is unrecoverable
         # by definition, so the cursor jumps past the hole here rather than waiting for
@@ -526,6 +538,68 @@ class HostedSession:
         gap: GapRangeEvent = {"type": "gap", "from_seq": from_seq, "to_seq": first}
         self._emit(gap)
         return first
+    def _rehydrate(self, history: list[dict[str, Any]], last_seq: Any) -> None:
+        """Restore a reattached session's prior conversation into the ring (#1045).
+
+        The hosted transcript lives only in this process's ring, so a clauster
+        restart used to leave a reattached Direct session's view empty even though
+        the agent — and claude's own ``.jsonl`` — carried the whole conversation.
+        ``history`` is that transcript, read **read-only** by the caller (invariant 5:
+        claude owns its transcripts) and already redacted by ``usage``; each turn is
+        re-emitted here in the same ``{"type": role, "message": {...}}`` shape the live
+        stream uses, so the browser renders restored and live turns identically. It is
+        passed back through :func:`_redact_obj` regardless — invariant 4 is enforced at
+        this module's own boundary, not trusted from the reader.
+
+        **The seam.** The daemon's replay buffer also still holds frames for turns that
+        completed while we were down, so restoring the transcript *and* replaying them
+        would double-render exactly those turns. The transcript is the authoritative
+        record of the conversation up to now, so once it has been restored the replay's
+        **data** frames through the daemon's current ``lastSeq`` are suppressed
+        (:meth:`_suppressed_by_history`) — every conversation turn is rendered exactly
+        once, from one source. Only data frames are suppressed: parked control requests
+        (a permission prompt raised while we were down is still unanswered — dropping it
+        would break fail-closed), stderr, and the terminal exit all still come through,
+        as does every live frame past ``lastSeq``.
+
+        A daemon that answers a non-int/absent ``lastSeq`` suppresses nothing: the safe
+        direction on an unusable cursor is a possible duplicate, never lost output.
+        """
+        turns = history[-_REHYDRATE_MAX_TURNS:]
+        restored = (
+            f"restored {len(turns)} of {len(history)} turns from transcript"
+            if len(history) > len(turns)
+            else f"restored {len(turns)} turns from transcript"
+        )
+        self._emit({"type": "frame", "frame": {"type": "system", "subtype": restored}})
+        for turn in turns:
+            role = turn.get("role")
+            content = turn.get("content")
+            if not isinstance(role, str) or not isinstance(content, str) or not content:
+                continue  # not a renderable turn — skip rather than emit an empty bubble
+            frame = {"type": role, "message": {"role": role, "content": content}}
+            self._emit({"type": "frame", "frame": _redact_obj(frame)})
+        if isinstance(last_seq, int) and last_seq > 0:
+            self._rehydrated_through = last_seq
+        logger.info(
+            "hosted: restored %d transcript turns for process %s (replay data frames "
+            "through seq %d are covered by them)",
+            len(turns),
+            self._process_id,
+            self._rehydrated_through,
+        )
+
+    def _suppressed_by_history(self, seq: Any) -> bool:
+        """Whether a replayed data frame is already covered by rehydrated history (#1045).
+
+        True only for a session that actually rehydrated, and only for frames at or
+        below the daemon ``lastSeq`` captured at reattach — a live frame always renders.
+        """
+        return (
+            self._rehydrated_through > 0
+            and isinstance(seq, int)
+            and seq <= self._rehydrated_through
+        )
 
     async def _pump(self) -> None:
         """Drain the process stream, routing each event until exit or cancel."""
@@ -540,7 +614,7 @@ class HostedSession:
                 if isinstance(seq, int) and seq > self.daemon_last_seq:
                     self.daemon_last_seq = seq  # advance the reattach replay cursor
                 if etype == "line":
-                    await self._on_line(event.get("stream"), event.get("line", ""))
+                    await self._on_line(event.get("stream"), event.get("line", ""), seq)
                 elif etype == "exit":
                     self._on_exit(event.get("exit_code"))
                     return
@@ -562,8 +636,12 @@ class HostedSession:
                 self._stream.unsubscribe(source)
                 self._source = None
 
-    async def _on_line(self, stream: Any, line: str) -> None:
-        """Route one reassembled output line: stderr/non-JSON as text, else by frame type."""
+    async def _on_line(self, stream: Any, line: str, seq: Any = 0) -> None:
+        """Route one reassembled output line: stderr/non-JSON as text, else by frame type.
+
+        ``seq`` is the daemon frame seq the line arrived on; it gates only the
+        rehydration seam (:meth:`_suppressed_by_history`, #1045).
+        """
         if stream == "stderr":
             self._emit({"type": "stderr", "text": sanitize_line(line)})
             return
@@ -581,7 +659,11 @@ class HostedSession:
         if frame.get("type") == "control_request":
             await self._handle_control_request(frame)
             return
+        # Capture the uuid BEFORE any suppression: the replayed `system` init frame is
+        # where it comes from, and a rehydrated session still needs it for --resume.
         self._capture_session_uuid(frame)
+        if self._suppressed_by_history(seq):
+            return
         self._emit({"type": "frame", "frame": _redact_obj(frame)})
 
     async def _handle_control_request(self, frame: dict[str, Any]) -> None:
@@ -1074,7 +1156,12 @@ class HostedManager:
             await session.detach()
         await self._persist()
 
-    async def reattach_all(self, client: ClaustrumClient) -> list[RemoteControlInstance]:
+    async def reattach_all(
+        self,
+        client: ClaustrumClient,
+        *,
+        history_for: Callable[[RemoteControlInstance], list[dict[str, Any]]] | None = None,
+    ) -> list[RemoteControlInstance]:
         """Restore persisted hosted sessions on startup, reattaching the live ones.
 
         For each persisted record: an intentionally-stopped one is rebuilt as a
@@ -1083,6 +1170,12 @@ class HostedManager:
         finalized via the replayed exit; not-found → a CRASHED "session lost" row.
         Tolerates a daemon error per session (records it, keeps going — one bad
         reattach never blocks the rest or startup). Returns the restored instances.
+
+        ``history_for`` resolves a row to its prior conversation, read from claude's
+        on-disk transcript, so a reattached session's view isn't empty (#1045); the app
+        supplies it, unit tests leave it ``None`` for a purely in-memory manager. It is
+        blocking (it reads a file), so :meth:`_load_history` runs it off the loop and
+        treats any failure as "no history" — rehydration must never fail a reattach.
         """
         records = self._store.load() if self._store is not None else {}
         for process_id, fields in records.items():
@@ -1100,8 +1193,11 @@ class HostedManager:
                 on_permission_needed=self._on_permission_needed,
             )
             session.claude_session_uuid = fields.get("claude_session_uuid")
+            history = await self._load_history(history_for, instance)
             try:
-                result = await session.reattach(int(fields.get("daemon_last_seq") or 0))
+                result = await session.reattach(
+                    int(fields.get("daemon_last_seq") or 0), history=history
+                )
             except ClaustrumError as exc:
                 instance.status = InstanceStatus.ERROR
                 instance.error_detail = f"reattach failed: {exc}"
@@ -1123,6 +1219,31 @@ class HostedManager:
             self._sessions[process_id] = session
         await self._persist()
         return [self._synced(inst) for inst in self._instances.values()]
+
+    @staticmethod
+    async def _load_history(
+        history_for: Callable[[RemoteControlInstance], list[dict[str, Any]]] | None,
+        instance: RemoteControlInstance,
+    ) -> list[dict[str, Any]] | None:
+        """Read one reattaching session's prior transcript off the event loop (#1045).
+
+        Rehydration is a convenience layered on top of reattach, so it degrades rather
+        than propagates: a missing transcript, an unreadable one, or a resolver that
+        raises leaves the view exactly as it was before this feature (empty, plus
+        whatever the daemon replays) and is logged — never a failed reattach or a
+        blocked startup. ``history_for`` reads a file, so it runs in a thread.
+        """
+        if history_for is None:
+            return None
+        try:
+            return await asyncio.to_thread(history_for, instance)
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "hosted: could not restore the transcript for %s: %s",
+                instance.claustrum_process_id,
+                exc,
+            )
+            return None
 
     async def persist(self) -> None:
         """Public debounced persist — the dashboard poll calls this to refresh cursors."""
