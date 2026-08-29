@@ -132,6 +132,10 @@ EXCLUDED_FIELDS: dict[str, str] = {
     "state_dir": "structural: DB/state path; a wrong value orphans state",
     "root_path": "structural: ASGI sub-path; a wrong value breaks routing/login",
     "instance_name": "structural: cosmetic process label, but structural/identity; left out v1",
+    "log_level": "diagnostic: `debug` makes the host's server log record far more about what "
+    "Clauster is doing, so a browser toggle changes what is retained at rest outside the "
+    "dashboard — file/CLI/env-managed only (#993); its sibling log_format is Tier-A because it "
+    "changes the shape of a line, not how much is written",
     "db.backup_before_migrate": "structural: pre-migration snapshot safety net; file/CLI-managed "
     "only so it can't be silently disabled from the browser right before an upgrade",
     "ui.enabled": "structural: restart-required web-UI kill switch; a browser toggle that can "
