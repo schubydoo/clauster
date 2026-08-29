@@ -399,7 +399,10 @@ def _claustrum_embedded_version(binary: str) -> str | None:
     Two guards keep a fallback from turning into a confident wrong answer: the main module's
     last path segment must be ``claustrum`` (so a mis-configured ``claustrum.binary`` pointing
     at some other Go program reports unknown, not that program's version), and the version must
-    be semver-shaped (a source build records ``(devel)``, which is not an answer).
+    be a plain **release** ``vX.Y.Z`` — nothing else. A source build records ``(devel)``, and a
+    commit build records a *pseudo-version* (``v1.9.0-0.<timestamp>-<hash>`` denotes a commit
+    **before** the v1.9.0 release), which ``_version_ge``'s numeric comparison would read as
+    clearing a ``v1.9.0`` floor. Neither is an answer; both fall back to the honest advisory.
     """
     main = _go_main_module(binary)
     if main is None:
@@ -407,7 +410,8 @@ def _claustrum_embedded_version(binary: str) -> str | None:
     module, version = main
     if module.rsplit("/", 1)[-1] != "claustrum":
         return None
-    if not version.startswith("v") or not version[1:2].isdigit():
+    parts = version[1:].split(".") if version.startswith("v") else []
+    if len(parts) != 3 or not all(p.isdigit() for p in parts):
         return None
     return version
 

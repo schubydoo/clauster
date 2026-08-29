@@ -1801,6 +1801,26 @@ def test_claustrum_embedded_version_none_for_devel_source_build(tmp_path):
     assert ops._claustrum_embedded_version(devel) is None
 
 
+@pytest.mark.parametrize(
+    "version",
+    [
+        # A pseudo-version denotes a COMMIT, not a release — v1.9.0-0.<ts>-<hash> is a
+        # commit BEFORE the v1.9.0 release, and _version_ge's numeric comparison would
+        # read it as clearing a v1.9.0 floor. Not an answer.
+        "v1.9.0-0.20260828023803-f0b3a9c00742",
+        "v1.9.1-0.20260828023803-f0b3a9c00742",
+        "v1.9.0-rc.1",  # any prerelease: same class
+        "v1.9",  # not a full release triple
+        "v1.9.0.4",  # not a semver release shape either
+    ],
+)
+def test_claustrum_embedded_version_none_for_non_release_versions(tmp_path, version):
+    from clauster import ops
+
+    binary = _go_binary(tmp_path, (f"mod\tgithub.com/schubydoo/claustrum\t{version}\t",))
+    assert ops._claustrum_embedded_version(binary) is None
+
+
 def test_claustrum_embedded_version_none_when_module_table_has_no_mod_line(tmp_path):
     from clauster import ops
 
