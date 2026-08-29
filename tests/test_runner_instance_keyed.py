@@ -2124,3 +2124,187 @@ async def test_resolve_bridge_id_resolves_unambiguous_project_name(runner_config
 
     assert runner.resolve_bridge_id("alpha") == "iid-only"
     assert runner.bridge_id_candidates("alpha") == []
+
+
+# ---------------------------------------------------------------------------
+# Bug 1106 — an adopted bridge with no connect evidence is pinned at STARTING
+# ---------------------------------------------------------------------------
+
+
+def _adopted_starting(runner: SessionRunner, *, pid: int = 7001, project: str = "alpha"):
+    """Register the shape #1106 describes: adopted, alive, STARTING, no connect facts."""
+    inst = RemoteControlInstance(
+        instance_id="iid-adopted",
+        project=project,
+        label=project,
+        status=InstanceStatus.STARTING,
+        bridge_pid=pid,
+        bridge_proc_start=100.0,
+    )
+    runner._instances[inst.instance_id] = inst
+    return inst
+
+
+async def test_adopted_starting_bridge_promotes_once_connect_evidence_lands(
+    runner_config, monkeypatch
+):
+    # THE #1106 regression test, as the issue's four-tick probe: an instance adopted from
+    # another process's row before its pointer/ready sidecar existed. `_reconcile_status`
+    # only demotes, the re-sync is one-shot, and every other promotion path is a self-spawn
+    # path — so before the fix this stayed `status=starting url=None` on every later tick.
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    inst = _adopted_starting(runner)
+
+    evidence: dict = {}
+    monkeypatch.setattr(SessionRunner, "_connect_facts_for", lambda *a, **k: dict(evidence))
+
+    await runner.poll_once()  # tick 1: no evidence yet
+    assert inst.status is InstanceStatus.STARTING
+    assert inst.url is None
+
+    evidence.update(  # tick 2: the peer's bridge finished registering
+        {
+            "url": "https://claude.ai/code?environment=env_LATE",
+            "environment_id": "env_LATE",
+            "starter_session_id": "session_LATE",
+        }
+    )
+    await runner.poll_once()
+
+    assert inst.status is InstanceStatus.RUNNING, "pinned at STARTING with evidence available"
+    assert inst.url == "https://claude.ai/code?environment=env_LATE"
+    assert inst.environment_id == "env_LATE"
+    assert inst.starter_session_id == "session_LATE"
+
+
+async def test_alive_but_unregistered_bridge_is_not_promoted(runner_config, monkeypatch):
+    # Fail closed, visibly: liveness is not usability. Without connect evidence the honest
+    # state is STARTING — promoting on a live process alone is exactly what `_reconcile_status`
+    # refuses to do, and it reported uncontrollable bridges as RUNNING.
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    monkeypatch.setattr(SessionRunner, "_connect_facts_for", lambda *a, **k: {})
+    inst = _adopted_starting(runner)
+
+    await runner.poll_once()
+
+    assert inst.status is InstanceStatus.STARTING
+    assert inst.url is None
+
+
+async def test_dead_starting_bridge_is_reconciled_not_promoted(runner_config, monkeypatch):
+    # A STARTING row whose process is gone must take the demotion, never the promotion —
+    # even if a stale pointer/sidecar would still answer with connect facts.
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    _stub_connect(monkeypatch)
+    inst = _adopted_starting(runner)
+
+    await runner.poll_once()
+
+    assert inst.status is InstanceStatus.CRASHED
+    assert inst.url is None
+
+
+async def test_promotion_leaves_a_bridge_with_its_own_startup_watch_alone(
+    runner_config, monkeypatch
+):
+    # A self-spawned bridge already has an owner for its readiness: `_watch_startup`, which
+    # also runs `_post_spawn_enrich` and can decide ERROR on the grace deadline. The poll must
+    # not race it into RUNNING behind its back.
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    _stub_connect(monkeypatch)
+    inst = _adopted_starting(runner)
+
+    async def _never() -> None:
+        await asyncio.Event().wait()
+
+    watch = asyncio.create_task(_never())
+    runner._startup_watches[inst.instance_id] = watch
+    try:
+        await runner.poll_once()
+    finally:
+        watch.cancel()
+
+    assert inst.status is InstanceStatus.STARTING, "stole a promotion from the startup-watch"
+
+
+async def test_promotion_skips_a_row_whose_generation_changed_mid_probe(
+    runner_config, monkeypatch
+):
+    # The evidence read happens off-loop. If a resume() republishes the instance onto a NEW
+    # process generation during that hop, the facts in hand describe the OLD one — publishing
+    # them would hand the operator a link into an environment that is already gone.
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    inst = _adopted_starting(runner)
+
+    def _resume_lands(self, proj, mode, pid, start):
+        inst.bridge_pid, inst.bridge_proc_start = 9999, 500.0
+        return {"url": "https://claude.ai/code?environment=env_OLD"}
+
+    monkeypatch.setattr(SessionRunner, "_connect_facts_for", _resume_lands)
+
+    await runner.poll_once()
+
+    assert inst.status is InstanceStatus.STARTING
+    assert inst.url is None, "published the previous generation's connect link"
+
+
+async def test_promotion_skips_an_undiscovered_project(runner_config, monkeypatch, caplog):
+    # No Project means nothing to read the pointer/sidecar from, so the row is left alone
+    # rather than promoted half-populated — and the skip must not raise out of the tick.
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    _stub_connect(monkeypatch)
+    inst = _adopted_starting(runner, project="deleted-project")
+
+    with caplog.at_level(logging.ERROR, logger="clauster.runner"):
+        await runner.poll_once()
+
+    assert inst.status is InstanceStatus.STARTING
+    assert not caplog.records, f"the guard must SKIP this row, not raise: {caplog.records}"
+
+
+async def test_observation_only_poll_promotes_but_stays_silent(runner_config, monkeypatch):
+    # `side_effects=False` is write-free, not read-only (see poll_once): a headless reader must
+    # SEE the real state, so the promotion still happens — it just doesn't announce it, the
+    # same rule the crash arm follows so one transition can't notify twice.
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    _stub_connect(monkeypatch)
+    inst = _adopted_starting(runner)
+    emitted: list[str] = []
+    monkeypatch.setattr(SessionRunner, "_emit_lifecycle", lambda self, e, i: emitted.append(e))
+
+    await runner.poll_once(side_effects=False)
+
+    assert inst.status is InstanceStatus.RUNNING
+    assert emitted == [], "an observation-only poll must not announce the transition"
+
+
+async def test_promotion_announces_the_transition_once(runner_config, monkeypatch):
+    # The `ready` event is what the self-spawn promotion paths emit, and it must fire on the
+    # transition only — a second tick over an already-RUNNING bridge announces nothing.
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    _stub_connect(monkeypatch)
+    inst = _adopted_starting(runner)
+    emitted: list[str] = []
+    monkeypatch.setattr(SessionRunner, "_emit_lifecycle", lambda self, e, i: emitted.append(e))
+
+    await runner.poll_once()
+    await runner.poll_once()
+
+    assert inst.status is InstanceStatus.RUNNING
+    assert emitted == ["ready"]
