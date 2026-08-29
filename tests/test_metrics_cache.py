@@ -338,4 +338,42 @@ async def test_snapshots_drop_sample_for_vanished_instance(runner_config):
     runner = _runner(runner_config)
     runner._metrics_cache = {"gone-iid": {"procs": 1, "cpu_percent": 1.0, "rss_bytes": 10}}
     assert runner.metrics_snapshots() == {}
+    assert runner.metrics_snapshots_by_instance() == {}
     assert runner.metrics_snapshot("alpha") is None
+
+
+# ----- per-instance reader, un-folded (#1090) -----------------------------------
+
+
+async def test_snapshots_by_instance_keep_bridges_of_one_project_apart(runner_config, monkeypatch):
+    """Each bridge of one project keeps its OWN figure, un-folded (#1090).
+
+    The project fold credits a single row with every co-located bridge's CPU/RAM; the
+    per-instance reader is what a dashboard row must use to report only itself.
+    """
+    runner = _runner(runner_config)
+    server = _running(runner, project="alpha", pid=201)
+    interactive = _running(runner, project="alpha", pid=202)
+
+    disk = {"disk_read_bps": None, "disk_write_bps": None}
+    samples = {
+        201: {"procs": 1, "cpu_percent": 1.0, "rss_bytes": 100, **disk},
+        202: {"procs": 3, "cpu_percent": 8.0, "rss_bytes": 900, **disk},
+    }
+    monkeypatch.setattr("clauster.runner.metrics.sample_tree", lambda pid, **k: dict(samples[pid]))
+    await runner._refresh_metrics_cache()
+
+    by_iid = runner.metrics_snapshots_by_instance()
+    assert by_iid[server.instance_id] == samples[201]
+    assert by_iid[interactive.instance_id] == samples[202]
+    # ... while the project reader still sums them for the callers that want a total.
+    assert runner.metrics_snapshot("alpha")["rss_bytes"] == 1000
+
+
+async def test_snapshots_by_instance_returns_copies(runner_config):
+    """Mutating a returned sample must not corrupt the shared cache (#1090)."""
+    runner = _runner(runner_config)
+    inst = _running(runner, project="alpha")
+    runner._metrics_cache[inst.instance_id] = {"procs": 1, "cpu_percent": 1.0, "rss_bytes": 10}
+    runner.metrics_snapshots_by_instance()[inst.instance_id]["rss_bytes"] = 999
+    assert runner._metrics_cache[inst.instance_id]["rss_bytes"] == 10

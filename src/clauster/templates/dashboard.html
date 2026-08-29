@@ -732,11 +732,13 @@
                  x-show="activeFilter === 'all' || activeFilter === 'desktop'">
               <div class="d-flex align-items-center flex-wrap gap-1">
                 {{ desktop_row_head("Running") }}
-                {# Project-keyed metrics on the STANDARD row only (#779): a pty row would
-                   otherwise wear the co-located standard bridge's CPU/MEM figures. #}
+                {# Instance-keyed metrics (#1090): each row shows ITS OWN bridge's CPU/MEM.
+                   Keyed by project this was the co-located bridges' SUM, so a Server-Mode
+                   row wore the Interactive Sessions' usage — which is also why the pty row
+                   was excluded outright (#779). Both go away with the per-instance key. #}
                 <span class="text-secondary small ms-1" x-cloak
-                      x-show="i.resume_mode !== 'pty' && metricsLabel(i.project)"
-                      :title="metricsTitle(i.project)" x-text="metricsLabel(i.project)"></span>
+                      x-show="metricsLabel(i.rk)"
+                      :title="metricsTitle(i.rk)" x-text="metricsLabel(i.rk)"></span>
                 <span class="ms-auto d-flex gap-1">
                   <a class="btn btn-sm btn-primary" target="_blank" rel="noopener"
                      x-show="sessionUrlOf(i.rk)" x-cloak :href="sessionUrlOf(i.rk)"

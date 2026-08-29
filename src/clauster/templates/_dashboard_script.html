@@ -380,7 +380,7 @@
       sortMeta: {},       // project name -> {last_used: iso|null, cost_usd: float|null}; Zone 1 sort (lazy)
       preflight: {},      // project name -> per-project preflight result ({ok, checks}); lazy-loaded
       preflightOpen: {},  // project name -> true while its preflight-warning detail is expanded
-      metrics: {},        // project name -> live CPU/mem/disk sample (null when not running)
+      metrics: {},        // row key (instance_id) -> live CPU/mem/disk sample (null when not running)
       trustState: {},     // project name -> 'trusted' | 'untrusted' (reactive; no reload on trust)
       trusting: {},       // project name -> bool (trust request in flight)
       trustingAll: false, // bulk "Trust all" request in flight (#1224)
@@ -3923,9 +3923,9 @@
         // Own cadence (metrics.poll_seconds), decoupled from the status poll. One batch
         // read of /api/metrics (the O(1) server-side snapshot) refreshes every running
         // bridge's badge in a single round trip instead of one fetch per bridge. The
-        // response is a map keyed by project name carrying only the running ones; merge
-        // each through the Alpine proxy so the badges repaint, then null out any sample
-        // whose project is no longer running.
+        // response is a map keyed by INSTANCE ID — the row key `i.rk` (#1090) — carrying
+        // only the running ones; merge each through the Alpine proxy so the badges
+        // repaint, then null out any sample whose bridge is no longer running.
         if (!METRICS_ENABLED) return;
         let batch;
         try {
@@ -3934,25 +3934,27 @@
           batch = await res.json();
         } catch (e) { return; /* keep the last samples; don't break the poll loop */ }
         if (!batch || typeof batch !== "object" || Array.isArray(batch)) return;
-        for (const [n, m] of Object.entries(batch)) {
-          if (m && m.running) this.metrics[n] = m;
+        for (const [rk, m] of Object.entries(batch)) {
+          if (m && m.running) this.metrics[rk] = m;
         }
-        for (const n of Object.keys(this.metrics)) {
-          if (!batch[n]) this.metrics[n] = null;  // batch only carries running bridges
+        for (const rk of Object.keys(this.metrics)) {
+          if (!batch[rk]) this.metrics[rk] = null;  // batch only carries running bridges
         }
       },
-      metricsLabel(name) {
+      // Takes a ROW KEY (`i.rk`), never a project name (#1090): the sample belongs to one
+      // bridge, and several bridges of one project each carry their own figure.
+      metricsLabel(rk) {
         if (!METRICS_ENABLED) return null;
-        if (this.statusOf(name) !== "running") return null;  // race: a stopped card must not flash stale metrics
-        const m = this.metrics[name];
+        if (this.statusOf(rk) !== "running") return null;  // race: a stopped card must not flash stale metrics
+        const m = this.metrics[rk];
         if (!m || !m.running) return null;  // x-show hides the line when not running
         const rate = (bps) => bps >= 1048576 ? (bps / 1048576).toFixed(1) + " MB/s" : Math.round(bps / 1024) + " KB/s";
         let s = Math.round(m.cpu_percent) + "% CPU · " + Math.round(m.rss_bytes / 1048576) + " MB";
         if (METRICS_SHOW_DISK && m.disk_read_bps != null) s += " · ⬇" + rate(m.disk_read_bps) + " ⬆" + rate(m.disk_write_bps);
         return s;
       },
-      metricsTitle(name) {
-        const m = this.metrics[name];
+      metricsTitle(rk) {
+        const m = this.metrics[rk];
         if (!m || !m.running) return "";
         const cpuNote = m.cpu_normalized
           ? "CPU% is the share of total host capacity (all cores)"

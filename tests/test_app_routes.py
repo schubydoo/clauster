@@ -1730,11 +1730,11 @@ def test_metrics_no_running_bridge_returns_false(write_config, tmp_path):
     assert r.json() == {"running": False}
 
 
-def _cache_sample(client, project: str, sample: dict) -> None:
-    """Register an instance for ``project`` and cache ``sample`` under its id (#778).
+def _cache_sample(client, project: str, sample: dict) -> str:
+    """Register an instance for ``project``, cache ``sample`` under its id, return that id.
 
-    The cache is keyed by instance_id and the public readers fold per project, so a
-    seeded sample must belong to a registered instance to be visible.
+    The cache is keyed by instance_id (#778), so a seeded sample must belong to a
+    registered instance to be visible through either public reader.
     """
     from clauster.models import RemoteControlInstance
 
@@ -1742,6 +1742,7 @@ def _cache_sample(client, project: str, sample: dict) -> None:
     runner = client.app.state.runner
     runner._instances[inst.instance_id] = inst
     runner._metrics_cache[inst.instance_id] = sample
+    return inst.instance_id
 
 
 def test_metrics_running_bridge_returns_sample(write_config, tmp_path):
@@ -1759,13 +1760,38 @@ def test_metrics_running_bridge_returns_sample(write_config, tmp_path):
 
 
 def test_metrics_batch_returns_all_cached(write_config, tmp_path):
-    # The batch endpoint (#354) returns every cached bridge in one O(1) read.
+    # The batch endpoint (#354) returns every cached bridge in one O(1) read, keyed by
+    # instance_id (#1090) so a row can look up its OWN bridge.
     client = _client(write_config, tmp_path)
-    _cache_sample(client, "alpha", {"cpu_percent": 1.0, "rss_bytes": 10})
-    _cache_sample(client, "beta", {"cpu_percent": 2.0, "rss_bytes": 20})
+    alpha = _cache_sample(client, "alpha", {"cpu_percent": 1.0, "rss_bytes": 10})
+    beta = _cache_sample(client, "beta", {"cpu_percent": 2.0, "rss_bytes": 20})
     body = client.get("/api/metrics").json()
-    assert body["alpha"] == {"running": True, "cpu_percent": 1.0, "rss_bytes": 10, "bridges": 1}
-    assert body["beta"]["cpu_percent"] == 2.0
+    assert body[alpha] == {"running": True, "cpu_percent": 1.0, "rss_bytes": 10}
+    assert body[beta]["cpu_percent"] == 2.0
+    assert "alpha" not in body  # project names are no longer keys
+
+
+def test_metrics_batch_keeps_bridges_of_one_project_apart(write_config, tmp_path):
+    # #1090: two bridges of ONE project each report their own figure. Folded per project
+    # the Server-Mode row wore the Interactive Session's CPU/RAM as its own.
+    client = _client(write_config, tmp_path)
+    disk = {"disk_read_bps": None, "disk_write_bps": None}
+    one = {"cpu_percent": 1.0, "rss_bytes": 10, "procs": 1, **disk}
+    two = {"cpu_percent": 8.0, "rss_bytes": 90, "procs": 3, **disk}
+    server = _cache_sample(client, "alpha", dict(one))
+    interactive = _cache_sample(client, "alpha", dict(two))
+    body = client.get("/api/metrics").json()
+    assert body[server] == {"running": True, **one}
+    assert body[interactive] == {"running": True, **two}
+    # The project total stays available on the per-project endpoint.
+    assert client.get("/api/projects/alpha/metrics").json() == {
+        "running": True,
+        "cpu_percent": 9.0,
+        "rss_bytes": 100,
+        "procs": 4,
+        "bridges": 2,
+        **disk,
+    }
 
 
 def test_metrics_batch_empty_when_disabled(write_config, tmp_path):
