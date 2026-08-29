@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-# The 17 methods server.capabilities self-describes, in returned order.
+# The 18 methods server.capabilities self-describes, in returned order.
 # server.version was removed in claustrum v1.10 to match the reference daemon.
 _METHODS = [
     "server.ping",
@@ -43,6 +43,7 @@ _METHODS = [
     "process.spawn",
     "process.stdin",
     "process.kill",
+    "process.killAndWait",
     "process.reattach",
 ]
 

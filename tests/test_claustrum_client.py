@@ -56,8 +56,9 @@ async def test_server_methods_roundtrip(fake_claustrum):
         assert await client.ping() == {"pong": True}
         caps = await client.capabilities()
         assert caps["version"] == fake.version
-        assert len(caps["methods"]) == 17
+        assert len(caps["methods"]) == 18
         assert "process.spawn" in caps["methods"]
+        assert "process.killAndWait" in caps["methods"]
         # server.version was removed in claustrum v1.10 — no longer advertised or served.
         assert "server.version" not in caps["methods"]
         with pytest.raises(RpcError) as excinfo:
@@ -72,7 +73,7 @@ async def test_capabilities_against_legacy_daemon(fake_claustrum):
         caps = await client.capabilities()
         assert caps["version"] == fake.version
         # The legacy daemon advertises and still serves the extra method...
-        assert len(caps["methods"]) == 18
+        assert len(caps["methods"]) == 19
         assert "server.version" in caps["methods"]
         legacy = await client.call("server.version", None)
         assert legacy["version"] == fake.version
