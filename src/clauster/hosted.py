@@ -177,6 +177,10 @@ class HostedSession:
         # Highest *daemon* frame seq drained — the reattach replay cursor across
         # clauster restarts (distinct from _event_seq, the clauster-side ring seq).
         self.daemon_last_seq = 0
+        # Inclusive (first, last) daemon seq range the daemon had already evicted when
+        # we reattached — None when the replay was complete. Latched by reattach (#1175)
+        # so callers can report the hole; the frames themselves are unrecoverable.
+        self.replay_gap: tuple[int, int] | None = None
         self._ring: deque[Mapping[str, Any]] = deque(maxlen=ring_size)
         self._event_seq = 0
         # Subscriber list: the DEPTH-bound (per-subscriber queue) is bounded above by
@@ -253,6 +257,10 @@ class HostedSession:
         ``{found, running, firstSeq, lastSeq}`` result. ``from_seq`` is the persisted
         :attr:`daemon_last_seq`; a stale/zero value only costs replay overlap (the
         client de-dupes by seq), never a double-emit.
+
+        The opposite direction — the daemon's capped replay buffer having *evicted*
+        frames past ``from_seq`` — is reported rather than absorbed: see
+        :meth:`_note_replay_gap` (#1175).
         """
         if self._pump_task is not None:
             raise HostedSessionError("hosted session already started")
@@ -272,6 +280,9 @@ class HostedSession:
             self._stream, self._source = None, None
             self.status = InstanceStatus.CRASHED
             return result
+        # Report an evicted replay range BEFORE the cursor moves and before the pump
+        # starts, so the marker sits ahead of the surviving frames in the ring (#1175).
+        self._note_replay_gap(result.get("firstSeq"), from_seq)
         self.daemon_last_seq = max(self.daemon_last_seq, from_seq)
         # If not running, the exit frame (seq > from_seq) replays through the pump,
         # which latches the terminal status; "stopped" is the neutral default until.
@@ -434,6 +445,40 @@ class HostedSession:
         self._subscribers = [s for s in self._subscribers if s.queue is not queue]
 
     # -- internals ---------------------------------------------------------
+
+    def _note_replay_gap(self, first_seq: Any, from_seq: int) -> None:
+        """Report a daemon replay range that was evicted before we could read it (#1175).
+
+        The daemon caps its per-process replay buffer (the reference ``claude-ssh``
+        at 16 MiB), so a chatty agent can outrun it while clauster is down. Its
+        reattach result then carries a ``firstSeq`` *above* our cursor, meaning
+        ``from_seq + 1 .. firstSeq - 1`` no longer exist anywhere — not on the
+        daemon, and never on us.
+
+        Those frames are unrecoverable, and the cursor still has to move over them
+        for the surviving replay to be delivered exactly once (refusing to advance
+        would re-replay the whole buffer on every subsequent restart, duplicating
+        the transcript). So the invariant this keeps is the fail-closed-*visibly*
+        one: the hole is never silent. It is latched on :attr:`replay_gap`, logged
+        with its exact range, and emitted into the ring as a ``gap`` marker — which
+        the caller has ordered ahead of the replayed frames, so a watcher sees the
+        break in position rather than a seamless transcript.
+
+        ``first_seq`` is untrusted daemon-supplied JSON, so it is ``isinstance``-
+        checked here; a non-int (or an in-range value) means no gap to report.
+        """
+        if not isinstance(first_seq, int) or first_seq <= from_seq + 1:
+            return
+        self.replay_gap = (from_seq + 1, first_seq - 1)
+        logger.warning(
+            "hosted: daemon replay buffer evicted frames %d-%d for process %s; "
+            "that output is lost and cannot be replayed",
+            self.replay_gap[0],
+            self.replay_gap[1],
+            self._process_id,
+        )
+        gap: GapRangeEvent = {"type": "gap", "from_seq": from_seq, "to_seq": first_seq}
+        self._emit(gap)
 
     async def _pump(self) -> None:
         """Drain the process stream, routing each event until exit or cancel."""

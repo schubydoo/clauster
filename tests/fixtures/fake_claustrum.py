@@ -167,6 +167,17 @@ class FakeClaustrum:
         await self._push(proc, frame)
         return proc.seq
 
+    def evict_through(self, process_id: str, seq: int) -> None:
+        """Drop buffered frames with ``seq <= seq``, modelling the capped replay buffer.
+
+        The real daemon caps its per-process buffer by bytes (16 MiB in the reference
+        claude-ssh), evicting the oldest frames; a later ``process.reattach`` then
+        answers ``firstSeq`` = the oldest survivor. This is the cheap unit-test route
+        into that state — no need to push 16 MiB through the socket to reach it.
+        """
+        proc = self._processes.setdefault(process_id, _Process())
+        proc.frames = [f for f in proc.frames if f["seq"] > seq]
+
     async def emit_exit(self, process_id: str, exit_code: int) -> int:
         """Emit the terminal ``exit`` frame for a process."""
         proc = self._processes.setdefault(process_id, _Process())
