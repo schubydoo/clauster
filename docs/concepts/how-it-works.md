@@ -133,7 +133,8 @@ A Direct Session's conversation is streamed live and held in Clauster's memory,
 so a restart used to leave the reattached session's View pane empty even though
 the agent itself was still there. On reattach Clauster now rebuilds the pane
 from `claude`'s own transcript on disk, marked with a `· restored N turns from
-transcript ·` line, and the live stream continues underneath it. The transcript
+transcript ·` line — `· restored N of M turns from transcript ·` when the cap
+below trimmed it — and the live stream continues underneath it. The transcript
 is only ever **read** — Clauster never writes to it — and the restored turns go
 through the same [redaction](../security.md#log-redaction) as the live stream.
 
@@ -145,6 +146,14 @@ find, so its pane stays empty. And because `claude` writes its stream output and
 flushes its transcript independently, a single turn landing at the exact instant
 of the reattach can fall between the two and not be shown; the conversation
 itself is unaffected, since the agent still has it.
+
+<!-- when the firstSeq gap section lands in troubleshooting.md, cross-link it here (rebase note) -->
+
+An `· output lost (N frames) ·` marker near the restored turns is a separate
+thing: it means frames were evicted before they could be replayed to your
+browser. The conversation is still restored from the transcript — what a gap
+over that range covers is the non-conversation output, stderr lines and control
+frames, which the transcript does not hold.
 
 !!! warning "systemd can undo all of this"
     The survival table assumes nothing reaps the child processes. Under a
