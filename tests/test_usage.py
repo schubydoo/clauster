@@ -1020,6 +1020,101 @@ def test_transcript_summary_cache_is_lru_bounded(tmp_path):
     assert str(p2) in cache._entries
 
 
+# ----- subagent (sidechain) classification (#1092) -----------------------
+# The picker must not list a dispatched subagent's transcript as a forkable conversation.
+# Every ambiguous shape has to fall back to "real conversation" — never silently hidden.
+
+
+def _sidechain(flag, content="hi"):
+    return {"isSidechain": flag, "message": {"role": "user", "content": content}}
+
+
+def test_is_subagent_transcript_true_when_every_flagged_record_is_sidechain(tmp_path):
+    from clauster.usage import _is_subagent_transcript
+
+    p = _transcript(tmp_path, [_sidechain(True), _sidechain(True, "more")])
+    assert _is_subagent_transcript(p) is True
+
+
+def test_is_subagent_transcript_false_for_a_normal_conversation(tmp_path):
+    from clauster.usage import _is_subagent_transcript
+
+    p = _transcript(tmp_path, [_sidechain(False), _sidechain(False, "more")])
+    assert _is_subagent_transcript(p) is False
+
+
+def test_is_subagent_transcript_false_when_a_main_thread_record_is_present(tmp_path):
+    # A MIXED transcript is a real conversation that merely embeds a sidechain turn.
+    # Hiding it would lose a genuine conversation, so one non-sidechain record decides.
+    from clauster.usage import _is_subagent_transcript
+
+    p = _transcript(tmp_path, [_sidechain(False), _sidechain(True, "subagent turn")])
+    assert _is_subagent_transcript(p) is False
+
+
+def test_is_subagent_transcript_false_when_a_sidechain_record_leads_a_mixed_file(tmp_path):
+    # Order must not matter: the non-sidechain record still wins even when it comes second.
+    from clauster.usage import _is_subagent_transcript
+
+    p = _transcript(tmp_path, [_sidechain(True), _sidechain(False, "main turn")])
+    assert _is_subagent_transcript(p) is False
+
+
+def test_is_subagent_transcript_false_when_the_key_is_absent(tmp_path):
+    # An older Claude Code build never wrote isSidechain — unflagged is a real conversation.
+    from clauster.usage import _is_subagent_transcript
+
+    p = _transcript(tmp_path, [{"message": {"role": "user", "content": "hi"}}])
+    assert _is_subagent_transcript(p) is False
+
+
+def test_is_subagent_transcript_ignores_malformed_and_non_dict_records(tmp_path):
+    from clauster.usage import _is_subagent_transcript
+
+    p = tmp_path / "t.jsonl"
+    p.write_text(
+        "not json at all\n"
+        + json.dumps(["a bare list, not a record"])
+        + "\n"
+        + json.dumps(_sidechain(True))
+        + "\n"
+    )
+    # The junk lines are skipped, leaving a uniformly-sidechain transcript.
+    assert _is_subagent_transcript(p) is True
+
+
+def test_is_subagent_transcript_unreadable_file_is_treated_as_a_conversation(tmp_path):
+    from clauster.usage import _is_subagent_transcript
+
+    # A missing file raises OSError on open; unproven means "leave it listed".
+    assert _is_subagent_transcript(tmp_path / "nope.jsonl") is False
+
+
+def test_is_subagent_transcript_stops_at_the_record_bound(tmp_path):
+    from clauster.usage import _is_subagent_transcript
+
+    # The deciding non-sidechain record sits past the bound, so it is never read and the
+    # leading sidechain records decide. Documents the bound rather than endorsing it.
+    p = _transcript(tmp_path, [_sidechain(True), _sidechain(True), _sidechain(False)])
+    assert _is_subagent_transcript(p, max_records=2) is True
+    assert _is_subagent_transcript(p, max_records=3) is False
+
+
+def test_transcript_summary_carries_is_subagent(tmp_path, _clean_transcript_cache):
+    p = _transcript(tmp_path, [_sidechain(True), _sidechain(True, "more")])
+    assert read_transcript_summary(p).is_subagent is True
+
+
+def test_transcript_summary_is_subagent_false_for_the_shared_fixture(
+    tmp_path, _clean_transcript_cache
+):
+    # The repo fixture is a real conversation (isSidechain: false), so the default listing
+    # behavior is unchanged for it.
+    p = tmp_path / "fixture.jsonl"
+    p.write_bytes(FIXTURE.read_bytes())
+    assert read_transcript_summary(p).is_subagent is False
+
+
 def test_read_transcript_turns_render_content_unexpected_shape(tmp_path):
     # A content that is neither str nor list (an int, or a bare dict) is summarized
     # as a generic [content] placeholder — never dumped raw and never raised.

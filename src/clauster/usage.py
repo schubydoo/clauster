@@ -480,20 +480,71 @@ def read_transcript_turns(path: Path) -> list[dict]:
     return turns
 
 
+def _is_subagent_transcript(path: Path, max_records: int = 200) -> bool:
+    """Whether ``path`` is a SUBAGENT (sidechain) transcript rather than a real conversation.
+
+    Claude Code stamps every record it writes for a dispatched subagent with
+    ``"isSidechain": true``; records belonging to the top-level conversation carry
+    ``false``. A subagent run therefore produces a transcript whose records are
+    *uniformly* sidechain, which is what distinguishes it from a conversation a user
+    would want to fork — the picker listed those alongside real ones and buried them
+    (#1092).
+
+    Read-only inspection of a file clauster does not own (invariant 5): the transcript is
+    only parsed, never rewritten, and an unparseable line is skipped rather than raising.
+
+    **Deliberately biased toward "real conversation".** ``True`` is returned only when,
+    within the first ``max_records`` records, at least one record is flagged sidechain and
+    **none** is flagged non-sidechain. Anything else — an empty or unreadable file, a
+    transcript that never carries the key (older Claude Code builds), or a mixed file
+    where a main-thread record appears — is reported as a real conversation. The failure
+    mode is therefore always "a subagent transcript is still listed", never "a genuine
+    conversation silently disappears".
+
+    Bounded like :func:`_recorded_cwd`: the deciding non-sidechain record sits in the
+    opening handful of lines in practice, so ``max_records`` is generous headroom rather
+    than a tuned limit, and it keeps a huge transcript from being walked end to end.
+    """
+    saw_sidechain = False
+    try:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            for index, line in enumerate(handle):
+                if index >= max_records:
+                    break
+                try:
+                    record = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                flag = record.get("isSidechain")
+                if flag is False:
+                    # A main-thread record proves this is not a pure subagent transcript.
+                    return False
+                if flag is True:
+                    saw_sidechain = True
+    except OSError:
+        # Unreadable is unproven, and unproven means "show it" — see the docstring.
+        return False
+    return saw_sidechain
+
+
 @dataclass(frozen=True)
 class TranscriptSummary:
     """The transcript-listing fields both the Transcripts selector and the resume picker need.
 
     ``turn_count`` drives the picker's ``turn_count > 0`` filter; ``first_prompt`` (the first
     user turn, already truncated + redacted) labels the conversation; ``first_ts``/``last_ts``
-    bound its "when · duration" display. Derived from a full parse but far smaller than the
-    turn list, so it caches per file (see :func:`read_transcript_summary`).
+    bound its "when · duration" display; ``is_subagent`` marks a sidechain transcript so the
+    picker can leave it out (#1092). Derived from a full parse but far smaller than the turn
+    list, so it caches per file (see :func:`read_transcript_summary`).
     """
 
     turn_count: int
     first_prompt: str
     first_ts: str
     last_ts: str
+    is_subagent: bool = False
 
 
 def _derive_transcript_summary(path: Path) -> TranscriptSummary:
@@ -510,6 +561,9 @@ def _derive_transcript_summary(path: Path) -> TranscriptSummary:
         first_prompt=first_prompt,
         first_ts=(turns[0].get("timestamp") or "") if turns else "",
         last_ts=(turns[-1].get("timestamp") or "") if turns else "",
+        # Classified here so it rides the same per-file cache as the rest of the summary;
+        # a bounded second pass, not a re-parse of the whole transcript.
+        is_subagent=_is_subagent_transcript(path),
     )
 
 

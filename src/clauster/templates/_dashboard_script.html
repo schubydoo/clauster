@@ -3804,9 +3804,15 @@
           const body = await res.json();
           // Only ended conversations with content are forkable: a LIVE session is
           // already running (resume it from its own row), and an empty transcript
-          // has nothing to restore.
+          // has nothing to restore. A SUBAGENT (sidechain) transcript is dropped
+          // too (#1092) — it is one internal turn of a conversation, not a
+          // conversation, so forking it resumes a fragment with none of the
+          // parent's context. `=== true` keeps the test conservative: only a
+          // transcript the server positively classified is hidden, so an older
+          // server (or an unreadable file) leaves the entry listed. Nothing is
+          // lost either way — the read-only Transcripts viewer still shows all.
           this.resumableSessions[name] = (body.sessions || []).filter(
-            (s) => !s.live && s.turn_count > 0
+            (s) => !s.live && s.turn_count > 0 && s.is_subagent !== true
           );
         } catch (e) { delete this.resumableSessions[name]; /* picker offers just "New conversation" */ }
       },
