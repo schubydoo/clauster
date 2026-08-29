@@ -358,6 +358,18 @@ def test_hosted_history_resolver_reads_the_on_disk_transcript(
     assert history_for(_row("sess-1", project="")) == []  # no project recorded
     assert history_for(_row("no-such-session")) == []  # no transcript on disk
 
+    # An oversized transcript is TAIL-read, not parsed whole: this runs in the startup
+    # lifespan, so an unbounded parse could exhaust memory before the app serves.
+    monkeypatch.setattr(app_module, "_HOSTED_HISTORY_MAX_BYTES", 512)
+    lines = [
+        json.dumps({"message": {"role": "user", "content": f"turn {n}"}, "timestamp": "t"})
+        for n in range(200)
+    ]
+    (tdir / "big.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    tail = history_for(_row("big"))
+    assert 0 < len(tail) < 200  # only the tail was read
+    assert tail[-1]["content"] == "turn 199"  # ...and it is the NEWEST end of the file
+
 
 def test_dashboard_hides_hosted_panel_when_disabled(write_config, projects_root):
     app = _app(write_config)  # claustrum disabled by default

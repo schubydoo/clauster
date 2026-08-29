@@ -137,10 +137,14 @@ transcript ·` line, and the live stream continues underneath it. The transcript
 is only ever **read** — Clauster never writes to it — and the restored turns go
 through the same [redaction](../security.md#log-redaction) as the live stream.
 
-Two limits are worth knowing. Only the newest 200 turns are restored, so a very
-long conversation comes back trimmed. And a session Clauster never saw a
+Three limits are worth knowing. Only the newest 200 turns are restored, so a
+very long conversation comes back trimmed — and a very large transcript file is
+read from its tail rather than parsed whole. A session Clauster never saw a
 `session_id` for — one that died before its first frame — has no transcript to
-find, so its pane stays empty.
+find, so its pane stays empty. And because `claude` writes its stream output and
+flushes its transcript independently, a single turn landing at the exact instant
+of the reattach can fall between the two and not be shown; the conversation
+itself is unaffected, since the agent still has it.
 
 !!! warning "systemd can undo all of this"
     The survival table assumes nothing reaps the child processes. Under a

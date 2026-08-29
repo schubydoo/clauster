@@ -557,6 +557,13 @@ def _unresolved_bridge(
 # without busy-spinning; frames already seen are skipped by their monotonic ``seq``.
 _SCREEN_POLL_INTERVAL = 0.25
 
+# Most a hosted session's transcript rehydration (#1045) will READ off disk. A live
+# session's JSONL grows without bound and the rehydration runs inside the startup
+# lifespan, so an unbounded parse could exhaust memory before the app serves anything.
+# Past this the tail is read instead — comfortably more than the 200-turn render cap
+# in `hosted._REHYDRATE_MAX_TURNS`, so the cap, not this, is what normally binds.
+_HOSTED_HISTORY_MAX_BYTES = 4 * 1024 * 1024
+
 
 async def stream_until_disconnect(
     websocket: WebSocket, stream: Callable[[], Awaitable[None]]
@@ -621,6 +628,13 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         project path is derived the same way a spawn derives it (``projects_root/name``),
         because a hosted row records the project *name*, not its cwd. Blocking; the
         manager runs it in a thread.
+
+        The **read** is bounded, not just the ring insert: a long-running session's
+        JSONL grows without limit, and this runs in the startup lifespan, so parsing a
+        multi-gigabyte file whole could exhaust memory before the app ever serves. Past
+        the cap only the tail is read. That tail starts mid-line; ``_line_to_turn``
+        already skips an unparseable record, so the partial first line is dropped rather
+        than rendered corrupt.
         """
         name = instance.project
         session_uuid = instance.claude_session_uuid
@@ -629,7 +643,13 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         path = usage.resolve_session_transcript(config.projects_root / name, session_uuid)
         if path is None:
             return []
-        return usage.read_transcript_turns(path)
+        size = path.stat().st_size
+        if size <= _HOSTED_HISTORY_MAX_BYTES:
+            return usage.read_transcript_turns(path)
+        turns, _offset, _reset = usage.read_transcript_turns_from_offset(
+            path, size - _HOSTED_HISTORY_MAX_BYTES
+        )
+        return turns
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
