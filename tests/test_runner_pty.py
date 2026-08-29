@@ -1536,6 +1536,8 @@ def test_pty_worktree_name_prefers_an_explicit_name() -> None:
         "../clauster-abcd1234",
         "--force",  # flag-looking token
         "worktree-abcd1234",
+        "clauster-abcd1234\n",  # trailing newline: the case where \Z beats $ ($ would match)
+        "clauster-abcd1234\x00",  # embedded NUL from a corrupt sidecar
     ],
 )
 def test_recovered_worktree_name_rejects_anything_we_could_not_have_minted(value) -> None:
