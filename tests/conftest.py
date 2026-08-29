@@ -13,6 +13,7 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any
 
+import psutil
 import pytest
 from hypothesis import settings
 from sqlalchemy import Engine
@@ -311,6 +312,79 @@ FAKE_CLAUDE = FIXTURES / "fake_claude" / f"claude{WIN_STUB_SUFFIX}"
 def fake_claude() -> Path:
     """Absolute path to the parameterizable fake `claude` binary."""
     return FAKE_CLAUDE
+
+
+# --- Reap the fixture-stub subprocesses a session abandons (#1086) --------------------
+#
+# The `fake_claude` stub idles until it is signalled — that is its contract, and several
+# tests deliberately never signal it: `test_forget_running_bridge` and the rest of the
+# forget family exist precisely to ABANDON a running bridge, and the API-spawn route
+# tests simply never stop the bridge they spawned. Nothing reaped them, so each xdist
+# worker exited leaving its stubs behind, reparented to init. They idle for ~600s and a
+# full run left ~24 of them, so a day of iterating buried a dev host in idle pythons
+# whose argv reads `claude remote-control --name alpha` — indistinguishable, at a glance,
+# from real bridges on a box that also runs clauster.
+#
+# Fixing it in the tests would mean making them stop the bridge, which is the very thing
+# they assert does NOT happen. So the reap belongs here, once, at the end of the session.
+
+
+def _fixture_stub_descendants() -> list[psutil.Process]:
+    """Live descendants of THIS pytest process that are running a `tests/fixtures/` stub.
+
+    Identity comes from the process TREE, never from a name match. We walk our own
+    descendants and keep only those whose argv names a path inside `tests/fixtures/`, so
+    a developer's real `claude` bridge — or the live clauster service on the same host —
+    is structurally unreachable from here. A `pkill -f remote-control` would hit both.
+
+    Both halves of a Windows stub match: the direct child is the `.cmd` shim under
+    `tests/fixtures/`, and the python grandchild it spawns carries the expanded stub path
+    in its own argv. Killing the shim alone would strand that grandchild (#1126/#1127),
+    which is why the reap below goes through `force_kill_tree`.
+    """
+    marker = os.path.normcase(str(FIXTURES))
+    try:
+        descendants = psutil.Process().children(recursive=True)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):  # pragma: no cover — defensive
+        return []
+    stubs = []
+    for proc in descendants:
+        try:
+            argv = proc.cmdline()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue  # exited, or not ours to inspect — either way, not ours to kill
+        if any(marker in os.path.normcase(arg) for arg in argv):
+            stubs.append(proc)
+    return stubs
+
+
+def reap_fixture_stub_strays() -> list[int]:
+    """Hard-kill every surviving fixture-stub descendant, returning the pids reaped.
+
+    Each pid is one we just read out of our own descendant tree, and `force_kill_tree`
+    is safe on a pid that died in between. No `wait_timeout`: on POSIX these ARE our own
+    children, and psutil's wait goes through `os.waitpid`, which would reap them out from
+    under any `Popen` still holding them and rewrite a SIGKILL as a clean exit 0 (see
+    `procutil.force_kill_tree`). Nothing observes an exit code after the session ends, so
+    the wait buys nothing and the footgun is real.
+    """
+    from clauster import procutil
+
+    strays = _fixture_stub_descendants()
+    for proc in strays:
+        procutil.force_kill_tree(proc.pid)
+    return [proc.pid for proc in strays]
+
+
+def pytest_sessionfinish() -> None:
+    """Reap any fixture-stub subprocess the session left running (#1086).
+
+    A hook rather than a session-scoped autouse fixture: this must run AFTER every
+    fixture finalizer, including one that legitimately still owns a stub while tearing
+    it down. Finalizer ordering would only approximate that; `sessionfinish` is after
+    all of it by definition. It runs per xdist worker, which is where the stubs are.
+    """
+    reap_fixture_stub_strays()
 
 
 @pytest.fixture
