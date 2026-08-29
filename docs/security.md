@@ -252,14 +252,26 @@ The `claude` CLI writes the same file concurrently, so the trust writer
 
 - **Atomic replace** (temp file + `os.replace`) so no reader ever sees a
   half-written file, and every key Clauster doesn't touch is preserved.
-- **An advisory `flock`** held across the whole read-modify-write (via a sidecar
-  `<file>.lock`, never the target itself — `os.replace` swaps the inode). This
-  serializes Clauster's own concurrent writers and shrinks the window against
-  the CLI to the gap between the read-under-lock and the replace. POSIX only; on
-  platforms without `fcntl` it degrades to a best-effort no-op (the atomic
-  replace still prevents a torn file).
+- **An advisory `flock`** held across the whole read-modify-write, taken on a lock
+  file under `<state_dir>/locks/` keyed by the target's real path — never the
+  target itself (`os.replace` swaps the inode) and never a `<file>.lock` sidecar
+  beside it, which for a project `.claude/settings.json` would land inside your
+  git-tracked tree. This serializes Clauster's own concurrent writers and shrinks
+  the window against the CLI to the gap between the read-under-lock and the
+  replace. POSIX only; on platforms without `fcntl` it degrades to a best-effort
+  no-op (the atomic replace still prevents a torn file). Because the lock file is
+  keyed under one deployment's `state_dir`, the cross-process guarantee covers a
+  single Clauster deployment — the same scope as the config and `CLAUDE.md`
+  writers, which share this lock.
 
 A one-time `.bak` is taken before the first modification.
+
+> **Upgrading from 1.0.2 or earlier?** Those versions wrote the sidecar beside the
+> target, so you may still have a 0-byte `settings.json.lock` / `.mcp.json.lock` /
+> `.claude.json.lock` on disk. Clauster no longer creates or uses them and
+> deliberately does not delete them — a file inside your project is yours, and
+> unlinking a lock file is the very race the pattern avoids. Remove them by hand
+> (and, if you committed one, `git rm` it) once no older Clauster is running.
 
 ## Auto-enable remote control
 

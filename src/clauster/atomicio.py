@@ -29,7 +29,10 @@ a visible ``CLAUDE.md.lock``. Since #949 the bridge lifecycle uses the same prim
 ``SessionRunner`` holds a per-project ``cross_process_lock`` (keyed by the project
 directory) across its spawn/stop/forget/adopt sections, so a headless CLI/MCP writer
 and the running web app mutually exclude their read-modify-writes of the shared
-instance store and can't double-launch a standard bridge.
+instance store and can't double-launch a standard bridge. Since #1171 the JSON writers
+in :mod:`clauster.claude_json` (``~/.claude.json``, project ``.claude/settings.json`` /
+``.mcp.json``) use it too, for the same reason: their old ``<file>.lock`` sidecar landed
+inside the user's git-tracked project tree.
 """
 
 from __future__ import annotations

@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from clauster import atomicio
 from clauster import claude_json as cj
 
 
@@ -141,38 +142,48 @@ def test_update_claude_json_non_posix_skips_chmod(tmp_path: Path, monkeypatch) -
     assert json.loads(f.read_text(encoding="utf-8")) == {"a": 1, "b": 2}
 
 
-def test_locked_noop_without_fcntl(tmp_path: Path, monkeypatch) -> None:
-    # Where fcntl is unavailable (Windows) the lock degrades to a no-op: the write
-    # still completes and no .lock sidecar is created.
-    monkeypatch.setattr(cj, "fcntl", None)
+# --- #1171: the flock lives in the state dir, never as a sidecar beside the target ---
+
+
+def test_locked_write_leaves_no_lock_sidecar_beside_the_target(tmp_path: Path) -> None:
+    # Regression for #1171: a project `.claude/settings.json` sits inside the user's
+    # git-tracked tree, so a `<file>.lock` sidecar there is a commit-hygiene hazard.
+    project = tmp_path / "proj" / ".claude"
+    project.mkdir(parents=True)
+    atomicio.configure_lock_dir(tmp_path / "state" / "locks")
+    f = project / "settings.json"
+
+    cj.locked_replace_json_file(f, lambda raw: {"k": 1}, render=json.dumps)
+
+    assert json.loads(f.read_text(encoding="utf-8")) == {"k": 1}
+    assert sorted(p.name for p in project.iterdir()) == ["settings.json"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="advisory flock is POSIX-only (no fcntl)")
+def test_locked_flock_lands_in_the_configured_state_lock_dir(tmp_path: Path) -> None:
+    # The relocation is not just "no sidecar": the flock is still taken, on a file keyed
+    # to the target inside the deployment state dir (the #915 primitive).
+    lock_dir = tmp_path / "state" / "locks"
+    atomicio.configure_lock_dir(lock_dir)
     f = tmp_path / "claude.json"
-    f.write_text("{}", encoding="utf-8")
 
     cj.update_claude_json(f, lambda data: data.__setitem__("k", 1))
 
-    assert json.loads(f.read_text(encoding="utf-8")) == {"k": 1}
+    assert [p.name for p in lock_dir.iterdir()] == [atomicio._cross_process_lock_file(f).name]
     assert not f.with_suffix(f.suffix + ".lock").exists()
 
 
-@pytest.mark.skipif(cj.fcntl is None, reason="advisory flock is POSIX-only (no fcntl)")
-def test_locked_lockfile_open_failure_is_best_effort(tmp_path: Path, monkeypatch, caplog) -> None:
-    # If the .lock sidecar can't be opened, never block the write — proceed unlocked
-    # (the atomic replace still protects the file) and surface a warning.
+def test_locked_write_still_lands_when_no_lock_dir_is_configured(tmp_path: Path, caplog) -> None:
+    # Degrade loudly, never silently: with no lock dir the cross-process flock is skipped
+    # (the in-process lock still holds, the atomic replace still protects the file) and a
+    # warning is emitted. The autouse fixture leaves atomicio unconfigured.
     f = tmp_path / "claude.json"
-    f.write_text("{}", encoding="utf-8")
-    real_open = os.open
-
-    def boom(path, *a, **k):
-        if str(path).endswith(".lock"):
-            raise OSError("simulated: cannot open lock file")
-        return real_open(path, *a, **k)
-
-    monkeypatch.setattr(cj.os, "open", boom)
-    with caplog.at_level("WARNING", logger="clauster.claude_json"):
+    with caplog.at_level("WARNING", logger="clauster.atomicio"):
         cj.update_claude_json(f, lambda data: data.__setitem__("k", 1))
 
-    assert json.loads(f.read_text(encoding="utf-8")) == {"k": 1}  # write still landed
-    assert any("without a lock" in r.message for r in caplog.records)
+    assert json.loads(f.read_text(encoding="utf-8")) == {"k": 1}
+    if os.name == "posix":  # the warning is on the flock path, which Windows never enters
+        assert any("lock dir not configured" in r.message for r in caplog.records)
 
 
 # --- locked_replace_json_file: the project-file (non-~/.claude.json) primitive ----
@@ -268,27 +279,3 @@ def test_locked_replace_non_posix_skips_chmod(tmp_path: Path, monkeypatch) -> No
     f = tmp_path / ".mcp.json"
     cj.locked_replace_json_file(f, lambda raw: {"k": 1}, render=json.dumps)
     assert json.loads(f.read_text(encoding="utf-8")) == {"k": 1}
-
-
-def test_import_without_fcntl_degrades_module_to_none(monkeypatch):
-    # The POSIX-only `import fcntl` guard: on a platform lacking fcntl (Windows) the
-    # module still imports and degrades `fcntl` to None. Force the ImportError on this
-    # POSIX host by making the real import of `fcntl` raise, reload, and assert the
-    # fallback actually fired — then reload again to restore the real module.
-    import builtins
-    import importlib
-
-    real_import = builtins.__import__
-
-    def no_fcntl(name, *args, **kwargs):
-        if name == "fcntl":
-            raise ImportError("simulated: platform without fcntl")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", no_fcntl)
-    try:
-        importlib.reload(cj)
-        assert cj.fcntl is None
-    finally:
-        monkeypatch.undo()
-        importlib.reload(cj)

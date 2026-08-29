@@ -9,13 +9,14 @@ from pathlib import Path
 
 import pytest
 
-from clauster import claude_json, trust
+from clauster import atomicio, claude_json, trust
 
-# The advisory flock is POSIX-only; on Windows `claude_json.fcntl` is None and the
-# lock degrades to a no-op, so the serialization/lockfile-path tests don't apply.
-# (The lock primitive lives in clauster.claude_json; trust routes its writes through it.)
+# The advisory flock is POSIX-only; on Windows `atomicio.fcntl` is None and the
+# cross-process lock degrades to a no-op, so the serialization/lock-file tests don't
+# apply. (`claude_json._locked` layers `atomicio.inproc_path_lock` +
+# `atomicio.cross_process_lock`; trust routes its writes through it.)
 needs_fcntl = pytest.mark.skipif(
-    claude_json.fcntl is None, reason="advisory flock is POSIX-only (no fcntl)"
+    atomicio.fcntl is None, reason="advisory flock is POSIX-only (no fcntl)"
 )
 # POSIX-only behaviours: file-mode preservation (Windows stat reports 0o666 for any
 # writable file) and atomic concurrent os.replace (Windows raises WinError 5 on a
@@ -215,10 +216,27 @@ def test_locked_serializes_concurrent_writers(tmp_path: Path, monkeypatch):
     json.loads(cj.read_text(encoding="utf-8"))  # never left half-written
 
 
-def test_locked_noop_without_fcntl(tmp_path: Path, monkeypatch):
-    # On a platform without fcntl (Windows) the lock degrades to a no-op: the
-    # write still completes and no .lock sidecar is created.
-    monkeypatch.setattr(claude_json, "fcntl", None)
+def test_trust_write_leaves_no_lock_sidecar_beside_the_target(tmp_path: Path):
+    # #1171: the flock lives under `<state_dir>/locks/`, so the trust write drops no
+    # `<file>.lock` next to the file it edits. Asserted with the lock dir configured
+    # (the flock really is taken) so this can't pass merely because it degraded.
+    atomicio.configure_lock_dir(tmp_path / "state" / "locks")
+    home = tmp_path / "home"
+    home.mkdir()
+    cj = home / "claude.json"
+    cj.write_text("{}", encoding="utf-8")
+    target = tmp_path / "proj"
+    target.mkdir()
+
+    trust.trust_directory(target, cj)
+
+    assert trust.is_trusted(target, cj) is True
+    assert sorted(p.name for p in home.iterdir()) == ["claude.json", "claude.json.bak"]
+
+
+def test_trust_write_lands_when_no_lock_dir_is_configured(tmp_path: Path):
+    # Degraded (no lock dir → in-process lock only, warned once by atomicio) the write
+    # still completes: the atomic replace is independent of the lock.
     cj = tmp_path / "claude.json"
     cj.write_text("{}", encoding="utf-8")
     target = tmp_path / "proj"
@@ -228,29 +246,6 @@ def test_locked_noop_without_fcntl(tmp_path: Path, monkeypatch):
 
     assert trust.is_trusted(target, cj) is True
     assert not cj.with_suffix(cj.suffix + ".lock").exists()
-
-
-@needs_fcntl
-def test_locked_lockfile_open_failure_is_best_effort(tmp_path: Path, monkeypatch, caplog):
-    # If the .lock sidecar can't be opened, never block the write — proceed
-    # unlocked (atomic replace still protects the file) and surface a warning.
-    cj = tmp_path / "claude.json"
-    cj.write_text("{}", encoding="utf-8")
-    target = tmp_path / "proj"
-    target.mkdir()
-    real_open = os.open
-
-    def boom(path, *args, **kwargs):
-        if str(path).endswith(".lock"):
-            raise OSError("simulated: cannot open lock file")
-        return real_open(path, *args, **kwargs)
-
-    monkeypatch.setattr(claude_json.os, "open", boom)
-    with caplog.at_level("WARNING", logger="clauster.claude_json"):
-        trust.trust_directory(target, cj)
-
-    assert trust.is_trusted(target, cj) is True  # write still completed
-    assert any("without a lock" in r.message for r in caplog.records)
 
 
 def test_unreadable_file_propagates_not_clobbered(tmp_path: Path, monkeypatch):
@@ -305,7 +300,7 @@ def test_concurrent_writers_without_lock_keep_valid_json(tmp_path: Path, monkeyp
     # POSIX-only: this relies on rename() being atomic under concurrency; Windows
     # os.replace raises WinError 5 on a racing replace (and has no advisory lock to
     # serialize writers), so the property simply doesn't hold there.
-    monkeypatch.setattr(claude_json, "fcntl", None)
+    monkeypatch.setattr(atomicio, "fcntl", None)
     cj = tmp_path / "claude.json"
     cj.write_text("{}", encoding="utf-8")
     targets = [tmp_path / f"proj{i}" for i in range(6)]
