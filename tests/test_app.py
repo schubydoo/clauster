@@ -1546,6 +1546,51 @@ def test_dashboard_never_keys_bridge_rows_by_project(write_config):
     # property itself and would survive a client rewrite.
 
 
+def test_dashboard_bounds_optimistic_stopping_row(write_config):
+    """A preserved optimistic "stopping" row must age out, and only on confirmations (#1146).
+
+    `refresh()` keeps a locally-optimistic "stopping" row alive until the server confirms
+    it is gone. Unbounded, a row the server had genuinely dropped (failed DELETE leaves it
+    "stopping"; then it is forgotten elsewhere or pruned as a phantom) was re-preserved on
+    every poll forever, unclearable — isResumable is false so no Forget renders, and Stop
+    would 404. That is the misleading state the fail-closed invariant exists to prevent.
+
+    Two properties matter and both are asserted below:
+
+    1. A bound exists, with the values that are the actual product decision.
+    2. It only advances on a poll where /api/instances ANSWERED and omitted the row.
+       A backend that stopped answering is not a backend confirming the row is gone, so
+       the counting must sit inside the `iRes.ok` branch, and the wall clock alone must
+       not be sufficient (an outage spends it for free) — hence the ANDed poll floor.
+
+    Strength caveat, same as the neighbouring #1143 test: this is textual, so a rewrite
+    that preserves behaviour under different spelling turns it red, and an equivalent
+    unbounded rewrite could slip past the negative. There is no JS harness in the unit
+    suite; the rendered script is the only surface Python can reach. The value assertions
+    are the durable half — they are what a careless "simplify the loop" revert would drop.
+    """
+    page = _client(write_config).get("/").text
+
+    # 1. The bound, and its values.
+    assert "STOPPING_ABSENT_MS: 30000," in page
+    assert "STOPPING_ABSENT_POLLS: 2," in page
+    # ANDed, not OR: the poll floor is what survives an outage that spent the clock.
+    assert ">= this.STOPPING_ABSENT_POLLS &&" in page
+    # The exact unbounded line this fixes — a revert must not pass.
+    assert (
+        'if (this.instances[k] && this.instances[k].status === "stopping" && !next[k]) '
+        "next[k] = this.instances[k];"
+    ) not in page
+
+    # 2. Counting happens only on a successful /api/instances response. The preservation
+    # loop must fall between the `iRes.ok` gate and the next response's gate; outside it,
+    # an outage would age rows out on the clock alone.
+    i_ok = page.index("if (iRes.ok) {")
+    s_ok = page.index("if (sRes.ok)")
+    assert page.count("row._absentPolls++") == 1
+    assert i_ok < page.index("row._absentPolls++") < s_ok
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="the pty launch controls are POSIX-only")
 def test_launch_popover_pty_worktree_controls(write_config):
     """The Spawn picker applies to interactive sessions; the collision hint warns (#779).
