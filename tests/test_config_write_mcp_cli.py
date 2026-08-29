@@ -187,6 +187,22 @@ def test_entry_needs_direct_write_true_for_bogus_port() -> None:
     )
 
 
+def test_entry_needs_direct_write_true_for_non_structural_url_bytes() -> None:
+    # The raw-charset gate. A backslash or percent is never structural in a bare origin,
+    # and the tab case is why the check runs on the RAW url: urlsplit strips tab/CR/LF
+    # BEFORE parsing, so `https://host<TAB>sk-live-…` would otherwise fold the secret
+    # bytes into a charset-clean hostname and read as bare.
+    assert mcp_cli.entry_needs_direct_write(
+        {"type": "http", "url": "https://host\\sk-live-SECRET"}
+    )
+    assert mcp_cli.entry_needs_direct_write(
+        {"type": "http", "url": "https://host%2Fsk-live-SECRET"}
+    )
+    assert mcp_cli.entry_needs_direct_write(
+        {"type": "http", "url": "https://host\tsk-live-SECRET"}
+    )
+
+
 def test_entry_needs_direct_write_true_for_unknown_scheme_or_missing_host() -> None:
     # An unrecognised scheme is not provably anything (a `data:` payload is entirely
     # operator-supplied), and a scheme-less string makes urlsplit dump everything into

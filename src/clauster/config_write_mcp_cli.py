@@ -109,6 +109,14 @@ def _has_nonempty_value(block: Any) -> bool:
     return isinstance(block, dict) and any(isinstance(v, str) and v for v in block.values())
 
 
+#: Every byte a bare origin can legitimately contain: scheme chars, ``://``, host chars
+#: (incl. ``_`` for real-world hostnames and ``[]`` for IPv6), and a port. Checked against
+#: the RAW url BEFORE ``urlsplit``, which strips tab/CR/LF pre-parse — so
+#: ``https://host<TAB>sk-live-…`` would otherwise parse to a charset-clean hostname with
+#: the secret bytes folded in. ``\\`` and ``%`` are likewise never structural in an origin.
+_CLI_SAFE_URL_BYTES_RE = re.compile(r"[A-Za-z0-9._~+\-:/\[\]]+")
+
+
 def _url_is_cli_safe(url: str) -> bool:
     """Whether ``url`` is **provably** credential-free, so it may ride ``add-json``'s argv.
 
@@ -121,6 +129,10 @@ def _url_is_cli_safe(url: str) -> bool:
     question is inverted — a ``url`` is CLI-eligible only when it is a **bare origin**
     whose every byte is structural:
 
+    * every RAW byte is in :data:`_CLI_SAFE_URL_BYTES_RE` — checked before parsing,
+      because ``urlsplit`` strips tab/CR/LF pre-parse and would fold
+      ``https://host<TAB>sk-live-…`` into a charset-clean hostname carrying the secret;
+      a backslash or percent is equally never structural in a bare origin,
     * ``urlsplit`` parses it, **and** ``parts.port`` is accessible. Accessing the property
       is the port validation: ``urlsplit`` itself never checks, so ``https://host:sk-live-…``
       parses with a *string* "port" and only raises on access. Reading it inside the
@@ -134,6 +146,8 @@ def _url_is_cli_safe(url: str) -> bool:
     equivalent on-disk state. Over-routing a genuinely benign ``https://host/sse`` is
     therefore near-free; under-routing a credential is not.
     """
+    if not _CLI_SAFE_URL_BYTES_RE.fullmatch(url):
+        return False  # a non-structural byte anywhere -> fail closed, keep it off the CLI
     try:
         parts = urlsplit(url)
         parts.port  # noqa: B018 - the property access IS the validation (raises on a bogus port)
