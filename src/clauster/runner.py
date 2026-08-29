@@ -2041,6 +2041,43 @@ class SessionRunner:
             return None
         return max(matches, key=lambda t: (t[0], t[1]))[2]
 
+    def archived_log_path(self, instance: RemoteControlInstance) -> Path | None:
+        """Re-derive a DEAD instance's on-disk bridge log from the log dir, or ``None`` (#1117).
+
+        A stopped or crashed bridge's record carries no log path once it is restored from
+        persistence — the ``instances`` table has no column for one (``_INSTANCE_FIELDS`` in
+        :mod:`clauster.db.stores`) — so a fresh ``clauster logs`` process refused to read the
+        log of the very bridge an operator most wants to read: the one that just died, whose
+        file is still sitting in the log dir.
+
+        Re-derived exactly as a rediscovered *standard* survivor's live tail already is
+        (:meth:`_latest_debug_log_for`): the newest ``<project>-<ms>-<seq>.log`` Clauster
+        wrote for THIS project, anchored to the project's exact filename shape so a sibling
+        project's log can never be handed over. It is that project's newest log rather than
+        provably *this* instance's — a project holding several dead rows resolves them all to
+        the same file — because nothing on disk binds a log to an instance id. Binding one
+        would need a persistence schema addition, which the issue leaves open as a design
+        question; a shared newest-log answer beats the operator getting nothing at all.
+
+        Returns the verbatim parse-source when it exists and the redacted at-rest mirror
+        otherwise, matching what a live tail resolves to (:meth:`_raw_log_path_for`) — the
+        reader redacts either one on the way out, so this changes no redaction semantics.
+
+        Live instances always return ``None``: their tail is bound at spawn or reattach, and
+        re-deriving one by project would risk pointing a pty session at a *different*
+        session's log — the same hazard :meth:`_reattach_pty_from_sidecar` refuses to take.
+        """
+        if instance.status in (InstanceStatus.STARTING, InstanceStatus.RUNNING):
+            return None
+        log_path = self._latest_debug_log_for(instance.project)
+        if log_path is None:
+            return None
+        raw_path = self._raw_log_path_for(log_path)
+        # Identical to log_path when `logs.redact_session_url` is off (the single verbatim
+        # file); when it is on, prefer the raw parse-source but fall back to the public
+        # mirror rather than reporting an unreadable path the operator can't act on.
+        return raw_path if raw_path.exists() else log_path
+
     def _keeper_sidecars_for(self, name: str) -> list[Path]:
         """Keeper sidecars belonging to *name* exactly — the anchored form of the bare glob.
 

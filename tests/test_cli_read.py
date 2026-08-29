@@ -45,6 +45,7 @@ class _FakeEngine:
     log_path = None
     log_reads: list[tuple[int, list[str]]] = []
     url: str | None = None
+    resolved: RemoteControlInstance | None = None
 
     def __init__(self, config, *, runner=None) -> None:
         self._read = 0
@@ -69,6 +70,10 @@ class _FakeEngine:
 
     def bridge_log_path(self, identity):
         return type(self).log_path
+
+    def resolve_instance(self, identity):
+        # #1117: the `logs` diagnostic resolves the id to tell "unknown" from "no log".
+        return type(self).resolved
 
     def connect_url(self, identity):
         return type(self).url
@@ -97,6 +102,7 @@ def _fake_engine(monkeypatch):
     _FakeEngine.log_path = None
     _FakeEngine.log_reads = []
     _FakeEngine.url = None
+    _FakeEngine.resolved = None
     monkeypatch.setattr(cli_read, "ClausterEngine", _FakeEngine)
 
 
@@ -196,8 +202,47 @@ def test_sessions_empty(cfg, capsys):
 
 
 def test_logs_unknown_instance_exits_2(cfg, capsys):
+    # #1117: an id that resolves to nothing says so plainly — no longer conflated with a
+    # real instance whose log is simply absent (the two need opposite next actions).
     assert main(["logs", "-c", cfg, "ghost"]) == 2
-    assert "no bridge log" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "unknown instance 'ghost'" in err
+    assert "retention" not in err
+
+
+def test_logs_known_instance_without_a_log_names_the_project_and_status(cfg, capsys):
+    # #1117: the id IS a real (stopped) bridge, but nothing is on disk for it — say which
+    # record was found and why there is nothing to read, rather than "unknown instance".
+    _FakeEngine.resolved = _inst("i1", project="alpha", status=InstanceStatus.STOPPED)
+    assert main(["logs", "-c", cfg, "i1"]) == 2
+    err = capsys.readouterr().err
+    assert "no bridge log on disk for 'i1'" in err
+    assert "'alpha'" in err and "stopped" in err and "retention" in err
+
+
+def test_logs_ambiguous_id_still_outranks_the_no_log_diagnostic(cfg, capsys):
+    # An ambiguous reference is refused with its candidates (#1099/#1150) before the
+    # unknown-vs-no-log split is even considered — that verdict is the more actionable one.
+    _FakeEngine.candidates = ["f2c456fd-aaaa", "f2c456fd-bbbb"]
+    try:
+        assert main(["logs", "-c", cfg, "f2c456fd"]) == 2
+        err = capsys.readouterr().err
+        assert "ambiguous 'f2c456fd'" in err and "use more characters" in err
+    finally:
+        _FakeEngine.candidates = []
+
+
+def test_logs_reads_a_stopped_bridges_log_from_disk(cfg, tmp_path, capsys):
+    # #1117 end to end at the command layer: a stopped card whose log the engine resolved
+    # from the log dir tails exactly like a live one, read-only.
+    log = tmp_path / "alpha-1700000000000-0.log"
+    log.write_text("bridge exited unexpectedly\n", encoding="utf-8")
+    _FakeEngine.resolved = _inst("i1", project="alpha", status=InstanceStatus.STOPPED)
+    _FakeEngine.log_path = log
+    _FakeEngine.log_reads = [(0, ["bridge exited unexpectedly"])]
+    assert main(["logs", "-c", cfg, "i1"]) == 0
+    assert capsys.readouterr().out.splitlines() == ["bridge exited unexpectedly"]
+    assert log.read_text(encoding="utf-8") == "bridge exited unexpectedly\n"  # untouched
 
 
 def test_logs_stale_missing_file_exits_2(cfg, tmp_path, capsys):

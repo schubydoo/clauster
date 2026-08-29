@@ -265,11 +265,25 @@ class ClausterEngine(AbstractContextManager["ClausterEngine"]):
         return instance.session_url or instance.url
 
     def bridge_log_path(self, identity: str) -> Path | None:
-        """Return the on-disk bridge log to tail (raw if present, else the redacted mirror)."""
+        """Return the on-disk bridge log to tail (raw if present, else the redacted mirror).
+
+        A **stopped or crashed** bridge restored from persistence carries neither path —
+        the instance row has no log-path column — so its log was unreadable even with the
+        file still on disk, which is exactly when an operator wants it (#1117). Fall back
+        to :meth:`~clauster.runner.SessionRunner.archived_log_path`, which re-derives the
+        project's newest log from the log dir. Live instances never reach the fallback:
+        their tail is already bound, and that method declines them anyway.
+
+        ``None`` still means "nothing to read" — an unknown/ambiguous id, or a known
+        instance whose log was never written or has been pruned by retention.
+        """
         instance = self.resolve_instance(identity)
         if instance is None:
             return None
-        return instance.bridge_raw_log_path or instance.bridge_debug_log_path
+        bound = instance.bridge_raw_log_path or instance.bridge_debug_log_path
+        if bound is not None:
+            return bound
+        return self._runner.archived_log_path(instance)
 
     @staticmethod
     def initial_log_offset(path: Path, *, tail_bytes: int = logstream.DEFAULT_TAIL_BYTES) -> int:

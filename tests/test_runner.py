@@ -2748,6 +2748,73 @@ def test_latest_debug_log_for_returns_none_when_no_match(runner_config):
     assert runner._latest_debug_log_for("alpha") is None
 
 
+def _dead_instance(status: InstanceStatus = InstanceStatus.STOPPED) -> RemoteControlInstance:
+    """A restored-from-persistence card: right project, no log path bound (#1117)."""
+    return RemoteControlInstance(instance_id="i1", project="alpha", label="alpha", status=status)
+
+
+@pytest.mark.parametrize(
+    "status", [InstanceStatus.STOPPED, InstanceStatus.CRASHED, InstanceStatus.ERROR]
+)
+def test_archived_log_path_resolves_a_dead_instance_to_the_projects_newest_log(
+    runner_config, status
+):
+    """#1117: a stopped/crashed card carries no log path (the instances table has no column
+    for one), so `clauster logs` refused the very bridge an operator wants to read. Re-derive
+    the project's newest `<name>-<ms>-<seq>.log` — and only that project's."""
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    log_dir = config.state_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "alpha-1700000000000-0.log").write_text("older\n")
+    newest = log_dir / "alpha-1700000000001-0.log"
+    newest.write_text("newest\n")
+    (log_dir / "alpha-2-1700000000009-0.log").write_text("sibling project\n")
+
+    assert runner.archived_log_path(_dead_instance(status)) == newest
+
+
+def test_archived_log_path_returns_none_when_the_log_is_gone(runner_config):
+    """Retention pruned (or never wrote) the project's log set → None, so the caller reports
+    "nothing on disk" rather than handing back a path that fails to open."""
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    (config.state_dir / "logs").mkdir(parents=True, exist_ok=True)
+    assert runner.archived_log_path(_dead_instance()) is None
+
+
+@pytest.mark.parametrize("status", [InstanceStatus.STARTING, InstanceStatus.RUNNING])
+def test_archived_log_path_declines_a_live_instance(runner_config, status):
+    """A live bridge's tail is bound at spawn/reattach. Re-deriving one by project could point
+    a pty session at a DIFFERENT session's log, so the fallback refuses live cards outright."""
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    log_dir = config.state_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "alpha-1700000000000-0.log").write_text("someone else's\n")
+    assert runner.archived_log_path(_dead_instance(status)) is None
+
+
+def test_archived_log_path_prefers_the_raw_parse_source_then_the_mirror(runner_config):
+    """With `logs.redact_session_url` on, the public `.log` is a redacted mirror of a private
+    `.raw.log`. Prefer the raw source exactly as a live tail does — and fall back to the
+    mirror when it is absent, rather than returning a path that cannot be opened."""
+    config, claude_json = runner_config
+    config = config.model_copy(
+        update={"logs": config.logs.model_copy(update={"redact_session_url": True})}
+    )
+    runner = SessionRunner(config, claude_json=claude_json)
+    log_dir = config.state_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    public = log_dir / "alpha-1700000000000-0.log"
+    public.write_text("redacted mirror\n")
+    assert runner.archived_log_path(_dead_instance()) == public  # no raw sibling → mirror
+
+    raw = log_dir / "alpha-1700000000000-0.raw.log"
+    raw.write_text("verbatim\n")
+    assert runner.archived_log_path(_dead_instance()) == raw
+
+
 async def test_adopt_leaves_log_path_unset(runner_config, monkeypatch):
     """Adopting an EXTERNAL standard bridge leaves the tail source None — Clauster never
     spawned it, so there is no Clauster-written log to bind (unlike a rediscovered
