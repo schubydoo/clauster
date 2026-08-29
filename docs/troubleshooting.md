@@ -543,8 +543,13 @@ added, so read the prefix rather than expecting this page to enumerate them:
   path (the minimal-PATH workaround) counts as present rather than warning falsely.
   For claustrum the row also reports the **detected version** from `claustrum
   --version` and warns (advisorily — never a doctor failure) when it can't be
-  confirmed at or above the release clauster pins; an unstamped local/dev build
-  (`claustrum-dev`) is expected to warn. A separate `binary:<name>:shadow` warn
+  confirmed at or above the release clauster pins. A `go install`-built binary
+  keeps the unstamped `claustrum-dev` sentinel, so when `--version` can't confirm
+  the floor doctor reads the module version Go embeds in every binary and names
+  the release outright — `claustrum v1.3.1 < required v1.7.1` rather than a
+  can't-tell shrug. That fallback stays quiet unless it is certain: a build info
+  blob that is absent, unreadable, records `(devel)`, or belongs to some other Go
+  program leaves the original advisory in place. A separate `binary:<name>:shadow` warn
   appears when a managed `deps/bin` install exists but a different `PATH`/configured
   binary wins resolution, so you know which copy actually runs.
 
