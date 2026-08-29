@@ -494,7 +494,7 @@ def _is_subagent_transcript(path: Path, max_records: int = 200) -> bool:
     only parsed, never rewritten, and an unparseable line is skipped rather than raising.
 
     **Deliberately biased toward "real conversation".** ``True`` is returned only when,
-    within the first ``max_records`` records, at least one record is flagged sidechain and
+    within the first ``max_records`` lines, at least one record is flagged sidechain and
     **none** is flagged non-sidechain. Anything else — an empty or unreadable file, a
     transcript that never carries the key (older Claude Code builds), or a mixed file
     where a main-thread record appears — is reported as a real conversation. The failure
@@ -504,6 +504,8 @@ def _is_subagent_transcript(path: Path, max_records: int = 200) -> bool:
     Bounded like :func:`_recorded_cwd`: the deciding non-sidechain record sits in the
     opening handful of lines in practice, so ``max_records`` is generous headroom rather
     than a tuned limit, and it keeps a huge transcript from being walked end to end.
+    Unlike ``_recorded_cwd``, the bound is NOT part of the summary cache key — the
+    default is the only bound the cache may ever see; only tests pass another value.
     """
     saw_sidechain = False
     try:
@@ -513,7 +515,7 @@ def _is_subagent_transcript(path: Path, max_records: int = 200) -> bool:
                     break
                 try:
                     record = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
+                except json.JSONDecodeError:
                     continue
                 if not isinstance(record, dict):
                     continue
