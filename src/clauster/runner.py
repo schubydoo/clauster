@@ -4391,13 +4391,15 @@ class SessionRunner:
             # restart; recover its pid from the sidecar so stop()/poll_once can reap
             # it — otherwise a rediscovered pty bridge would leak its keeper. The log
             # path is timestamped (not derivable), so match the sidecar by bridge pid
-            # + proc-start (PID-reuse defense — see _recover_keeper_pid).
-            keeper_pid = (
+            # + proc-start (PID-reuse defense — see _recover_keeper_pid). The pid and
+            # its create-time travel as a PAIR (#1178): recovering only the pid here
+            # would persist a row whose forget gate degrades to cmdline-only.
+            keeper_pid, keeper_proc_start = (
                 await asyncio.to_thread(
-                    self._recover_keeper_pid, proj.name, ptr.pid, bridge_proc_start
+                    self._recover_keeper_identity, proj.name, ptr.pid, bridge_proc_start
                 )
                 if resume_mode == "pty"
-                else None
+                else (None, None)
             )
             # Re-bind the live tail to the log this survivor was already writing before the
             # restart, so `/ws/bridge-log` resolves a real path instead of 1008-ing (#584).
@@ -4411,6 +4413,7 @@ class SessionRunner:
                 resume_mode=resume_mode,
                 bridge_proc_start=bridge_proc_start,
                 keeper_pid=keeper_pid,
+                keeper_proc_start=keeper_proc_start,
                 bridge_debug_log_path=log_path,
                 bridge_raw_log_path=(
                     self._raw_log_path_for(log_path) if log_path is not None else None
@@ -4549,6 +4552,7 @@ class SessionRunner:
         resume_mode: ResumeMode,
         bridge_proc_start: float | None,
         keeper_pid: int | None,
+        keeper_proc_start: float | None = None,
         bridge_debug_log_path: Path | None = None,
         bridge_raw_log_path: Path | None = None,
         instance_id: str | None = None,
@@ -4586,6 +4590,10 @@ class SessionRunner:
             resume_mode=resume_mode,
             worktree_name=worktree_name,
             keeper_pid=keeper_pid,
+            # The keeper pid's create-time travels with it (#1178) — a pointer-walk
+            # survivor must regain the full PID-reuse defense, not the cmdline-only
+            # degrade a pre-upgrade row gets.
+            keeper_proc_start=keeper_proc_start,
             intentional_stop=False,
             status=InstanceStatus.RUNNING,
             bridge_pid=ptr.pid,

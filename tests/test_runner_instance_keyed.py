@@ -1045,6 +1045,35 @@ async def test_reattach_records_the_keeper_start_time_with_its_pid(runner_config
     assert (inst.keeper_pid, inst.keeper_proc_start) == (5555, 777.0)
 
 
+async def test_pointer_walk_reattach_records_the_keeper_start_time_too(runner_config, monkeypatch):
+    # The pointer-walk leg — a pre-instance-keyed row with NO persisted pid whose bridge is
+    # still live at the Anthropic pointer — recovered only the keeper PID, leaving that row's
+    # forget gate degraded to cmdline-only: the one reattach path where the pair defense
+    # stayed inert. The create-time must be snapshotted here exactly as the instance-keyed
+    # leg above does.
+    from clauster import pointers
+
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save({"iid-pty": _row("alpha", pid=None)})
+    ptr = pointers.BridgePointer(
+        pid=6001,
+        proc_start="123",
+        source="test",
+        environment_id="env_PTY",
+        session_id="session_PTY",
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    monkeypatch.setattr("clauster.runner.pointers.pointer_for_project", lambda *a, **k: ptr)
+    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s: 6666)
+    monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: 888.0)
+
+    await runner.rediscover(persist=False)
+
+    inst = runner.get_instance("iid-pty")
+    assert inst is not None
+    assert (inst.keeper_pid, inst.keeper_proc_start) == (6666, 888.0)
+
+
 async def test_resync_replaces_the_keeper_pair_together(runner_config, monkeypatch):
     # A cross-process resync adopts a NEW keeper pid. Leaving the previous generation's
     # start time beside it would be worse than carrying none: the comparison then fails for
