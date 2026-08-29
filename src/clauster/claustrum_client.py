@@ -380,12 +380,12 @@ class ClaustrumClient:
         """Call ``server.ping`` → ``{"pong":true}``."""
         return await self.call("server.ping", None)
 
-    async def version(self) -> dict[str, Any]:
-        """Call ``server.version`` → ``{"version","platform","arch"}``."""
-        return await self.call("server.version", None)
-
     async def capabilities(self) -> dict[str, Any]:
-        """Call ``server.capabilities`` → ``{"version","methods":[…]}``."""
+        """Call ``server.capabilities`` → ``{"version","methods":[…],"features":[…]}``.
+
+        Replaces the removed ``server.version`` probe: it carries the same
+        ``version`` field and is present in every claustrum since v1.0.0.
+        """
         return await self.call("server.capabilities", None)
 
     async def spawn(

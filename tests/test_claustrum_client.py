@@ -54,11 +54,29 @@ async def test_server_methods_roundtrip(fake_claustrum):
     fake = await fake_claustrum()
     async with ClaustrumClient(fake.socket_path, fake.token) as client:
         assert await client.ping() == {"pong": True}
-        version = await client.version()
-        assert version["version"] == fake.version
         caps = await client.capabilities()
-        assert len(caps["methods"]) == 18
+        assert caps["version"] == fake.version
+        assert len(caps["methods"]) == 17
         assert "process.spawn" in caps["methods"]
+        # server.version was removed in claustrum v1.10 — no longer advertised or served.
+        assert "server.version" not in caps["methods"]
+        with pytest.raises(RpcError) as excinfo:
+            await client.call("server.version", None)
+        assert excinfo.value.code == -32601
+
+
+async def test_capabilities_against_legacy_daemon(fake_claustrum):
+    """A pre-v1.10 daemon still advertising server.version works via capabilities."""
+    fake = await fake_claustrum(legacy_version=True)
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        caps = await client.capabilities()
+        assert caps["version"] == fake.version
+        # The legacy daemon advertises and still serves the extra method...
+        assert len(caps["methods"]) == 18
+        assert "server.version" in caps["methods"]
+        legacy = await client.call("server.version", None)
+        assert legacy["version"] == fake.version
+        # ...but clauster reads its version from capabilities either way.
 
 
 async def test_auth_rejected(fake_claustrum):

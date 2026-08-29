@@ -412,7 +412,13 @@ class ClaustrumDaemon:
                 token_file.unlink()
 
     async def _connect(self, token: str) -> ClaustrumClient:
-        """Dial the socket and verify with an authed ping + version probe."""
+        """Dial the socket and verify with an authed ping + capabilities probe.
+
+        The version is read from ``server.capabilities`` (present in every
+        claustrum since v1.0.0), not the ``server.version`` method that v1.10
+        removes to match the reference daemon. ``capabilities`` keeps the same
+        ``version`` field, so this stays forward- and backward-compatible.
+        """
         client = ClaustrumClient(
             str(self._socket),
             token,
@@ -421,11 +427,11 @@ class ClaustrumDaemon:
         await client.connect()
         try:
             await client.ping()
-            version = await client.version()
+            caps = await client.capabilities()
         except BaseException:
             await client.close()
             raise
-        self._version = version.get("version") if isinstance(version, dict) else None
+        self._version = caps.get("version") if isinstance(caps, dict) else None
         return client
 
     async def _spawn(self, token: str, deadline: float) -> None:
