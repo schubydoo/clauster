@@ -1378,9 +1378,10 @@ class ClausterConfig(BaseModel):
     log_level: LogLevel = Field(
         default="info",
         description="Minimum severity written to the application log, applied to "
-        "Clauster's own loggers and uvicorn's alike. `debug` surfaces the server-side "
-        "detail a bug report needs — auth rejections, spawn validation, reconcile "
-        "passes, claustrum lifecycle — and is meant for diagnosis rather than steady "
+        "Clauster's own loggers and uvicorn's alike. `debug` mostly adds uvicorn's own "
+        "debug records (per-request and per-connection detail), plus a handful of "
+        "Clauster best-effort cleanup diagnostics and claustrum daemon lifecycle notes "
+        "— a wider view of the same events, meant for diagnosis rather than steady "
         "state: it is high-volume, and while every line is still redacted the same way "
         "(see `log_format`), it records far more about what the server is doing, so the "
         "log is worth treating as sensitive. Names are case-insensitive (`DEBUG` works). "

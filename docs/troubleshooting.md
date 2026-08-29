@@ -484,6 +484,9 @@ a new Direct Session for the project and resume from the captured session.
 
 ### Raising the log level
 
+> **New in 1.1:** the `log_level` key and its `CLAUSTER_LOG_LEVEL` override.
+> Before that the server logged at `info` in every deployment.
+
 Set `log_level` (default `info`) to raise the server's own verbosity — it
 covers Clauster's loggers and uvicorn's alike:
 
@@ -499,9 +502,11 @@ CLAUSTER_LOG_LEVEL=debug clauster run -c clauster.yml
 ```
 
 Either way the level is read **once at startup**, so restart Clauster after
-changing it. `debug` adds the server-side decisions an issue report usually
-needs — auth rejections, spawn validation, reconcile passes, claustrum
-lifecycle.
+changing it. What `debug` mostly adds is **uvicorn's own** debug records —
+per-request and per-connection detail — plus a handful of Clauster's
+best-effort cleanup diagnostics (a stop signal that was a no-op, a worktree
+unlock that failed) and claustrum daemon lifecycle notes. It is a wider view of
+the same events, not a separate decision trace.
 
 Treat it as a diagnostic setting, not a steady state: it is high-volume, and
 although every line still goes through the same redaction as `info` (see
