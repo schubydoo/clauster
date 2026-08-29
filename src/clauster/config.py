@@ -136,8 +136,10 @@ PERMISSION_LABELS: dict[str, dict[str, str]] = {
     },
     # Listed LAST deliberately: the six above are ordered by how much they let the
     # agent do, and "don't force a mode" isn't a point on that axis — it opts out of
-    # the choice entirely. Never more permissive than the session's own default: it
-    # cannot grant bypassPermissions, it only declines to force anything.
+    # the choice entirely. It never REQUESTS anything itself — but with no flag
+    # passed, an on-disk settings.json `permissions.defaultMode` takes effect,
+    # including a hand-edited `bypassPermissions` clauster refuses to write. See
+    # the caveat in docs/security.md.
     INHERIT_PERMISSION_MODE: {
         "short": "No forced mode",
         "long": "No forced mode (session default)",
@@ -286,8 +288,11 @@ class InstanceDefaults(BaseModel):
         default="default",
         description="Default permission mode for new bridges. `inherit` is a Clauster "
         "sentinel, not a claude mode: it passes **no** `--permission-mode` flag, so the "
-        "session starts in whatever mode it would pick on its own. It is never more "
-        "permissive than that default and can never grant `bypassPermissions`.",
+        "session starts in whatever mode it would pick on its own. Caveat: with no flag "
+        "passed, an existing `permissions.defaultMode` in a settings file takes effect — "
+        "including a hand-edited `bypassPermissions` Clauster refuses to write itself. "
+        "See the `inherit` caveat in the security guide before using it on a project "
+        "with `allow_bypass_permissions: false`.",
     )
     verbose: bool = Field(
         default=False,

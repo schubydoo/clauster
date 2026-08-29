@@ -344,12 +344,18 @@ A bridge can never be spawned with `--permission-mode bypassPermissions` unless
 the project sets `allow_bypass_permissions: true` in `clauster.yml` (the hard
 ceiling). The dashboard's per-session typed-confirm is the second layer.
 
-The `inherit` permission mode (**No forced mode** in the launch picker) does not
-sidestep that gate. It omits `--permission-mode` entirely, so the session starts in
-whatever mode it would have picked on its own — never `bypassPermissions`, which
-claude only enters when explicitly asked. The mode is still screened against the
-allowed set before any spawn, so no unrecognized string ever reaches the subprocess.
-It is also not a value this deployment can write into a project's `settings.json`
+The `inherit` permission mode (**No forced mode** in the launch picker) cannot itself
+*request* `bypassPermissions`, and Clauster refuses to write that value into any
+`settings.json` it manages. **But the caveat is structural:** because no
+`--permission-mode` flag is passed, an existing `permissions.defaultMode` in the
+project, local, or user settings file takes effect — including a `bypassPermissions`
+one that was hand-edited, committed to the repo, or enterprise-managed, which Clauster
+cannot prevent. Before `inherit` existed, the always-passed flag overrode any such
+file; with `inherit`, that file wins. On a project with
+`allow_bypass_permissions: false`, prefer an explicit mode — or audit the project's
+settings files before offering `inherit` to its operators. The mode is still screened
+against the allowed set before any spawn, so no unrecognized string ever reaches the
+subprocess, and `inherit` is not a value this deployment can write into
 `permissions.defaultMode`: it is a Clauster launch-time sentinel, not a claude mode.
 
 ## Ghost-environment reaper
