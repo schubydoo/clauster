@@ -90,6 +90,12 @@ class RemoteControlInstance(BaseModel):
     # bridge the keeper spawned and `keeper_pid` is the keeper holding its terminal.
     resume_mode: ResumeMode = "standard"
     keeper_pid: int | None = None  # PTY keeper holding the bridge's terminal ("pty" mode only)
+    # The `--worktree <name>` a spawn_mode="worktree" pty session actually runs under, when
+    # it is known EXPLICITLY rather than derived from the instance_id (#1241). Recovered
+    # from the keeper sidecar on a reattach that had to mint a fresh id, and persisted so
+    # the recovery survives the next restart too. None -> derive it (the normal case, where
+    # the instance_id is the original one). See `SessionRunner._pty_worktree_name`.
+    worktree_name: str | None = None
     status: InstanceStatus = InstanceStatus.STARTING
     intentional_stop: bool = False
     started_at: datetime | None = None

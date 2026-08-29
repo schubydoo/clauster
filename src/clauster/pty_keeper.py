@@ -60,6 +60,30 @@ _RE_CONNECT_URL = re.compile(rb"https?://claude\.ai/code/(session_[A-Za-z0-9]+)"
 _URL_TIMEOUT = 30.0
 
 
+def _worktree_from_argv(bridge_argv: list[str]) -> str | None:
+    """Return the ``--worktree <name>`` the bridge was launched with, or ``None`` (#1241).
+
+    A ``spawn_mode="worktree"`` interactive session runs in
+    ``<repo>/.claude/worktrees/<name>``, and Clauster derives ``<name>`` from the
+    instance_id. A keeper-only reattach (a live keeper found with no row whose identity
+    it can be correlated to) mints a FRESH instance_id, so that derivation stops
+    describing the worktree actually on disk — a resume would create a second one and
+    orphan the first, and the stop-time ``git worktree unlock`` would target a path that
+    does not exist. Recording it here makes the name recoverable from the sidecar, which
+    is the one artifact that outlives the restart.
+
+    Read off the argv the keeper is about to exec rather than passed as a separate flag:
+    the value is definitionally whatever the bridge runs with, so there is no second
+    source to disagree with. Returns ``None`` for the flag's absence and for a trailing
+    ``--worktree`` with no value (malformed argv is not a name).
+    """
+    try:
+        idx = bridge_argv.index("--worktree")
+    except ValueError:
+        return None
+    return bridge_argv[idx + 1] if idx + 1 < len(bridge_argv) else None
+
+
 def _write_sidecar(path: Path, data: dict[str, object]) -> None:
     """Atomically write the sidecar JSON so a polling reader never sees a partial file."""
     tmp = path.with_name(path.name + ".tmp")
@@ -300,6 +324,7 @@ def _run_keeper_conpty(
         "bridge_proc_start": None,
         "connect_url": None,
         "session_id": None,
+        "worktree_name": _worktree_from_argv(bridge_argv),
         "state": "starting",
         "error": None,
     }
@@ -418,6 +443,7 @@ def run_keeper(
         "bridge_proc_start": None,
         "connect_url": None,
         "session_id": None,
+        "worktree_name": _worktree_from_argv(bridge_argv),
         "state": "starting",
         "error": None,
     }
