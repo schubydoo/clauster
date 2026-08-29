@@ -25,9 +25,9 @@ from pathlib import Path
 from typing import Any
 
 # The 18 methods server.capabilities self-describes, in returned order.
+# server.version was removed in claustrum v1.10 to match the reference daemon.
 _METHODS = [
     "server.ping",
-    "server.version",
     "server.capabilities",
     "server.shutdown",
     "files.list",
@@ -43,6 +43,7 @@ _METHODS = [
     "process.spawn",
     "process.stdin",
     "process.kill",
+    "process.killAndWait",
     "process.reattach",
 ]
 
@@ -71,12 +72,19 @@ class FakeClaustrum:
         *,
         version: str = "fake-claustrum-0",
         support_want_pid: bool = False,
+        legacy_version: bool = False,
     ) -> None:
-        """Configure the fake; nothing listens until :meth:`start`."""
+        """Configure the fake; nothing listens until :meth:`start`.
+
+        ``legacy_version=True`` models a pre-v1.10 daemon that still serves and
+        advertises the removed ``server.version`` method; the default models the
+        v1.10 shape where only ``server.capabilities`` carries the version.
+        """
         self.socket_path = socket_path
         self.token = token
         self.version = version
         self.support_want_pid = support_want_pid
+        self.legacy_version = legacy_version
         # Introspection for assertions.
         self.spawned: list[dict[str, Any]] = []
         self.stdin_received: dict[str, bytes] = {}
@@ -235,6 +243,8 @@ class FakeClaustrum:
             if isinstance(method, str)
             else None
         )
+        if method == "server.version" and not self.legacy_version:
+            handler = None  # v1.10 removed it; only the legacy fake serves it
         if handler is None:
             if method == "server.shutdown":
                 self._safe_close(writer)  # no response, connection closes
@@ -253,6 +263,8 @@ class FakeClaustrum:
     async def _m_server_version(
         self, request_id: Any, _params: dict, writer: asyncio.StreamWriter
     ) -> None:
+        # Only reachable when legacy_version is set (gated in _dispatch); models a
+        # pre-v1.10 daemon still answering the method removed in v1.10.
         await self._reply(
             writer,
             request_id,
@@ -262,8 +274,13 @@ class FakeClaustrum:
     async def _m_server_capabilities(
         self, request_id: Any, _params: dict, writer: asyncio.StreamWriter
     ) -> None:
+        methods = list(_METHODS)
+        if self.legacy_version:
+            methods.insert(1, "server.version")  # advertised right after server.ping
         await self._reply(
-            writer, request_id, result={"version": self.version, "methods": list(_METHODS)}
+            writer,
+            request_id,
+            result={"version": self.version, "methods": methods, "features": []},
         )
 
     async def _m_process_spawn(

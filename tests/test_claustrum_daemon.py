@@ -470,11 +470,23 @@ def test_replace_blank_token_cleans_up_temp_on_replace_failure(make_daemon, monk
 
 
 async def test_custom_version_surfaced(make_daemon, monkeypatch):
-    """server.version is reflected into the daemon status."""
+    """server.capabilities' version is reflected into the daemon status."""
     monkeypatch.setenv("FAKE_CLAUSTRUM_VERSION", "fake-9.9.9")
     daemon = make_daemon()
     await daemon.ensure()
     assert daemon.status()["version"] == "fake-9.9.9"
+
+
+async def test_connect_against_legacy_daemon(make_daemon, monkeypatch):
+    """Connect succeeds against a pre-v1.10 daemon that still serves server.version."""
+    monkeypatch.setenv("FAKE_CLAUSTRUM_VERSION", "fake-1.9.0")
+    monkeypatch.setenv("FAKE_CLAUSTRUM_LEGACY_VERSION", "1")
+    daemon = make_daemon()
+    client = await daemon.ensure()
+    # clauster probes via capabilities, so the connection is identical whether or
+    # not the daemon still exposes the removed server.version method.
+    assert daemon.status()["version"] == "fake-1.9.0"
+    assert (await client.ping())["pong"] is True
 
 
 async def test_ensure_revalidates_and_recovers_dead_client(make_daemon):

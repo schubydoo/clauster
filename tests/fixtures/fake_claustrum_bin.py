@@ -5,7 +5,7 @@ Mimics the parts of ``claustrum -serve -socket <path>`` that
 :mod:`clauster.claustrum_daemon` depends on: it reads the auth token (from
 ``-token-fd`` on POSIX, or the read-then-unlinked ``-token-file`` on Windows),
 self-daemonizes, and then serves a minimal auth-gated NDJSON JSON-RPC subset
-(``server.ping`` / ``server.version`` / ``server.shutdown``).
+(``server.ping`` / ``server.capabilities`` / ``server.shutdown``).
 
 * **POSIX** — ``fork`` + ``setsid``; the launcher process exits 0 once the real
   daemon is reparented to ``init`` and serves the ``AF_UNIX`` socket.
@@ -30,7 +30,9 @@ Behaviour knobs (env vars), used to exercise the failure paths:
   daemon that comes up but never accepts a connection → poll timeout).
 * ``FAKE_CLAUSTRUM_BAD_TOKEN=1``     — the daemon serves with the wrong token, so
   every authed request is rejected (models a token mismatch after spawn).
-* ``FAKE_CLAUSTRUM_VERSION=<s>``     — the version reported by ``server.version``.
+* ``FAKE_CLAUSTRUM_VERSION=<s>``     — the version reported by ``server.capabilities``.
+* ``FAKE_CLAUSTRUM_LEGACY_VERSION=1`` — also serve + advertise the pre-v1.10
+  ``server.version`` method (models a current daemon; default off = v1.10 shape).
 """
 
 from __future__ import annotations
@@ -63,7 +65,17 @@ def _read_token(fd: int) -> str:
 
 
 def _make_handler(token: str, version: str):
-    """Build the ``(reader, writer)`` coroutine that serves the auth-gated RPC subset."""
+    """Build the ``(reader, writer)`` coroutine that serves the auth-gated RPC subset.
+
+    ``FAKE_CLAUSTRUM_LEGACY_VERSION=1`` models a pre-v1.10 daemon that still serves
+    the removed ``server.version`` method (and advertises it) alongside
+    ``server.capabilities`` — read from the env (inherited by the fork/re-exec child)
+    so it needs no signature threading.
+    """
+    legacy = os.environ.get("FAKE_CLAUSTRUM_LEGACY_VERSION") == "1"
+    methods = ["server.ping", "server.capabilities", "server.shutdown"]
+    if legacy:
+        methods.insert(1, "server.version")
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         while True:
@@ -84,7 +96,13 @@ def _make_handler(token: str, version: str):
                 }
             elif method == "server.ping":
                 resp = {"jsonrpc": "2.0", "id": rid, "result": {"pong": True}}
-            elif method == "server.version":
+            elif method == "server.capabilities":
+                resp = {
+                    "jsonrpc": "2.0",
+                    "id": rid,
+                    "result": {"version": version, "methods": list(methods), "features": []},
+                }
+            elif method == "server.version" and legacy:
                 resp = {
                     "jsonrpc": "2.0",
                     "id": rid,
