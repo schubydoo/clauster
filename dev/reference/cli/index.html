@@ -1022,6 +1022,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Headless read commands">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#reading-a-stopped-or-crashed-bridges-log" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reading a stopped or crashed bridge's log
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -1616,6 +1633,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Headless read commands">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#reading-a-stopped-or-crashed-bridges-log" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reading a stopped or crashed bridge's log
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -1929,6 +1963,32 @@ reads used to match no pattern in either half and print verbatim
 (<a href="https://github.com/schubydoo/clauster/issues/1105">#1105</a>). The practical effect is that
 a partially-written final line appears on the next poll under <code>--follow</code>, rather than
 appearing twice in pieces.</p>
+<h3 id="reading-a-stopped-or-crashed-bridges-log">Reading a stopped or crashed bridge's log<a class="headerlink" href="#reading-a-stopped-or-crashed-bridges-log" title="Permanent link">&para;</a></h3>
+<p><code>logs</code> reads a <strong>stopped, crashed, or errored</strong> bridge too, which is when you most want it — a card
+reading "Crashed — The bridge exited unexpectedly" is an invitation to go look. The persisted
+instance record carries no log path, so for a bridge that is no longer running the file is
+re-derived from the log dir: the newest <code>&lt;project&gt;-&lt;ms&gt;-&lt;seq&gt;.log</code> Clauster wrote for <strong>that
+project</strong>, and only that project
+(<a href="https://github.com/schubydoo/clauster/issues/1117">#1117</a>). Two consequences worth knowing:
+a project holding several stopped instances resolves them all to the same, newest file
+(nothing on disk binds a log to one instance id), and retention prunes a whole spawn set at
+once, so an old crash's log eventually disappears. A live bridge is unaffected — its log is
+bound when it starts.</p>
+<p>Reading is <strong>read-only</strong>: <code>logs</code> never writes, rotates, or removes the file. When there is
+nothing to read the message says which case you hit, rather than one line covering all three:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="gp">$ </span>clauster<span class="w"> </span>logs<span class="w"> </span>ghost
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="go">clauster: unknown instance 'ghost'</span>
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="gp">$ </span>clauster<span class="w"> </span>logs<span class="w"> </span>f2c456fd
+<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="go">clauster: no bridge log on disk for 'f2c456fd' (project 'alpha', stopped); none was written yet, or log retention has pruned it</span>
+</code></pre></div>
+<p>⚠️ <strong>The on-disk bridge log is verbatim unless
+<a href="../config/#logs-bridge-log-rotation-redaction-logsconfig"><code>logs.redact_session_url</code></a> is
+<code>true</code>.</strong> <code>logs</code> redacts every line on the way to your terminal, exactly as the dashboard's
+live stream does — but by default the file itself keeps the unredacted session URL and bridge
+output at rest, so an old log is as sensitive as a live one. Setting that option makes the
+bridge write its verbatim parse-source to a private <code>0600</code> <code>.raw.log</code> sibling and turns the
+public <code>.log</code> into a redacted mirror; <code>logs</code> then prefers the raw source, still redacting on
+the way out.</p>
 <h2 id="headless-write-commands">Headless write commands<a class="headerlink" href="#headless-write-commands" title="Permanent link">&para;</a></h2>
 <p>Headless <strong>write</strong> commands spawn and stop bridges through that same engine —
 identical mode policy, singleton cap, and option validation to the dashboard. Both
@@ -1944,9 +2004,9 @@ contents — a record the other process added or removed in the meantime stays
 added or removed. (On Windows the file lock is unavailable, so two <em>processes</em>
 fall back to the atomic-write + re-detect behavior; a single process is always
 fully serialized.)</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>clauster start &lt;project&gt; [--mode standard|pty] [--spawn-mode …] [--permission-mode …] \
-<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>               [--name NAME] [--sandbox default|on|off] [--trust] [--json]
-<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>clauster stop  &lt;instance&gt; [--json]        # stop a bridge by id / unique prefix / identity
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>clauster start &lt;project&gt; [--mode standard|pty] [--spawn-mode …] [--permission-mode …] \
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>               [--name NAME] [--sandbox default|on|off] [--trust] [--json]
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>clauster stop  &lt;instance&gt; [--json]        # stop a bridge by id / unique prefix / identity
 </code></pre></div>
 <p><code>&lt;instance&gt;</code> resolves the same way as for the read commands above — full id, unique
 prefix, or project name — and an ambiguous reference (a prefix, or a project name with

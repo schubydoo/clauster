@@ -2135,7 +2135,9 @@ over a WebSocket to the dashboard's live log view.</p>
   before exiting, so a <code>crashed</code> card's log tail (or the on-disk file) usually
   shows the cause. A spawn that fails outright also captures a tail of the
   bridge's stdout/stderr so the UI can show <em>why</em> instead of a bare "Failed to
-  start".</li>
+  start". <code>clauster logs &lt;instance&gt;</code> reads a dead bridge's log too, so you do not
+  have to find the file yourself — see <a href="../reference/cli/#reading-a-stopped-or-crashed-bridges-log">reading a stopped or crashed bridge's
+  log</a>.</li>
 </ul>
 <p>Bridge lifecycle states you will see on a card or in <code>clauster_bridges</code>:</p>
 <table>
