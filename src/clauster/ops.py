@@ -20,7 +20,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Literal, TypedDict
+from typing import BinaryIO, Literal, TypedDict
 from xml.sax.saxutils import escape as _xml_escape
 
 import yaml
@@ -282,6 +282,140 @@ def resolve_configured_binary(key: str, config: ClausterConfig) -> str | None:
     return shutil.which(key)
 
 
+# Every Go binary carries a self-describing build-info blob the linker writes: a 32-byte
+# header (a 14-byte magic, the pointer size, a flags byte, then padding) followed — since Go
+# 1.18, signalled by flag bit 0x2 — by two varint-length-prefixed strings, the toolchain
+# version and the module table. The table is wrapped in a 16-byte sentinel on each side and
+# holds tab-separated ``path`` / ``mod`` / ``dep`` / ``build`` lines. We locate the blob by
+# scanning for the magic rather than walking ELF/Mach-O/PE section tables, which keeps the
+# reader short and format-agnostic (#1087). The pre-1.18 pointer-addressed layout needs the
+# section tables to translate addresses and is deliberately not supported: it reads as "no
+# answer", never as a wrong answer.
+_GO_BUILDINFO_MAGIC = b"\xff Go buildinf:"
+_GO_BUILDINFO_FLAGS_OFFSET = 15
+_GO_BUILDINFO_INLINE_STRINGS = 0x2
+_GO_BUILDINFO_STRINGS_OFFSET = 32
+_GO_BUILDINFO_MOD_SENTINEL = 16
+_GO_BUILDINFO_SCAN_CHUNK = 1 << 20
+_GO_BUILDINFO_MAX_BLOB = 1 << 20
+
+
+def _read_uvarint(blob: bytes, pos: int) -> tuple[int, int]:
+    """Decode the Go varint at ``pos``; return ``(value, next position)``.
+
+    Raises ``IndexError`` past the end of ``blob`` and ``ValueError`` on a varint too long to
+    be a real length — both signal a malformed blob and are the caller's to turn into "no
+    answer" rather than a crash.
+    """
+    value = shift = 0
+    while True:
+        byte = blob[pos]
+        pos += 1
+        value |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return value, pos
+        shift += 7
+        if shift >= 64:
+            raise ValueError("buildinfo varint too long")
+
+
+def _read_go_string(blob: bytes, pos: int) -> tuple[bytes, int]:
+    """Read one varint-length-prefixed buildinfo string; return ``(bytes, next position)``."""
+    length, pos = _read_uvarint(blob, pos)
+    end = pos + length
+    if end > len(blob):
+        raise ValueError("buildinfo string truncated")
+    return blob[pos:end], end
+
+
+def _find_go_buildinfo(fh: BinaryIO) -> bytes | None:
+    """Return the buildinfo blob from an open binary, or ``None`` if the magic isn't present.
+
+    Scans in bounded chunks (carrying a magic-sized overlap so a straddling match is still
+    found) so a large executable never has to be held in memory, then re-reads a capped window
+    starting at the magic — enough for the toolchain string and the whole module table.
+    """
+    overlap = len(_GO_BUILDINFO_MAGIC) - 1
+    carry = b""
+    chunk_start = 0
+    while True:
+        chunk = fh.read(_GO_BUILDINFO_SCAN_CHUNK)
+        if not chunk:
+            return None
+        window = carry + chunk
+        found = window.find(_GO_BUILDINFO_MAGIC)
+        if found >= 0:
+            fh.seek(chunk_start - len(carry) + found)
+            return fh.read(_GO_BUILDINFO_MAX_BLOB)
+        chunk_start += len(chunk)
+        carry = window[-overlap:]
+
+
+def _go_main_module(binary: str) -> tuple[str, str] | None:
+    """Return ``(module path, version)`` from ``binary``'s embedded Go buildinfo, else ``None``.
+
+    ``None`` for anything we cannot read *definitively*: a non-Go or unreadable file, a
+    non-regular file (a device or FIFO an operator-configured path could point at — we must
+    not block doctor on a read that never returns), the pre-1.18 pointer-addressed layout, or
+    a blob whose framing doesn't hold up. Degrading to "unknown" is the whole contract here:
+    doctor's caller already has a visible advisory for the unknown case.
+    """
+    path = Path(binary)
+    if not path.is_file():
+        return None
+    try:
+        with path.open("rb") as fh:
+            blob = _find_go_buildinfo(fh)
+        if blob is None or len(blob) <= _GO_BUILDINFO_STRINGS_OFFSET:
+            return None
+        flags = blob[_GO_BUILDINFO_FLAGS_OFFSET]
+        if flags & _GO_BUILDINFO_INLINE_STRINGS != _GO_BUILDINFO_INLINE_STRINGS:
+            return None
+        _toolchain, pos = _read_go_string(blob, _GO_BUILDINFO_STRINGS_OFFSET)
+        table, _pos = _read_go_string(blob, pos)
+        # Go's own validity test for "the module table is present": long enough to hold both
+        # sentinels plus content, and a newline immediately before the closing sentinel.
+        sentinels = 2 * _GO_BUILDINFO_MOD_SENTINEL
+        if len(table) < sentinels + 1 or table[-_GO_BUILDINFO_MOD_SENTINEL - 1] != 0x0A:
+            return None
+        body = table[_GO_BUILDINFO_MOD_SENTINEL:-_GO_BUILDINFO_MOD_SENTINEL].decode()
+    except (OSError, ValueError, IndexError):
+        return None
+    for line in body.splitlines():
+        fields = line.split("\t")
+        if fields[0] == "mod" and len(fields) >= 3:
+            return fields[1], fields[2]
+    return None
+
+
+def _claustrum_embedded_version(binary: str) -> str | None:
+    """Return claustrum's module version from its Go buildinfo, or ``None`` (#1087).
+
+    ``go install github.com/schubydoo/claustrum@latest`` skips the release ldflags, so the
+    binary keeps its ``claustrum-dev`` sentinel and ``--version`` structurally cannot report
+    which release it is — but Go embeds the module version regardless. Read that instead of
+    shrugging.
+
+    Two guards keep a fallback from turning into a confident wrong answer: the main module's
+    last path segment must be ``claustrum`` (so a mis-configured ``claustrum.binary`` pointing
+    at some other Go program reports unknown, not that program's version), and the version must
+    be a plain **release** ``vX.Y.Z`` — nothing else. A source build records ``(devel)``, and a
+    commit build records a *pseudo-version* (``v1.9.0-0.<timestamp>-<hash>`` denotes a commit
+    **before** the v1.9.0 release), which ``_version_ge``'s numeric comparison would read as
+    clearing a ``v1.9.0`` floor. Neither is an answer; both fall back to the honest advisory.
+    """
+    main = _go_main_module(binary)
+    if main is None:
+        return None
+    module, version = main
+    if module.rsplit("/", 1)[-1] != "claustrum":
+        return None
+    parts = version[1:].split(".") if version.startswith("v") else []
+    if len(parts) != 3 or not all(p.isdigit() for p in parts):
+        return None
+    return version
+
+
 def _claustrum_version(binary: str) -> str:
     """Return the version token from ``<binary> --version`` (e.g. ``v1.7.1`` / ``claustrum-dev``).
 
@@ -310,20 +444,46 @@ def _check_claustrum_version(resolved: str) -> Check:
     """Advisory version check for a resolved claustrum binary (#1013 Bug 3-4).
 
     Reports the detected version and WARNs — never FAILs — when it can't be confirmed at or
-    above the pinned floor (an unstamped/dev build parses below any floor; an older release is
-    under it). A ``--version`` probe that errors is itself a WARN, not a doctor failure. This is
-    deliberately advisory: an older or unstamped daemon may work fine, and a hard floor would
-    flag the common ``go install …@latest`` / local dev build.
+    above the pinned floor. A ``--version`` probe that errors is itself a WARN, not a doctor
+    failure. This is deliberately advisory: an older or unstamped daemon may work fine, and a
+    hard floor would flag the common ``go install …@latest`` / local dev build.
+
+    When ``--version`` can't confirm the floor — the unstamped ``claustrum-dev`` sentinel every
+    ``go install`` build carries, an unparseable token, or a probe that failed — the embedded Go
+    module version is consulted (#1087). That turns "unstamped/dev **or** older build" from one
+    indistinguishable shrug into a definite statement of which release is installed. If it too
+    yields nothing, the original advisory stands.
     """
     floor = deps.claustrum_pinned_version()
+    version, probe_error = "", ""
     try:
         version = _claustrum_version(resolved)
     except (OSError, subprocess.SubprocessError) as exc:
-        return Check(
-            "binary:claustrum", WARN, f"claustrum available but `--version` failed: {exc}"
-        )
+        probe_error = str(exc)
     if version and _version_ge(version, floor):
         return Check("binary:claustrum", OK, f"claustrum {version} available (>= {floor})")
+    embedded = _claustrum_embedded_version(resolved)
+    if embedded is not None:
+        stamp = version or "nothing"
+        if _version_ge(embedded, floor):
+            return Check(
+                "binary:claustrum",
+                OK,
+                f"claustrum {embedded} available (>= {floor}) — module version read from Go "
+                f"buildinfo (`--version` reports {stamp})",
+            )
+        return Check(
+            "binary:claustrum",
+            WARN,
+            f"claustrum {embedded} < required {floor} (module version read from Go buildinfo; "
+            f"`--version` reports {stamp}) — install the signed release binary from "
+            f"github.com/schubydoo/claustrum/releases, or "
+            f"`go install github.com/schubydoo/claustrum@latest`",
+        )
+    if probe_error:
+        return Check(
+            "binary:claustrum", WARN, f"claustrum available but `--version` failed: {probe_error}"
+        )
     return Check(
         "binary:claustrum",
         WARN,

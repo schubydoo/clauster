@@ -1656,6 +1656,226 @@ def test_check_claustrum_version_warns_on_probe_error(monkeypatch):
     assert c.status == WARN and "version" in c.detail.lower()
 
 
+# ----- Go buildinfo fallback for the claustrum version (#1087) -----------
+#
+# Fixtures are crafted bytes, not a real Go toolchain: the blob layout is a stable published
+# format, and a build-time dependency on `go` would make these tests unrunnable in CI.
+
+_MOD_SENTINEL_START = bytes.fromhex("3077af0c9274080241e1c107e6d618e6")
+_MOD_SENTINEL_END = bytes.fromhex("f932433186182072008242104116d8f2")
+
+
+def _uvarint(n):
+    out = bytearray()
+    while True:
+        chunk = n & 0x7F
+        n >>= 7
+        out.append(chunk | 0x80 if n else chunk)
+        if not n:
+            return bytes(out)
+
+
+_DEFAULT_MOD_LINES = (
+    "path\tgithub.com/schubydoo/claustrum",
+    "mod\tgithub.com/schubydoo/claustrum\tv1.3.1\t",
+    "build\t-buildmode=exe",
+)
+
+
+def _go_binary(
+    tmp_path,
+    lines=_DEFAULT_MOD_LINES,
+    *,
+    name="claustrum",
+    flags=0x02,
+    toolchain=b"go1.26.7",
+    lead=b"\x7fELF" + b"\x00" * 512,
+    framed=True,
+    truncate=None,
+):
+    """Write a fake Go executable carrying a buildinfo blob and return its path as a str."""
+    body = ("\n".join(lines) + "\n").encode() if lines else b""
+    table = _MOD_SENTINEL_START + body + _MOD_SENTINEL_END if framed else body
+    header = b"\xff Go buildinf:" + bytes([8, flags]) + b"\x00" * 16
+    blob = header + _uvarint(len(toolchain)) + toolchain + _uvarint(len(table)) + table
+    raw = lead + blob + b"\x00" * 32
+    path = tmp_path / name
+    path.write_bytes(raw if truncate is None else raw[:truncate])
+    return str(path)
+
+
+def test_go_main_module_reads_module_path_and_version(tmp_path):
+    from clauster import ops
+
+    assert ops._go_main_module(_go_binary(tmp_path)) == (
+        "github.com/schubydoo/claustrum",
+        "v1.3.1",
+    )
+
+
+def test_claustrum_embedded_version_reads_go_buildinfo(tmp_path):
+    from clauster import ops
+
+    assert ops._claustrum_embedded_version(_go_binary(tmp_path)) == "v1.3.1"
+
+
+def test_claustrum_embedded_version_finds_magic_straddling_a_scan_chunk(tmp_path, monkeypatch):
+    # The chunked scan carries a magic-sized overlap; shrink the chunk so the blob spans one.
+    from clauster import ops
+
+    monkeypatch.setattr(ops, "_GO_BUILDINFO_SCAN_CHUNK", 16)
+    assert ops._claustrum_embedded_version(_go_binary(tmp_path)) == "v1.3.1"
+
+
+def test_claustrum_embedded_version_none_for_non_go_file(tmp_path):
+    from clauster import ops
+
+    plain = tmp_path / "claustrum"
+    plain.write_bytes(b"\x7fELF" + b"\x11" * 4096)
+    assert ops._claustrum_embedded_version(str(plain)) is None
+
+
+def test_claustrum_embedded_version_none_for_missing_or_non_regular_path(tmp_path):
+    # A directory stands in for the class doctor must never block on (device/FIFO/absent).
+    from clauster import ops
+
+    assert ops._claustrum_embedded_version(str(tmp_path / "nope")) is None
+    assert ops._claustrum_embedded_version(str(tmp_path)) is None
+
+
+def test_claustrum_embedded_version_none_for_pre_go118_pointer_layout(tmp_path):
+    from clauster import ops
+
+    assert ops._claustrum_embedded_version(_go_binary(tmp_path, flags=0x00)) is None
+
+
+def test_claustrum_embedded_version_none_for_unframed_module_table(tmp_path):
+    from clauster import ops
+
+    assert ops._claustrum_embedded_version(_go_binary(tmp_path, framed=False)) is None
+
+
+def test_claustrum_embedded_version_none_when_module_body_lacks_trailing_newline(tmp_path):
+    from clauster import ops
+
+    body = b"mod\tgithub.com/schubydoo/claustrum\tv1.3.1\t" + b"x" * 8
+    table = _MOD_SENTINEL_START + body + _MOD_SENTINEL_END
+    header = b"\xff Go buildinf:" + bytes([8, 0x02]) + b"\x00" * 16
+    blob = header + _uvarint(8) + b"go1.26.7" + _uvarint(len(table)) + table
+    path = tmp_path / "claustrum"
+    path.write_bytes(blob)
+    assert ops._claustrum_embedded_version(str(path)) is None
+
+
+def test_claustrum_embedded_version_none_for_truncated_blob(tmp_path):
+    from clauster import ops
+
+    full = _go_binary(tmp_path, name="full")
+    truncated = _go_binary(tmp_path, truncate=len(Path(full).read_bytes()) - 40)
+    assert ops._claustrum_embedded_version(truncated) is None
+
+
+def test_claustrum_embedded_version_none_for_runaway_varint(tmp_path):
+    from clauster import ops
+
+    header = b"\xff Go buildinf:" + bytes([8, 0x02]) + b"\x00" * 16
+    path = tmp_path / "claustrum"
+    path.write_bytes(header + b"\xff" * 64)
+    assert ops._claustrum_embedded_version(str(path)) is None
+
+
+def test_claustrum_embedded_version_none_for_a_different_go_program(tmp_path):
+    # A mis-configured claustrum.binary pointing at some other Go tool must read as unknown,
+    # never as that tool's version dressed up as claustrum's.
+    from clauster import ops
+
+    other = _go_binary(tmp_path, ("mod\tgithub.com/cli/cli/v2\tv2.98.0\t",))
+    assert ops._go_main_module(other) == ("github.com/cli/cli/v2", "v2.98.0")
+    assert ops._claustrum_embedded_version(other) is None
+
+
+def test_claustrum_embedded_version_none_for_devel_source_build(tmp_path):
+    from clauster import ops
+
+    devel = _go_binary(tmp_path, ("mod\tgithub.com/schubydoo/claustrum\t(devel)\t",))
+    assert ops._claustrum_embedded_version(devel) is None
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        # A pseudo-version denotes a COMMIT, not a release — v1.9.0-0.<ts>-<hash> is a
+        # commit BEFORE the v1.9.0 release, and _version_ge's numeric comparison would
+        # read it as clearing a v1.9.0 floor. Not an answer.
+        "v1.9.0-0.20260828023803-f0b3a9c00742",
+        "v1.9.1-0.20260828023803-f0b3a9c00742",
+        "v1.9.0-rc.1",  # any prerelease: same class
+        "v1.9",  # not a full release triple
+        "v1.9.0.4",  # not a semver release shape either
+    ],
+)
+def test_claustrum_embedded_version_none_for_non_release_versions(tmp_path, version):
+    from clauster import ops
+
+    binary = _go_binary(tmp_path, (f"mod\tgithub.com/schubydoo/claustrum\t{version}\t",))
+    assert ops._claustrum_embedded_version(binary) is None
+
+
+def test_claustrum_embedded_version_none_when_module_table_has_no_mod_line(tmp_path):
+    from clauster import ops
+
+    no_mod = _go_binary(tmp_path, ("build\t-buildmode=exe",))
+    assert ops._claustrum_embedded_version(no_mod) is None
+
+
+def test_check_claustrum_version_names_the_release_behind_a_dev_stamp(tmp_path, monkeypatch):
+    # The #1087 headline case: `go install` leaves the dev sentinel, and buildinfo turns
+    # "unstamped/dev or older build" into a definite "v1.3.1 is below the floor".
+    from clauster import ops
+
+    monkeypatch.setattr(ops, "_claustrum_version", lambda binary: "claustrum-dev")
+    monkeypatch.setattr(ops.deps, "claustrum_pinned_version", lambda: "v1.7.1")
+    c = ops._check_claustrum_version(_go_binary(tmp_path))
+    assert c.status == WARN
+    assert "v1.3.1 < required v1.7.1" in c.detail
+    assert "buildinfo" in c.detail and "claustrum-dev" in c.detail
+    assert "could not confirm" not in c.detail
+
+
+def test_check_claustrum_version_ok_when_buildinfo_clears_the_floor(tmp_path, monkeypatch):
+    from clauster import ops
+
+    monkeypatch.setattr(ops, "_claustrum_version", lambda binary: "claustrum-dev")
+    monkeypatch.setattr(ops.deps, "claustrum_pinned_version", lambda: "v1.0.0")
+    c = ops._check_claustrum_version(_go_binary(tmp_path))
+    assert c.status == OK and "v1.3.1 available (>= v1.0.0)" in c.detail
+    assert "buildinfo" in c.detail
+
+
+def test_check_claustrum_version_falls_back_to_buildinfo_when_probe_errors(tmp_path, monkeypatch):
+    from clauster import ops
+
+    def _boom(binary):
+        raise OSError("no such file")
+
+    monkeypatch.setattr(ops, "_claustrum_version", _boom)
+    monkeypatch.setattr(ops.deps, "claustrum_pinned_version", lambda: "v1.7.1")
+    c = ops._check_claustrum_version(_go_binary(tmp_path))
+    assert c.status == WARN and "v1.3.1 < required v1.7.1" in c.detail
+    assert "reports nothing" in c.detail
+
+
+def test_check_claustrum_version_keeps_the_old_advisory_without_buildinfo(tmp_path, monkeypatch):
+    # No readable buildinfo -> the pre-#1087 shrug is still what an operator sees.
+    from clauster import ops
+
+    plain = tmp_path / "claustrum"
+    plain.write_bytes(b"not a go binary")
+    monkeypatch.setattr(ops, "_claustrum_version", lambda binary: "claustrum-dev")
+    c = ops._check_claustrum_version(str(plain))
+    assert c.status == WARN and "could not confirm" in c.detail
+
+
 def _managed_shawl(tmp_path):
     """Create a managed shawl.exe under <tmp_path>/deps/bin and return its Path."""
     from clauster import ops
