@@ -37,11 +37,6 @@ from pathlib import Path
 
 from . import atomicio
 
-try:
-    import fcntl  # POSIX only; Windows has no flock equivalent we rely on here.
-except ImportError:
-    fcntl = None  # type: ignore[assignment]
-
 _log = logging.getLogger("clauster.claude_json")
 
 
@@ -58,32 +53,32 @@ def _is_posix() -> bool:
 def _locked(claude_json: Path) -> Iterator[None]:
     """Hold an exclusive advisory lock for a read-modify-write of ``claude_json``.
 
-    An **in-process lock** (:func:`atomicio.inproc_path_lock`) serializes THIS process's
-    own concurrent writers of the same file on every OS — the primary guard on Windows,
-    where ``fcntl.flock`` is unavailable. On POSIX an advisory ``flock`` is *additionally*
-    taken via a sidecar ``<file>.lock`` (never the target itself — ``os.replace`` swaps the
-    inode, orphaning a lock held on the old one), which also serializes *other processes*.
-    Where ``fcntl`` is unavailable (Windows) or the lock file can't be opened, only the
-    in-process lock applies and the atomic replace still prevents a torn file. (Neither lock
-    coordinates with the ``claude`` CLI, which takes no lock — that's the atomic replace +
-    the caller's external-edit hash guard's job.)
+    Two layers, taken in the project-wide order (in-process first, cross-process second,
+    so these writers can never deadlock against the CLAUDE.md / config-file ones):
+
+    * :func:`atomicio.inproc_path_lock` serializes THIS process's own concurrent writers
+      of the same file on every OS — the only guard on Windows, where ``fcntl.flock`` is
+      unavailable.
+    * :func:`atomicio.cross_process_lock` adds the POSIX advisory ``flock`` that also
+      serializes *other* clauster processes. Its lock file lives in the deployment state
+      dir (:func:`atomicio.configure_lock_dir`), keyed by the target's realpath — the same
+      primitive the CLAUDE.md and config-file writers already use (#915). It is
+      deliberately NOT a ``<file>.lock`` sidecar beside the target: for a project
+      ``.claude/settings.json`` or ``.mcp.json`` that artifact landed inside the user's
+      git-tracked tree (#1171). The lock file is never unlinked — deleting it is the
+      ``flock``+``unlink`` inode race the pattern exists to avoid.
+
+    Keying by the state dir narrows the cross-process guarantee to ONE deployment: two
+    clauster deployments with different ``state_dir``s writing the same file no longer
+    mutually exclude (the accepted #915 trade-off — clauster is single-deployment by
+    design). Where no lock dir is configured the flock is skipped with a one-time WARNING
+    — degraded loudly, never silently — and the in-process lock still holds. Neither case
+    can corrupt the file: the atomic replace in :func:`_atomic_write_json` is independent
+    of the lock. (Neither lock coordinates with the ``claude`` CLI, which takes no lock —
+    that's the atomic replace + the caller's external-edit hash guard's job.)
     """
-    with atomicio.inproc_path_lock(claude_json):
-        if fcntl is None:
-            yield
-            return
-        lock_path = claude_json.with_suffix(claude_json.suffix + ".lock")  # pragma: skip-on-win
-        try:  # pragma: skip-on-win
-            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-        except OSError as exc:  # pragma: skip-on-win
-            _log.warning("could not open %s; proceeding without a lock: %s", lock_path, exc)
-            yield
-            return
-        try:  # pragma: skip-on-win
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            yield
-        finally:  # pragma: skip-on-win
-            os.close(fd)  # implicitly releases the flock
+    with atomicio.inproc_path_lock(claude_json), atomicio.cross_process_lock(claude_json):
+        yield
 
 
 def _read_claude_json(claude_json: Path) -> tuple[str | None, dict]:
