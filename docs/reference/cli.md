@@ -246,6 +246,38 @@ reads used to match no pattern in either half and print verbatim
 a partially-written final line appears on the next poll under `--follow`, rather than
 appearing twice in pieces.
 
+### Reading a stopped or crashed bridge's log
+
+`logs` reads a **stopped or crashed** bridge too, which is when you most want it — a card
+reading "Crashed — The bridge exited unexpectedly" is an invitation to go look. The persisted
+instance record carries no log path, so for a bridge that is no longer running the file is
+re-derived from the log dir: the newest `<project>-<ms>-<seq>.log` Clauster wrote for **that
+project**, and only that project
+([#1117](https://github.com/schubydoo/clauster/issues/1117)). Two consequences worth knowing:
+a project holding several stopped instances resolves them all to the same, newest file
+(nothing on disk binds a log to one instance id), and retention prunes a whole spawn set at
+once, so an old crash's log eventually disappears. A live bridge is unaffected — its log is
+bound when it starts.
+
+Reading is **read-only**: `logs` never writes, rotates, or removes the file. When there is
+nothing to read the message says which case you hit, rather than one line covering all three:
+
+```console
+$ clauster logs ghost
+clauster: unknown instance 'ghost'
+$ clauster logs f2c456fd
+clauster: no bridge log on disk for 'f2c456fd' (project 'alpha', stopped); none was written yet, or log retention has pruned it
+```
+
+⚠️ **The on-disk bridge log is verbatim unless
+[`logs.redact_session_url`](config.md#logs-bridge-log-rotation-redaction-logsconfig) is
+`true`.** `logs` redacts every line on the way to your terminal, exactly as the dashboard's
+live stream does — but by default the file itself keeps the unredacted session URL and bridge
+output at rest, so an old log is as sensitive as a live one. Setting that option makes the
+bridge write its verbatim parse-source to a private `0600` `.raw.log` sibling and turns the
+public `.log` into a redacted mirror; `logs` then prefers the raw source, still redacting on
+the way out.
+
 ## Headless write commands
 
 Headless **write** commands spawn and stop bridges through that same engine —

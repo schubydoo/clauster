@@ -48,6 +48,9 @@ class _FakeRunner:
         # lets a test drive the standard-singleton-cap decline (#1148).
         self.resume_detailed_outcome = None
         self.trusted: list[str] = []
+        # #1117: what `archived_log_path` hands back, and the ids it was asked about.
+        self.archived: Path | None = None
+        self.archived_asked: list[str] = []
 
     def list_instances(self) -> list[RemoteControlInstance]:
         return list(self._instances.values())
@@ -66,6 +69,11 @@ class _FakeRunner:
 
     def get_instance(self, instance_id: str) -> RemoteControlInstance | None:
         return self._instances.get(instance_id)
+
+    def archived_log_path(self, instance: RemoteControlInstance) -> Path | None:
+        # #1117 fallback for a dead card with no bound log; records who asked.
+        self.archived_asked.append(instance.instance_id)
+        return self.archived
 
     async def rediscover(self, *, persist: bool = True) -> None:
         self.rediscovered += 1
@@ -337,6 +345,22 @@ def test_bridge_log_path_prefers_raw_then_debug(tmp_path, projects_root):
     assert engine.bridge_log_path("dbg") == tmp_path / "d.log"
     assert engine.bridge_log_path("none") is None
     assert engine.bridge_log_path("unknown") is None
+    # A bound path short-circuits the #1117 fallback — the live tail is never re-derived.
+    assert runner.archived_asked == ["none"]
+
+
+def test_bridge_log_path_falls_back_to_the_archived_log_for_a_dead_card(tmp_path, projects_root):
+    # #1117: a stopped/crashed instance restored from persistence carries neither path (the
+    # row has no log-path column), so without this its still-on-disk log was unreadable.
+    dead = RemoteControlInstance(instance_id="dead", project="alpha", label="alpha")
+    runner = _FakeRunner(claude_json=tmp_path / "claude.json", instances=[dead])
+    runner.archived = tmp_path / "alpha-1700000000000-0.log"
+    engine = _engine(tmp_path, projects_root, runner)
+
+    assert engine.bridge_log_path("dead") == tmp_path / "alpha-1700000000000-0.log"
+    # An unknown id never reaches the runner — there is no instance to derive a project from.
+    assert engine.bridge_log_path("unknown") is None
+    assert runner.archived_asked == ["dead"]
 
 
 # -- read_log_lines: offset advance + redaction --------------------------------

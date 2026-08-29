@@ -138,17 +138,38 @@ def _log_read_error(path: Path) -> str | None:
         return exc.strerror or str(exc)
 
 
+def _no_log_message(engine: ClausterEngine, identity: str) -> str:
+    """Say WHY there is no log to tail: ambiguous id, unknown id, or nothing on disk (#1117).
+
+    One sentence used to cover all three ("unknown instance or no log yet"), so an operator
+    could not tell a mistyped id from a real instance whose log retention had pruned — the
+    two need opposite next actions. Resolving the instance separates them: a resolved
+    record names its project and status, an unresolved one is simply unknown.
+    """
+    if (ambiguous := ambiguous_id_message(engine, identity)) is not None:
+        return ambiguous
+    instance = engine.resolve_instance(identity)
+    if instance is None:
+        return f"clauster: unknown instance {identity!r}"
+    return (
+        f"clauster: no bridge log on disk for {identity!r} "
+        f"(project {instance.project!r}, {instance.status.value}); "
+        "none was written yet, or log retention has pruned it"
+    )
+
+
 def cmd_logs(config: ClausterConfig, identity: str, *, follow: bool) -> int:
-    """Tail a bridge's redacted log; ``--follow`` streams new lines until interrupted."""
+    """Tail a bridge's redacted log; ``--follow`` streams new lines until interrupted.
+
+    Reads the log **read-only**, and a stopped or crashed bridge resolves to its
+    still-on-disk log rather than being refused (#1117) — see
+    :meth:`~clauster.engine.ClausterEngine.bridge_log_path`.
+    """
     with ClausterEngine(config) as engine:
         asyncio.run(engine.hydrate())  # populate the registry so the id resolves
         path = engine.bridge_log_path(identity)
         if path is None:
-            print(
-                ambiguous_id_message(engine, identity)
-                or f"clauster: no bridge log for {identity!r} (unknown instance or no log yet)",
-                file=sys.stderr,
-            )
+            print(_no_log_message(engine, identity), file=sys.stderr)
             return 2
         if (err := _log_read_error(path)) is not None:
             print(
