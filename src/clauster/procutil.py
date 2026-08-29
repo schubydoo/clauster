@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -422,6 +423,117 @@ def bridge_ancestor(pid: int, *, max_depth: int = _MAX_BRIDGE_ANCESTRY) -> int |
         if parent is None or parent.pid <= 1:
             return None
         proc = parent
+    return None
+
+
+# The native `claude` installer keeps every downloaded release at
+# `…/claude/versions/<version>` and points the launcher on PATH at one of them by SYMLINK,
+# so a process exec'd from it carries the versioned path in its `exe` (and, for a worker
+# the bridge re-execs, in `argv[0]`). Both anchors below are load-bearing:
+#
+#   * `claude/` as the PARENT of `versions/` is what makes the match specific. A bare
+#     `versions/<x>` is the layout pyenv, nvm AND rbenv all use, and a bridge's process
+#     tree really does carry such paths — a `…/.nvm/versions/node/v24.19.0/bin/…` language
+#     server was a direct grandchild of a live bridge on the dogfood host. Matching one of
+#     those would put a confidently WRONG release on the card, which is the single outcome
+#     #1275 rules out ("show nothing rather than a wrong value").
+#   * the segment after `versions/` must itself look like a release number, so a
+#     `versions/node/…` style layout is rejected rather than rendered verbatim.
+_CLAUDE_VERSIONS_PARENT = "claude"
+_CLAUDE_VERSIONS_DIR = "versions"
+_CLAUDE_VERSION_RE = re.compile(r"\d+\.\d+(?:\.\d+)*(?:[-+][0-9A-Za-z.-]+)?")
+# Split on BOTH separators rather than `os.sep`: the string being parsed is a path read out
+# of ANOTHER process, and a Windows host yields backslashes regardless of our own platform.
+_PATH_SPLIT_RE = re.compile(r"[\\/]+")
+
+
+def parse_claude_version(path: str | None) -> str | None:
+    """Extract the release from a versioned ``claude`` binary path, else ``None`` (#1275).
+
+    Recognises only the native installer's ``…/claude/versions/<version>`` layout (see the
+    module constants above for why both path anchors are required). An npm/global install,
+    an unrecognised layout, or another version manager's ``versions/`` directory all return
+    ``None`` — this feeds a dashboard label, and a blank label is honest where a guess is not.
+    """
+    if not path:
+        return None
+    parts = [p for p in _PATH_SPLIT_RE.split(path) if p]
+    lowered = [p.lower() for p in parts]
+    # Needs a segment BEFORE (the `claude/` parent) and AFTER (the version) `versions/`.
+    for idx in range(1, len(parts) - 1):
+        if (
+            lowered[idx] == _CLAUDE_VERSIONS_DIR
+            and lowered[idx - 1] == _CLAUDE_VERSIONS_PARENT
+            and _CLAUDE_VERSION_RE.fullmatch(parts[idx + 1])
+        ):
+            return parts[idx + 1]
+    return None
+
+
+def _proc_claude_version(proc: psutil.Process) -> str | None:
+    """Release carried by one process's own ``exe``/``argv[0]``, else ``None``.
+
+    ``exe`` first because it is RESOLVED: the launcher on PATH is a symlink, so
+    ``argv[0]`` is typically the unversioned ``…/bin/claude`` while ``exe`` is the
+    versioned target the process actually runs. Fails closed on every psutil error —
+    a process we cannot read reports no version rather than raising into a poll tick.
+    """
+    try:
+        exe: str | None = proc.exe()
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+        exe = None
+    version = parse_claude_version(exe)
+    if version:
+        return version
+    try:
+        cmdline = proc.cmdline()
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+        return None
+    return parse_claude_version(cmdline[0]) if cmdline else None
+
+
+def running_claude_version(pid: int) -> str | None:
+    """Best-effort ``claude`` release that a live bridge ``pid`` is running (#1275).
+
+    Read-only process introspection — it observes the tree and mutates nothing (invariant 5).
+
+    Asks the BRIDGE PROCESS ITSELF first. On the native install layout the bridge is exec'd
+    straight from the versioned binary (``~/.local/bin/claude`` is a symlink into
+    ``versions/``), so one ``exe`` read answers for BOTH bridge modes — the standard
+    ``remote-control`` subcommand and the pty ``--remote-control`` flag form under a keeper —
+    without depending on either one's distinct process shape. Verified against a live bridge
+    and its worker on the dogfood host: both resolve to ``…/claude/versions/2.1.251``.
+
+    Only if that yields nothing does it fall back to the bridge's DIRECT children, which is
+    the route #1275 measured: a standard bridge's SDK worker execs
+    ``…/claude/versions/<version> --print --sdk-url …``, so the version is in its ``argv[0]``
+    even on a layout whose launcher is a wrapper rather than the versioned binary itself.
+    Direct children only, never the recursive tree — a bridge's descendants include language
+    servers and tools carrying OTHER version managers' paths, and widening the walk only adds
+    chances to match one of those.
+
+    The child ``comm`` name #1275 lists as a last resort is deliberately NOT consulted:
+    ``exe`` is readable on the same terms, is not truncated at 15 characters, and is not
+    platform-dependent in its naming, so it strictly dominates.
+
+    Returns ``None`` — never a stale or guessed value — for a dead/denied/unreadable process
+    and for any install layout the parse doesn't recognise.
+    """
+    try:
+        proc = psutil.Process(pid)
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, ValueError):
+        return None
+    version = _proc_claude_version(proc)
+    if version:
+        return version
+    try:
+        children = proc.children()
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        return None
+    for child in children:
+        version = _proc_claude_version(child)
+        if version:
+            return version
     return None
 
 

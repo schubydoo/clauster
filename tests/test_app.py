@@ -1503,6 +1503,27 @@ def test_dashboard_multi_session_client_plumbing(write_config):
     assert "delete this._byId[body.project];" in page
 
 
+def test_dashboard_live_bridge_row_shows_the_running_claude_version(write_config):
+    """The live bridge card carries an instance-keyed `claude` version label (#1275).
+
+    Guarded on the value itself, so a bridge whose version could not be resolved renders
+    nothing rather than an "unknown" placeholder — and bound to `i.claude_version` rather
+    than to the project, since co-located bridges can run different releases (#1109).
+    """
+    page = _client(write_config).get("/").text
+    assert 'data-test="bridge-claude-version"' in page
+    assert 'x-show="i.claude_version"' in page
+    # The label reads on its own ("claude 2.1.251"), so the meaning survives without the
+    # tooltip — a `title` never fires on touch and a non-interactive span can't be focused,
+    # which would leave a bare "v2.1.251" adrift for keyboard and screen-reader users.
+    # The ternary keeps `textContent` EMPTY (not "claude null") while the row is hidden, so
+    # the data-test hook can't hand an E2E assertion a version that isn't there.
+    assert "x-text=\"i.claude_version ? 'claude ' + i.claude_version : ''\"" in page
+    # The LIVE loop only. A stopped bridge has no running process to report a version for,
+    # so a Recent-zone copy of this label could only ever show a stale one.
+    assert page.count('data-test="bridge-claude-version"') == 1
+
+
 def test_dashboard_never_keys_bridge_rows_by_project(write_config):
     """No SERVER row may be keyed by project name (#1143).
 

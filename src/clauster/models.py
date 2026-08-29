@@ -102,6 +102,13 @@ class RemoteControlInstance(BaseModel):
     # Tail of the bridge's stdout/stderr, captured when a spawn fails (ERROR/CRASHED)
     # so the UI can show *why* instead of a bare "Failed to start". None on success.
     error_detail: str | None = None
+    # The `claude` release the bridge PROCESS is running (#1275) — read off the live process
+    # tree by `procutil.running_claude_version` on every liveness poll, and cleared the tick
+    # a bridge stops. Deliberately NOT persisted (`SessionRunner._persist_subset` builds its
+    # rows field-by-field): a version is only true of a process that exists right now, so a
+    # restart must re-observe it rather than revive a value from state.json. `None` whenever
+    # it can't be resolved — the card then shows nothing rather than a stale guess.
+    claude_version: str | None = None
 
     # --- hosted channel (CL-4) ------------------------------------------------
     # Orthogonal axis to resume_mode: "hosted" sessions (Direct Session) run a headless
