@@ -984,11 +984,9 @@ async def test_rediscover_pty_orphan_resumable_and_skips_unpersisted(runner_conf
     assert runner.get_instance_for_project("beta") is None
 
 
-def test_reattach_pty_from_sidecar_without_instance_id_autogenerates(runner_config, monkeypatch):
-    # #789 follow-up: _reattach_pty_from_sidecar takes an optional instance_id. rediscover
-    # always passes the persisted record's id, so the `instance_id is None` default branch
-    # (skip the kwarg -> the model auto-generates one) was left uncovered. Call it directly
-    # without an instance_id and assert the reattached instance still gets a valid id.
+def test_reattach_pty_from_sidecar_autogenerates_an_instance_id(runner_config, monkeypatch):
+    # #1108: the reattach no longer takes an instance_id at all — nothing at this point can
+    # say which row owns the keeper the glob found, so the model always mints a fresh one.
     config, claude_json = runner_config
     runner = SessionRunner(config, claude_json=claude_json)
     log_dir = config.state_dir / "logs"
@@ -1013,14 +1011,14 @@ def test_reattach_pty_from_sidecar_without_instance_id_autogenerates(runner_conf
         "intentional_stop": False,
     }
 
-    inst = runner._reattach_pty_from_sidecar("alpha", saved)  # no instance_id -> None branch
+    inst = runner._reattach_pty_from_sidecar("alpha", saved)
 
     assert inst is not None
     assert inst.status is InstanceStatus.RUNNING
     assert inst.resume_mode == "pty"
     assert inst.keeper_pid == 4321 and inst.bridge_pid == 5678
-    # The None branch skipped kwargs["instance_id"], so the model supplied its own.
     assert inst.instance_id  # non-empty auto-generated id
+    assert inst.label == "alpha"  # label/modes still come from the caller's pty row
 
 
 async def test_stop_instance_without_pid_marks_stopped(runner_config):
