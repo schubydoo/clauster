@@ -112,15 +112,20 @@ Permission modes: `default`, `plan`, `acceptEdits`, `auto`, `dontAsk`,
 `bypassPermissions`. `bypassPermissions` is footgun-gated — see
 `projects.<name>.allow_bypass_permissions` below.
 
-`inherit` is a seventh choice and not a claude mode at all: Clauster passes **no**
-`--permission-mode` flag, so the session starts in whatever mode it would pick on its
-own. Use it when the flag's spawn-time effect is unwanted — claude bakes
-`--permission-mode` into the session's initial system prompt, which reaching the same
-mode later at runtime does not do. It can never be more permissive than the session's
-own default and can never grant `bypassPermissions`; the footgun gate above is
-unaffected. It applies to every launch channel (standard bridge, Interactive Session,
-browser/hosted, and background runs) and is opt-in — the shipped default stays
-`default`.
+**New in 1.1:** `inherit` is a seventh choice and not a claude mode at all: Clauster
+passes **no** `--permission-mode` flag, so the session starts in whatever mode it
+would pick on its own. Use it when the flag's spawn-time effect is unwanted — claude
+bakes `--permission-mode` into the session's initial system prompt, which reaching the
+same mode later at runtime does not do. It applies to every launch channel (standard
+bridge, Interactive Session, browser/hosted, and background runs) and is opt-in — the
+shipped default stays `default`.
+
+`inherit` cannot itself *request* `bypassPermissions`, but because no flag is passed,
+an on-disk `permissions.defaultMode` takes effect instead — including a
+`bypassPermissions` one that was hand-edited into a settings file, which Clauster
+refuses to write but cannot prevent. Prefer an explicit mode where
+`allow_bypass_permissions: false` is what you are relying on; the full caveat is in
+[bypassPermissions footgun gate](../security.md#bypasspermissions-footgun-gate).
 
 ## `projects` — per-project map (`ProjectConfig`)
 

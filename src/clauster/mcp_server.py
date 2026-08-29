@@ -365,7 +365,9 @@ _WRITE_TOOLS: list[dict[str, Any]] = [
                 "spawn_mode": {"type": "string", "description": "same-dir | worktree | session."},
                 "permission_mode": {
                     "type": "string",
-                    "description": "The claude permission mode.",
+                    "description": "default | plan | acceptEdits | auto | dontAsk | "
+                    "bypassPermissions | inherit. 'inherit' is Clauster's own sentinel "
+                    "for passing no --permission-mode flag at all, not a claude mode.",
                 },
                 "resume_mode": {"type": "string", "description": "standard | pty."},
                 "custom_name": {"type": "string", "description": "Display name (standard only)."},
