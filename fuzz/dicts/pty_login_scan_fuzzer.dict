@@ -25,10 +25,13 @@
 "."
 ")"
 "\""
-# a malformed port — the urlsplit ValueError class the normalize_origin harness found
-":99999999999999/"
-":notaport/"
+# The urlsplit ValueError `_url_host`/`_url_path` guard is the INVALID-IPv6-BRACKET one,
+# not the `.port` case (neither helper reads `.port`, so a bad port never raises there).
+# An unterminated `[` is what reaches the guard.
+"https://[::1/"
+"https://[bad/"
 "[::1]"
+":99999999999999/"
 # OSC 8 hyperlink framing: ESC ] 8 ; <params> ; <URI> (ST | BEL)
 "\x1b]8;;"
 "\x1b]8;id=1;"

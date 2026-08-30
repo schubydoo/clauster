@@ -4,8 +4,11 @@ Coverage-guided fuzz harnesses for clauster's untrusted-input parsers. They run
 in CI via [ClusterFuzzLite](https://google.github.io/clusterfuzzlite/) two ways:
 per-PR over the changed code (`.github/workflows/cflite_pr.yml`, `address`
 sanitizer, ~180s) and an every-other-day scheduled batch over **every** harness
-(`.github/workflows/cflite_batch.yml`, 300s each) whose corpus **persists across
-runs** in a private storage repo, so coverage compounds over time. A weekly cron
+(`.github/workflows/cflite_batch.yml`, 300s) whose corpus **persists across
+runs** in a private storage repo, so coverage compounds over time. Note
+`fuzz-seconds` is a **total** budget CFLite splits across the harnesses, not a
+per-target one — adding a harness thins every harness's slice rather than
+lengthening the run. A weekly cron
 (`.github/workflows/cflite_cron.yml`) prunes that corpus and replays it to publish
 per-harness edge counts (see [below](#reading-the-weekly-coverage-signal)). All are
 informational — never block a merge; a reproducible crash surfaces as SARIF in the
@@ -24,7 +27,7 @@ Security tab. Build config lives in [`.clusterfuzzlite/`](../.clusterfuzzlite/).
 | `supervisor_job_from_state_fuzzer.py` | `supervisor._job_from_state` | coerces the agent-view daemon's churning on-disk state into a `BackgroundJob`; total over any dict — must never raise |
 | `load_trusted_paths_fuzzer.py` | `discovery._load_trusted_paths` | parses the user-editable `~/.claude.json`; must degrade any malformed file to an empty set. Found + fixed a non-dict-JSON `AttributeError` (the #122 class) |
 | `auth_headers_fuzzer.py` | `auth.verify_proxy_hmac` + `auth.parse_bearer` | the two **pre-authentication** header parsers on the same boundary as `normalize_origin`. `verify_proxy_hmac` must return `False` on any malformation, never raise (it already 500'd once on a non-ASCII signature via `compare_digest`'s `TypeError`). Also builds a correctly signed header per input so the accept path is exercised, not just the reject path |
-| `pty_login_scan_fuzzer.py` | `pty_screen.extract_authorize_url` + `extract_osc8_hyperlinks` + `extract_oauth_token` | the scanners `login_shepherd` runs over `claude auth login` / `setup-token` terminal output to find the authorize URL an operator is told to click. Beyond crashes it asserts the anti-decoy property the selector exists for: when any candidate URL's path is a real authorize endpoint, the winner must be one too |
+| `pty_login_scan_fuzzer.py` | `pty_screen.extract_authorize_url` + `extract_osc8_hyperlinks` + `extract_oauth_token` | the scanners `login_shepherd` runs over `claude auth login` / `setup-token` terminal output to find the authorize URL an operator is told to click. Beyond crashes it asserts two selection properties — anti-decoy (when any candidate's path is a real authorize endpoint, the winner's must be too) and the stricter bar a *hidden* OSC 8 target must clear (known auth host **and** authorize path). Both are judged by predicates the harness restates itself, so a misclassification inside `pty_screen` can't shift both sides of the comparison together |
 
 ## Running a harness locally
 
@@ -44,16 +47,27 @@ as an argument to reproduce: `python fuzz/redact_fuzzer.py crash-abc123`.
 
 ## Reading the weekly coverage signal
 
-⚠️ **There is no HTML line-coverage report, and there never was.** ClusterFuzzLite's
-report layer is LLVM-based and emits nothing for Python/Atheris targets, so the weekly
-cron's `coverage` job is really a *corpus replay*: it rebuilds the harnesses, runs the
+⚠️ **No HTML line-coverage report lands, and none ever has.** The weekly cron's
+`coverage` job is in practice a *corpus replay*: it rebuilds the harnesses, runs the
 whole persisted corpus through each one, and pushes the raw libFuzzer output to the
-corpus repo's `gh-pages` branch. What lands there is:
+corpus repo's `gh-pages` branch. Verified directly against that branch — there is no
+`coverage/latest/report/` directory, and a weekly upload commit touches only the
+per-harness logs.
+
+⚠️ **Do not read that as "impossible for Python."** oss-fuzz's base-runner `coverage`
+script has a coverage.py-based Python branch that builds an `htmlcov` report and moves
+it to `$COVERAGE_OUTPUT_DIR/report/$PLATFORM` — exactly the `report/linux/` path our
+workflow comment used to promise. It just produces nothing for our Atheris harnesses,
+and ClusterFuzzLite swallows that script's output, so the failure never reaches the
+Actions log and the job stays green. The cause is not established; it is open work on
+[issue 1322](https://github.com/schubydoo/clauster/issues/1322).
+
+What does land:
 
 | Path (on `gh-pages`) | What it is |
 | --- | --- |
-| `coverage/latest/logs/<harness>.log` | that harness's libFuzzer replay log; its final `DONE cov: E ft: F` line is the edge (`E`) and feature (`F`) count reached over the whole corpus |
-| `coverage/latest/logs/<harness>_error.log` | its stderr — non-empty means the replay itself broke |
+| `coverage/latest/logs/<harness>.log` | that harness's libFuzzer replay log (stdout and stderr together); its final `DONE cov: E ft: F` line is the edge (`E`) and feature (`F`) count reached over the whole corpus |
+| `coverage/latest/logs/<harness>_error.log` | always empty for us — it holds a filtered libFuzzer `ERROR:` extract the base-runner writes only on its C/C++ path, never on the Python one |
 | `coverage/latest/fuzzer_stats/coverage_targets.txt` | the harnesses the replay covered |
 
 The corpus repo is private, so read them from a clone rather than a Pages URL:
@@ -86,6 +100,19 @@ the existing ones). `build.sh` discovers `fuzz/*_fuzzer.py` automatically — no
 workflow change needed. Good targets: pure functions that accept untrusted/
 structured input and are expected never to crash.
 
+Two traps worth knowing before you measure anything:
+
+- ⚠️ **Put every import the harness needs inside the `atheris.instrument_imports()`
+  block** — including stdlib ones like `urlsplit`. An import at module scope loads the
+  module *before* Atheris can instrument it, and the target's own later import then
+  reuses the uninstrumented copy. Measured on `pty_login_scan_fuzzer`: hoisting
+  `from urllib.parse import urlsplit` to the top dropped edge coverage from ~210 to 52,
+  silently, because the URL parsing the harness exists to drive stopped being traced.
+- ⚠️ **Give libFuzzer a scratch corpus directory, not `fuzz/seeds/<name>/`.** It writes
+  every retained input into the *first* corpus dir on the command line, so running
+  `python fuzz/x_fuzzer.py fuzz/seeds/x_fuzzer` buries the curated seeds under
+  thousands of generated files. Use `python fuzz/x_fuzzer.py /tmp/corp fuzz/seeds/x_fuzzer`.
+
 ## Seed corpora & dictionaries
 
 A harness whose interesting branches are gated on **literal tokens** (the
@@ -105,10 +132,11 @@ regexes need structured tokens the random fuzzer never synthesises);
 `auth_headers_fuzzer` ships a dictionary only. The rest grow a corpus fine from
 structural input and need neither.
 
-The effect is not marginal. `pty_login_scan_fuzzer` sits at **11 edges** on random
-bytes — it never synthesises `https://` — and reaches **215** with its dictionary and
-ten seeds. Measure before deciding a harness "needs neither": run it locally for a
-few hundred thousand iterations and read the `cov:` figure.
+The effect is not marginal. `pty_login_scan_fuzzer` sits at **11 edges** on random bytes
+— it never synthesises `https://`, so it fuzzes only the no-match path — and passes
+**200** within the first million iterations once its dictionary and twelve seeds are in
+play. Measure before deciding a harness "needs neither": run it locally for a few
+hundred thousand iterations and read the `cov:` figure.
 
 If a harness asserts a *property* rather than only "does not crash", prove the
 assertion can fail before trusting it. Break the implementation on purpose (monkeypatch
