@@ -4384,6 +4384,19 @@ class SessionRunner:
         # live keeper is UNACCOUNTED FOR, and the walk above has just accounted for these —
         # under a fresh id that proves nothing about which pid-less row owns them (#1108).
         blocked |= {(name, "pty") for name in uncorrelated_keepers}
+        # And one restart LATER (the review catch on #1108): the fresh-id row now reattaches
+        # by its persisted pids, so the keeper is accounted for, `uncorrelated_keepers` is
+        # empty — and the original pid-less row would be carded STOPPED, offering a Resume
+        # that spawns a second keeper on the same conversation. A pty resume is `--continue`,
+        # which grabs the project's LATEST conversation, so while ANY managed pty instance is
+        # live in a project, resuming a pid-less pty row can only duplicate or steal that
+        # conversation. Hidden-but-recoverable beats a duplicate bridge, again.
+        blocked |= {
+            (i.project, "pty")
+            for i in self._instances.values()
+            if i.resume_mode == "pty"
+            and i.status in (InstanceStatus.STARTING, InstanceStatus.RUNNING)
+        }
         for iid, saved in list(self._persisted.items()):
             if iid in self._instances:
                 continue  # live-claimed, or already carded by a pass above
