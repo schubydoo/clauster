@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.1.0 (2026-08-30)
+
+[Compare with 1.0.2](https://github.com/schubydoo/clauster/compare/v1.0.2...v1.1.0)
+
+### Features
+
+- Show the `claude` version each running bridge is actually on as a small muted label on its live session card, read from the live process tree and left blank when it can't be resolved. ([#1292](https://github.com/schubydoo/clauster/pull/1292))
+- Restore a Direct Session's prior conversation in its View pane after a Clauster restart, rebuilt read-only from `claude`'s own transcript. ([#1300](https://github.com/schubydoo/clauster/pull/1300))
+- Add a `log_level` config key (`debug` | `info` | `warning` | `error`, also settable as `CLAUSTER_LOG_LEVEL`) that raises Clauster's and uvicorn's server log verbosity, which was previously pinned at `info`. ([#1289](https://github.com/schubydoo/clauster/pull/1289))
+- Add a **No forced mode** (`inherit`) launch choice that passes no `--permission-mode` flag at all, so a session starts in its own default mode instead of one forced into its spawn-time system prompt. ([#1290](https://github.com/schubydoo/clauster/pull/1290))
+
+### Fixes
+
+- Promote an adopted bridge out of "Starting" once its connect evidence appears, so a session taken over from another process no longer shows "preparing connect link…" forever. ([#1297](https://github.com/schubydoo/clauster/pull/1297))
+- Probe the claustrum daemon with `server.capabilities` instead of the `server.version` method that claustrum v1.10 removes, so the connection keeps working across current and future daemon releases. ([#1281](https://github.com/schubydoo/clauster/pull/1281))
+- Config and trust JSON writes now take their advisory lock on a file under `<state_dir>/locks/` instead of a `<file>.lock` sidecar, so editing a project's settings no longer drops a lock artifact inside its git-tracked tree. ([#1171](https://github.com/schubydoo/clauster/issues/1171)) ([#1286](https://github.com/schubydoo/clauster/pull/1286))
+- `clauster doctor` now reads the module version Go embeds in the claustrum binary when `--version` reports only the unstamped `claustrum-dev` sentinel, so the row names the installed release instead of shrugging "unstamped/dev or older build". ([#1283](https://github.com/schubydoo/clauster/pull/1283))
+- Give every dashboard form control a stable `id`/`name` and an accessible name, clearing the browser's form-field accessibility advisories for screen-reader and password-manager users. ([#1294](https://github.com/schubydoo/clauster/pull/1294))
+- Report the range a Direct Session's daemon replay buffer evicted on reattach — an "output lost" marker leads the replayed stream instead of the gap being skipped silently. ([#1299](https://github.com/schubydoo/clauster/pull/1299))
+- Persist each Interactive Session keeper's start time so `forget` can tell that keeper from a different one that later reused its process id, instead of refusing to clear the record. ([#1298](https://github.com/schubydoo/clauster/pull/1298))
+- Stop a rediscovered pty keeper from being carded under an unrelated session's instance id, which overwrote that session's persisted record. ([#1295](https://github.com/schubydoo/clauster/pull/1295))
+- `clauster logs` now reads a stopped or crashed bridge's log from disk instead of refusing it, and says whether an id was unknown or simply has no log. ([#1284](https://github.com/schubydoo/clauster/pull/1284))
+- Show each session row its own bridge's CPU/memory instead of the project total, so a Server Mode row no longer reports the co-located Interactive Sessions' usage as its own (Interactive Session rows now show metrics too). ([#1287](https://github.com/schubydoo/clauster/pull/1287))
+- The resume picker no longer lists headless agent transcripts (`entrypoint: "sdk-py"`), which passed the sidechain filter. ([#1311](https://github.com/schubydoo/clauster/pull/1311))
+- Leave dispatched-subagent (sidechain) transcripts out of the launch popover's Conversation picker so real conversations are no longer buried; they stay visible in the read-only Transcripts viewer. ([#1288](https://github.com/schubydoo/clauster/pull/1288))
+- The transcript picker labels a slash-command-started session with its first human prompt instead of the `<local-command-caveat>` wrapper. ([#1318](https://github.com/schubydoo/clauster/pull/1318))
+- Keep an Interactive Session's git worktree across a keeper-only reattach, so a rediscovered session resumes into its original worktree instead of creating a second one. ([#1296](https://github.com/schubydoo/clauster/pull/1296))
+- A `CLAUSTER_PYTE_PATH`-provided pyte is now visible from startup, so the Live terminal no longer stays disabled until something else imports it. ([#1312](https://github.com/schubydoo/clauster/pull/1312))
+- Bound the dashboard's optimistic "stopping" bridge row so a session the server has confirmed gone can no longer strand on screen forever. ([#1291](https://github.com/schubydoo/clauster/pull/1291))
+
 ## 1.0.2 (2026-08-28)
 
 [Compare with 1.0.1](https://github.com/schubydoo/clauster/compare/v1.0.1...v1.0.2)
