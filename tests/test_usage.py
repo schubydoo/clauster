@@ -947,6 +947,36 @@ def test_transcript_summary_first_prompt_truncated_to_120(tmp_path, _clean_trans
     assert len(read_transcript_summary(p).first_prompt) == 120
 
 
+def test_transcript_summary_first_prompt_skips_command_wrappers(tmp_path, _clean_transcript_cache):
+    # #1315: a session started via a slash command opens with wrapper turns; the label
+    # must be the first HUMAN prompt, not the caveat/command markup.
+    p = _transcript(
+        tmp_path,
+        [
+            {"message": {"role": "user", "content": "<local-command-caveat>Caveat: ..."}},
+            {"message": {"role": "user", "content": "<command-name>/model</command-name>"}},
+            {"message": {"role": "assistant", "content": "switched"}},
+            {"message": {"role": "user", "content": "the real question"}},
+        ],
+    )
+    assert read_transcript_summary(p).first_prompt == "the real question"
+
+
+def test_transcript_summary_all_wrapper_turns_fall_back_to_first(
+    tmp_path, _clean_transcript_cache
+):
+    # When every user turn is wrapper machinery, keep the old first-turn label — a
+    # previously non-empty label must never go blank.
+    p = _transcript(
+        tmp_path,
+        [
+            {"message": {"role": "user", "content": "<command-name>/status</command-name>"}},
+            {"message": {"role": "assistant", "content": "ok"}},
+        ],
+    )
+    assert read_transcript_summary(p).first_prompt == "<command-name>/status</command-name>"
+
+
 def test_transcript_summary_cached_hit_skips_reparse(
     tmp_path, monkeypatch, _clean_transcript_cache
 ):
