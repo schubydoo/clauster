@@ -66,17 +66,25 @@ stays green either way because ClusterFuzzLite discards the coverage script's ou
 
 `language: python` is now set on every `run_fuzzers` step
 ([issue 1327](https://github.com/schubydoo/clauster/issues/1327)), but it is
-*necessary*, not proven *sufficient* — the Python report stage also wants a
-`${fuzzer}.pkg.deps.zip` out of the coverage *build*, which has never been observed
-here. (The other input it needs, `.coverage_$target`, the run step writes itself.)
+*necessary*, not proven *sufficient* — the Python report stage also unzips a
+`${fuzzer}.pkg.deps.zip` out of the coverage *build*. base-builder's
+`compile_python_fuzzer` should already emit that whenever `SANITIZER` matches
+`*coverage*`, which the cron's build step sets, but it has never been *observed*
+here — so it is the open question. (The other input, `.coverage_$target`, the run
+step writes at the end of each target that exits cleanly.)
 
-**On the next scheduled cron, check `gh-pages` for two things:** whether
-`coverage/latest/report/` appeared, and whether the per-harness logs below survived.
-Those logs are the only fuzz-coverage signal we have; if the Python path stops
-producing them without producing a report, revert `language` on the *coverage job
-only* — the PR, batch and prune jobs need it for the crash-reproduce timeout
-regardless. Wait for the cron rather than dispatching it by hand: a dispatch runs
-unmerged workflow code with the write PAT and pushes to the real `gh-pages`.
+**On the next scheduled cron, check `gh-pages` for three things:** whether
+`coverage/latest/report/` appeared — and if it did, that its `.coverage_*` count
+matches the harness count, because the report loop fails silently per harness and can
+re-translate the previous harness's data under the next one's name; whether the
+per-harness logs below survived; and whether their `DONE cov: E ft: F` lines are still
+present, since everything in this section is read off them. Those logs are the only
+fuzz-coverage signal we have; if the Python path stops producing them without
+producing a report, revert `language` on the *coverage job only* — the PR and batch
+jobs need it for the crash-reproduce timeout regardless. (On prune it is inert:
+cifuzz's prune path returns `testcase=None` and never reaches the reproduce step.)
+Wait for the cron rather than dispatching it by hand: a dispatch runs unmerged
+workflow code with the write PAT and pushes to the real `gh-pages`.
 
 Expect the artefact *shape* to change on the Python path even when it works:
 `<harness>.log` is still written, but `_error.log` and the `MERGE-` lines are
