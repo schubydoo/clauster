@@ -1920,7 +1920,11 @@ async def test_manager_reattach_all_survives_a_junk_persisted_cursor(fake_claust
         assert [i.claustrum_process_id for i in restored] == [pid]
         inst = mgr.get_instance(pid)
         assert inst.status is InstanceStatus.RUNNING
-        assert inst.daemon_last_seq >= 0  # coerced, never the junk string
+        # Pins the semantics, not just the absence of a raise: the junk cursor coerced
+        # to 0, so reattach replayed the WHOLE retained window — generation 1's frame
+        # comes back — rather than resuming from a guessed position.
+        init = {"type": "system", "subtype": "init"}
+        await wait_until(lambda: _frames(mgr.session(pid)) == [init])
         await mgr.aclose()
 
 

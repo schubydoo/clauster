@@ -750,8 +750,9 @@ class HostedSession:
             # scanner, and it is not a ValueError — so it escaped this handler into
             # `_pump`, which catches only CancelledError/ClaustrumError. The pump task
             # died and the session went dark with no `lost` event (a fail-silent that
-            # invariant 1 forbids). The scanner's ceiling is version-dependent (~994 on
-            # the 3.11 floor), so this is reachable from a ~1 KB agent output line.
+            # invariant 1 forbids). The scanner's ceiling is version-dependent — ~994 on
+            # the 3.11 floor (a ~1 KB line), ~3000 on Windows and ~10000 elsewhere from
+            # 3.12 — and the agent output line is unbounded, so every leg is reachable.
             # Degrading to opaque text isolates the bad frame instead of the stream.
             self._emit({"type": "text", "text": sanitize_line(line)})
             return
@@ -1494,12 +1495,14 @@ class HostedManager:
 def _coerce_seq(value: Any) -> int:
     """Coerce a persisted ``daemon_last_seq`` to an int, falling back to ``0``.
 
-    :meth:`HostedManager._instance_from_record` is expected to be total over the
-    on-disk ``hosted_state.json`` record map (the structural twin of
-    :func:`supervisor._job_from_state`), but a bare ``int(...)`` is not: a
-    non-numeric string (``ValueError``), a dict/list (``TypeError``), a NaN
-    (``ValueError``) or an ``inf`` (``OverflowError``) each aborted the whole
-    reattach on restart. An uncoercible cursor degrades to 0 — replay from the
+    This makes :meth:`HostedManager._instance_from_record` total over **this one
+    field** of the on-disk ``hosted_state.json`` record map. A bare ``int(...)``
+    was not: a non-numeric string (``ValueError``), a dict/list (``TypeError``),
+    a NaN (``ValueError``) or an ``inf`` (``OverflowError``) each aborted the
+    whole reattach on restart. (The mapper's *other* persisted fields still reach
+    the model unguarded and can raise ``ValidationError`` — pre-existing, and not
+    something this helper should be read as having closed.) An uncoercible
+    cursor degrades to 0 — replay from the
     start of the retained window, the fail-*visible* direction: the client sees
     frames it may already have, rather than the session silently vanishing.
 

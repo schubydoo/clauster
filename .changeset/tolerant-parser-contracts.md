@@ -2,4 +2,4 @@
 default: patch
 ---
 
-Seven untrusted-input parsers no longer raise on deeply-nested or non-object payloads their contracts promise to tolerate, so a hostile transcript line, settings file, frontmatter block, 404 body, or hosted-state record degrades instead of crashing the request or the stream pump.
+A deeply-nested or non-object payload no longer crashes the usage tally, the transcript viewer, a config-write parse, an anthropic 404 probe, or the hosted stream pump — seven parsers now honor the tolerate-malformed contracts they document.
