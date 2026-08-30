@@ -108,8 +108,8 @@ runner state:
 | `clauster_bridges{status="…"}` | gauge | Number of managed bridges per lifecycle status (`starting`, `running`, `stopped`, `crashed`, `error`). |
 | `clauster_projects` | gauge | Number of discovered projects. |
 | `clauster_bridge_crashes_total{project="…"}` | counter | Per-project bridge crashes since process start. Only emitted once a bridge has crashed — absent (not `0`) on a process with no crashes yet, so guard `absent()` rules accordingly. |
-| `clauster_bridge_cpu_percent{project="…"}` | gauge | Per-bridge process-tree CPU percent. Emitted only when the `metrics` sampler is enabled and has a fresh sample; otherwise absent. |
-| `clauster_bridge_rss_bytes{project="…"}` | gauge | Per-bridge process-tree resident memory. Sampler-gated, as above. |
+| `clauster_bridge_cpu_percent{project="…"}` | gauge | Per-**project** process-tree CPU percent, summed across that project's live bridges. Emitted only when the `metrics` sampler is enabled and has a fresh sample; otherwise absent. |
+| `clauster_bridge_rss_bytes{project="…"}` | gauge | Per-**project** process-tree resident memory, summed across that project's live bridges. Sampler-gated, as above. |
 | `clauster_hosted_sessions` | gauge | Live hosted (claustrum) sessions. Emitted only when `claustrum.enabled`; absent otherwise. |
 | `clauster_claustrum_up` | gauge | `1` if the claustrum daemon is connected, else `0`. Emitted only when `claustrum.enabled`; absent otherwise. |
 
@@ -175,13 +175,17 @@ clauster_projects 7
 A useful alert is a non-zero `clauster_bridges{status="crashed"}` or `="error"`
 sustained over a scrape interval.
 
-The per-project live resource metrics (CPU / memory / disk shown on a running
-bridge's card) are a separate, dashboard-only fetch
-(`/api/projects/{name}/metrics`); they are not part of the Prometheus exposition
-and are governed by the `metrics` config block, not `observability`. **Disk I/O is
-unavailable on macOS** — `psutil` has no per-process `io_counters` there, so the API
-returns `null` for `disk_read_bps` / `disk_write_bps` and the card leaves those fields
-blank on macOS (CPU and memory still show). See the
+The live resource metrics (CPU / memory / disk shown on a running session's row)
+are a separate, dashboard-only fetch. Each row shows **its own bridge's** usage:
+the dashboard reads `/api/metrics`, keyed by instance id, so two bridges of one
+project — a Server Mode bridge and an Interactive Session, say — never report each
+other's figures. `/api/projects/{name}/metrics` still returns the project **total**,
+summed across that project's live bridges. Neither is part of the Prometheus
+exposition, and both are governed by the `metrics` config block, not
+`observability`. **Disk I/O is unavailable on macOS** — `psutil` has no per-process
+`io_counters` there, so the API returns `null` for `disk_read_bps` /
+`disk_write_bps` and the row leaves those fields blank on macOS (CPU and memory
+still show). See the
 [platform-support matrix](reference/platforms.md) for the full per-OS list.
 
 ## Crash alerts

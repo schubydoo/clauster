@@ -384,7 +384,8 @@ class SessionRunner:
         # request path so /api/projects/{name}/metrics + the batch read + the /metrics
         # scrape all serve from the last sample at O(1), no per-request thread. Keyed
         # by instance_id (#778 — a project may run several bridges, so a project key
-        # would clobber); the public readers aggregate per project.
+        # would clobber); the public readers either serve that per-instance truth
+        # (#1090) or fold it per project.
         self._metrics_cache: dict[str, dict] = {}
         self._metrics_task: asyncio.Task | None = None
         # Per-spawn background tasks that watch a STARTING bridge until it either
@@ -489,8 +490,28 @@ class SessionRunner:
         """
         return self.metrics_snapshots().get(name)
 
+    def metrics_snapshots_by_instance(self) -> dict[str, dict]:
+        """Return the un-folded per-instance resource samples, keyed by instance_id (#1090).
+
+        The cache is already per-instance (#778); this is the reader that hands that truth
+        out unchanged, for callers that display ONE bridge's usage — a dashboard row must
+        not wear the CPU/RAM of the other bridges sharing its project. A cache entry whose
+        instance vanished from the registry between refreshes is dropped, never
+        misattributed; :meth:`metrics_snapshots` folds the same entries per project for
+        callers that genuinely want a project total.
+        """
+        return {
+            iid: dict(sample)
+            for iid, sample in self._metrics_cache.items()
+            if iid in self._instances  # forgotten since the last refresh
+        }
+
     def metrics_snapshots(self) -> dict[str, dict]:
-        """Return per-project aggregated resource samples (#354 batch read).
+        """Return per-project aggregated resource samples (#354).
+
+        Serves the callers that want a whole project's total: the per-project metrics
+        route and the Prometheus project-labelled gauges. Per-row display uses
+        :meth:`metrics_snapshots_by_instance` instead (#1090).
 
         The cache holds one sample per *instance* (#778); this folds them into one
         dict per project — ``procs``/``cpu_percent``/``rss_bytes`` summed, the

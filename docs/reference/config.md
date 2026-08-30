@@ -403,7 +403,7 @@ runs.
 <!-- BEGIN GEN: metrics -->
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `enabled` | bool | `true` | Show the per-session resource metrics line — live CPU, memory, and disk I/O for each running bridge. When `false`, the line is hidden and Clauster skips the work behind it entirely: no `/api/projects/{name}/metrics` polling from the browser and no server-side resource sampling. |
+| `enabled` | bool | `true` | Show the per-session resource metrics line — live CPU, memory, and disk I/O for each running bridge, each row reporting its own bridge. When `false`, the line is hidden and Clauster skips the work behind it entirely: no `/api/metrics` polling from the browser and no server-side resource sampling. |
 | `normalize_cpu` | bool | `false` | Divide summed CPU% by the host core count (0–100% of the machine) instead of the raw across-cores figure (which can exceed 100%). |
 | `show_disk` | bool | `true` | Toggle the disk read/write rate portion. |
 | `sample_interval_seconds` | float | `0.15` | Two-snapshot sampling window (>0, ≤2.0). Longer is steadier but each fetch blocks a worker thread for that long. |
@@ -418,7 +418,7 @@ auth guard. See [Networking](../networking.md) for scraping behind auth.
 <!-- BEGIN GEN: observability -->
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `prometheus_enabled` | bool | `false` | Gate a text-format `/metrics` endpoint (build info, bridge counts by status, project count, per-bridge cpu/rss, crash counter, hosted/claustrum gauges). Off by default; when off, `/metrics` returns 404. The endpoint stays **behind** the auth guard unless `metrics_token_hash` is set. |
+| `prometheus_enabled` | bool | `false` | Gate a text-format `/metrics` endpoint (build info, bridge counts by status, project count, per-project cpu/rss summed across that project's live bridges, crash counter, hosted/claustrum gauges). Off by default; when off, `/metrics` returns 404. The endpoint stays **behind** the auth guard unless `metrics_token_hash` is set. |
 | `metrics_token_hash` | str \| null | `null` | SHA-256 hash of an optional bearer token that lets a scraper (e.g. Prometheus) reach `/metrics` without a browser session — the scraper presents the raw token as `Authorization: Bearer <token>`. When set, a valid token OR a normal session grants access; when unset, `/metrics` stays behind the auth guard. Only the hash is stored (parity with `auth.api_token_hash`); the raw token is shown once by `clauster hash-metrics-token`. Supply via `CLAUSTER_OBSERVABILITY_METRICS_TOKEN_HASH_FILE` to keep it out of the config file. |
 <!-- END GEN: observability -->
 

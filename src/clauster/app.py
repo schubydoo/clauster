@@ -1789,15 +1789,21 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/api/metrics")
     async def api_metrics_batch() -> dict:
-        """Return the cached metrics sample for every running bridge in one read."""
+        """Return the cached metrics sample for every running bridge, keyed by instance_id."""
         # Batch counterpart to the per-project endpoint (#354): one in-memory read of
         # every running bridge's cached sample, so a dashboard can refresh all badges in
         # a single request instead of one per bridge.
+        #
+        # Keyed by instance_id, NOT project (#1090). Several bridges may share one project,
+        # and the project-folded figure was presented on a single row as that bridge's own
+        # usage — a Server-Mode row silently reporting its project's Interactive Sessions'
+        # CPU/RAM too. The per-project total stays available on
+        # /api/projects/{name}/metrics and in the Prometheus exposition.
         if not config.metrics.enabled:
             return {}
         return {
-            name: {"running": True, **sample}
-            for name, sample in runner.metrics_snapshots().items()
+            iid: {"running": True, **sample}
+            for iid, sample in runner.metrics_snapshots_by_instance().items()
         }
 
     # --- ghost-environment reaper (spec §11), dashboard surface ----------------

@@ -63,7 +63,7 @@ Bracketed numbers point at the [notes](#notes) below.
    with a clear message (subscription sign-in still works).
 6. Routes exercised on the Windows CI cells + VM.
 7. `psutil.cpu_times` / `memory_info` on every platform.
-8. `psutil` has no per-process `io_counters` on macOS, so a bridge card's
+8. `psutil` has no per-process `io_counters` on macOS, so a bridge row's
    `disk_read_bps` / `disk_write_bps` fields are blank there.
 9. An in-process lock serializes clauster's own concurrent writers on every
    OS; POSIX additionally takes an advisory `fcntl.flock`, which also guards
