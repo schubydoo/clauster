@@ -79,7 +79,16 @@ class GapDroppedEvent(TypedDict):
 
 
 class GapRangeEvent(TypedDict):
-    """A first-view replay gap: the ring had already evicted past the cursor."""
+    """A replay gap: a buffer had already evicted past the cursor.
+
+    Emitted from two places, both meaning "the frames between these two cursors
+    are gone": :meth:`~clauster.hosted.HostedSession.subscribe` on a first-view
+    replay whose ``after_seq`` predates the ring, and
+    :meth:`~clauster.hosted.HostedSession.reattach` when the *daemon's* replay
+    buffer answered a ``firstSeq`` past our cursor (#1175). The two carry
+    different seq spaces (ring ``event_seq`` vs daemon frame ``seq``), which is
+    why only the count between them is user-facing.
+    """
 
     type: Literal["gap"]
     from_seq: int
@@ -132,12 +141,14 @@ class ExitEvent(TypedDict):
 
 
 #: Payloads accepted by ``HostedSession._emit`` (before it stamps ``event_seq``).
-#: ``GapRangeEvent`` is excluded — it is offered directly by ``subscribe`` on a
-#: first-view replay, never through ``_emit``.
+#: ``GapRangeEvent`` is in the union because ``reattach`` emits one for an evicted
+#: daemon replay range (#1175); ``subscribe`` still offers its own directly to the
+#: one new queue rather than through ``_emit`` (that gap is per-viewer, not global).
 HostedEvent = (
     ControlResolvedEvent
     | LostEvent
     | GapDroppedEvent
+    | GapRangeEvent
     | StderrEvent
     | TextEvent
     | FrameEvent

@@ -167,6 +167,17 @@ class FakeClaustrum:
         await self._push(proc, frame)
         return proc.seq
 
+    def evict_through(self, process_id: str, seq: int) -> None:
+        """Drop buffered frames with ``seq <= seq``, modelling the capped replay buffer.
+
+        The real daemon caps its per-process buffer by bytes (16 MiB in the reference
+        claude-ssh), evicting the oldest frames; a later ``process.reattach`` then
+        answers ``firstSeq`` = the oldest survivor. This is the cheap unit-test route
+        into that state — no need to push 16 MiB through the socket to reach it.
+        """
+        proc = self._processes.setdefault(process_id, _Process())
+        proc.frames = [f for f in proc.frames if f["seq"] > seq]
+
     async def emit_exit(self, process_id: str, exit_code: int) -> int:
         """Emit the terminal ``exit`` frame for a process."""
         proc = self._processes.setdefault(process_id, _Process())
@@ -359,6 +370,13 @@ class FakeClaustrum:
             line = (json.dumps(frame, separators=(",", ":")) + "\n").encode("utf-8")
             writer.write(line)
         await writer.drain()
+        # An EMPTY buffer answers firstSeq 0, matching the real daemon: claustrum's
+        # process.go only assigns firstSeq/lastSeq when the buffer is non-empty, and the
+        # fields are not omitempty, so Go's zero value goes on the wire. That is not a
+        # missed gap — eviction happens only on append and always keeps the frame just
+        # added, so a process that emitted anything since the client detached has a
+        # non-empty buffer and a truthful firstSeq. Empty means nothing was emitted.
+        # (Verified against claustrum main; the v1.10 reattach handler is identical.)
         first_seq = proc.frames[0]["seq"] if proc.frames else 0
         await self._reply(
             writer,

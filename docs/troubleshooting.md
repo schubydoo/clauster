@@ -480,6 +480,21 @@ card shows an error like `reattach failed: ...` (server log:
 down, so there was nothing to reattach to. The transcript is not lost — start
 a new Direct Session for the project and resume from the captured session.
 
+### "output lost (N frames)" after a restart
+
+**What you see:** a reattached Direct Session's view opens with a yellow
+`output lost (N frames)` marker ahead of the replayed output (server log:
+`hosted: daemon replay buffer evicted frames <first>-<last> for process <id>`).
+
+**Most likely cause:** the agent produced more output while Clauster was down
+than the claustrum daemon's per-process replay buffer holds, so the daemon
+dropped the oldest frames before Clauster could read them. The marker is
+deliberate — those frames are gone from the daemon and Clauster will not
+pretend the stream is continuous. The conversation itself is unaffected: the
+session keeps running and `claude` has still written its own transcript to
+disk. Restarting Clauster promptly, or keeping sessions shorter, narrows the
+window.
+
 ## Getting more detail
 
 ### Raising the log level
