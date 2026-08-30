@@ -95,7 +95,9 @@
                       </template>
                       <!-- cloud option folds into Background -->
                       <label class="form-check small mt-1 ms-1" x-show="lmode === 'detached'" x-cloak>
-                        <input type="checkbox" class="form-check-input" data-test="launch-cloud-optin" x-model="lcloud" {{ NO_AUTOFILL }}>
+                        <input type="checkbox" class="form-check-input" data-test="launch-cloud-optin"
+                               id="lcloud-{{ p.name }}" name="lcloud-{{ p.name }}"
+                               x-model="lcloud" {{ NO_AUTOFILL }}>
                         <span class="form-check-label">also register on claude.ai</span>
                       </label>
                       <!-- With claude.ai on, a Background run is actually live and
@@ -298,7 +300,9 @@
                           lets it run tools and execute any code in <code>CLAUDE.md</code> /
                           <code>.claude</code> in this directory.</p>
                         <label class="form-check mb-2">
-                          <input class="form-check-input" type="checkbox" x-ref="trustCheck" x-model="trustConfirmed['{{ p.name }}']" {{ NO_AUTOFILL }}>
+                          <input class="form-check-input" type="checkbox" x-ref="trustCheck"
+                                 id="trust-ok-{{ p.name }}" name="trust-ok-{{ p.name }}"
+                                 x-model="trustConfirmed['{{ p.name }}']" {{ NO_AUTOFILL }}>
                           <span class="form-check-label">I trust the files in this directory</span>
                         </label>
                         <div class="btn-list">
@@ -318,6 +322,7 @@
                           run tools without asking. Type the project name to confirm.</p>
                         <div class="input-group">
                           <input type="text" class="form-control" x-ref="bypassInput" x-model="bypassTyped['{{ p.name }}']" placeholder="{{ p.name }}"
+                                 id="bypass-typed-{{ p.name }}" name="bypass-typed-{{ p.name }}"
                                  aria-label="Type the project name to confirm bypassPermissions"
                                  @keyup.enter="confirmBypassStart('{{ p.name }}')" {{ NO_AUTOFILL }}>
                           <button type="button" class="btn btn-danger" data-test="bypass-start-go" @click="confirmBypassStart('{{ p.name }}')"
@@ -442,6 +447,7 @@
                   <svg class="ico me-1 text-warning" aria-hidden="true"><use href="#ic-alert"/></svg>A session is running — saved changes apply to <strong>new</strong> sessions, not the attached one.</div>
                 <div class="alert alert-danger py-1" x-show="cmd['{{ p.name }}'].error" x-cloak x-text="cmd['{{ p.name }}'].error"></div>
                 <textarea class="form-control cmd-text" x-model="cmd['{{ p.name }}'].content" rows="12"
+                          id="cmd-text-{{ p.name }}" name="cmd-text-{{ p.name }}"
                           spellcheck="false" {{ NO_AUTOFILL }} aria-label="CLAUDE.md contents for {{ p.name }}"
                           :disabled="cmd['{{ p.name }}'].loading || cmd['{{ p.name }}'].saving"></textarea>
                 <div class="btn-list mt-2">
