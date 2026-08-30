@@ -1,0 +1,28 @@
+# libFuzzer dictionary for auth_headers_fuzzer (auth.verify_proxy_hmac +
+# auth.parse_bearer). Both parsers are gated on literal tokens — the `t=`/`v1=`
+# key names of the X-Proxy-Auth header and the `Bearer` scheme — that Atheris'
+# random FuzzedDataProvider bytes essentially never synthesise, so without this
+# dict the harness only ever exercises the "no key found" reject path.
+# Non-ASCII entries use \xNN escapes (libFuzzer dict format). See fuzz/README.md.
+"t="
+"v1="
+","
+"="
+"t=1700000000"
+"t=1700000000,v1="
+"v1=0123456789abcdef"
+# `int(t_raw)` accepts far more than plain ASCII digits — a sign, underscores, an
+# over-long literal and non-ASCII digits each reach a different branch.
+"+1700000000"
+"-1700000000"
+"1_700_000_000"
+# Arabic-Indic digits U+0661..0663 (int() accepts them; the HMAC then must not).
+"\xd9\xa1\xd9\xa2\xd9\xa3"
+# A non-ASCII signature byte — the isascii() guard that replaced a compare_digest
+# TypeError.
+"v1=\xc3\xbf"
+# Authorization: Bearer <token>
+"Bearer "
+"bearer "
+"BEARER "
+"Bearer clauster_pat_"

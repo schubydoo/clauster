@@ -1,22 +1,47 @@
-# ClusterFuzzLite — weekly corpus PRUNE + COVERAGE report. The maintenance
+# ClusterFuzzLite — weekly corpus PRUNE + COVERAGE replay. The maintenance
 # counterpart to the daily cflite_batch.yml (which fuzzes + grows the corpus).
 #
 # - prune: the daily batch keeps APPENDING inputs to the persisted corpus; pruning
 #   minimizes it (drops inputs that add no coverage) so the storage-repo doesn't
 #   grow unboundedly. A replay can still surface a reproducible crash → SARIF.
 # - coverage: builds the harnesses with the `coverage` sanitizer, replays the whole
-#   persisted corpus, and pushes an HTML line-coverage report to the corpus repo's
-#   `gh-pages` branch — i.e. EXACTLY which clauster code the fuzzers reach. This is
-#   how we SEE whether the harness set has kept up with the code (an unfuzzed
-#   module shows as 0% — the signal that a new harness is owed). With the corpus
-#   repo private, view the report by cloning gh-pages (or enable private Pages):
-#   it lands at coverage/latest/report/linux/report.html.
+#   persisted corpus, and pushes the replay artefacts to the corpus repo's
+#   `gh-pages` branch under `coverage/latest/`.
+#   ⚠️ NO HTML line-coverage report lands, and none ever has — verified against the
+#   corpus repo. It is NOT "impossible for Python": oss-fuzz's base-runner `coverage`
+#   script has a coverage.py branch that builds an htmlcov report and moves it to
+#   $COVERAGE_OUTPUT_DIR/report/$PLATFORM — the `report/linux/` path the old comment
+#   here promised. We never reach it. The `run_fuzzers` step below does not pass
+#   `language: python` (only the BUILD step does) and that input defaults to `c++`,
+#   so the script takes its LLVM branch instead. Proof, from the uploaded logs
+#   themselves: they carry `-merge=1` MERGE-INNER/MERGE-OUTER lines, which only the
+#   C/C++ path emits — the Python path runs `-atheris_runs=N` and emits none. Our
+#   Atheris wrappers produce no .profraw, so that path yields nothing, and the job
+#   still passes because CFLite discards the coverage script's output. Fixing it is
+#   one input, but NOT here: unverifiable without a dispatch that writes to the
+#   corpus repo, and it could cost us the logs below. Tracked in #1327 (which also
+#   covers the same omission silently cutting crash reproduction to 30s on the
+#   FUZZING jobs); #1322 is the umbrella. What lands today:
+#     coverage/latest/logs/<harness>.log             — that harness's libFuzzer
+#       replay log (stdout+stderr); its LAST `#N DONE cov: E ft: F` line is the edge
+#       (E) and feature (F) count reached over the whole persisted corpus. It is not
+#       the last line of the file — MERGE-OUTER: lines follow it
+#     coverage/latest/logs/<harness>_error.log       — always EMPTY, and empty means
+#       "no crash line matched": the C/C++ path creates it by redirecting a grep for
+#       libFuzzer `ERROR:` lines, which is why the file exists at all
+#     coverage/latest/fuzzer_stats/coverage_targets.txt — the harness list
+#   Those per-harness edge counts are the signal we actually have that the harness
+#   set has kept up with the code: a harness pinned at a handful of edges is one
+#   whose corpus never gets past the guard clause, and a module with no harness at
+#   all simply does not appear. There is no per-line/per-module view — reading it
+#   needs the human judgement fuzz/README.md ("Reading the weekly coverage signal")
+#   describes. The corpus repo is private, so read the logs by cloning `gh-pages`.
 #
 # Both reuse the same private storage-repo + FUZZ_STORAGE_TOKEN PAT as the batch.
 # WEEKLY (not daily): a coverage build + full-corpus replay is far heavier than a
 # time-boxed fuzz run, and the corpus changes slowly. NOT a required check — it
 # signals, it never gates. If the PAT is rotated/expired these jobs keep passing
-# but silently stop pruning/reporting. See https://google.github.io/clusterfuzzlite/.
+# but silently stop pruning/uploading. See https://google.github.io/clusterfuzzlite/.
 name: ClusterFuzzLite cron (prune + coverage)
 
 on:
@@ -30,7 +55,7 @@ jobs:
   prune:
     name: prune corpus
     runs-on: ubuntu-latest
-    timeout-minutes: 55 # ≈ fuzz-seconds × harness count + build (re-check when adding harnesses)
+    timeout-minutes: 55 # ≈ fuzz-seconds (a TOTAL, split across harnesses) + build; observed ≈7 min
     permissions:
       contents: read # checkout + build the harnesses
       security-events: write # a replay can still surface a reproducible crash (SARIF)
@@ -50,7 +75,12 @@ jobs:
         uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          fuzz-seconds: 300
+          # 375, matching cflite_batch.yml, for the same 8 -> 10 harness-count reason:
+          # prune runs the same divide-across-targets loop, and here the per-target slice
+          # is a MERGE TIMEOUT that raises (clusterfuzz's libFuzzer engine raises
+          # TimeoutError on a timed-out merge, and nothing catches it), not a fuzz
+          # duration that simply ends. Holding the slice at ~37s keeps that headroom.
+          fuzz-seconds: 375
           mode: prune
           sanitizer: address
           output-sarif: true
@@ -58,11 +88,11 @@ jobs:
           storage-repo-branch: main
 
   coverage:
-    name: coverage report
+    name: coverage replay (per-harness edge stats)
     runs-on: ubuntu-latest
     timeout-minutes: 60 # coverage build + full-corpus replay over every harness — the slow one
     permissions:
-      contents: read # builds + replays only; the report is pushed via the storage PAT
+      contents: read # builds + replays only; the logs are pushed via the storage PAT
     concurrency:
       group: ${{ github.workflow }}-coverage
       cancel-in-progress: true
@@ -74,11 +104,17 @@ jobs:
           language: python
           github-token: ${{ secrets.GITHUB_TOKEN }}
           sanitizer: coverage
-      - name: Generate the coverage report
+      # Replays the persisted corpus and uploads the per-harness libFuzzer logs to
+      # gh-pages. Despite the mode name no HTML report reaches us — see the file
+      # header for what actually lands under coverage/latest/ and why.
+      - name: Replay the corpus and upload the edge stats
         id: run
         uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          # Inert here: CFLite's CoverageTargetRunner overrides the per-target loop and
+          # calls generate_coverage_report directly, so fuzz-seconds is only validated
+          # (must be >= 1), never spent. Tuning it on THIS job changes nothing.
           fuzz-seconds: 300
           mode: coverage
           sanitizer: coverage

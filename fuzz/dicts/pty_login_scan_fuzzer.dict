@@ -1,0 +1,44 @@
+# libFuzzer dictionary for pty_login_scan_fuzzer (pty_screen's login-output
+# scanners). Every interesting branch is gated on a literal token — the `https://`
+# URL prefix, the OSC 8 escape framing, the authorize path markers, the known auth
+# host suffixes and the token key. Atheris' random FuzzedDataProvider bytes never
+# synthesise these, so without the dict (and the seed corpus) the harness sits at
+# ~11 edges, fuzzing only the no-match path. See fuzz/README.md.
+"https://"
+"http://"
+# authorize-endpoint path markers (matched against the PATH only)
+"oauth/authorize"
+"/cai/oauth/authorize"
+"/authorize"
+"?redirect_uri="
+# known auth host suffixes, and the docs/marketing prefixes that must NOT win
+"claude.ai"
+"claude.com"
+"anthropic.com"
+"console.anthropic.com"
+"platform.claude.com"
+"docs."
+"help."
+"support."
+"www."
+# trailing characters `_clean_url` trims back off a matched URL
+"."
+")"
+"\""
+# The urlsplit ValueError `_url_host`/`_url_path` guard is the INVALID-IPv6-BRACKET one,
+# not the `.port` case (neither helper reads `.port`, so a bad port never raises there).
+# An unterminated `[` is what reaches the guard.
+"https://[::1/"
+"https://[bad/"
+"[::1]"
+":99999999999999/"
+# OSC 8 hyperlink framing: ESC ] 8 ; <params> ; <URI> (ST | BEL)
+"\x1b]8;;"
+"\x1b]8;id=1;"
+"\x1b\x5c"
+"\x07"
+# generic CSI/SGR noise the ANSI strip must remove first
+"\x1b["
+"\x1b[0m"
+# the printed long-lived credential
+"CLAUDE_CODE_OAUTH_TOKEN="

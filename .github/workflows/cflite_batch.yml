@@ -15,8 +15,15 @@
 # accumulating. See https://google.github.io/clusterfuzzlite/.
 #
 # Cost knobs (see the CI-cost-audit TODO): the `cron` cadence and `fuzz-seconds`.
-# NB `fuzz-seconds` is PER fuzz target, so wall-clock ≈ fuzz-seconds × harness
-# count + build — keep that under `timeout-minutes`.
+# NB `fuzz-seconds` is the TOTAL budget for the whole run, not a per-target one:
+# CFLite divides it across the harnesses (`fuzz_seconds // fuzzers_left_to_run`
+# in oss-fuzz's infra/cifuzz/run_fuzzers.py). So the FUZZ BUDGET stays flat as
+# harnesses are added — what shrinks is the slice EACH harness gets. Per-target
+# OVERHEAD does still scale (an Atheris process start plus a corpus push per
+# target), and it dominates here: ≈12 min observed against a 300s budget. Adding
+# harnesses is therefore a coverage-dilution decision, not a timeout one: raise
+# `fuzz-seconds` in step with the harness count to hold the per-harness slice, and
+# re-check `timeout-minutes`. At 375s / 10 harnesses that slice is ~37s.
 name: ClusterFuzzLite batch fuzzing
 
 on:
@@ -30,7 +37,7 @@ jobs:
   batch-fuzzing:
     name: batch fuzzing
     runs-on: ubuntu-latest
-    timeout-minutes: 55 # ≈ fuzz-seconds × harness count + build (re-check when adding harnesses)
+    timeout-minutes: 55 # ≈ fuzz-seconds + build; generous headroom (observed ≈12 min)
     permissions:
       contents: read # checkout + build the harnesses
       security-events: write # upload crash SARIF to the Security tab
@@ -54,7 +61,12 @@ jobs:
         uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          fuzz-seconds: 300 # PER fuzz target → wall-clock ≈ 300 × harness count
+          # TOTAL for the run, split across the harnesses (see the header). 375 not 300
+          # because this branch took the harness count 8 -> 10: the loop floors, and
+          # 375//10 == 300//8 == 37s each, so the two new harnesses cost the existing
+          # eight nothing. The extra 75s is nothing against `timeout-minutes: 55` and a
+          # ≈12 min observed run.
+          fuzz-seconds: 375
           mode: batch
           sanitizer: ${{ matrix.sanitizer }}
           output-sarif: true
