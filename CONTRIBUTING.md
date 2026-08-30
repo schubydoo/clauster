@@ -73,6 +73,9 @@ the CI coverage-gate interpreter (`uv` still supports the full 3.11+ floor).
 
   Use `default: minor` for a feature, `patch` for a fix, `major` for a breaking
   change, or `perf` / `security` / `build` for those sections (each a patch bump).
+  The key really is the literal word `default` — knope silently ignores a fragment
+  keyed to anything else, so it would ship with no changelog entry and no version
+  bump; `scripts/lint_changesets.py` (pre-commit and CI) rejects that.
   You don't need to add a PR link — knope appends `([#NNN])` for the PR that
   introduces the changeset, at release time.
   Keep the summary to a single concise line that gets straight to the point;
