@@ -714,7 +714,17 @@ def test_transcripts_list_newest_first_with_counts(write_config, tmp_path, monke
     assert [s["session"] for s in sessions] == ["s-new", "s-old"]  # newest first
     assert all(s["turn_count"] == 4 for s in sessions)  # fixture has 4 renderable turns
     assert all(
-        set(s) == {"session", "mtime", "turn_count", "live", "first_prompt", "first_ts", "last_ts"}
+        set(s)
+        == {
+            "session",
+            "mtime",
+            "turn_count",
+            "live",
+            "first_prompt",
+            "first_ts",
+            "last_ts",
+            "is_subagent",
+        }
         for s in sessions
     )
     assert all(s["live"] is False for s in sessions)  # no running session → none live
@@ -744,6 +754,30 @@ def test_transcripts_list_resume_picker_fields(write_config, tmp_path, monkeypat
     long = sessions["s-long"]
     assert len(long["first_prompt"]) == 120  # server-side truncation
     assert long["first_ts"] == "" and long["last_ts"] == ""  # no timestamps → ""
+
+
+def test_transcripts_list_flags_subagent_transcripts(write_config, tmp_path, monkeypatch):
+    """A dispatched-subagent (sidechain) transcript is FLAGGED, not dropped (#1092).
+
+    The listing feeds both the read-only viewer and the fork picker; the server keeps the
+    entry and only the picker filters on it, so nothing is hidden from the viewer.
+    """
+    tdir = _plant_transcripts(monkeypatch, tmp_path, sessions=["s-real"])
+    (tdir / "s-sub.jsonl").write_text(
+        json.dumps(
+            {"isSidechain": True, "message": {"role": "user", "content": "Review this change"}}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    sessions = {
+        s["session"]: s
+        for s in _client(write_config, tmp_path)
+        .get("/api/projects/gamma/transcripts")
+        .json()["sessions"]
+    }
+    assert sessions["s-sub"]["is_subagent"] is True
+    assert sessions["s-real"]["is_subagent"] is False  # the fixture is a real conversation
 
 
 def test_transcripts_list_badges_running_bridge_session_live(write_config, tmp_path, monkeypatch):

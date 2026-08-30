@@ -1556,10 +1556,13 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         """List a project's session transcripts for the read-only viewer (issue #431, #614).
 
         Returns ``{project, sessions: [{session, mtime, turn_count, live, first_prompt,
-        first_ts, last_ts}]}``,
+        first_ts, last_ts, is_subagent}]}``,
         live-first then newest-first (by mtime). ``session`` is the transcript filename
         stem (the per-session uuid); ``live`` is True when that session id maps to a
-        currently-running bridge/agent or hosted session (#614). Mirrors
+        currently-running bridge/agent or hosted session (#614). ``is_subagent`` marks a
+        sidechain (dispatched-subagent) transcript: the listing still carries it so the
+        read-only viewer can show everything, and only the fork picker leaves it out
+        (#1092). Mirrors
         :func:`api_project_usage`: the name is validated for path-component safety (422),
         the on-disk walk runs off the event loop, and a broken directory or unreadable
         file (``OSError``) degrades to a defined 503 — never a bare 500 and never echoing
@@ -1607,6 +1610,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                         "first_prompt": summary.first_prompt,
                         "first_ts": summary.first_ts,
                         "last_ts": summary.last_ts,
+                        "is_subagent": summary.is_subagent,
                     }
                 )
             # Live sessions first (a glance at what's running now), then newest-first
