@@ -1503,6 +1503,150 @@ async def test_spawn_pty_worktree_passes_flag_and_resume_reuses_name(
         await runner.stop(resumed.instance_id)
 
 
+# ----- worktree identity across a keeper-only reattach (#1241) ----------------------
+
+
+def test_pty_worktree_name_prefers_an_explicit_name() -> None:
+    # #1241: a session rediscovered from its keeper sidecar is carded under a FRESH
+    # instance_id, so deriving the name from that id names a worktree that isn't on disk.
+    # The explicit name recovered from the sidecar wins; the mode gate still applies.
+    from clauster.models import RemoteControlInstance
+
+    wt = RemoteControlInstance(
+        project="alpha", label="alpha", spawn_mode="worktree", worktree_name="clauster-deadbeef"
+    )
+    assert SessionRunner._pty_worktree_name(wt) == "clauster-deadbeef"
+    assert wt.worktree_name != f"clauster-{wt.instance_id[:8]}", "fixture must not be derivable"
+    same_dir = RemoteControlInstance(
+        project="alpha", label="alpha", spawn_mode="same-dir", worktree_name="clauster-deadbeef"
+    )
+    assert SessionRunner._pty_worktree_name(same_dir) is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        123,
+        "",
+        "clauster-DEADBEEF",  # uppercase: not a shape we mint
+        "clauster-abcd123",  # 7 chars
+        "clauster-abcd12345",  # 9 chars
+        "clauster-abcd1234/../../etc",  # traversal past the worktrees dir
+        "../clauster-abcd1234",
+        "--force",  # flag-looking token
+        "worktree-abcd1234",
+        "clauster-abcd1234\n",  # trailing newline: the case where \Z beats $ ($ would match)
+        "clauster-abcd1234\x00",  # embedded NUL from a corrupt sidecar
+    ],
+)
+def test_recovered_worktree_name_rejects_anything_we_could_not_have_minted(value) -> None:
+    # The value reaches `--worktree <name>` argv and the git-unlock path, and both of its
+    # sources are on-disk files. Only the minting shape is accepted; everything else falls
+    # back to the derived name rather than reaching a subprocess.
+    assert SessionRunner._recovered_worktree_name(value) is None
+
+
+def test_recovered_worktree_name_accepts_a_minted_name() -> None:
+    assert SessionRunner._recovered_worktree_name("clauster-0a1b2c3d") == "clauster-0a1b2c3d"
+
+
+@_POSIX_ONLY
+async def test_keeper_sidecar_records_the_worktree_name(runner_config, monkeypatch) -> None:
+    # The sidecar is the one artifact that outlives a Clauster restart, so it is where the
+    # real `--worktree` name has to be recorded for a keeper-only reattach to recover it.
+    runner, _ = _pty_runner(runner_config)
+    pty = await runner.spawn("alpha", resume_mode="pty", spawn_mode="worktree")
+    try:
+        assert pty.bridge_debug_log_path is not None
+        sidecar = SessionRunner._sidecar_path_for(pty.bridge_debug_log_path)
+        info = json.loads(sidecar.read_text(encoding="utf-8"))
+        assert info["worktree_name"] == f"clauster-{pty.instance_id[:8]}"
+    finally:
+        await runner.stop(pty.instance_id)
+
+
+async def test_keeper_only_reattach_keeps_the_original_worktree_identity(
+    runner_config, monkeypatch
+) -> None:
+    # #1241. A live keeper reattached with no row to take its identity from gets a fresh
+    # instance_id, so the DERIVED worktree name stops matching the one on disk: a resume
+    # would build a second worktree and orphan the original (uncommitted work + branch),
+    # and stop()'s unlock (#1089) would target a path that does not exist. The name comes
+    # off the sidecar instead — and is persisted, so it survives the NEXT restart too,
+    # by which time the keeper may be gone.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    runner._log_dir.mkdir(parents=True, exist_ok=True)
+    (runner._log_dir / "alpha-1700000000000-0.keeper.json").write_text(
+        json.dumps(
+            {
+                "keeper_pid": 7777,
+                "bridge_pid": 8888,
+                "bridge_proc_start": 333.0,
+                "state": "ready",
+                "worktree_name": "clauster-0a1b2c3d",
+            }
+        )
+    )
+    saved = {
+        "project_name": "alpha",
+        "label": "alpha",
+        "spawn_mode": "worktree",
+        "resume_mode": "pty",
+    }
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda pid: pid == 7777)
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge", lambda pid, start=None, **k: pid == 8888
+    )
+
+    inst = runner._reattach_pty_from_sidecar("alpha", saved)
+
+    assert inst is not None
+    assert inst.worktree_name == "clauster-0a1b2c3d"
+    assert SessionRunner._pty_worktree_name(inst) == "clauster-0a1b2c3d"
+    assert inst.instance_id[:8] != "0a1b2c3d", "the fresh id must not accidentally derive it"
+
+    # It round-trips through the real store: a later restart rebuilds the row, and by then
+    # the sidecar's keeper may be gone — which is exactly when the Resume happens.
+    runner._instances[inst.instance_id] = inst
+    store = runner.persistence.state_store()
+    store.save(runner._persist_subset())
+    row = store.load()[inst.instance_id]
+    assert row["worktree_name"] == "clauster-0a1b2c3d"
+    rebuilt = runner._stopped_from_row(inst.instance_id, row)
+    assert SessionRunner._pty_worktree_name(rebuilt) == "clauster-0a1b2c3d"
+
+
+@_POSIX_ONLY
+async def test_resume_keeps_an_explicit_worktree_name(runner_config, monkeypatch) -> None:
+    # A resume mints a new instance object and copies only the identity across. The
+    # explicit name has to come with it — otherwise the very session the recovery was for
+    # resumes into a NEW worktree on its first Resume, which is the harm #1241 describes.
+    runner, _ = _pty_runner(runner_config)
+    seen: list[list[str]] = []
+    real = SessionRunner._popen_keeper
+
+    def _capture(self, cwd, sidecar, bridge_argv, screen_sidecar=None):
+        seen.append(list(bridge_argv))
+        return real(self, cwd, sidecar, bridge_argv, screen_sidecar)
+
+    monkeypatch.setattr(SessionRunner, "_popen_keeper", _capture)
+    pty = await runner.spawn("alpha", resume_mode="pty", spawn_mode="worktree")
+    await runner.stop(pty.instance_id)
+    # Stand in for the rediscovered card: same id, but an explicit name that its id does
+    # NOT derive — exactly what `_reattach_pty_from_sidecar` produces.
+    runner._instances[pty.instance_id].worktree_name = "clauster-0a1b2c3d"
+
+    resumed = await runner.resume(pty.instance_id)
+    try:
+        argv = seen[-1]
+        assert argv[argv.index("--worktree") + 1] == "clauster-0a1b2c3d"
+        assert resumed.worktree_name == "clauster-0a1b2c3d"
+    finally:
+        await runner.stop(resumed.instance_id)
+
+
 # ----- audited coverage gaps (2026-07 audit) ---------------------------------
 
 

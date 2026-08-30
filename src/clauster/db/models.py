@@ -126,6 +126,12 @@ class Instance(Base, TimestampMixin):
     bridge_pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
     bridge_proc_start: Mapped[float | None] = mapped_column(Float, nullable=True)
     keeper_pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # A pty session's git-worktree name, stored ONLY when it is not derivable from this
+    # row's own instance_id (#1241) — i.e. a session a keeper-only reattach had to card
+    # under a fresh id. NULL for every ordinary row, which derives it. Without it the
+    # recovery lives only as long as the keeper, and the Resume that needs it happens
+    # after the session ends.
+    worktree_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     project: Mapped[Project] = relationship(back_populates="instances")
 

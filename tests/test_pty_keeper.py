@@ -154,6 +154,36 @@ def test_run_keeper_inprocess_scrapes_url(tmp_path: Path, _restore_sighup) -> No
     assert isinstance(info["bridge_pid"], int)
 
 
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (
+            ["claude", "--remote-control", "a", "--worktree", "clauster-abcd1234"],
+            "clauster-abcd1234",
+        ),
+        (["claude", "--remote-control", "a"], None),
+        (["claude", "--worktree"], None),  # malformed: flag with no value is not a name
+    ],
+)
+def test_worktree_from_argv(argv, expected) -> None:
+    # #1241: the keeper records the `--worktree` name it launched the bridge with, read off
+    # that argv rather than passed separately, so there is no second source to disagree.
+    from clauster import pty_keeper
+
+    assert pty_keeper._worktree_from_argv(argv) == expected
+
+
+def test_run_keeper_records_the_worktree_name(tmp_path: Path, _restore_sighup) -> None:
+    """The discovery sidecar carries the worktree name, so a keeper-only reattach can
+    recover the session's real worktree instead of deriving one from a fresh id (#1241)."""
+    from clauster import pty_keeper
+
+    sidecar = tmp_path / "k.json"
+    bridge = [sys.executable, "-c", "pass", "--worktree", "clauster-0a1b2c3d"]
+    assert pty_keeper.run_keeper(bridge, sidecar, cwd=str(tmp_path)) == 0
+    assert _read(sidecar)["worktree_name"] == "clauster-0a1b2c3d"
+
+
 def test_run_keeper_scrapes_url_from_screen_when_raw_fragments_it(
     tmp_path: Path, _restore_sighup
 ) -> None:

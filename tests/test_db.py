@@ -222,6 +222,24 @@ def test_hosted_instance_id_absent_stays_absent(persistence):
     assert "instance_id" not in loaded
 
 
+def test_state_worktree_name_round_trips_and_stays_absent_when_unset(persistence):
+    # #1241: the pty worktree name is normally DERIVED from the instance_id, so it is
+    # persisted only for a session a keeper-only reattach had to card under a fresh id.
+    # It has to survive the restart after that session ends — that is when the Resume
+    # which would otherwise build a second worktree happens. A row without it stays
+    # absent, so the ordinary session keeps deriving.
+    store = persistence.state_store()
+    store.save(
+        {
+            "iid-recovered": {"project_name": "alpha", "worktree_name": "clauster-0a1b2c3d"},
+            "iid-derived": {"project_name": "alpha"},
+        }
+    )
+    loaded = store.load()
+    assert loaded["iid-recovered"]["worktree_name"] == "clauster-0a1b2c3d"
+    assert "worktree_name" not in loaded["iid-derived"]
+
+
 # ----- fail-closed read + raising save -----------------------------------
 
 

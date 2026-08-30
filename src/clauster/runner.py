@@ -292,6 +292,15 @@ _PROC_START_TOLERANCE = 2.0
 # How long shutdown() waits for in-flight fire-and-forget notify sends to finish
 # before cancelling them — bounds shutdown while letting a quick send complete.
 _NOTIFY_DRAIN_GRACE = 2.0
+# The exact shape `_pty_worktree_name` mints: "clauster-" + the first 8 chars of an RFC
+# 4122 instance_id, which are always lowercase hex. A RECOVERED name (#1241) comes off a
+# keeper sidecar or a state.json row — both on-disk files a hand edit or a corrupt write
+# can put anything into — and is then interpolated into `--worktree <name>` argv AND into
+# `<project>/.claude/worktrees/<name>` for the stop-time git unlock. So it is matched
+# against the minting rule rather than merely type-checked: anything else (a traversal
+# segment, an absolute path, a flag-looking token) is not a name we could have produced,
+# and falls back to the derived value instead of reaching a subprocess.
+_WORKTREE_NAME_RE = re.compile(r"clauster-[0-9a-f]{8}\Z")
 
 
 def _release_flock_if_acquired(cm) -> Callable[[asyncio.Task], None]:
@@ -1022,6 +1031,12 @@ class SessionRunner:
                 "permission_mode": inst.permission_mode,
                 "resume_mode": inst.resume_mode,
                 "sandbox_mode": inst.sandbox_mode,
+                # Only set when the name is NOT derivable from this row's instance_id
+                # (#1241) — a keeper-only reattach that had to mint a fresh id. Persisted
+                # so the recovery survives the next restart: by then the keeper may be
+                # gone, and the row would otherwise be rebuilt with the derived name and
+                # resume into a second worktree. None for every ordinary session.
+                "worktree_name": inst.worktree_name,
                 # Liveness identity (#1088/#1091): without these persisted, a fresh process
                 # cannot tell which rows are live, and `rediscover` could only ever resolve
                 # one instance per project via the (project-keyed) pointer walk. A dead
@@ -1817,6 +1832,12 @@ class SessionRunner:
             # Identity stability is also what keeps per-instance derivations (e.g.
             # the pty worktree name, #779) the same across a stop→resume cycle.
             instance.instance_id = resume_target.instance_id
+            # And carry the EXPLICIT worktree name when the target has one (#1241) — a
+            # session rediscovered from its keeper sidecar was carded under a fresh id, so
+            # for it the derivation above is exactly what does not hold. Dropping the name
+            # here would resume into a new, empty worktree and orphan the one holding the
+            # session's uncommitted work.
+            instance.worktree_name = resume_target.worktree_name
         # Register under instance_id — the stable UUID minted by RemoteControlInstance
         # (via _new_instance_id default_factory) or carried over from the instance
         # being resumed, NOT the project name.
@@ -2492,15 +2513,24 @@ class SessionRunner:
 
     @staticmethod
     def _pty_worktree_name(instance: RemoteControlInstance) -> str | None:
-        """Derive the stable per-session worktree name for a worktree-mode pty spawn.
+        """Resolve the per-session worktree name for a worktree-mode pty spawn.
 
-        Derived from the instance_id — which survives stop→resume (a resume revives
-        the same identity) — so the revived session lands back in ITS worktree.
+        Normally derived from the instance_id — which survives stop→resume (a resume
+        revives the same identity) — so the revived session lands back in ITS worktree.
         ``None`` for non-worktree spawns (the session runs in the project dir).
+
+        An explicit ``worktree_name`` wins when the instance carries one (#1241). That is
+        the keeper-only reattach: a live keeper adopted from its sidecar with no row whose
+        identity it can be given gets a FRESH instance_id, and the derivation then names a
+        worktree that does not exist — a resume would create a second one and orphan the
+        original (which still holds any uncommitted work and its branch), while the
+        stop-time unlock (#1089) would target the empty name and leave the real worktree
+        locked. The sidecar records the name the bridge was actually launched with, so the
+        recovered value is the truth and the derivation is only the fallback.
         """
         if instance.spawn_mode != "worktree":
             return None
-        return f"clauster-{instance.instance_id[:8]}"
+        return instance.worktree_name or f"clauster-{instance.instance_id[:8]}"
 
     def _unlock_pty_worktree(self, instance: RemoteControlInstance) -> None:
         """Release the git lock on a stopped pty session's worktree (#1089).
@@ -3491,6 +3521,21 @@ class SessionRunner:
         return set(RESUME_MODES)
 
     @staticmethod
+    def _recovered_worktree_name(value: object) -> str | None:
+        """Coerce a worktree name read back off disk, or ``None`` (#1241).
+
+        Applied to both sources of a non-derived name — the keeper sidecar and the
+        persisted row — so the argv and the git-unlock path can only ever see a name
+        Clauster itself could have minted. See :data:`_WORKTREE_NAME_RE` for why the
+        check is the minting rule rather than a type test. Absent, wrong-typed, or
+        non-conforming values return ``None``, which sends the caller back to the derived
+        name: fail closed to the safe value rather than to a stranger's path.
+        """
+        if not isinstance(value, str) or not _WORKTREE_NAME_RE.match(value):
+            return None
+        return value
+
+    @staticmethod
     def _saved_sandbox(saved: dict) -> SandboxMode:
         """Coerce a persisted ``sandbox_mode`` against the allowed set (#780).
 
@@ -3538,6 +3583,9 @@ class SessionRunner:
             # re-applies the same --sandbox/--no-sandbox (or neither). pty is out of
             # scope, so a pty record coerces to "default" harmlessly.
             sandbox_mode=self._saved_sandbox(saved),
+            # Carried so a Resume of this card lands back in the worktree the session
+            # actually ran in, not one derived from an id it was rediscovered under (#1241).
+            worktree_name=self._recovered_worktree_name(saved.get("worktree_name")),
             # The process is gone: no pid/keeper/env to recover. intentional_stop is
             # carried through (a host-down bridge has it False — "interrupted" — vs a
             # deliberate Stop's True); both render as a resumable STOPPED card.
@@ -3772,6 +3820,12 @@ class SessionRunner:
                 bridge_raw_log_path=tail_source,
                 starter_session_id=info.get("session_id") or None,
                 url=info.get("connect_url") or None,
+                # The bridge's real `--worktree` name (#1241). Without it a reattach that
+                # had to mint a fresh instance_id would derive a name for a worktree that
+                # does not exist — resuming into a NEW one and orphaning the original,
+                # and leaving the real one locked at stop. Only meaningful for a
+                # worktree-mode session; `_pty_worktree_name` gates on spawn_mode anyway.
+                worktree_name=self._recovered_worktree_name(info.get("worktree_name")),
             )
         return None
 
@@ -4040,6 +4094,7 @@ class SessionRunner:
                 permission_mode=permission_mode,
                 resume_mode=resume_mode,
                 sandbox_mode=self._saved_sandbox(saved),
+                worktree_name=self._recovered_worktree_name(saved.get("worktree_name")),
                 # Seeded from the row, not hardcoded False: `stop()` records the intent and
                 # THEN signals, so a poll landing in that grace window adopts a still-live
                 # pid whose stop was already requested. Hardcoding False reports CRASHED.
@@ -4142,6 +4197,7 @@ class SessionRunner:
             permission_mode=permission_mode,
             resume_mode=resume_mode,
             sandbox_mode=self._saved_sandbox(saved),
+            worktree_name=self._recovered_worktree_name(saved.get("worktree_name")),
             intentional_stop=bool(saved.get("intentional_stop", False)),
             status=InstanceStatus.STOPPED,
             # The process is gone: drop the stale pids rather than carry them onto a dead
@@ -4313,6 +4369,7 @@ class SessionRunner:
                     self._raw_log_path_for(log_path) if log_path is not None else None
                 ),
                 instance_id=persisted_iid,
+                worktree_name=self._recovered_worktree_name(saved.get("worktree_name")),
             )
             self._instances[instance.instance_id] = instance
         # Third pass (#1115): rows carrying NO pid at all. The two passes above resolve at
@@ -4448,6 +4505,7 @@ class SessionRunner:
         bridge_debug_log_path: Path | None = None,
         bridge_raw_log_path: Path | None = None,
         instance_id: str | None = None,
+        worktree_name: str | None = None,
     ) -> RemoteControlInstance:
         """Build a RUNNING managed instance from a live Anthropic-written pointer.
 
@@ -4467,6 +4525,11 @@ class SessionRunner:
         the returned instance carries the same stable UUID so the registry key is
         consistent across restarts.  When ``None`` a fresh UUID is minted (adopt path,
         or a rediscovered bridge with no prior persisted record).
+
+        ``worktree_name`` carries a row's EXPLICIT pty worktree name through (#1241) — set
+        only for a session an earlier keeper-only reattach had to card under a fresh id,
+        where the name is no longer derivable from that id. ``None`` (the normal case, and
+        always for :meth:`adopt`'s external standard bridge) leaves it derived.
         """
         kwargs: dict = dict(
             project=name,
@@ -4474,6 +4537,7 @@ class SessionRunner:
             spawn_mode=spawn_mode,
             permission_mode=permission_mode,
             resume_mode=resume_mode,
+            worktree_name=worktree_name,
             keeper_pid=keeper_pid,
             intentional_stop=False,
             status=InstanceStatus.RUNNING,
