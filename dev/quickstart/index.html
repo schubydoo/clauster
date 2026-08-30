@@ -1679,7 +1679,12 @@ stay visible on the card.</p>
   <strong>Conversation</strong> picker (under <em>More options</em>) lists the project's previous
   conversations by their first prompt. Picking one forks it into the new
   session (<code>--resume --fork-session</code> under the hood): the new session continues
-  from that conversation, and the original stays untouched.</li>
+  from that conversation, and the original stays untouched. Transcripts written
+  by a dispatched <strong>subagent</strong> are left out of this picker — they are one internal
+  turn of a conversation rather than a conversation, so forking one would resume a
+  fragment without the parent's context. They remain visible in the read-only
+  <strong>Transcripts</strong> viewer, and a transcript clauster cannot positively identify as a
+  subagent's is always offered rather than hidden.</li>
 <li>To start fresh, <strong>Forget</strong> the stopped session (drops it from Recent) and
   launch again with <strong>Run Claude here</strong>.</li>
 </ul>
