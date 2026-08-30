@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import get_args
+
+import pytest
 
 from clauster.logging_config import (
+    LOG_LEVELS,
     JsonFormatter,
+    LogLevel,
     RedactingTextFormatter,
     setup_logging,
 )
@@ -110,3 +115,59 @@ def test_setup_logging_selects_formatter_and_is_idempotent():
         assert isinstance(root.handlers[0].formatter, RedactingTextFormatter)
     finally:
         logging.getLogger().handlers[:] = []  # don't leak config into other tests
+
+
+def test_setup_logging_defaults_to_info():
+    root = logging.getLogger()
+    previous = root.level
+    try:
+        setup_logging("text")
+        assert root.level == logging.INFO
+    finally:
+        root.handlers[:] = []
+        root.setLevel(previous)
+
+
+@pytest.mark.parametrize(
+    ("level", "expected"),
+    [
+        ("debug", logging.DEBUG),
+        ("info", logging.INFO),
+        ("warning", logging.WARNING),
+        ("error", logging.ERROR),
+        (logging.DEBUG, logging.DEBUG),  # a raw stdlib int still works
+    ],
+)
+def test_setup_logging_applies_level(level, expected):
+    # #993: the level is what `log_level` sets; every LogLevel name must map to its
+    # stdlib level, and the int form stays accepted for direct callers.
+    root = logging.getLogger()
+    previous = root.level
+    try:
+        setup_logging("text", level=level)
+        assert root.level == expected
+    finally:
+        root.handlers[:] = []
+        root.setLevel(previous)
+
+
+def test_log_levels_names_match_the_literal():
+    # The mapping and the Literal are two lists that must not drift: a name in one and
+    # not the other is either an unreachable entry or a KeyError at startup.
+    assert set(LOG_LEVELS) == set(get_args(LogLevel))
+
+
+def test_debug_records_are_emitted_and_still_redacted(capsys):
+    # The point of the knob (#993) — a DEBUG record reaches the handler — plus the
+    # invariant it must not weaken: raising verbosity does not bypass redaction.
+    root = logging.getLogger()
+    previous = root.level
+    try:
+        setup_logging("text", level="debug")
+        logging.getLogger("clauster.test").debug("token=%s", _SECRET)
+        err = capsys.readouterr().err
+        assert "DEBUG" in err
+        assert _SECRET not in err
+    finally:
+        root.handlers[:] = []
+        root.setLevel(previous)

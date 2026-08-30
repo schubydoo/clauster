@@ -440,6 +440,33 @@ def test_env_override_nested_bool(write_config, monkeypatch):
     assert config.logs.strip_ansi_in_stream is False
 
 
+def test_log_level_defaults_to_info(write_config):
+    # #993: absent from the file, the server keeps its historical INFO verbosity.
+    assert load_config(write_config()).log_level == "info"
+
+
+def test_log_level_from_file_and_env_override(write_config, monkeypatch):
+    # #993 advertises `CLAUSTER_LOG_LEVEL` — a top-level `log_level` derives exactly that
+    # name (`logs.level` would have derived CLAUSTER_LOGS_LEVEL instead).
+    cfg_path = write_config("log_level: warning\n")
+    assert load_config(cfg_path).log_level == "warning"
+    monkeypatch.setenv("CLAUSTER_LOG_LEVEL", "debug")
+    assert load_config(cfg_path).log_level == "debug"
+
+
+def test_log_level_accepts_uppercase_names(write_config, monkeypatch):
+    # `DEBUG` is what a Python-logging reader writes in a unit file; case-fold it rather
+    # than fail startup on a spelling.
+    monkeypatch.setenv("CLAUSTER_LOG_LEVEL", " DEBUG ")
+    assert load_config(write_config()).log_level == "debug"
+
+
+def test_log_level_rejects_unknown_name(write_config):
+    # Fail closed and loudly: an unusable level must not silently fall back to info.
+    with pytest.raises(ValueError, match="log_level"):
+        load_config(write_config("log_level: trace\n"))
+
+
 def test_env_override_merges_into_existing_nested_mapping(write_config, monkeypatch):
     # When the yaml already defines the parent mapping (`logs`), a nested env
     # override must merge into the existing dict rather than replacing it — i.e.

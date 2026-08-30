@@ -22,6 +22,7 @@ from typing import Literal, Union, get_args, get_origin
 import yaml
 from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
+from .logging_config import LogLevel
 from .reconcile import resume_mode_to_launch_mode, show_cost_to_mode
 
 _log = logging.getLogger("clauster.config")
@@ -1374,6 +1375,18 @@ class ClausterConfig(BaseModel):
         "format; `json` emits one structured JSON object per record. Both modes redact "
         "session URLs / bearer ids before the line is written.",
     )
+    log_level: LogLevel = Field(
+        default="info",
+        description="Minimum severity written to the application log, applied to "
+        "Clauster's own loggers and uvicorn's alike. `debug` mostly adds uvicorn's own "
+        "debug records (per-request and per-connection detail), plus a handful of "
+        "Clauster best-effort cleanup diagnostics and claustrum daemon lifecycle notes "
+        "— a wider view of the same events, meant for diagnosis rather than steady "
+        "state: it is high-volume, and while every line is still redacted the same way "
+        "(see `log_format`), it records far more about what the server is doing, so the "
+        "log is worth treating as sensitive. Names are case-insensitive (`DEBUG` works). "
+        "Applied once at startup — restart Clauster for a change to take effect.",
+    )
     instance_name: str | None = Field(
         default=None,
         max_length=32,
@@ -1452,6 +1465,18 @@ class ClausterConfig(BaseModel):
         callers raise when this is ``True``).
         """
         return permission_mode == "bypassPermissions" and not self.allows_bypass(project_name)
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def _normalize_log_level(cls, v: object) -> object:
+        """Accept the conventional uppercase level names (`DEBUG`, `WARNING`, …).
+
+        The `Literal` is lowercase because uvicorn's `log_level` is, but "DEBUG" is what
+        a reader of Python logging (or of `CLAUSTER_LOG_LEVEL=DEBUG` in a unit file)
+        writes. Case-fold rather than reject; anything that is not a known name still
+        fails the `Literal` and lists the valid ones.
+        """
+        return v.strip().lower() if isinstance(v, str) else v
 
     @field_validator("projects_root", "state_dir", mode="before")
     @classmethod

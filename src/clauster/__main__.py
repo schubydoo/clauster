@@ -1543,7 +1543,7 @@ def _run(config_path: str | None) -> int:
     # Configure logging before serving (#361). log_config=None below stops uvicorn from
     # reconfiguring logging, so its loggers propagate to the root handler set here and
     # share the chosen text/JSON format + redaction.
-    setup_logging(config.log_format)
+    setup_logging(config.log_format, level=config.log_level)
     app = create_app(config)
     # proxy_headers=False: keep request.client.host as the real socket peer so the
     # reverse-proxy IP allowlist can't be defeated via a spoofed X-Forwarded-For.
@@ -1554,7 +1554,11 @@ def _run(config_path: str | None) -> int:
             app,
             host=config.host,
             port=config.port,
-            log_level="info",
+            # uvicorn sets its own loggers' level from this regardless of log_config, so
+            # passing the root level too is what makes `log_level: debug` actually raise
+            # server-side verbosity instead of only Clauster's own records (#993). The
+            # LogLevel names are a subset of uvicorn's, so config.log_level is valid here.
+            log_level=config.log_level,
             log_config=None,
             proxy_headers=False,
             ssl_certfile=ssl_certfile,

@@ -484,11 +484,39 @@ a new Direct Session for the project and resume from the captured session.
 
 ### Raising the log level
 
-The server log level is **not currently adjustable** — Clauster runs uvicorn
-pinned at `info`. A verbosity knob is tracked in
-[#993](https://github.com/schubydoo/clauster/issues/993). Note that the
-`logs.*` config keys control the **bridge debug log** stream (rotation, ANSI
-stripping, redaction), not server verbosity.
+> **New in 1.1:** the `log_level` key and its `CLAUSTER_LOG_LEVEL` override.
+> Before that the server logged at `info` in every deployment.
+
+Set `log_level` (default `info`) to raise the server's own verbosity — it
+covers Clauster's loggers and uvicorn's alike:
+
+```yaml
+log_level: debug   # debug | info | warning | error
+```
+
+For a one-shot run, or in a container or unit file, use the env override
+instead of editing the config:
+
+```bash
+CLAUSTER_LOG_LEVEL=debug clauster run -c clauster.yml
+```
+
+Either way the level is read **once at startup**, so restart Clauster after
+changing it. What `debug` mostly adds is **uvicorn's own** debug records —
+per-request and per-connection detail — plus a handful of Clauster's
+best-effort cleanup diagnostics (a stop signal that was a no-op, a worktree
+unlock that failed) and claustrum daemon lifecycle notes. It is a wider view of
+the same events, not a separate decision trace.
+
+Treat it as a diagnostic setting, not a steady state: it is high-volume, and
+although every line still goes through the same redaction as `info` (see
+[log redaction](security.md#log-redaction)), it records much more about what
+the server is doing — so treat a `debug` log as sensitive and skim it before
+attaching it to an issue.
+
+Note the `logs.*` config keys are a different thing entirely: they control the
+**bridge debug log** stream (rotation, ANSI stripping, redaction), not server
+verbosity.
 
 ### Reading the bridge debug log (on-disk vs the redacted stream)
 
@@ -565,6 +593,9 @@ with install state.
 - `clauster --version` and your OS / install method (pip, binary, Docker...).
 - Full `clauster doctor` output — it is designed to be safe to share.
 - The relevant server-log excerpt (`journalctl -u clauster` / `docker logs`).
+  If `info` doesn't show the cause, reproduce with
+  [`log_level: debug`](#raising-the-log-level) and attach that excerpt instead —
+  scrubbed, as below.
 - For bridge problems: the tail of the bridge's
   `<label>-<timestamp>-<seq>.log` — **scrubbed first, see below**.
 

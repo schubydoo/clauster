@@ -8,6 +8,7 @@ tests don't touch.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import types
@@ -83,6 +84,7 @@ def _stub_server(monkeypatch, on_run=None):
                     "app": config.app,
                     "host": config.host,
                     "port": config.port,
+                    "log_level": config.log_level,
                     "proxy_headers": config.proxy_headers,
                     # None when no tls is configured; the resolved abs path otherwise.
                     "ssl_certfile": getattr(config, "ssl_certfile", None),
@@ -107,6 +109,30 @@ def test_run_invokes_uvicorn(write_config, tmp_path, monkeypatch):
     # No tls configured: uvicorn must NOT receive ssl_certfile/ssl_keyfile.
     assert captured.get("ssl_certfile") is None
     assert captured.get("ssl_keyfile") is None
+    assert captured.get("log_level") == "info"  # the default stays INFO (#993)
+
+
+def test_run_applies_log_level_to_root_logger_and_uvicorn(write_config, tmp_path, monkeypatch):
+    # #993: one `log_level` key has to move BOTH levels. Only setting the root logger
+    # would leave uvicorn's own loggers pinned at info, since uvicorn levels them from
+    # its own `log_level` regardless of `log_config=None`.
+    root = logging.getLogger()
+    previous = root.level
+    uvicorn_error = logging.getLogger("uvicorn.error")
+    previous_uvicorn = uvicorn_error.level
+    try:
+        captured = _stub_server(monkeypatch)
+        cfg = write_config(
+            f"claude:\n  binary: {FAKE_CLAUDE}\nstate_dir: {tmp_path}/.cstate\nlog_level: debug\n"
+        )
+        rc = cli.main(["run", "-c", str(cfg)])
+        assert rc == 0
+        assert captured.get("log_level") == "debug"
+        assert root.level == logging.DEBUG
+    finally:
+        root.handlers[:] = []
+        root.setLevel(previous)
+        uvicorn_error.setLevel(previous_uvicorn)
 
 
 def _tls_cert_key(tmp_path):

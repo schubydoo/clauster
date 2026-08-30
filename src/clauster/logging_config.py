@@ -1,4 +1,4 @@
-"""Application logging setup honoring ``log_format`` (#361).
+"""Application logging setup honoring ``log_format`` (#361) and ``log_level`` (#993).
 
 ``text`` (the default) keeps the human-readable single-line format; ``json`` emits
 one structured JSON object per record. Both modes **redact** the final output —
@@ -6,7 +6,8 @@ one structured JSON object per record. Both modes **redact** the final output �
 either format — by running the same :mod:`clauster.redact` passes the WebSocket log
 stream uses; that module's shape allow-list bounds what "token" covers. Configures the
 root logger so application *and* propagated server (uvicorn) records share the chosen
-format.
+format, at the severity :data:`LogLevel` names (``info`` unless ``log_level`` says
+otherwise).
 """
 
 from __future__ import annotations
@@ -59,9 +60,21 @@ class JsonFormatter(logging.Formatter):
 
 _TEXT_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
+#: The configurable severities (``log_level``). Deliberately a subset of the stdlib's:
+#: ``critical`` would hide startup/lifecycle errors, and ``notset`` is not a level.
+#: The names double as uvicorn's own ``log_level`` values, so one config key sets both.
+LogLevel = Literal["debug", "info", "warning", "error"]
+
+LOG_LEVELS: dict[str, int] = {
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "warning": logging.WARNING,
+    "error": logging.ERROR,
+}
+
 
 def setup_logging(
-    log_format: Literal["text", "json"] = "text", *, level: int = logging.INFO
+    log_format: Literal["text", "json"] = "text", *, level: LogLevel | int = logging.INFO
 ) -> None:
     """Configure the root logger with a single redacting handler for ``log_format``.
 
@@ -70,6 +83,10 @@ def setup_logging(
     human text format. Both formatters run the same redaction passes, so neither mode can
     leak an ``env_``/``session_``/``cse_`` id, a bare UUID, or a listed token shape (see
     :mod:`clauster.redact` for what the shape allow-list does *not* catch).
+
+    ``level`` takes either a :data:`LogLevel` name (what ``log_level`` holds) or a raw
+    stdlib level int. Redaction is applied by the formatter, so raising the level to
+    ``debug`` widens *what* is logged without widening what may leak into a line.
     """
     handler = logging.StreamHandler()
     handler.setFormatter(
@@ -77,4 +94,4 @@ def setup_logging(
     )
     root = logging.getLogger()
     root.handlers[:] = [handler]
-    root.setLevel(level)
+    root.setLevel(LOG_LEVELS[level] if isinstance(level, str) else level)
