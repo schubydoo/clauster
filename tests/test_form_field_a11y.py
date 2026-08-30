@@ -152,14 +152,18 @@ def _controls(source: str, origin: str) -> tuple[list[dict], set[str]]:
     return rows, label_targets
 
 
-def _sweep() -> tuple[list[dict], set[str]]:
+def _sweep() -> list[dict]:
+    # Label targets are scoped PER TEMPLATE: each template renders as its own page (or
+    # fragment swapped into one), so a `<label for>` in dashboard.html cannot name a
+    # control in login.html — a global set would let an id reused across pages satisfy
+    # the gate vacuously. Each row carries its own template's declared targets.
     rows: list[dict] = []
-    targets: set[str] = set()
     for path in sorted(_TEMPLATES.glob("*.html")):
         found, declared = _controls(path.read_text(encoding="utf-8"), path.name)
+        for row in found:
+            row["targets"] = declared
         rows += found
-        targets |= declared
-    return rows, targets
+    return rows
 
 
 def _lacks_id_and_name(row: dict) -> bool:
@@ -167,6 +171,8 @@ def _lacks_id_and_name(row: dict) -> bool:
 
 
 def _lacks_accessible_name(row: dict, targets: set[str]) -> bool:
+    # `targets` must be the DECLARING template's own label-for set (see _sweep) — never a
+    # union across templates, which would let an unrelated page's label name this control.
     attrs = row["attrs"]
     return not (
         _has(attrs, "aria-label")
@@ -183,22 +189,37 @@ def _lacks_accessible_name(row: dict, targets: set[str]) -> bool:
 
 
 def test_every_form_field_has_an_id_or_name():
-    rows, _ = _sweep()
+    rows = _sweep()
     offenders = [f"{r['where']} {r['raw']}" for r in rows if _lacks_id_and_name(r)]
     assert offenders == []
 
 
 def test_every_control_has_an_accessible_name():
-    rows, targets = _sweep()
-    offenders = [f"{r['where']} {r['raw']}" for r in rows if _lacks_accessible_name(r, targets)]
+    rows = _sweep()
+    offenders = [
+        f"{r['where']} {r['raw']}" for r in rows if _lacks_accessible_name(r, r["targets"])
+    ]
     assert offenders == []
 
 
 def test_sweep_actually_inspected_the_templates():
     """Guard the guard: an empty scan would make both sweeps pass vacuously."""
-    rows, _ = _sweep()
+    rows = _sweep()
     assert len(rows) > 100
     assert {r["tag"] for r in rows} >= {"input", "select", "textarea", "button"}
+
+
+def test_label_targets_do_not_leak_across_templates():
+    """A label in one template must not name an id-reusing control in another."""
+    labelled = "<label for='shared-id'>Name</label><input id='shared-id'>"
+    bare = "<input id='shared-id' name='x'>"
+    rows_a, targets_a = _controls(labelled, "page_a")
+    rows_b, targets_b = _controls(bare, "page_b")
+    # In its own template the labelled control is named; the OTHER template's identical
+    # id is not — the cross-template union Greptile flagged would have passed both.
+    assert not _lacks_accessible_name(rows_a[0], targets_a)
+    assert _lacks_accessible_name(rows_b[0], targets_b)
+    assert not _lacks_accessible_name(rows_b[0], targets_a | targets_b)  # the old, wrong way
 
 
 def test_scanner_flags_a_known_offender():
