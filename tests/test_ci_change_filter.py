@@ -303,3 +303,16 @@ def test_the_lint_job_actually_runs_the_repo_meta_marker():
         "a step in lint.yml's `lint` job must run `pytest -m repo_meta` — it is the only "
         "thing validating a `.github/**`-only PR (see this module's header)"
     )
+
+
+def test_the_lint_job_actually_runs_the_changeset_lint():
+    # Same shape, same reason. A `.changeset/*.md`-only PR classifies non-code and skips the
+    # tests matrix, so this step is the ONLY thing checking a fragment knope would silently
+    # drop (#1320). Nothing else asserts it exists, so deleting it would merge green.
+    # Parsed and matched on the script path, so a step rename doesn't break the guard.
+    doc = yaml.safe_load((WORKFLOWS / "lint.yml").read_text(encoding="utf-8"))
+    runs = [step.get("run", "") for step in doc["jobs"]["lint"]["steps"]]
+    assert any("scripts/lint_changesets.py" in run for run in runs), (
+        "a step in lint.yml's `lint` job must run `scripts/lint_changesets.py` — it is the "
+        "only thing validating a changeset-only PR"
+    )

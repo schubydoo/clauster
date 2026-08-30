@@ -61,9 +61,11 @@ jobs:
           uv run --no-sync pytest -m repo_meta -o addopts="" --ignore=tests/e2e
           -q -p no:cacheprovider
       # Blocking: a malformed changeset (a summary that wraps mid-sentence) renders a
-      # truncated `###` heading in the GitHub release notes (v0.12.3 #560/#561). The
-      # local pre-commit hook catches it pre-push; this enforces it on every PR.
-      - name: changeset summary lint
+      # truncated `###` heading in the GitHub release notes (v0.12.3 #560/#561), and one
+      # keyed to a package/bump knope doesn't know is skipped SILENTLY, losing its
+      # changelog entry and version bump (#1320). The local pre-commit hook catches both
+      # pre-push; this enforces them on every PR.
+      - name: changeset lint
         run: uv run --no-sync python scripts/lint_changesets.py
       # Node for markdownlint-cli2: pin the runtime (ubuntu-latest's bundled Node
       # drifts across image refreshes) and install the version-pinned, integrity-

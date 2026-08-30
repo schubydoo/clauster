@@ -72,14 +72,18 @@ repos:
         files: '^(src/clauster/templates/.+\.html|scripts/check_csp_expressions\.mjs)$'
 
       - id: changeset-summary-lint
-        name: changeset summary lint
+        name: changeset lint
         # knope uses a changeset's first line as the entry summary; a summary that
         # wraps mid-sentence renders a truncated `### heading` in the release notes
-        # (v0.12.3 #560/#561). Scans all fragments whenever a changeset changes.
+        # (v0.12.3 #560/#561). It also silently SKIPS a fragment whose frontmatter
+        # names a package/bump it doesn't know (#1320), so the key is checked too.
+        # Scans all fragments whenever a changeset changes.
         entry: uv run python scripts/lint_changesets.py
         language: system
         pass_filenames: false
-        files: '^\.changeset/.+\.md$'
+        # knope.toml and the script itself are inputs too — the valid package key and
+        # change types are read from the former, so editing either changes the verdict.
+        files: '^(\.changeset/.+\.md|knope\.toml|scripts/lint_changesets\.py)$'
 
       - id: actionlint
         name: actionlint (workflow lint)
