@@ -74,11 +74,28 @@ here — so it is the open question. (The other input, `.coverage_$target`, the 
 step writes at the end of each target that exits cleanly.)
 
 **On the next scheduled cron, check `gh-pages` for three things:** whether
-`coverage/latest/report/` appeared — and if it did, that its `.coverage_*` count
-matches the harness count, because the report loop fails silently per harness and can
-re-translate the previous harness's data under the next one's name; whether the
-per-harness logs below survived; and whether their `DONE cov: E ft: F` lines are still
-present, since everything in this section is read off them. Those logs are the only
+`coverage/latest/report/` appeared; whether the per-harness logs below survived; and
+whether their `DONE cov: E ft: F` lines are still present, since everything in this
+section is read off them.
+
+A `report/` directory is not by itself proof the numbers are right. The report loop
+has no `set -e`, so if a harness's `.coverage_$fuzzer` is missing — it died
+mid-replay — the `mv` fails silently and the *previous* harness's data is
+re-translated under this one's name. The two checks cover different halves: a
+`.coverage_*` count below the harness count catches only the missing-file variant,
+because in the stale case the count still *matches* and only the content is wrong.
+That one shows up as two or more byte-identical files:
+
+```sh
+md5sum report/linux/.coverage_*     # duplicate hashes = a stale re-translate
+```
+
+If `report/` carries no `.coverage_*` at all, check before calling it a failure:
+upstream runs coverage.py `combine` without `--keep`, which deletes those files, so
+they may never reach the upload. Fall back to the logs — a harness whose log stops
+before its `DONE` line is the trigger for the stale re-translate.
+
+Those logs are the only
 fuzz-coverage signal we have; if the Python path stops producing them without
 producing a report, revert `language` on the *coverage job only* — the PR and batch
 jobs need it for the crash-reproduce timeout regardless. (On prune it is inert:
