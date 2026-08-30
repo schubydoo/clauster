@@ -9,6 +9,7 @@ endpoints, and the ``/ws/hosted`` stream — no real socket or cross-loop client
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 import sys
 import tempfile
@@ -65,6 +66,7 @@ class _StubManager:
         self.kill_orphan_error: Exception | None = None
         self.forgotten: list[str] = []
         self.forget_error: Exception | None = None
+        self.history_for = None
 
     def seed(self) -> RemoteControlInstance:
         inst = RemoteControlInstance(
@@ -97,7 +99,10 @@ class _StubManager:
     def list_instances(self):
         return list(self.instances.values())
 
-    async def reattach_all(self, client):
+    async def reattach_all(self, client, *, history_for=None):
+        # Capture the app's transcript resolver (#1045) so a test can drive it
+        # directly — it's a create_app closure with no other handle.
+        self.history_for = history_for
         return list(self.instances.values())
 
     async def persist(self):
@@ -301,6 +306,69 @@ class _NoopDaemon:
 
     async def aclose(self) -> None:
         pass
+
+
+def test_hosted_history_resolver_reads_the_on_disk_transcript(
+    write_config, projects_root, monkeypatch, tmp_path
+):
+    # #1045: the resolver the lifespan hands reattach_all, which a reattached Direct
+    # session rehydrates its view from. It's a create_app closure, so the lifespan is
+    # the only handle on it — the stub manager captures it.
+    from clauster import usage as usage_mod
+    from clauster.pointers import sanitize_cwd
+
+    claude_dir = tmp_path / "claude_projects"
+    real_resolve = usage_mod.resolve_session_transcript
+    # resolve_session_transcript defaults to ~/.claude/projects — the live account
+    # dir. Rebind it onto the tmp dir, as the transcript-route tests do.
+    monkeypatch.setattr(
+        usage_mod,
+        "resolve_session_transcript",
+        lambda project_path, session, claude_projects_dir=claude_dir: real_resolve(
+            project_path, session, claude_projects_dir
+        ),
+    )
+    tdir = claude_dir / sanitize_cwd(projects_root / "alpha")
+    tdir.mkdir(parents=True)
+    record = {"message": {"role": "user", "content": "hello"}, "timestamp": "t1"}
+    (tdir / "sess-1.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    monkeypatch.setattr(app_module, "ClaustrumDaemon", _NoopDaemon)
+    config = load_config(write_config("claustrum:\n  enabled: true\n"))
+    app = create_app(config)
+    manager = _StubManager()
+    app.state.hosted = manager
+    with TestClient(app):
+        pass  # the lifespan's reattach_all hands the resolver to the stub
+    history_for = manager.history_for
+    assert history_for is not None
+
+    def _row(uuid, project="alpha"):
+        return RemoteControlInstance(
+            project=project, label="hosted", channel="hosted", claude_session_uuid=uuid
+        )
+
+    assert history_for(_row("sess-1")) == [
+        {"role": "user", "content": "hello", "model": None, "timestamp": "t1"}
+    ]
+    # Every "nothing to restore" case answers with [], never an error — rehydration
+    # must not be able to fail a reattach.
+    assert history_for(_row(None)) == []  # no session uuid captured yet
+    assert history_for(_row("sess-1", project="bad.name")) == []  # unsafe project name
+    assert history_for(_row("sess-1", project="")) == []  # no project recorded
+    assert history_for(_row("no-such-session")) == []  # no transcript on disk
+
+    # An oversized transcript is TAIL-read, not parsed whole: this runs in the startup
+    # lifespan, so an unbounded parse could exhaust memory before the app serves.
+    monkeypatch.setattr(app_module, "_HOSTED_HISTORY_MAX_BYTES", 512)
+    lines = [
+        json.dumps({"message": {"role": "user", "content": f"turn {n}"}, "timestamp": "t"})
+        for n in range(200)
+    ]
+    (tdir / "big.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    tail = history_for(_row("big"))
+    assert 0 < len(tail) < 200  # only the tail was read
+    assert tail[-1]["content"] == "turn 199"  # ...and it is the NEWEST end of the file
 
 
 def test_dashboard_hides_hosted_panel_when_disabled(write_config, projects_root):

@@ -557,6 +557,13 @@ def _unresolved_bridge(
 # without busy-spinning; frames already seen are skipped by their monotonic ``seq``.
 _SCREEN_POLL_INTERVAL = 0.25
 
+# Most a hosted session's transcript rehydration (#1045) will READ off disk. A live
+# session's JSONL grows without bound and the rehydration runs inside the startup
+# lifespan, so an unbounded parse could exhaust memory before the app serves anything.
+# Past this the tail is read instead — comfortably more than the 200-turn render cap
+# in `hosted._REHYDRATE_MAX_TURNS`, so the cap, not this, is what normally binds.
+_HOSTED_HISTORY_MAX_BYTES = 4 * 1024 * 1024
+
 
 async def stream_until_disconnect(
     websocket: WebSocket, stream: Callable[[], Awaitable[None]]
@@ -607,6 +614,43 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     # #915). Configured here in prod ⇒ the warn-once "unconfigured" path is test-only misuse.
     atomicio.configure_lock_dir(Path(config.state_dir).expanduser() / "locks")
 
+    def _hosted_history(instance: RemoteControlInstance) -> list[dict]:
+        """Read a hosted session's prior conversation from claude's transcript (#1045).
+
+        The hosted stream lives only in server memory, so a restart left a reattached
+        Direct session's view empty. claude has written the same conversation to its own
+        ``.jsonl``; this reads it **read-only** (invariant 5 — clauster never mutates a
+        transcript) via ``usage.read_transcript_turns``, which redacts every turn before
+        it leaves the reader (invariant 4 — and ``HostedSession`` re-redacts on emit).
+
+        Returns ``[]`` — "nothing to restore", never an error — when the row has no
+        captured session uuid, an unsafe project name, or no transcript on disk. The
+        project path is derived the same way a spawn derives it (``projects_root/name``),
+        because a hosted row records the project *name*, not its cwd. Blocking; the
+        manager runs it in a thread.
+
+        The **read** is bounded, not just the ring insert: a long-running session's
+        JSONL grows without limit, and this runs in the startup lifespan, so parsing a
+        multi-gigabyte file whole could exhaust memory before the app ever serves. Past
+        the cap only the tail is read. That tail starts mid-line; ``_line_to_turn``
+        already skips an unparseable record, so the partial first line is dropped rather
+        than rendered corrupt.
+        """
+        name = instance.project
+        session_uuid = instance.claude_session_uuid
+        if not session_uuid or not name or not is_valid_project_name(name):
+            return []
+        path = usage.resolve_session_transcript(config.projects_root / name, session_uuid)
+        if path is None:
+            return []
+        size = path.stat().st_size
+        if size <= _HOSTED_HISTORY_MAX_BYTES:
+            return usage.read_transcript_turns(path)
+        turns, _offset, _reset = usage.read_transcript_turns_from_offset(
+            path, size - _HOSTED_HISTORY_MAX_BYTES
+        )
+        return turns
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Start the poll loop and hosted daemon on startup; detach from both on shutdown.
@@ -626,7 +670,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 # per-session, never blocks startup. Skip if the daemon came up
                 # without a live client (nothing to reattach through).
                 if daemon.client is not None:
-                    await app.state.hosted.reattach_all(daemon.client)
+                    await app.state.hosted.reattach_all(daemon.client, history_for=_hosted_history)
             except ClaustrumError as exc:
                 # Fail-closed: the daemon's health carries the error and hosted
                 # spawns are refused, but bridges (and startup) are unaffected.

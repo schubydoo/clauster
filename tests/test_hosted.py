@@ -191,6 +191,8 @@ async def test_reattach_drops_stream_subscription_when_rpc_fails(fake_claustrum,
             await session.reattach()
         assert captured and not captured[0]._subscribers  # no leaked subscriber
         assert session._stream is None and session._source is None
+        session._drop_subscription()  # idempotent: a second release is a no-op
+        assert session._stream is None and session._source is None
 
 
 async def test_pump_drops_stream_subscription_on_exit(fake_claustrum):
@@ -1545,6 +1547,320 @@ async def test_manager_reattach_all_surfaces_an_evicted_range(fake_claustrum, tm
         await mgr.reattach_all(client)
         session = mgr.session(pid)
         assert (await _drain(session.subscribe()))["type"] == "gap"
+
+
+# -- transcript rehydration on reattach (#1045) ----------------------------
+
+
+_HISTORY = [
+    {"role": "user", "content": "add a changelog", "model": None, "timestamp": "t1"},
+    {"role": "assistant", "content": "done", "model": "claude", "timestamp": "t2"},
+]
+
+
+def _frames(session):
+    """The `frame` payloads currently in a session's ring, in order."""
+    return [e["frame"] for e in session._ring if e["type"] == "frame"]
+
+
+async def _seed_process(fake, process_id, count):
+    """Buffer ``count`` assistant frames on the fake daemon for ``process_id``."""
+    for n in range(count):
+        payload = json.dumps({"type": "assistant", "n": n}).encode("utf-8") + b"\n"
+        await fake.emit(process_id, "stdout", payload)
+
+
+def _loader(turns):
+    """A history_loader returning fixed ``turns`` (the reattach-time transcript read)."""
+
+    async def _load():
+        return turns
+
+    return _load
+
+
+async def test_reattach_rehydrates_prior_conversation(fake_claustrum):
+    # #1045: a restart left the reattached view empty. The on-disk transcript is
+    # restored into the ring, ahead of anything the daemon replays.
+    fake = await fake_claustrum()
+    await _seed_process(fake, _PID, 1)
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        session = HostedSession(client, _PID, _BIN)
+        await session.reattach(0, history_loader=_loader(_HISTORY))
+        frames = _frames(session)
+        assert frames[0] == {"type": "system", "subtype": "restored 2 turns from transcript"}
+        # Rendered in the same shape the live stream uses, so the browser needs no
+        # special case for restored turns.
+        user_turn = {"role": "user", "content": "add a changelog"}
+        assert frames[1] == {"type": "user", "message": user_turn}
+        assert frames[2] == {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": "done"},
+        }
+        await session.detach()
+
+
+async def test_reattach_without_a_history_loader_restores_nothing(fake_claustrum):
+    # Rehydration is opt-in: with no loader the replay renders exactly as it always did.
+    fake = await fake_claustrum()
+    await _seed_process(fake, _PID, 2)
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        session = HostedSession(client, _PID, _BIN)
+        await session.reattach(0)
+        assert session._rehydrated_through == 0
+        await wait_until(lambda: len(_frames(session)) == 2)  # both replayed frames
+        assert all("subtype" not in f for f in _frames(session))  # no restored marker
+        await session.detach()
+
+
+async def test_frames_emitted_during_the_transcript_read_are_not_suppressed(fake_claustrum):
+    # The snapshot-order invariant: the transcript is read AFTER the reattach RPC has
+    # fixed lastSeq. A frame the agent emits WHILE we're reading therefore lands past
+    # that cursor and renders. Reading first (the earlier design) would have snapshotted
+    # the transcript without it, then suppressed its frame — shown nowhere, forever.
+    fake = await fake_claustrum()
+    await _seed_process(fake, _PID, 2)  # seqs 1..2 → lastSeq is 2 at RPC time
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        session = HostedSession(client, _PID, _BIN)
+
+        async def _load_slowly():
+            await fake.emit(_PID, "stdout", b'{"type":"assistant","during_read":true}\n')
+            return _HISTORY
+
+        await session.reattach(0, history_loader=_load_slowly)
+        assert session._rehydrated_through == 2  # the window closed before that frame
+        await wait_until(lambda: any(f.get("during_read") for f in _frames(session)))
+        await session.detach()
+
+
+async def test_transcript_read_cannot_overflow_the_bounded_queue(fake_claustrum):
+    # The review catch on the loader design: the pre-pump buffer is the CLIENT's
+    # bounded stream-subscriber queue, and the transcript read takes real time —
+    # frames arriving in that window used to overflow it before the pump existed,
+    # dropping output (or a parked control_request, leaving claude waiting on a
+    # prompt the dashboard never shows). reattach() now spills the queue into an
+    # unbounded backlog while the read runs.
+    fake = await fake_claustrum()
+    await _emit_frames(fake, _PID, 1)  # seq 1: our persisted cursor
+    async with ClaustrumClient(fake.socket_path, fake.token, queue_maxsize=8) as client:
+        session = HostedSession(client, _PID, _BIN)
+
+        async def _emits_while_reading():
+            # One frame per loop turn, yielding between: the production loader is a
+            # to_thread file read (a true suspension), so the read loop and the
+            # spill interleave with the arriving frames — the in-process fake's
+            # fast-path awaits would otherwise run everything in one task step.
+            for _ in range(200):  # seqs 2..201 land mid-"file read"
+                await _emit_frames(fake, _PID, 1)
+                await asyncio.sleep(0)
+            return None
+
+        await session.reattach(1, history_loader=_emits_while_reading)
+        await wait_until(lambda: session.daemon_last_seq == 201)
+        # Nothing dropped: no overflow marker, and every emitted frame reached the
+        # ring — a pre-pump drop would leave holes or a marker instead.
+        assert not any(e["type"] == "overflow" for e in session._ring)
+        assert len([f for f in _frames(session) if "n" in f]) == 200
+        await session.detach()
+
+
+async def test_rehydration_suppresses_the_replayed_data_frames_it_covers(fake_claustrum):
+    # The seam: the daemon still buffers frames for turns the transcript already
+    # holds. Restoring AND replaying them would double-render, so the replay's data
+    # frames through the daemon's reattach-time lastSeq are dropped.
+    fake = await fake_claustrum()
+    await _seed_process(fake, _PID, 4)  # seqs 1..4, all covered by the transcript
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        session = HostedSession(client, _PID, _BIN)
+        await session.reattach(1, history_loader=_loader(_HISTORY))
+        assert session._rehydrated_through == 4
+        await wait_until(lambda: session.daemon_last_seq == 4)  # the replay WAS drained
+        assert len(_frames(session)) == 3  # marker + 2 restored turns, nothing replayed
+        # ...and a LIVE frame past that cursor still renders normally.
+        await fake.emit(_PID, "stdout", b'{"type":"assistant","live":true}\n')
+        await wait_until(lambda: len(_frames(session)) == 4)
+        assert _frames(session)[-1] == {"type": "assistant", "live": True}
+        # Passing the window also CLEARS it, so a later in-window seq can't re-suppress.
+        assert session._rehydrated_through == 0
+        await session.detach()
+
+
+async def test_rehydration_never_suppresses_a_result_frame(fake_claustrum):
+    # A `result` frame has no `message`, so the transcript reader structurally cannot
+    # regenerate it — and is_error is how a failed turn reaches the operator.
+    # Suppressing it would swallow an error state (invariant 1).
+    fake = await fake_claustrum()
+    err = json.dumps({"type": "result", "is_error": True, "result": "Not logged in"})
+    await fake.emit(_PID, "stdout", err.encode("utf-8") + b"\n")
+    await _seed_process(fake, _PID, 1)  # a data frame that IS covered, for contrast
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        session = HostedSession(client, _PID, _BIN)
+        await session.reattach(0, history_loader=_loader(_HISTORY))
+        assert session._rehydrated_through == 2  # both frames are inside the window
+        await wait_until(lambda: any(f.get("type") == "result" for f in _frames(session)))
+        # ...while the ordinary data frame beside it stayed suppressed.
+        assert not any(f.get("type") == "assistant" and "n" in f for f in _frames(session))
+        await session.detach()
+
+
+async def test_rehydration_rejects_a_bool_last_seq(fake_claustrum, monkeypatch):
+    # bool subclasses int: a daemon answering `true` must not bound the window at 1.
+    fake = await fake_claustrum()
+    await _seed_process(fake, _PID, 1)
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        real = client.reattach
+
+        async def _bool_last_seq(process_id, from_seq=0):
+            return {**(await real(process_id, from_seq)), "lastSeq": True}
+
+        monkeypatch.setattr(client, "reattach", _bool_last_seq)
+        session = HostedSession(client, _PID, _BIN)
+        await session.reattach(0, history_loader=_loader(_HISTORY))
+        assert session._rehydrated_through == 0  # suppress nothing
+        await wait_until(lambda: len(_frames(session)) == 4)  # marker + 2 turns + replay
+        await session.detach()
+
+
+async def test_rehydration_only_renders_whitelisted_roles(fake_claustrum):
+    # The role becomes the frame `type` the browser dispatches on, so an unexpected
+    # role must not be able to render as a control frame.
+    fake = await fake_claustrum()
+    await _seed_process(fake, _PID, 1)
+    history = [
+        {"role": "control_request", "content": "not a real turn"},
+        {"role": "assistant", "content": "a real turn"},
+    ]
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        session = HostedSession(client, _PID, _BIN)
+        await session.reattach(0, history_loader=_loader(history))
+        frames = _frames(session)
+        assert [f["type"] for f in frames] == ["system", "assistant"]
+        await session.detach()
+
+
+async def test_rehydration_never_suppresses_control_requests_or_stderr(fake_claustrum):
+    # Fail-closed: a permission prompt raised while we were down is still unanswered,
+    # so it must survive the seam. stderr isn't in the transcript either.
+    fake = await fake_claustrum()
+    prompt = json.dumps(
+        {"type": "control_request", "request_id": "r1", "request": {"subtype": "can_use_tool"}}
+    ).encode("utf-8")
+    await fake.emit(_PID, "stdout", prompt + b"\n")
+    await fake.emit(_PID, "stderr", b"a warning\n")
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        session = HostedSession(client, _PID, _BIN)
+        await session.reattach(0, history_loader=_loader(_HISTORY))
+        assert session._rehydrated_through == 2  # both frames are inside the window
+        await wait_until(lambda: [p.request_id for p in session.pending_requests] == ["r1"])
+        types = await wait_until(
+            lambda: [e["type"] for e in session._ring if e["type"] != "frame"] or None
+        )
+        assert types == ["control_request", "stderr"]
+        await session.detach()
+
+
+async def test_rehydration_caps_the_restored_turns(fake_claustrum):
+    # An unbounded transcript must not be poured into the bounded ring.
+    fake = await fake_claustrum()
+    await _seed_process(fake, _PID, 1)
+    history = [{"role": "user", "content": f"turn {n}"} for n in range(250)]
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        session = HostedSession(client, _PID, _BIN)
+        await session.reattach(0, history_loader=_loader(history))
+        frames = _frames(session)
+        assert frames[0]["subtype"] == "restored 200 of 250 turns from transcript"
+        assert len(frames) == 1 + hosted._REHYDRATE_MAX_TURNS
+        assert frames[1]["message"]["content"] == "turn 50"  # the NEWEST 200, not the oldest
+        await session.detach()
+
+
+async def test_rehydration_skips_unrenderable_turns(fake_claustrum):
+    # A malformed/empty transcript record must be skipped, not emitted as a blank bubble.
+    fake = await fake_claustrum()
+    await _seed_process(fake, _PID, 1)
+    history = [
+        {"role": None, "content": "no role"},
+        {"role": "user", "content": ""},
+        {"role": "user", "content": None},
+        {"role": "user", "content": "the only real turn"},
+    ]
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        session = HostedSession(client, _PID, _BIN)
+        await session.reattach(0, history_loader=_loader(history))
+        frames = _frames(session)
+        assert len(frames) == 2  # the marker plus one renderable turn
+        assert frames[1]["message"]["content"] == "the only real turn"
+        await session.detach()
+
+
+async def test_rehydration_without_a_usable_last_seq_suppresses_nothing(
+    fake_claustrum, monkeypatch
+):
+    # lastSeq is untrusted daemon JSON. On an unusable cursor the safe direction is a
+    # possible duplicate, never dropped output — so nothing is suppressed.
+    fake = await fake_claustrum()
+    await _seed_process(fake, _PID, 2)
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        real = client.reattach
+
+        async def _no_last_seq(process_id, from_seq=0):
+            return {**(await real(process_id, from_seq)), "lastSeq": None}
+
+        monkeypatch.setattr(client, "reattach", _no_last_seq)
+        session = HostedSession(client, _PID, _BIN)
+        await session.reattach(0, history_loader=_loader(_HISTORY))
+        assert session._rehydrated_through == 0
+        # marker + 2 restored turns + both replayed frames
+        await wait_until(lambda: len(_frames(session)) == 5)
+        await session.detach()
+
+
+async def test_manager_reattach_all_rehydrates_from_the_history_resolver(fake_claustrum, tmp_path):
+    # The startup sweep hands each row's transcript to reattach.
+    fake = await fake_claustrum()
+    store = HostedStateStore(tmp_path)
+    pid = await _spawn_gen1(fake, store)
+    seen: list[str] = []
+
+    def _history_for(instance):
+        seen.append(instance.claustrum_process_id)
+        return _HISTORY
+
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        await mgr.reattach_all(client, history_for=_history_for)
+        assert seen == [pid]
+        session = mgr.session(pid)
+        assert [f.get("message", {}).get("content") for f in _frames(session)[1:]] == [
+            "add a changelog",
+            "done",
+        ]
+        await mgr.aclose()
+
+
+async def test_manager_reattach_all_survives_a_failing_history_resolver(
+    fake_claustrum, tmp_path, caplog
+):
+    # Rehydration is a convenience layered on reattach: an unreadable transcript
+    # degrades to today's empty view, it never fails the reattach.
+    fake = await fake_claustrum()
+    store = HostedStateStore(tmp_path)
+    pid = await _spawn_gen1(fake, store)
+
+    def _boom(instance):
+        # Not an OSError: this runs in the startup lifespan, so ANY resolver fault —
+        # a decode error, a MemoryError on an oversized transcript, a resolver bug —
+        # must degrade to "no history" rather than abort startup.
+        raise MemoryError("transcript too large to parse")
+
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        with caplog.at_level(logging.WARNING, logger="clauster.hosted"):
+            restored = await mgr.reattach_all(client, history_for=_boom)
+        assert [i.claustrum_process_id for i in restored] == [pid]
+        assert mgr.get_instance(pid).status is InstanceStatus.RUNNING  # reattach still worked
+        assert "could not restore the transcript" in caplog.text
+        assert _frames(mgr.session(pid)) == []
         await mgr.aclose()
 
 

@@ -118,7 +118,7 @@ restarting Clauster does not take your sessions down:
 | --- | --- |
 | Server Mode bridge | Keeps running; Clauster re-derives its status and the dashboard reattaches. |
 | Interactive Session bridge | Keeps running — the PTY keeper, not Clauster, owns its terminal, and the keeper outlives the restart. |
-| Direct Session | The claustrum daemon keeps running (it outlives Clauster) and, by default, keeps its `claude` children alive too; Clauster reconnects and reattaches the sessions recorded in `clauster.db`. |
+| Direct Session | The claustrum daemon keeps running (it outlives Clauster) and, by default, keeps its `claude` children alive too; Clauster reconnects and reattaches the sessions recorded in `clauster.db`. The live view is restored too — see below. |
 | The database | `clauster.db` is stable across restarts; schema migrations run automatically on startup. |
 
 Restarting a *bridge* is a different question: a Server Mode bridge comes back
@@ -126,6 +126,34 @@ with a fresh, empty context (the opt-in `claude.resume_recap` hook can recap
 the prior transcript), while an Interactive Session genuinely restores the
 prior conversation — see
 [The two bridge modes](../index.md#the-two-bridge-modes).
+
+### A Direct Session's view after a restart
+
+A Direct Session's conversation is streamed live and held in Clauster's memory,
+so a restart used to leave the reattached session's View pane empty even though
+the agent itself was still there. On reattach Clauster now rebuilds the pane
+from `claude`'s own transcript on disk, marked with a `· restored N turns from
+transcript ·` line — `· restored N of M turns from transcript ·` when the cap
+below trimmed it — and the live stream continues underneath it. The transcript
+is only ever **read** — Clauster never writes to it — and the restored turns go
+through the same [redaction](../security.md#log-redaction) as the live stream.
+
+Three limits are worth knowing. Only the newest 200 turns are restored, so a
+very long conversation comes back trimmed — and a very large transcript file is
+read from its tail rather than parsed whole. A session Clauster never saw a
+`session_id` for — one that died before its first frame — has no transcript to
+find, so its pane stays empty. And because `claude` writes its stream output and
+flushes its transcript independently, a single turn landing at the exact instant
+of the reattach can fall between the two and not be shown; the conversation
+itself is unaffected, since the agent still has it.
+
+<!-- when the firstSeq gap section lands in troubleshooting.md, cross-link it here (rebase note) -->
+
+An `· output lost (N frames) ·` marker near the restored turns is a separate
+thing: it means frames were evicted before they could be replayed to your
+browser. The conversation is still restored from the transcript — what a gap
+over that range covers is the non-conversation output, stderr lines and control
+frames, which the transcript does not hold.
 
 !!! warning "systemd can undo all of this"
     The survival table assumes nothing reaps the child processes. Under a
