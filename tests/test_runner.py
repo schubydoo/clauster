@@ -1935,6 +1935,39 @@ async def test_poll_prune_ignores_a_recycled_pid_from_a_stopped_instance(
     )
 
 
+async def test_poll_stamps_the_running_claude_version_and_clears_it_on_death(
+    runner_config, monkeypatch
+):
+    # #1275: the card's version label is runtime-observed, never persisted, so the poll that
+    # reconciles liveness is also what publishes it — and the tick a bridge dies must CLEAR
+    # it. A stopped card still wearing a version is exactly the stale guess the issue rules
+    # out, and nothing else in the codebase would ever unset the field.
+    runner = _make_runner(runner_config)
+    inst = RemoteControlInstance(
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.RUNNING,
+        resume_mode="standard",
+        bridge_pid=990001,
+    )
+    runner._instances[inst.instance_id] = inst
+    monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [])
+    monkeypatch.setattr("clauster.runner.procutil.running_claude_version", lambda pid: "2.1.251")
+
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    await runner.poll_once()
+    assert inst.claude_version == "2.1.251"
+    # Pin the non-persistence the model's comment promises: a version written to state.json
+    # would outlive the process it describes and come back stale on the next cold start.
+    assert all("claude_version" not in row for row in runner._persist_subset().values())
+
+    # The bridge dies. The probe itself would still answer (a recycled pid, a lagging read),
+    # so the clear has to be driven by LIVENESS rather than by the probe returning None.
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    await runner.poll_once()
+    assert inst.claude_version is None
+
+
 async def test_poll_prune_keeps_every_owner_at_a_shared_cwd(runner_config, monkeypatch):
     # Several EXTERNAL sessions can share one resolved cwd with DIFFERENT bridge ancestors:
     # a managed bridge whose session reads EXTERNAL because the #820 pid gate could not

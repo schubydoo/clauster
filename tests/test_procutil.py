@@ -996,3 +996,178 @@ def test_owned_pids_denied_root_does_not_drop_co_located_readable_root(monkeypat
 
     monkeypatch.setattr(procutil.psutil, "Process", FakeProc)
     assert procutil.owned_pids([10, 20]) == {10, 11, 20}
+
+
+# ----- running claude version (#1275) -------------------------------------
+
+# The exact paths measured on the dogfood host: `~/.local/bin/claude` is a SYMLINK to the
+# versioned binary, so the bridge's argv[0] is unversioned while its resolved exe is not.
+_LIVE_BRIDGE_EXE = "/home/claude/.local/share/claude/versions/2.1.251"
+_LIVE_BRIDGE_ARGV0 = "/home/claude/.local/bin/claude"
+
+
+def test_parse_claude_version_reads_the_native_install_layout():
+    # The measured shapes: the bare versioned binary (what `exe` resolves to, and what the
+    # SDK worker's argv[0] is), and a path with components BELOW the version segment.
+    assert procutil.parse_claude_version(_LIVE_BRIDGE_EXE) == "2.1.251"
+    assert procutil.parse_claude_version("/opt/claude/versions/2.1.247/bin/claude") == "2.1.247"
+    # Windows: backslashes, and a drive letter. Parsed on a POSIX host too — the string comes
+    # from ANOTHER process, so the separator is the remote host's, not ours.
+    win = r"C:\Users\u\.local\share\Claude\Versions\2.1.251"
+    assert procutil.parse_claude_version(win) == "2.1.251"
+    # A prerelease suffix survives intact rather than being rejected or truncated.
+    assert procutil.parse_claude_version("/o/claude/versions/2.2.0-rc.1") == "2.2.0-rc.1"
+
+
+def test_parse_claude_version_refuses_other_version_managers():
+    # THE false-positive class this guard exists for. `versions/<x>` is pyenv's, nvm's and
+    # rbenv's layout too, and such paths really do appear in a live bridge's process tree —
+    # an nvm-installed language server was a grandchild of a running bridge on the dogfood
+    # host. Without the `claude/` parent anchor, pyenv would render "3.12.0" as the Claude
+    # version: a confidently WRONG label, the one outcome #1275 rules out.
+    assert procutil.parse_claude_version("/home/u/.pyenv/versions/3.12.0/bin/python") is None
+    assert procutil.parse_claude_version("/home/u/.nvm/versions/node/v24.19.0/bin/node") is None
+    assert procutil.parse_claude_version("/home/u/.rbenv/versions/3.3.0/bin/ruby") is None
+    # A `claude/versions/` whose next segment isn't a release number is still refused.
+    assert procutil.parse_claude_version("/o/claude/versions/node/v24/bin/x") is None
+    assert procutil.parse_claude_version("/o/claude/versions/latest") is None
+    # `versions/` with nothing after it, no `versions/` at all, and the empty inputs.
+    assert procutil.parse_claude_version("/o/claude/versions") is None
+    assert procutil.parse_claude_version("/usr/local/bin/claude") is None
+    assert procutil.parse_claude_version("") is None
+    assert procutil.parse_claude_version(None) is None
+
+
+def _version_tree(monkeypatch, tree):
+    """Patch ``psutil.Process`` with a {pid: (exe, argv, [child_pids])} stand-in."""
+
+    class _P:
+        def __init__(self, pid):
+            if pid not in tree:
+                raise psutil.NoSuchProcess(pid)
+            self.pid = pid
+
+        def exe(self):
+            value = tree[self.pid][0]
+            if isinstance(value, BaseException):
+                raise value
+            return value
+
+        def cmdline(self):
+            value = tree[self.pid][1]
+            if isinstance(value, BaseException):
+                raise value
+            return list(value)
+
+        def children(self, recursive=False):
+            # Pinned, not incidental: `running_claude_version` must ask for DIRECT children
+            # only. A recursive walk would reach the nvm/pyenv paths deeper in a bridge's
+            # tree and hand them to the parse.
+            assert recursive is False
+            return [_P(p) for p in tree[self.pid][2]]
+
+    monkeypatch.setattr(procutil.psutil, "Process", _P)
+
+
+def test_running_claude_version_reads_the_bridge_process_itself(monkeypatch):
+    # The primary path, and why it is primary: the bridge is exec'd straight from the
+    # versioned binary, so ONE exe read answers for both bridge modes without depending on
+    # either one's process shape. Here the bridge has no children at all — a standard bridge
+    # between sessions — and the version still resolves.
+    standard = (_LIVE_BRIDGE_ARGV0, "remote-control", "--name", "clauster")
+    _version_tree(monkeypatch, {577519: (_LIVE_BRIDGE_EXE, standard, [])})
+    assert procutil.running_claude_version(577519) == "2.1.251"
+    # The pty (flag-form, under a keeper) bridge: different argv, same answer.
+    pty = (_LIVE_BRIDGE_ARGV0, "--remote-control", "alpha")
+    _version_tree(monkeypatch, {4242: (_LIVE_BRIDGE_EXE, pty, [])})
+    assert procutil.running_claude_version(4242) == "2.1.251"
+
+
+def test_running_claude_version_falls_back_to_the_sdk_worker_child(monkeypatch):
+    # #1275's measured route, for a layout whose launcher is a WRAPPER rather than the
+    # versioned binary: the bridge's own exe/argv carry no version, but its direct child —
+    # the SDK worker — execs `…/claude/versions/<version> --print --sdk-url …`.
+    worker_argv = (
+        "/home/claude/.local/share/claude/versions/2.1.247",
+        "--print",
+        "--sdk-url",
+        "https://example.invalid/x",
+    )
+    _version_tree(
+        monkeypatch,
+        {
+            43400: ("/usr/bin/node", ("node", "/opt/wrapper/claude", "remote-control"), [846286]),
+            846286: ("/usr/bin/node", worker_argv, []),
+        },
+    )
+    assert procutil.running_claude_version(43400) == "2.1.247"
+
+
+def test_running_claude_version_does_not_recurse_past_direct_children(monkeypatch):
+    # A GRANDCHILD's versioned path is not consulted. The bound is what keeps the parse away
+    # from the other version managers living deeper in a bridge's tree; `_version_tree`
+    # additionally asserts the call is non-recursive, so this pins the outcome as well as
+    # the call shape.
+    _version_tree(
+        monkeypatch,
+        {
+            10: ("/usr/bin/node", ("node", "wrapper"), [11]),
+            11: ("/usr/bin/node", ("node", "inner"), [12]),
+            12: (_LIVE_BRIDGE_EXE, (_LIVE_BRIDGE_EXE, "--print"), []),
+        },
+    )
+    assert procutil.running_claude_version(10) is None
+
+
+def test_running_claude_version_uses_argv_when_exe_is_denied(monkeypatch):
+    # A hardened /proc denies `exe` while `cmdline` stays readable. The per-process fallback
+    # must absorb that rather than give up on the process.
+    worker = "/home/claude/.local/share/claude/versions/2.1.238"
+    _version_tree(monkeypatch, {7: (psutil.AccessDenied(7), (worker, "--print"), [])})
+    assert procutil.running_claude_version(7) == "2.1.238"
+
+
+def test_running_claude_version_fails_closed(monkeypatch):
+    # Never a stale or guessed value: a dead pid, a negative pid (psutil raises ValueError,
+    # not NoSuchProcess — the same untrusted-on-disk-int path the rest of this module
+    # absorbs), and a process whose exe, cmdline AND children are all unreadable.
+    assert procutil.running_claude_version(2_000_000_000) is None
+    assert procutil.running_claude_version(-1) is None
+
+    class _Opaque:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def exe(self):
+            raise psutil.AccessDenied(self.pid)
+
+        def cmdline(self):
+            raise psutil.AccessDenied(self.pid)
+
+        def children(self, recursive=False):
+            raise psutil.AccessDenied(self.pid)
+
+    monkeypatch.setattr(procutil.psutil, "Process", _Opaque)
+    assert procutil.running_claude_version(99) is None
+
+
+def test_running_claude_version_absorbs_a_raw_oserror_from_child_enumeration(monkeypatch):
+    # This runs inside poll_once's tick: a raw errno from the OS while listing children
+    # (not one of psutil's wrapped exceptions) must degrade to "no version", never
+    # escape and abort the whole poll — status reconciliation, crash notifications and
+    # phantom pruning all ride the same tick.
+    class _RawErrno:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def exe(self):
+            return "/usr/bin/other"  # no version derivable -> falls through to children
+
+        def cmdline(self):
+            return ["/usr/bin/other"]
+
+        def children(self, recursive=False):
+            raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(procutil.psutil, "Process", _RawErrno)
+    assert procutil.running_claude_version(99) is None

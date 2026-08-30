@@ -4634,6 +4634,14 @@ class SessionRunner:
                 procutil.is_live_bridge, pid, instance.bridge_proc_start
             )
             pid_is_ours[instance.instance_id] = alive
+            # The running `claude` release for the card (#1275). Re-derived every tick
+            # rather than memoized: it is one `exe` readlink for a live bridge, it is never
+            # persisted, and re-reading is what guarantees the label can only ever describe
+            # the process that is running NOW. Cleared for a dead bridge on the same tick
+            # its status is reconciled, so a stopped card can't keep wearing a version.
+            instance.claude_version = (
+                await asyncio.to_thread(procutil.running_claude_version, pid) if alive else None
+            )
             prev_status = instance.status
             self._reconcile_status(instance, alive)
             if (
