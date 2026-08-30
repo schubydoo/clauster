@@ -1083,6 +1083,37 @@ def test_is_subagent_transcript_ignores_malformed_and_non_dict_records(tmp_path)
     assert _is_subagent_transcript(p) is True
 
 
+def test_is_subagent_transcript_true_for_a_headless_sdk_py_run(tmp_path):
+    # #1309: a headless agent run (SDK/hook dispatch) self-declares entrypoint "sdk-py" on
+    # records that ALSO carry isSidechain false — the entrypoint marker must win.
+    from clauster.usage import _is_subagent_transcript
+
+    record = dict(_sidechain(False), entrypoint="sdk-py")
+    p = _transcript(tmp_path, [record, _sidechain(False, "more")])
+    assert _is_subagent_transcript(p) is True
+
+
+def test_is_subagent_transcript_false_for_interactive_entrypoints(tmp_path):
+    # Only the exact "sdk-py" value hides; interactive entrypoints stay listed.
+    from clauster.usage import _is_subagent_transcript
+
+    for value in ("cli", "sdk-cli", "claude-desktop"):
+        p = _transcript(tmp_path, [dict(_sidechain(False), entrypoint=value)])
+        assert _is_subagent_transcript(p) is False, value
+
+
+def test_is_subagent_transcript_sdk_py_beyond_the_bound_is_not_seen(tmp_path):
+    # The scan is bounded; a marker past max_records falls back to "real conversation".
+    from clauster.usage import _is_subagent_transcript
+
+    unflagged = {"message": {"role": "user", "content": "hi"}}  # neither marker key
+    records = [unflagged] * 3 + [dict(_sidechain(False), entrypoint="sdk-py")]
+    p = _transcript(tmp_path, records)
+    assert _is_subagent_transcript(p, max_records=2) is False
+    # Same file, default bound: the marker IS within reach and decides.
+    assert _is_subagent_transcript(p) is True
+
+
 def test_is_subagent_transcript_unreadable_file_is_treated_as_a_conversation(tmp_path):
     from clauster.usage import _is_subagent_transcript
 
