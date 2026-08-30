@@ -548,7 +548,8 @@ class TranscriptSummary:
     """The transcript-listing fields both the Transcripts selector and the resume picker need.
 
     ``turn_count`` drives the picker's ``turn_count > 0`` filter; ``first_prompt`` (the first
-    user turn, already truncated + redacted) labels the conversation; ``first_ts``/``last_ts``
+    non-wrapper user turn, already truncated + redacted) labels the conversation (#1315);
+    ``first_ts``/``last_ts``
     bound its "when · duration" display; ``is_subagent`` marks a sidechain transcript so the
     picker can leave it out (#1092). Derived from a full parse but far smaller than the turn
     list, so it caches per file (see :func:`read_transcript_summary`).
@@ -561,14 +562,24 @@ class TranscriptSummary:
     is_subagent: bool = False
 
 
+# A session started with a slash command records wrapper machinery as its opening user
+# turns (`<local-command-caveat>…`, `<command-name>/model</command-name>…`). Labeling the
+# picker with that markup tells the reader nothing (#1315) — skip past it to the first
+# human prompt. Prefix-matched, not parsed: these are Claude Code's own literal markers.
+_COMMAND_WRAPPER_PREFIXES = ("<local-command-", "<command-")
+
+
 def _derive_transcript_summary(path: Path) -> TranscriptSummary:
     """Parse ``path`` and reduce it to a :class:`TranscriptSummary` (the cache-miss body)."""
     turns = read_transcript_turns(path)
-    # First USER turn labels the conversation in the resume picker — truncated server-side so a
-    # pasted wall of text can't bloat the listing payload.
+    # First HUMAN user turn labels the conversation in the resume picker — command/caveat
+    # wrapper turns are skipped (#1315), falling back to the first user turn when the
+    # transcript holds nothing else (a label that was non-empty must never go blank).
+    # Truncated server-side so a pasted wall of text can't bloat the listing payload.
+    user_prompts = [t["content"] for t in turns if t.get("role") == "user" and t.get("content")]
     first_prompt = next(
-        (t["content"] for t in turns if t.get("role") == "user" and t.get("content")),
-        "",
+        (c for c in user_prompts if not c.lstrip().startswith(_COMMAND_WRAPPER_PREFIXES)),
+        user_prompts[0] if user_prompts else "",
     )[:120]
     return TranscriptSummary(
         turn_count=len(turns),
