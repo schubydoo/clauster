@@ -14,6 +14,12 @@ globs:
 ignores:
   - "**/vendor/**" # third-party assets we ship verbatim
   - "**/node_modules/**"
+  # gitignore:true filters MATCHES, but the glob still WALKS excluded trees. A local
+  # .claude/ full of agent worktrees (each with a .venv of dep READMEs) grows to
+  # hundreds of thousands of files and OOMs the node heap before filtering happens —
+  # seen repeatedly during the v1.1 batch. Prune the walk itself, not just the results.
+  - ".claude/**"
+  - "**/.venv/**"
   # knope owns CHANGELOG.md — it regenerates the file on every release prep from the
   # .changeset fragments (hand-edits get overwritten), and its blank-line spacing
   # between release sections trips MD012/no-multiple-blanks. Linting a tool-generated
