@@ -2740,11 +2740,23 @@ class SessionRunner:
         running process — the exact failure the pair exists to prevent. ``None`` for the
         start time (psutil error, or a keeper that exited between the two reads) is the
         honest unknown and degrades to the cmdline-only gate.
+
+        The snapshot is **fenced by validation time** (review catch): if the keeper exits
+        and the OS recycles its pid between :meth:`_recover_keeper_pid` and the
+        ``proc_create_time`` read, the pair would otherwise authenticate the NEW occupant —
+        and a keeper-shaped occupant would strand ``forget`` with ``InstanceStillLive``,
+        the very bug this defends against. A process created *after* validation began
+        cannot be the keeper that validation saw, so its time is rejected and the whole
+        recovery reports "no keeper" — honest, since the validated keeper is gone.
         """
+        validated_at = time.time()
         keeper_pid = self._recover_keeper_pid(name, bridge_pid, bridge_proc_start)
         if keeper_pid is None:
             return None, None
-        return keeper_pid, procutil.proc_create_time(keeper_pid)
+        created = procutil.proc_create_time(keeper_pid)
+        if created is not None and created > validated_at:
+            return None, None  # pid recycled mid-recovery: the keeper we validated is gone
+        return keeper_pid, created
 
     def _await_ready_pty(self, sidecar: Path, proc: subprocess.Popen) -> dict:
         """Block until the keeper publishes a connect URL, the keeper exits, or timeout."""

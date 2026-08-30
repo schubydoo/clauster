@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 
 import pytest
 
@@ -1043,6 +1044,23 @@ async def test_reattach_records_the_keeper_start_time_with_its_pid(runner_config
     inst = runner.get_instance("iid-pty")
     assert inst is not None
     assert (inst.keeper_pid, inst.keeper_proc_start) == (5555, 777.0)
+
+
+def test_recovery_rejects_a_pid_recycled_mid_snapshot(runner_config, monkeypatch):
+    # The review catch: between validating the keeper and reading its create-time, the
+    # OS can recycle the pid — snapshotting the NEW occupant's time would authenticate
+    # it, and a keeper-shaped occupant strands forget with InstanceStillLive. A process
+    # created AFTER validation began cannot be the keeper validation saw.
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s: 5555)
+    monkeypatch.setattr(
+        "clauster.runner.procutil.proc_create_time", lambda pid: time.time() + 100.0
+    )
+    assert runner._recover_keeper_identity("alpha", 4242, 222.0) == (None, None)
+
+    # Control: a create-time from before validation is the keeper we validated.
+    monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: 777.0)
+    assert runner._recover_keeper_identity("alpha", 4242, 222.0) == (5555, 777.0)
 
 
 async def test_pointer_walk_reattach_records_the_keeper_start_time_too(runner_config, monkeypatch):
