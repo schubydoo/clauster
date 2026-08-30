@@ -108,6 +108,19 @@ os.environ.pop("CLAUSTER_CONFIG", None)
 os.environ.pop("CLAUSTER_STATE_DIR", None)
 atexit.register(lambda: shutil.rmtree(_SESSION_HOME, ignore_errors=True))
 
+# Route registration is the suite's single largest CPU slice: ~1170 tests build an app and
+# each rebuilds all ~105 routes' pydantic fields from scratch (#1128). Memoize that one
+# pure step, once per worker, before any test can build an app. This patches FastAPI only —
+# no clauster import, nothing resolved off `~` — so it is indifferent to the HOME pin above
+# and sits below it purely so that block stays first. See the module for why sharing a
+# `ModelField` between two apps is safe, and why this is NOT a shared-app fixture.
+# The return value (which bindings the cache serves) is deliberately dropped here: a
+# FastAPI upgrade that moves one is caught by `test_cache_is_installed_on_every_binding`,
+# which names the problem, rather than by an exception at collection that kills the run.
+from _route_field_cache import install as _install_route_field_cache  # noqa: E402
+
+_install_route_field_cache()
+
 # ⚠️ BELOW the pin on purpose — a `noqa: E402` on each is the cost of the invariant above.
 # (The hash is omitted from that token deliberately: ruff scans every comment for it and
 # reads a mention in prose as a real, malformed directive.)

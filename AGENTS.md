@@ -139,6 +139,16 @@ Conventions live alongside the tests; the rules that matter most in-context:
   instead. The failure mode is asymmetric: forgetting the marker doesn't error, it makes
   the test pass **vacuously**. `--strict-markers` catches a typo'd marker; nothing catches
   an absent one.
+- **FastAPI route fields are memoized across app builds.** `tests/_route_field_cache.py`
+  (installed from `conftest.py`) caches `create_model_field`, so the ~1170 tests that call
+  `create_app` stop rebuilding every route's pydantic fields from scratch. Nothing else is
+  shared — each test still gets its own app, runner and `app.state`. ⚠️ It is only correct
+  while the key fingerprints the **full** `FieldInfo`: `fastapi.params.*` override
+  `__repr__` to class-name + default, so a repr-based key would let a constrained param
+  reuse an unconstrained field and silently drop a route's input guard. Set
+  `CLAUSTER_TEST_NO_ROUTE_FIELD_CACHE=1` to rule the cache out when triaging a
+  route/validation oddity, and see `tests/test_route_field_cache.py` for the guards a
+  FastAPI upgrade must keep passing.
 - Use the existing fixtures rather than constructing app state by hand.
 - Tests must pass on Linux, macOS, and Windows — CI runs all three. Use
   `Path.as_posix()`, gate POSIX-only calls (`fcntl`, mode bits), and write
