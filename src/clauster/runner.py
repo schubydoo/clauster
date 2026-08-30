@@ -5121,13 +5121,25 @@ class SessionRunner:
         if not pending:
             return
         # One thread hop for the whole tick's worth of pointer reads / sidecar globs,
-        # matching `_adopt_rows_from_store`'s batched liveness probe.
+        # matching `_adopt_rows_from_store`'s batched liveness probe. The liveness
+        # probe runs AFTER the evidence read (tuple order is evaluation order): a
+        # bridge that exits mid-read would otherwise be promoted on stale-but-matching
+        # evidence — a false `ready` webhook, then a crash on the next tick. Rechecked
+        # here, the death is seen and the reconcile pass owns the verdict instead.
         facts = await asyncio.to_thread(
-            lambda: {iid: self._connect_facts_for(*args) for iid, args in pending.items()}
+            lambda: {
+                iid: (
+                    self._connect_facts_for(*args),
+                    procutil.is_live_bridge(args[2], args[3]),
+                )
+                for iid, args in pending.items()
+            }
         )
-        for iid, connect in facts.items():
+        for iid, (connect, alive) in facts.items():
             if not connect:
                 continue  # still no evidence: STARTING is the honest state, leave it
+            if not alive:
+                continue  # died during the evidence read: never a ready for a dead bridge
             inst = self._instances.get(iid)
             expected = pending[iid]
             # Re-checked across the await, like every other mutation on this lock-free

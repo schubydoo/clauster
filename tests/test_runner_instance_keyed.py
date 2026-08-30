@@ -2258,6 +2258,35 @@ async def test_promotion_skips_a_row_whose_generation_changed_mid_probe(
     assert inst.url is None, "published the previous generation's connect link"
 
 
+async def test_promotion_skips_a_bridge_that_died_during_the_evidence_read(
+    runner_config, monkeypatch
+):
+    # The review catch: the post-hop guard proves the SAME GENERATION, not that it is
+    # still alive. A bridge exiting after the pre-hop liveness filter but before the
+    # evidence read completes left stale-but-matching pid/start fields — promoting on
+    # them emits a false `ready` for a dead process, corrected only a full tick later.
+    # Liveness is now re-probed after the evidence read inside the same hop.
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    state = {"read": False}
+
+    def _dies_during_read(self, proj, mode, pid, start):
+        state["read"] = True
+        return {"url": "https://claude.ai/code?environment=env_DEAD"}
+
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge",
+        lambda *a, **k: not state["read"],  # alive until the read happens, then gone
+    )
+    monkeypatch.setattr(SessionRunner, "_connect_facts_for", _dies_during_read)
+    inst = _adopted_starting(runner)
+
+    await runner.poll_once()
+
+    assert inst.status is InstanceStatus.STARTING, "promoted a bridge that died mid-read"
+    assert inst.url is None
+
+
 async def test_promotion_skips_an_undiscovered_project(runner_config, monkeypatch, caplog):
     # No Project means nothing to read the pointer/sidecar from, so the row is left alone
     # rather than promoted half-populated — and the skip must not raise out of the tick.
