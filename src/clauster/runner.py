@@ -48,6 +48,7 @@ from . import (
 )
 from .claude_cli import ClaudeNotFound, resolve_binary
 from .config import (
+    INHERIT_PERMISSION_MODE,
     PERMISSION_MODES,
     RESUME_MODES,
     SANDBOX_MODES,
@@ -2259,9 +2260,13 @@ class SessionRunner:
             str(log_path),
             "--spawn",
             spawn_mode,
-            "--permission-mode",
-            permission_mode,
         ]
+        # "inherit" (#1231) is Clauster's own sentinel, never a claude mode string: emit
+        # NO --permission-mode at all so the session starts in its own default and carries
+        # none of the flag's spawn-time system-prompt effect. Every other value is one of
+        # the six real modes, already screened by _validate_spawn_options.
+        if permission_mode != INHERIT_PERMISSION_MODE:
+            cmd += ["--permission-mode", permission_mode]
         # Sandbox toggle (#780) — append only for an explicit on/off; "default" leaves it
         # to claude's own setting. Placed before the config-driven flags below, order is
         # immaterial to claude's parser. Disabled for 1.0 (#1037) not here but at the source:
@@ -2471,9 +2476,12 @@ class SessionRunner:
             name,
             "--debug-file",
             str(log_path),
-            "--permission-mode",
-            permission_mode,
         ]
+        # Same "inherit" sentinel handling as the subcommand form (#1231) — kept here
+        # rather than factored out, because the two bridge argvs stay deliberately
+        # separate (they share no builder).
+        if permission_mode != INHERIT_PERMISSION_MODE:
+            argv += ["--permission-mode", permission_mode]
         if worktree_name is not None:
             argv += ["--worktree", worktree_name]
         if resume:

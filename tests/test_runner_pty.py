@@ -110,6 +110,16 @@ def test_build_pty_bridge_argv_uses_flag_form(runner_config) -> None:
     assert "--continue" not in argv
 
 
+def test_build_pty_bridge_argv_omits_permission_mode_for_inherit(runner_config) -> None:
+    # #1231: the sentinel emits NO --permission-mode on the flag-form bridge either —
+    # the two bridge argvs are separate builders, so each is asserted on its own.
+    runner, _ = _pty_runner(runner_config)
+    argv = runner._build_pty_bridge_argv(Path("/tmp/x.log"), "alpha", "inherit", resume=True)
+    assert "--permission-mode" not in argv
+    assert "inherit" not in argv  # the sentinel never reaches the subprocess
+    assert "--continue" in argv  # the rest of the flag-form argv is untouched
+
+
 def test_build_pty_bridge_argv_resume_adds_continue(runner_config) -> None:
     runner, _ = _pty_runner(runner_config)
     argv = runner._build_pty_bridge_argv(Path("/tmp/x.log"), "alpha", "plan", resume=True)

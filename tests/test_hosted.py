@@ -105,6 +105,16 @@ def test_build_hosted_argv_minimal_contract():
     assert "--resume" not in argv
 
 
+def test_build_hosted_argv_omits_permission_mode_for_inherit():
+    # #1231: hosted spawns honor the sentinel too — no --permission-mode at all, and the
+    # stream-json contract flags are otherwise unchanged.
+    argv = build_hosted_argv(_BIN, permission_mode="inherit", resume_uuid="abc-123")
+    assert "--permission-mode" not in argv
+    assert "inherit" not in argv  # the sentinel never reaches the subprocess
+    assert "--output-format" in argv and "stream-json" in argv
+    assert argv[argv.index("--resume") + 1] == "abc-123"
+
+
 def test_build_hosted_argv_with_resume():
     argv = build_hosted_argv(_BIN, permission_mode="default", resume_uuid="abc-123")
     assert argv[argv.index("--resume") + 1] == "abc-123"

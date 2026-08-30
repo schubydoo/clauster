@@ -37,7 +37,8 @@ claude:
 
 instance_defaults:
   spawn_mode: same-dir       # same-dir | worktree (git repos) | session
-  permission_mode: default   # default | plan | acceptEdits | auto | dontAsk | bypassPermissions
+  # `inherit` passes NO --permission-mode flag — the session starts in its own default mode.
+  permission_mode: default   # default | plan | acceptEdits | auto | dontAsk | bypassPermissions | inherit
   capacity: 32               # max sessions within one bridge (claude --capacity)
   # session_name_prefix: myteam   # prefix for auto-generated session names (default: hostname)
   # max_bridges: 8           # best-effort cap on remote-control bridges (unset = no limit)

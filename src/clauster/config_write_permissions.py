@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from . import config_write as cw
-from .config import PERMISSION_LABELS
+from .config import INHERIT_PERMISSION_MODE, PERMISSION_LABELS
 
 #: The top-level key holding the permission rules in ``settings.json``.
 PERMISSIONS_KEY = "permissions"
@@ -60,7 +60,10 @@ BYPASS_MODE = "bypassPermissions"
 #: The recognized ``defaultMode`` values: the canonical permission-label vocabulary
 #: minus :data:`BYPASS_MODE`, which is footgun-gated and never settable here. Derived
 #: from :data:`~clauster.config.PERMISSION_LABELS` so the two never drift (#685).
-RECOGNIZED_MODES = frozenset(PERMISSION_LABELS) - {BYPASS_MODE}
+#: ``inherit`` (#1231) is subtracted too: it is a Clauster *launch-time* sentinel meaning
+#: "pass no ``--permission-mode`` flag", not a value claude understands — writing it into
+#: a real ``settings.json`` would produce a file claude rejects.
+RECOGNIZED_MODES = frozenset(PERMISSION_LABELS) - {BYPASS_MODE, INHERIT_PERMISSION_MODE}
 
 
 def _validate_rule_list(value: Any, label: str) -> None:

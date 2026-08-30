@@ -127,6 +127,39 @@ def test_build_cmd_explicit_default_appends_neither(runner_config):
     assert "--no-sandbox" not in cmd
 
 
+# ----- "inherit" sentinel: no --permission-mode at all (#1231) ----------
+
+
+def test_build_cmd_omits_permission_mode_for_inherit(runner_config):
+    runner = _runner(runner_config)
+    cmd = runner._build_cmd(Path("/tmp/x.log"), "alpha", "same-dir", "inherit")
+    # The flag is absent ENTIRELY — the session starts in its own default mode and
+    # never carries the flag's spawn-time system-prompt effect.
+    assert "--permission-mode" not in cmd
+    # ...and the sentinel itself never leaks into the argv as a bogus mode string.
+    assert "inherit" not in cmd
+    # The rest of the argv is untouched.
+    assert cmd[cmd.index("--spawn") + 1] == "same-dir"
+
+
+def test_build_cmd_still_passes_every_real_mode(runner_config):
+    # The six real modes are unchanged by the sentinel's introduction.
+    runner = _runner(runner_config)
+    for mode in ("default", "plan", "acceptEdits", "auto", "dontAsk", "bypassPermissions"):
+        cmd = runner._build_cmd(Path("/tmp/x.log"), "alpha", "same-dir", mode)
+        assert cmd[cmd.index("--permission-mode") + 1] == mode
+
+
+async def test_inherit_passes_validation(runner_config, monkeypatch):
+    # Validate-before-spawn stays intact: the sentinel is an ACCEPTED value (not a
+    # string smuggled past the gate), and the spawned bridge records it.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _runner(runner_config)
+    inst = await runner.spawn("alpha", permission_mode="inherit")
+    assert inst.permission_mode == "inherit"
+    await runner.stop(inst.instance_id)
+
+
 # ----- validation -------------------------------------------------------
 
 

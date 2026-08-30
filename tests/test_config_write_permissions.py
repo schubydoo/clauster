@@ -98,13 +98,27 @@ def test_validate_rejects_bypass_default_mode() -> None:
         perms.validate_permissions({"defaultMode": "bypassPermissions"})
 
 
+def test_validate_rejects_inherit_default_mode() -> None:
+    """#1231: ``inherit`` is a Clauster launch sentinel, never a claude settings value.
+
+    It means "pass no ``--permission-mode`` flag"; writing it into a real
+    ``settings.json`` would produce a ``defaultMode`` claude does not understand.
+    """
+    with pytest.raises(cw.InvalidCandidateError):
+        perms.validate_permissions({"defaultMode": "inherit"})
+
+
 def test_bypass_excluded_from_recognized_modes() -> None:
     assert "bypassPermissions" not in perms.RECOGNIZED_MODES
     # Assert the RELATIONSHIP to the source of truth, not a frozen copy: the recognized
-    # set is exactly the canonical permission-label vocabulary minus the footgun mode,
+    # set is exactly the canonical permission-label vocabulary minus the footgun mode and
+    # the "inherit" launch sentinel (#1231, which is not a settings.json value at all),
     # so adding a label to PERMISSION_LABELS tracks here instead of failing on a stale
     # literal set (same brittleness class flagged on #731).
-    assert perms.RECOGNIZED_MODES == frozenset(PERMISSION_LABELS) - {"bypassPermissions"}
+    assert perms.RECOGNIZED_MODES == frozenset(PERMISSION_LABELS) - {
+        "bypassPermissions",
+        "inherit",
+    }
 
 
 def test_bypass_as_rule_string_is_inert_data(tmp_path: Path) -> None:

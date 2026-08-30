@@ -101,7 +101,7 @@ row in the table above.
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `spawn_mode` | `same-dir` \| `worktree` \| `session` | `same-dir` | Default spawn mode for new **bridge** sessions (the standard / pty launch flow) — where the session's working directory lives. `worktree` requires a git repo; `session` runs in a fresh sandbox. Bridge launches only — hosted (browser) sessions ignore this. |
-| `permission_mode` | `default` \| `plan` \| `acceptEdits` \| `auto` \| `dontAsk` \| `bypassPermissions` | `default` | Default permission mode for new bridges. |
+| `permission_mode` | `default` \| `plan` \| `acceptEdits` \| `auto` \| `dontAsk` \| `bypassPermissions` \| `inherit` | `default` | Default permission mode for new bridges. `inherit` is a Clauster sentinel, not a claude mode: it passes **no** `--permission-mode` flag, so the session starts in whatever mode it would pick on its own. Caveat: with no flag passed, an existing `permissions.defaultMode` in a settings file takes effect — including a hand-edited `bypassPermissions` Clauster refuses to write itself. See the `inherit` caveat in the security guide before using it on a project with `allow_bypass_permissions: false`. |
 | `verbose` | bool | `false` | Pass `--verbose` to spawned standard `claude remote-control` bridges for detailed connection/session logs — every spawn mode (same-dir/worktree/session). The pty (flag-form) bridge is never passed --verbose. Off by default. |
 | `session_name_prefix` | str \| null | `null` | Optional prefix for auto-generated Remote Control session names (maps to `claude remote-control --remote-control-session-name-prefix`); applies to the standard multi-session bridge only. Unset → claude's default (the hostname). |
 | `capacity` | int | `32` | Max concurrent sessions a single standard bridge runs in `same-dir`/`worktree` spawn mode (≥1); passed to `claude remote-control --capacity`. Ignored for `session` spawn mode and the pty bridge (both single-session). |
@@ -111,6 +111,21 @@ row in the table above.
 Permission modes: `default`, `plan`, `acceptEdits`, `auto`, `dontAsk`,
 `bypassPermissions`. `bypassPermissions` is footgun-gated — see
 `projects.<name>.allow_bypass_permissions` below.
+
+**New in 1.1:** `inherit` is a seventh choice and not a claude mode at all: Clauster
+passes **no** `--permission-mode` flag, so the session starts in whatever mode it
+would pick on its own. Use it when the flag's spawn-time effect is unwanted — claude
+bakes `--permission-mode` into the session's initial system prompt, which reaching the
+same mode later at runtime does not do. It applies to every launch channel (standard
+bridge, Interactive Session, browser/hosted, and background runs) and is opt-in — the
+shipped default stays `default`.
+
+`inherit` cannot itself *request* `bypassPermissions`, but because no flag is passed,
+an on-disk `permissions.defaultMode` takes effect instead — including a
+`bypassPermissions` one that was hand-edited into a settings file, which Clauster
+refuses to write but cannot prevent. Prefer an explicit mode where
+`allow_bypass_permissions: false` is what you are relying on; the full caveat is in
+[bypassPermissions footgun gate](../security.md#bypasspermissions-footgun-gate).
 
 ## `projects` — per-project map (`ProjectConfig`)
 

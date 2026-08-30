@@ -144,7 +144,7 @@ dashboard's **Run Claude here**).
 | `project` | string (required) | The project name to start in. |
 | `resume_mode` | string | `standard` (multi-session server) or `pty` (single interactive session, true-resume). |
 | `spawn_mode` | string | `same-dir` · `worktree` · `session`. |
-| `permission_mode` | string | The claude permission mode. |
+| `permission_mode` | string | `default` · `plan` · `acceptEdits` · `auto` · `dontAsk` · `bypassPermissions` · `inherit`. **New in 1.1:** `inherit` is Clauster's own sentinel for passing no `--permission-mode` flag at all, not a claude mode — read the [caveat](security.md#bypasspermissions-footgun-gate) before using it where `allow_bypass_permissions: false` is load-bearing. |
 | `custom_name` | string | Display name (standard/Server Mode only). |
 | `sandbox` | string | `default` · `on` · `off` (standard only). **Disabled in this release** ([#1037](https://github.com/schubydoo/clauster/issues/1037)) — accepted but inert (coerced to `default`); the launch popover no longer offers it. Returns behind dependency-preflight + platform gating in [#1046](https://github.com/schubydoo/clauster/issues/1046). |
 | `trust` | boolean | Accept the workspace-trust dialog for this project. **Defaults to `false`** — an untrusted directory is refused unless you pass `true`, the headless equivalent of the dashboard's Trust action. |

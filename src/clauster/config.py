@@ -35,7 +35,9 @@ _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 # version, distinct from the `min_version` support floor below). worktree requires
 # a git repo; bypassPermissions is footgun-gated (see `ProjectConfig.allow_bypass_permissions`).
 SpawnMode = Literal["same-dir", "worktree", "session"]
-PermissionMode = Literal["default", "plan", "acceptEdits", "auto", "dontAsk", "bypassPermissions"]
+PermissionMode = Literal[
+    "default", "plan", "acceptEdits", "auto", "dontAsk", "bypassPermissions", "inherit"
+]
 # How a bridge is launched. "standard" = Server Mode: the headless `claude remote-control`
 # subcommand server (multi-session, survives a restart, no conversation resume).
 # "pty" = Interactive Session: the `claude --remote-control` flag form under a PTY keeper,
@@ -72,6 +74,15 @@ SANDBOX_MODES: tuple[str, ...] = ("default", "on", "off")
 # kept intact so re-enabling behind dependency preflight + platform gating in #1046 is a one-line
 # flip of this flag. Left as a plain bool (not Final/Literal) so it stays runtime-togglable.
 SANDBOX_TOGGLE_ENABLED = False
+# The sentinel that means "force nothing" (#1231): every spawn channel OMITS
+# `--permission-mode` entirely for this value, so the session starts in whatever
+# permission mode the plan/CLI would give it on its own. It is NOT a claude mode
+# string and must never reach a subprocess argv or a claude `settings.json`
+# `permissions.defaultMode` (see `config_write_permissions.RECOGNIZED_MODES`).
+# Passing the flag is not equivalent to reaching the same mode at runtime — claude
+# bakes `--permission-mode` into the session's spawn-time system prompt — so this
+# is the only way to launch with that spawn-time effect absent.
+INHERIT_PERMISSION_MODE = "inherit"
 PERMISSION_MODES: tuple[str, ...] = (
     "default",
     "plan",
@@ -79,6 +90,7 @@ PERMISSION_MODES: tuple[str, ...] = (
     "auto",
     "dontAsk",
     "bypassPermissions",
+    INHERIT_PERMISSION_MODE,
 )
 
 # Canonical permission-mode labels — the SINGLE source of truth for every label
@@ -121,6 +133,17 @@ PERMISSION_LABELS: dict[str, dict[str, str]] = {
         "short": "Skip all checks ⚠",
         "long": "Skip all checks ⚠",
         "effect": "Skips every permission check — the agent may do anything.",
+    },
+    # Listed LAST deliberately: the six above are ordered by how much they let the
+    # agent do, and "don't force a mode" isn't a point on that axis — it opts out of
+    # the choice entirely. It never REQUESTS anything itself — but with no flag
+    # passed, an on-disk settings.json `permissions.defaultMode` takes effect,
+    # including a hand-edited `bypassPermissions` clauster refuses to write. See
+    # the caveat in docs/security.md.
+    INHERIT_PERMISSION_MODE: {
+        "short": "No forced mode",
+        "long": "No forced mode (session default)",
+        "effect": "Forces nothing — the session starts in its own default permission mode.",
     },
 }
 
@@ -262,7 +285,14 @@ class InstanceDefaults(BaseModel):
         "ignore this.",
     )
     permission_mode: PermissionMode = Field(
-        default="default", description="Default permission mode for new bridges."
+        default="default",
+        description="Default permission mode for new bridges. `inherit` is a Clauster "
+        "sentinel, not a claude mode: it passes **no** `--permission-mode` flag, so the "
+        "session starts in whatever mode it would pick on its own. Caveat: with no flag "
+        "passed, an existing `permissions.defaultMode` in a settings file takes effect — "
+        "including a hand-edited `bypassPermissions` Clauster refuses to write itself. "
+        "See the `inherit` caveat in the security guide before using it on a project "
+        "with `allow_bypass_permissions: false`.",
     )
     verbose: bool = Field(
         default=False,

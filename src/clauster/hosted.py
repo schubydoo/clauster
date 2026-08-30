@@ -47,7 +47,7 @@ from typing import Any
 
 from . import procutil
 from .claustrum_client import ClaustrumClient, ClaustrumError, ProcessStream, _Subscriber
-from .config import PermissionMode
+from .config import INHERIT_PERMISSION_MODE, PermissionMode
 from .hosted_events import GapRangeEvent, HostedEvent, StdinFrame
 from .models import InstanceStatus, RemoteControlInstance
 from .redact import sanitize_line
@@ -98,8 +98,15 @@ def build_hosted_argv(
     ``claude_binary`` must already be an absolute, resolved path (validate-before-
     spawn is the caller's job). ``resume_uuid`` adds ``--resume <uuid>`` for
     deterministic conversation resume (CL-7); omit it for a fresh session.
+
+    ``permission_mode`` of :data:`~clauster.config.INHERIT_PERMISSION_MODE` emits **no**
+    ``--permission-mode`` flag (#1231), so the session starts in its own default mode
+    instead of one forced into its spawn-time system prompt. The sentinel is a Clauster
+    value only and never reaches the argv.
     """
-    argv = [claude_binary, *_STREAM_JSON_ARGS, "--permission-mode", permission_mode]
+    argv = [claude_binary, *_STREAM_JSON_ARGS]
+    if permission_mode != INHERIT_PERMISSION_MODE:
+        argv += ["--permission-mode", permission_mode]
     if resume_uuid is not None:
         argv += ["--resume", resume_uuid]
     return argv
