@@ -3433,8 +3433,8 @@ class SessionRunner:
         card, and the live bridge's fields would be written over a different session's
         record — losing it, because the next ``_persist`` rewrites that row too.
 
-        ``resume_mode`` narrows to rows of that mode. Both walk legs need it, because
-        first-match over a project's rows is arbitrary in MODE as well as identity: a
+        ``resume_mode`` narrows to rows of that mode. The keeper-sidecar leg needs it,
+        because first-match over a project's rows is arbitrary in MODE as well as identity: a
         project holding a standard row and a pty row would hand the keeper-sidecar leg
         the standard row, whose ``resume_mode`` makes ``_reattach_pty_from_sidecar``
         return before it ever globs a sidecar — leaving a live detached keeper unmanaged
@@ -3665,9 +3665,7 @@ class SessionRunner:
                 return True
         return False
 
-    def _reattach_pty_from_sidecar(
-        self, name: str, saved: dict, instance_id: str | None = None
-    ) -> RemoteControlInstance | None:
+    def _reattach_pty_from_sidecar(self, name: str, saved: dict) -> RemoteControlInstance | None:
         """Reattach a self-spawned pty bridge from its keeper sidecar after a restart.
 
         A pty (flag-form ``claude --remote-control``) bridge writes no Anthropic
@@ -3691,6 +3689,22 @@ class SessionRunner:
         adopted as ``app``'s instance. A sidecar holding a non-positive pid is skipped
         rather than raising: the gate below checks ``> 0``, and ``is_keeper_process``
         fails closed on psutil's ``ValueError`` besides.
+
+        The reattached bridge always gets a **fresh** ``instance_id`` (#1108). It used to
+        take one the caller resolved by PROJECT — first match over that project's unclaimed
+        pty rows — chosen before anything knew *whose* keeper the glob would find, so the
+        keeper's pids were written onto an unrelated session's row and the next
+        :meth:`_persist` rewrote that row too, losing it. Correlating the sidecar to a row
+        instead would be the ideal answer but is not reachable here: by the time this runs,
+        :meth:`_reattach_rows_with_pids` has already carded every row of this project that
+        carries a pid (live rows claim the project outright, so the walk skips it; dead ones
+        become STOPPED cards, so they are no longer unclaimed). Every row still unclaimed is
+        therefore pid-LESS — it has no liveness identity to match a sidecar against — and
+        adopting one would be a guess in every case, not just the ambiguous ones.
+        ``saved`` still supplies the label and modes (it is the same shape of first match,
+        but those are cosmetic and mode-pinned by the caller, not an identity), so the cost
+        is one extra card for the project rather than a lost session — the trade the pointer
+        leg makes for an ambiguous project too.
         """
         if not saved:
             return None
@@ -3741,7 +3755,9 @@ class SessionRunner:
             # path symmetric with the standard path's `_latest_debug_log_for` (#584).
             tail_source = raw_path if raw_path.exists() else None
             log_path = log_path if tail_source is not None else None
-            kwargs: dict = dict(
+            # No `instance_id=`: the model mints a fresh one. See the identity paragraph
+            # above — nothing here can say which row owns this keeper (#1108).
+            return RemoteControlInstance(
                 project=name,
                 label=saved.get("label") or name,
                 spawn_mode=spawn_mode,
@@ -3757,9 +3773,6 @@ class SessionRunner:
                 starter_session_id=info.get("session_id") or None,
                 url=info.get("connect_url") or None,
             )
-            if instance_id is not None:
-                kwargs["instance_id"] = instance_id
-            return RemoteControlInstance(**kwargs)
         return None
 
     async def _adopt_rows_from_store(self) -> None:
@@ -4172,6 +4185,9 @@ class SessionRunner:
         await self._refresh_persisted()
         discovered = self._discovered()
         row_claimed, row_stopped = await self._reattach_rows_with_pids(discovered)
+        # Projects whose live keeper the sidecar leg re-managed under a FRESH id because no
+        # row could be correlated to it (#1108). Consumed by the pid-less pass below.
+        uncorrelated_keepers: set[str] = set()
         for proj in discovered.values():
             if proj.name in row_claimed:
                 continue  # resolved per-instance above; don't let the walk re-claim it
@@ -4194,31 +4210,38 @@ class SessionRunner:
                 # sidecar so a live keeper is re-managed (Stop/observe restored)
                 # rather than leaking behind a STOPPED card; fall through to the
                 # STOPPED resurrection when no live keeper remains.
-                # TWO lookups on purpose, both pinned to pty (only a pty bridge has a
-                # sidecar, and adopting a standard row's id would write the keeper's pids
-                # over a standard session's record): modes/label from ANY pty row of the
-                # project, but the id only from an UNCLAIMED one, so a recovered live keeper
-                # is never written over another session's record (SF-4). Resolving both from
-                # one `unclaimed_only=True` call disabled the leg outright — the row pass has
-                # already carded every row, so `saved` came back empty and the leg bailed on
+                # ONE lookup, pinned to pty (only a pty bridge has a sidecar, and a standard
+                # row's fields would describe a different bridge shape): modes/label from ANY
+                # pty row of the project. Resolving it from an `unclaimed_only=True` call
+                # instead disabled the leg outright — the row pass has already carded every
+                # row that carries a pid, so `saved` came back empty and the leg bailed on
                 # its first line, for precisely the dead-row-plus-live-keeper case MF-1
-                # exists to fix. No pty row -> empty `saved` -> the leg bails, correctly; no
-                # unclaimed row -> mint a fresh id, one extra card, the same trade the
-                # pointer leg below makes for an ambiguous project (#1088).
+                # exists to fix. No pty row -> empty `saved` -> the leg bails, correctly.
+                #
+                # No id is resolved here any more (#1108). The leg used to be handed the
+                # first UNCLAIMED pty row's id, picked before the glob had found *whose*
+                # keeper this is — see `_reattach_pty_from_sidecar` for why no row reachable
+                # at this point can be correlated to it. The reattach mints a fresh id: one
+                # extra card for the project, the same trade the pointer leg below makes for
+                # an ambiguous project, instead of overwriting a resumable record (#1088 SF-4).
                 modes_hit = self._persisted_for_project(proj.name, resume_mode="pty")
                 persisted_saved = modes_hit[1] if modes_hit is not None else {}
-                unclaimed_hit = self._persisted_for_project(
-                    proj.name, unclaimed_only=True, resume_mode="pty"
-                )
-                persisted_iid = unclaimed_hit[0] if unclaimed_hit is not None else None
                 reattached = await asyncio.to_thread(
                     self._reattach_pty_from_sidecar,
                     proj.name,
                     persisted_saved,
-                    persisted_iid,
                 )
                 if reattached is not None:
                     self._instances[reattached.instance_id] = reattached
+                    # The keeper is managed again, but under an id of its own — so this
+                    # project's pid-less pty rows are still UNRESOLVED: one of them may be
+                    # the session this keeper is holding. The pid-less pass below would
+                    # otherwise card them STOPPED (its sweep now sees the keeper as
+                    # "accounted for", held by the card just inserted) and offer a Resume
+                    # that spawns a SECOND keeper on the same `--continue` conversation.
+                    # Block them here instead: a hidden card is recoverable on the next
+                    # start, a duplicate bridge is not (#1108).
+                    uncorrelated_keepers.add(proj.name)
                 elif proj.name not in row_stopped and (
                     (stopped := self._stopped_from_persisted(proj.name)) is not None
                 ):
@@ -4237,9 +4260,13 @@ class SessionRunner:
                 continue
             # Overlay the few fields the pointer-walk can't recover; a bridge
             # found alive is by definition NOT intentionally stopped.
-            # `unclaimed_only` for the same reason as the pty leg above: this attaches the
-            # LIVE bridge under the id it is handed, so a claimed one would overwrite a
-            # different session's record irrecoverably (#1088 SF-4).
+            # `unclaimed_only` because this attaches the LIVE bridge under the id it is
+            # handed, so a claimed one would overwrite a different session's record
+            # irrecoverably (#1088 SF-4). Unlike the pty leg above, this one still ADOPTS
+            # that unclaimed id rather than minting a fresh one — the same
+            # picked-before-we-know-whose class #1108 describes, deliberately left alone
+            # here because that issue scopes to the keeper-sidecar leg and changing the
+            # pointer leg would drop the row association every standard reattach relies on.
             #
             # Deliberately NOT also pinned to `resume_mode="standard"`, unlike the pty leg.
             # A pointer means the live bridge is standard, so the mirror mismatch is real —
@@ -4248,7 +4275,6 @@ class SessionRunner:
             # legacy row and mint a fresh id, losing the association it was meant to keep.
             # The pty leg has no such exposure: a keeper sidecar only exists for a bridge
             # Clauster spawned in pty mode, and those rows always record their mode.
-            # Correlating a row to the process actually found is tracked in #1108.
             persisted_hit = self._persisted_for_project(proj.name, unclaimed_only=True)
             saved = persisted_hit[1] if persisted_hit is not None else {}
             persisted_iid = persisted_hit[0] if persisted_hit is not None else None
@@ -4354,6 +4380,23 @@ class SessionRunner:
             if pending
             else set()
         )
+        # Unioned, never derived from the sweep: `_has_unclaimed_live_keeper` asks whether a
+        # live keeper is UNACCOUNTED FOR, and the walk above has just accounted for these —
+        # under a fresh id that proves nothing about which pid-less row owns them (#1108).
+        blocked |= {(name, "pty") for name in uncorrelated_keepers}
+        # And one restart LATER (the review catch on #1108): the fresh-id row now reattaches
+        # by its persisted pids, so the keeper is accounted for, `uncorrelated_keepers` is
+        # empty — and the original pid-less row would be carded STOPPED, offering a Resume
+        # that spawns a second keeper on the same conversation. A pty resume is `--continue`,
+        # which grabs the project's LATEST conversation, so while ANY managed pty instance is
+        # live in a project, resuming a pid-less pty row can only duplicate or steal that
+        # conversation. Hidden-but-recoverable beats a duplicate bridge, again.
+        blocked |= {
+            (i.project, "pty")
+            for i in self._instances.values()
+            if i.resume_mode == "pty"
+            and i.status in (InstanceStatus.STARTING, InstanceStatus.RUNNING)
+        }
         for iid, saved in list(self._persisted.items()):
             if iid in self._instances:
                 continue  # live-claimed, or already carded by a pass above

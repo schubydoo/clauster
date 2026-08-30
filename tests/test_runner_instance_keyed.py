@@ -288,6 +288,99 @@ async def test_a_standard_row_ordered_first_does_not_hide_the_pty_keeper(
     assert live[0].instance_id != "iid-standard"
 
 
+async def test_keeper_reattach_does_not_card_itself_under_a_pid_less_rows_id(
+    runner_config, monkeypatch
+):
+    # #1108. The keeper-sidecar leg picked its `instance_id` BEFORE the glob had found whose
+    # keeper it was: first match over the project's UNCLAIMED pty rows. By the time the leg
+    # runs, every row carrying a pid has been carded by the row pass, so the only unclaimed
+    # rows left are pid-LESS ones — nothing about them can be correlated to the sidecar. The
+    # live keeper was therefore carded under a pid-less session's identity, and the next
+    # `_persist` rewrote that row with the keeper's pids, losing the session it described.
+    runner = _make_runner(runner_config)
+    _stub_connect(monkeypatch)
+    runner.persistence.state_store().save(
+        {
+            # Pid-less (pre-#1115 / cleared): the row pass skips it, so it stays UNCLAIMED
+            # and used to be the id the leg adopted.
+            "iid-pidless": _row("alpha", pid=None, label="session-A"),
+            # Dead by its own pids: carded STOPPED, hence claimed — this is what makes the
+            # pid-less row the first (and only) unclaimed match.
+            "iid-dead": _row("alpha", pid=5003, label="session-B"),
+        }
+    )
+    runner._log_dir.mkdir(parents=True, exist_ok=True)
+    (runner._log_dir / "alpha-1700000000000-0.keeper.json").write_text(
+        json.dumps(
+            {
+                "keeper_pid": 5555,
+                "bridge_pid": 4242,
+                "bridge_proc_start": 222.0,
+                "state": "ready",
+                "connect_url": "https://claude.ai/code/KEEPER",
+            }
+        )
+    )
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge", lambda pid, proc_start=None: pid == 4242
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda pid: pid == 5555)
+    monkeypatch.setattr("clauster.runner.pointers.pointer_for_project", lambda path: None)
+
+    await runner.rediscover()
+
+    live = [i for i in runner.list_instances() if i.status is InstanceStatus.RUNNING]
+    assert len(live) == 1, "the live detached keeper must still be re-managed"
+    assert (live[0].keeper_pid, live[0].bridge_pid) == (5555, 4242)
+    assert live[0].instance_id not in ("iid-pidless", "iid-dead")
+    # ...the pid-less session's record survives the persist untouched...
+    rows = runner.persistence.state_store().load()
+    assert rows["iid-pidless"]["label"] == "session-A"
+    assert rows["iid-pidless"].get("bridge_pid") is None, "the keeper's pids overwrote a row"
+    # ...and it stays UNCARDED rather than offering a Resume that would spawn a second
+    # keeper on the conversation this one may already be holding. The pid-less pass can no
+    # longer see the keeper as unaccounted for (the fresh-id card holds it), so the walk
+    # blocks the project's pty rows explicitly.
+    assert runner.get_instance("iid-pidless") is None
+
+
+async def test_second_restart_still_hides_the_pid_less_row_of_a_live_pty_session(
+    runner_config, monkeypatch
+):
+    # The review catch on the fix above: `uncorrelated_keepers` only covers the restart
+    # where the sidecar leg itself re-managed the keeper. One restart LATER the fresh-id
+    # row reattaches by its persisted pids — the keeper is accounted for, that set is
+    # empty, and the original pid-less row would be carded STOPPED, offering a Resume
+    # that spawns a second keeper on the same `--continue` conversation. While ANY
+    # managed pty instance is live in a project, its pid-less pty rows stay hidden.
+    runner = _make_runner(runner_config)
+    _stub_connect(monkeypatch)
+    runner.persistence.state_store().save(
+        {
+            # The stale row of the very session the fresh-id card now drives.
+            "iid-pidless": _row("alpha", pid=None, label="session-A"),
+            # Restart-1's fresh-id card, persisted WITH the keeper's pids: the row pass
+            # reattaches it directly, so the sidecar leg never runs for this project.
+            "iid-fresh": _row("alpha", pid=4242, proc_start=222.0, label="session-A"),
+        }
+    )
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge", lambda pid, proc_start=None: pid == 4242
+    )
+    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s: 5555)
+    monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: 777.0)
+    monkeypatch.setattr("clauster.runner.pointers.pointer_for_project", lambda path: None)
+
+    await runner.rediscover()
+
+    fresh = runner.get_instance("iid-fresh")
+    assert fresh is not None and fresh.status is InstanceStatus.RUNNING
+    assert runner.get_instance("iid-pidless") is None, (
+        "a live managed pty instance must keep the project's pid-less pty rows hidden — "
+        "carding one offers a duplicate --continue Resume"
+    )
+
+
 async def test_rediscover_rejects_a_recycled_pid(runner_config, monkeypatch):
     # PID-reuse defence. The pid is alive but belongs to something else, which the
     # proc-start half of the pair detects. Persisting a bare pid would have let an unrelated
@@ -595,11 +688,15 @@ async def test_pid_less_pty_row_is_not_carded_while_a_live_keeper_is_unclaimed(
         "a pid-less pty row must stay uncarded while a live keeper is unaccounted for"
     )
 
-    # With the keeper gone, the same row cards normally.
+    # With the keeper gone AND no live pty session left in the project, the same row cards
+    # normally. Both conditions matter: while any managed pty instance is live, a pid-less
+    # pty row stays hidden regardless — its `--continue` Resume could only duplicate or
+    # steal the live conversation (the second-restart review catch).
     runner2 = _make_runner(runner_config)
     monkeypatch.setattr(
         SessionRunner, "_has_unclaimed_live_keeper", lambda self, name, held: False
     )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
     await runner2.rediscover(persist=False)
     assert runner2.get_instance("iid-pidless") is not None
 

@@ -95,9 +95,18 @@ def is_bridge_cmdline(cmdline: list[str]) -> bool:
     :func:`~clauster.supervisor.build_dispatch_argv`'s ``claude --bg --rc <name>``: a
     BACKGROUND AGENT that opens a cloud door, not a bridge. Matching the alias would let
     a background agent stand as proof that "the bridge is alive, just unmanaged" and
-    prune the card out from under it. Whether a ``--bg --rc`` job should count as bridge
-    liveness is a real question, but it is one to answer deliberately, not by widening a
-    delete gate.
+    prune the card out from under it.
+
+    That question was answered deliberately rather than by widening the gate: a
+    ``claude --bg --rc <name>`` job does **not** count as bridge liveness (maintainer
+    decision on #1107, closed 2026-08-29). Bridge liveness stays with the bridge lifecycle
+    and supervisor jobs stay with the supervisor; the delete gate fails closed, so the
+    cheap failure (a lingering phantom card) wins over the expensive one (a deleted
+    resumable session); and matching the bare alias would reopen the documented
+    ``claude``-in-path false-match class that made the earlier attempt a real incident on a
+    host whose service user is ``claude``. The behavior is pinned by
+    ``test_is_bridge_cmdline_does_not_match_the_bare_rc_alias``.
+
     Use :func:`is_standard_bridge_cmdline` when the subcommand form must be told apart.
     """
     if not cmdline:
