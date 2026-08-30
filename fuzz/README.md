@@ -4,11 +4,11 @@ Coverage-guided fuzz harnesses for clauster's untrusted-input parsers. They run
 in CI via [ClusterFuzzLite](https://google.github.io/clusterfuzzlite/) two ways:
 per-PR over the changed code (`.github/workflows/cflite_pr.yml`, `address`
 sanitizer, ~180s) and an every-other-day scheduled batch over **every** harness
-(`.github/workflows/cflite_batch.yml`, 300s) whose corpus **persists across
+(`.github/workflows/cflite_batch.yml`, 375s) whose corpus **persists across
 runs** in a private storage repo, so coverage compounds over time. Note
 `fuzz-seconds` is a **total** budget CFLite splits across the harnesses, not a
 per-target one — adding a harness thins every harness's slice rather than
-lengthening the run. A weekly cron
+lengthening the run, so raise it in step with the harness count. A weekly cron
 (`.github/workflows/cflite_cron.yml`) prunes that corpus and replays it to publish
 per-harness edge counts (see [below](#reading-the-weekly-coverage-signal)). All are
 informational — never block a merge; a reproducible crash surfaces as SARIF in the
@@ -54,20 +54,23 @@ corpus repo's `gh-pages` branch. Verified directly against that branch — there
 `coverage/latest/report/` directory, and a weekly upload commit touches only the
 per-harness logs.
 
-⚠️ **Do not read that as "impossible for Python."** oss-fuzz's base-runner `coverage`
-script has a coverage.py-based Python branch that builds an `htmlcov` report and moves
-it to `$COVERAGE_OUTPUT_DIR/report/$PLATFORM` — exactly the `report/linux/` path our
-workflow comment used to promise. It just produces nothing for our Atheris harnesses,
-and ClusterFuzzLite swallows that script's output, so the failure never reaches the
-Actions log and the job stays green. The cause is not established; it is open work on
-[issue 1322](https://github.com/schubydoo/clauster/issues/1322).
+⚠️ **This is not "Python can't do coverage reports."** oss-fuzz's base-runner
+`coverage` script has a coverage.py branch that builds an `htmlcov` report and moves it
+to `$COVERAGE_OUTPUT_DIR/report/$PLATFORM` — exactly the `report/linux/` path the
+workflow comment used to promise. We never reach it: the cron's `run_fuzzers` step
+does not pass `language: python` (only the *build* step does) and that input defaults
+to `c++`, so the script takes its LLVM branch. The uploaded logs prove it — they carry
+`-merge=1` `MERGE-INNER`/`MERGE-OUTER` lines, which only the C/C++ path emits. Our
+Atheris wrappers produce no `.profraw`, so that path yields nothing, and the job stays
+green because ClusterFuzzLite discards the coverage script's output. Tracked in
+[issue 1327](https://github.com/schubydoo/clauster/issues/1327).
 
 What does land:
 
 | Path (on `gh-pages`) | What it is |
 | --- | --- |
-| `coverage/latest/logs/<harness>.log` | that harness's libFuzzer replay log (stdout and stderr together); its final `DONE cov: E ft: F` line is the edge (`E`) and feature (`F`) count reached over the whole corpus |
-| `coverage/latest/logs/<harness>_error.log` | always empty for us — it holds a filtered libFuzzer `ERROR:` extract the base-runner writes only on its C/C++ path, never on the Python one |
+| `coverage/latest/logs/<harness>.log` | that harness's libFuzzer replay log (stdout and stderr together); its last `DONE cov: E ft: F` line is the edge (`E`) and feature (`F`) count reached over the whole corpus. Not the last line of the file — `MERGE-OUTER:` lines follow it, so grep for `DONE` rather than reaching for `tail -1` |
+| `coverage/latest/logs/<harness>_error.log` | always empty, and empty is the good case — the C/C++ path creates it by redirecting a `grep` for libFuzzer `ERROR:` lines, so an empty file means no crash line matched |
 | `coverage/latest/fuzzer_stats/coverage_targets.txt` | the harnesses the replay covered |
 
 The corpus repo is private, so read them from a clone rather than a Pages URL:
@@ -103,11 +106,17 @@ structured input and are expected never to crash.
 Two traps worth knowing before you measure anything:
 
 - ⚠️ **Put every import the harness needs inside the `atheris.instrument_imports()`
-  block** — including stdlib ones like `urlsplit`. An import at module scope loads the
-  module *before* Atheris can instrument it, and the target's own later import then
-  reuses the uninstrumented copy. Measured on `pty_login_scan_fuzzer`: hoisting
-  `from urllib.parse import urlsplit` to the top dropped edge coverage from ~210 to 52,
-  silently, because the URL parsing the harness exists to drive stopped being traced.
+  block** — including stdlib ones like `urlsplit`, `hmac` and `hashlib`. An import at
+  module scope loads the module *before* Atheris can instrument it, and the target's
+  own later import then reuses the uninstrumented copy. Measured: hoisting
+  `from urllib.parse import urlsplit` out of `pty_login_scan_fuzzer` dropped it from
+  ~210 edges to 52, and hoisting `hmac`/`hashlib` out of `auth_headers_fuzzer` dropped
+  it from 32 to 22 — silently both times, because the parsing each harness exists to
+  drive stopped being traced. Both numbers are from a direct `python fuzz/…` run; under
+  ClusterFuzzLite the harness is PyInstaller-frozen, so if that bootstrap has already
+  imported the module the in-block import degrades to a lookup and instrumentation is
+  lost again. Atheris prints `INFO: Instrumenting <module>` at startup — check for it
+  in the run log rather than assuming.
 - ⚠️ **Give libFuzzer a scratch corpus directory, not `fuzz/seeds/<name>/`.** It writes
   every retained input into the *first* corpus dir on the command line, so running
   `python fuzz/x_fuzzer.py fuzz/seeds/x_fuzzer` buries the curated seeds under

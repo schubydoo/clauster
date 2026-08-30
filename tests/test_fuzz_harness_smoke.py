@@ -51,3 +51,56 @@ def test_fuzz_harness_imports_and_exposes_entrypoints(harness: str) -> None:
     spec.loader.exec_module(module)
     assert callable(module.TestOneInput), f"{harness} missing a callable TestOneInput"
     assert callable(module.main), f"{harness} missing a callable main"
+
+
+def _load(harness: str):
+    path = _FUZZ_DIR / harness
+    spec = importlib.util.spec_from_file_location(f"_fuzz_smoke.{path.stem}", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# URLs spanning every branch of the authorize-path / known-auth-host predicates:
+# the real endpoint, the bare-/authorize fallback, the query-string decoy the path
+# check exists to reject, docs/marketing exclusions, subdomains, an unknown host,
+# and the invalid-IPv6-bracket URL that makes urlsplit raise.
+_PREDICATE_URLS = [
+    "https://claude.com/cai/oauth/authorize?client_id=x",
+    "https://claude.ai/oauth/authorize",
+    "https://console.anthropic.com/authorize",
+    "https://claude.com/settings?redirect_uri=%2Foauth%2Fauthorize",
+    "https://docs.anthropic.com/en/docs/oauth/authorize",
+    "https://help.claude.com/oauth/authorize",
+    "https://support.claude.ai/authorize",
+    "https://www.claude.com/oauth/authorize",
+    "https://anthropic.com/oauth/authorize",
+    "https://notclaude.com/oauth/authorize",
+    "https://evil.example/cai/oauth/authorize",
+    "https://claude.com/",
+    "https://claude.com:notaport/oauth/authorize",
+    "https://[::1/oauth/authorize",
+    "https://[bad/authorize",
+    "",
+]
+
+
+@pytest.mark.parametrize("url", _PREDICATE_URLS)
+def test_pty_login_scan_restated_predicates_match_pty_screen(url: str) -> None:
+    """The harness's independent oracles must agree with the functions they judge.
+
+    ``pty_login_scan_fuzzer`` deliberately restates ``_is_authorize_path`` and
+    ``_is_known_auth_host`` rather than calling them, so an oracle cannot be fooled by
+    a misclassification inside the code it is checking. That independence has a cost:
+    a maintainer who legitimately broadens either predicate would otherwise get a green
+    ``just check`` and learn about the drift days later, as an ``assert`` in ``fuzz/``
+    surfacing in the Security tab. This test moves that failure back into the suite.
+    """
+    from clauster import pty_screen
+
+    harness = _load("pty_login_scan_fuzzer.py")
+    assert harness._path_is_authorize(url) == pty_screen._is_authorize_path(url), url
+    assert harness._host_is_known_auth(url) == pty_screen._is_known_auth_host(
+        pty_screen._url_host(url)
+    ), url

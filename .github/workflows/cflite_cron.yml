@@ -8,20 +8,27 @@
 #   persisted corpus, and pushes the replay artefacts to the corpus repo's
 #   `gh-pages` branch under `coverage/latest/`.
 #   ⚠️ NO HTML line-coverage report lands, and none ever has — verified against the
-#   corpus repo (no `coverage/latest/report/` exists; a weekly upload commit touches
-#   only the per-harness logs). ⚠️ But do NOT read that as "impossible for Python":
-#   oss-fuzz's base-runner `coverage` script has a coverage.py-based Python branch
-#   that builds an htmlcov report and moves it to exactly $COVERAGE_OUTPUT_DIR/
-#   report/$PLATFORM — i.e. the `report/linux/` path the old comment here promised.
-#   It simply produces nothing for our Atheris harnesses, and CFLite swallows that
-#   script's output, so the failure never reaches the Actions log and the job stays
-#   green. The cause is NOT established; #1322 tracks it. What DOES land:
+#   corpus repo. It is NOT "impossible for Python": oss-fuzz's base-runner `coverage`
+#   script has a coverage.py branch that builds an htmlcov report and moves it to
+#   $COVERAGE_OUTPUT_DIR/report/$PLATFORM — the `report/linux/` path the old comment
+#   here promised. We never reach it. The `run_fuzzers` step below does not pass
+#   `language: python` (only the BUILD step does) and that input defaults to `c++`,
+#   so the script takes its LLVM branch instead. Proof, from the uploaded logs
+#   themselves: they carry `-merge=1` MERGE-INNER/MERGE-OUTER lines, which only the
+#   C/C++ path emits — the Python path runs `-atheris_runs=N` and emits none. Our
+#   Atheris wrappers produce no .profraw, so that path yields nothing, and the job
+#   still passes because CFLite discards the coverage script's output. Fixing it is
+#   one input, but NOT here: unverifiable without a dispatch that writes to the
+#   corpus repo, and it could cost us the logs below. Tracked in #1327 (which also
+#   covers the same omission silently cutting crash reproduction to 30s on the
+#   FUZZING jobs); #1322 is the umbrella. What lands today:
 #     coverage/latest/logs/<harness>.log             — that harness's libFuzzer
-#       replay log (stdout+stderr); its final `#N DONE cov: E ft: F` line is the
-#       edge (E) and feature (F) count reached over the whole persisted corpus
-#     coverage/latest/logs/<harness>_error.log       — always empty for us: it holds
-#       a filtered libFuzzer `ERROR:` extract the base-runner writes only on its
-#       C/C++ path, never on the Python one
+#       replay log (stdout+stderr); its LAST `#N DONE cov: E ft: F` line is the edge
+#       (E) and feature (F) count reached over the whole persisted corpus. It is not
+#       the last line of the file — MERGE-OUTER: lines follow it
+#     coverage/latest/logs/<harness>_error.log       — always EMPTY, and empty means
+#       "no crash line matched": the C/C++ path creates it by redirecting a grep for
+#       libFuzzer `ERROR:` lines, which is why the file exists at all
 #     coverage/latest/fuzzer_stats/coverage_targets.txt — the harness list
 #   Those per-harness edge counts are the signal we actually have that the harness
 #   set has kept up with the code: a harness pinned at a handful of edges is one
