@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 import uvicorn
 import yaml
 
-from . import __version__, claude_cli, deps, environments, ops, pty_keeper, usage
+from . import __version__, claude_cli, deps, environments, ops, pty_keeper, pty_screen, usage
 from .app import create_app
 from .auth import hash_password, make_hasher, mint_metrics_token, mint_token
 from .config import (
@@ -1513,6 +1513,10 @@ def _run(config_path: str | None) -> int:
     # before create_app imports anything that needs them. Frozen-binary-only + best-effort — a
     # no-op on a normal install, where extras resolve through site-packages.
     deps.add_deps_dir_to_sys_path(config.state_dir)
+    # Same for a CLAUSTER_PYTE_PATH-provided pyte (#699): without this the availability probe
+    # (find_spec) can't see it, the dashboard disables the Live terminal, and the disabled
+    # control prevents the lazy import that would have fixed sys.path (#1310).
+    pty_screen._maybe_add_external_pyte_path()
 
     try:
         version = claude_cli.claude_version(config.claude.binary)
