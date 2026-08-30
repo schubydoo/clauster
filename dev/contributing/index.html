@@ -1584,6 +1584,9 @@ the CI coverage-gate interpreter (<code>uv</code> still supports the full 3.11+ 
 </code></pre></div>
 <p>Use <code>default: minor</code> for a feature, <code>patch</code> for a fix, <code>major</code> for a breaking
   change, or <code>perf</code> / <code>security</code> / <code>build</code> for those sections (each a patch bump).
+  The key really is the literal word <code>default</code> — knope silently ignores a fragment
+  keyed to anything else, so it would ship with no changelog entry and no version
+  bump; <code>scripts/lint_changesets.py</code> (pre-commit and CI) rejects that.
   You don't need to add a PR link — knope appends <code>([#NNN])</code> for the PR that
   introduces the changeset, at release time.
   Keep the summary to a single concise line that gets straight to the point;
