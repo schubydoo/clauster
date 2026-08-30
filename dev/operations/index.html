@@ -1947,12 +1947,12 @@ runner state:</p>
 <tr>
 <td><code>clauster_bridge_cpu_percent{project="…"}</code></td>
 <td>gauge</td>
-<td>Per-bridge process-tree CPU percent. Emitted only when the <code>metrics</code> sampler is enabled and has a fresh sample; otherwise absent.</td>
+<td>Per-<strong>project</strong> process-tree CPU percent, summed across that project's live bridges. Emitted only when the <code>metrics</code> sampler is enabled and has a fresh sample; otherwise absent.</td>
 </tr>
 <tr>
 <td><code>clauster_bridge_rss_bytes{project="…"}</code></td>
 <td>gauge</td>
-<td>Per-bridge process-tree resident memory. Sampler-gated, as above.</td>
+<td>Per-<strong>project</strong> process-tree resident memory, summed across that project's live bridges. Sampler-gated, as above.</td>
 </tr>
 <tr>
 <td><code>clauster_hosted_sessions</code></td>
@@ -2012,13 +2012,17 @@ scraper needs a session, or you scrape over loopback).</p>
 </code></pre></div>
 <p>A useful alert is a non-zero <code>clauster_bridges{status="crashed"}</code> or <code>="error"</code>
 sustained over a scrape interval.</p>
-<p>The per-project live resource metrics (CPU / memory / disk shown on a running
-bridge's card) are a separate, dashboard-only fetch
-(<code>/api/projects/{name}/metrics</code>); they are not part of the Prometheus exposition
-and are governed by the <code>metrics</code> config block, not <code>observability</code>. <strong>Disk I/O is
-unavailable on macOS</strong> — <code>psutil</code> has no per-process <code>io_counters</code> there, so the API
-returns <code>null</code> for <code>disk_read_bps</code> / <code>disk_write_bps</code> and the card leaves those fields
-blank on macOS (CPU and memory still show). See the
+<p>The live resource metrics (CPU / memory / disk shown on a running session's row)
+are a separate, dashboard-only fetch. Each row shows <strong>its own bridge's</strong> usage:
+the dashboard reads <code>/api/metrics</code>, keyed by instance id, so two bridges of one
+project — a Server Mode bridge and an Interactive Session, say — never report each
+other's figures. <code>/api/projects/{name}/metrics</code> still returns the project <strong>total</strong>,
+summed across that project's live bridges. Neither is part of the Prometheus
+exposition, and both are governed by the <code>metrics</code> config block, not
+<code>observability</code>. <strong>Disk I/O is unavailable on macOS</strong> — <code>psutil</code> has no per-process
+<code>io_counters</code> there, so the API returns <code>null</code> for <code>disk_read_bps</code> /
+<code>disk_write_bps</code> and the row leaves those fields blank on macOS (CPU and memory
+still show). See the
 <a href="../reference/platforms/">platform-support matrix</a> for the full per-OS list.</p>
 <h2 id="crash-alerts">Crash alerts<a class="headerlink" href="#crash-alerts" title="Permanent link">&para;</a></h2>
 <p>Clauster can send an outbound notification when a bridge <strong>crashes</strong> — exits

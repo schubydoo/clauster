@@ -1532,7 +1532,7 @@ Bracketed numbers point at the <a href="#notes">notes</a> below.</p>
    with a clear message (subscription sign-in still works).</li>
 <li>Routes exercised on the Windows CI cells + VM.</li>
 <li><code>psutil.cpu_times</code> / <code>memory_info</code> on every platform.</li>
-<li><code>psutil</code> has no per-process <code>io_counters</code> on macOS, so a bridge card's
+<li><code>psutil</code> has no per-process <code>io_counters</code> on macOS, so a bridge row's
    <code>disk_read_bps</code> / <code>disk_write_bps</code> fields are blank there.</li>
 <li>An in-process lock serializes clauster's own concurrent writers on every
    OS; POSIX additionally takes an advisory <code>fcntl.flock</code>, which also guards

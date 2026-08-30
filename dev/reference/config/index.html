@@ -2832,7 +2832,7 @@ runs.</p>
 <td><code>enabled</code></td>
 <td>bool</td>
 <td><code>true</code></td>
-<td>Show the per-session resource metrics line — live CPU, memory, and disk I/O for each running bridge. When <code>false</code>, the line is hidden and Clauster skips the work behind it entirely: no <code>/api/projects/{name}/metrics</code> polling from the browser and no server-side resource sampling.</td>
+<td>Show the per-session resource metrics line — live CPU, memory, and disk I/O for each running bridge, each row reporting its own bridge. When <code>false</code>, the line is hidden and Clauster skips the work behind it entirely: no <code>/api/metrics</code> polling from the browser and no server-side resource sampling.</td>
 </tr>
 <tr>
 <td><code>normalize_cpu</code></td>
@@ -2880,7 +2880,7 @@ auth guard. See <a href="../../networking/">Networking</a> for scraping behind a
 <td><code>prometheus_enabled</code></td>
 <td>bool</td>
 <td><code>false</code></td>
-<td>Gate a text-format <code>/metrics</code> endpoint (build info, bridge counts by status, project count, per-bridge cpu/rss, crash counter, hosted/claustrum gauges). Off by default; when off, <code>/metrics</code> returns 404. The endpoint stays <strong>behind</strong> the auth guard unless <code>metrics_token_hash</code> is set.</td>
+<td>Gate a text-format <code>/metrics</code> endpoint (build info, bridge counts by status, project count, per-project cpu/rss summed across that project's live bridges, crash counter, hosted/claustrum gauges). Off by default; when off, <code>/metrics</code> returns 404. The endpoint stays <strong>behind</strong> the auth guard unless <code>metrics_token_hash</code> is set.</td>
 </tr>
 <tr>
 <td><code>metrics_token_hash</code></td>
