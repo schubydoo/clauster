@@ -316,8 +316,31 @@ class HostedSession:
             # conversation *turns* only, so stderr and control-plane frames inside
             # the evicted range are still gone — dropping it would claim a
             # completeness we don't have (the restart docs state this composition).
+            backlog: list[Mapping[str, Any]] = []
             if history_loader is not None:
-                self._rehydrate(await history_loader(), result.get("lastSeq"))
+                # The subscriber queue is BOUNDED (ring + 1), and the transcript read
+                # takes real time on a big .jsonl — a large replay plus live tail can
+                # outrun the queue in that window and drop frames before the pump
+                # exists (review catch: a dropped control_request parks claude on a
+                # prompt the dashboard never shows). Spill the queue into an
+                # unbounded local backlog while the read runs; the pump routes it
+                # first, so nothing is lost and ring order is unchanged.
+                source = self._source
+
+                async def _spill() -> None:
+                    while True:
+                        backlog.append(await source.get())
+
+                spill = asyncio.create_task(_spill())
+                try:
+                    history = await history_loader()
+                finally:
+                    spill.cancel()
+                    try:
+                        await spill
+                    except asyncio.CancelledError:
+                        pass
+                self._rehydrate(history, result.get("lastSeq"))
             gap_first = self._note_replay_gap(result.get("firstSeq"), from_seq)
             # SYNCHRONOUS with the report (#1175 review catch): the evicted range is
             # unrecoverable by definition, so the cursor jumps past the hole here
@@ -337,7 +360,7 @@ class HostedSession:
         # If not running, the exit frame (seq > from_seq) replays through the pump,
         # which latches the terminal status; "stopped" is the neutral default until.
         self.status = InstanceStatus.RUNNING if result.get("running") else InstanceStatus.STOPPED
-        self._pump_task = asyncio.create_task(self._pump())
+        self._pump_task = asyncio.create_task(self._pump(backlog))
         return result
 
     def _drop_subscription(self) -> None:
@@ -653,14 +676,21 @@ class HostedSession:
             and seq_value <= self._rehydrated_through
         )
 
-    async def _pump(self) -> None:
-        """Drain the process stream, routing each event until exit or cancel."""
+    async def _pump(self, backlog: list[Mapping[str, Any]] | None = None) -> None:
+        """Drain the process stream, routing each event until exit or cancel.
+
+        ``backlog`` carries the frames :meth:`reattach` spilled out of the bounded
+        subscriber queue while the transcript was being read (review catch): they are
+        routed first, in arrival order, through exactly the same loop — so ring order
+        and the suppression/gap logic see one uninterrupted sequence.
+        """
         source = self._source
         if source is None:  # pragma: no cover - start() always sets it before pumping
             return
+        pending = deque(backlog or ())
         try:
             while True:
-                event = await source.get()
+                event = pending.popleft() if pending else await source.get()
                 etype = event.get("type")
                 seq = event.get("seq")
                 seq_value = _as_seq(seq)

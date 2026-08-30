@@ -1633,6 +1633,37 @@ async def test_frames_emitted_during_the_transcript_read_are_not_suppressed(fake
         await session.detach()
 
 
+async def test_transcript_read_cannot_overflow_the_bounded_queue(fake_claustrum):
+    # The review catch on the loader design: the pre-pump buffer is the CLIENT's
+    # bounded stream-subscriber queue, and the transcript read takes real time —
+    # frames arriving in that window used to overflow it before the pump existed,
+    # dropping output (or a parked control_request, leaving claude waiting on a
+    # prompt the dashboard never shows). reattach() now spills the queue into an
+    # unbounded backlog while the read runs.
+    fake = await fake_claustrum()
+    await _emit_frames(fake, _PID, 1)  # seq 1: our persisted cursor
+    async with ClaustrumClient(fake.socket_path, fake.token, queue_maxsize=8) as client:
+        session = HostedSession(client, _PID, _BIN)
+
+        async def _emits_while_reading():
+            # One frame per loop turn, yielding between: the production loader is a
+            # to_thread file read (a true suspension), so the read loop and the
+            # spill interleave with the arriving frames — the in-process fake's
+            # fast-path awaits would otherwise run everything in one task step.
+            for _ in range(200):  # seqs 2..201 land mid-"file read"
+                await _emit_frames(fake, _PID, 1)
+                await asyncio.sleep(0)
+            return None
+
+        await session.reattach(1, history_loader=_emits_while_reading)
+        await wait_until(lambda: session.daemon_last_seq == 201)
+        # Nothing dropped: no overflow marker, and every emitted frame reached the
+        # ring — a pre-pump drop would leave holes or a marker instead.
+        assert not any(e["type"] == "overflow" for e in session._ring)
+        assert len([f for f in _frames(session) if "n" in f]) == 200
+        await session.detach()
+
+
 async def test_rehydration_suppresses_the_replayed_data_frames_it_covers(fake_claustrum):
     # The seam: the daemon still buffers frames for turns the transcript already
     # holds. Restoring AND replaying them would double-render, so the replay's data
