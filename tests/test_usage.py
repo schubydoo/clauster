@@ -331,6 +331,24 @@ def test_recorded_cwd_skips_records_without_one(short_tmp_root):
     assert _recorded_cwd(path) == "/srv/projects/found"
 
 
+def test_recorded_cwd_serves_a_repeat_from_the_cache_without_reopening(
+    short_tmp_root, monkeypatch
+):
+    # The (path, mtime_ns, size, bound) key must serve a repeat lookup from the cache. Proven
+    # by making a reopen impossible: the file is unchanged, so the second call may not touch it.
+    from clauster.usage import _recorded_cwd
+
+    path = short_tmp_root / "t.jsonl"
+    path.write_text(json.dumps({"type": "user", "cwd": "/srv/projects/found"}) + "\n")
+    assert _recorded_cwd(path) == "/srv/projects/found"
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("cache hit must not reopen the transcript")
+
+    monkeypatch.setattr(Path, "open", _boom)
+    assert _recorded_cwd(path) == "/srv/projects/found"
+
+
 def test_recorded_cwd_gives_up_past_the_line_bound(short_tmp_root):
     # Bounded scan: a transcript whose cwd only appears beyond the cap reads as unproven
     # rather than making the walk read an arbitrarily large file.

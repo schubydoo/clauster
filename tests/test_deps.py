@@ -605,6 +605,31 @@ def test_install_binary_dep_targz_downloads_verifies_places(tmp_path, monkeypatc
     assert exe.read_bytes() == b"\x7fELF-fake-claustrum"
 
 
+def test_install_binary_dep_reports_write_error_even_when_cleanup_fails(
+    tmp_path, monkeypatch, capsys
+):
+    # The atomic-swap error arm cleans up its temp best-effort; a cleanup that ALSO fails
+    # (e.g. the same dying disk) must stay silent and the ORIGINAL write error is reported.
+    data, _dep = _install_fake_claustrum(monkeypatch)
+    cleanup_attempts: list[Path] = []
+
+    def _replace_boom(self, target):
+        raise OSError("disk full")
+
+    def _unlink_boom(self, missing_ok=False):
+        cleanup_attempts.append(self)
+        raise OSError("cleanup also failed")
+
+    monkeypatch.setattr(Path, "replace", _replace_boom)
+    monkeypatch.setattr(Path, "unlink", _unlink_boom)
+    rc = deps.install_binary_dep("claustrum", tmp_path, assume_yes=True, fetch=lambda _u: data)
+    assert rc == 1
+    assert cleanup_attempts, "the error arm must attempt best-effort temp cleanup"
+    err = capsys.readouterr().err
+    assert "could not write" in err and "disk full" in err
+    assert "cleanup also failed" not in err  # the original error wins
+
+
 def test_install_binary_dep_targz_checksum_mismatch_refuses(tmp_path, monkeypatch):
     _install_fake_claustrum(monkeypatch)
     rc = deps.install_binary_dep(

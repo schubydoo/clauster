@@ -753,6 +753,32 @@ def test_bridge_ancestor_finds_the_bridge_above_an_sdk_worker(monkeypatch):
     assert procutil.bridge_ancestor(3227255) == 3227255
 
 
+def test_bridge_ancestor_stops_when_the_parent_chain_ends(monkeypatch):
+    # A process whose parent is gone (or is init) ends the walk with None — a session whose
+    # bridge already exited must never charge an unrelated ancestor.
+    tree = {60: (("bash",), None), 61: (("bash",), 1), 1: (("init",), None)}
+
+    class _P:
+        def __init__(self, pid):
+            if pid not in tree:
+                raise psutil.NoSuchProcess(pid)
+            self.pid = pid
+
+        def status(self):
+            return psutil.STATUS_RUNNING
+
+        def cmdline(self):
+            return list(tree[self.pid][0])
+
+        def parent(self):
+            parent_pid = tree[self.pid][1]
+            return _P(parent_pid) if parent_pid in tree else None
+
+    monkeypatch.setattr(procutil.psutil, "Process", _P)
+    assert procutil.bridge_ancestor(60, max_depth=3) is None  # parent is None
+    assert procutil.bridge_ancestor(61, max_depth=3) is None  # parent is pid 1
+
+
 def test_bridge_ancestor_refuses_to_answer_with_a_pty_keeper(monkeypatch):
     # A keeper matches `is_bridge_cmdline` — it carries the bridge argv after `--`, and that
     # test is a substring match over the joined cmdline. The keeper is the bridge's PARENT,

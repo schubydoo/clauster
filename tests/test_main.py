@@ -1182,6 +1182,24 @@ def test_deps_uninstall_routes_binary_to_binary_dep(write_config, tmp_path, monk
     assert rc == 0 and calls["key"] == "shawl"
 
 
+def test_deps_list_marks_an_off_platform_extra_na(write_config, tmp_path, capsys, monkeypatch):
+    # A platform-scoped extra that doesn't apply here renders "n/a (other platform)" —
+    # forced via applies() so every OS leg exercises the arm its own platform never takes.
+    monkeypatch.setattr(cli.deps, "applies", lambda entry: False)
+    rc = cli.main(["deps", "list", "-c", _cfg(write_config, tmp_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "n/a" in out and "(other platform)" in out
+
+
+def test_deps_list_marks_an_off_platform_binary_na(write_config, tmp_path, capsys, monkeypatch):
+    # resolve_binary_dep returns None for another platform/arch; the row must say so.
+    monkeypatch.setattr(cli.deps, "resolve_binary_dep", lambda key: None)
+    rc = cli.main(["deps", "list", "-c", _cfg(write_config, tmp_path)])
+    assert rc == 0
+    assert "(other platform/arch)" in capsys.readouterr().out
+
+
 def test_deps_list_includes_shawl_binary(write_config, tmp_path, capsys):
     rc = cli.main(["deps", "list", "-c", _cfg(write_config, tmp_path)])
     assert rc == 0
