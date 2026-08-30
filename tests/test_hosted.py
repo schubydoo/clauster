@@ -1547,6 +1547,8 @@ async def test_manager_reattach_all_surfaces_an_evicted_range(fake_claustrum, tm
         await mgr.reattach_all(client)
         session = mgr.session(pid)
         assert (await _drain(session.subscribe()))["type"] == "gap"
+
+
 # -- transcript rehydration on reattach (#1045) ----------------------------
 
 
