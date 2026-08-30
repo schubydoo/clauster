@@ -1513,6 +1513,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#output-lost-n-frames-after-a-restart" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        "output lost (N frames)" after a restart
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -2259,6 +2270,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#output-lost-n-frames-after-a-restart" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        "output lost (N frames)" after a restart
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -2728,6 +2750,18 @@ card shows an error like <code>reattach failed: ...</code> (server log:
 <p><strong>Most likely cause:</strong> the underlying daemon process ended while Clauster was
 down, so there was nothing to reattach to. The transcript is not lost — start
 a new Direct Session for the project and resume from the captured session.</p>
+<h3 id="output-lost-n-frames-after-a-restart">"output lost (N frames)" after a restart<a class="headerlink" href="#output-lost-n-frames-after-a-restart" title="Permanent link">&para;</a></h3>
+<p><strong>What you see:</strong> a reattached Direct Session's view opens with a yellow
+<code>output lost (N frames)</code> marker ahead of the replayed output (server log:
+<code>hosted: daemon replay buffer evicted frames &lt;first&gt;-&lt;last&gt; for process &lt;id&gt;</code>).</p>
+<p><strong>Most likely cause:</strong> the agent produced more output while Clauster was down
+than the claustrum daemon's per-process replay buffer holds, so the daemon
+dropped the oldest frames before Clauster could read them. The marker is
+deliberate — those frames are gone from the daemon and Clauster will not
+pretend the stream is continuous. The conversation itself is unaffected: the
+session keeps running and <code>claude</code> has still written its own transcript to
+disk. Restarting Clauster promptly, or keeping sessions shorter, narrows the
+window.</p>
 <h2 id="getting-more-detail">Getting more detail<a class="headerlink" href="#getting-more-detail" title="Permanent link">&para;</a></h2>
 <h3 id="raising-the-log-level">Raising the log level<a class="headerlink" href="#raising-the-log-level" title="Permanent link">&para;</a></h3>
 <blockquote>
