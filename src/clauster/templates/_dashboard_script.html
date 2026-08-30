@@ -3272,6 +3272,14 @@
           }
         }
       },
+      // --- optimistic "stopping" preservation bound (#1146) ---------------------
+      // How long a locally-optimistic "stopping" row may outlive its disappearance from
+      // /api/instances. Grace enough for a slow stop to land (the poll cadence is 4s, so
+      // ~7 confirming polls) without stranding a row the server has dropped forever.
+      STOPPING_ABSENT_MS: 30000,
+      // Floor on CONFIRMING polls, independent of the clock: after an outage the 30s is
+      // already spent, and this is what still forces two real "server omitted it" answers.
+      STOPPING_ABSENT_POLLS: 2,
       async refresh() {
         // Single-flight: setInterval can fire a new tick while a slow refresh is still
         // awaiting. Without this, an older refresh can resolve AFTER a newer one and clobber
@@ -3313,8 +3321,34 @@
             // Preserve a local optimistic "stopping" until the server confirms it's gone.
             // Keyed by rk, so stopping ONE of a project's bridges can't hold a card open
             // for a sibling that is genuinely gone.
+            //
+            // BOUNDED (#1146). Preservation used to be unconditional, so a row the server
+            // had genuinely dropped — a failed DELETE leaves the row "stopping", then it is
+            // forgotten from another tab/the CLI, or pruned as a phantom by rediscover — was
+            // re-preserved on every poll forever, with no way to clear it: isResumable is
+            // false so no Forget button renders, and Stop would 404. A session on screen that
+            // no longer exists is exactly the misleading state invariant 1 exists to prevent.
+            //
+            // What does NOT change: a bridge that is genuinely still stopping is still
+            // REPORTED by /api/instances, so `next[k]` exists and the server row wins before
+            // this loop is reached. Only a row the server has stopped listing ages out. The
+            // stop failure itself stays visible either way — stop() writes errorOf(project),
+            // rendered by _project_row.html outside any bridge row.
+            //
+            // "Backend confirms gone" vs "backend stopped answering": this whole branch is
+            // inside `iRes.ok`, so a tick only counts when /api/instances ANSWERED and
+            // omitted the row. An outage cannot age a row out — it stops the count entirely.
+            // Both bounds must clear, and the poll floor is what makes that hold across an
+            // outage: after a long one the wall clock is already spent, so the floor is the
+            // only thing left guaranteeing real confirmations before the row goes.
             for (const k of Object.keys(this.instances)) {
-              if (this.instances[k] && this.instances[k].status === "stopping" && !next[k]) next[k] = this.instances[k];
+              const row = this.instances[k];
+              if (!row || row.status !== "stopping" || next[k]) continue;
+              if (row._absentSince === undefined) { row._absentSince = Date.now(); row._absentPolls = 0; }
+              row._absentPolls++;
+              const aged = row._absentPolls >= this.STOPPING_ABSENT_POLLS &&
+                           Date.now() - row._absentSince >= this.STOPPING_ABSENT_MS;
+              if (!aged) next[k] = row;  // else: drop it — the server says it is gone
             }
             const byId = {};
             for (const i of Object.values(next)) byId[i.rk] = i;
