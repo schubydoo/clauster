@@ -1,22 +1,32 @@
-# ClusterFuzzLite — weekly corpus PRUNE + COVERAGE report. The maintenance
+# ClusterFuzzLite — weekly corpus PRUNE + COVERAGE replay. The maintenance
 # counterpart to the daily cflite_batch.yml (which fuzzes + grows the corpus).
 #
 # - prune: the daily batch keeps APPENDING inputs to the persisted corpus; pruning
 #   minimizes it (drops inputs that add no coverage) so the storage-repo doesn't
 #   grow unboundedly. A replay can still surface a reproducible crash → SARIF.
 # - coverage: builds the harnesses with the `coverage` sanitizer, replays the whole
-#   persisted corpus, and pushes an HTML line-coverage report to the corpus repo's
-#   `gh-pages` branch — i.e. EXACTLY which clauster code the fuzzers reach. This is
-#   how we SEE whether the harness set has kept up with the code (an unfuzzed
-#   module shows as 0% — the signal that a new harness is owed). With the corpus
-#   repo private, view the report by cloning gh-pages (or enable private Pages):
-#   it lands at coverage/latest/report/linux/report.html.
+#   persisted corpus, and pushes the replay artefacts to the corpus repo's
+#   `gh-pages` branch under `coverage/latest/`.
+#   ⚠️ There is NO HTML line-coverage report, and there never was: ClusterFuzzLite's
+#   report layer is LLVM-based and emits nothing for Python/Atheris targets. What
+#   this job actually stores is
+#     coverage/latest/logs/<harness>.log             — the libFuzzer replay log per
+#       harness; its final `#N DONE cov: E ft: F` line is that harness's edge (E)
+#       and feature (F) count over the whole persisted corpus
+#     coverage/latest/logs/<harness>_error.log       — stderr (empty on a clean run)
+#     coverage/latest/fuzzer_stats/coverage_targets.txt — the harness list
+#   Those per-harness edge counts are the signal we have that the harness set has
+#   kept up with the code: a harness pinned at a handful of edges is one whose
+#   corpus never gets past the guard clause, and a module with no harness at all
+#   simply does not appear. There is no per-line/per-module view — reading it needs
+#   the human judgement fuzz/README.md ("Reading the weekly coverage signal")
+#   describes. The corpus repo is private, so read the logs by cloning `gh-pages`.
 #
 # Both reuse the same private storage-repo + FUZZ_STORAGE_TOKEN PAT as the batch.
 # WEEKLY (not daily): a coverage build + full-corpus replay is far heavier than a
 # time-boxed fuzz run, and the corpus changes slowly. NOT a required check — it
 # signals, it never gates. If the PAT is rotated/expired these jobs keep passing
-# but silently stop pruning/reporting. See https://google.github.io/clusterfuzzlite/.
+# but silently stop pruning/uploading. See https://google.github.io/clusterfuzzlite/.
 name: ClusterFuzzLite cron (prune + coverage)
 
 on:
@@ -30,7 +40,7 @@ jobs:
   prune:
     name: prune corpus
     runs-on: ubuntu-latest
-    timeout-minutes: 55 # ≈ fuzz-seconds × harness count + build (re-check when adding harnesses)
+    timeout-minutes: 55 # ≈ fuzz-seconds (a TOTAL, split across harnesses) + build; observed ≈12 min
     permissions:
       contents: read # checkout + build the harnesses
       security-events: write # a replay can still surface a reproducible crash (SARIF)
@@ -58,11 +68,11 @@ jobs:
           storage-repo-branch: main
 
   coverage:
-    name: coverage report
+    name: coverage replay (per-harness edge stats)
     runs-on: ubuntu-latest
     timeout-minutes: 60 # coverage build + full-corpus replay over every harness — the slow one
     permissions:
-      contents: read # builds + replays only; the report is pushed via the storage PAT
+      contents: read # builds + replays only; the logs are pushed via the storage PAT
     concurrency:
       group: ${{ github.workflow }}-coverage
       cancel-in-progress: true
@@ -74,7 +84,10 @@ jobs:
           language: python
           github-token: ${{ secrets.GITHUB_TOKEN }}
           sanitizer: coverage
-      - name: Generate the coverage report
+      # Replays the persisted corpus and uploads the per-harness libFuzzer logs to
+      # gh-pages. Despite the mode name it emits no HTML report for Python — see
+      # the file header for exactly what lands under coverage/latest/.
+      - name: Replay the corpus and upload the edge stats
         id: run
         uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
         with:

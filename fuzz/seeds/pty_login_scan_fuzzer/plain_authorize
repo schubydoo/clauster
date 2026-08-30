@@ -1,0 +1,4 @@
+Browser didn't open? Use the url below to sign in:
+https://claude.com/cai/oauth/authorize?client_id=abc&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcallback&state=xyz
+
+Paste code here if prompted >

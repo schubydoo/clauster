@@ -6,9 +6,10 @@ per-PR over the changed code (`.github/workflows/cflite_pr.yml`, `address`
 sanitizer, ~180s) and an every-other-day scheduled batch over **every** harness
 (`.github/workflows/cflite_batch.yml`, 300s each) whose corpus **persists across
 runs** in a private storage repo, so coverage compounds over time. A weekly cron
-(`.github/workflows/cflite_cron.yml`) prunes that corpus and publishes a coverage
-report. All are informational — never block a merge; a reproducible crash surfaces
-as SARIF in the Security tab. Build config lives in [`.clusterfuzzlite/`](../.clusterfuzzlite/).
+(`.github/workflows/cflite_cron.yml`) prunes that corpus and replays it to publish
+per-harness edge counts (see [below](#reading-the-weekly-coverage-signal)). All are
+informational — never block a merge; a reproducible crash surfaces as SARIF in the
+Security tab. Build config lives in [`.clusterfuzzlite/`](../.clusterfuzzlite/).
 
 ## Harnesses
 
@@ -22,6 +23,8 @@ as SARIF in the Security tab. Build config lives in [`.clusterfuzzlite/`](../.cl
 | `parse_agents_json_fuzzer.py` | `inspector.parse_agents_json` | parses external `claude agents --json` stdout (Anthropic-controlled, version-dependent); stays strict on malformed JSON (`JSONDecodeError` caught), any other escape is a bug |
 | `supervisor_job_from_state_fuzzer.py` | `supervisor._job_from_state` | coerces the agent-view daemon's churning on-disk state into a `BackgroundJob`; total over any dict — must never raise |
 | `load_trusted_paths_fuzzer.py` | `discovery._load_trusted_paths` | parses the user-editable `~/.claude.json`; must degrade any malformed file to an empty set. Found + fixed a non-dict-JSON `AttributeError` (the #122 class) |
+| `auth_headers_fuzzer.py` | `auth.verify_proxy_hmac` + `auth.parse_bearer` | the two **pre-authentication** header parsers on the same boundary as `normalize_origin`. `verify_proxy_hmac` must return `False` on any malformation, never raise (it already 500'd once on a non-ASCII signature via `compare_digest`'s `TypeError`). Also builds a correctly signed header per input so the accept path is exercised, not just the reject path |
+| `pty_login_scan_fuzzer.py` | `pty_screen.extract_authorize_url` + `extract_osc8_hyperlinks` + `extract_oauth_token` | the scanners `login_shepherd` runs over `claude auth login` / `setup-token` terminal output to find the authorize URL an operator is told to click. Beyond crashes it asserts the anti-decoy property the selector exists for: when any candidate URL's path is a real authorize endpoint, the winner must be one too |
 
 ## Running a harness locally
 
@@ -38,6 +41,43 @@ python fuzz/parse_markers_fuzzer.py
 
 A crash writes a `crash-<sha1>` reproducer file; re-run the harness with that file
 as an argument to reproduce: `python fuzz/redact_fuzzer.py crash-abc123`.
+
+## Reading the weekly coverage signal
+
+⚠️ **There is no HTML line-coverage report, and there never was.** ClusterFuzzLite's
+report layer is LLVM-based and emits nothing for Python/Atheris targets, so the weekly
+cron's `coverage` job is really a *corpus replay*: it rebuilds the harnesses, runs the
+whole persisted corpus through each one, and pushes the raw libFuzzer output to the
+corpus repo's `gh-pages` branch. What lands there is:
+
+| Path (on `gh-pages`) | What it is |
+| --- | --- |
+| `coverage/latest/logs/<harness>.log` | that harness's libFuzzer replay log; its final `DONE cov: E ft: F` line is the edge (`E`) and feature (`F`) count reached over the whole corpus |
+| `coverage/latest/logs/<harness>_error.log` | its stderr — non-empty means the replay itself broke |
+| `coverage/latest/fuzzer_stats/coverage_targets.txt` | the harnesses the replay covered |
+
+The corpus repo is private, so read them from a clone rather than a Pages URL:
+
+```sh
+git clone --depth 1 -b gh-pages git@github.com:schubydoo/clauster-fuzz-corpus.git
+cd clauster-fuzz-corpus
+for f in coverage/latest/logs/*_fuzzer.log; do
+  printf '%-34s %s\n' "$(basename "$f" .log)" "$(grep -o 'DONE .*' "$f" | tail -1)"
+done | sort
+```
+
+**What the numbers do and don't tell you.** `cov:` counts *instrumented edges the
+corpus reaches* — not lines, not a percentage — and is only meaningful against the
+same harness's own previous runs; a harness over a short validator legitimately sits
+an order of magnitude below one over an NDJSON demuxer. Two things are worth acting
+on:
+
+- **A harness whose `cov:` stops growing** while its target keeps changing — its
+  corpus is likely stuck behind a guard clause. Give it a seed corpus or a
+  dictionary (below).
+- **A module that appears nowhere in `coverage_targets.txt`** — nothing fuzzes it at
+  all. That absence, rather than a 0% cell in a report, is the signal that a new
+  harness is owed.
 
 ## Adding a harness
 
@@ -60,6 +100,17 @@ up automatically by `build.sh`:
   format: `"token"` per line, `\xNN` escapes). `build.sh` copies it to
   `$OUT/<harness_name>.dict`, which the fuzzer auto-loads as `-dict=`.
 
-`redact_fuzzer` and `parse_markers_fuzzer` ship both (their regexes need structured
-tokens the random fuzzer never synthesises); the others grow a corpus fine from
+`redact_fuzzer`, `parse_markers_fuzzer` and `pty_login_scan_fuzzer` ship both (their
+regexes need structured tokens the random fuzzer never synthesises);
+`auth_headers_fuzzer` ships a dictionary only. The rest grow a corpus fine from
 structural input and need neither.
+
+The effect is not marginal. `pty_login_scan_fuzzer` sits at **11 edges** on random
+bytes — it never synthesises `https://` — and reaches **215** with its dictionary and
+ten seeds. Measure before deciding a harness "needs neither": run it locally for a
+few hundred thousand iterations and read the `cov:` figure.
+
+If a harness asserts a *property* rather than only "does not crash", prove the
+assertion can fail before trusting it. Break the implementation on purpose (monkeypatch
+the function under test to return something wrong) and check the harness raises — an
+oracle that has never fired is indistinguishable from no oracle at all.

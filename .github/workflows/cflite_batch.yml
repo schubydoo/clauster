@@ -15,8 +15,13 @@
 # accumulating. See https://google.github.io/clusterfuzzlite/.
 #
 # Cost knobs (see the CI-cost-audit TODO): the `cron` cadence and `fuzz-seconds`.
-# NB `fuzz-seconds` is PER fuzz target, so wall-clock ≈ fuzz-seconds × harness
-# count + build — keep that under `timeout-minutes`.
+# NB `fuzz-seconds` is the TOTAL budget for the whole run, not a per-target one:
+# CFLite divides it across the harnesses (`fuzz_seconds // fuzzers_left_to_run`
+# in oss-fuzz's infra/cifuzz/run_fuzzers.py). So wall-clock ≈ fuzz-seconds + build
+# and stays flat as harnesses are added — what shrinks is the time EACH harness
+# gets. Adding harnesses is therefore a coverage-dilution decision, not a
+# timeout one; raise `fuzz-seconds` (and re-check `timeout-minutes`) if the
+# per-harness slice gets too thin.
 name: ClusterFuzzLite batch fuzzing
 
 on:
@@ -30,7 +35,7 @@ jobs:
   batch-fuzzing:
     name: batch fuzzing
     runs-on: ubuntu-latest
-    timeout-minutes: 55 # ≈ fuzz-seconds × harness count + build (re-check when adding harnesses)
+    timeout-minutes: 55 # ≈ fuzz-seconds + build; generous headroom (observed ≈12 min)
     permissions:
       contents: read # checkout + build the harnesses
       security-events: write # upload crash SARIF to the Security tab
@@ -54,7 +59,7 @@ jobs:
         uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          fuzz-seconds: 300 # PER fuzz target → wall-clock ≈ 300 × harness count
+          fuzz-seconds: 300 # TOTAL for the run, split across the harnesses (see the header)
           mode: batch
           sanitizer: ${{ matrix.sanitizer }}
           output-sarif: true
