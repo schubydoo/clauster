@@ -1516,10 +1516,11 @@ async def test_reattach_to_an_empty_replay_buffer_reports_no_gap(fake_claustrum)
         await session.detach()
 
 
-async def test_a_reported_gap_always_advances_the_cursor_past_the_hole(fake_claustrum):
-    # Whenever a gap is reported, firstSeq itself is a surviving frame above the
-    # cursor, so the replay carries it and daemon_last_seq moves past the hole — the
-    # same range can never be re-reported, wider, on the next restart.
+async def test_a_reported_gap_advances_the_cursor_synchronously(fake_claustrum):
+    # The review catch: the advance must be atomic with the REPORT, not left to the
+    # pump's first drained frame — a crash in that window re-reported the same gap
+    # and re-replayed the survivors on the next restart. So the cursor is already
+    # past the hole the moment reattach() returns, before anything drains.
     fake = await fake_claustrum()
     await _emit_frames(fake, _PID, 5)
     fake.evict_through(_PID, 3)  # firstSeq 4, frames 2..3 evicted
@@ -1527,7 +1528,8 @@ async def test_a_reported_gap_always_advances_the_cursor_past_the_hole(fake_clau
         session = HostedSession(client, _PID, _BIN)
         await session.reattach(1)
         assert len(_gap_events(session)) == 1
-        await wait_until(lambda: session.daemon_last_seq == 5)  # well past the hole
+        assert session.daemon_last_seq >= 3, "cursor must clear the hole at report time"
+        await wait_until(lambda: session.daemon_last_seq == 5)  # survivors still drain
         await session.detach()
 
 

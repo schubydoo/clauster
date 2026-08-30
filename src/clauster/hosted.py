@@ -303,8 +303,14 @@ class HostedSession:
         # dropping the marker would claim a completeness we don't have. "Output lost"
         # sitting directly above a restored conversation is merely misleading, which
         # is a wording fix, not a reason to go silent.
-        self._note_replay_gap(result.get("firstSeq"), from_seq)
-        self.daemon_last_seq = max(self.daemon_last_seq, from_seq)
+        gap_first = self._note_replay_gap(result.get("firstSeq"), from_seq)
+        # SYNCHRONOUS with the report (review catch): the evicted range is unrecoverable
+        # by definition, so the cursor jumps past the hole here rather than waiting for
+        # the pump's first drained frame — a crash in that window re-reported the same
+        # gap and re-replayed the survivors on the next restart.
+        self.daemon_last_seq = max(
+            self.daemon_last_seq, from_seq, (gap_first - 1) if gap_first is not None else 0
+        )
         # If not running, the exit frame (seq > from_seq) replays through the pump,
         # which latches the terminal status; "stopped" is the neutral default until.
         self.status = InstanceStatus.RUNNING if result.get("running") else InstanceStatus.STOPPED
@@ -467,7 +473,7 @@ class HostedSession:
 
     # -- internals ---------------------------------------------------------
 
-    def _note_replay_gap(self, first_seq: Any, from_seq: int) -> None:
+    def _note_replay_gap(self, first_seq: Any, from_seq: int) -> int | None:
         """Report a daemon replay range that was evicted before we could read it (#1175).
 
         The daemon caps its per-process replay buffer (the reference ``claude-ssh``
@@ -481,13 +487,15 @@ class HostedSession:
         marker, which the caller orders ahead of the replayed frames so a watcher
         sees the break in position rather than a seamless transcript.
 
-        **Why the cursor may still advance over it.** Whenever a gap is reported,
-        ``firstSeq`` itself is a surviving frame above ``from_seq``, so the replay
-        delivers at least that frame and the pump advances
-        :attr:`daemon_last_seq` past the hole — the same range is therefore never
-        re-reported on the next restart. Refusing to advance would instead re-replay
-        the whole surviving buffer every restart and duplicate the transcript. What
-        this fix changes is only that the advance is no longer *silent*.
+        **The cursor advance is synchronous with the report** (review catch): the
+        caller uses the returned ``firstSeq`` to jump :attr:`daemon_last_seq` past
+        the hole in the same block that emits the marker. Leaving the advance to the
+        pump's first drained frame meant a crash between the report and that frame
+        re-reported the same gap and re-replayed the survivors on the next restart.
+        The evicted range is unrecoverable *by definition*, so jumping to
+        ``firstSeq - 1`` loses nothing — the replay then delivers from ``firstSeq``
+        exactly once. Refusing to advance at all would instead re-replay the whole
+        surviving buffer every restart and duplicate the transcript.
 
         **Why an empty buffer is genuinely not a gap.** Verified against the
         claustrum daemon's source (``process.go`` reattach, current main; the v1.10
@@ -507,7 +515,7 @@ class HostedSession:
         """
         first = _as_seq(first_seq)
         if first is None or first <= from_seq + 1:
-            return
+            return None
         logger.warning(
             "hosted: daemon replay buffer evicted frames %d-%d for process %s; "
             "that output is lost and cannot be replayed",
@@ -517,6 +525,7 @@ class HostedSession:
         )
         gap: GapRangeEvent = {"type": "gap", "from_seq": from_seq, "to_seq": first}
         self._emit(gap)
+        return first
 
     async def _pump(self) -> None:
         """Drain the process stream, routing each event until exit or cancel."""
