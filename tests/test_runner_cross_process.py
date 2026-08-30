@@ -262,6 +262,28 @@ async def test_resume_gate_fails_closed_when_refresh_fails(runner_config, monkey
     assert runner.get_instance_for_project("beta") is card  # kept for the retry
 
 
+def test_stale_resume_gate_is_a_no_op_for_live_and_never_saved_targets(runner_config):
+    # The gate only fires for a DEAD, row-backed target; its early return was measured
+    # as missed (and the guard as a partial branch) on the Windows coverage flag
+    # (#1324). Called directly — it is synchronous by design — so both no-op cases are
+    # exercised on every platform, not only where a resume test happens to run.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+
+    live = _fake_instance("alpha")  # RUNNING
+    runner._row_backed.add(live.instance_id)
+    # Row-backed but alive: falls through to the idempotent already-running return.
+    assert runner._gate_stale_resume(resume=True, resume_target=live, refreshed=True) is None
+
+    never_saved = _fake_instance("alpha")
+    never_saved.status = InstanceStatus.STOPPED
+    # Dead but never persisted: there is no row for another process to have forgotten,
+    # so not even a failed refresh (refreshed=False) may refuse it.
+    assert (
+        runner._gate_stale_resume(resume=True, resume_target=never_saved, refreshed=False) is None
+    )
+
+
 async def test_persist_keeps_never_saved_error_instance(runner_config):
     # The flip side of the ownership signal: a spawn that failed straight to ERROR was
     # never saved (not row-backed), so its FIRST persist must still write it — the
@@ -480,6 +502,61 @@ async def test_cancelled_contended_acquire_never_pins_the_lock(runner_config):
 
     # B's landed-after-cancel acquisition is released by the callback (not GC).
     await wait_until(_acquirable)
+
+
+async def test_flock_cancel_registers_the_release_callback_on_every_platform(
+    runner_config, tmp_path, monkeypatch
+):
+    # The same cancellation branch as the test above, but over a STUB lock manager so
+    # it runs on Windows too (#1324). `fcntl` is POSIX-only, yet `_flock`'s cancel
+    # handling is plain asyncio around the context manager and exists on every
+    # platform — without this the branch was measured as missed on the Windows flag.
+    # The stub also makes this the STRICTER of the two: a real `cross_process_lock`
+    # closes its fd when refcounting reclaims the manager, so the POSIX test above
+    # passes even without the done-callback; here only the callback can exit the stub.
+    import asyncio
+    import threading
+
+    from conftest import wait_until
+
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+
+    entered = threading.Event()  # the worker thread is inside the blocking acquire
+    landed = threading.Event()  # let that acquire finally succeed
+    exits: list[tuple] = []
+    body_ran = []
+    stalled = []  # the acquire timed out instead of being released by the test
+
+    class _StubLock:
+        def __enter__(self):
+            entered.set()
+            if not landed.wait(5):
+                stalled.append(True)
+            return self
+
+        def __exit__(self, *exc):
+            exits.append(exc)
+            return False
+
+    monkeypatch.setattr(atomicio, "cross_process_lock", lambda *a, **k: _StubLock())
+
+    async def _section():
+        async with runner._flock(tmp_path / "stub-target"):
+            body_ran.append(True)
+
+    task = asyncio.create_task(_section())
+    try:
+        assert await asyncio.to_thread(entered.wait, 5), "the acquire never started"
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not body_ran  # cancelled mid-acquire: the guarded section never ran
+        assert not exits  # and nothing released yet — the acquire is still in flight
+    finally:
+        landed.set()  # never leave the worker thread parked on a failing path
+    await wait_until(lambda: exits == [(None, None, None)])
+    assert not stalled  # a slow box, not a lost callback, if this is the one that fails
 
 
 async def test_cancelled_flock_acquire_is_released_when_the_thread_lands():

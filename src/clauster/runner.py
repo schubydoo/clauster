@@ -1582,22 +1582,30 @@ class SessionRunner:
         # colliding project's conversation. This is a Claude-storage property the
         # picker listing shares; refusing here keeps the spawn no less strict than
         # the source it validates against.
-        proj_dir = pointers.sanitize_cwd(proj.path)
-        colliding = [
+        #
+        # Everything from here down carries the Windows-exclusion pragma (#1324): it
+        # sits BEHIND the `effective_resume_mode != "pty"` raise above, and pty mode is
+        # off on the Windows CI run (`_is_pty_mode` → False without pywinpty — see
+        # `.coveragerc-win`), so a Windows execution always raises before reaching it.
+        # Both raises below are fail-closed fork-ownership gates, and they stay measured
+        # for real on Linux/macOS — if the Windows job ever gains pywinpty, drop these
+        # pragmas rather than let the exclusions hide a gate that can then run there.
+        proj_dir = pointers.sanitize_cwd(proj.path)  # pragma: skip-on-win
+        colliding = [  # pragma: skip-on-win
             other.name
             for other in self._discovered().values()
             if other.name != proj.name and pointers.sanitize_cwd(other.path) == proj_dir
         ]
-        if colliding:
+        if colliding:  # pragma: skip-on-win
             raise InvalidSpawnOption(
                 f"cannot fork a conversation for {name!r}: its transcript directory "
                 f"is shared with project(s) {sorted(colliding)!r} (paths differing only "
                 "in punctuation), so conversation ownership is ambiguous"
             )
-        resolved_transcript = await asyncio.to_thread(
+        resolved_transcript = await asyncio.to_thread(  # pragma: skip-on-win
             usage.resolve_session_transcript, proj.path, resume_session_id
         )
-        if resolved_transcript is None:
+        if resolved_transcript is None:  # pragma: skip-on-win
             raise InvalidSpawnOption(
                 f"resume_session_id {resume_session_id!r} is not a conversation "
                 f"of project {name!r}"
