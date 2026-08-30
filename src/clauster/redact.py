@@ -11,7 +11,33 @@ from __future__ import annotations
 import re
 
 # CSI / escape sequences (colors, cursor moves, OSC).
-_ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*\x07)")
+#
+# ⚠️ The alternation ORDER is load-bearing. `]` is 0x5D, which falls inside the
+# two-character alternative's `\\-_` (0x5C-0x5F) range, and Python alternation is
+# ordered first-match-wins — so while that alternative came first it consumed `ESC ]`
+# on its own and the OSC alternative was unreachable, leaving every OSC payload
+# (terminal title, hyperlink target, clipboard) in the text as readable junk (#1329).
+# Both 7-bit terminators are accepted: BEL, and ST (`ESC \`). The 8-bit C1 forms
+# (0x9B CSI / 0x9D OSC / 0x9C ST) are deliberately NOT matched. A raw C1 byte from the
+# bridge never survives to get here — every path into redact decodes with
+# ``errors="replace"`` (logstream.py:118, runner.py:2346), which turns a lone 0x9C into
+# U+FFFD — and a deliberately UTF-8-encoded U+009C (`C2 9C` on the wire) that did arrive
+# would only keep its payload as plain text, which the id/secret masks below still see.
+#
+# The OSC body excludes ESC and BEL so an *unterminated* OSC can only scan to the next
+# escape rather than to the end of the input, and excludes CR/LF because a real OSC never
+# spans a line: without that, `redact_for_disk` (which runs over a multi-line chunk, not a
+# single line) would let one stray `ESC ]` swallow every line up to the next BEL and
+# delete them from the public log mirror and from `error_detail`. Together they keep the
+# pattern linear: every star is followed by a class disjoint from it, so no alternative
+# can backtrack into another (see test_strip_ansi_is_linear_on_osc).
+_ANSI_RE = re.compile(
+    r"\x1B(?:"
+    r"\][^\x07\x1B\r\n]*(?:\x07|\x1B\\)"  # OSC … BEL / OSC … ST (never spans a line)
+    r"|\[[0-?]*[ -/]*[@-~]"  # CSI
+    r"|[@-Z\\-_]"  # two-character escapes (incl. a bare, unterminated `ESC ]`)
+    r")"
+)
 
 # API identifiers that act as bearer credentials in a URL.
 _ID_RE = re.compile(r"\b(env|session|cse)_[A-Za-z0-9]{6,}\b")
@@ -48,7 +74,12 @@ _REDACTED = "<redacted>"
 
 
 def strip_ansi(text: str) -> str:
-    """Remove ANSI/CSI escape sequences (colors, cursor moves, OSC) from ``text``."""
+    r"""Remove ANSI/CSI escape sequences (colors, cursor moves, OSC) from ``text``.
+
+    OSC sequences are removed whole — introducer, payload and terminator — in both the
+    BEL and 7-bit ST (``ESC \``) terminated forms. An unterminated OSC keeps its payload:
+    only the two-character ``ESC ]`` introducer goes, as for any other bare escape.
+    """
     return _ANSI_RE.sub("", text)
 
 
