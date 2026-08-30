@@ -47,25 +47,43 @@ as an argument to reproduce: `python fuzz/redact_fuzzer.py crash-abc123`.
 
 ## Reading the weekly coverage signal
 
-⚠️ **No HTML line-coverage report lands, and none ever has.** The weekly cron's
-`coverage` job is in practice a *corpus replay*: it rebuilds the harnesses, runs the
-whole persisted corpus through each one, and pushes the raw libFuzzer output to the
-corpus repo's `gh-pages` branch. Verified directly against that branch — there is no
-`coverage/latest/report/` directory, and a weekly upload commit touches only the
+⚠️ **No HTML line-coverage report has landed yet.** The weekly cron's `coverage` job
+has in practice been a *corpus replay*: it rebuilds the harnesses, runs the whole
+persisted corpus through each one, and pushes the raw libFuzzer output to the corpus
+repo's `gh-pages` branch. Verified directly against that branch through 2026-08-30 —
+no `coverage/latest/report/` directory, and a weekly upload commit touching only the
 per-harness logs.
 
-⚠️ **This is not "Python can't do coverage reports."** oss-fuzz's base-runner
+⚠️ **This was never "Python can't do coverage reports."** oss-fuzz's base-runner
 `coverage` script has a coverage.py branch that builds an `htmlcov` report and moves it
 to `$COVERAGE_OUTPUT_DIR/report/$PLATFORM` — exactly the `report/linux/` path the
-workflow comment used to promise. We never reach it: the cron's `run_fuzzers` step
-does not pass `language: python` (only the *build* step does) and that input defaults
-to `c++`, so the script takes its LLVM branch. The uploaded logs prove it — they carry
+workflow comment used to promise. We never reached it: the cron's `run_fuzzers` step
+passed no `language` (only the *build* step did) and that input defaults to `c++`, so
+the script took its LLVM branch. The uploaded logs proved it — they carried
 `-merge=1` `MERGE-INNER`/`MERGE-OUTER` lines, which only the C/C++ path emits. Our
-Atheris wrappers produce no `.profraw`, so that path yields nothing, and the job stays
-green because ClusterFuzzLite discards the coverage script's output. Tracked in
-[issue 1327](https://github.com/schubydoo/clauster/issues/1327).
+Atheris wrappers produce no `.profraw`, so that path yielded nothing, and the job
+stays green either way because ClusterFuzzLite discards the coverage script's output.
 
-What does land:
+`language: python` is now set on every `run_fuzzers` step
+([issue 1327](https://github.com/schubydoo/clauster/issues/1327)), but it is
+*necessary*, not proven *sufficient* — the Python report stage also wants a
+`${fuzzer}.pkg.deps.zip` out of the coverage *build*, which has never been observed
+here. (The other input it needs, `.coverage_$target`, the run step writes itself.)
+
+**On the next scheduled cron, check `gh-pages` for two things:** whether
+`coverage/latest/report/` appeared, and whether the per-harness logs below survived.
+Those logs are the only fuzz-coverage signal we have; if the Python path stops
+producing them without producing a report, revert `language` on the *coverage job
+only* — the PR, batch and prune jobs need it for the crash-reproduce timeout
+regardless. Wait for the cron rather than dispatching it by hand: a dispatch runs
+unmerged workflow code with the write PAT and pushes to the real `gh-pages`.
+
+Expect the artefact *shape* to change on the Python path even when it works:
+`<harness>.log` is still written, but `_error.log` and the `MERGE-` lines are
+C/C++-only and should disappear, and `fuzzer_stats/<harness>.json` becomes a dummy
+`{}`. Update the table below once that is observed.
+
+What has landed to date (under the `c++` default):
 
 | Path (on `gh-pages`) | What it is |
 | --- | --- |

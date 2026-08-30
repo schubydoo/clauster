@@ -60,6 +60,10 @@ jobs:
         id: run
         uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
         with:
+          # Needed on the RUN step as well as the build — it defaults to `c++`, which
+          # cuts crash reproduction from 120s to 30s and drops slow-to-re-trigger
+          # Atheris crashes as "unreproducible". See cflite_pr.yml for the detail.
+          language: python
           github-token: ${{ secrets.GITHUB_TOKEN }}
           # TOTAL for the run, split across the harnesses (see the header). 375 not 300
           # because this branch took the harness count 8 -> 10: the loop floors, and
