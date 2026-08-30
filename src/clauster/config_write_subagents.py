@@ -85,6 +85,7 @@ CLAUDE.md, hooks, and permissions all use), so a save always re-submits the real
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -120,11 +121,6 @@ _PLUGIN_ROOT_MARKER = "CLAUDE_PLUGIN_ROOT"
 
 #: Frontmatter keys required on every subagent (Claude Code's own requirement).
 _REQUIRED_FRONTMATTER_KEYS = frozenset({"name", "description"})
-
-#: Frontmatter keys whose value is a non-empty string OR a non-empty list of
-#: non-empty strings (Claude Code accepts either a comma-separated string or an
-#: array for these — this repo's own shipped subagents use the string form).
-_STRING_OR_LIST_KEYS = frozenset({"tools", "disallowedTools"})
 
 # A frontmatter block: ``---`` on its own line, the YAML body, then a closing ``---``
 # on its own line (optionally followed by the rest of the file). DOTALL so `.` spans
@@ -283,6 +279,125 @@ def _validate_string_or_string_list(value: Any, label: str) -> None:
     raise cw.InvalidCandidateError(f"{label} must be a string or a list of strings")
 
 
+def _validate_non_empty_string(value: Any, label: str) -> None:
+    """Reject ``value`` unless it is a string with non-whitespace content."""
+    if not isinstance(value, str) or not value.strip():
+        raise cw.InvalidCandidateError(f"{label} must be a non-empty string")
+
+
+def _validate_string(value: Any, label: str) -> None:
+    """Reject ``value`` unless it is a string; an empty one is allowed."""
+    if not isinstance(value, str):
+        raise cw.InvalidCandidateError(f"{label} must be a string")
+
+
+def _validate_bool(value: Any, label: str) -> None:
+    """Reject ``value`` unless it is a real boolean."""
+    if not isinstance(value, bool):
+        raise cw.InvalidCandidateError(f"{label} must be a boolean")
+
+
+def _validate_string_list(value: Any, label: str) -> None:
+    """Reject ``value`` unless it is a list of non-empty strings (an empty list passes)."""
+    if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
+        raise cw.InvalidCandidateError(f"{label} must be a list of non-empty strings")
+
+
+def _validate_positive_int(value: Any, label: str) -> None:
+    """Reject ``value`` unless it is an int > 0 — ``bool`` excluded, since it subclasses int."""
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise cw.InvalidCandidateError(f"{label} must be a positive integer")
+
+
+def _validate_string_or_mapping(value: Any, label: str) -> None:
+    """Reject ``value`` unless it is a string or a mapping."""
+    if not isinstance(value, str | dict):
+        raise cw.InvalidCandidateError(f"{label} must be a string or an object")
+
+
+def _validate_permission_mode(value: Any, label: str) -> None:
+    """Reject ``value`` unless it is a recognized, non-footgun-gated permission mode."""
+    if not isinstance(value, str):
+        raise cw.InvalidCandidateError(f"{label} must be a string")
+    if value == BYPASS_MODE:
+        # Fail closed: bypassPermissions stays behind the existing footgun gate,
+        # never settable through a subagent's frontmatter either.
+        raise cw.InvalidCandidateError(f"{label} cannot be 'bypassPermissions' (footgun-gated)")
+    if value not in RECOGNIZED_MODES:
+        raise cw.InvalidCandidateError(
+            f"unknown frontmatter permissionMode {value!r} "
+            f"(want one of {sorted(RECOGNIZED_MODES)})"
+        )
+
+
+def _validate_mcp_servers(value: Any, label: str) -> None:
+    """Reject ``value`` unless it maps server names to objects — never connected to."""
+    if not isinstance(value, dict) or not all(isinstance(v, dict) for v in value.values()):
+        raise cw.InvalidCandidateError(f"{label} must be an object mapping server name to object")
+
+
+def _validate_hooks_block(value: Any, label: str) -> None:
+    """Delegate to the hooks structural validator, prefixing its message with ``label``."""
+    try:
+        validate_hooks(value)
+    except cw.InvalidCandidateError as exc:
+        raise cw.InvalidCandidateError(f"{label}: {exc}") from exc
+
+
+def _validate_env(value: Any, label: str) -> None:
+    """Reject ``value`` unless it maps non-empty names to scalars — never exported here."""
+    if not isinstance(value, dict):
+        raise cw.InvalidCandidateError(
+            f"{label} must be an object mapping variable names to scalar values"
+        )
+    for var_name, var_value in value.items():
+        if not isinstance(var_name, str) or not var_name.strip():
+            raise cw.InvalidCandidateError(f"{label} keys must be non-empty strings")
+        if not isinstance(var_value, str | int | float | bool):
+            raise cw.InvalidCandidateError(
+                f"{label} value for {var_name!r} must be a scalar (string, number, or boolean)"
+            )
+
+
+#: The signature every entry in :data:`_OPTIONAL_FRONTMATTER_RULES` satisfies:
+#: ``(value, label) -> None``, raising :class:`~clauster.config_write.InvalidCandidateError`.
+_FrontmatterRule = Callable[[Any, str], None]
+
+#: Optional frontmatter keys → the structural check their value must pass, in the order
+#: they are checked. Table-driven (#1155) so the recognized-key set reads as one list
+#: rather than a branch per key. Every entry is a pure *shape* check: nothing here ever
+#: resolves a tool name, spawns a hook command, or connects to an MCP server. An
+#: UNRECOGNIZED key is absent from this table and passes through untouched — see
+#: :func:`validate_frontmatter` for why.
+_OPTIONAL_FRONTMATTER_RULES: tuple[tuple[str, _FrontmatterRule], ...] = (
+    # Claude Code accepts either a comma-separated string or an array for these two —
+    # this repo's own shipped subagents use the string form.
+    ("tools", _validate_string_or_string_list),
+    ("disallowedTools", _validate_string_or_string_list),
+    ("skills", _validate_string_list),
+    ("model", _validate_non_empty_string),
+    ("permissionMode", _validate_permission_mode),
+    ("mcpServers", _validate_mcp_servers),
+    # A subagent's own hooks are exactly as RCE-sensitive as a project/user hooks block,
+    # so the hooks validator is reused wholesale (including its plugin-owned-command
+    # rejection) rather than duplicated. STRUCTURE ONLY — no command is ever executed.
+    ("hooks", _validate_hooks_block),
+    ("maxTurns", _validate_positive_int),
+    ("initialPrompt", _validate_string),
+    ("memory", _validate_string_or_mapping),
+    ("effort", _validate_non_empty_string),
+    ("background", _validate_bool),
+    ("isolation", _validate_non_empty_string),
+    ("color", _validate_non_empty_string),
+    # Dropping the unknown-key allowlist made ``env`` reachable for the first time (it was
+    # never in the old recognized-key set). Claude Code loads it as a name→value
+    # environment map, so a non-mapping payload (``env: 42``) or a non-scalar value would
+    # land on disk here and only fail later when Claude Code tries to load the subagent —
+    # validate the shape at write time instead.
+    ("env", _validate_env),
+)
+
+
 def validate_frontmatter(candidate: Any, *, expected_name: str | None = None) -> None:
     """Structural validator for a subagent's parsed frontmatter mapping.
 
@@ -294,8 +409,13 @@ def validate_frontmatter(candidate: Any, *, expected_name: str | None = None) ->
     forward-compatible frontmatter, so a hardcoded allowlist produced false "unknown
     key" errors on valid subagents (#958/DF-3). The security-relevant keys it DOES
     know (``hooks`` / ``mcpServers`` / ``permissionMode``) are still fully validated
-    below when present, and no key is ever executed — this only stops rejecting keys
-    the surface has no opinion about.
+    when present, and no key is ever executed — this only stops rejecting keys the
+    surface has no opinion about.
+
+    ``name``/``description`` are checked inline because they are required and
+    ``name`` additionally cross-checks ``expected_name``; every OPTIONAL key is
+    checked by :data:`_OPTIONAL_FRONTMATTER_RULES`, which is the single place to
+    read (or extend) the recognized-key set.
 
     When ``expected_name`` is given (the write path always supplies it — the target
     filename, ``<name>.md``), the frontmatter's own ``name`` must match it exactly:
@@ -323,106 +443,9 @@ def validate_frontmatter(candidate: Any, *, expected_name: str | None = None) ->
     if not isinstance(description, str) or not description.strip():
         raise cw.InvalidCandidateError("frontmatter 'description' must be a non-empty string")
 
-    for key in _STRING_OR_LIST_KEYS:
+    for key, check in _OPTIONAL_FRONTMATTER_RULES:
         if key in candidate:
-            _validate_string_or_string_list(candidate[key], f"frontmatter {key!r}")
-
-    if "skills" in candidate:
-        skills = candidate["skills"]
-        if not isinstance(skills, list) or not all(
-            isinstance(v, str) and v.strip() for v in skills
-        ):
-            raise cw.InvalidCandidateError(
-                "frontmatter 'skills' must be a list of non-empty strings"
-            )
-
-    if "model" in candidate:
-        model = candidate["model"]
-        if not isinstance(model, str) or not model.strip():
-            raise cw.InvalidCandidateError("frontmatter 'model' must be a non-empty string")
-
-    if "permissionMode" in candidate:
-        mode = candidate["permissionMode"]
-        if not isinstance(mode, str):
-            raise cw.InvalidCandidateError("frontmatter 'permissionMode' must be a string")
-        if mode == BYPASS_MODE:
-            # Fail closed: bypassPermissions stays behind the existing footgun gate,
-            # never settable through a subagent's frontmatter either.
-            raise cw.InvalidCandidateError(
-                "frontmatter 'permissionMode' cannot be 'bypassPermissions' (footgun-gated)"
-            )
-        if mode not in RECOGNIZED_MODES:
-            raise cw.InvalidCandidateError(
-                f"unknown frontmatter permissionMode {mode!r} "
-                f"(want one of {sorted(RECOGNIZED_MODES)})"
-            )
-
-    if "mcpServers" in candidate:
-        servers = candidate["mcpServers"]
-        if not isinstance(servers, dict) or not all(isinstance(v, dict) for v in servers.values()):
-            raise cw.InvalidCandidateError(
-                "frontmatter 'mcpServers' must be an object mapping server name to object"
-            )
-
-    if "hooks" in candidate:
-        # Reuse the hooks structural validator wholesale (including its
-        # plugin-owned-command rejection) rather than duplicating the RCE-sensitive
-        # shape checks: a subagent's own hooks are exactly as dangerous as a
-        # project/user hooks block. STRUCTURE ONLY — no command is ever executed.
-        try:
-            validate_hooks(candidate["hooks"])
-        except cw.InvalidCandidateError as exc:
-            raise cw.InvalidCandidateError(f"frontmatter 'hooks': {exc}") from exc
-
-    if "maxTurns" in candidate:
-        turns = candidate["maxTurns"]
-        if not isinstance(turns, int) or isinstance(turns, bool) or turns <= 0:
-            raise cw.InvalidCandidateError("frontmatter 'maxTurns' must be a positive integer")
-
-    if "initialPrompt" in candidate and not isinstance(candidate["initialPrompt"], str):
-        raise cw.InvalidCandidateError("frontmatter 'initialPrompt' must be a string")
-
-    if "memory" in candidate and not isinstance(candidate["memory"], str | dict):
-        raise cw.InvalidCandidateError("frontmatter 'memory' must be a string or an object")
-
-    if "effort" in candidate:
-        effort = candidate["effort"]
-        if not isinstance(effort, str) or not effort.strip():
-            raise cw.InvalidCandidateError("frontmatter 'effort' must be a non-empty string")
-
-    if "background" in candidate and not isinstance(candidate["background"], bool):
-        raise cw.InvalidCandidateError("frontmatter 'background' must be a boolean")
-
-    if "isolation" in candidate:
-        isolation = candidate["isolation"]
-        if not isinstance(isolation, str) or not isolation.strip():
-            raise cw.InvalidCandidateError("frontmatter 'isolation' must be a non-empty string")
-
-    if "color" in candidate:
-        color = candidate["color"]
-        if not isinstance(color, str) or not color.strip():
-            raise cw.InvalidCandidateError("frontmatter 'color' must be a non-empty string")
-
-    if "env" in candidate:
-        # Dropping the unknown-key allowlist makes ``env`` reachable for the first time
-        # (it was never in the old recognized-key set). Claude Code loads ``env`` as a
-        # name→value environment map, so a non-mapping payload (``env: 42``) or a
-        # non-scalar value would land on disk here and only fail later when Claude Code
-        # tries to load the subagent — validate the shape at write time instead. STRUCTURE
-        # ONLY: names/values are never resolved or exported here.
-        env = candidate["env"]
-        if not isinstance(env, dict):
-            raise cw.InvalidCandidateError(
-                "frontmatter 'env' must be an object mapping variable names to scalar values"
-            )
-        for var_name, var_value in env.items():
-            if not isinstance(var_name, str) or not var_name.strip():
-                raise cw.InvalidCandidateError("frontmatter 'env' keys must be non-empty strings")
-            if not isinstance(var_value, str | int | float | bool):
-                raise cw.InvalidCandidateError(
-                    f"frontmatter 'env' value for {var_name!r} must be a scalar "
-                    "(string, number, or boolean)"
-                )
+            check(candidate[key], f"frontmatter {key!r}")
 
 
 def validate_agent_content(candidate: Any, *, expected_name: str | None = None) -> None:

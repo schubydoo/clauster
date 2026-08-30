@@ -486,7 +486,6 @@ dependencies = [
     { name = "setproctitle" },
     { name = "sqlalchemy" },
     { name = "uvicorn", extra = ["standard"] },
-    { name = "watchdog" },
 ]
 
 [package.optional-dependencies]
@@ -573,7 +572,6 @@ requires-dist = [
     { name = "setproctitle", specifier = ">=1.3" },
     { name = "sqlalchemy", specifier = ">=2.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34" },
-    { name = "watchdog", specifier = ">=4.0" },
     { name = "yamllint", marker = "extra == 'dev'", specifier = ">=1.38" },
 ]
 provides-extras = ["dev", "package", "docs", "notify", "pty", "fuzz"]
