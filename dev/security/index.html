@@ -2146,6 +2146,19 @@ in the configuration reference for the field.</p>
 <p>A bridge can never be spawned with <code>--permission-mode bypassPermissions</code> unless
 the project sets <code>allow_bypass_permissions: true</code> in <code>clauster.yml</code> (the hard
 ceiling). The dashboard's per-session typed-confirm is the second layer.</p>
+<p>The <code>inherit</code> permission mode (<strong>No forced mode</strong> in the launch picker) cannot itself
+<em>request</em> <code>bypassPermissions</code>, and Clauster refuses to write that value into any
+<code>settings.json</code> it manages. <strong>But the caveat is structural:</strong> because no
+<code>--permission-mode</code> flag is passed, an existing <code>permissions.defaultMode</code> in the
+project, local, or user settings file takes effect — including a <code>bypassPermissions</code>
+one that was hand-edited, committed to the repo, or enterprise-managed, which Clauster
+cannot prevent. Before <code>inherit</code> existed, the always-passed flag overrode any such
+file; with <code>inherit</code>, that file wins. On a project with
+<code>allow_bypass_permissions: false</code>, prefer an explicit mode — or audit the project's
+settings files before offering <code>inherit</code> to its operators. The mode is still screened
+against the allowed set before any spawn, so no unrecognized string ever reaches the
+subprocess, and <code>inherit</code> is not a value this deployment can write into
+<code>permissions.defaultMode</code>: it is a Clauster launch-time sentinel, not a claude mode.</p>
 <h2 id="ghost-environment-reaper">Ghost-environment reaper<a class="headerlink" href="#ghost-environment-reaper" title="Permanent link">&para;</a></h2>
 <p>The reaper (<code>clauster reap-environments</code>) defaults to a <strong>dry run</strong> and fails
 closed: if it cannot enumerate the live bridge set it aborts rather than risk

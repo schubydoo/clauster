@@ -1530,7 +1530,7 @@ where a term is defined there, the definition below matches it.</p>
 </tr>
 <tr>
 <td><strong>Permission mode</strong></td>
-<td>How much a session may do without asking you first: <code>default</code>, <code>plan</code>, <code>acceptEdits</code>, <code>auto</code>, <code>dontAsk</code>, or <code>bypassPermissions</code>. These are Claude Code's own modes; <code>bypassPermissions</code> (no confirmation at all) is <a href="../../security/#bypasspermissions-footgun-gate">footgun-gated</a>.</td>
+<td>How much a session may do without asking you first: <code>default</code>, <code>plan</code>, <code>acceptEdits</code>, <code>auto</code>, <code>dontAsk</code>, or <code>bypassPermissions</code>. These are Claude Code's own modes; <code>bypassPermissions</code> (no confirmation at all) is <a href="../../security/#bypasspermissions-footgun-gate">footgun-gated</a>. A seventh choice, <code>inherit</code>, is Clauster's own: it forces nothing, passing no <code>--permission-mode</code> flag so the session starts in its own default mode — which is whatever the session's settings files say, so see the <a href="../../security/#bypasspermissions-footgun-gate"><code>inherit</code> caveat</a> before using it where <code>allow_bypass_permissions: false</code> matters.</td>
 <td>Launch dialog; <a href="../../reference/config/">Configuration</a>.</td>
 </tr>
 <tr>

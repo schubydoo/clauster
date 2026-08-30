@@ -2156,9 +2156,9 @@ row in the table above.</p>
 </tr>
 <tr>
 <td><code>permission_mode</code></td>
-<td><code>default</code> | <code>plan</code> | <code>acceptEdits</code> | <code>auto</code> | <code>dontAsk</code> | <code>bypassPermissions</code></td>
+<td><code>default</code> | <code>plan</code> | <code>acceptEdits</code> | <code>auto</code> | <code>dontAsk</code> | <code>bypassPermissions</code> | <code>inherit</code></td>
 <td><code>default</code></td>
-<td>Default permission mode for new bridges.</td>
+<td>Default permission mode for new bridges. <code>inherit</code> is a Clauster sentinel, not a claude mode: it passes <strong>no</strong> <code>--permission-mode</code> flag, so the session starts in whatever mode it would pick on its own. Caveat: with no flag passed, an existing <code>permissions.defaultMode</code> in a settings file takes effect — including a hand-edited <code>bypassPermissions</code> Clauster refuses to write itself. See the <code>inherit</code> caveat in the security guide before using it on a project with <code>allow_bypass_permissions: false</code>.</td>
 </tr>
 <tr>
 <td><code>verbose</code></td>
@@ -2191,6 +2191,19 @@ row in the table above.</p>
 <p>Permission modes: <code>default</code>, <code>plan</code>, <code>acceptEdits</code>, <code>auto</code>, <code>dontAsk</code>,
 <code>bypassPermissions</code>. <code>bypassPermissions</code> is footgun-gated — see
 <code>projects.&lt;name&gt;.allow_bypass_permissions</code> below.</p>
+<p><strong>New in 1.1:</strong> <code>inherit</code> is a seventh choice and not a claude mode at all: Clauster
+passes <strong>no</strong> <code>--permission-mode</code> flag, so the session starts in whatever mode it
+would pick on its own. Use it when the flag's spawn-time effect is unwanted — claude
+bakes <code>--permission-mode</code> into the session's initial system prompt, which reaching the
+same mode later at runtime does not do. It applies to every launch channel (standard
+bridge, Interactive Session, browser/hosted, and background runs) and is opt-in — the
+shipped default stays <code>default</code>.</p>
+<p><code>inherit</code> cannot itself <em>request</em> <code>bypassPermissions</code>, but because no flag is passed,
+an on-disk <code>permissions.defaultMode</code> takes effect instead — including a
+<code>bypassPermissions</code> one that was hand-edited into a settings file, which Clauster
+refuses to write but cannot prevent. Prefer an explicit mode where
+<code>allow_bypass_permissions: false</code> is what you are relying on; the full caveat is in
+<a href="../../security/#bypasspermissions-footgun-gate">bypassPermissions footgun gate</a>.</p>
 <h2 id="projects-per-project-map-projectconfig"><code>projects</code> — per-project map (<code>ProjectConfig</code>)<a class="headerlink" href="#projects-per-project-map-projectconfig" title="Permanent link">&para;</a></h2>
 <p>A map of project name → settings. Additive-only; unknown keys ignored.</p>
 <!-- BEGIN GEN: projects -->
