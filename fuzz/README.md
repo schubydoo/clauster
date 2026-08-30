@@ -110,9 +110,11 @@ Two traps worth knowing before you measure anything:
   module scope loads the module *before* Atheris can instrument it, and the target's
   own later import then reuses the uninstrumented copy. Measured: hoisting
   `from urllib.parse import urlsplit` out of `pty_login_scan_fuzzer` dropped it from
-  ~210 edges to 52, and hoisting `hmac`/`hashlib` out of `auth_headers_fuzzer` dropped
-  it from 32 to 22 — silently both times, because the parsing each harness exists to
-  drive stopped being traced. Both numbers are from a direct `python fuzz/…` run; under
+  ~210 edges to 52 — `urlsplit` *is* the parser behind the helpers that harness drives,
+  so the loss is most of its signal — and hoisting `hmac`/`hashlib` out of
+  `auth_headers_fuzzer` dropped it from 32 to 22, there just losing the stdlib digest
+  code (`clauster.auth` is traced either way, being imported in-block in both layouts).
+  Both numbers are from a direct `python fuzz/…` run; under
   ClusterFuzzLite the harness is PyInstaller-frozen, so if that bootstrap has already
   imported the module the in-block import degrades to a lookup and instrumentation is
   lost again. Atheris prints `INFO: Instrumenting <module>` at startup — check for it

@@ -32,14 +32,23 @@ import sys
 import atheris
 
 with atheris.instrument_imports():
-    # `hashlib`/`hmac` MUST be imported inside this block, not at module scope: a
-    # module-scope import loads them before Atheris can instrument them, and `auth`'s
-    # own later import reuses the uninstrumented copies. Measured over 300k runs with
-    # the dictionary: 22 edges hoisted vs 32 in here. See fuzz/README.md.
+    # `hashlib`/`hmac` are imported inside this block, not at module scope, so Atheris
+    # instruments them: a module-scope import loads them first and `auth`'s own later
+    # import then reuses the uninstrumented copies. Measured over 300k runs with the
+    # dictionary: 22 edges hoisted vs 32 in here. Note the +10 are stdlib `hmac`/
+    # `hashlib` edges — `clauster.auth` itself is traced either way, since it is
+    # imported in here in both layouts. See fuzz/README.md.
     import hashlib
     import hmac
 
     from clauster import auth
+
+    # Bound here rather than looked up inside TestOneInput: the harness smoke test only
+    # checks that TestOneInput/main exist, so a rename of either function would sail
+    # through `just check` and reappear as an AttributeError SARIF "crash" on the next
+    # batch run. Binding makes the drift fail in the test suite instead.
+    _verify_proxy_hmac = auth.verify_proxy_hmac
+    _parse_bearer = auth.parse_bearer
 
 # Fixed so the harness is deterministic: the fuzzed bytes are the input under test,
 # not the server-side secret.
@@ -65,7 +74,7 @@ def TestOneInput(data: bytes) -> None:
 
     # 1. Reject path — total over any header string, and a random string is never a
     #    valid signature, so the answer must be a plain False.
-    rejected = auth.verify_proxy_hmac(_SECRET, header, user, method, path, _WINDOW, now=_NOW)
+    rejected = _verify_proxy_hmac(_SECRET, header, user, method, path, _WINDOW, now=_NOW)
     assert rejected is False, "a fuzzed header must never verify"
 
     # 2. Accept path — a header signed over the SAME values must verify inside the
@@ -73,13 +82,13 @@ def TestOneInput(data: bytes) -> None:
     #    function itself (empty user => False regardless), so only assert when set.
     if user:
         t = _NOW + skew
-        accepted = auth.verify_proxy_hmac(
+        accepted = _verify_proxy_hmac(
             _SECRET, _signed_header(user, method, path, t), user, method, path, _WINDOW, now=_NOW
         )
         assert accepted is (abs(skew) <= _WINDOW), "signed header verified against its window"
 
     # 3. `parse_bearer` on the same untrusted blob: None, or a space-free credential.
-    credential = auth.parse_bearer(header)
+    credential = _parse_bearer(header)
     assert credential is None or (credential and " " not in credential)
 
 

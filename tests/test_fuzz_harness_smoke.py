@@ -64,12 +64,15 @@ def _load(harness: str):
 
 # URLs spanning every branch of the authorize-path / known-auth-host predicates:
 # the real endpoint, the bare-/authorize fallback, the query-string decoy the path
-# check exists to reject, docs/marketing exclusions, subdomains, an unknown host,
+# check exists to reject, docs/marketing exclusions, an ACCEPTED subdomain on each
+# parent domain (the `endswith("." + suffix)` branch, which every excluded-prefix row
+# short-circuits past), an unknown host that proves the leading dot is load-bearing,
 # and the invalid-IPv6-bracket URL that makes urlsplit raise.
 _PREDICATE_URLS = [
     "https://claude.com/cai/oauth/authorize?client_id=x",
     "https://claude.ai/oauth/authorize",
     "https://console.anthropic.com/authorize",
+    "https://platform.claude.com/oauth/authorize",
     "https://claude.com/settings?redirect_uri=%2Foauth%2Fauthorize",
     "https://docs.anthropic.com/en/docs/oauth/authorize",
     "https://help.claude.com/oauth/authorize",
@@ -79,6 +82,8 @@ _PREDICATE_URLS = [
     "https://notclaude.com/oauth/authorize",
     "https://evil.example/cai/oauth/authorize",
     "https://claude.com/",
+    # Parses fine — urlsplit validates a port only when `.port` is read, and neither
+    # helper reads it. Kept to pin that, not to drive the ValueError branch below.
     "https://claude.com:notaport/oauth/authorize",
     "https://[::1/oauth/authorize",
     "https://[bad/authorize",

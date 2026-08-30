@@ -55,7 +55,7 @@ jobs:
   prune:
     name: prune corpus
     runs-on: ubuntu-latest
-    timeout-minutes: 55 # ≈ fuzz-seconds (a TOTAL, split across harnesses) + build; observed ≈12 min
+    timeout-minutes: 55 # ≈ fuzz-seconds (a TOTAL, split across harnesses) + build; observed ≈7 min
     permissions:
       contents: read # checkout + build the harnesses
       security-events: write # a replay can still surface a reproducible crash (SARIF)
@@ -75,7 +75,12 @@ jobs:
         uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          fuzz-seconds: 300
+          # 375, matching cflite_batch.yml, for the same 8 -> 10 harness-count reason:
+          # prune runs the same divide-across-targets loop, and here the per-target slice
+          # is a MERGE TIMEOUT that raises (clusterfuzz's libFuzzer engine raises
+          # TimeoutError on a timed-out merge, and nothing catches it), not a fuzz
+          # duration that simply ends. Holding the slice at ~37s keeps that headroom.
+          fuzz-seconds: 375
           mode: prune
           sanitizer: address
           output-sarif: true

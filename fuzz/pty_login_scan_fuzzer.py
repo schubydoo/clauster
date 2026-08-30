@@ -51,9 +51,10 @@ with atheris.instrument_imports():
 
     from clauster import pty_screen, redact
 
-    # Bound at module scope on purpose: referenced only inside TestOneInput, a rename in
-    # `pty_screen` would sail past tests/test_fuzz_harness_smoke.py (which just imports
-    # the module) and surface as an AttributeError SARIF crash on the next batch run.
+    # Bound at module scope on purpose. Were these looked up inside TestOneInput, a
+    # rename in `pty_screen` would sail past tests/test_fuzz_harness_smoke.py (which
+    # only imports the module) and reappear as an AttributeError SARIF "crash" on the
+    # next batch run. Binding makes the drift fail in the test suite instead.
     _URL_RE = pty_screen._URL_RE
     _clean_url = pty_screen._clean_url
     _select_authorize_url = pty_screen._select_authorize_url
