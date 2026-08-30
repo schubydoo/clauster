@@ -986,6 +986,22 @@ async def test_rediscover_pty_orphan_resumable_and_skips_unpersisted(runner_conf
     assert runner.get_instance_for_project("beta") is None
 
 
+def test_reattach_pty_from_sidecar_refuses_a_non_pty_row(runner_config, monkeypatch):
+    # Defensive guard: the only production caller filters rows on resume_mode=="pty" before
+    # handing one over, but a corrupt/hand-edited state.json row must still never adopt a
+    # keeper for a standard-mode session. The sidecar scan being skipped is the proof the
+    # MODE guard fired — an empty glob would return the same None vacuously.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    scanned: list[str] = []
+    monkeypatch.setattr(
+        SessionRunner, "_keeper_sidecars_for", lambda self, n: scanned.append(n) or []
+    )
+    saved = {"project_name": "alpha", "resume_mode": "standard", "spawn_mode": "same-dir"}
+    assert runner._reattach_pty_from_sidecar("alpha", saved) is None
+    assert scanned == []  # returned on the mode guard, before any sidecar was consulted
+
+
 def test_reattach_pty_from_sidecar_autogenerates_an_instance_id(runner_config, monkeypatch):
     # #1108: the reattach no longer takes an instance_id at all — nothing at this point can
     # say which row owns the keeper the glob found, so the model always mints a fresh one.

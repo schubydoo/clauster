@@ -422,6 +422,16 @@ def test_cross_process_lock_file_lives_in_lock_dir_not_target_dir(tmp_path):
     assert lock_file.parent != target.parent
 
 
+def test_cross_process_lock_file_explicit_lock_dir_skips_the_global(tmp_path):
+    # A deployment-bound caller passes its own locks/ dir; the module global must not be
+    # consulted at all — a later configure_lock_dir for another state dir can't redirect it.
+    explicit = tmp_path / "deployment-locks"
+    explicit.mkdir()
+    lock_file = atomicio._cross_process_lock_file(tmp_path / "CLAUDE.md", lock_dir=explicit)
+    assert lock_file is not None
+    assert lock_file.parent == explicit
+
+
 def test_cross_process_lock_file_same_realpath_shares_one_file(tmp_path):
     # The editor target and the config-write target for the SAME project-root CLAUDE.md
     # both go through `_lock_key` (realpath), so they must hash to ONE lock file — this is
