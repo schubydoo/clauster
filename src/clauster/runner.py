@@ -1473,159 +1473,154 @@ class SessionRunner:
         finally:
             await asyncio.to_thread(cm.__exit__, None, None, None)
 
-    async def _spawn_locked(
+    # ----- _spawn_locked's pre-spawn gates, in the order the spawn runs them ---------
+    # Extracted from _spawn_locked (#1155) so the gate ordering is legible in one screen:
+    # stale-resume → option validation → fork-target ownership → per-mode idempotency →
+    # trust gate → claude-side settings → poisoned-pointer clear → bridge cap →
+    # deferred --trust write → launch. Each helper preserves its gate's logic, ordering
+    # and messages exactly; _gate_stale_resume is the one whose nested guards were
+    # inverted into early returns, and nothing here relaxes or short-circuits a gate.
+    #
+    # ⚠️ _gate_stale_resume and _enforce_bridge_cap are SYNCHRONOUS BY DESIGN. Each reads
+    # loop-owned mutable state (_instances / _row_backed / _persisted) and raises on what
+    # it read; with no await between the read and the decision, a concurrent spawn cannot
+    # interleave. Making either async — or adding an await inside one — silently reopens
+    # that window even though the caller still holds both spawn locks.
+
+    def _gate_stale_resume(
         self,
-        name: str,
         *,
-        spawn_mode: SpawnMode | None = None,
-        permission_mode: PermissionMode | None = None,
-        resume_mode: ResumeMode | None = None,
-        resume: bool = False,
-        resume_target: RemoteControlInstance | None = None,
-        custom_name: str | None = None,
-        sandbox: SandboxMode | None = None,
-        resume_session_id: str | None = None,
-        trust: bool = False,
-    ) -> SpawnOutcome:
-        """Spawn (or hand back) a bridge for ``name`` with the per-project lock held.
+        resume: bool,
+        resume_target: RemoteControlInstance | None,
+        refreshed: bool,
+    ) -> None:
+        """Refuse a resume whose row another clauster process already forgot (#951 round 4).
 
-        The body of :meth:`spawn_detailed`, split out so the locking lives in the caller.
+        Resuming a DEAD card whose row-backed record is gone from the fresh merge base
+        would relaunch — and re-persist — a session another clauster process explicitly
+        forgot, silently undoing that delete. Fail closed with the truth instead, and drop
+        the card (it was only a view of the deleted row). A LIVE resume target is
+        untouched — it falls through to the idempotent already-running return in
+        :meth:`_apply_mode_spawn_policy`. When the refresh itself failed, the gate must not
+        decide from the known-stale snapshot (#951 round 5): refuse the resume as
+        retryable — WITHOUT dropping the card, since we couldn't learn whether its row is
+        actually gone. A plain (non-resume) spawn proceeds on a failed refresh: the store
+        is non-authoritative and launching bridges must not depend on it; ``_persist``
+        re-checks on its own.
         """
-        proj = self._resolve_project(name)
-        # Refresh the persist merge-base under the locks (#949): the persisted-record
-        # reads below (the reattach probe's saved modes) and this spawn's trailing
-        # _persist must see the shared store as it is NOW, not as it was when this
-        # runner was constructed — a headless writer's construction-time snapshot can
-        # predate rows the web app has since added or forgotten.
-        refreshed = await self._refresh_persisted()
-        # Stale-resume gate (#951 round 4): resuming a DEAD card whose row-backed
-        # record is gone from the fresh base would relaunch — and re-persist — a
-        # session another clauster process explicitly forgot, silently undoing that
-        # delete. Fail closed with the truth instead, and drop the card (it was only
-        # a view of the deleted row). A LIVE resume target is untouched — it falls
-        # through to the idempotent already-running return below. When the refresh
-        # itself failed, the gate must not decide from the known-stale snapshot
-        # (#951 round 5): refuse the resume as retryable — WITHOUT dropping the card,
-        # since we couldn't learn whether its row is actually gone. A plain (non-
-        # resume) spawn proceeds on a failed refresh: the store is non-authoritative
-        # and launching bridges must not depend on it; _persist re-checks on its own.
-        if resume and resume_target is not None:
-            iid = resume_target.instance_id
-            dead = resume_target.status not in (InstanceStatus.STARTING, InstanceStatus.RUNNING)
-            if dead and iid in self._row_backed:
-                if not refreshed:
-                    raise SpawnError(
-                        f"could not verify session {iid} against the shared state store "
-                        "(transient read failure) — try the resume again"
-                    )
-                if iid not in self._persisted:
-                    self._instances.pop(iid, None)
-                    raise UnknownProject(
-                        f"session {iid} was forgotten by another clauster process — "
-                        "nothing left to resume"
-                    )
-        defaults = self._config.instance_defaults
-        spawn_mode = spawn_mode or defaults.spawn_mode
-        permission_mode = permission_mode or defaults.permission_mode
-        # None == "default" (append neither sandbox flag); normalize up front so the value
-        # validated below is always one of SANDBOX_MODES. The toggle is DISABLED for 1.0
-        # (#1037, config.SANDBOX_TOGGLE_ENABLED): the requested value is still validated (a bad
-        # value 422s below) but coerced to "default" so nothing on/off is recorded, resumed, or
-        # emitted while `--sandbox` doesn't reach the server-mode worker. Re-enabled via #1046.
-        requested_sandbox: SandboxMode = sandbox or "default"
-        sandbox_mode: SandboxMode = (
-            requested_sandbox if config.SANDBOX_TOGGLE_ENABLED else "default"
-        )
-        # Resolve resume_mode early so we can apply the per-mode policy checks below
-        # before spending side-effect budget (trust writes, log file creation, etc.).
-        # For a resume the prior instance is the SPECIFIC one being revived
-        # (resume_target) — NOT a mode-agnostic project scan, which could return a
-        # coincidentally-live standard bridge and flip a pty resume to standard (#777).
-        prior_for_mode = resume_target if resume else None
-        effective_resume_mode: ResumeMode = (
-            "pty" if self._is_pty_mode(prior_for_mode, requested=resume_mode) else "standard"
-        )
-        self._validate_spawn_options(
-            proj, spawn_mode, permission_mode, resume_mode, requested_sandbox
-        )
-        # Fork-a-past-conversation (#303): validate BEFORE any spawn side effect, and
-        # strictly — this string ends up on a subprocess argv, so nothing but a UUID
-        # shape may pass (fail closed; list-argv means no shell, but defense in depth).
-        if resume_session_id is not None:
-            # Format FIRST: garbage is rejected identically on every platform/mode
-            # (on Windows the effective mode is always standard — pty is POSIX-only —
-            # so a mode-first ordering would mask the format error there).
-            if not _SESSION_UUID_RE.fullmatch(resume_session_id):
-                raise InvalidSpawnOption(
-                    "resume_session_id must be a session UUID "
-                    "(8-4-4-4-12 hex, as listed by the transcripts API)"
-                )
-            if resume:
-                # The internal revive path (resume()) restores the instance's OWN
-                # conversation via --continue; combining it with an operator-picked
-                # conversation would be ambiguous — reject rather than pick a winner.
-                raise InvalidSpawnOption(
-                    "resume_session_id cannot be combined with resuming an existing session"
-                )
-            if effective_resume_mode != "pty":
-                raise InvalidSpawnOption(
-                    "resume_session_id requires the pty (Interactive Session) mode"
-                )
-            # Scope the pick to THIS project's own conversations (fail closed): a
-            # well-formed uuid belonging to another project's transcript must never
-            # fork foreign context into this session. resolve_session_transcript
-            # walks the project's own sanitized-cwd transcript dir PLUS its worktree
-            # dirs (#1020) — the same source the picker lists from — so anything it
-            # can't resolve is rejected before any spawn side effect.
-            #
-            # The worktree dirs are found by name prefix, and the same punctuation
-            # ambiguity described below applies to them: a sibling project named
-            # "<project>--claude-worktrees-x" sanitizes into this project's worktree
-            # prefix. _transcript_dirs_for therefore excludes every real sibling
-            # project's directory, so the set stays this project's own.
-            #
-            # Ownership requires that dir to be UNAMBIGUOUS. Claude keys transcripts
-            # by sanitize_cwd (non-alphanumerics → "-"), so two configured project
-            # paths that differ only in punctuation (e.g. ".../foo-bar" vs
-            # ".../foo_bar") collide onto ONE transcript dir — membership alone can't
-            # then prove which project a conversation belongs to. If any OTHER
-            # discovered project shares this project's sanitized dir, ownership is
-            # unprovable → refuse the fork (fail closed) rather than risk forking a
-            # colliding project's conversation. This is a Claude-storage property the
-            # picker listing shares; refusing here keeps the spawn no less strict than
-            # the source it validates against.
-            proj_dir = pointers.sanitize_cwd(proj.path)
-            colliding = [
-                other.name
-                for other in self._discovered().values()
-                if other.name != proj.name and pointers.sanitize_cwd(other.path) == proj_dir
-            ]
-            if colliding:
-                raise InvalidSpawnOption(
-                    f"cannot fork a conversation for {name!r}: its transcript directory "
-                    f"is shared with project(s) {sorted(colliding)!r} (paths differing only "
-                    "in punctuation), so conversation ownership is ambiguous"
-                )
-            resolved_transcript = await asyncio.to_thread(
-                usage.resolve_session_transcript, proj.path, resume_session_id
+        if not resume or resume_target is None:
+            return
+        iid = resume_target.instance_id
+        dead = resume_target.status not in (InstanceStatus.STARTING, InstanceStatus.RUNNING)
+        if not dead or iid not in self._row_backed:
+            return
+        if not refreshed:
+            raise SpawnError(
+                f"could not verify session {iid} against the shared state store "
+                "(transient read failure) — try the resume again"
             )
-            if resolved_transcript is None:
-                raise InvalidSpawnOption(
-                    f"resume_session_id {resume_session_id!r} is not a conversation "
-                    f"of project {name!r}"
-                )
-        # Validate before any spawn side effect (fail closed), same as spawn/permission
-        # mode above. Blank/None falls back to the project name (today's behavior); a
-        # non-blank value is only actually passed as --name for a *standard* bridge (see
-        # spawn_detailed docstring) — resolved_name still gets computed uniformly here so
-        # a bad value 422s regardless of which mode ends up launching.
-        resolved_name = _normalize_custom_name(custom_name, fallback=name)
+        if iid not in self._persisted:
+            self._instances.pop(iid, None)
+            raise UnknownProject(
+                f"session {iid} was forgotten by another clauster process — nothing left to resume"
+            )
 
-        # Non-blocking advisories collected along the way, surfaced on the outcome so
-        # the API can show them to the operator (#778).
-        spawn_warnings: list[str] = []
+    async def _validate_resume_session_id(
+        self,
+        proj: Project,
+        name: str,
+        resume_session_id: str,
+        *,
+        resume: bool,
+        effective_resume_mode: ResumeMode,
+    ) -> None:
+        """Validate a fork-a-past-conversation target BEFORE any spawn side effect (#303).
 
-        # --- per-mode spawn policy (#777) -----------------------------------
+        Strict by construction: this string ends up on a subprocess argv, so nothing but a
+        UUID shape may pass (fail closed; list-argv means no shell, but defense in depth).
+        Raises :class:`InvalidSpawnOption` (→ 422) on every rejection.
+        """
+        # Format FIRST: garbage is rejected identically on every platform/mode
+        # (on Windows the effective mode is always standard — pty is POSIX-only —
+        # so a mode-first ordering would mask the format error there).
+        if not _SESSION_UUID_RE.fullmatch(resume_session_id):
+            raise InvalidSpawnOption(
+                "resume_session_id must be a session UUID "
+                "(8-4-4-4-12 hex, as listed by the transcripts API)"
+            )
+        if resume:
+            # The internal revive path (resume()) restores the instance's OWN
+            # conversation via --continue; combining it with an operator-picked
+            # conversation would be ambiguous — reject rather than pick a winner.
+            raise InvalidSpawnOption(
+                "resume_session_id cannot be combined with resuming an existing session"
+            )
+        if effective_resume_mode != "pty":
+            raise InvalidSpawnOption(
+                "resume_session_id requires the pty (Interactive Session) mode"
+            )
+        # Scope the pick to THIS project's own conversations (fail closed): a
+        # well-formed uuid belonging to another project's transcript must never
+        # fork foreign context into this session. resolve_session_transcript
+        # walks the project's own sanitized-cwd transcript dir PLUS its worktree
+        # dirs (#1020) — the same source the picker lists from — so anything it
+        # can't resolve is rejected before any spawn side effect.
+        #
+        # The worktree dirs are found by name prefix, and the same punctuation
+        # ambiguity described below applies to them: a sibling project named
+        # "<project>--claude-worktrees-x" sanitizes into this project's worktree
+        # prefix. _transcript_dirs_for therefore excludes every real sibling
+        # project's directory, so the set stays this project's own.
+        #
+        # Ownership requires that dir to be UNAMBIGUOUS. Claude keys transcripts
+        # by sanitize_cwd (non-alphanumerics → "-"), so two configured project
+        # paths that differ only in punctuation (e.g. ".../foo-bar" vs
+        # ".../foo_bar") collide onto ONE transcript dir — membership alone can't
+        # then prove which project a conversation belongs to. If any OTHER
+        # discovered project shares this project's sanitized dir, ownership is
+        # unprovable → refuse the fork (fail closed) rather than risk forking a
+        # colliding project's conversation. This is a Claude-storage property the
+        # picker listing shares; refusing here keeps the spawn no less strict than
+        # the source it validates against.
+        proj_dir = pointers.sanitize_cwd(proj.path)
+        colliding = [
+            other.name
+            for other in self._discovered().values()
+            if other.name != proj.name and pointers.sanitize_cwd(other.path) == proj_dir
+        ]
+        if colliding:
+            raise InvalidSpawnOption(
+                f"cannot fork a conversation for {name!r}: its transcript directory "
+                f"is shared with project(s) {sorted(colliding)!r} (paths differing only "
+                "in punctuation), so conversation ownership is ambiguous"
+            )
+        resolved_transcript = await asyncio.to_thread(
+            usage.resolve_session_transcript, proj.path, resume_session_id
+        )
+        if resolved_transcript is None:
+            raise InvalidSpawnOption(
+                f"resume_session_id {resume_session_id!r} is not a conversation "
+                f"of project {name!r}"
+            )
+
+    async def _apply_mode_spawn_policy(
+        self,
+        proj: Project,
+        name: str,
+        effective_resume_mode: ResumeMode,
+        *,
+        spawn_mode: SpawnMode | None,
+        resume: bool,
+        resume_target: RemoteControlInstance | None,
+        spawn_warnings: list[str],
+    ) -> SpawnOutcome | None:
+        """Apply the per-mode idempotency policy (#777); return an outcome to hand back.
+
+        A non-``None`` return means an already-live bridge satisfies this spawn and NOTHING
+        should be launched — :meth:`_spawn_locked` returns it verbatim. ``None`` means carry
+        on to the trust gate and the launch. Non-blocking advisories are appended to
+        ``spawn_warnings`` (#778). The two bridge modes stay deliberately separate here.
+        """
         if effective_resume_mode == "standard":
             # Standard bridges: cap at one per project.
             # If a live standard bridge already exists — for any reason (idempotent
@@ -1697,17 +1692,16 @@ class SessionRunner:
                     "edits. Use spawn_mode='worktree' to isolate each session (#777).",
                     name,
                 )
-        # --- end per-mode spawn policy ---------------------------------------
+        return None
 
-        # Workspace-trust gate. Without --trust an untrusted directory fails closed here
-        # (fast, before any spawn side effect). With --trust we do NOT trust yet — the
-        # trust write is deferred until after the capacity check below, so a rejected
-        # start (bad option OR a full bridge cap) never leaves the directory trusted.
-        if not trust and not await asyncio.to_thread(is_trusted, proj.path, self._claude_json):
-            raise NotTrusted(
-                f"directory not trusted: {proj.path}. Use the Trust action before starting."
-            )
+    async def _ensure_claude_side_settings(self) -> None:
+        """Pre-write the two claude-side settings a bridge start depends on, once per runner.
 
+        Both are BEST-EFFORT by design and neither may fail the spawn — but neither is
+        silent either: an :class:`OSError` is logged at WARNING and the ``_ensured`` latch
+        still flips, so each write is attempted exactly once per runner (the latches are
+        instance state, so a second :class:`SessionRunner` in the same process retries).
+        """
         if self._config.claude.auto_enable_remote_control and not self._rc_setting_ensured:
             try:
                 changed = await asyncio.to_thread(ensure_remote_control_enabled, self._claude_json)
@@ -1743,31 +1737,135 @@ class SessionRunner:
                 )
             self._recap_hook_ensured = True
 
+    def _enforce_bridge_cap(self, max_bridges: int | None) -> None:
+        """Fail closed when the optional concurrent-bridge cap is already reached.
+
+        EVERY live bridge counts, this project's included. The per-mode idempotency
+        early-returns in :meth:`_apply_mode_spawn_policy` already sent back any live bridge
+        this spawn would duplicate, so nothing reaching here is the instance being spawned —
+        but the same project can legitimately hold a live bridge on the OTHER axis (a live
+        pty session does not block a standard spawn, and vice versa), and skipping those made
+        a project with an interactive session contribute 0 to the cap. Raised BEFORE the
+        log-file creation, the process spawn, and the deferred ``--trust`` write — the one
+        earlier side effect is :meth:`_clear_pointer_if_anchor_poisoned`, which is
+        best-effort pointer hygiene rather than per-spawn state.
+        """
+        if max_bridges is None:
+            return
+        live = sum(
+            1
+            for inst in self._instances.values()
+            if inst.status in (InstanceStatus.STARTING, InstanceStatus.RUNNING)
+        )
+        if live >= max_bridges:
+            raise CapacityExceeded(
+                f"max_bridges={max_bridges} reached ({live} live); "
+                "stop a bridge before starting another"
+            )
+
+    # ----- end _spawn_locked's pre-spawn gates ---------------------------------------
+
+    async def _spawn_locked(
+        self,
+        name: str,
+        *,
+        spawn_mode: SpawnMode | None = None,
+        permission_mode: PermissionMode | None = None,
+        resume_mode: ResumeMode | None = None,
+        resume: bool = False,
+        resume_target: RemoteControlInstance | None = None,
+        custom_name: str | None = None,
+        sandbox: SandboxMode | None = None,
+        resume_session_id: str | None = None,
+        trust: bool = False,
+    ) -> SpawnOutcome:
+        """Spawn (or hand back) a bridge for ``name`` with the per-project lock held.
+
+        The body of :meth:`spawn_detailed`, split out so the locking lives in the caller.
+        """
+        proj = self._resolve_project(name)
+        # Refresh the persist merge-base under the locks (#949): the persisted-record
+        # reads below (the reattach probe's saved modes) and this spawn's trailing
+        # _persist must see the shared store as it is NOW, not as it was when this
+        # runner was constructed — a headless writer's construction-time snapshot can
+        # predate rows the web app has since added or forgotten.
+        refreshed = await self._refresh_persisted()
+        self._gate_stale_resume(resume=resume, resume_target=resume_target, refreshed=refreshed)
+        defaults = self._config.instance_defaults
+        spawn_mode = spawn_mode or defaults.spawn_mode
+        permission_mode = permission_mode or defaults.permission_mode
+        # None == "default" (append neither sandbox flag); normalize up front so the value
+        # validated below is always one of SANDBOX_MODES. The toggle is DISABLED for 1.0
+        # (#1037, config.SANDBOX_TOGGLE_ENABLED): the requested value is still validated (a bad
+        # value 422s below) but coerced to "default" so nothing on/off is recorded, resumed, or
+        # emitted while `--sandbox` doesn't reach the server-mode worker. Re-enabled via #1046.
+        requested_sandbox: SandboxMode = sandbox or "default"
+        sandbox_mode: SandboxMode = (
+            requested_sandbox if config.SANDBOX_TOGGLE_ENABLED else "default"
+        )
+        # Resolve resume_mode early so we can apply the per-mode policy checks below
+        # before spending side-effect budget (trust writes, log file creation, etc.).
+        # For a resume the prior instance is the SPECIFIC one being revived
+        # (resume_target) — NOT a mode-agnostic project scan, which could return a
+        # coincidentally-live standard bridge and flip a pty resume to standard (#777).
+        prior_for_mode = resume_target if resume else None
+        effective_resume_mode: ResumeMode = (
+            "pty" if self._is_pty_mode(prior_for_mode, requested=resume_mode) else "standard"
+        )
+        self._validate_spawn_options(
+            proj, spawn_mode, permission_mode, resume_mode, requested_sandbox
+        )
+        if resume_session_id is not None:
+            await self._validate_resume_session_id(
+                proj,
+                name,
+                resume_session_id,
+                resume=resume,
+                effective_resume_mode=effective_resume_mode,
+            )
+        # Validate before any spawn side effect (fail closed), same as spawn/permission
+        # mode above. Blank/None falls back to the project name (today's behavior); a
+        # non-blank value is only actually passed as --name for a *standard* bridge (see
+        # spawn_detailed docstring) — resolved_name still gets computed uniformly here so
+        # a bad value 422s regardless of which mode ends up launching.
+        resolved_name = _normalize_custom_name(custom_name, fallback=name)
+
+        # Non-blocking advisories collected along the way, surfaced on the outcome so
+        # the API can show them to the operator (#778).
+        spawn_warnings: list[str] = []
+
+        # --- per-mode spawn policy (#777) -----------------------------------
+        already_live = await self._apply_mode_spawn_policy(
+            proj,
+            name,
+            effective_resume_mode,
+            spawn_mode=spawn_mode,
+            resume=resume,
+            resume_target=resume_target,
+            spawn_warnings=spawn_warnings,
+        )
+        if already_live is not None:
+            return already_live
+        # --- end per-mode spawn policy ---------------------------------------
+
+        # Workspace-trust gate. Without --trust an untrusted directory fails closed here
+        # (fast, before any spawn side effect). With --trust we do NOT trust yet — the
+        # trust write is deferred until after the capacity check below, so a rejected
+        # start (bad option OR a full bridge cap) never leaves the directory trusted.
+        if not trust and not await asyncio.to_thread(is_trusted, proj.path, self._claude_json):
+            raise NotTrusted(
+                f"directory not trusted: {proj.path}. Use the Trust action before starting."
+            )
+
+        await self._ensure_claude_side_settings()
+
         # #867 L2: before launching, drop a preserved pointer whose anchor was archived or
         # deleted — otherwise the CLI reattaches it and the bridge comes back with no
         # session (#671). Best-effort; a no-op for a cold start, a pty spawn, or when the
         # anchor is healthy/indeterminate.
         await self._clear_pointer_if_anchor_poisoned(proj.path)
 
-        # Enforce the optional clauster-side concurrent-bridge cap: EVERY live bridge counts,
-        # this project's included. The per-mode idempotency early-returns above already sent
-        # back any live bridge this spawn would duplicate, so nothing reaching here is the
-        # instance being spawned — but the same project can legitimately hold a live bridge on
-        # the OTHER axis (a live pty session does not block a standard spawn, and vice versa),
-        # and skipping those made a project with an interactive session contribute 0 to the
-        # cap. Fail closed BEFORE any per-spawn side effect (file/process).
-        max_bridges = defaults.max_bridges
-        if max_bridges is not None:
-            live = sum(
-                1
-                for inst in self._instances.values()
-                if inst.status in (InstanceStatus.STARTING, InstanceStatus.RUNNING)
-            )
-            if live >= max_bridges:
-                raise CapacityExceeded(
-                    f"max_bridges={max_bridges} reached ({live} live); "
-                    "stop a bridge before starting another"
-                )
+        self._enforce_bridge_cap(defaults.max_bridges)
 
         # --trust (#775): every rejection — option validation, the idempotency
         # early-returns, and the bridge cap above — has now passed, so trust the

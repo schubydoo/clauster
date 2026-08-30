@@ -817,6 +817,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     app.add_middleware(GZipMiddleware, minimum_size=1024)
     app.mount("/static", _ImmutableStaticFiles(directory=str(_STATIC_DIR)), name="static")
 
+    # ----- error handling: one JSON/HTML shape for every HTTPException ---------------------------
     @app.exception_handler(StarletteHTTPException)
     async def _http_exception(request: Request, exc: StarletteHTTPException) -> Response:
         """Render a friendly HTML 404 for browser navigation; keep JSON for the API.
@@ -993,6 +994,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         presented = auth.parse_bearer(request.headers.get("authorization"))
         return auth.verify_token(presented, config.observability.metrics_token_hash)
 
+    # ----- middleware: the fail-closed auth gate, UI guard, security headers ---------------------
     @app.middleware("http")
     async def guard(request: Request, call_next):
         """Apply the CSRF Origin gate to unsafe methods, and authenticate when auth is on.
@@ -1129,6 +1131,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             headers.setdefault("Strict-Transport-Security", "max-age=31536000")
         return response
 
+    # ----- session routes: login, logout, re-auth ------------------------------------------------
     @app.get("/login", response_class=HTMLResponse)
     async def login_form(request: Request) -> Response:
         """Render the login page, redirecting an already-authenticated caller to the dashboard."""
@@ -1255,6 +1258,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # discover-then-stamp-bypass path, so the two can't drift.
         return await asyncio.to_thread(engine.list_projects)
 
+    # ----- liveness, login status, and the Prometheus endpoint -----------------------------------
     @app.get("/healthz")
     async def healthz(request: Request) -> dict:
         """Report liveness — plus claude version and counts once the caller is authenticated."""
@@ -1362,6 +1366,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         )
         return Response(content=body, media_type=prometheus.CONTENT_TYPE)
 
+    # ----- projects: discovery, preflight, sort metadata, row fragments, usage -------------------
     @app.get("/api/projects")
     async def api_projects() -> list[Project]:
         """Return every discovered project."""
@@ -1595,6 +1600,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         }
         return live_uuids
 
+    # ----- transcripts (read-only: Claude owns these .jsonl files) -------------------------------
     @app.get("/api/projects/{name}/transcripts")
     async def api_project_transcripts(name: str) -> dict:
         """List a project's session transcripts for the read-only viewer (issue #431, #614).
@@ -1818,6 +1824,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         body["live"] = live
         return body
 
+    # ----- dashboard metrics: per-project and aggregate ------------------------------------------
     @app.get("/api/projects/{name}/metrics")
     async def api_project_metrics(name: str) -> dict:
         """Return the cached CPU/memory/disk sample for this project's running bridge."""
@@ -2040,6 +2047,8 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         await asyncio.to_thread(app.state.login_shepherd.cancel)
         return {"ok": True}
 
+    # ----- config-write (Tier-B): MCP, permissions, hooks, CLAUDE.md, subagents, -----------------
+    # -----   skills, settings, plugins, marketplaces ---------------------------------------------
     @app.get("/api/config-write/status")
     async def api_config_write_status() -> dict:
         """Report the config-write opt-in flags, or 404 when the capability is off."""
@@ -3886,6 +3895,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 return proj
         raise HTTPException(status_code=500, detail=f"project {name!r} missing after provisioning")
 
+    # ----- project provisioning: create and clone ------------------------------------------------
     @app.post("/api/projects", status_code=201)
     async def api_create_project(body: dict) -> Project:
         """Create a new project directory under ``projects_root``, optionally git-initialized."""
@@ -4031,6 +4041,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         """
         return {"jobs": [job.status_snapshot() for job in clone_jobs.active_jobs()]}
 
+    # ----- registry read surfaces: instances, hosted, widget, sessions ---------------------------
     @app.get("/api/instances")
     async def api_instances() -> list[RemoteControlInstance]:
         """Every managed bridge, one row per instance (registration order).
@@ -4126,6 +4137,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         """
         return sorted(await asyncio.to_thread(runner.adoptable_external_projects))
 
+    # ----- clauster's own config (Tier-A + advanced) and the restart hook ------------------------
     @app.get("/api/config")
     async def api_config_get() -> dict:
         """Tier-A editable config values + a content hash, for the in-app editor (FE-3).
@@ -4332,6 +4344,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         server.should_exit = True
         return {"restarting": True}
 
+    # ----- background agents (`claude --bg`, supervisor.py) --------------------------------------
     @app.get("/api/agents")
     async def api_agents() -> list[BackgroundJob]:
         """Agent-view background sessions (`claude --bg`), observed read-only.
@@ -4574,6 +4587,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             "warnings": warnings or [],
         }
 
+    # ----- bridge lifecycle: spawn, stop, resume, forget, adopt, trust ---------------------------
     @app.post("/api/instances", status_code=201)
     async def api_spawn(body: dict, response: Response) -> dict:
         """Start a bridge/session; 201 when launched, 200 when an existing one was reused.
@@ -4948,6 +4962,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             return True
         return name in runner.external_sessions_by_project()
 
+    # ----- per-project CLAUDE.md -----------------------------------------------------------------
     @app.get("/api/projects/{name}/claude-md")
     async def api_claude_md_get(name: str) -> ClaudeMdDoc:
         """Return the project's CLAUDE.md, stamped with whether a bridge is running."""
@@ -4990,6 +5005,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         doc.bridge_running = _bridge_running(name)
         return doc
 
+    # ----- session QR codes ----------------------------------------------------------------------
     @app.get("/api/instances/{instance_id}/qr")
     async def api_instance_qr(instance_id: str) -> Response:
         """SVG QR for the primary deep link (feature 5) — scan to open on mobile."""
@@ -5043,6 +5059,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         origin = websocket.headers.get("origin")
         return origin is None or auth.normalize_origin(origin) in _allowed_origins
 
+    # ----- websockets: bridge log, hosted stream, clone progress, pty screen ---------------------
     @app.websocket("/ws/bridge-log/{instance_id}")
     async def ws_bridge_log(websocket: WebSocket, instance_id: str) -> None:
         """Tail the bridge debug log — ID-redacted, and ANSI-stripped by default (feature 6).
@@ -5281,6 +5298,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             "login_shepherd_allow_setup_token": config.login_shepherd.allow_setup_token,
         }
 
+    # ----- the dashboard page itself -------------------------------------------------------------
     @app.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request) -> Response:
         """Render the dashboard page."""
