@@ -1977,11 +1977,12 @@ def test_instance_from_record_without_instance_id_mints_a_fresh_one():
 def test_instance_from_record_tolerates_junk_daemon_last_seq(junk):
     """A junk ``daemon_last_seq`` in ``hosted_state.json`` degrades to 0, never raises.
 
-    ``_instance_from_record`` is expected to be total over the on-disk record map (the
-    structural twin of ``supervisor._job_from_state``), but the bare ``int(...)`` was
-    not: each value below aborted the whole reattach on restart with a different
-    exception. 0 means "replay from the start of the retained window" — the
-    fail-visible direction, versus the session silently vanishing.
+    This covers ``_instance_from_record``'s handling of that ONE field of the on-disk
+    record map — its other persisted fields still reach the model unguarded, which is
+    pre-existing and not what this test claims. The bare ``int(...)`` was not total:
+    each value below aborted the whole reattach on restart with a different exception.
+    0 means "replay from the start of the retained window" — the fail-visible
+    direction, versus the session silently vanishing.
     """
     inst = HostedManager._instance_from_record(
         _PID, {"project": "proj", "label": "hosted:proj", "daemon_last_seq": junk}
