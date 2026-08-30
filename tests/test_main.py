@@ -1135,6 +1135,18 @@ def test_run_puts_side_installed_extras_on_sys_path(write_config, tmp_path, monk
     assert len(seen) == 1 and seen[0].endswith(".cstate")
 
 
+def test_run_applies_the_external_pyte_path_shim(write_config, tmp_path, monkeypatch):
+    # #1310: the CLAUSTER_PYTE_PATH shim must run at serve startup, not only from doctor and
+    # the lazy import — otherwise the availability probe can't see an env-provided pyte and
+    # the disabled Live-terminal control prevents the lazy import that would have fixed it.
+    _stub_server(monkeypatch)
+    seen = []
+    monkeypatch.setattr(cli.pty_screen, "_maybe_add_external_pyte_path", lambda: seen.append(True))
+    rc = cli.main(["run", "-c", _cfg(write_config, tmp_path)])
+    assert rc == 0
+    assert len(seen) == 1
+
+
 def test_deps_list_reports_installed_but_not_loaded(write_config, tmp_path, capsys):
     # A dist present in <state_dir>/deps but not importable shows "installed …; restart to load".
     cfg = _cfg(write_config, tmp_path)
