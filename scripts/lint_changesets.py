@@ -35,6 +35,14 @@ paragraph. (Earlier this allowed a multi-line body whose line 1 was a complete s
 on the theory the heading was "clean" -- but a heading among bullets is itself the breakage,
 so multi-line is now rejected outright.)
 
+**Layout.** knope reads ``.changeset/*.md`` and nothing else, so a fragment that lands as
+``a.txt``, ``a.MD`` or ``sub/a.md`` is dropped exactly as silently as a wrongly-keyed one --
+no changelog entry, no version bump, and (before this rule) no lint failure either (#1332).
+Every entry in ``.changeset/`` must therefore be a top-level ``*.md`` fragment this linter
+can validate, bar the housekeeping names in ``_ALLOWED_NON_FRAGMENTS`` and the editor
+scratch files in ``_EDITOR_ARTEFACT_SUFFIXES``. There is deliberately no ``README.md``
+carve-out -- see the note in ``main``.
+
 Exit 0 when every fragment is well-formed, 1 (with a per-file reason) otherwise. Stdlib only.
 """
 
@@ -56,6 +64,27 @@ _KNOPE_TOML = str(_REPO_ROOT / "knope.toml")
 # knope's built-in change types. `extra_changelog_sections` in knope.toml adds the
 # repo's custom ones (perf / security / build), which are equally valid in a fragment.
 _BUILTIN_CHANGE_TYPES = frozenset({"major", "minor", "patch"})
+
+# The only names allowed in `.changeset/` that are not fragments. Deliberately a closed
+# allowlist rather than a "skip dotfiles" rule: an unexpected name is far more likely to be
+# a changeset that landed under the wrong extension than a housekeeping file worth keeping,
+# and making that loud is this linter's whole job. (Note a dotted `*.md` name is NOT
+# special -- knope consumes `.changeset/.hidden.md` and renders its entry, verified against
+# 0.23.0, and `endswith(".md")` below matches it the same way.)
+#
+# * `.gitkeep` -- git cannot track an empty directory, so a contributor who wants
+#   `.changeset/` to survive in the tree once knope has consumed every pending fragment
+#   adds one. None is committed today; absent is equally fine (see `main`).
+# * `.DS_Store` / `Thumbs.db` -- created by macOS Finder and Windows Explorer merely for
+#   LOOKING in the folder. CI runs on clean checkouts, so failing on these would red only
+#   local runs, on the two OSes the maintainer does not develop on.
+_ALLOWED_NON_FRAGMENTS = frozenset({".gitkeep", ".DS_Store", "Thumbs.db"})
+
+# Editor scratch files, which exist only WHILE a fragment is open: a `just check` run
+# mid-edit must not go red for one. Vim's shapes specifically (`.a.md.swp` beside `a.md`,
+# and `a.md~`) -- emacs' `#a.md#` is not covered, since a suffix test cannot express it and
+# a stray called `#slug.md#` is a plausible enough mistake to keep failing loudly.
+_EDITOR_ARTEFACT_SUFFIXES = (".swp", ".swo", "~")
 
 
 def _knope_expectations(config_path: str) -> tuple[frozenset[str], frozenset[str]]:
@@ -183,6 +212,29 @@ def _violation(path: str, body: str) -> str | None:
     return None
 
 
+def _is_housekeeping(name: str) -> bool:
+    """Return True for the few non-fragment names allowed to sit in ``.changeset/``."""
+    return name in _ALLOWED_NON_FRAGMENTS or name.endswith(_EDITOR_ARTEFACT_SUFFIXES)
+
+
+def _stray_violation(path: str, is_dir: bool) -> str:
+    """Return the violation message for an entry in ``.changeset/`` knope will never read."""
+    what = (
+        "a directory -- knope's `*.md` glob does not recurse, so a fragment nested inside it"
+        if is_dir
+        else "not a `*.md` fragment -- knope reads only `.changeset/*.md`, so it"
+    )
+    allowed = ", ".join(f"`{name}`" for name in sorted(_ALLOWED_NON_FRAGMENTS))
+    suffixes = ", ".join(f"`{suffix}`" for suffix in _EDITOR_ARTEFACT_SUFFIXES)
+    return (
+        f"{path}: {what} is dropped SILENTLY -- no changelog entry and no version bump, and "
+        f"nothing fails until the release notes come out short (#1332). Fix: make it a "
+        f"top-level `.changeset/<slug>.md` fragment (the extension is matched "
+        f"case-sensitively, so `.MD` counts as a stray), or delete it. The only "
+        f"non-fragments allowed here: {allowed}, and editor scratch files ending {suffixes}."
+    )
+
+
 def main() -> int:
     """Lint every changeset fragment; print violations and return 1 if any, else 0."""
     try:
@@ -200,8 +252,35 @@ def main() -> int:
     # a `.changeset/README.md` as a fragment and fails the release run on its missing
     # frontmatter. (knope-prepare.yml's `! -iname 'README.md'` only COUNTS pending fragments;
     # skipping it here too would hide that failure until it hit main.)
-    paths = sorted(str(p) for p in _CHANGESET_DIR.glob("*.md"))
-    problems = []
+    #
+    # `iterdir` rather than a `*.md` glob so the entries that DON'T match are visible: they
+    # are the silent-drop case this rule closes (#1332). A missing `.changeset/` is not one
+    # of them -- knope deletes every fragment as it prepares a release and git does not track
+    # the emptied directory, so it is legitimately absent on a release checkout. Anything
+    # else at that path is NOT legitimate: reporting "0 fragment(s) OK" for a `.changeset`
+    # that is a regular file would be this script's own silent pass.
+    cdir = _relative_to_cwd(str(_CHANGESET_DIR))
+    # `is_symlink()` as well as `exists()`: the latter FOLLOWS the link, so a dangling
+    # `.changeset -> /nowhere` would otherwise read as "absent" and pass.
+    if (_CHANGESET_DIR.exists() or _CHANGESET_DIR.is_symlink()) and not _CHANGESET_DIR.is_dir():
+        print(f"Changeset lint FAILED: {cdir} is not a directory (regular file? dead symlink?).")
+        return 1
+    try:
+        entries = sorted(_CHANGESET_DIR.iterdir()) if _CHANGESET_DIR.is_dir() else []
+    except OSError as exc:
+        # Every other error path here is caught and named; an unreadable directory should
+        # not be the one that exits on a bare traceback.
+        print(f"Changeset lint FAILED: could not list {cdir} ({exc}).")
+        return 1
+    # Name-based, so a DIRECTORY called `foo.md` still reaches the read below and is reported
+    # as unreadable rather than as a stray -- either way it fails, and the split keeps this
+    # rule about layout only.
+    paths = [str(p) for p in entries if p.name.endswith(".md")]
+    problems = [
+        _stray_violation(_relative_to_cwd(str(p)), p.is_dir())
+        for p in entries
+        if not p.name.endswith(".md") and not _is_housekeeping(p.name)
+    ]
     for path in paths:
         label = _relative_to_cwd(path)
         try:

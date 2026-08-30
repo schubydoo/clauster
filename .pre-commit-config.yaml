@@ -83,7 +83,10 @@ repos:
         pass_filenames: false
         # knope.toml and the script itself are inputs too — the valid package key and
         # change types are read from the former, so editing either changes the verdict.
-        files: '^(\.changeset/.+\.md|knope\.toml|scripts/lint_changesets\.py)$'
+        # `\.changeset/.*` (not `.+\.md`): a stray like `.changeset/a.txt` is exactly what
+        # the linter's layout rule (#1332) exists to catch, and a `.md`-only trigger would
+        # SKIP the hook for it — the commit would pass because nothing ran.
+        files: '^(\.changeset/.*|knope\.toml|scripts/lint_changesets\.py)$'
 
       - id: actionlint
         name: actionlint (workflow lint)
