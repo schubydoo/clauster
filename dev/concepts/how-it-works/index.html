@@ -586,6 +586,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="What survives a restart">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#a-direct-sessions-view-after-a-restart" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A Direct Session's view after a restart
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
     </ul>
@@ -1451,6 +1468,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="What survives a restart">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#a-direct-sessions-view-after-a-restart" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A Direct Session's view after a restart
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
     </ul>
@@ -1612,7 +1646,7 @@ restarting Clauster does not take your sessions down:</p>
 </tr>
 <tr>
 <td>Direct Session</td>
-<td>The claustrum daemon keeps running (it outlives Clauster) and, by default, keeps its <code>claude</code> children alive too; Clauster reconnects and reattaches the sessions recorded in <code>clauster.db</code>.</td>
+<td>The claustrum daemon keeps running (it outlives Clauster) and, by default, keeps its <code>claude</code> children alive too; Clauster reconnects and reattaches the sessions recorded in <code>clauster.db</code>. The live view is restored too — see below.</td>
 </tr>
 <tr>
 <td>The database</td>
@@ -1625,6 +1659,30 @@ with a fresh, empty context (the opt-in <code>claude.resume_recap</code> hook ca
 the prior transcript), while an Interactive Session genuinely restores the
 prior conversation — see
 <a href="../../#the-two-bridge-modes">The two bridge modes</a>.</p>
+<h3 id="a-direct-sessions-view-after-a-restart">A Direct Session's view after a restart<a class="headerlink" href="#a-direct-sessions-view-after-a-restart" title="Permanent link">&para;</a></h3>
+<p>A Direct Session's conversation is streamed live and held in Clauster's memory,
+so a restart used to leave the reattached session's View pane empty even though
+the agent itself was still there. On reattach Clauster now rebuilds the pane
+from <code>claude</code>'s own transcript on disk, marked with a <code>· restored N turns from
+transcript ·</code> line — <code>· restored N of M turns from transcript ·</code> when the cap
+below trimmed it — and the live stream continues underneath it. The transcript
+is only ever <strong>read</strong> — Clauster never writes to it — and the restored turns go
+through the same <a href="../../security/#log-redaction">redaction</a> as the live stream.</p>
+<p>Three limits are worth knowing. Only the newest 200 turns are restored, so a
+very long conversation comes back trimmed — and a very large transcript file is
+read from its tail rather than parsed whole. A session Clauster never saw a
+<code>session_id</code> for — one that died before its first frame — has no transcript to
+find, so its pane stays empty. And because <code>claude</code> writes its stream output and
+flushes its transcript independently, a single turn landing at the exact instant
+of the reattach can fall between the two and not be shown; the conversation
+itself is unaffected, since the agent still has it.</p>
+<!-- when the firstSeq gap section lands in troubleshooting.md, cross-link it here (rebase note) -->
+
+<p>An <code>· output lost (N frames) ·</code> marker near the restored turns is a separate
+thing: it means frames were evicted before they could be replayed to your
+browser. The conversation is still restored from the transcript — what a gap
+over that range covers is the non-conversation output, stderr lines and control
+frames, which the transcript does not hold.</p>
 <div class="admonition warning">
 <p class="admonition-title">systemd can undo all of this</p>
 <p>The survival table assumes nothing reaps the child processes. Under a
