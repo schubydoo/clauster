@@ -528,7 +528,9 @@ def running_claude_version(pid: int) -> str | None:
         return version
     try:
         children = proc.children()
-    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+        # OSError too: this runs inside poll_once's tick, and a raw errno from child
+        # enumeration must degrade to "no version", never abort the whole poll.
         return None
     for child in children:
         version = _proc_claude_version(child)

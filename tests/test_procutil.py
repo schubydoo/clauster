@@ -1149,3 +1149,25 @@ def test_running_claude_version_fails_closed(monkeypatch):
 
     monkeypatch.setattr(procutil.psutil, "Process", _Opaque)
     assert procutil.running_claude_version(99) is None
+
+
+def test_running_claude_version_absorbs_a_raw_oserror_from_child_enumeration(monkeypatch):
+    # This runs inside poll_once's tick: a raw errno from the OS while listing children
+    # (not one of psutil's wrapped exceptions) must degrade to "no version", never
+    # escape and abort the whole poll — status reconciliation, crash notifications and
+    # phantom pruning all ride the same tick.
+    class _RawErrno:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def exe(self):
+            return "/usr/bin/other"  # no version derivable -> falls through to children
+
+        def cmdline(self):
+            return ["/usr/bin/other"]
+
+        def children(self, recursive=False):
+            raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(procutil.psutil, "Process", _RawErrno)
+    assert procutil.running_claude_version(99) is None
