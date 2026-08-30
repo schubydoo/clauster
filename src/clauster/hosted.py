@@ -744,8 +744,15 @@ class HostedSession:
             return
         try:
             frame = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
             # Not NDJSON — forward as opaque text rather than dropping it silently.
+            # RecursionError: a deeply-nested line overflows CPython's recursive JSON
+            # scanner, and it is not a ValueError — so it escaped this handler into
+            # `_pump`, which catches only CancelledError/ClaustrumError. The pump task
+            # died and the session went dark with no `lost` event (a fail-silent that
+            # invariant 1 forbids). The scanner's ceiling is version-dependent (~994 on
+            # the 3.11 floor), so this is reachable from a ~1 KB agent output line.
+            # Degrading to opaque text isolates the bad frame instead of the stream.
             self._emit({"type": "text", "text": sanitize_line(line)})
             return
         if not isinstance(frame, dict):
@@ -1293,9 +1300,12 @@ class HostedManager:
             # the read — see HostedSession._rehydrate.
             loader = partial(self._load_history, history_for, instance)
             try:
-                result = await session.reattach(
-                    int(fields.get("daemon_last_seq") or 0), history_loader=loader
-                )
+                # Reuse the cursor `_instance_from_record` already coerced rather than
+                # re-deriving it from the raw record: a bare `int()` here raised
+                # ValueError/TypeError/OverflowError on a junk persisted value, which is
+                # not a ClaustrumError, so it escaped the handler below AND the lifespan's
+                # (app.py) — a junk cursor failed the whole app boot. One coercion site.
+                result = await session.reattach(instance.daemon_last_seq, history_loader=loader)
             except ClaustrumError as exc:
                 instance.status = InstanceStatus.ERROR
                 instance.error_detail = f"reattach failed: {exc}"
@@ -1492,9 +1502,18 @@ def _coerce_seq(value: Any) -> int:
     reattach on restart. An uncoercible cursor degrades to 0 — replay from the
     start of the retained window, the fail-*visible* direction: the client sees
     frames it may already have, rather than the session silently vanishing.
+
+    ``bool`` is rejected for the same reason :func:`_as_seq` rejects it: it
+    subclasses ``int``, so a persisted ``true`` would read as seq 1 and *skip*
+    frame 1 — a silent missed frame, the one direction this must not fail in.
+    A negative cursor is clamped to 0 rather than passed through, so
+    :meth:`HostedSession._note_replay_gap` cannot report a fabricated eviction
+    range for frames that never existed.
     """
+    if isinstance(value, bool):
+        return 0
     try:
-        return int(value or 0)
+        return max(0, int(value or 0))
     except (TypeError, ValueError, OverflowError):
         return 0
 
