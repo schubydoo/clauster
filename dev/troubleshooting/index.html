@@ -2730,11 +2730,32 @@ down, so there was nothing to reattach to. The transcript is not lost — start
 a new Direct Session for the project and resume from the captured session.</p>
 <h2 id="getting-more-detail">Getting more detail<a class="headerlink" href="#getting-more-detail" title="Permanent link">&para;</a></h2>
 <h3 id="raising-the-log-level">Raising the log level<a class="headerlink" href="#raising-the-log-level" title="Permanent link">&para;</a></h3>
-<p>The server log level is <strong>not currently adjustable</strong> — Clauster runs uvicorn
-pinned at <code>info</code>. A verbosity knob is tracked in
-<a href="https://github.com/schubydoo/clauster/issues/993">#993</a>. Note that the
-<code>logs.*</code> config keys control the <strong>bridge debug log</strong> stream (rotation, ANSI
-stripping, redaction), not server verbosity.</p>
+<blockquote>
+<p><strong>New in 1.1:</strong> the <code>log_level</code> key and its <code>CLAUSTER_LOG_LEVEL</code> override.
+Before that the server logged at <code>info</code> in every deployment.</p>
+</blockquote>
+<p>Set <code>log_level</code> (default <code>info</code>) to raise the server's own verbosity — it
+covers Clauster's loggers and uvicorn's alike:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a><span class="nt">log_level</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">debug</span><span class="w">   </span><span class="c1"># debug | info | warning | error</span>
+</code></pre></div>
+<p>For a one-shot run, or in a container or unit file, use the env override
+instead of editing the config:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a><span class="nv">CLAUSTER_LOG_LEVEL</span><span class="o">=</span>debug<span class="w"> </span>clauster<span class="w"> </span>run<span class="w"> </span>-c<span class="w"> </span>clauster.yml
+</code></pre></div>
+<p>Either way the level is read <strong>once at startup</strong>, so restart Clauster after
+changing it. What <code>debug</code> mostly adds is <strong>uvicorn's own</strong> debug records —
+per-request and per-connection detail — plus a handful of Clauster's
+best-effort cleanup diagnostics (a stop signal that was a no-op, a worktree
+unlock that failed) and claustrum daemon lifecycle notes. It is a wider view of
+the same events, not a separate decision trace.</p>
+<p>Treat it as a diagnostic setting, not a steady state: it is high-volume, and
+although every line still goes through the same redaction as <code>info</code> (see
+<a href="../security/#log-redaction">log redaction</a>), it records much more about what
+the server is doing — so treat a <code>debug</code> log as sensitive and skim it before
+attaching it to an issue.</p>
+<p>Note the <code>logs.*</code> config keys are a different thing entirely: they control the
+<strong>bridge debug log</strong> stream (rotation, ANSI stripping, redaction), not server
+verbosity.</p>
 <h3 id="reading-the-bridge-debug-log-on-disk-vs-the-redacted-stream">Reading the bridge debug log (on-disk vs the redacted stream)<a class="headerlink" href="#reading-the-bridge-debug-log-on-disk-vs-the-redacted-stream" title="Permanent link">&para;</a></h3>
 <p>The dashboard's live tail is ANSI-stripped and redacted; the on-disk file
 under <code>&lt;state_dir&gt;/logs/</code> is, by default, the <strong>verbatim</strong> debug log
@@ -2859,7 +2880,10 @@ with install state.</p>
 <ul>
 <li><code>clauster --version</code> and your OS / install method (pip, binary, Docker...).</li>
 <li>Full <code>clauster doctor</code> output — it is designed to be safe to share.</li>
-<li>The relevant server-log excerpt (<code>journalctl -u clauster</code> / <code>docker logs</code>).</li>
+<li>The relevant server-log excerpt (<code>journalctl -u clauster</code> / <code>docker logs</code>).
+  If <code>info</code> doesn't show the cause, reproduce with
+  <a href="#raising-the-log-level"><code>log_level: debug</code></a> and attach that excerpt instead —
+  scrubbed, as below.</li>
 <li>For bridge problems: the tail of the bridge's
   <code>&lt;label&gt;-&lt;timestamp&gt;-&lt;seq&gt;.log</code> — <strong>scrubbed first, see below</strong>.</li>
 </ul>

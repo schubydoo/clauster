@@ -1992,6 +1992,12 @@ Changing settings from the browser is covered in
 <td>Application log format. <code>text</code> (default) is the human single-line format; <code>json</code> emits one structured JSON object per record. Both modes redact session URLs / bearer ids before the line is written.</td>
 </tr>
 <tr>
+<td><code>log_level</code></td>
+<td><code>debug</code> | <code>info</code> | <code>warning</code> | <code>error</code></td>
+<td><code>info</code></td>
+<td>Minimum severity written to the application log, applied to Clauster's own loggers and uvicorn's alike. <code>debug</code> mostly adds uvicorn's own debug records (per-request and per-connection detail), plus a handful of Clauster best-effort cleanup diagnostics and claustrum daemon lifecycle notes — a wider view of the same events, meant for diagnosis rather than steady state: it is high-volume, and while every line is still redacted the same way (see <code>log_format</code>), it records far more about what the server is doing, so the log is worth treating as sensitive. Names are case-insensitive (<code>DEBUG</code> works). Applied once at startup — restart Clauster for a change to take effect.</td>
+</tr>
+<tr>
 <td><code>instance_name</code></td>
 <td>str | null</td>
 <td><code>null</code></td>
