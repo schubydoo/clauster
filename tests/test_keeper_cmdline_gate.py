@@ -58,6 +58,73 @@ def test_iter_keepers_rejects_a_live_non_keeper_pid(tmp_path):
     assert info.alive is False
 
 
+def _keeper_argv():
+    """The cmdline shape `is_keeper_cmdline` accepts, for a faked psutil.Process."""
+    return (sys.executable, "-m", "clauster.pty_keeper", "--sidecar", "/tmp/k.json")
+
+
+class _FakeKeeperProc:
+    """A live process whose cmdline IS a keeper's, with a fixed create-time."""
+
+    create_time_value = 1000.0
+
+    def __init__(self, pid):
+        pass
+
+    def status(self):
+        return procutil.psutil.STATUS_RUNNING
+
+    def cmdline(self):
+        return list(_keeper_argv())
+
+    def create_time(self):
+        return type(self).create_time_value
+
+
+def test_is_live_keeper_rejects_a_different_keeper_on_the_same_pid(monkeypatch):
+    # #1178, the whole point. `is_keeper_process` answers "is this pid *a* keeper", which a
+    # DIFFERENT live keeper that inherited the pid also satisfies — and on a host running many
+    # interactive sessions those are the pids most likely to be recycled by another keeper.
+    # The persisted create-time is what tells the two apart.
+    monkeypatch.setattr(procutil.psutil, "Process", _FakeKeeperProc)
+    assert procutil.is_keeper_process(1234) is True  # ...a keeper, by cmdline
+    assert procutil.is_live_keeper(1234, 1000.0) is True  # ...and ours: start times agree
+    assert procutil.is_live_keeper(1234, 500.0) is False  # a keeper, but NOT the one we stored
+
+
+def test_is_live_keeper_degrades_to_cmdline_when_the_start_time_is_unknown(monkeypatch):
+    # Backward compatibility for a row written before `keeper_proc_start` existed: with no
+    # stored start-time the answer must stay exactly what it was — cmdline + alive. Treating
+    # unknown as a mismatch would report a live keeper as dead and let `forget` drop the
+    # record of a running process.
+    monkeypatch.setattr(procutil.psutil, "Process", _FakeKeeperProc)
+    assert procutil.is_live_keeper(1234, None) is True
+
+
+def test_is_live_keeper_rejects_a_live_non_keeper_pid():
+    # The cmdline half still holds: a pid recycled onto a stranger is not a live keeper,
+    # start-time or no start-time. Real process, real psutil — no fake to drift out of sync.
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        ct = procutil.proc_create_time(proc.pid)
+        assert ct is not None  # the stranger is genuinely alive
+        assert procutil.is_live_keeper(proc.pid, ct) is False
+        assert procutil.is_live_keeper(proc.pid, None) is False
+    finally:
+        try:
+            proc.kill()
+            proc.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+def test_is_live_keeper_fails_closed_on_a_dead_or_negative_pid():
+    # Same untrusted on-disk ints the rest of the family absorbs: a sidecar or a hand-edited
+    # state row can hold either, and neither may raise into `forget`.
+    assert procutil.is_live_keeper(2_147_483_646, 1000.0) is False
+    assert procutil.is_live_keeper(-1, None) is False
+
+
 def test_stop_keeper_refuses_to_kill_a_non_keeper_pid():
     # A live process that is NOT our keeper (a PID recycled onto a stranger) must never
     # be SIGKILLed: stop_keeper reports it gone but leaves the stranger running.

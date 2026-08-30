@@ -96,6 +96,13 @@ class RemoteControlInstance(BaseModel):
     # the recovery survives the next restart too. None -> derive it (the normal case, where
     # the instance_id is the original one). See `SessionRunner._pty_worktree_name`.
     worktree_name: str | None = None
+    # The keeper pid's psutil create-time, snapshotted when we spawned or classified it.
+    # Same PID-reuse defense `bridge_proc_start` gives the bridge half (#1178): a cmdline
+    # gate alone rules out a recycled pid running something else, but not a DIFFERENT live
+    # keeper on that pid. Always set and cleared together with `keeper_pid` — a start-time
+    # left over from a previous generation is worse than none, because it would report a
+    # live keeper as gone. None means "unknown", which degrades to the cmdline-only gate.
+    keeper_proc_start: float | None = None
     status: InstanceStatus = InstanceStatus.STARTING
     intentional_stop: bool = False
     started_at: datetime | None = None

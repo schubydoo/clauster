@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 
 import pytest
 
@@ -886,9 +887,11 @@ async def test_forget_refuses_a_persisted_only_row_with_a_live_keeper(runner_con
     # The keeper half of the same gate: a pty row can have no bridge pid and still own a live
     # keeper holding the terminal.
     runner = _make_runner(runner_config)
-    runner.persistence.state_store().save({"iid-ghost": _row("alpha", pid=None, keeper_pid=7777)})
+    runner.persistence.state_store().save(
+        {"iid-ghost": _row("alpha", pid=None, keeper_pid=7777, keeper_proc_start=900.0)}
+    )
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
-    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda pid: True)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_keeper", lambda pid, start: True)
 
     with pytest.raises(InstanceStillLive):
         await runner.forget("iid-ghost")
@@ -897,22 +900,264 @@ async def test_forget_refuses_a_persisted_only_row_with_a_live_keeper(runner_con
 
 
 async def test_forget_is_not_stranded_by_a_recycled_keeper_pid(runner_config, monkeypatch):
-    # The reason the keeper gate is `is_keeper_process` and not `proc_create_time is not
-    # None`. The latter answers "is ANY process alive at this pid" — and a persisted-only row
-    # can predate a reboot, so its keeper_pid has a real chance of having been recycled onto
+    # The reason the keeper gate is `is_live_keeper` and not `proc_create_time is not None`.
+    # The latter answers "is ANY process alive at this pid" — and a persisted-only row can
+    # predate a reboot, so its keeper_pid has a real chance of having been recycled onto
     # something unrelated. Since forget never kills, a false "still live" strands the record
-    # with no operator path out short of editing the state DB. The cmdline gate is what tells
-    # our keeper apart from whatever else now holds that pid.
+    # with no operator path out short of editing the state DB.
     runner = _make_runner(runner_config)
     runner.persistence.state_store().save({"iid-ghost": _row("alpha", pid=None, keeper_pid=7777)})
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
-    # Alive, but NOT a keeper — exactly the recycled-pid shape.
+    # Alive, but not our keeper — exactly the recycled-pid shape.
     monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: 12345.0)
-    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda pid: False)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_keeper", lambda pid, start: False)
 
     await runner.forget("iid-ghost")  # must not be refused
 
     assert "iid-ghost" not in runner.persistence.state_store().load()
+
+
+# ---------------------------------------------------------------------------
+# Bug 1178 — forget's keeper gate had no PID-reuse defense
+# ---------------------------------------------------------------------------
+
+
+def _pretend_a_live_keeper_holds_the_pid(monkeypatch, *, create_time: float) -> None:
+    """Make every pid look like a LIVE keeper started at ``create_time``.
+
+    Faked at ``psutil.Process`` rather than at ``procutil.is_live_keeper``, so these tests
+    run the real predicate: what is under test is whether ``forget`` hands it the stored
+    start time at all, and stubbing the predicate itself would pass with the value dropped.
+    """
+    import psutil
+
+    class _FakeKeeper:
+        def __init__(self, pid):
+            pass
+
+        def status(self):
+            return psutil.STATUS_RUNNING
+
+        def cmdline(self):
+            return ["/usr/bin/python3", "-m", "clauster.pty_keeper", "--sidecar", "/tmp/k.json"]
+
+        def create_time(self):
+            return create_time
+
+    monkeypatch.setattr("clauster.procutil.psutil.Process", _FakeKeeper)
+
+
+async def test_forget_allows_a_row_whose_keeper_pid_now_holds_a_different_keeper(
+    runner_config, monkeypatch
+):
+    # THE #1178 regression test. The row's keeper_pid is held by a live process that IS a
+    # keeper by cmdline — just not OURS, which the persisted create-time proves. Before the
+    # column existed the cmdline gate answered "still live", and since forget never kills,
+    # the record was stranded with no operator path out short of editing the state DB.
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save(
+        {"iid-ghost": _row("alpha", pid=None, keeper_pid=7777, keeper_proc_start=900.0)}
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    # A keeper by cmdline, but started at a different time — a DIFFERENT keeper on that pid.
+    _pretend_a_live_keeper_holds_the_pid(monkeypatch, create_time=5000.0)
+
+    await runner.forget("iid-ghost")  # must not be refused
+
+    assert "iid-ghost" not in runner.persistence.state_store().load()
+
+
+async def test_forget_still_refuses_when_the_keeper_start_time_matches(runner_config, monkeypatch):
+    # The other half of the same gate, and the control for the test above: with the create-time
+    # MATCHING, this is our keeper and the forget must still fail closed. Only the start time
+    # differs between the two tests, so it is that value deciding — not the cmdline.
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save(
+        {"iid-ghost": _row("alpha", pid=None, keeper_pid=7777, keeper_proc_start=900.0)}
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    _pretend_a_live_keeper_holds_the_pid(monkeypatch, create_time=900.0)
+
+    with pytest.raises(InstanceStillLive):
+        await runner.forget("iid-ghost")
+
+    assert "iid-ghost" in runner.persistence.state_store().load()
+
+
+async def test_forget_gate_degrades_to_cmdline_for_a_pre_1178_row(runner_config, monkeypatch):
+    # Old-row compatibility. A row written before `keeper_proc_start` existed carries
+    # keeper_pid and no start time; the gate must behave exactly as it did then — cmdline +
+    # alive — so an upgrade neither orphans that keeper nor makes the row unforgettable.
+    # Identical to the test above except that the row stores no start time, and the live
+    # process's create-time is one that WOULD have mismatched.
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save({"iid-legacy": _row("alpha", pid=None, keeper_pid=7777)})
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    _pretend_a_live_keeper_holds_the_pid(monkeypatch, create_time=5000.0)
+
+    with pytest.raises(InstanceStillLive):
+        await runner.forget("iid-legacy")
+
+    assert "iid-legacy" in runner.persistence.state_store().load()
+
+
+async def test_keeper_pid_and_start_time_are_persisted_and_reloaded_together(
+    runner_config, monkeypatch
+):
+    # The pair has to survive the round-trip or the gate above has nothing to compare. A pid
+    # persisted WITHOUT its start time is the pre-#1178 state; a start time persisted without
+    # its pid is meaningless.
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    runner._instances["iid-pty"] = RemoteControlInstance(
+        instance_id="iid-pty",
+        project="alpha",
+        label="alpha",
+        resume_mode="pty",
+        status=InstanceStatus.STOPPED,
+        bridge_pid=4242,
+        bridge_proc_start=222.0,
+        keeper_pid=5555,
+        keeper_proc_start=333.0,
+    )
+
+    await runner._persist()
+
+    row = runner.persistence.state_store().load()["iid-pty"]
+    assert (row["keeper_pid"], row["keeper_proc_start"]) == (5555, 333.0)
+
+
+async def test_reattach_records_the_keeper_start_time_with_its_pid(runner_config, monkeypatch):
+    # A row reattached at startup takes its keeper pid from the sidecar, so the create-time
+    # has to be snapshotted at that same classification — otherwise every reattached pty row
+    # would carry a bare pid and the defense would be inert exactly where the stale-pid risk
+    # is highest.
+    runner = _make_runner(runner_config)
+    _stub_connect(monkeypatch)
+    runner.persistence.state_store().save({"iid-pty": _row("alpha", pid=5002)})
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s: 5555)
+    monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: 777.0)
+
+    await runner.rediscover(persist=False)
+
+    inst = runner.get_instance("iid-pty")
+    assert inst is not None
+    assert (inst.keeper_pid, inst.keeper_proc_start) == (5555, 777.0)
+
+
+def test_recovery_rejects_a_pid_recycled_mid_snapshot(runner_config, monkeypatch):
+    # The review catch: between validating the keeper and reading its create-time, the
+    # OS can recycle the pid — snapshotting the NEW occupant's time would authenticate
+    # it, and a keeper-shaped occupant strands forget with InstanceStillLive. A process
+    # created AFTER validation began cannot be the keeper validation saw.
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s: 5555)
+    monkeypatch.setattr(
+        "clauster.runner.procutil.proc_create_time", lambda pid: time.time() + 100.0
+    )
+    assert runner._recover_keeper_identity("alpha", 4242, 222.0) == (None, None)
+
+    # Control: a create-time from before validation is the keeper we validated.
+    monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: 777.0)
+    assert runner._recover_keeper_identity("alpha", 4242, 222.0) == (5555, 777.0)
+
+
+async def test_pointer_walk_reattach_records_the_keeper_start_time_too(runner_config, monkeypatch):
+    # The pointer-walk leg — a pre-instance-keyed row with NO persisted pid whose bridge is
+    # still live at the Anthropic pointer — recovered only the keeper PID, leaving that row's
+    # forget gate degraded to cmdline-only: the one reattach path where the pair defense
+    # stayed inert. The create-time must be snapshotted here exactly as the instance-keyed
+    # leg above does.
+    from clauster import pointers
+
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save({"iid-pty": _row("alpha", pid=None)})
+    ptr = pointers.BridgePointer(
+        pid=6001,
+        proc_start="123",
+        source="test",
+        environment_id="env_PTY",
+        session_id="session_PTY",
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    monkeypatch.setattr("clauster.runner.pointers.pointer_for_project", lambda *a, **k: ptr)
+    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s: 6666)
+    monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: 888.0)
+
+    await runner.rediscover(persist=False)
+
+    inst = runner.get_instance("iid-pty")
+    assert inst is not None
+    assert (inst.keeper_pid, inst.keeper_proc_start) == (6666, 888.0)
+
+
+async def test_resync_replaces_the_keeper_pair_together(runner_config, monkeypatch):
+    # A cross-process resync adopts a NEW keeper pid. Leaving the previous generation's
+    # start time beside it would be worse than carrying none: the comparison then fails for
+    # a keeper that is genuinely alive, and forget would drop the record of a running process.
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    runner._instances["iid-pty"] = RemoteControlInstance(
+        instance_id="iid-pty",
+        project="alpha",
+        label="alpha",
+        resume_mode="pty",
+        status=InstanceStatus.STOPPED,
+        bridge_pid=4401,
+        bridge_proc_start=100.0,
+        keeper_pid=1111,
+        keeper_proc_start=111.0,  # the DEAD generation's keeper
+    )
+    runner.persistence.state_store().save(
+        {"iid-pty": _row("alpha", pid=4402, proc_start=200.0)}  # another process's live bridge
+    )
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None: pid == 4402
+    )
+    _stub_connect(monkeypatch)
+    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s: 2222)
+    monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: 222.0)
+
+    await runner.poll_once()
+
+    inst = runner.get_instance("iid-pty")
+    assert inst is not None
+    assert (inst.keeper_pid, inst.keeper_proc_start) == (2222, 222.0), (
+        "the keeper pid and its start time must be replaced as a pair"
+    )
+
+
+async def test_a_standard_resync_clears_the_keeper_pair(runner_config, monkeypatch):
+    # A standard bridge has no keeper. Both halves must go, not just the pid: a leftover
+    # start time paired with a None pid is dead weight the gate would never consult, and the
+    # asymmetry is how a stale value survives into the next pty generation.
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    runner._instances["iid-std"] = RemoteControlInstance(
+        instance_id="iid-std",
+        project="alpha",
+        label="alpha",
+        resume_mode="standard",
+        status=InstanceStatus.STOPPED,
+        bridge_pid=4401,
+        bridge_proc_start=100.0,
+        keeper_pid=1111,
+        keeper_proc_start=111.0,
+    )
+    runner.persistence.state_store().save(
+        {"iid-std": _row("alpha", pid=4402, proc_start=200.0, resume_mode="standard")}
+    )
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None: pid == 4402
+    )
+    _stub_connect(monkeypatch)
+
+    await runner.poll_once()
+
+    inst = runner.get_instance("iid-std")
+    assert inst is not None
+    assert (inst.keeper_pid, inst.keeper_proc_start) == (None, None)
 
 
 async def test_forget_still_prunes_a_dead_persisted_only_row(runner_config, monkeypatch):

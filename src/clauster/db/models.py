@@ -123,6 +123,13 @@ class Instance(Base, TimestampMixin):
     # the start time would let a recycled pid resurrect an unrelated process as a live bridge.
     # All nullable — a row written by an older build simply has none, and the reattach path
     # falls back to the pointer/sidecar lookup rather than declaring the bridge dead.
+    #
+    # ``keeper_proc_start`` closes the same window on the keeper half (#1178). The cmdline
+    # gate alone rules out a recycled pid running something ELSE, but not a different live
+    # keeper holding that pid — and on a host running many interactive sessions those are
+    # the pids most likely to be reused by another keeper. NULL keeps the pre-#1178
+    # cmdline-only behaviour, so an older build's row stays forgettable rather than
+    # becoming permanently "still live".
     bridge_pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
     bridge_proc_start: Mapped[float | None] = mapped_column(Float, nullable=True)
     keeper_pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -132,6 +139,7 @@ class Instance(Base, TimestampMixin):
     # recovery lives only as long as the keeper, and the Resume that needs it happens
     # after the session ends.
     worktree_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    keeper_proc_start: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     project: Mapped[Project] = relationship(back_populates="instances")
 

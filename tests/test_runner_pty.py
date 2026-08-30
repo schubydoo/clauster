@@ -770,6 +770,10 @@ async def test_spawn_pty_reaches_running_then_stops(runner_config) -> None:
         assert inst.bridge_pid != inst.keeper_pid  # bridge is the keeper's child
         # the keeper-tracked bridge passes the same liveness check as a subcommand bridge
         assert procutil.is_live_bridge(inst.bridge_pid, inst.bridge_proc_start) is True
+        # …and the keeper is carried as a PAIR (#1178), the same PID-reuse defense: the
+        # snapshot must be the real create-time, or the stored value proves nothing.
+        assert inst.keeper_proc_start == procutil.proc_create_time(inst.keeper_pid)
+        assert procutil.is_live_keeper(inst.keeper_pid, inst.keeper_proc_start) is True
     finally:
         stopped = await runner.stop(inst.instance_id)
     assert stopped.status is InstanceStatus.STOPPED
@@ -1030,6 +1034,7 @@ async def test_rediscover_reattaches_live_pty_keeper_without_pointer(
     monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: None)
     monkeypatch.setattr("clauster.procutil.is_keeper_process", lambda pid: pid == 9999)
     monkeypatch.setattr("clauster.procutil.is_live_bridge", lambda pid, start, **k: pid == 4242)
+    monkeypatch.setattr("clauster.procutil.proc_create_time", lambda pid: 8888.0)
 
     await runner.rediscover()
 
@@ -1037,6 +1042,10 @@ async def test_rediscover_reattaches_live_pty_keeper_without_pointer(
     assert inst.status is InstanceStatus.RUNNING  # re-managed, not orphaned
     assert inst.resume_mode == "pty"
     assert inst.keeper_pid == 9999  # so stop()/poll_once own the survivor
+    # The sidecar records no create-time, so it is snapshotted at classification (#1178) —
+    # a keeper adopted here must carry the PAIR, or the reuse defense is inert on the very
+    # path where a pid is most likely to be stale.
+    assert inst.keeper_proc_start == 8888.0
     assert inst.bridge_pid == 4242
     assert inst.intentional_stop is False
     assert inst.url == "https://claude.ai/code/session_x"
