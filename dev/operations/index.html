@@ -2177,6 +2177,10 @@ over a WebSocket to the dashboard's live log view.</p>
 <p>A bridge stuck in <code>starting</code> → <code>error</code> most often means a <code>claude-login</code> problem
 (see <code>clauster doctor</code> above) or that the bridge couldn't register within
 <code>startup_grace_seconds</code>.</p>
+<p>A bridge <strong>adopted from another Clauster process</strong> (one started by <code>clauster start</code> or
+<code>clauster mcp</code>, or one that outlived a restart) has no <code>startup_grace_seconds</code> deadline of
+its own, so it never flips to <code>error</code>: it shows <code>starting</code> until its connect details are
+readable, then moves to <code>running</code> on the next poll.</p>
 <h2 id="restart">The <code>KillMode</code> / <code>systemctl restart</code> caveat<a class="headerlink" href="#restart" title="Permanent link">&para;</a></h2>
 <p>This is the single operational gotcha most likely to surprise you.</p>
 <p>Clauster's spawned bridges run <strong>inside the service's cgroup</strong>. With systemd's
