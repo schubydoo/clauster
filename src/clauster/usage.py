@@ -481,31 +481,39 @@ def read_transcript_turns(path: Path) -> list[dict]:
 
 
 def _is_subagent_transcript(path: Path, max_records: int = 200) -> bool:
-    """Whether ``path`` is a SUBAGENT (sidechain) transcript rather than a real conversation.
+    """Whether ``path`` is an AGENT transcript rather than a real conversation.
 
-    Claude Code stamps every record it writes for a dispatched subagent with
-    ``"isSidechain": true``; records belonging to the top-level conversation carry
-    ``false``. A subagent run therefore produces a transcript whose records are
-    *uniformly* sidechain, which is what distinguishes it from a conversation a user
-    would want to fork — the picker listed those alongside real ones and buried them
-    (#1092).
+    Two self-declared markers identify an agent transcript (#1092, #1309):
+
+    - Claude Code stamps every record it writes for a dispatched subagent with
+      ``"isSidechain": true``; records belonging to the top-level conversation carry
+      ``false``. A subagent run therefore produces a transcript whose records are
+      *uniformly* sidechain, which is what distinguishes it from a conversation a user
+      would want to fork — the picker listed those alongside real ones and buried them
+      (#1092).
+    - A headless agent run (an SDK/hook dispatch) writes ``"entrypoint": "sdk-py"`` on
+      its records — but ``"isSidechain": false`` on those same records, so it passes
+      the sidechain test (#1309). The entrypoint check therefore runs **before** the
+      main-thread early return. Interactive conversations carry other values
+      (``cli``/``sdk-cli``/``claude-desktop``) or omit the key.
 
     Read-only inspection of a file clauster does not own (invariant 5): the transcript is
     only parsed, never rewritten, and an unparseable line is skipped rather than raising.
 
-    **Deliberately biased toward "real conversation".** ``True`` is returned only when,
-    within the first ``max_records`` lines, at least one record is flagged sidechain and
-    **none** is flagged non-sidechain. Anything else — an empty or unreadable file, a
-    transcript that never carries the key (older Claude Code builds), or a mixed file
-    where a main-thread record appears — is reported as a real conversation. The failure
-    mode is therefore always "a subagent transcript is still listed", never "a genuine
-    conversation silently disappears".
+    **Deliberately biased toward "real conversation".** ``True`` is returned only on an
+    explicit positive: an ``entrypoint`` of exactly ``"sdk-py"``, or — within the first
+    ``max_records`` lines — at least one record flagged sidechain and **none** flagged
+    non-sidechain. Anything else — an empty or unreadable file, a transcript that never
+    carries either key (older Claude Code builds), or a mixed file where a main-thread
+    record appears — is reported as a real conversation. The failure mode is therefore
+    always "an agent transcript is still listed", never "a genuine conversation silently
+    disappears".
 
-    Bounded like :func:`_recorded_cwd`: the deciding non-sidechain record sits in the
-    opening handful of lines in practice, so ``max_records`` is generous headroom rather
-    than a tuned limit, and it keeps a huge transcript from being walked end to end.
-    Unlike ``_recorded_cwd``, the bound is NOT part of the summary cache key — the
-    default is the only bound the cache may ever see; only tests pass another value.
+    Bounded like :func:`_recorded_cwd`: the deciding record sits in the opening handful
+    of lines in practice, so ``max_records`` is generous headroom rather than a tuned
+    limit, and it keeps a huge transcript from being walked end to end. Unlike
+    ``_recorded_cwd``, the bound is NOT part of the summary cache key — the default is
+    the only bound the cache may ever see; only tests pass another value.
     """
     saw_sidechain = False
     try:
@@ -519,6 +527,10 @@ def _is_subagent_transcript(path: Path, max_records: int = 200) -> bool:
                     continue
                 if not isinstance(record, dict):
                     continue
+                if record.get("entrypoint") == "sdk-py":
+                    # A headless agent run self-declares; must win over the isSidechain
+                    # check below — the same record carries "isSidechain": false.
+                    return True
                 flag = record.get("isSidechain")
                 if flag is False:
                     # A main-thread record proves this is not a pure subagent transcript.
