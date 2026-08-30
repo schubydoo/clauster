@@ -1913,6 +1913,41 @@ def test_instance_from_record_without_instance_id_mints_a_fresh_one():
     assert inst.instance_id != "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 
 
+@pytest.mark.parametrize(
+    "junk",
+    [
+        "abc",  # ValueError: invalid literal for int()
+        {"x": 1},  # TypeError: int() argument must be a string...
+        [1, 2],  # TypeError
+        float("nan"),  # ValueError: cannot convert float NaN to integer
+        float("inf"),  # OverflowError: cannot convert float infinity to integer
+    ],
+)
+def test_instance_from_record_tolerates_junk_daemon_last_seq(junk):
+    """A junk ``daemon_last_seq`` in ``hosted_state.json`` degrades to 0, never raises.
+
+    ``_instance_from_record`` is expected to be total over the on-disk record map (the
+    structural twin of ``supervisor._job_from_state``), but the bare ``int(...)`` was
+    not: each value below aborted the whole reattach on restart with a different
+    exception. 0 means "replay from the start of the retained window" — the
+    fail-visible direction, versus the session silently vanishing.
+    """
+    inst = HostedManager._instance_from_record(
+        _PID, {"project": "proj", "label": "hosted:proj", "daemon_last_seq": junk}
+    )
+    assert inst.daemon_last_seq == 0
+
+
+def test_instance_from_record_keeps_a_valid_daemon_last_seq():
+    # The guard must not flatten a real cursor: an int and its digit-string form both
+    # survive, so a legitimate reattach still resumes where it left off.
+    for value, expected in ((42, 42), ("42", 42), (None, 0), (0, 0)):
+        inst = HostedManager._instance_from_record(
+            _PID, {"project": "proj", "label": "hosted:proj", "daemon_last_seq": value}
+        )
+        assert inst.daemon_last_seq == expected
+
+
 async def test_manager_reattach_restores_persisted_instance_id(fake_claustrum, tmp_path):
     """A hosted session's ``instance_id`` survives a persist → reattach cycle.
 
@@ -2547,3 +2582,42 @@ def test_redact_obj_passes_through_bare_scalars():
     assert _redact_obj(True) is True
     assert _redact_obj(None) is None
     assert "sk-" not in _redact_obj("token sk-ABCDEFGHIJKLMNOPQRST rest")
+
+
+def test_redact_obj_truncates_past_the_depth_cap_instead_of_raising():
+    """A frame nested past the cap is truncated, never a RecursionError.
+
+    ``json.loads`` in ``_on_line`` parses frames nested far deeper than this recursive
+    walker could descend, so a deeply-nested frame raised RecursionError inside
+    ``_pump`` — which catches only ``CancelledError``/``ClaustrumError``. The pump task
+    died and the session went dark with **no** ``lost`` event: a fail-silent, which
+    invariant 1 forbids. The redactor must still return a value (invariant 4: nothing
+    unredacted may reach a subscriber), so the over-deep subtree is replaced wholesale.
+    """
+    frame: dict = {}
+    cursor = frame
+    for _ in range(5_000):  # far past both the cap and CPython's recursion limit
+        cursor["next"] = {"leak": "session_01ZZZZZZZZZZZZZZZZZZZZZZ"}
+        cursor = cursor["next"]
+
+    out = _redact_obj(frame)  # the regression: this used to raise RecursionError
+
+    # Walk down to the cap: every level within it is a real dict whose leaf is masked.
+    cursor = out
+    for _ in range(hosted._REDACT_MAX_DEPTH - 1):
+        cursor = cursor["next"]
+        assert "session_01" not in cursor["leak"]
+    # One level further is the constant marker — no input bytes survive past the cap.
+    assert cursor["next"] == hosted._REDACT_TOO_DEEP
+
+
+def test_redact_obj_leaves_a_realistic_frame_untruncated():
+    # The cap sits orders of magnitude above real stream-json nesting, so a normal
+    # frame is redacted in full and the marker never appears.
+    frame = {
+        "type": "assistant",
+        "message": {"content": [{"text": "env_01BCDEFGHIJKLMNOPQRSTUVWX"}]},
+    }
+    out = _redact_obj(frame)
+    assert hosted._REDACT_TOO_DEEP not in json.dumps(out)
+    assert "env_01" not in out["message"]["content"][0]["text"]

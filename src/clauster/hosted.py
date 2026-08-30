@@ -1463,7 +1463,7 @@ class HostedManager:
             permission_mode=fields.get("permission_mode", "default"),
             claustrum_process_id=process_id,
             claude_session_uuid=fields.get("claude_session_uuid"),
-            daemon_last_seq=int(fields.get("daemon_last_seq") or 0),
+            daemon_last_seq=_coerce_seq(fields.get("daemon_last_seq")),
             hosted_log_path=Path(log_path) if isinstance(log_path, str) and log_path else None,
             agent_pid=fields.get("agent_pid"),
             agent_proc_start=fields.get("agent_proc_start"),
@@ -1481,18 +1481,57 @@ class HostedManager:
         return instance
 
 
-def _redact_obj(obj: Any) -> Any:
+def _coerce_seq(value: Any) -> int:
+    """Coerce a persisted ``daemon_last_seq`` to an int, falling back to ``0``.
+
+    :meth:`HostedManager._instance_from_record` is expected to be total over the
+    on-disk ``hosted_state.json`` record map (the structural twin of
+    :func:`supervisor._job_from_state`), but a bare ``int(...)`` is not: a
+    non-numeric string (``ValueError``), a dict/list (``TypeError``), a NaN
+    (``ValueError``) or an ``inf`` (``OverflowError``) each aborted the whole
+    reattach on restart. An uncoercible cursor degrades to 0 — replay from the
+    start of the retained window, the fail-*visible* direction: the client sees
+    frames it may already have, rather than the session silently vanishing.
+    """
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+# Depth cap for the recursive walk in :func:`_redact_obj`. `json.loads` in `_on_line`
+# parses frames nested far deeper than this walker can descend, so an unguarded
+# recursion raised RecursionError inside `_pump` — which catches only CancelledError
+# and ClaustrumError. The pump task died and the hosted session went dark with no
+# `lost` event: a fail-*silent*, which invariant 1 forbids. Real stream-json frames
+# nest a handful of levels; this cap is orders of magnitude above that and far below
+# CPython's recursion limit, so a legitimate frame can never reach it.
+_REDACT_MAX_DEPTH = 100
+
+# What a past-the-cap subtree is replaced by. A constant carrying no input bytes: the
+# redactor must still return a value (the frame has to reach the browser), and dropping
+# the subtree wholesale is the only way to keep invariant 4 — no unredacted leaf escapes.
+_REDACT_TOO_DEEP = "<clauster: frame nesting too deep to redact>"
+
+
+def _redact_obj(obj: Any, _depth: int = 0) -> Any:
     """Recursively sanitize every string leaf of a parsed JSON frame.
 
     Defense-in-depth over the structured stream: the same redaction the WS bridge
     log applies (ANSI strip + id/secret masking via :func:`sanitize_line`) is run
     on each string value, so a session/env identifier or obvious secret embedded
     anywhere in tool output or assistant text never reaches a browser subscriber.
+
+    Never raises on a deeply-nested frame: a container nested past
+    :data:`_REDACT_MAX_DEPTH` is replaced by :data:`_REDACT_TOO_DEEP` rather than
+    recursed into. ``_depth`` is internal bookkeeping — callers pass one argument.
     """
     if isinstance(obj, str):
         return sanitize_line(obj)
-    if isinstance(obj, dict):
-        return {k: _redact_obj(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_redact_obj(v) for v in obj]
+    if isinstance(obj, dict | list):
+        if _depth >= _REDACT_MAX_DEPTH:
+            return _REDACT_TOO_DEEP
+        if isinstance(obj, dict):
+            return {k: _redact_obj(v, _depth + 1) for k, v in obj.items()}
+        return [_redact_obj(v, _depth + 1) for v in obj]
     return obj

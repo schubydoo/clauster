@@ -719,6 +719,14 @@ def load_settings_json_obj(raw: bytes) -> dict[str, Any]:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
         raise InvalidCandidateError(f"existing settings file is not valid JSON: {exc}") from exc
+    except RecursionError as exc:
+        # Deeply-nested JSON overflows CPython's recursive scanner before json can raise
+        # JSONDecodeError, and RecursionError is not a ValueError — so it escaped the
+        # handler above and left this function raising outside its documented contract.
+        # Fail closed as the same structural error: we still refuse to overwrite it.
+        raise InvalidCandidateError(
+            "existing settings file is nested too deeply to parse"
+        ) from exc
     if not isinstance(data, dict):
         raise InvalidCandidateError("existing settings file is not a JSON object")
     return data

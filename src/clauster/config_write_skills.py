@@ -162,6 +162,14 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
         raise cw.InvalidCandidateError(
             f"{SKILL_FILENAME} frontmatter is not valid YAML: {exc}"
         ) from exc
+    except RecursionError as exc:
+        # Deeply-nested YAML overflows the composer before it can raise YAMLError, and
+        # RecursionError is not a YAMLError — surface it as the same rejection. Kept
+        # byte-for-byte in step with config_write_subagents.parse_frontmatter: the two
+        # parsers guard the same write tier and must not drift.
+        raise cw.InvalidCandidateError(
+            f"{SKILL_FILENAME} frontmatter is nested too deeply to parse"
+        ) from exc
     if not isinstance(data, dict):
         raise cw.InvalidCandidateError(f"{SKILL_FILENAME} frontmatter must be a YAML mapping")
     return data, match.group(2)

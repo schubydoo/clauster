@@ -198,6 +198,36 @@ def test_parse_tolerates_invalid_utf8(tmp_path):
     assert u.totals.input == 7 and u.totals.messages == 1
 
 
+def test_parse_tolerates_non_dict_and_deeply_nested_records(tmp_path):
+    # The docstring promises "malformed records are skipped", but two shapes escaped:
+    #  - valid JSON that is not an object (`5`, `null`, `[1,2]`) has no `.get`, so the
+    #    unguarded `record.get("message")` raised AttributeError;
+    #  - a deeply-nested line overflows CPython's recursive JSON scanner, which raises
+    #    RecursionError *before* json can raise JSONDecodeError — and RecursionError is
+    #    not a ValueError, so it sailed past the `except json.JSONDecodeError`.
+    # Either one 500'd the usage endpoint for the whole project. Both must now skip,
+    # and the good line after them must still be tallied (the walk is not aborted).
+    p = tmp_path / "t.jsonl"
+    good = json.dumps(_assistant("claude-opus-4-8", input_tokens=7))
+    hostile = ["5", "null", "true", '"x"', "[1,2]", "[" * 100_000]
+    p.write_text("\n".join([*hostile, good]) + "\n", encoding="utf-8")
+    u = parse_transcript(p)
+    assert u.totals.input == 7 and u.totals.messages == 1
+
+
+def test_line_to_turn_tolerates_deeply_nested_json():
+    # `_line_to_turn` documents "Never raises on a malformed line", and it already
+    # guards the non-dict case — but a deeply-nested line raised RecursionError out of
+    # json.loads, which is not a ValueError and so escaped the JSONDecodeError handler,
+    # breaking the transcript viewer and its live tail. It must skip like any other
+    # corrupt line, and a well-formed line must still parse.
+    from clauster.usage import _line_to_turn
+
+    assert _line_to_turn("[" * 100_000) is None
+    turn = _line_to_turn(json.dumps({"message": {"role": "user", "content": "hi"}}))
+    assert turn is not None and turn["role"] == "user"
+
+
 def test_parse_missing_file_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         parse_transcript(tmp_path / "nope.jsonl")
