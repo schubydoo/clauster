@@ -4776,6 +4776,11 @@ class SessionRunner:
                     # loop, and a read must not write into the instance's log set.
                     await asyncio.to_thread(self._flush_redacted_mirror, instance)
 
+        # Deliberately ABOVE the cross-check, which returns early whenever `agents --json`
+        # is degraded: a bridge pinned at STARTING must not stay pinned for as long as that
+        # probe keeps failing.
+        await self._promote_ready_unwatched(pid_is_ours, side_effects=side_effects)
+
         try:
             sessions = await asyncio.to_thread(inspector.list_working_sessions, self._binary)
         except (
@@ -5064,6 +5069,99 @@ class SessionRunner:
             del self._instances[n]
             self._procs.pop(n, None)  # don't leak the phantom's dead Popen handle
 
+    async def _promote_ready_unwatched(
+        self, pid_is_ours: dict[str, bool], *, side_effects: bool
+    ) -> None:
+        """Promote a STARTING bridge that nothing else will ever look at again (#1106).
+
+        Every other promotion path belongs to a bridge THIS process spawned:
+        :meth:`_apply_markers` and :meth:`_apply_pty_info`, both driven by
+        :meth:`_watch_startup`. A bridge taken over from another process's row has none
+        of them — :meth:`_adopt_rows_from_store`'s re-sync is one-shot (once the pids
+        agree, the first arm of its loop wins on every later tick and the connect facts
+        are never re-read), and :meth:`_reconcile_status` only ever demotes, by design.
+
+        So an instance adopted *before* its connect evidence existed — the peer's own
+        ``_await_ready`` timed out and persisted a live pid ahead of its pointer or ready
+        sidecar — is pinned at STARTING for the life of the process, and the dashboard
+        shows "preparing connect link…" forever for a bridge that is fine.
+
+        Re-read that evidence here for exactly the rows that can be stuck: STARTING, pid
+        provably still ours, no connect URL yet, and no startup watch of their own.
+        Promotion still requires the evidence itself — ``_connect_facts_for`` resolves
+        only from a live pointer or a ready sidecar — so a bridge that is merely alive
+        stays STARTING, which is the honest state and the rule ``_reconcile_status``
+        states. This never demotes and never touches a row it has no evidence for.
+
+        ``pid_is_ours`` defaults to **False** for an instance the caller's loop never saw
+        (one adopted mid-tick): not promoting is the conservative direction here, and the
+        next tick sees it. Runs under ``side_effects=False`` too — a reader must SEE the
+        real state — but announces the transition only when side effects are allowed,
+        matching the crash arm in :meth:`poll_once`.
+        """
+        stuck = [
+            inst
+            for inst in self._instances.values()
+            if inst.status is InstanceStatus.STARTING
+            and inst.url is None
+            and inst.bridge_pid is not None
+            and pid_is_ours.get(inst.instance_id, False)
+            and inst.instance_id not in self._startup_watches
+        ]
+        if not stuck:
+            return
+        discovered = self._discovered()
+        pending: dict[str, tuple[Project, ResumeMode, int, float | None]] = {}
+        for inst in stuck:
+            proj = discovered.get(inst.project)
+            pid = inst.bridge_pid
+            if proj is None or pid is None:
+                continue  # project gone from discovery: nothing to read the evidence from
+            pending[inst.instance_id] = (proj, inst.resume_mode, pid, inst.bridge_proc_start)
+        if not pending:
+            return
+        # One thread hop for the whole tick's worth of pointer reads / sidecar globs,
+        # matching `_adopt_rows_from_store`'s batched liveness probe. The liveness
+        # probe runs AFTER the evidence read (tuple order is evaluation order): a
+        # bridge that exits mid-read would otherwise be promoted on stale-but-matching
+        # evidence — a false `ready` webhook, then a crash on the next tick. Rechecked
+        # here, the death is seen and the reconcile pass owns the verdict instead.
+        facts = await asyncio.to_thread(
+            lambda: {
+                iid: (
+                    self._connect_facts_for(*args),
+                    procutil.is_live_bridge(args[2], args[3]),
+                )
+                for iid, args in pending.items()
+            }
+        )
+        for iid, (connect, alive) in facts.items():
+            if not connect:
+                continue  # still no evidence: STARTING is the honest state, leave it
+            if not alive:
+                continue  # died during the evidence read: never a ready for a dead bridge
+            inst = self._instances.get(iid)
+            expected = pending[iid]
+            # Re-checked across the await, like every other mutation on this lock-free
+            # path: a lock-holding spawn()/resume()/stop() can have replaced this object,
+            # resolved it, or moved it onto a different process generation meanwhile —
+            # publishing the evidence we gathered for the OLD generation would hand the
+            # operator a link into an environment that is already gone.
+            if (
+                inst is None
+                or inst.status is not InstanceStatus.STARTING
+                or inst.instance_id in self._startup_watches
+                or inst.bridge_pid != expected[2]
+                or inst.bridge_proc_start != expected[3]
+            ):
+                continue
+            inst.url = connect.get("url") or inst.url
+            inst.environment_id = connect.get("environment_id") or inst.environment_id
+            inst.starter_session_id = connect.get("starter_session_id") or inst.starter_session_id
+            inst.status = InstanceStatus.RUNNING
+            if side_effects:
+                self._emit_lifecycle("ready", inst)
+
     @staticmethod
     def _reconcile_status(instance: RemoteControlInstance, alive: bool) -> None:
         """Move a vanished bridge to STOPPED or CRASHED, by whether the exit was expected."""
@@ -5077,9 +5175,10 @@ class SessionRunner:
             instance.status = InstanceStatus.STOPPED if expected_exit else InstanceStatus.CRASHED
         # NB: a STARTING bridge that is merely *alive* is NOT promoted to RUNNING
         # here. Promotion requires a confirmed environment registration (handled by
-        # the startup-watch via _apply_markers). A bridge can stay alive without
-        # ever authenticating to the controller — liveness is not usability, and
-        # promoting on it reported uncontrollable bridges as RUNNING.
+        # the startup-watch via _apply_markers, or — for a bridge adopted from another
+        # process, which has no watch — by `_promote_ready_unwatched`, #1106). A bridge
+        # can stay alive without ever authenticating to the controller — liveness is
+        # not usability, and promoting on it reported uncontrollable bridges as RUNNING.
 
     @staticmethod
     def _notify_message(event: str, instance: RemoteControlInstance) -> tuple[str, str]:
