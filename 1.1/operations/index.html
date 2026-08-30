@@ -1,0 +1,2362 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Self-hosted web UI for spawning and managing Claude Code remote-control bridges on a remote host.">
+      
+      
+      
+        <link rel="canonical" href="https://schubydoo.github.io/clauster/1.1/operations/">
+      
+      
+        <link rel="prev" href="../reference/platforms/">
+      
+      
+        <link rel="next" href="../troubleshooting/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Operations runbook - Clauster</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#operations" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+          <aside class="md-banner md-banner--warning">
+            <div class="md-banner__inner md-grid md-typeset">
+              
+  You are not reading the documentation for the latest release.
+  <a href="../..">
+    <strong>Go to the latest release.</strong>
+  </a>
+
+            </div>
+            <script>var el=document.querySelector("[data-md-component=outdated]"),base=new URL(".."),outdated=__md_get("__outdated",sessionStorage,base);!0===outdated&&el&&(el.hidden=!1)</script>
+          </aside>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="Clauster" class="md-header__button md-logo" aria-label="Clauster" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Clauster
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Operations runbook
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/schubydoo/clauster" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    schubydoo/clauster
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="Clauster" class="md-nav__button md-logo" aria-label="Clauster" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    Clauster
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/schubydoo/clauster" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    schubydoo/clauster
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quickstart
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concepts
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Concepts
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../concepts/how-it-works/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    How it works
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../concepts/glossary/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Glossary
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture (contributors)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    How Clauster secures itself
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../privacy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Privacy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuring Clauster
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/config-editor/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The in-app config editor
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../networking/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Networking & exposing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI commands
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../public-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Public API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../mcp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MCP server
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/platforms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Platform support
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations runbook
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations runbook
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#health-checks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Health checks
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Health checks">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#healthz-liveness-and-readiness" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        /healthz — liveness and readiness
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#clauster-doctor-configuration-and-environment-diagnostics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        clauster doctor — configuration and environment diagnostics
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#metrics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Metrics
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Metrics">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#metrics-prometheus-exposition" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        /metrics — Prometheus exposition
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#scrape-token-let-prometheus-in-without-a-session" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Scrape token — let Prometheus in without a session
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#crash-alerts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Crash alerts
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#lifecycle-webhooks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Lifecycle webhooks
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Lifecycle webhooks">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#events" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Events
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reading-the-bridge-debug-log" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reading the bridge debug log
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#restart" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The KillMode / systemctl restart caveat
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#backup-restore-and-corruption-recovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Backup, restore, and corruption recovery
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Backup, restore, and corruption recovery">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#routine-backup" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Routine backup
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#recovering-from-a-corrupted-state-database" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Recovering from a corrupted state database
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-quick-monitoring-checklist" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A quick monitoring checklist
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../upgrading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Upgrading
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Project
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../support/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Support
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security-policy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reporting a vulnerability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#health-checks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Health checks
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Health checks">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#healthz-liveness-and-readiness" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        /healthz — liveness and readiness
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#clauster-doctor-configuration-and-environment-diagnostics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        clauster doctor — configuration and environment diagnostics
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#metrics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Metrics
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Metrics">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#metrics-prometheus-exposition" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        /metrics — Prometheus exposition
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#scrape-token-let-prometheus-in-without-a-session" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Scrape token — let Prometheus in without a session
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#crash-alerts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Crash alerts
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#lifecycle-webhooks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Lifecycle webhooks
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Lifecycle webhooks">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#events" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Events
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reading-the-bridge-debug-log" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reading the bridge debug log
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#restart" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The KillMode / systemctl restart caveat
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#backup-restore-and-corruption-recovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Backup, restore, and corruption recovery
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Backup, restore, and corruption recovery">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#routine-backup" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Routine backup
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#recovering-from-a-corrupted-state-database" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Recovering from a corrupted state database
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-quick-monitoring-checklist" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A quick monitoring checklist
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="operations">Operations<a class="headerlink" href="#operations" title="Permanent link">&para;</a></h1>
+<p>A monitoring and troubleshooting runbook for the operator running Clauster as a
+service. It assembles the building blocks Clauster already ships — <code>/healthz</code>,
+<code>/metrics</code>, <code>clauster doctor</code>, crash notifications, and the bridge debug log —
+into one page, plus the two operational caveats that bite most often (the
+<code>systemctl restart</code> / <code>KillMode</code> interaction and recovering from a corrupted
+state file).</p>
+<p>For installing Clauster as a service see <a href="../installation/">Installation</a>; for
+the full config surface see <a href="../reference/config/">Configuration</a>; for the
+maintenance subcommands (<code>config reconcile</code>, <code>keepers</code>, <code>deps</code>, and the rest of
+the CLI) see <a href="../reference/cli/">CLI commands</a>.</p>
+<h2 id="health-checks">Health checks<a class="headerlink" href="#health-checks" title="Permanent link">&para;</a></h2>
+<h3 id="healthz-liveness-and-readiness"><code>/healthz</code> — liveness and readiness<a class="headerlink" href="#healthz-liveness-and-readiness" title="Permanent link">&para;</a></h3>
+<p>Clauster exposes a JSON health endpoint at <code>/healthz</code>. It is the one route that
+is reachable <strong>without</strong> authentication (so an upstream load balancer or
+<code>systemd</code>/container health probe can hit it), but it only returns liveness to an
+unauthenticated caller when auth is enabled:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:7621/healthz
+</code></pre></div>
+<p>When auth is <strong>off</strong> (loopback) or the caller is <strong>authenticated</strong>, the full
+body is returned:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>status</code></td>
+<td>Always <code>"ok"</code> if the process is serving.</td>
+</tr>
+<tr>
+<td><code>version</code></td>
+<td>Clauster's own version.</td>
+</tr>
+<tr>
+<td><code>claude_ok</code></td>
+<td>Whether the <code>claude</code> binary probe (<code>claude --version</code>) succeeded.</td>
+</tr>
+<tr>
+<td><code>claude_version</code></td>
+<td>The detected <code>claude</code> CLI version (<code>null</code> if the probe failed).</td>
+</tr>
+<tr>
+<td><code>claude_login_ok</code></td>
+<td>Whether the <code>claude</code> account is logged in (<code>claude auth status</code>; OAuth / apiKeyHelper / API key / env token all count). <code>true</code> on a cold start before the first probe, so it never cries wolf.</td>
+</tr>
+<tr>
+<td><code>claude_login_method</code></td>
+<td>How it is authenticated (<code>null</code> until probed).</td>
+</tr>
+<tr>
+<td><code>claude_login_expires_at</code></td>
+<td>Login expiry as a Unix-epoch <strong>millisecond</strong> timestamp, or <code>null</code> if not applicable/unknown — alert as it approaches.</td>
+</tr>
+<tr>
+<td><code>instances_running</code></td>
+<td>Count of bridges Clauster currently considers running.</td>
+</tr>
+<tr>
+<td><code>claustrum</code></td>
+<td>Present only when the hosted channel is enabled — the daemon's health (<code>{enabled, running, …}</code>).</td>
+</tr>
+</tbody>
+</table>
+<p>When auth is <strong>on</strong> and the caller is <strong>unauthenticated</strong>, the body is just
+<code>{"status": "ok"}</code> — Clauster deliberately does not leak the <code>claude</code> version or
+running-bridge count on a public reverse-proxy deploy.</p>
+<p>A simple container/systemd health probe only needs the <code>200</code> + <code>status: ok</code>; a
+monitoring system with credentials can additionally alert on <code>claude_login_ok:
+false</code> (logged out / credentials expired — the classic "bridge runs but is dead"
+mode) or an approaching <code>claude_login_expires_at</code>, on <code>claude_ok: false</code> (the
+bridge host has lost its <code>claude</code> CLI), or watch <code>instances_running</code>.</p>
+<h3 id="clauster-doctor-configuration-and-environment-diagnostics"><code>clauster doctor</code> — configuration and environment diagnostics<a class="headerlink" href="#clauster-doctor-configuration-and-environment-diagnostics" title="Permanent link">&para;</a></h3>
+<p><code>clauster doctor</code> runs the same pre-launch diagnostics the dashboard's preflight
+panel uses, from the CLI:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>clauster<span class="w"> </span>doctor<span class="w"> </span>-c<span class="w"> </span>/etc/clauster/clauster.yml
+</code></pre></div>
+<p>It prints one line per check and exits non-zero if any check <strong>fails</strong>. Checks:</p>
+<table>
+<thead>
+<tr>
+<th>Check</th>
+<th>What it verifies</th>
+<th>Failure vs warning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>config</code></td>
+<td><code>clauster.yml</code> loads and passes the fail-closed validators.</td>
+<td><strong>FAIL</strong> if missing/invalid.</td>
+</tr>
+<tr>
+<td><code>claude</code></td>
+<td>The <code>claude</code> binary is present and <code>&gt;= claude.min_version</code>.</td>
+<td><strong>FAIL</strong> if absent, too old, or the probe errors.</td>
+</tr>
+<tr>
+<td><code>claude-login</code></td>
+<td>The runtime user's <code>claude</code> CLI has usable credentials (a spawned bridge inherits the operator's login).</td>
+<td><strong>WARN</strong> — <code>ANTHROPIC_API_KEY</code> is a valid alternative; a missing/expired token is recoverable with <code>claude</code>.</td>
+</tr>
+<tr>
+<td><code>projects_root</code></td>
+<td><code>projects_root</code> exists and is a directory.</td>
+<td><strong>FAIL</strong> if not.</td>
+</tr>
+<tr>
+<td><code>state_dir</code></td>
+<td><code>state_dir</code> is writable (or creatable under an existing ancestor).</td>
+<td><strong>FAIL</strong> if not writable.</td>
+</tr>
+<tr>
+<td><code>git</code></td>
+<td><code>git</code> is on <code>PATH</code> (needed for <code>create --git-init</code> and clone).</td>
+<td><strong>WARN</strong> if absent.</td>
+</tr>
+<tr>
+<td><code>auth</code></td>
+<td>Auth is internally consistent and enforced for the bind (the same rule that refuses to start).</td>
+<td><strong>FAIL</strong> for a non-loopback bind without enforced auth.</td>
+</tr>
+<tr>
+<td><code>workspace-trust</code></td>
+<td>How many discovered projects are trusted (reports <code>N/M discovered projects trusted</code>). Per-repo since Claude Code 2.1.232 — a git repo needs its own grant, so a <code>projects_root</code> grant no longer covers nested repos.</td>
+<td><strong>WARN</strong> if any discovered project is untrusted — advisory, recoverable from the UI (Trust &amp; start, or Trust all).</td>
+</tr>
+<tr>
+<td><code>version</code></td>
+<td>For a from-source checkout, whether <code>HEAD</code> is behind its last-fetched upstream.</td>
+<td><strong>WARN</strong> if behind; absent for PyPI/Docker installs.</td>
+</tr>
+<tr>
+<td><code>node-toolchain</code></td>
+<td>On an nvm host, whether nvm's default <code>node</code> is reachable on a spawned bridge's <code>PATH</code>.</td>
+<td><strong>WARN</strong> if missing or not on the bridge <code>PATH</code> — advisory; only present on POSIX nvm hosts.</td>
+</tr>
+<tr>
+<td><code>port</code></td>
+<td>(CLI only) whether the listen port is free to bind.</td>
+<td><strong>WARN</strong> if already in use.</td>
+</tr>
+<tr>
+<td><code>systemd</code></td>
+<td>The loaded <code>clauster.service</code> uses a non-reaping <code>KillMode</code> (see below).</td>
+<td><strong>WARN</strong> if it would reap live pty bridges.</td>
+</tr>
+<tr>
+<td><code>extra:*</code></td>
+<td>Each optional <a href="../installation/">extra</a> (<code>pty</code>/<code>notify</code>) is importable in the running interpreter.</td>
+<td><strong>WARN</strong> if missing (with the install hint) — never FAIL; a missing extra only leaves its feature dormant. A Windows-only extra is skipped off-Windows.</td>
+</tr>
+</tbody>
+</table>
+<p><code>claude-login</code> deserves a callout: it is the cause of the classic "bridge runs
+but is dead" failure mode — the bridge process starts, but the inherited
+<code>claude</code> login is logged out, so it can never authenticate. If a freshly spawned
+bridge never becomes ready, check this first.</p>
+<h2 id="metrics">Metrics<a class="headerlink" href="#metrics" title="Permanent link">&para;</a></h2>
+<h3 id="metrics-prometheus-exposition"><code>/metrics</code> — Prometheus exposition<a class="headerlink" href="#metrics-prometheus-exposition" title="Permanent link">&para;</a></h3>
+<p>Clauster can expose a small text-format Prometheus endpoint at <code>/metrics</code>. It is
+<strong>off by default</strong>; enable it with:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="nt">observability</span><span class="p">:</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="w">  </span><span class="nt">prometheus_enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+<p>When disabled, <code>/metrics</code> returns <code>404</code>. When enabled, it stays <strong>behind the
+auth guard</strong> like every other route — so by default a scraper must satisfy the
+deployment's auth, or scrape over loopback where no auth is enforced.
+See <a href="../reference/config/#observability-read-only-metrics-endpoint-observabilityconfig">Configuration → <code>observability</code></a>.</p>
+<p>The endpoint exposes point-in-time gauges (and one counter) derived from live
+runner state:</p>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Type</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>clauster_build_info{version="…"}</code></td>
+<td>gauge</td>
+<td>Always <code>1</code>; carries the running version as a label.</td>
+</tr>
+<tr>
+<td><code>clauster_bridges{status="…"}</code></td>
+<td>gauge</td>
+<td>Number of managed bridges per lifecycle status (<code>starting</code>, <code>running</code>, <code>stopped</code>, <code>crashed</code>, <code>error</code>).</td>
+</tr>
+<tr>
+<td><code>clauster_projects</code></td>
+<td>gauge</td>
+<td>Number of discovered projects.</td>
+</tr>
+<tr>
+<td><code>clauster_bridge_crashes_total{project="…"}</code></td>
+<td>counter</td>
+<td>Per-project bridge crashes since process start. Only emitted once a bridge has crashed — absent (not <code>0</code>) on a process with no crashes yet, so guard <code>absent()</code> rules accordingly.</td>
+</tr>
+<tr>
+<td><code>clauster_bridge_cpu_percent{project="…"}</code></td>
+<td>gauge</td>
+<td>Per-<strong>project</strong> process-tree CPU percent, summed across that project's live bridges. Emitted only when the <code>metrics</code> sampler is enabled and has a fresh sample; otherwise absent.</td>
+</tr>
+<tr>
+<td><code>clauster_bridge_rss_bytes{project="…"}</code></td>
+<td>gauge</td>
+<td>Per-<strong>project</strong> process-tree resident memory, summed across that project's live bridges. Sampler-gated, as above.</td>
+</tr>
+<tr>
+<td><code>clauster_hosted_sessions</code></td>
+<td>gauge</td>
+<td>Live hosted (claustrum) sessions. Emitted only when <code>claustrum.enabled</code>; absent otherwise.</td>
+</tr>
+<tr>
+<td><code>clauster_claustrum_up</code></td>
+<td>gauge</td>
+<td><code>1</code> if the claustrum daemon is connected, else <code>0</code>. Emitted only when <code>claustrum.enabled</code>; absent otherwise.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="scrape-token-let-prometheus-in-without-a-session">Scrape token — let Prometheus in without a session<a class="headerlink" href="#scrape-token-let-prometheus-in-without-a-session" title="Permanent link">&para;</a></h3>
+<p>A scraper like Prometheus can't log in through the password form. On a guarded
+deployment, set a <strong>scrape token</strong> so the scraper can reach <code>/metrics</code> directly.
+Mint one with <code>clauster hash-metrics-token</code> — it prints the raw token once (give
+it to the scraper) and the hash to store at rest. (For the reverse-proxy-specific
+setup, see <a href="../networking/#scraping-metrics-from-behind-the-auth-gate">Networking → Scraping <code>/metrics</code></a>.)</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="nt">observability</span><span class="p">:</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">  </span><span class="nt">prometheus_enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">  </span><span class="nt">metrics_token_hash</span><span class="p">:</span><span class="w"> </span><span class="s">"&lt;sha-256</span><span class="nv"> </span><span class="s">hash</span><span class="nv"> </span><span class="s">from</span><span class="nv"> </span><span class="s">clauster</span><span class="nv"> </span><span class="s">hash-metrics-token&gt;"</span><span class="w">  </span><span class="c1"># or via *_FILE, below</span>
+</code></pre></div>
+<p>The scraper then presents the raw token as a bearer token:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>curl<span class="w"> </span>-s<span class="w"> </span>-H<span class="w"> </span><span class="s2">"Authorization: Bearer &lt;token&gt;"</span><span class="w"> </span>https://clauster.example.com/metrics
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="c1"># prometheus.yml</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="nt">scrape_configs</span><span class="p">:</span>
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">job_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">clauster</span>
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="w">    </span><span class="nt">scheme</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https</span>
+<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="w">    </span><span class="nt">authorization</span><span class="p">:</span>
+<a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a><span class="w">      </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Bearer</span>
+<a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="w">      </span><span class="nt">credentials</span><span class="p">:</span><span class="w"> </span><span class="s">"&lt;token&gt;"</span>
+<a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a><span class="w">    </span><span class="nt">static_configs</span><span class="p">:</span>
+<a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">targets</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">"clauster.example.com"</span><span class="p p-Indicator">]</span>
+</code></pre></div>
+<p>When <code>metrics_token_hash</code> is set, <strong>a valid token <em>or</em> a normal session</strong> grants
+access — and only to <code>/metrics</code>, nowhere else. Only the SHA-256 hash is stored at
+rest (parity with <code>auth.api_token_hash</code>), and the presented token's hash is
+compared in constant time. To keep the hash out of the config file, point
+<code>CLAUSTER_OBSERVABILITY_METRICS_TOKEN_HASH_FILE</code> at a file holding it. When
+<code>metrics_token_hash</code> is unset, <code>/metrics</code> stays fully behind the auth guard (so a
+scraper needs a session, or you scrape over loopback).</p>
+<p>Example scrape (authenticated, loopback):</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:7621/metrics
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a># HELP clauster_build_info Build information for the running Clauster.
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a># TYPE clauster_build_info gauge
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>clauster_build_info{version="0.12.x"} 1
+<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a># HELP clauster_bridges Number of managed bridges by lifecycle status.
+<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a># TYPE clauster_bridges gauge
+<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a>clauster_bridges{status="running"} 2
+<a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a>clauster_bridges{status="crashed"} 0
+<a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a># HELP clauster_projects Number of discovered projects.
+<a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a># TYPE clauster_projects gauge
+<a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a>clauster_projects 7
+</code></pre></div>
+<p>A useful alert is a non-zero <code>clauster_bridges{status="crashed"}</code> or <code>="error"</code>
+sustained over a scrape interval.</p>
+<p>The live resource metrics (CPU / memory / disk shown on a running session's row)
+are a separate, dashboard-only fetch. Each row shows <strong>its own bridge's</strong> usage:
+the dashboard reads <code>/api/metrics</code>, keyed by instance id, so two bridges of one
+project — a Server Mode bridge and an Interactive Session, say — never report each
+other's figures. <code>/api/projects/{name}/metrics</code> still returns the project <strong>total</strong>,
+summed across that project's live bridges. Neither is part of the Prometheus
+exposition, and both are governed by the <code>metrics</code> config block, not
+<code>observability</code>. <strong>Disk I/O is unavailable on macOS</strong> — <code>psutil</code> has no per-process
+<code>io_counters</code> there, so the API returns <code>null</code> for <code>disk_read_bps</code> /
+<code>disk_write_bps</code> and the row leaves those fields blank on macOS (CPU and memory
+still show). See the
+<a href="../reference/platforms/">platform-support matrix</a> for the full per-OS list.</p>
+<h2 id="crash-alerts">Crash alerts<a class="headerlink" href="#crash-alerts" title="Permanent link">&para;</a></h2>
+<p>Clauster can send an outbound notification when a bridge <strong>crashes</strong> — exits
+unexpectedly rather than via the Stop button. Notifications go through
+<a href="https://github.com/caronc/apprise">Apprise</a>, so any Apprise URL works (Slack,
+Discord, Telegram, email, …).</p>
+<p>They are <strong>off by default</strong> and require the optional <code>notify</code> extra:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>pip<span class="w"> </span>install<span class="w"> </span><span class="s1">'clauster[notify]'</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="nt">notifications</span><span class="p">:</span>
+<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="w">  </span><span class="nt">urls</span><span class="p">:</span>
+<a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">"slack://TOKEN_A/TOKEN_B/TOKEN_C"</span>
+<a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">"tgram://bottoken/ChatID"</span>
+<a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a><span class="w">  </span><span class="nt">notify_on_crash</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">   </span><span class="c1"># default; the alert that matters most for monitoring</span>
+</code></pre></div>
+<p>Behaviour and caveats:</p>
+<ul>
+<li><strong>Fail-closed and best-effort.</strong> A notification failure never affects the
+  bridge lifecycle, and sends run off the event loop. If <code>notifications.enabled</code>
+  is true but Apprise isn't installed, Clauster logs a warning at startup and
+  sends nothing — it does not crash.</li>
+<li><strong>A crash alert means status <code>crashed</code></strong>, i.e. the bridge exited on its own.
+  A deliberate Stop does not notify.</li>
+<li><strong>Secrets in URLs are yours to protect.</strong> An Apprise URL often embeds a token;
+  keep it out of any shared/committed config (see
+  <a href="../reference/config/#notifications-outbound-alerts-via-apprise-notificationsconfig">Configuration → <code>notifications</code></a>).</li>
+</ul>
+<p>See <a href="../reference/config/#notifications-outbound-alerts-via-apprise-notificationsconfig">Configuration → <code>notifications</code></a>
+for the full field reference.</p>
+<h2 id="lifecycle-webhooks">Lifecycle webhooks<a class="headerlink" href="#lifecycle-webhooks" title="Permanent link">&para;</a></h2>
+<p>Where <code>notifications</code> push a human-readable message to a chat app, <strong>webhooks</strong>
+deliver a machine-readable JSON <code>POST</code> to your own HTTP endpoint on a Clauster
+lifecycle transition — for wiring Clauster into an automation, a queue, or your
+own dashboard. They are <strong>off by default</strong> and need no extra dependency.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="nt">webhooks</span><span class="p">:</span>
+<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="w">  </span><span class="nt">urls</span><span class="p">:</span>
+<a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">"https://example.com/hooks/clauster"</span>
+<a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a><span class="w">  </span><span class="nt">timeout_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">10.0</span><span class="w">   </span><span class="c1"># per-POST timeout (&gt;0)</span>
+<a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a><span class="w">  </span><span class="nt">events</span><span class="p">:</span>
+<a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a><span class="w">    </span><span class="c1"># Bridge events: an absent key defaults to ENABLED.</span>
+<a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a><span class="w">    </span><span class="nt">spawn</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a><span class="w">    </span><span class="nt">ready</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a><span class="w">    </span><span class="nt">stop</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<a id="__codelineno-10-11" name="__codelineno-10-11" href="#__codelineno-10-11"></a><span class="w">    </span><span class="nt">crash</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<a id="__codelineno-10-12" name="__codelineno-10-12" href="#__codelineno-10-12"></a><span class="w">    </span><span class="c1"># Extended events: an absent key defaults to DISABLED — opt in explicitly.</span>
+<a id="__codelineno-10-13" name="__codelineno-10-13" href="#__codelineno-10-13"></a><span class="w">    </span><span class="nt">bg-settled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<a id="__codelineno-10-14" name="__codelineno-10-14" href="#__codelineno-10-14"></a><span class="w">    </span><span class="nt">permission-needed</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<a id="__codelineno-10-15" name="__codelineno-10-15" href="#__codelineno-10-15"></a><span class="w">    </span><span class="nt">clone-done</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+<h3 id="events">Events<a class="headerlink" href="#events" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Bridge events</strong> — <code>spawn</code> / <code>ready</code> / <code>stop</code> / <code>crash</code>, one JSON <code>POST</code> per
+  transition. <strong>Default on</strong> (an absent key stays enabled); set a key to <code>false</code> to
+  mute it.</li>
+<li><strong>Extended events</strong> — <code>bg-settled</code> (a <code>claude --bg</code> job settled),
+  <code>permission-needed</code> (a hosted session parked a tool-permission prompt — the
+  highest-value "come look" signal), and <code>clone-done</code> (a clone finished). <strong>Default
+  off</strong> — opt in per key, so a sensitive attention signal never starts egressing on
+  upgrade alone. Each carries an <code>event_type</code> discriminator and a distinct shape.</li>
+</ul>
+<p>Every payload is redaction-safe by construction — the raw <code>session_&lt;ULID&gt;</code> (a
+correlatable but non-reversible <code>session_ref</code> is sent instead), clone URLs, and
+permission-prompt bodies are <strong>never</strong> egressed. See
+<a href="../public-api/#lifecycle-webhooks">Public API → Lifecycle webhooks</a> for the exact
+payload schema of every event.</p>
+<p>Behaviour and caveats:</p>
+<ul>
+<li><strong>Fail-open and best-effort.</strong> A slow endpoint is bounded by <code>timeout_seconds</code>
+  and any error is logged and swallowed — a broken webhook never blocks or breaks
+  a spawn/stop. POSTs fire off the event loop and are not awaited on a lifecycle
+  path.</li>
+<li><strong><code>http</code>/<code>https</code> URLs only.</strong> A non-<code>http(s)</code> or malformed URL is rejected at
+  startup (that target is disabled, not a failed spawn). A <code>4xx</code>/<code>5xx</code> from your
+  endpoint is logged but otherwise ignored — there is <strong>no retry</strong>.</li>
+<li><strong>Adopted / reattached bridges don't emit <code>spawn</code>/<code>ready</code>.</strong> Events fire for
+  bridges Clauster itself spawns and manages; a bridge adopted from an external
+  session, or reattached after a Clauster restart, was not spawned here — so
+  <code>ready</code> means "every bridge Clauster brought to RUNNING", not "every RUNNING
+  bridge".</li>
+<li><strong>Secrets in URLs are yours to protect.</strong> A token embedded in a webhook URL is
+  redacted from logs, but keep it out of any shared/committed config. The URL
+  comes only from this config (an operator-trusted source), never from runtime or
+  user input.</li>
+</ul>
+<p>See <a href="../reference/config/#webhooks-outbound-lifecycle-webhooks-webhooksconfig">Configuration → <code>webhooks</code></a>
+for the full field reference.</p>
+<h2 id="reading-the-bridge-debug-log">Reading the bridge debug log<a class="headerlink" href="#reading-the-bridge-debug-log" title="Permanent link">&para;</a></h2>
+<p>When a bridge misbehaves, the bridge's own debug log is the source of truth for
+<em>why</em>. Each bridge writes a <code>--debug-file</code> debug log under the <code>logs/</code>
+subdirectory of your <code>state_dir</code> (default <code>~/.clauster/logs/</code>). Clauster parses
+this file for readiness and the deep link, and streams a sanitized tail of it
+over a WebSocket to the dashboard's live log view.</p>
+<ul>
+<li><strong>From the dashboard</strong> — open the project card's live log tail. It is
+  ANSI-stripped and has session IDs redacted (<code>logs.strip_ansi_in_stream</code>,
+  <code>logs.redact_session_url</code>); this is the everyday path.</li>
+<li><strong>On disk</strong> — the public log under <code>&lt;state_dir&gt;/logs/</code> is, by default, the
+  verbatim debug file (redaction happens only over the WebSocket unless
+  <code>logs.redact_session_url: true</code>, which also redacts the on-disk copy). Tail it
+  directly when the dashboard is unavailable — but <strong>review it and scrub session
+  URLs or secrets before pasting it into a public issue</strong>, even with redaction
+  enabled (the redactor only recognizes known token shapes); the redaction you
+  see in the dashboard does not protect the on-disk copy.
+  The on-disk filename is
+  <code>&lt;label&gt;-&lt;timestamp&gt;-&lt;seq&gt;.log</code>, where <code>&lt;label&gt;</code> is the bridge label (the project
+  name by default), so glob on the label:</li>
+</ul>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a>tail<span class="w"> </span>-f<span class="w"> </span>~/.clauster/logs/&lt;label&gt;-*.log
+</code></pre></div>
+<ul>
+<li><strong>For a Crashed bridge</strong> — the bridge logs its failure reason to its debug file
+  before exiting, so a <code>crashed</code> card's log tail (or the on-disk file) usually
+  shows the cause. A spawn that fails outright also captures a tail of the
+  bridge's stdout/stderr so the UI can show <em>why</em> instead of a bare "Failed to
+  start". <code>clauster logs &lt;instance&gt;</code> reads a dead bridge's log too, so you do not
+  have to find the file yourself — see <a href="../reference/cli/#reading-a-stopped-or-crashed-bridges-log">reading a stopped or crashed bridge's
+  log</a>.</li>
+</ul>
+<p>Bridge lifecycle states you will see on a card or in <code>clauster_bridges</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Status</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>starting</code></td>
+<td>Spawned; waiting to register an environment within <code>startup_grace_seconds</code>.</td>
+</tr>
+<tr>
+<td><code>running</code></td>
+<td>Live and ready.</td>
+</tr>
+<tr>
+<td><code>stopped</code></td>
+<td>Stopped via the Stop button (resumable).</td>
+</tr>
+<tr>
+<td><code>crashed</code></td>
+<td>Exited unexpectedly (not via Stop) — read the debug log.</td>
+</tr>
+<tr>
+<td><code>error</code></td>
+<td>Failed to become ready (e.g. didn't register in time, or the spawn errored).</td>
+</tr>
+</tbody>
+</table>
+<p>A bridge stuck in <code>starting</code> → <code>error</code> most often means a <code>claude-login</code> problem
+(see <code>clauster doctor</code> above) or that the bridge couldn't register within
+<code>startup_grace_seconds</code>.</p>
+<p>A bridge <strong>adopted from another Clauster process</strong> (one started by <code>clauster start</code> or
+<code>clauster mcp</code>, or one that outlived a restart) has no <code>startup_grace_seconds</code> deadline of
+its own, so it never flips to <code>error</code>: it shows <code>starting</code> until its connect details are
+readable, then moves to <code>running</code> on the next poll.</p>
+<h2 id="restart">The <code>KillMode</code> / <code>systemctl restart</code> caveat<a class="headerlink" href="#restart" title="Permanent link">&para;</a></h2>
+<p>This is the single operational gotcha most likely to surprise you.</p>
+<p>Clauster's spawned bridges run <strong>inside the service's cgroup</strong>. With systemd's
+default <code>KillMode=control-group</code>, a <code>systemctl restart</code> (or <code>stop</code>) reaps the
+<strong>whole cgroup</strong> — taking every running bridge down with the service, including
+<code>pty</code> true-resume sessions, even though Clauster's own shutdown leaves them
+running and would reattach them on the next start.</p>
+<p>The unit generated by <code>clauster install-service systemd</code> sets
+<strong><code>KillMode=process</code></strong> so systemd signals only the Clauster process; detached
+bridges keep running and Clauster reattaches them on startup. A deliberate
+<code>stop</code> then leaves bridges running (orphaned until the next start re-adopts
+them) — intentional, so an upgrade restart doesn't drop live coding sessions.</p>
+<ul>
+<li><strong><code>clauster doctor</code> warns</strong> (<code>systemd</code> check) when the loaded <code>clauster.service</code>
+  still uses a reaping <code>KillMode</code>.</li>
+<li><strong>To fix an older unit</strong>: regenerate and reload —</li>
+</ul>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>sudo<span class="w"> </span>clauster<span class="w"> </span>install-service<span class="w"> </span>systemd<span class="w"> </span>--write
+<a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>sudo<span class="w"> </span>systemctl<span class="w"> </span>daemon-reload
+<a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a>sudo<span class="w"> </span>systemctl<span class="w"> </span>restart<span class="w"> </span>clauster.service
+</code></pre></div>
+<p>That one restart still reaps the current pty bridges, but later restarts
+  won't.
+- <strong>A bridge truly lost</strong> to a crash, reboot, or that one reaping restart is
+  still recoverable: its transcript persists locally, so <code>claude --continue</code> in
+  the project directory resumes the conversation.</p>
+<p><code>standard</code>-mode bridges don't restore a conversation on restart regardless; the
+<code>KillMode</code> concern is specifically about not killing live <code>pty</code> sessions. See
+<a href="../architecture/">Architecture → bridge lifecycle</a> and
+<a href="../installation/#run-as-a-systemd-service-linux">Installation → systemd</a>.</p>
+<h2 id="backup-restore-and-corruption-recovery">Backup, restore, and corruption recovery<a class="headerlink" href="#backup-restore-and-corruption-recovery" title="Permanent link">&para;</a></h2>
+<h3 id="routine-backup">Routine backup<a class="headerlink" href="#routine-backup" title="Permanent link">&para;</a></h3>
+<p><code>clauster backup</code> tars the whole <code>state_dir</code> — the <code>clauster.db</code> persistence
+database (the live store for bridge and hosted-session records) plus everything
+else under it — together with the active config into a single archive:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>clauster<span class="w"> </span>backup<span class="w"> </span>-c<span class="w"> </span>/etc/clauster/clauster.yml<span class="w"> </span>-o<span class="w"> </span>/var/backups/
+</code></pre></div>
+<p>Restore it with <code>clauster restore &lt;archive&gt; --state-dir ~/.clauster</code> (the
+<code>--state-dir</code> target is required — point it at your configured <code>state_dir</code>,
+<code>~/.clauster</code> by default). Add <code>--config-out /etc/clauster/clauster.yml</code> to also
+write the config back out, and <code>--force</code> to overwrite a non-empty target.</p>
+<p>The database schema is migrated automatically: on every start Clauster brings
+<code>clauster.db</code> to the latest <a href="https://alembic.sqlalchemy.org/">Alembic</a> revision
+before serving, and <strong>refuses to start</strong> (fail-closed) if that migration fails —
+so a routine upgrade-and-restart is all an in-place schema change needs. The
+separate <code>clauster migrate</code> command is a legacy helper that only upgrades an
+older <code>state.json</code> to the current JSON schema; on a database-backed install (the
+legacy <code>state.json</code> has already been imported and renamed <code>state.json.imported</code>)
+it has no meaningful state to migrate.</p>
+<!-- Legacy anchors: these sections moved to reference/cli.md (same slugs);
+     the stubs keep old operations/#clauster-… deep links landing on the
+     pointer below instead of silently jumping to the top of the page. -->
+<p><a id="clauster-config-reconcile-clean-up-deprecated-config-keys"></a>
+<a id="clauster-keepers-stop-an-orphaned-pty-keeper"></a>
+<a id="clauster-deps-inspect-and-manage-optional-extras"></a></p>
+<p>Looking for <code>clauster config reconcile</code>, <code>clauster keepers</code>, or
+<code>clauster deps</code>? Those maintenance commands moved to
+<a href="../reference/cli/">CLI commands</a>.</p>
+<h3 id="recovering-from-a-corrupted-state-database">Recovering from a corrupted state database<a class="headerlink" href="#recovering-from-a-corrupted-state-database" title="Permanent link">&para;</a></h3>
+<p>Runtime state lives in the SQLite <code>clauster.db</code> under your <code>state_dir</code> (the live
+store for bridge and hosted-session records). Its durability guard is the
+fail-closed schema migration: on every start Clauster brings <code>clauster.db</code> to the
+latest Alembic revision before serving, in a single transaction, and <strong>refuses to
+start</strong> if that migration fails rather than running against a half-migrated
+database (see Routine backup, above). The workspace-trust writes to
+<code>~/.claude.json</code> are atomic <strong>and</strong> additionally keep a one-time <code>.bak</code>.</p>
+<blockquote>
+<p><strong>Legacy note.</strong> Pre-0.12 installs kept state in a JSON <code>state.json</code>, written
+atomically (write a temp file, then <code>os.replace</code>). On a current install that
+file is imported into <code>clauster.db</code> once on first boot and renamed
+<code>state.json.imported</code> — it is never read or written again, so moving it aside
+does nothing.</p>
+</blockquote>
+<p>If <code>clauster.db</code> is ever unreadable (disk fault, a failed migration that refuses
+to start):</p>
+<ol>
+<li><strong>Stop Clauster</strong> so nothing is writing.</li>
+<li>Running pty bridges survive a <code>KillMode=process</code> stop (see above), so this
+     is safe to do.</li>
+<li><strong>Restore from a backup</strong> — <code>clauster restore &lt;archive&gt; --state-dir
+   ~/.clauster</code> (the <code>--state-dir</code> target is required — use your configured
+   <code>state_dir</code>; add <code>--config-out PATH</code> to also restore the config, <code>--force</code> to
+   overwrite a non-empty target). If you have no backup, <strong>move the bad database
+   aside</strong> and let Clauster start with empty state:</li>
+</ol>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a>mv<span class="w"> </span>~/.clauster/clauster.db<span class="w"> </span>~/.clauster/clauster.db.corrupt
+</code></pre></div>
+<p>Clauster starts fresh and <strong>rediscovers</strong> still-running bridges on startup
+   (it matches live processes), so a lost database is not a lost session —
+   you primarily lose recorded metadata, not the bridges themselves.
+3. <strong>For <code>~/.claude.json</code></strong> (workspace trust / remote-control acknowledgement):
+   the trust writer keeps a one-time <code>~/.claude.json.bak</code> taken before its first
+   modification. If that file is damaged, the <code>.bak</code> is the recovery source.
+   Because the <code>claude</code> CLI writes the same file, prefer letting <code>claude</code> rewrite
+   it (re-accept trust from the dashboard) over hand-editing.
+4. <strong>Run <code>clauster doctor</code></strong> to confirm <code>config</code>, <code>state_dir</code>, and <code>claude-login</code>
+   are green before resuming normal operation.</p>
+<p>Keep periodic <code>clauster backup</code> archives off-host so step 2 always has a clean
+restore point.</p>
+<h2 id="a-quick-monitoring-checklist">A quick monitoring checklist<a class="headerlink" href="#a-quick-monitoring-checklist" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Probe <code>/healthz</code></strong> from your load balancer / systemd / container runtime
+  (unauthenticated liveness is enough for the probe).</li>
+<li><strong>Scrape <code>/metrics</code></strong> (enable <code>observability.prometheus_enabled</code>, authenticated
+  scrape) and alert on sustained <code>clauster_bridges{status="crashed"}</code> /
+  <code>="error"</code>.</li>
+<li><strong>Wire <code>notifications</code></strong> with <code>notify_on_crash</code> for push alerts on unexpected
+  bridge exits.</li>
+<li><strong>Run <code>clauster doctor</code></strong> after any config change or upgrade; it catches the
+  logged-out-<code>claude</code>, non-loopback-without-auth, and reaping-<code>KillMode</code> traps.</li>
+<li><strong><code>clauster backup</code> on a schedule</strong>, archives stored off-host.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; schubydoo — Apache-2.0
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.top", "navigation.instant", "navigation.tracking", "toc.follow", "content.code.copy", "search.suggest", "search.highlight"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
