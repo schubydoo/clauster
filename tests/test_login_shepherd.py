@@ -216,6 +216,28 @@ def test_extract_url_trims_and_strips_ansi() -> None:
     assert ls._extract_authorize_url(out) == "https://claude.ai/authorize?fake=1"
 
 
+def test_extract_url_is_not_polluted_by_an_osc8_hyperlink() -> None:
+    # #1329: `strip_ansi` used to consume only the `ESC ]` introducer of an OSC 8
+    # hyperlink, so the escape's own target welded onto the visible label and the closing
+    # sequence's `8;;` — the plain-pipe reader handed the operator
+    # "https://…/authorize?real=1\x07claude.com8;;\x07" to open. The whole OSC sequence is
+    # removed now, target included, so what is scanned is the visible text only. With no
+    # visible URL left there is nothing to offer and the reader keeps waiting (fail
+    # closed) rather than surfacing a mangled link.
+    out = (
+        "Open \x1b]8;;https://claude.ai/oauth/authorize?real=1\x07claude.com\x1b]8;;\x07"
+        " in your browser."
+    )
+    assert ls._extract_authorize_url(out) is None
+
+
+def test_extract_url_survives_an_osc_title_sequence() -> None:
+    # The common real shape: the CLI sets its terminal title, then prints the link as
+    # visible text. The title text must not become a candidate, and the link must survive.
+    out = "\x1b]0;claude — login\x07Then authorize at https://claude.ai/oauth/authorize?real=1"
+    assert ls._extract_authorize_url(out) == "https://claude.ai/oauth/authorize?real=1"
+
+
 def test_extract_url_docs_subdomain_is_not_an_auth_host() -> None:
     # `docs.anthropic.com` is a subdomain of a known parent (anthropic.com) but is a docs
     # page, NOT an auth endpoint — a docs link printed BEFORE the real authorize URL must
