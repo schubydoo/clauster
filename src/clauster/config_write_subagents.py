@@ -120,12 +120,9 @@ _PLUGIN_ROOT_MARKER = "CLAUDE_PLUGIN_ROOT"
 #: Frontmatter keys required on every subagent (Claude Code's own requirement).
 _REQUIRED_FRONTMATTER_KEYS = frozenset({"name", "description"})
 
-# A frontmatter block: ``---`` on its own line, the YAML body, then a closing ``---``
-# on its own line (optionally followed by the rest of the file). DOTALL so `.` spans
-# newlines inside the captured YAML; non-greedy so the FIRST closing `---` ends the
-# block (a body that itself contains a `---` line is not swallowed into the header).
 # THE SAME OBJECT config_write_skills uses — an alias, not a copy, so the two parsers
-# on this write tier cannot drift apart again (#1352). Change it in config_write.
+# on this write tier cannot drift apart again (#1352). The pattern, its mechanics and
+# its tolerance decisions are documented at the definition — change it in config_write.
 _FRONTMATTER_RE = cw.FRONTMATTER_RE
 
 

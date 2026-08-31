@@ -712,6 +712,10 @@ def capability_status(config: ClausterConfig) -> dict[str, bool]:
 #: object, aliased by both modules, makes that class of drift structurally impossible
 #: rather than merely tested for. The tolerant direction is deliberate: an editor that
 #: strips nothing on save is the common case, and rejecting such a file helps no one.
+#:
+#: Mechanics: DOTALL so ``.`` spans newlines inside the captured YAML; non-greedy so the
+#: FIRST closing ``---`` ends the block (a body that itself contains a ``---`` line is
+#: not swallowed into the header).
 FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*\r?\n?", re.DOTALL)
 
 
@@ -724,18 +728,24 @@ def load_frontmatter_yaml(header: str, *, what: str) -> Any:
     :class:`InvalidCandidateError` escapes — is enforced in one place.
 
     ``safe_load`` never evaluates the document (no ``python/object`` construction), but
-    it does raise outside :class:`yaml.YAMLError` for three separate reasons, each of
-    which used to reach the route as a 500 on a path documented to fail as a 422:
+    the composer and ``SafeConstructor`` can raise outside :class:`yaml.YAMLError`, and
+    each escape used to reach the route as a 500 on a path documented to fail as a 422:
 
     * ``RecursionError`` — deeply-nested flow collections overflow the composer before it
       can raise ``YAMLError`` (#1326).
-    * ``ValueError`` / ``KeyError`` / ``AttributeError`` — a resolvable **explicit tag**
-      whose value does not fit it: ``!!int x`` and ``!!float x`` raise ``ValueError``,
-      ``!!bool x`` a ``KeyError``, and ``!!timestamp x`` an ``AttributeError``
-      (``construct_yaml_timestamp`` calls ``.groupdict()`` on an unchecked ``re.match``).
-      Every *other* tag already fails as a ``ConstructorError``, which is a ``YAMLError``
-      (#1354). Caught only around the ``safe_load`` call itself, so nothing beyond the
-      parse is swallowed.
+    * A resolvable **explicit tag** whose scalar does not fit it (#1354): ``!!int x`` and
+      ``!!float x`` raise ``ValueError``, ``!!bool x`` a ``KeyError``, ``!!timestamp x``
+      an ``AttributeError`` (``construct_yaml_timestamp`` calls ``.groupdict()`` on an
+      unchecked ``re.match``), and an **empty or all-underscore scalar** under ``!!int``
+      / ``!!float`` an ``IndexError`` — both constructors index the scalar before
+      parsing it. Every *other* tag already fails as a ``ConstructorError``, which is a
+      ``YAMLError``. Caught only around the ``safe_load`` call itself, so nothing beyond
+      the parse is swallowed.
+
+    The bullets record where each class was SEEN, not a proof of exhaustiveness — the
+    fuzz harness (``fuzz/parse_frontmatter_fuzzer.py``) is what hunts for members this
+    tuple is still missing; a new one belongs in the tuple below, not in a wider
+    blanket ``except``.
 
     All of them are the same structural verdict — we could not parse the header, so we
     refuse to act on it. Fails closed: this only ever converts a crash into a rejection,
@@ -747,9 +757,9 @@ def load_frontmatter_yaml(header: str, *, what: str) -> Any:
         raise InvalidCandidateError(f"{what} is not valid YAML: {exc}") from exc
     except RecursionError as exc:
         raise InvalidCandidateError(f"{what} is nested too deeply to parse") from exc
-    except (ValueError, KeyError, AttributeError) as exc:
+    except (ValueError, KeyError, AttributeError, IndexError) as exc:
         # The class name ONLY — never the exception's payload. PyYAML embeds the offending
-        # scalar in all four of these ("KeyError('<the value>')"), and this message is
+        # scalar in the unfitting-value shapes ("KeyError('<the value>')"), and this message is
         # surfaced to the browser as a skill's ``frontmatter_error``, so echoing it would
         # put a credential pasted into a frontmatter value straight onto the dashboard:
         # :func:`redact_secret_lines` scans line-anchored ``key: value`` pairs, and a bare

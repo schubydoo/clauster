@@ -113,6 +113,17 @@ def test_parse_frontmatter_rejects_explicit_tag_with_an_unfitting_value(
     assert isinstance(excinfo.value.__cause__, raised)
 
 
+@pytest.mark.parametrize("value", ["!!int", "!!float", "!!int __"])
+def test_parse_frontmatter_rejects_explicit_int_tag_with_an_empty_scalar(value: str) -> None:
+    # Review catch on the first fix for issue 1354: construct_yaml_int/float INDEX the
+    # scalar before parsing it, so an empty (or all-underscore, which strips to empty)
+    # scalar raises IndexError — none of the unfitting-value trio above — and still
+    # escaped as a 500 until IndexError joined the shared handler's tuple.
+    with pytest.raises(cw.InvalidCandidateError, match="YAML tag") as excinfo:
+        sk.parse_frontmatter(f"---\nname: {value}\ndescription: d\n---\nbody\n")
+    assert isinstance(excinfo.value.__cause__, IndexError)
+
+
 def test_parse_frontmatter_tag_rejection_does_not_echo_the_value() -> None:
     # Invariant 4. PyYAML embeds the offending scalar in all four of these exceptions
     # ("KeyError('<the value>')"), and list_skills surfaces this message to the browser as

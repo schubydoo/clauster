@@ -103,6 +103,18 @@ def test_parse_frontmatter_rejects_explicit_tag_with_an_unfitting_value(
     assert isinstance(excinfo.value.__cause__, raised)
 
 
+@pytest.mark.parametrize("value", ["!!int", "!!float", "!!int __"])
+def test_parse_frontmatter_rejects_explicit_int_tag_with_an_empty_scalar(value: str) -> None:
+    # Review catch on the first fix for issue 1354: construct_yaml_int/float INDEX the
+    # scalar before parsing it, so an empty (or all-underscore, which strips to empty)
+    # scalar raises IndexError — none of the unfitting-value trio above — and still
+    # escaped as a 500 until IndexError joined the shared handler's tuple. Same test in
+    # the SKILL.md parser's module, as for the trio.
+    with pytest.raises(cw.InvalidCandidateError, match="YAML tag") as excinfo:
+        sub.parse_frontmatter(f"---\nname: {value}\ndescription: d\n---\nbody\n")
+    assert isinstance(excinfo.value.__cause__, IndexError)
+
+
 def test_parse_frontmatter_tolerates_trailing_whitespace_on_a_fence() -> None:
     # #1352: the fence pattern accepts trailing spaces/tabs on either `---` line, and the
     # whitespace belongs to the fence rather than to the body. Shared byte-for-byte with
