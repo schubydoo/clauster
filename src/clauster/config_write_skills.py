@@ -155,7 +155,10 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     :func:`clauster.config_write_subagents.parse_frontmatter` (see
     :data:`~clauster.config_write.FRONTMATTER_RE` and
     :func:`~clauster.config_write.load_frontmatter_yaml`) — the two parsers guard the
-    same code-executing write tier and must not drift.
+    same code-executing write tier and must not drift. One deliberate difference
+    remains: an empty header (YAML ``None``) is rejected here as a non-mapping, while
+    the subagents parser reads it as an empty mapping and lets its own validator
+    reject it for the missing keys.
     """
     match = _FRONTMATTER_RE.match(content)
     if not match:

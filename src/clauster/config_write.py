@@ -703,13 +703,15 @@ def capability_status(config: ClausterConfig) -> dict[str, bool]:
 #: :mod:`clauster.config_write_subagents` and :mod:`clauster.config_write_skills`.
 #: Both surfaces are code-executing (a header becomes a subagent's ``tools`` or a
 #: skill's ``allowed-tools``), so a file must not parse in one and be rejected — or
-#: split differently — in the other. It lived as two near-identical copies until
-#: they drifted on exactly that: the subagent copy tolerated trailing spaces/tabs on
-#: a fence and the skill copy did not, so ``---\na: 1\n--- \nbody`` yielded a body of
-#: ``'body'`` from one and ``' \nbody'`` from the other (#1352). One object, aliased
-#: by both modules, makes that class of drift structurally impossible rather than
-#: merely tested for. The tolerant direction is deliberate: an editor that strips
-#: nothing on save is the common case, and rejecting such a file helps no one.
+#: split differently — in the other. It lived as two near-identical copies until they
+#: drifted on trailing spaces/tabs after a ``---``, in both directions (#1352): on the
+#: OPENING fence the skill copy rejected what the subagent copy accepted, so one file
+#: was a 422 on one surface and a write on the other; on the CLOSING fence both
+#: matched, but the skill copy handed the whitespace back as the head of the body, so
+#: ``---\na: 1\n--- \nbody`` split as ``'body'`` here and ``' \nbody'`` there. One
+#: object, aliased by both modules, makes that class of drift structurally impossible
+#: rather than merely tested for. The tolerant direction is deliberate: an editor that
+#: strips nothing on save is the common case, and rejecting such a file helps no one.
 FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*\r?\n?", re.DOTALL)
 
 
@@ -746,8 +748,15 @@ def load_frontmatter_yaml(header: str, *, what: str) -> Any:
     except RecursionError as exc:
         raise InvalidCandidateError(f"{what} is nested too deeply to parse") from exc
     except (ValueError, KeyError, AttributeError) as exc:
+        # The class name ONLY — never the exception's payload. PyYAML embeds the offending
+        # scalar in all four of these ("KeyError('<the value>')"), and this message is
+        # surfaced to the browser as a skill's ``frontmatter_error``. Unlike a YAMLError,
+        # whose mark puts the source on its own indented ``key: value`` line that
+        # :func:`redact_secret_lines` masks, a bare payload lands mid-line where the
+        # line-anchored key/value scanner cannot reach it — so echoing it would leak a
+        # credential pasted into a frontmatter value straight onto the dashboard.
         raise InvalidCandidateError(
-            f"{what} has a YAML tag its value does not satisfy: {exc!r}"
+            f"{what} has a YAML tag its value does not satisfy ({type(exc).__name__})"
         ) from exc
 
 

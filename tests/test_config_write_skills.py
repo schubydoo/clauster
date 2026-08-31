@@ -113,6 +113,23 @@ def test_parse_frontmatter_rejects_explicit_tag_with_an_unfitting_value(
     assert isinstance(excinfo.value.__cause__, raised)
 
 
+def test_parse_frontmatter_tag_rejection_does_not_echo_the_value() -> None:
+    # Invariant 4. PyYAML embeds the offending scalar in all four of these exceptions
+    # ("KeyError('<the value>')"), and list_skills surfaces this message to the browser as
+    # `frontmatter_error`. redact_secret_lines cannot save it: its key/value scanner is
+    # line-anchored, so a payload sitting mid-message is unreachable — unlike a YAMLError,
+    # whose mark puts the source on its own indented `key: value` line. So the handler
+    # names the exception CLASS and never its payload. The value below is low-entropy
+    # padding on purpose (a secret-shaped literal in any commit fails the gitleaks gate).
+    secret = "FAKEFAKEFAKEFAKEFAKEfake42"
+    with pytest.raises(cw.InvalidCandidateError) as excinfo:
+        sk.parse_frontmatter(f"---\napi_key: !!bool {secret}\n---\nbody\n")
+    message = str(excinfo.value)
+    assert secret.lower() not in message.lower()
+    assert secret.lower() not in cw.redact_secret_lines(message).lower()
+    assert "KeyError" in message
+
+
 def test_parse_frontmatter_tolerates_trailing_whitespace_on_a_fence() -> None:
     # #1352: this parser used to REJECT a fence carrying a trailing space while the
     # subagents parser accepted it, so the same file parsed on one surface of the write

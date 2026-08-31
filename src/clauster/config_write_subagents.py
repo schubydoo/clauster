@@ -247,7 +247,9 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     :func:`clauster.config_write_skills.parse_frontmatter` (see
     :data:`~clauster.config_write.FRONTMATTER_RE` and
     :func:`~clauster.config_write.load_frontmatter_yaml`) — the two guard the same
-    code-executing tier and must not drift.
+    code-executing tier and must not drift. One deliberate difference remains: an empty
+    header (YAML ``None``) is an empty mapping here and a rejection there, so the two
+    still differ on what they ACCEPT even though they now split identically.
     """
     match = _FRONTMATTER_RE.match(text)
     if not match:
