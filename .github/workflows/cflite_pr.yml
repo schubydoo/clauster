@@ -34,6 +34,11 @@ permissions: {}
 jobs:
   pr-fuzzing:
     runs-on: ubuntu-latest
+    # Skip draft PRs: at 11–39 min this is one of the pricier PR jobs, and a draft is
+    # still churning. `ready_for_review` is already in the trigger `types:` above, so
+    # flipping a PR out of draft re-fires this workflow and the guard then lets it run
+    # (#623). `!= true` (not `== false`) is the fail-safe form the peer guards use.
+    if: github.event.pull_request.draft != true
     # Was the only cflite job on GitHub's 360-minute default. Sized from the last 15
     # successful runs (11m09s–38m54s): the driver is NOT `fuzz-seconds: 180` but the
     # BUILD of all 18 harnesses (~41s of PyInstaller each, ≈12 min), which is why this
