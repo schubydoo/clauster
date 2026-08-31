@@ -108,9 +108,22 @@ _TOKEN_RE = re.compile(r"CLAUDE_CODE_OAUTH_TOKEN=(\S+)")
 # inside the escape — pyte (0.8.2, empirically verified) drops it entirely, rendering just
 # the visible link label, so a display scan returns None. We capture the URI straight from
 # the raw byte stream instead. ``<params>`` (e.g. ``id=foo``) is ``:``-separated and carries
-# no ``;``, so ``[^;]*`` is a safe match for it; the URI capture stops at the ST (``ESC \``)
-# or BEL terminator. The closing sequence ``ESC ] 8 ; ; ST`` carries an empty URI (skipped).
-_OSC8_RE = re.compile(rb"\x1b\]8;[^;]*;([^\x1b\x07]*)(?:\x1b\\|\x07)")
+# no ``;``; the URI capture stops at the ST (``ESC \``) or BEL terminator. The closing
+# sequence ``ESC ] 8 ; ; ST`` carries an empty URI (skipped).
+#
+# ⚠️ The params class excludes ESC/BEL/CR/LF as well as ``;`` (#1356). A bare ``[^;]*``
+# admits ESC, so a stray, never-terminated ``ESC ]8;`` earlier in the stream swallowed the
+# NEXT opener into its own params run and matched the URI one character early: the real
+# authorize URL came back as ``;https://…``, failed ``_scan_osc8``'s ``https://`` filter, and
+# the operator was shown no link at all — on the ConPTY path (#905) the only recoverable copy.
+# Whether that happened depended on where a ``read()`` landed, since ``_scan_osc8``'s carry
+# restarts at the last opener; excluding ESC ends a stray opener at the next escape instead,
+# the same discipline ``redact._ANSI_RE`` adopted for OSC bodies in #1329. Note this covers
+# the PARAMS run only: the URI capture two characters later still admits ``;``, CR and LF, so
+# an unterminated hyperlink can still take a following line's text into its URI. Pre-existing
+# and out of scope for #1356 — the host + authorize-path filter in
+# :meth:`PtyScreen.find_authorize_url` is what stands between that and an operator.
+_OSC8_RE = re.compile(rb"\x1b\]8;[^;\x1b\x07\r\n]*;([^\x1b\x07]*)(?:\x1b\\|\x07)")
 
 # Bound on the raw-byte tail carried between :meth:`PtyScreen.feed` calls so a hyperlink
 # split across a chunk boundary still matches — comfortably larger than the ~450-char
@@ -560,6 +573,33 @@ class PtyScreen:
             display = list(self._screen.display)
         return extract_oauth_token(_unwrap_display(display))
 
+    def _fit_redacted_row(self, row: str) -> str:
+        r"""Fit one redacted ``row`` to exactly ``cols``, re-redacting whatever the trim exposed.
+
+        Trimming redacted text is not safe on its own (#1359, safety invariant 4).
+        :data:`redact._ID_RE` ends in ``\b``, so ``cse_01JABCDEFGHJKMN_more`` is correctly not an
+        identifier and is correctly left unmasked — but redaction can LENGTHEN a row
+        (``session_ABCDEF`` masks to the four-character-longer ``session_<redacted>``), and
+        cutting that row back to ``cols`` drops the ``_more`` and manufactures the word boundary
+        the pattern needs. A bare, matchable identifier would then reach the browser purely
+        because of the trim; a cursor-addressed TUI puts text against the column boundary
+        constantly, and any word character triggers it.
+
+        So a row the trim actually shortened is redacted again. One extra pass is enough, for
+        two reasons that compose. First, the trim can only create a boundary at the END —
+        everything before the cut is untouched and was already redacted — so the second pass
+        can only mask a suffix. Second, only :data:`redact._ID_RE` can lengthen a row at all:
+        every other mask is the bare 10-character ``<redacted>`` replacing a match of at least
+        15 characters, so it always shrinks. And ``_ID_RE``'s shortest match is ``prefix`` + 6
+        while its mask is ``prefix`` + 10, so when the final trim cuts inside that mask it
+        provably keeps at least ``cse_<redac`` — a ``<`` in the position the pattern needs an
+        alphanumeric. There is nothing left for a third pass to find.
+        """
+        fitted = row[: self.cols]
+        if fitted != row:  # only a row the trim shortened can have gained a boundary
+            fitted = redact_screen_text([fitted])[0][: self.cols]
+        return fitted.ljust(self.cols)
+
     def frame(self) -> dict[str, Any]:
         """Return the current screen as a redacted, cells-only frame.
 
@@ -567,17 +607,17 @@ class PtyScreen:
         "cols": int, "rows_count": int}``. No raw ANSI and no terminal title ever appear:
         the rows are pyte-rendered plaintext run through :func:`redact_screen_text`.
 
-        Each row is re-fit to exactly ``cols`` characters AFTER redaction — masking can
+        Each row is re-fit to exactly ``cols`` characters after redaction — masking can
         shorten or lengthen a row (see :func:`redact_screen_text`), and the client draws a
         fixed ``cols`` x ``rows_count`` grid, so an off-width row would corrupt the
-        geometry (a too-long row wraps). Truncation only trims the right edge, so it can
-        never expose a redacted span.
+        geometry (a too-long row wraps). Because that re-fit can *create* a match the
+        redactor was right to leave alone, :meth:`_fit_redacted_row` redacts the fitted
+        text again — see there for why one extra pass is enough (#1359).
         """
         with self._lock:
             cursor_x, cursor_y = self._screen.cursor.x, self._screen.cursor.y
             display = list(self._screen.display)
-        redacted = redact_screen_text(display)
-        rows = [row[: self.cols].ljust(self.cols) for row in redacted]
+        rows = [self._fit_redacted_row(row) for row in redact_screen_text(display)]
         return {
             "rows": rows,
             "cursor": {"x": cursor_x, "y": cursor_y},

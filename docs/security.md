@@ -319,6 +319,13 @@ debugging), and only the WebSocket stream is redacted. Set
 stripping in the stream is controlled by `logs.strip_ansi_in_stream` (default
 on).
 
+Turning stripping **off** (the dashboard's "Strip ANSI colours in stream" toggle)
+keeps a line's color only when two checks both pass: the line must be as redacted
+as the stripped view, and it must carry nothing unmasked inside an OSC/DCS-style
+string sequence's payload. A line failing either check is streamed stripped and
+redacted instead — within the shape limits noted above, color is what gets
+sacrificed, never redaction.
+
 ## Clone / SSRF guards
 
 Project clone URLs are user-supplied and hit the network from the host, so

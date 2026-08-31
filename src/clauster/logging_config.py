@@ -24,9 +24,12 @@ def _redact(text: str) -> str:
 
     Runs against an ANSI-stripped view first — as ``redact.sanitize_line`` does — so a
     colorised library log can't smuggle a secret past the ``\b``-anchored id/secret
-    regexes by splitting an identifier with an escape sequence.
+    regexes by splitting an identifier with an escape sequence. Delegates rather than
+    repeating those passes inline: stripping can also SPLICE two word characters together
+    and destroy the boundary the masks need, and :func:`redact.redact_stripped` is where
+    that second view is handled for every egress path at once.
     """
-    return redact.redact_secrets(redact.redact_ids(redact.strip_ansi(text)))
+    return redact.redact_stripped(text)
 
 
 class RedactingTextFormatter(logging.Formatter):
