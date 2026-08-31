@@ -111,8 +111,12 @@ fuzz-coverage signal we have; if the Python path stops producing them without
 producing a report, revert `language` on the *coverage job only* — the PR and batch
 jobs need it for the crash-reproduce timeout regardless. (On prune it is inert:
 cifuzz's prune path returns `testcase=None` and never reaches the reproduce step.)
-Wait for the cron rather than dispatching it by hand: a dispatch runs unmerged
-workflow code with the write PAT and pushes to the real `gh-pages`.
+Wait for the cron rather than dispatching it by hand. The write PAT is an environment
+secret in `fuzz-corpus`, whose `main`-only deployment-branch policy GitHub enforces
+server-side, so a dispatch of the prune or coverage job from a feature branch cannot
+reach it (their `if: github.ref == 'refs/heads/main'` is belt-and-braces). A dispatch
+*from main* still runs and still pushes to the real `gh-pages` with that PAT — so the
+advice stands.
 
 Expect the artefact *shape* to change on the Python path even when it works:
 `<harness>.log` is still written, but `_error.log` and the `MERGE-` lines are

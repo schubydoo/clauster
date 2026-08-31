@@ -24,12 +24,34 @@ on:
       # it (found on the PR that hash-pinned the installs — its rewritten build.sh
       # was never run by CI because this filter skipped the job).
       - ".clusterfuzzlite/**"
+      # This workflow itself, for the same reason: a PR that changes how the PR fuzzer
+      # RUNS (timeouts, inputs, the `language` that sets the reproduce budget) would
+      # otherwise never execute the rewritten job pre-merge.
+      - ".github/workflows/cflite_pr.yml"
 
 permissions: {}
 
 jobs:
   pr-fuzzing:
     runs-on: ubuntu-latest
+    # Skip draft PRs: at 11–39 min this is one of the pricier PR jobs, and a draft is
+    # still churning. `ready_for_review` is already in the trigger `types:` above, so
+    # flipping a PR out of draft re-fires this workflow and the guard then lets it run
+    # (#623). `!= true` (not `== false`) is the fail-safe form the peer guards use.
+    # NB the `types:` above omit `synchronize`, so a change to how the PR fuzzer RUNS that
+    # is pushed AFTER open/reopen/ready fires no event and can merge without this job
+    # re-running — the deliberate cost trade recorded at the top, not a bug.
+    if: github.event.pull_request.draft != true
+    # Was the only cflite job on GitHub's 360-minute default. Sized from the last 15
+    # successful runs (11m09s–38m54s): the driver is NOT `fuzz-seconds: 180` but the
+    # BUILD of all 18 harnesses (~41s of PyInstaller each, ≈12 min), which is why this
+    # job sits at or above the band of batch/prune (55) and coverage (60) despite the
+    # far smaller fuzz budget. 75 rather than 60 so the headroom holds at the OBSERVED
+    # MAX and not merely at a typical run: 39 + one full crash-triage cycle (10
+    # reproduce attempts x 120s = 20 min, the python reproduce timeout that
+    # `language: python` selects) = 59, which 60 would clear by a single minute.
+    # A hung job now dies in 75 min instead of 360.
+    timeout-minutes: 75
     permissions:
       contents: read
       security-events: write

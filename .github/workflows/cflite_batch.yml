@@ -8,8 +8,10 @@
 # Corpus persistence: this run clones the corpus from a private `storage-repo`
 # (schubydoo/clauster-fuzz-corpus, auth via the FUZZ_STORAGE_TOKEN PAT), fuzzes,
 # and pushes the grown corpus back — so coverage *compounds* across runs and
-# reaches the deeper bugs a from-seed run never finds. The write PAT lives ONLY
-# here (cron + workflow_dispatch, no fork exposure); cflite_pr.yml deliberately
+# reaches the deeper bugs a from-seed run never finds. The write PAT is an environment
+# secret (`fuzz-corpus`, `main`-only branch policy that GitHub enforces server-side — see
+# the job `if:` below), reachable only from these main-branch jobs (cron + a main-gated
+# workflow_dispatch, no fork exposure); cflite_pr.yml deliberately
 # does NOT carry it (a fork PR with a write secret is an exfil surface). If the
 # PAT is ever rotated/expired, this job keeps passing but silently stops
 # accumulating. See https://google.github.io/clusterfuzzlite/.
@@ -36,6 +38,16 @@ permissions: {}
 jobs:
   batch-fuzzing:
     name: batch fuzzing
+    # FUZZ_STORAGE_TOKEN is an environment secret in `fuzz-corpus`, whose deployment-branch
+    # policy limits it to `main`. GitHub checks the run's ref against that policy BEFORE the
+    # job starts and it is not overridable by the workflow file, so a dispatch from an
+    # arbitrary ref can never reach the write PAT below. (A job-level `if:` alone cannot
+    # deliver this: a workflow_dispatch runs the SELECTED ref's own copy of this file, so a
+    # branch that deleted the `if:` would bypass it — the environment is checked server-side.)
+    # The `if:` stays as cheap belt-and-braces: it skips an accidental dispatch from a
+    # non-default ref before a runner even spins up.
+    environment: fuzz-corpus
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # ≈ fuzz-seconds + build. The ≈12 min was observed at 8 harnesses / 300s; at 18 the
     # build step dominates (~41s each) and the run projects to ≈25 min — still 2x headroom.
