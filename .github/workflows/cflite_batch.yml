@@ -23,7 +23,7 @@
 # target), and it dominates here: ≈12 min observed against a 300s budget. Adding
 # harnesses is therefore a coverage-dilution decision, not a timeout one: raise
 # `fuzz-seconds` in step with the harness count to hold the per-harness slice, and
-# re-check `timeout-minutes`. At 413s / 11 harnesses that slice is ~37s.
+# re-check `timeout-minutes`. At 666s / 18 harnesses that slice is ~37s.
 name: ClusterFuzzLite batch fuzzing
 
 on:
@@ -37,7 +37,9 @@ jobs:
   batch-fuzzing:
     name: batch fuzzing
     runs-on: ubuntu-latest
-    timeout-minutes: 55 # ≈ fuzz-seconds + build; generous headroom (observed ≈12 min)
+    # ≈ fuzz-seconds + build. The ≈12 min was observed at 8 harnesses / 300s; at 18 the
+    # build step dominates (~41s each) and the run projects to ≈25 min — still 2x headroom.
+    timeout-minutes: 55
     permissions:
       contents: read # checkout + build the harnesses
       security-events: write # upload crash SARIF to the Security tab
@@ -65,12 +67,14 @@ jobs:
           # Atheris crashes as "unreproducible". See cflite_pr.yml for the detail.
           language: python
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          # TOTAL for the run, split across the harnesses (see the header). 413 not 375
-          # because this branch took the harness count 10 -> 11: the loop floors, and
-          # 413//11 == 375//10 == 300//8 == 37s each, so the new harness costs the
-          # existing ten nothing. The extra 38s is nothing against `timeout-minutes: 55`
-          # and a ≈12 min observed run.
-          fuzz-seconds: 413
+          # TOTAL for the run, split across the harnesses (see the header). 666 not 413
+          # because this branch took the harness count 11 -> 18: the loop floors, and
+          # 666//18 == 413//11 == 375//10 == 300//8 == 37s each, so the seven new
+          # harnesses cost the existing eleven nothing. The extra 253s is ~4 min against
+          # `timeout-minutes: 55` and a ≈12 min observed run — note the per-harness cost
+          # that actually scales is PyInstaller in the BUILD step (~41s each), which
+          # `fuzz-seconds` does not govern; at 18 harnesses expect ≈25 min end to end.
+          fuzz-seconds: 666
           mode: batch
           sanitizer: ${{ matrix.sanitizer }}
           output-sarif: true

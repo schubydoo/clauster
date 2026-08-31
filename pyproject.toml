@@ -155,7 +155,12 @@ pty = [
 ]
 fuzz = [
     # Standalone-fuzzing convenience extra: `uv pip install '.[fuzz]'` then
-    # `python fuzz/<name>_fuzzer.py -max_total_time=60`. atheris is also in `dev`
+    # `python fuzz/<name>_fuzzer.py -max_total_time=60`. NB `pty_screen_feed_fuzzer` drives
+    # the real PtyScreen and additionally needs the OPTIONAL `pty` extra (pyte) — without it
+    # it raises PyteUnavailableError on every input, so use `.[fuzz,pty]` for that one. The
+    # same reason `.clusterfuzzlite/build.sh` installs `clauster[pty]`; the licensing
+    # rationale for keeping pyte optional lives on the `pty` extra above.
+    # atheris is also in `dev`
     # (so the import-smoke test runs in the default suite); this extra keeps the
     # fuzzing dependency discoverable on its own. Marked linux-only — atheris has
     # no Windows/macOS wheels, so an unmarked dep would break cross-platform

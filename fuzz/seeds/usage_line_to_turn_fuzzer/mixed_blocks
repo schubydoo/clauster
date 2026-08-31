@@ -1,0 +1,1 @@
+{"message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}},{"type":"tool_result","content":"ok"},{"type":"thinking"},{"type":""},"bare string block",5,null]}}

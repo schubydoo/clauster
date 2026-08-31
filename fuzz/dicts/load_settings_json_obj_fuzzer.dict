@@ -1,0 +1,64 @@
+# libFuzzer dictionary for load_settings_json_obj_fuzzer (config_write.load_settings_json_obj).
+# The accept path is gated on literal JSON structure, and the interesting *rejections* are
+# gated on tokens random bytes never synthesise: the JSON extension literals (NaN/Infinity)
+# that make `==` unusable as an oracle, the non-object top levels, and the UTF-8 shapes that
+# make `bytes.decode` raise. See fuzz/README.md.
+
+# structure
+"{"
+"}"
+"["
+"]"
+"\"\""
+":"
+","
+"{}"
+"[]"
+"\"a\":"
+"{\"a\":1}"
+
+# scalar literals
+"null"
+"true"
+"false"
+"0"
+"-0"
+"1e400"
+"0.0"
+
+# the JSON extensions python's decoder accepts and `==` cannot compare
+"NaN"
+"Infinity"
+"-Infinity"
+
+# escape forms, incl. the surrogate pair the decoder builds a lone surrogate from
+"\\u0000"
+"\\ud800"
+"\\ud800\\udc00"
+"\\\\"
+"\\\""
+
+# real settings.json keys, so the corpus grows toward plausible files
+"\"permissions\""
+"\"allow\""
+"\"deny\""
+"\"hooks\""
+"\"env\""
+"\"model\""
+"\"enableAllProjectMcpServers\""
+
+# whitespace-only bodies (the documented `{}` shortcut) and a BOM
+" "
+"\x09"
+"\x0a"
+"\xef\xbb\xbf"
+
+# invalid UTF-8: a lone continuation byte and a truncated 4-byte sequence, the
+# UnicodeDecodeError branch that must surface as InvalidCandidateError
+"\x80"
+"\xf0\x9f"
+"\xff\xfe"
+
+# deep nesting, the RecursionError path the decoder takes before JSONDecodeError
+"[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[["
+"{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":"

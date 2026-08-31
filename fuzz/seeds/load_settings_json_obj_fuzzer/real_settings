@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": ["Bash(git status)", "Read"],
+    "deny": ["Bash(rm -rf *)"]
+  },
+  "env": {"FOO": "bar"},
+  "model": "claude-opus-4"
+}

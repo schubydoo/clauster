@@ -1,0 +1,5 @@
+---
+description: d
+script: ${CLAUDE_PLUGIN_ROOT}/run.sh
+---
+body

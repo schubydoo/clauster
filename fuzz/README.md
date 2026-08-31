@@ -4,7 +4,7 @@ Coverage-guided fuzz harnesses for clauster's untrusted-input parsers. They run
 in CI via [ClusterFuzzLite](https://google.github.io/clusterfuzzlite/) two ways:
 per-PR over the changed code (`.github/workflows/cflite_pr.yml`, `address`
 sanitizer, ~180s) and an every-other-day scheduled batch over **every** harness
-(`.github/workflows/cflite_batch.yml`, 413s) whose corpus **persists across
+(`.github/workflows/cflite_batch.yml`, 666s) whose corpus **persists across
 runs** in a private storage repo, so coverage compounds over time. Note
 `fuzz-seconds` is a **total** budget CFLite splits across the harnesses, not a
 per-target one — adding a harness thins every harness's slice rather than
@@ -28,16 +28,26 @@ Security tab. Build config lives in [`.clusterfuzzlite/`](../.clusterfuzzlite/).
 | `load_trusted_paths_fuzzer.py` | `discovery._load_trusted_paths` | parses the user-editable `~/.claude.json`; must degrade any malformed file to an empty set. Found + fixed a non-dict-JSON `AttributeError` (the #122 class) |
 | `auth_headers_fuzzer.py` | `auth.verify_proxy_hmac` + `auth.parse_bearer` | the two **pre-authentication** header parsers on the same boundary as `normalize_origin`. `verify_proxy_hmac` must return `False` on any malformation, never raise (it already 500'd once on a non-ASCII signature via `compare_digest`'s `TypeError`). Also builds a correctly signed header per input so the accept path is exercised, not just the reject path |
 | `redact_secret_lines_fuzzer.py` | `config_write.redact_secret_lines` | **differential.** The line-oriented redaction every free-text read path runs over a file that arrived with a cloned repo. Its three scanners are hand-rolled *linear* rewrites of regexes that were quadratic (`py/polynomial-redos`), each documented as reproducing its regex exactly — a claim that, if wrong, under-masks and leaks while still returning a well-formed string a crash harness would accept. So the harness re-derives the answer from the **replaced regexes** and compares byte for byte, plus: no `${…}` from the input survives into the output, the line count and endings are preserved, and the differential holds again on the already-redacted output. Deliberately *not* asserted (each would report a documented design choice as a crash): idempotence, and the absence of a `scheme://user@` shape in the output — the URL replacement carries its own `@`, so it manufactures shapes out of already-masked material |
+| `usage_line_to_turn_fuzzer.py` | `usage._line_to_turn` | one transcript JSONL line → the redacted turn the browser renders. Every byte originated in a model response or tool output. Must never raise on a malformed line; also asserts the turn's shape, that the documented skip rules decide `None`, and — like `redact_fuzzer` — that no bare `env_`/`session_`/`cse_` id survives into a rendered field |
+| `load_settings_json_obj_fuzzer.py` | `config_write.load_settings_json_obj` | the read side of the **code-executing write tier**: the `.claude/settings.json` that arrives with a cloned repo, parsed before anything merges into it. Had no direct unit tests. Only `InvalidCandidateError` may escape; accept/reject and the parsed value are differentiated against plain `json.loads` |
+| `parse_frontmatter_fuzzer.py` | `config_write_subagents.parse_frontmatter` + `config_write_skills.parse_frontmatter` | the two near-identical YAML frontmatter splitters on the write tier, in **one** harness so a drift shows up as a finding. Per parser: only `InvalidCandidateError` escapes, the header is a mapping, the body is a verbatim suffix of the input. Across the pair: when both accept, the headers must match — the tool-grant is the part with consequences |
+| `hosted_redact_obj_fuzzer.py` | `hosted._redact_obj` | invariant 4's enforcement point on every stream-json frame relayed to a browser. Frames are generated structurally, deliberately including chains past `_REDACT_MAX_DEPTH`, and checked for identifier leaks in string values, a genuinely capped output depth, and a preserved frame shape |
+| `hosted_instance_from_record_fuzzer.py` | `hosted.HostedManager._instance_from_record` | rebuilds a hosted session from `hosted_state.json` on restart, where one bad field aborts the reattach for every session. Oracle is the **round trip** its docstring promises ("inverse of `_record`"): a fixed point from the first pass on. Also pins `daemon_last_seq` to a non-negative non-bool int |
+| `is_session_not_found_fuzzer.py` | `code_sessions._is_session_not_found` | a 404 body from `api.anthropic.com` — genuinely remote bytes, on a dated beta whose shape is expected to churn. Returning `True` clears a bridge pointer, so the harness asserts **fail-closed**: a `True` requires a `not_found_error`/`session` pair to actually exist somewhere in the parsed body |
+| `pty_screen_feed_fuzzer.py` | `PtyScreen.feed` → `find_authorize_url` / `find_oauth_token` / `find_session_id` / `frame` | the **stateful** seam `pty_login_scan_fuzzer` leaves out (PR 1331 review): chunked feeds, OSC 8 carry across read boundaries, and the visible-to-hidden fallback, over both production configurations. Oracle is chunk-boundary invariance of the OSC 8 reassembly, plus frame geometry and the no-bare-identifier property on `redact_screen_text`'s output. Several exclusions are load-bearing and each is an open finding — read the module docstring before widening one |
 | `pty_login_scan_fuzzer.py` | `pty_screen.extract_authorize_url` + `extract_osc8_hyperlinks` + `extract_oauth_token` | the scanners `login_shepherd` runs over `claude auth login` / `setup-token` terminal output to find the authorize URL an operator is told to click. Beyond crashes it asserts two selection properties — anti-decoy (when any candidate's path is a real authorize endpoint, the winner's must be too) and the stricter bar a *hidden* OSC 8 target must clear (known auth host **and** authorize path). Both are judged by predicates the harness restates itself, so a misclassification inside `pty_screen` can't shift both sides of the comparison together |
 
 ## Running a harness locally
 
 Atheris has no Windows wheels. On Linux, install it via the `fuzz` extra (it is
 kept out of `dev` on purpose and marked linux-only so the default sync stays
-cross-platform); on macOS, `pip install atheris` directly. Quick smoke run:
+cross-platform); on macOS, `pip install atheris` directly. `pty_screen_feed_fuzzer` also
+needs the optional `pty` extra (pyte) — without it `PtyScreen` raises
+`PyteUnavailableError` on every input, so `.clusterfuzzlite/build.sh` installs
+`clauster[pty]` too. Quick smoke run:
 
 ```sh
-uv pip install '.[fuzz]'            # clauster + atheris (Linux)
+uv pip install '.[fuzz,pty]'        # clauster + atheris (Linux) + pyte
 python fuzz/redact_fuzzer.py -atheris_runs=100000     # finite run
 # or let it run until a crash / Ctrl-C:
 python fuzz/parse_markers_fuzzer.py
@@ -182,10 +192,39 @@ up automatically by `build.sh`:
   format: `"token"` per line, `\xNN` escapes). `build.sh` copies it to
   `$OUT/<harness_name>.dict`, which the fuzzer auto-loads as `-dict=`.
 
-`redact_fuzzer`, `parse_markers_fuzzer`, `pty_login_scan_fuzzer` and
-`redact_secret_lines_fuzzer` ship both (their regexes need structured tokens the random
-fuzzer never synthesises); `auth_headers_fuzzer` ships a dictionary only. The rest grow a
-corpus fine from structural input and need neither.
+`redact_fuzzer`, `parse_markers_fuzzer`, `pty_login_scan_fuzzer`,
+`redact_secret_lines_fuzzer`, `usage_line_to_turn_fuzzer`,
+`load_settings_json_obj_fuzzer`, `parse_frontmatter_fuzzer`,
+`is_session_not_found_fuzzer` and `pty_screen_feed_fuzzer` ship both (their regexes need
+structured tokens the random fuzzer never synthesises); `auth_headers_fuzzer` and
+`hosted_redact_obj_fuzzer` ship a dictionary only. The rest grow a corpus fine from
+structural input and need neither.
+
+⚠️ **A seed file only reaches the target verbatim if the harness consumes it with
+`ConsumeBytes`.** `FuzzedDataProvider.ConsumeUnicodeNoSurrogates` spends the **first byte**
+on an internal encoding selector and transforms the rest, so a seed corpus handed to a
+harness that uses it arrives with its first character missing and the remainder possibly
+re-encoded — every `{`-leading JSON seed becomes `"message":…`, unparseable. Measured on
+`usage_line_to_turn_fuzzer`: 26 edges reading its seeds through the unicode consumer
+against **65** through `ConsumeBytes(...).decode("utf-8", "replace")`, which is what
+`pty_login_scan_fuzzer` already does and why its seed corpus works. Use `ConsumeBytes` for
+any harness that ships seeds; the decode with `errors="replace"` also mirrors how these
+inputs are really read.
+
+⚠️ **Atheris does not draw every type from the same end of the buffer**, which matters as
+soon as a harness consumes more than one thing. Measured on the pinned atheris 3.1.0:
+
+| Call | Draws from |
+| --- | --- |
+| `ConsumeBytes`, `ConsumeBool`, `ConsumeInt`, `ConsumeFloat` | front |
+| `ConsumeIntInRange` | **back** |
+
+Whichever end they come from, a harness that consumes its payload with
+`ConsumeBytes(remaining_bytes())` and *then* asks for more values gets the same constant
+every time, and whatever those values controlled silently stops being fuzzed — no crash,
+no warning, just a dimension that is no longer explored. Reserve bytes for the later draws.
+`pty_screen_feed_fuzzer` does, and hit the bug first: its chunk boundaries had degenerated
+to a fixed single-byte split.
 
 The effect is not marginal. `pty_login_scan_fuzzer` sits at **11 edges** on random bytes
 — it never synthesises `https://`, so it fuzzes only the no-match path — and passes

@@ -1,0 +1,57 @@
+# libFuzzer dictionary for usage_line_to_turn_fuzzer (usage._line_to_turn).
+# Every branch past the first `json.loads` is gated on literal JSON structure and on
+# literal key names, none of which Atheris' FuzzedDataProvider synthesises from random
+# bytes: without this dict (and the seed corpus) the harness only ever exercises the
+# not-JSON reject path. See fuzz/README.md.
+
+# JSON structure
+"{"
+"}"
+"["
+"]"
+"\"\""
+":"
+","
+"null"
+"true"
+"{}"
+"[]"
+"\"a\":"
+
+# the record-level keys the skip rules read
+"\"message\""
+"\"timestamp\""
+
+# the message-level keys
+"\"role\""
+"\"content\""
+"\"model\""
+"\"type\""
+"\"text\""
+
+# role/type values that reach the renderable branches
+"\"user\""
+"\"assistant\""
+"\"text\""
+"\"tool_use\""
+"\"tool_result\""
+"\"thinking\""
+
+# the identifier prefixes the redaction pass must mask (redact._ID_RE)
+"session_"
+"env_"
+"cse_"
+"session_0123456789"
+
+# secret shapes redact_secrets looks for, so the leak oracle sees masked output
+"sk-ant-"
+"Bearer "
+"ghp_"
+
+# an ANSI CSI introducer: sanitize_line strips ANSI before matching ids, so an escape
+# spliced into an id is the smuggling shape the redaction order exists to defeat
+"\x1b["
+"\x1b[0m"
+
+# deep nesting, the RecursionError path json.loads takes before JSONDecodeError
+"[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[["

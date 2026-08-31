@@ -1,0 +1,8 @@
+---
+base: &b {a: 1}
+merged:
+  <<: *b
+  b: 2
+description: d
+---
+body

@@ -1,0 +1,9 @@
+---
+name: deploy
+description: Ships the app.
+allowed-tools: Bash(git push)
+user-invocable: true
+---
+# Deploy
+
+Steps go here.
