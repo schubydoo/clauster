@@ -31,7 +31,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up uv + Python
-        uses: ./.github/actions/setup
+        uses: $/.github/actions/setup
         with:
           python-version: "3.13"
       # `--no-sync`: the setup action above already `uv sync --extra dev`'d the

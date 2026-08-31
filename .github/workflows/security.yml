@@ -42,7 +42,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - id: changes
-        uses: ./.github/actions/changed-code
+        uses: $/.github/actions/changed-code
 
   codeql:
     name: codeql analyze

@@ -316,3 +316,30 @@ def test_the_lint_job_actually_runs_the_changeset_lint():
         "a step in lint.yml's `lint` job must run `scripts/lint_changesets.py` — it is the "
         "only thing validating a changeset-only PR"
     )
+
+
+def test_cflite_requirements_export_is_fresh():
+    # `.clusterfuzzlite/requirements.txt` is GENERATED from uv.lock (see build.sh) and hash-
+    # pins the fuzz build (Scorecard alert 149). The failure mode this guards is the silent
+    # one: a Renovate bump moves uv.lock, nobody regenerates the export, and the fuzzers run
+    # against dependency versions the project no longer declares — `pip3 check` cannot catch
+    # that, because pyproject's ranges are unbounded minimums the stale pins still satisfy.
+    # `--frozen` makes the export deterministic from uv.lock, so equality is checkable.
+    # Compared without comment lines: uv writes its own invocation into the header, which
+    # differs between `-o <file>` (committed) and stdout (here).
+    uv = shutil.which("uv")
+    if uv is None:
+        pytest.skip("uv not on PATH")
+    result = subprocess.run(  # noqa: S603 — fixed argv, no untrusted input
+        [uv, "export", "--frozen", "--no-emit-project", "--extra", "pty"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    strip = lambda text: [ln for ln in text.splitlines() if ln and not ln.startswith("#")]  # noqa: E731
+    committed = (REPO / ".clusterfuzzlite" / "requirements.txt").read_text(encoding="utf-8")
+    assert strip(committed) == strip(result.stdout), (
+        "`.clusterfuzzlite/requirements.txt` is stale — regenerate: uv export --frozen "
+        "--no-emit-project --extra pty -o .clusterfuzzlite/requirements.txt"
+    )

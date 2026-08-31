@@ -52,7 +52,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up uv + Python
-        uses: ./.github/actions/setup
+        uses: $/.github/actions/setup
         with:
           python-version: "3.13"
       - name: Set up Node
