@@ -29,6 +29,11 @@ concurrency:
 jobs:
   validate:
     name: conventional PR title
+    # Runs on drafts too: this required check is cheap (an App-token title lint,
+    # no SARIF), so keeping it live on drafts keeps the `conventional PR title`
+    # context TRULY covered rather than vacuously green — only the heavy / SARIF
+    # jobs skip drafts (see tests/test_workflow_draft_guard.py). `ready_for_review`
+    # stays in the trigger types so a flip with no push still re-confirms.
     runs-on: ubuntu-slim
     timeout-minutes: 5
     permissions:

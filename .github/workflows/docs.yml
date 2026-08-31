@@ -38,6 +38,10 @@ on:
     branches: [main]
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
   pull_request:
+    # Explicit list = the implicit defaults (opened/synchronize/reopened) PLUS
+    # `ready_for_review`, which re-fires the build on the draft → ready flip —
+    # setting any `types:` replaces the defaults (#623).
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "docs/**"
       - "mkdocs.yml"
@@ -79,6 +83,10 @@ permissions:
 jobs:
   build:
     name: build docs (strict)
+    # Draft PRs skip; `ready_for_review` re-fires this. `!= true` (not `== false`)
+    # so push:main / tags / workflow_dispatch — where `draft` is null — fail-safe
+    # to running, which keeps the deploy lane (needs: build) intact.
+    if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # Per-ref build group: a newer push/PR-sync supersedes an in-flight build.

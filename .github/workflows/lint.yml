@@ -24,6 +24,11 @@ jobs:
     # Runs ruff (check + format), pyright, and the Markdown + YAML doc-lint
     # (scripts/lint-docs.sh).
     name: lint
+    # Runs on drafts too: ruff/pyright/doc-lint are cheap and upload no SARIF, so
+    # keeping this required check live on drafts keeps the `lint` context TRULY
+    # covered rather than vacuously green — only the heavy / SARIF jobs skip drafts
+    # (see tests/test_workflow_draft_guard.py). `ready_for_review` stays in the
+    # trigger types so a draft → ready flip with no push still re-confirms.
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

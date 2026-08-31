@@ -14,6 +14,10 @@ name: Actionlint
 
 on:
   pull_request:
+    # Explicit list = the implicit defaults (opened/synchronize/reopened) PLUS
+    # `ready_for_review`, which re-fires the job on the draft → ready flip —
+    # setting any `types:` replaces the defaults (#623).
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
 
@@ -27,6 +31,8 @@ concurrency:
 jobs:
   actionlint:
     name: actionlint
+    # Runs on drafts too: linting workflow YAML is cheap and uploads no SARIF, so
+    # only the heavy / SARIF jobs skip drafts (see tests/test_workflow_draft_guard.py).
     # ubuntu-latest ships shellcheck; actionlint lints run: blocks only when it is on PATH.
     runs-on: ubuntu-latest
     timeout-minutes: 5

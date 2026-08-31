@@ -45,19 +45,31 @@ jobs:
   #              empty diff, or any non-PR event → code=true (never skip on
   #              main/cron). The `ci required checks passed` aggregator counts a
   #              skipped job as passing, so the required check still reports.
-  # DRAFT PRs (#623): the heavy jobs (tests, build, docker) also carry
-  #   `&& github.event.pull_request.draft != true`, so a DRAFT PR skips them
-  #   entirely — a batch of drafts can be opened cheaply and each flipped to
-  #   "ready for review" one at a time to fire its CI. `!= true` (not `== false`)
-  #   so push:main / cron (null draft field) fail-safe to running. The aggregator
-  #   counts the skipped jobs as passing, so `ci required checks passed` still
-  #   reports green on a draft (never the permanent "Expected — waiting" block);
+  # DRAFT PRs (#623): EVERY job in this workflow carries
+  #   `github.event.pull_request.draft != true`, so a draft PR runs nothing at
+  #   all — including `setup` and the aggregator. A batch of drafts can be opened
+  #   cheaply and each flipped to "ready for review" one at a time to fire its CI.
+  #   `!= true` (not `== false`) so push:main / cron — where the `draft` field is
+  #   null — fail-safe to running.
+  #
+  #   The guard used to stop short of `setup` and the aggregator, on the theory
+  #   that the required context must always report. It doesn't need to: GitHub
+  #   reports a job skipped by its `if:` as a check run whose conclusion is
+  #   SUCCESS, so `ci required checks passed` resolves on a draft instead of
+  #   hanging at "Expected — waiting for status" (that failure mode, #196, comes
+  #   from a WORKFLOW-level `paths:`/branch filter, which suppresses the check run
+  #   entirely — not from a job-level `if:`). Guarding the aggregator too is the
+  #   honest reading: a draft now shows the context greyed-out/skipped rather than
+  #   a solid green earned by a run in which zero test cells executed.
+  #
   #   `ready_for_review` is already in the pull_request types, so marking a draft
-  #   ready re-dispatches the full run. Do NOT add this guard to `setup` or the
-  #   aggregator (they must keep running so the required context always reports).
+  #   ready re-dispatches the whole workflow on the current head SHA.
+  #   TRADE-OFF, stated plainly: a draft PR gets NO CI feedback. Push freely while
+  #   drafting; the first real signal arrives when you flip it ready.
   # --------------------------------------------------------------------
   setup:
     name: setup (matrix + change filter)
+    if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -463,7 +475,10 @@ jobs:
   # --------------------------------------------------------------------
   ci-required-checks-passed:
     name: ci required checks passed
-    if: always()
+    # `always()` so a failed/skipped need still lets this job evaluate them; the
+    # draft term skips the whole aggregator on a draft PR, matching its upstreams
+    # (see the DRAFT PRs note above the `setup` job).
+    if: always() && github.event.pull_request.draft != true
     needs:
       - setup
       - tests
