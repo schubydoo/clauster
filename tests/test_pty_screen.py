@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 import threading
 from pathlib import Path
@@ -12,6 +13,10 @@ import pytest
 
 from clauster import pty_screen
 from clauster.pty_screen import PtyScreen, PyteUnavailableError, extract_osc8_hyperlinks
+
+# Mirrors `redact._ID_RE`, restated rather than imported: a test that asks the redactor
+# whether it redacted cannot fail. Same trade the fuzz harnesses make.
+_BARE_ID_RE = re.compile(r"\b(env|session|cse)_[A-Za-z0-9]{6,}\b")
 
 
 def test_renders_plaintext_cells_and_cursor():
@@ -185,6 +190,41 @@ def test_extract_osc8_hyperlinks_bel_terminator_and_params():
 
 def test_extract_osc8_hyperlinks_none_when_no_hyperlink():
     assert extract_osc8_hyperlinks(b"just some \x1b[31mcolored\x1b[0m output, no hyperlink") == []
+
+
+def test_extract_osc8_hyperlinks_stray_opener_does_not_swallow_the_real_one():
+    # #1356: the params run was `[^;]*`, which excludes `;` but admits ESC — so an
+    # unterminated `ESC]8;` ahead of a real hyperlink ate the real opener as its own params
+    # and the URI matched one character early, coming back as `;https://…`. That leading `;`
+    # then failed `_scan_osc8`'s `https://` filter, so the operator was offered no link at
+    # all. Excluding ESC ends the stray opener at the next escape instead.
+    stream = b"\x1b]8;junk" + _osc8(_OSC8_AUTH, bel=True)
+    assert extract_osc8_hyperlinks(stream) == [_OSC8_AUTH]
+
+
+def test_osc8_capture_is_chunk_invariant_across_a_stray_opener():
+    # The operator-visible half of #1356, and the property `pty_screen_feed_fuzzer`'s oracle
+    # asserts: the same bytes must give the same answer however a read() splits them. The
+    # carry restarts at the last `ESC]8` opener, so before the fix a whole read lost the URL
+    # while a byte-by-byte one recovered it — a login that worked or failed depending on the
+    # chunking, and on ConPTY (#905) the hyperlink target is the only recoverable copy.
+    stream = b"\x1b]8;junk" + _osc8(_OSC8_AUTH, bel=True)
+
+    def authorize(chunks):
+        scr = PtyScreen(cols=200, rows=6, capture_osc8=True)
+        for chunk in chunks:
+            scr.feed(chunk)
+        return scr.find_authorize_url()
+
+    assert authorize([stream]) == _OSC8_AUTH
+    assert authorize([stream[i : i + 1] for i in range(len(stream))]) == _OSC8_AUTH
+
+
+def test_extract_osc8_hyperlinks_params_never_span_a_line():
+    # CR/LF are excluded from the params run alongside ESC: a real OSC 8 params field never
+    # spans a line, and admitting one would let a stray opener reach across log lines to
+    # capture something that was never a hyperlink target.
+    assert extract_osc8_hyperlinks(b"\x1b]8;id=1\nnot-a-link;https://evil.example/\x07") == []
 
 
 def test_find_authorize_url_recovers_conpty_osc8_hyperlink():
@@ -448,8 +488,8 @@ def test_default_geometry_is_120x40():
 def test_every_frame_row_is_exactly_cols_wide_after_redaction():
     # Redaction can SHORTEN a row (long secret -> 10-char `<redacted>`) or LENGTHEN it
     # (short id -> `env_<redacted>`); frame() re-fits each row to exactly `cols` so the
-    # client's fixed grid never wraps. Truncation only trims the right edge (no span
-    # exposed). Both directions are exercised here.
+    # client's fixed grid never wraps. Both directions are exercised here; what the trim
+    # itself can expose is covered by the test below.
     scr = PtyScreen(cols=24, rows=3)
     scr.feed(b"sk-abcdef0123456789 tail")  # long secret -> row shrinks
     scr.feed(b"\r\nenv_ABCDEF")  # short id -> `env_<redacted>` lengthens past width
@@ -458,6 +498,36 @@ def test_every_frame_row_is_exactly_cols_wide_after_redaction():
     joined = "".join(frame["rows"])
     assert "sk-abcdef0123456789" not in joined and "env_ABCDEF" not in joined
     assert "<redacted>" in joined
+
+
+def test_frame_re_redacts_a_row_the_width_refit_sheared():
+    # #1359, safety invariant 4. `redact._ID_RE` ends in `\b`, so `cse_ABCDEFGH_zzz` is
+    # correctly NOT an identifier and is correctly left unmasked — but masking `env_ABCDEF`
+    # lengthens the row by 4, so trimming back to `cols` drops the `_zzz` and manufactures
+    # the word boundary the pattern needs, delivering a bare, matchable id to the browser.
+    # frame() now redacts the fitted row again, so the trim can no longer shear one into view.
+    cols = 32
+    row = "env_ABCDEF FAKE cse_ABCDEFGH_zzz"
+    assert len(row) == cols, "the row must fill the screen exactly for the shear to happen"
+    scr = PtyScreen(cols=cols, rows=2)
+    scr.feed(row.encode())
+
+    delivered = scr.frame()["rows"][0]
+    assert len(delivered) == cols
+    assert not _BARE_ID_RE.search(delivered), f"the re-fit exposed an identifier: {delivered!r}"
+    assert delivered.startswith("env_<redacted>")  # the lengthening mask that causes the shear
+    # The second pass masked the sheared tail and the final trim cut INSIDE that mask, where
+    # a `<` sits in the position the id pattern needs an alphanumeric — so it terminates.
+    assert delivered.endswith("cse_<redacte"), delivered
+
+
+def test_frame_leaves_an_unshorn_row_to_the_single_redaction_pass():
+    # The other side of that branch: masking a long secret SHORTENS the row, so the re-fit
+    # trims nothing, no word boundary can have been manufactured, and the row ships exactly
+    # as the first redaction pass produced it — padded, not cut.
+    scr = PtyScreen(cols=40, rows=2)
+    scr.feed(b"token sk-abcdef0123456789 ok")
+    assert scr.frame()["rows"][0] == "token <redacted> ok".ljust(40)
 
 
 def test_no_control_bytes_ever_reach_rows():

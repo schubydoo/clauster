@@ -64,41 +64,39 @@ revisits.
 
 What remains asserted is the seam the review comment was actually about — ``_scan_osc8``'s
 carry across chunk boundaries, which is clauster's own code and runs on the raw bytes
-before pyte sees them. It is asserted on every input except those matching
-:func:`_swallows_an_opener`, and that one exclusion is itself a finding rather than a
-convenience.
+before pyte sees them. It is asserted on every input.
 
-⚠️ When a matched OSC 8 run has swallowed a later opener the retained set is
-chunk-dependent, and this one *is* clauster's, not pyte's. ``_OSC8_RE``'s parameter run is
-``[^;]*``, which excludes ``;``
-but **not** ``ESC`` — so a stray ``ESC]8;`` earlier in the stream swallows the next
-opener into its own parameters, and the URI then matches one character early. Meanwhile
-``_scan_osc8``'s carry deliberately restarts at ``rfind(b"\\x1b]8")``, dropping the stray
-opener, so a chunk boundary between them makes the two scans see different text.
-Measured end to end::
+That "every" is recent. This harness's first runs found a chunk dependence that *was*
+clauster's rather than pyte's: ``_OSC8_RE``'s parameter run was ``[^;]*``, which excludes
+``;`` but **not** ``ESC``, so a stray ``ESC]8;`` earlier in the stream swallowed the next
+opener into its own parameters and the URI matched one character early. Meanwhile
+``_scan_osc8``'s carry restarts at ``rfind(b"\\x1b]8")``, dropping the stray opener, so a
+chunk boundary between them made the two scans see different text. Measured end to end::
 
     stray = b"\\x1b]8;junk" + b"\\x1b]8;;" + AUTHORIZE_URL + b"\\x07label\\x1b]8;;\\x07"
     one chunk      -> find_authorize_url() is None
     byte-by-byte   -> find_authorize_url() is the real URL
 
-Whole, ``extract_osc8_hyperlinks`` returns ``";https://claude.com/cai/oauth/authorize?…"``
-— note the leading ``;`` — which fails the ``https://`` filter in ``_scan_osc8`` and is
-discarded, so the operator is shown no link at all. Split, the URI is clean and the login
-proceeds. On the Windows/ConPTY path (#905) the OSC 8 target is the *only* way the
-authorize URL is recoverable, which makes this the difference between a working login and
-a dead end, decided by where a ``read()`` happened to land. Reported as an open finding on
-the PR that introduced this harness, pinned in ``tests/test_fuzz_harness_smoke.py``, and
-fixed nowhere here — ``pty_screen`` is on the credential path and a regex change there is
-its own review.
+Whole, ``extract_osc8_hyperlinks`` returned ``";https://claude.com/cai/oauth/authorize?…"``
+— note the leading ``;`` — which failed the ``https://`` filter in ``_scan_osc8`` and was
+discarded, so the operator was shown no link at all. On the Windows/ConPTY path (#905) the
+OSC 8 target is the *only* way the authorize URL is recoverable, which made this the
+difference between a working login and a dead end, decided by where a ``read()`` happened
+to land. Fixed in #1356 by excluding ESC/BEL/CR/LF from the parameter run, so a stray
+opener now ends at the next escape instead of eating the real one. The
+``_swallows_an_opener`` predicate that used to exempt these inputs from the invariance
+oracle went with it; ``tests/test_fuzz_harness_smoke.py`` keeps the reproducer as a
+regression test.
 
 The remaining properties are the ones a browser depends on:
 
 * ``frame()`` returns exactly ``rows_count`` rows of exactly ``cols`` characters — the
   client draws a fixed grid, and an off-width row corrupts the geometry.
 * No bare ``env_``/``session_``/``cse_`` identifier appears in any rendered row —
-  asserted on ``redact_screen_text``'s output for every row, and additionally on the row
-  ``frame`` actually delivers whenever the width re-fit did not shorten it (see
-  :func:`check` for why the truncated ones are an open finding). ``find_session_id`` is
+  asserted on ``redact_screen_text``'s output for every row AND on every row ``frame``
+  actually delivers. Delivered rows were once exempt wherever the width re-fit had
+  shortened them, because that trim could shear an identifier into view; #1359 made
+  ``frame`` redact the fitted row again, so the exemption is gone. ``find_session_id`` is
   deliberately **not** covered: it returns the id un-redacted by design, feeding the
   keeper's private sidecar rather than a browser.
 * A returned authorize URL is always ``https://`` — both the visible-text path
@@ -141,30 +139,6 @@ _MAX_BYTES = 1024
 #: Screen geometries, narrow-to-default. See the module docstring on why the production
 #: 1024-column login width is not among them.
 _GEOMETRIES = ((40, 6), (80, 24), (pty_screen.SCREEN_COLS, pty_screen.SCREEN_ROWS))
-
-#: The OSC 8 opener ``_scan_osc8`` carries from. Spelled here rather than imported because
-#: its use below is part of the *harness's* soundness argument, not of the target.
-_OSC8_OPENER = b"\x1b]8"
-
-
-def _swallows_an_opener(data: bytes) -> bool:
-    """Whether any complete OSC 8 match in ``data`` has swallowed a later opener.
-
-    This is the exact precondition for the chunk-dependence described in the module
-    docstring, and it is deliberately narrow. An earlier revision skipped on
-    ``data.count(_OSC8_OPENER) > 1``, which was **useless**: a well-formed hyperlink is
-    ``ESC]8;;URI BEL label ESC]8;; BEL``, whose closer is a second opener, so every real
-    hyperlink was excluded and the invariance assertion only ever compared two empty
-    lists. Measured on this harness's own seed corpus: 5 of the 19 seeds retain a URI and
-    the coarse count skipped **all five**.
-
-    The mechanism needs a *matched* run to contain an opener inside it — the parameter
-    field is ``[^;]*``, which excludes ``;`` but not ``ESC`` — so that is what is tested
-    for. Verified against the corpus: this admits all six opener-carrying seeds with zero
-    divergence, and excludes the documented ``b"\\x1b]8;junk" + b"\\x1b]8;;" + url`` case.
-    """
-    return any(_OSC8_OPENER in m.group(0)[3:] for m in pty_screen._OSC8_RE.finditer(data))
-
 
 #: How many chunk boundaries an input may request — so at most ``_MAX_CUTS + 1`` chunks.
 #: Bounded because each boundary costs a full ``feed`` call on a pure-Python emulator.
@@ -293,16 +267,14 @@ def check(data: bytes, cuts: list[int], cols: int, rows: int, capture_osc8: bool
     if not (chunked["read_cleanly"] and whole["read_cleanly"]):
         return  # the pyte `display` IndexError — see _drive's docstring
 
-    # Two skips, each tied to a reported defect and no wider than its mechanism:
-    #
-    # * a drive whose feed raised left the screen mid-sequence by design, and where the
-    #   boundary fell decides how much got in — so the two runs are not comparable. Note
-    #   this is not only about the rendered screen: `feed` runs `_stream.feed` BEFORE
-    #   `_scan_osc8`, so a pyte raise also costs that chunk's OSC 8 scan (see `_drive`).
-    # * `_swallows_an_opener` is the exact precondition for the `_OSC8_RE` chunk
-    #   dependence, and nothing broader — the earlier opener-count test excluded every
-    #   real hyperlink and made this assertion vacuous.
-    if chunked["fed_cleanly"] and whole["fed_cleanly"] and not _swallows_an_opener(data):
+    # One skip, tied to a reported defect and no wider than its mechanism: a drive whose
+    # feed raised left the screen mid-sequence by design, and where the boundary fell
+    # decides how much got in — so the two runs are not comparable. Note this is not only
+    # about the rendered screen: `feed` runs `_stream.feed` BEFORE `_scan_osc8`, so a pyte
+    # raise also costs that chunk's OSC 8 scan (see `_drive`). There was a second skip —
+    # inputs where a stray opener was swallowed by `_OSC8_RE`'s parameter run — and it went
+    # away with the fix in #1356; see the module docstring.
+    if chunked["fed_cleanly"] and whole["fed_cleanly"]:
         for key in _INVARIANT_KEYS:
             assert chunked[key] == whole[key], (
                 f"chunk-boundary divergence in {key!r}: "
@@ -314,26 +286,22 @@ def check(data: bytes, cuts: list[int], cols: int, rows: int, capture_osc8: bool
     for row in frame["rows"]:
         assert len(row) == cols, f"row is {len(row)} chars, not {cols}: {row!r}"
 
-    # The no-bare-identifier invariant, asserted on `redact_screen_text`'s output rather
-    # than on `frame`'s — because `frame` re-fits each row to `cols` AFTER redacting, and
-    # this harness found that the re-fit can EXPOSE an identifier redaction correctly left
-    # alone. `redact._ID_RE` ends in `\b`, so `cse_01JABCDEFGHJKMN_more` is not an id and
-    # is not masked; truncating that row at the column limit drops the `_more` and leaves a
-    # bare, matchable `cse_01JABCDEFGHJKMN` in the frame delivered to the browser. Any word
-    # character does it — `_`, `é`, `д` — and a cursor-addressed TUI puts text at the column
-    # boundary constantly. `frame`'s docstring states the opposite ("Truncation only trims
-    # the right edge, so it can never expose a redacted span"), which is true only of spans
-    # that were redacted; this is a span that never was. Safety invariant 4, reported as an
-    # open finding on the PR that introduced this harness and pinned in the suite — not
-    # fixed here, because the fix is a change to redaction on a live credential surface.
-    # A row that was NOT truncated cannot hit the defect, so the egress surface itself is
-    # still asserted there — the skip is only for rows the width re-fit actually shortened.
+    # The no-bare-identifier invariant (safety invariant 4), asserted on BOTH
+    # `redact_screen_text`'s output and the row `frame` actually delivers. They are separate
+    # assertions because the second one used to fail: `frame` re-fit each row to `cols`
+    # AFTER redacting, and this harness found that the trim can EXPOSE an identifier
+    # redaction correctly left alone. `redact._ID_RE` ends in `\b`, so
+    # `cse_01JABCDEFGHJKMN_more` is not an id and is not masked; trimming that row at the
+    # column limit drops the `_more` and leaves a bare, matchable `cse_01JABCDEFGHJKMN` in
+    # the frame delivered to the browser. Any word character does it — `_`, `é`, `д` — and a
+    # cursor-addressed TUI puts text at the column boundary constantly. #1359 fixed it:
+    # `frame` redacts the fitted row again, and the exemption that used to skip rows the
+    # trim had shortened came out with the fix, so the egress surface is now asserted whole.
     for redacted_row, frame_row in zip(chunked["redacted"], frame["rows"], strict=True):
         assert not _LEAK.search(redacted_row), (
             f"redaction leak in a rendered row: {redacted_row!r}"
         )
-        if len(redacted_row) <= cols:
-            assert not _LEAK.search(frame_row), f"redaction leak in a delivered row: {frame_row!r}"
+        assert not _LEAK.search(frame_row), f"redaction leak in a delivered row: {frame_row!r}"
     # The cursor is reported but deliberately NOT bounds-asserted. `frame`'s contract is
     # about the row geometry ("the client draws a fixed cols x rows_count grid") and says
     # nothing about the cursor, and pyte will hand back an x past the column count — this

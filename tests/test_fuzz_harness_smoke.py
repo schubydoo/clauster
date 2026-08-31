@@ -579,10 +579,9 @@ def test_pty_screen_feed_invariance_oracle_fires_on_a_broken_carry(
     harness = _load("pty_screen_feed_fuzzer.py")
     url = b"https://claude.com/cai/oauth/authorize?client_id=abc"
     # The real shape `claude setup-token` emits, closing sequence included. That closer is
-    # a second `\x1b]8`, which the harness's earlier opener-COUNT rule would have excluded —
-    # the bug that made this oracle vacuous. `_swallows_an_opener` admits it correctly,
-    # because no matched run contains a later opener, so the invariance assertion really
-    # does apply to the shape production produces.
+    # a second `\x1b]8`, which an earlier opener-COUNT skip in the harness excluded — the bug
+    # that made this oracle vacuous. No exclusion survives (#1356 removed the last one), so
+    # the invariance assertion really does apply to the shape production produces.
     stream = b"\x1b]8;;" + url + b"\x07label\x1b]8;;\x07"
     mid = [len(stream) // 2 * 256 // len(stream)]
     harness.check(stream, mid, 80, 24, True)  # unbroken: passes
@@ -650,21 +649,19 @@ def test_pty_screen_display_readers_raise_on_a_half_overwritten_wide_char() -> N
         screen.find_authorize_url()
 
 
-def test_pty_screen_frame_width_refit_can_expose_an_identifier() -> None:
-    """PIN: redaction runs BEFORE the width re-fit, so the re-fit can expose an id.
+def test_pty_screen_frame_width_refit_cannot_expose_an_identifier() -> None:
+    """Regression (#1359): the width re-fit must not shear an identifier into a frame.
 
     Driven through ``PtyScreen.frame()`` itself, deliberately: an earlier version of this
-    pin hand-built the row and sliced it, which meant the natural fix (redact after the
-    re-fit, or re-redact the fitted row) would have left it green — the silently-dead
-    exclusion this pin exists to prevent.
+    test hand-built the row and sliced it, which meant a fix inside ``frame`` would have left
+    it green either way — it proved nothing about the delivered frame.
 
-    Mechanism: masking ``session_ABCDEF`` *lengthens* the row by 4 characters, so
-    ``row[:cols]`` shears the ``_zzz`` off ``cse_ABCDEFGH_zzz`` and manufactures the word
+    Mechanism: masking ``session_ABCDEF`` *lengthens* the row by 4 characters, so trimming
+    back to ``cols`` shears the ``_zzz`` off ``cse_ABCDEFGH_zzz`` and manufactures the word
     boundary ``redact._ID_RE`` needs. The id was correctly not masked while it ran on; the
-    truncation is what exposes it. Safety invariant 4, and the opposite of what
-    ``PtyScreen.frame``'s docstring claims. ``pty_screen_feed_fuzzer`` therefore asserts the
-    leak property on ``redact_screen_text``'s output, and on delivered rows only where the
-    re-fit did not shorten them.
+    trim is what exposed it (safety invariant 4). ``frame`` now redacts the fitted row again,
+    so the delivered row carries the mask instead — and ``pty_screen_feed_fuzzer`` asserts the
+    leak property on every delivered row rather than exempting the shortened ones.
     """
     import re
 
@@ -679,11 +676,12 @@ def test_pty_screen_frame_width_refit_can_expose_an_identifier() -> None:
 
     delivered = screen.frame()["rows"][0]
     leak = re.compile(r"\b(env|session|cse)_[A-Za-z0-9]{6,}\b")
-    assert leak.search(delivered), (
-        f"frame() no longer exposes a bare identifier ({delivered!r}) — the ordering looks "
-        "fixed, so widen pty_screen_feed_fuzzer to assert the leak property on frame() rows"
-    )
+    assert not leak.search(delivered), f"frame() exposed a bare identifier: {delivered!r}"
     assert "session_<redacted>" in delivered, "the lengthening mask is what shears the row"
+    assert len(delivered) == cols, "the row must still be exactly one screen wide"
+    # The second pass masked the sheared tail, and the final trim cut inside that mask —
+    # `<` where `_ID_RE` needs an alphanumeric, which is why no third pass is needed.
+    assert delivered.endswith("cse_<redacte"), delivered
 
 
 def test_usage_line_to_turn_timestamp_is_still_unsanitized() -> None:
@@ -789,31 +787,26 @@ def test_pyte_render_is_still_chunk_dependent() -> None:
     assert authorize([payload[i : i + 1] for i in range(len(payload))]) == url.decode()
 
 
-def test_osc8_regex_still_swallows_a_later_opener() -> None:
-    """PIN: ``_OSC8_RE``'s ``[^;]*`` parameter run admits ESC, so a stray opener eats the next.
+def test_osc8_regex_does_not_swallow_a_later_opener() -> None:
+    """Regression (#1356): a stray opener must not eat the real hyperlink that follows it.
 
-    This is the precondition ``_swallows_an_opener`` gates the OSC 8 invariance assertion
-    on, and it is clauster's defect rather than pyte's. Tighten ``_OSC8_RE`` to
-    ``[^;\\x1b]*`` and the predicate silently stops matching, quietly widening the oracle
-    with nothing to say it happened — so both the mechanism and its consequence are pinned.
-
-    Consequence: fed as one read the real hyperlink is dropped (the extracted URI gains a
-    leading ``;`` and fails the ``https://`` filter), so the operator is shown no link;
-    fed byte by byte the carry restarts at the last opener and the URL comes back. On the
-    Windows/ConPTY path the OSC 8 target is the only recoverable copy.
+    ``_OSC8_RE``'s parameter run was ``[^;]*``, which excludes ``;`` but admits ESC, so an
+    unterminated ``ESC]8;`` swallowed the next opener into its own parameters and matched the
+    URI one character early. Fed as one read the real hyperlink was then dropped — the
+    extracted URI gained a leading ``;`` and failed ``_scan_osc8``'s ``https://`` filter, so
+    the operator was shown no link — while fed byte by byte the carry restarted at the last
+    opener and the URL came back. On the Windows/ConPTY path the OSC 8 target is the only
+    recoverable copy of the authorize URL, so a login worked or died on where a ``read()``
+    landed. The parameter run now excludes ESC/BEL/CR/LF, ending a stray opener at the next
+    escape; this is the exact reproducer from the issue, and the chunk-invariance it broke.
     """
     pty_screen = pytest.importorskip("clauster.pty_screen")
     pytest.importorskip("pyte")
 
-    harness = _load("pty_screen_feed_fuzzer.py")
     url = "https://claude.com/cai/oauth/authorize?client_id=abc"
     stream = b"\x1b]8;junk" + b"\x1b]8;;" + url.encode() + b"\x07label\x1b]8;;\x07"
 
-    assert pty_screen.extract_osc8_hyperlinks(stream) == [";" + url], (
-        "the parameter run no longer swallows a later opener — drop _swallows_an_opener "
-        "from pty_screen_feed_fuzzer and let the invariance oracle cover these inputs"
-    )
-    assert harness._swallows_an_opener(stream), "the harness predicate no longer fires"
+    assert pty_screen.extract_osc8_hyperlinks(stream) == [url], "the stray opener still swallows"
 
     def retained(chunks: list[bytes]) -> list[str]:
         screen = pty_screen.PtyScreen(cols=200, rows=6, capture_osc8=True)
@@ -821,7 +814,10 @@ def test_osc8_regex_still_swallows_a_later_opener() -> None:
             screen.feed(chunk)
         return list(screen._osc8_urls)
 
-    assert retained([stream]) == []
+    # The property the harness's invariance oracle asserts: same bytes, any chunking, same
+    # answer. Both drives now find the real URL; before the fix the whole-read drive found
+    # nothing, which is why these inputs had to be exempted from that oracle.
+    assert retained([stream]) == [url]
     assert retained([stream[i : i + 1] for i in range(len(stream))]) == [url]
 
 
