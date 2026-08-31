@@ -1,0 +1,6 @@
+---
+name: deploy
+description: uses ${DEPLOY_KEY}
+allowed-tools: Bash(git push https://tok@github.test/x.git)
+---
+Body text with no secret at all.

@@ -113,12 +113,12 @@ jobs:
           # Where the 120s-vs-30s actually bites is batch and PR (see cflite_pr.yml).
           language: python
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          # 375, matching cflite_batch.yml, for the same 8 -> 10 harness-count reason:
+          # 413, matching cflite_batch.yml, for the same 10 -> 11 harness-count reason:
           # prune runs the same divide-across-targets loop, and here the per-target slice
           # is a MERGE TIMEOUT that raises (clusterfuzz's libFuzzer engine raises
           # TimeoutError on a timed-out merge, and nothing catches it), not a fuzz
           # duration that simply ends. Holding the slice at ~37s keeps that headroom.
-          fuzz-seconds: 375
+          fuzz-seconds: 413
           mode: prune
           sanitizer: address
           output-sarif: true
