@@ -34,6 +34,8 @@ on:
     paths:
       - "uv.lock"
       - "pyproject.toml"
+      - ".clusterfuzzlite/requirements.txt"
+      - ".clusterfuzzlite/build-requirements.txt"
       - "package.json"
       - "package-lock.json"
       - "tests/e2e/package.json"

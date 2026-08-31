@@ -73,7 +73,7 @@ jobs:
       # allowlist in one place.
       - name: Classify changed files (code vs docs-only)
         id: changes
-        uses: ./.github/actions/changed-code
+        uses: $/.github/actions/changed-code
       - name: Decide matrix (subset vs full)
         id: matrix
         env:
@@ -162,7 +162,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up uv + Python
-        uses: ./.github/actions/setup
+        uses: $/.github/actions/setup
         with:
           python-version: ${{ matrix.python }}
       # `shell: bash` keeps one script across all three runners (Git Bash ships
@@ -259,7 +259,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up uv + Python
-        uses: ./.github/actions/setup
+        uses: $/.github/actions/setup
         with:
           python-version: "3.13"
           extras: ""   # build only needs the build backend, not test/lint tooling

@@ -102,7 +102,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up uv + Python
-        uses: ./.github/actions/setup
+        uses: $/.github/actions/setup
         with:
           python-version: "3.13"
           extras: docs
@@ -161,7 +161,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Set up uv + Python
-        uses: ./.github/actions/setup
+        uses: $/.github/actions/setup
         with:
           python-version: "3.13"
           extras: docs
