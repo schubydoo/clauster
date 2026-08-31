@@ -4,7 +4,7 @@ Coverage-guided fuzz harnesses for clauster's untrusted-input parsers. They run
 in CI via [ClusterFuzzLite](https://google.github.io/clusterfuzzlite/) two ways:
 per-PR over the changed code (`.github/workflows/cflite_pr.yml`, `address`
 sanitizer, ~180s) and an every-other-day scheduled batch over **every** harness
-(`.github/workflows/cflite_batch.yml`, 375s) whose corpus **persists across
+(`.github/workflows/cflite_batch.yml`, 413s) whose corpus **persists across
 runs** in a private storage repo, so coverage compounds over time. Note
 `fuzz-seconds` is a **total** budget CFLite splits across the harnesses, not a
 per-target one — adding a harness thins every harness's slice rather than
@@ -27,6 +27,7 @@ Security tab. Build config lives in [`.clusterfuzzlite/`](../.clusterfuzzlite/).
 | `supervisor_job_from_state_fuzzer.py` | `supervisor._job_from_state` | coerces the agent-view daemon's churning on-disk state into a `BackgroundJob`; total over any dict — must never raise |
 | `load_trusted_paths_fuzzer.py` | `discovery._load_trusted_paths` | parses the user-editable `~/.claude.json`; must degrade any malformed file to an empty set. Found + fixed a non-dict-JSON `AttributeError` (the #122 class) |
 | `auth_headers_fuzzer.py` | `auth.verify_proxy_hmac` + `auth.parse_bearer` | the two **pre-authentication** header parsers on the same boundary as `normalize_origin`. `verify_proxy_hmac` must return `False` on any malformation, never raise (it already 500'd once on a non-ASCII signature via `compare_digest`'s `TypeError`). Also builds a correctly signed header per input so the accept path is exercised, not just the reject path |
+| `redact_secret_lines_fuzzer.py` | `config_write.redact_secret_lines` | **differential.** The line-oriented redaction every free-text read path runs over a file that arrived with a cloned repo. Its three scanners are hand-rolled *linear* rewrites of regexes that were quadratic (`py/polynomial-redos`), each documented as reproducing its regex exactly — a claim that, if wrong, under-masks and leaks while still returning a well-formed string a crash harness would accept. So the harness re-derives the answer from the **replaced regexes** and compares byte for byte, plus: no `${…}` from the input survives into the output, the line count and endings are preserved, and the differential holds again on the already-redacted output. Deliberately *not* asserted (each would report a documented design choice as a crash): idempotence, and the absence of a `scheme://user@` shape in the output — the URL replacement carries its own `@`, so it manufactures shapes out of already-masked material |
 | `pty_login_scan_fuzzer.py` | `pty_screen.extract_authorize_url` + `extract_osc8_hyperlinks` + `extract_oauth_token` | the scanners `login_shepherd` runs over `claude auth login` / `setup-token` terminal output to find the authorize URL an operator is told to click. Beyond crashes it asserts two selection properties — anti-decoy (when any candidate's path is a real authorize endpoint, the winner's must be too) and the stricter bar a *hidden* OSC 8 target must clear (known auth host **and** authorize path). Both are judged by predicates the harness restates itself, so a misclassification inside `pty_screen` can't shift both sides of the comparison together |
 
 ## Running a harness locally
@@ -47,25 +48,68 @@ as an argument to reproduce: `python fuzz/redact_fuzzer.py crash-abc123`.
 
 ## Reading the weekly coverage signal
 
-⚠️ **No HTML line-coverage report lands, and none ever has.** The weekly cron's
-`coverage` job is in practice a *corpus replay*: it rebuilds the harnesses, runs the
-whole persisted corpus through each one, and pushes the raw libFuzzer output to the
-corpus repo's `gh-pages` branch. Verified directly against that branch — there is no
-`coverage/latest/report/` directory, and a weekly upload commit touches only the
+⚠️ **No HTML line-coverage report has landed yet.** The weekly cron's `coverage` job
+has in practice been a *corpus replay*: it rebuilds the harnesses, runs the whole
+persisted corpus through each one, and pushes the raw libFuzzer output to the corpus
+repo's `gh-pages` branch. Verified directly against that branch through 2026-08-30 —
+no `coverage/latest/report/` directory, and a weekly upload commit touching only the
 per-harness logs.
 
-⚠️ **This is not "Python can't do coverage reports."** oss-fuzz's base-runner
+⚠️ **This was never "Python can't do coverage reports."** oss-fuzz's base-runner
 `coverage` script has a coverage.py branch that builds an `htmlcov` report and moves it
 to `$COVERAGE_OUTPUT_DIR/report/$PLATFORM` — exactly the `report/linux/` path the
-workflow comment used to promise. We never reach it: the cron's `run_fuzzers` step
-does not pass `language: python` (only the *build* step does) and that input defaults
-to `c++`, so the script takes its LLVM branch. The uploaded logs prove it — they carry
+workflow comment used to promise. We never reached it: the cron's `run_fuzzers` step
+passed no `language` (only the *build* step did) and that input defaults to `c++`, so
+the script took its LLVM branch. The uploaded logs proved it — they carried
 `-merge=1` `MERGE-INNER`/`MERGE-OUTER` lines, which only the C/C++ path emits. Our
-Atheris wrappers produce no `.profraw`, so that path yields nothing, and the job stays
-green because ClusterFuzzLite discards the coverage script's output. Tracked in
-[issue 1327](https://github.com/schubydoo/clauster/issues/1327).
+Atheris wrappers produce no `.profraw`, so that path yielded nothing, and the job
+stays green either way because ClusterFuzzLite discards the coverage script's output.
 
-What does land:
+`language: python` is now set on every `run_fuzzers` step
+([issue 1327](https://github.com/schubydoo/clauster/issues/1327)), but it is
+*necessary*, not proven *sufficient* — the Python report stage also unzips a
+`${fuzzer}.pkg.deps.zip` out of the coverage *build*. base-builder's
+`compile_python_fuzzer` should already emit that whenever `SANITIZER` matches
+`*coverage*`, which the cron's build step sets, but it has never been *observed*
+here — so it is the open question. (The other input, `.coverage_$target`, the run
+step writes at the end of each target that exits cleanly.)
+
+**On the next scheduled cron, check `gh-pages` for three things:** whether
+`coverage/latest/report/` appeared; whether the per-harness logs below survived; and
+whether their `DONE cov: E ft: F` lines are still present, since everything in this
+section is read off them.
+
+A `report/` directory is not by itself proof the numbers are right. The report loop
+has no `set -e`, so if a harness's `.coverage_$fuzzer` is missing — it died
+mid-replay — the `mv` fails silently and the *previous* harness's data is
+re-translated under this one's name. The two checks cover different halves: a
+`.coverage_*` count below the harness count catches only the missing-file variant,
+because in the stale case the count still *matches* and only the content is wrong.
+That one shows up as two or more byte-identical files:
+
+```sh
+md5sum report/linux/.coverage_*     # duplicate hashes = a stale re-translate
+```
+
+If `report/` carries no `.coverage_*` at all, check before calling it a failure:
+upstream runs coverage.py `combine` without `--keep`, which deletes those files, so
+they may never reach the upload. Fall back to the logs — a harness whose log stops
+before its `DONE` line is the trigger for the stale re-translate.
+
+Those logs are the only
+fuzz-coverage signal we have; if the Python path stops producing them without
+producing a report, revert `language` on the *coverage job only* — the PR and batch
+jobs need it for the crash-reproduce timeout regardless. (On prune it is inert:
+cifuzz's prune path returns `testcase=None` and never reaches the reproduce step.)
+Wait for the cron rather than dispatching it by hand: a dispatch runs unmerged
+workflow code with the write PAT and pushes to the real `gh-pages`.
+
+Expect the artefact *shape* to change on the Python path even when it works:
+`<harness>.log` is still written, but `_error.log` and the `MERGE-` lines are
+C/C++-only and should disappear, and `fuzzer_stats/<harness>.json` becomes a dummy
+`{}`. Update the table below once that is observed.
+
+What has landed to date (under the `c++` default):
 
 | Path (on `gh-pages`) | What it is |
 | --- | --- |
@@ -138,10 +182,10 @@ up automatically by `build.sh`:
   format: `"token"` per line, `\xNN` escapes). `build.sh` copies it to
   `$OUT/<harness_name>.dict`, which the fuzzer auto-loads as `-dict=`.
 
-`redact_fuzzer`, `parse_markers_fuzzer` and `pty_login_scan_fuzzer` ship both (their
-regexes need structured tokens the random fuzzer never synthesises);
-`auth_headers_fuzzer` ships a dictionary only. The rest grow a corpus fine from
-structural input and need neither.
+`redact_fuzzer`, `parse_markers_fuzzer`, `pty_login_scan_fuzzer` and
+`redact_secret_lines_fuzzer` ship both (their regexes need structured tokens the random
+fuzzer never synthesises); `auth_headers_fuzzer` ships a dictionary only. The rest grow a
+corpus fine from structural input and need neither.
 
 The effect is not marginal. `pty_login_scan_fuzzer` sits at **11 edges** on random bytes
 — it never synthesises `https://`, so it fuzzes only the no-match path — and passes
@@ -149,7 +193,18 @@ The effect is not marginal. `pty_login_scan_fuzzer` sits at **11 edges** on rand
 play. Measure before deciding a harness "needs neither": run it locally for a few
 hundred thousand iterations and read the `cov:` figure.
 
+⚠️ **Measure at the batch run's real per-harness slice (~37s), not at a million
+iterations** — a long enough run lets random bytes stumble into the tokens eventually, so
+an iteration-matched comparison understates what seeds and a dictionary buy in CI.
+`redact_secret_lines_fuzzer` measured locally: at 1M iterations it is **71 edges** seeded
+against **70** bare, i.e. nothing; at 37 seconds it is **71 edges / 432 features** seeded
+against **39 / 242** bare — the dict and seeds are worth roughly double the reach inside
+the budget the harness actually gets.
+
 If a harness asserts a *property* rather than only "does not crash", prove the
 assertion can fail before trusting it. Break the implementation on purpose (monkeypatch
 the function under test to return something wrong) and check the harness raises — an
 oracle that has never fired is indistinguishable from no oracle at all.
+`redact_secret_lines_fuzzer` factors its checks into a `check(text)` the suite drives
+directly, so `tests/test_fuzz_harness_smoke.py` can do exactly that on every `just check`
+rather than leaving the proof as a one-off a maintainer did once.

@@ -7,6 +7,14 @@
 *.sh   text eol=lf
 *.bash text eol=lf
 
+# Fuzz seed corpora — byte-exact inputs, never normalize. Several seeds encode CRLF, a
+# lone CR, or a \v on purpose because the parser under test branches on the line-ending
+# shape; `text=auto` above would rewrite those to LF and silently delete the coverage.
+# They survive today only because auto-detection happens to classify them -text, which is
+# a property of their current contents: edit one to drop its lone CR and the CRLF case
+# disappears from the next fresh clone with nothing to show it ever existed.
+fuzz/seeds/** -text
+
 # Binary assets — never normalize.
 *.png   binary
 *.jpg   binary
