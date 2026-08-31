@@ -49,6 +49,7 @@ Exit 0 when every fragment is well-formed, 1 (with a per-file reason) otherwise.
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from pathlib import Path
 
@@ -82,9 +83,12 @@ _ALLOWED_NON_FRAGMENTS = frozenset({".gitkeep", ".DS_Store", "Thumbs.db"})
 
 # Editor scratch files, which exist only WHILE a fragment is open: a `just check` run
 # mid-edit must not go red for one. Vim's shapes specifically (`.a.md.swp` beside `a.md`,
-# and `a.md~`) -- emacs' `#a.md#` is not covered, since a suffix test cannot express it and
-# a stray called `#slug.md#` is a plausible enough mistake to keep failing loudly.
-_EDITOR_ARTEFACT_SUFFIXES = (".swp", ".swo", "~")
+# and `a.md~`) -- and not only `.swp`: when that name is taken vim decrements the last
+# letter (`.swp` -> `.swo` -> `.swn` -> ... -> `.swa`, `:h swap-file`), reached whenever a
+# stale swap from a crash is still on disk, so the whole `.sw[a-p]` range counts. emacs'
+# `#a.md#` is not covered: a stray called `#slug.md#` is a plausible enough mistake to
+# keep failing loudly.
+_EDITOR_ARTEFACT_RE = re.compile(r"(\.sw[a-p]|~)$")
 
 
 def _knope_expectations(config_path: str) -> tuple[frozenset[str], frozenset[str]]:
@@ -214,7 +218,7 @@ def _violation(path: str, body: str) -> str | None:
 
 def _is_housekeeping(name: str) -> bool:
     """Return True for the few non-fragment names allowed to sit in ``.changeset/``."""
-    return name in _ALLOWED_NON_FRAGMENTS or name.endswith(_EDITOR_ARTEFACT_SUFFIXES)
+    return name in _ALLOWED_NON_FRAGMENTS or _EDITOR_ARTEFACT_RE.search(name) is not None
 
 
 def _stray_violation(path: str, is_dir: bool) -> str:
@@ -225,13 +229,13 @@ def _stray_violation(path: str, is_dir: bool) -> str:
         else "not a `*.md` fragment -- knope reads only `.changeset/*.md`, so it"
     )
     allowed = ", ".join(f"`{name}`" for name in sorted(_ALLOWED_NON_FRAGMENTS))
-    suffixes = ", ".join(f"`{suffix}`" for suffix in _EDITOR_ARTEFACT_SUFFIXES)
     return (
         f"{path}: {what} is dropped SILENTLY -- no changelog entry and no version bump, and "
         f"nothing fails until the release notes come out short (#1332). Fix: make it a "
         f"top-level `.changeset/<slug>.md` fragment (the extension is matched "
         f"case-sensitively, so `.MD` counts as a stray), or delete it. The only "
-        f"non-fragments allowed here: {allowed}, and editor scratch files ending {suffixes}."
+        f"non-fragments allowed here: {allowed}, plus editor scratch files ending `~` or "
+        f"a vim swap suffix (`.sw[a-p]`)."
     )
 
 

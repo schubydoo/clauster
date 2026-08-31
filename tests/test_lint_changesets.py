@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 
 import pytest
@@ -292,11 +293,15 @@ def test_a_lone_valid_fragment_passes(changeset_dir: Path) -> None:
     assert lint_changesets.main() == 0
 
 
-@pytest.mark.parametrize("name", [".gitkeep", ".DS_Store", "Thumbs.db", ".good.md.swp", "a~"])
+@pytest.mark.parametrize(
+    "name", [".gitkeep", ".DS_Store", "Thumbs.db", ".good.md.swp", ".good.md.swn", "a~"]
+)
 def test_housekeeping_entries_are_allowed(changeset_dir: Path, name: str, capsys) -> None:
     # `.gitkeep` keeps the directory in git; `.DS_Store`/`Thumbs.db` appear from merely
     # OPENING the folder on macOS/Windows and a vim swap file exists while a fragment is
     # being edited — none is a lost changeset, and failing on them would red only local runs.
+    # `.swn` pins the swap-name CASCADE (`.swp` → `.swo` → `.swn` → …), which vim reaches
+    # whenever a stale swap file from a crash still occupies the earlier name.
     # Asserting the COUNT too: a regression that counted these as fragments would still
     # exit 0, and the point is that they are not fragments.
     _write(changeset_dir / name, "")
@@ -312,7 +317,10 @@ def test_non_md_stray_file_rejected(changeset_dir: Path, name: str, capsys) -> N
     _write(changeset_dir / name, "---\ndefault: patch\n---\n\nA clean one-line summary.\n")
     assert lint_changesets.main() == 1
     out = capsys.readouterr().out
-    assert name in out
+    # The PATH, not the bare name: for the extensionless "changeset" param the bare name
+    # is already boilerplate in every failure line, so it proves nothing about which
+    # file was flagged.
+    assert f"{changeset_dir.name}{os.sep}{name}" in out
     assert "not a `*.md` fragment" in out
 
 
