@@ -1587,6 +1587,11 @@ the CI coverage-gate interpreter (<code>uv</code> still supports the full 3.11+ 
   The key really is the literal word <code>default</code> — knope silently ignores a fragment
   keyed to anything else, so it would ship with no changelog entry and no version
   bump; <code>scripts/lint_changesets.py</code> (pre-commit and CI) rejects that.
+  The file name matters just as much: knope reads <code>.changeset/*.md</code> and nothing else,
+  so <code>a.txt</code>, <code>a.MD</code> or <code>sub/a.md</code> is dropped just as silently — the linter rejects any
+  entry in <code>.changeset/</code> that is not a top-level fragment whose extension is exactly
+  <code>.md</code> (only <code>.gitkeep</code>, OS droppings like <code>.DS_Store</code> / <code>Thumbs.db</code>, and editor
+  scratch files such as <code>.a.md.swp</code> are exempt).
   You don't need to add a PR link — knope appends <code>([#NNN])</code> for the PR that
   introduces the changeset, at release time.
   Keep the summary to a single concise line that gets straight to the point;
