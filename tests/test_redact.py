@@ -133,6 +133,18 @@ def test_scrub_masks_a_shape_that_appears_both_cleanly_and_spliced():
         assert "env_<redacted>" in out
 
 
+def test_scrub_masks_a_spliced_id_when_the_same_id_is_escape_split_elsewhere():
+    # A count of space-view vs delete-view matches would MISS this and leak: the DCS-welded
+    # copy (`user…env_ID`) is hidden from the delete view, while the colour-split copy
+    # (`env_…\x1b[0m…`) is REJOINED there — so the two tallies tie and a count gate skips the
+    # welded one. The `in cleaned` predicate (deduped) masks it because it is still raw.
+    ident = "env_01ABCDEFGHIJKLMNOP"
+    escape_split = "env_01ABCDE\x1b[0mFGHIJKLMNOP"  # rejoined + masked by the first pass
+    line = f"{escape_split} and user\x1bPx\x07{ident}"
+    for out in (redact.redact_for_disk(line), redact.sanitize_line(line)):
+        assert ident not in out  # the DCS-welded occurrence must not stream bare
+
+
 def test_scrub_leaves_an_already_masked_bounded_id_untouched():
     # The not-spliced branch of the count gate: an id with real boundaries BESIDE (not welded
     # by) a colour escape is masked by the first pass, and _scrub_spliced_shapes sees its

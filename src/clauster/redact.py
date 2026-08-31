@@ -9,7 +9,6 @@ anyone with ``env_<ULID>`` can open a New Session composer for that bridge).
 from __future__ import annotations
 
 import re
-from collections import Counter
 
 # CSI / escape sequences (colors, cursor moves, and the C1 *string* sequences).
 #
@@ -172,23 +171,22 @@ def _scrub_spliced_shapes(cleaned: str, text: str) -> str:
     """
     if "\x1b" not in text:  # nothing was removed, so nothing can have been spliced
         return cleaned
-    # Only a shape the DELETE view HID needs the (full-length) `in cleaned` scan + replace;
-    # everything else is already masked in `cleaned`. A shape is hidden-by-splice iff the
-    # SPACE view (word boundaries intact) exposes it MORE times than the DELETE view
-    # (`strip_ansi`, which `cleaned` was redacted from) does — a strict COUNT, not a set
-    # difference, so a token that appears BOTH cleanly and spliced in one chunk is still
-    # scrubbed for its spliced occurrence rather than skipped. This keeps the loop off the
-    # already-handled majority: `redact_for_disk` runs this over the whole multi-line bridge
-    # log on every poll, where an O(matches x len) scan-per-shape was a real per-tick cost.
-    welded: Counter[str] = Counter(tok for tok, _ in _shape_hits(_ANSI_RE.sub("", text)))
-    spaced_masks: dict[str, str] = {}
-    spaced_counts: Counter[str] = Counter()
+    # The gate is EXACTLY "is this shape's token still present RAW in `cleaned`?" — i.e. did
+    # the first pass miss it because stripping welded it past its `\b`. That predicate is not
+    # negotiable: a COUNT of space-view vs delete-view matches is NOT a valid substitute,
+    # because the two views tally DIFFERENT occurrences — a string-sequence splice hides a
+    # token from the delete view while a colour escape mid-token REJOINS one there, so the
+    # counts can tie while a genuinely welded copy still sits raw in `cleaned` (a leak).
+    # The only safe economy is to DEDUPE the space-view tokens: `str.replace` already masks
+    # every occurrence, so the `in cleaned` scan need run at most once per DISTINCT token
+    # rather than once per occurrence — which is what keeps `redact_for_disk`, run over the
+    # whole multi-line bridge log each poll, off an O(occurrences x len) scan-per-shape.
+    seen: dict[str, str] = {}
     for tok, mask in _shape_hits(_ANSI_RE.sub(" ", text)):
-        spaced_counts[tok] += 1
-        spaced_masks[tok] = mask
-    for tok, count in spaced_counts.items():
-        if count > welded[tok] and tok in cleaned:
-            cleaned = cleaned.replace(tok, spaced_masks[tok])
+        seen.setdefault(tok, mask)
+    for tok, mask in seen.items():
+        if tok in cleaned:
+            cleaned = cleaned.replace(tok, mask)
     return cleaned
 
 
