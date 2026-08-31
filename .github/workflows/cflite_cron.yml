@@ -45,12 +45,11 @@
 #   Those logs are the only fuzz-coverage signal we have; if the Python
 #   path stops producing them without yet producing a report, revert `language` on
 #   THIS job only — batch and PR need it for the reproduce timeout regardless.
-#   Wait for the cron rather than reaching for `workflow_dispatch`. Both jobs carry an
-#   `if: github.ref == 'refs/heads/main'` gate (issue 1348), but that enforces only the
-#   REF half: a dispatch from a feature branch is skipped outright, so the PAT can no
-#   longer be handed to unmerged workflow code. A dispatch FROM MAIN still runs, and
-#   still writes the real `gh-pages` with the write PAT — so the advice above stands,
-#   the gate narrows who can trip it rather than removing the hazard.
+#   Wait for the cron rather than reaching for `workflow_dispatch`. The write PAT is an
+#   environment secret in `fuzz-corpus`, whose `main`-only deployment-branch policy GitHub
+#   enforces server-side (issue 1348), so a dispatch from a feature branch cannot reach it —
+#   the `if:` on both jobs is belt-and-braces. A dispatch FROM MAIN still runs, and still
+#   writes the real `gh-pages` with the PAT, so the wait-for-cron advice above stands.
 #   Note the job passes either way — CFLite discards the coverage
 #   script's output — so a green run proves nothing; only `gh-pages` does.
 #   ⚠️ Expect the artefact SHAPE to change on the Python path even when it works:
@@ -90,9 +89,10 @@ permissions: {}
 jobs:
   prune:
     name: prune corpus
-    # Schedule events already run on the default branch; this also constrains a manual
-    # dispatch to main, so the FUZZ_STORAGE_TOKEN write PAT below can never be handed to
-    # unmerged workflow code dispatched from an arbitrary ref.
+    # Same server-side enforcement as `batch-fuzzing`: FUZZ_STORAGE_TOKEN is an environment
+    # secret in `fuzz-corpus`, whose `main`-only deployment-branch policy GitHub checks
+    # before the job starts (not overridable by this file). The `if:` is belt-and-braces.
+    environment: fuzz-corpus
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # ≈ fuzz-seconds (a TOTAL, split across harnesses) + build. The ≈7 min was observed at a
@@ -137,9 +137,11 @@ jobs:
 
   coverage:
     name: coverage replay (per-harness edge stats)
-    # Same default-branch gate as `prune`: this job pushes replay artefacts to the corpus
-    # repo's `gh-pages` with the FUZZ_STORAGE_TOKEN write PAT, so a dispatch from an
-    # arbitrary ref must not reach it.
+    # Same server-side enforcement as `prune`: this job pushes replay artefacts to the corpus
+    # repo's `gh-pages` with the FUZZ_STORAGE_TOKEN PAT, held as an environment secret in
+    # `fuzz-corpus` whose `main`-only deployment-branch policy GitHub enforces before the job
+    # starts (not overridable by this file). The `if:` is belt-and-braces.
+    environment: fuzz-corpus
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # Coverage build + full-corpus replay over every harness — the slow one, and the job
