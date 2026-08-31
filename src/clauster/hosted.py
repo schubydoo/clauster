@@ -46,6 +46,8 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+
 from . import procutil
 from .claustrum_client import ClaustrumClient, ClaustrumError, ProcessStream, _Subscriber
 from .config import INHERIT_PERMISSION_MODE, PermissionMode
@@ -1272,7 +1274,10 @@ class HostedManager:
         ``daemon_last_seq``. Found+running → a live, pumping session; found+exited →
         finalized via the replayed exit; not-found → a CRASHED "session lost" row.
         Tolerates a daemon error per session (records it, keeps going — one bad
-        reattach never blocks the rest or startup). Returns the restored instances.
+        reattach never blocks the rest or startup), and likewise an unreadable
+        persisted record: :meth:`_instance_from_record` degrades that one row to
+        defaults and logs it rather than raising through this loop (#1343).
+        Returns the restored instances.
 
         ``history_for`` resolves a row to its prior conversation, read from claude's
         on-disk transcript, so a reattached session's view isn't empty (#1045); the app
@@ -1458,7 +1463,63 @@ class HostedManager:
 
     @staticmethod
     def _instance_from_record(process_id: str, fields: dict) -> RemoteControlInstance:
-        """Rebuild a hosted instance row from a persisted record (inverse of _record)."""
+        """Rebuild a hosted instance row from a persisted record (inverse of _record).
+
+        Total over the record map (#1343). :func:`_coerce_seq` made one field total;
+        every *other* persisted field still reached the model unguarded, so a junk
+        ``project``/``label``/``permission_mode``/``agent_pid``/… raised
+        ``ValidationError`` — which is not a :class:`ClaustrumError`, so it escaped
+        both :meth:`reattach_all`'s per-session handler and the lifespan's in
+        ``app.py``: one corrupt record failed the whole app boot. Such a record now
+        degrades to :meth:`_degraded_row` and is logged at WARNING — visibly, not
+        silently, and per-record, so the other sessions still reattach.
+        """
+        try:
+            return HostedManager._row_from_record(process_id, fields)
+        except ValidationError as exc:
+            # Field names + pydantic's error *codes* only. The values are what the
+            # daemon and claude wrote; echoing them into the log would put session
+            # metadata in a file redaction never sees.
+            bad = ", ".join(
+                f"{'.'.join(str(part) for part in err['loc'])}:{err['type']}"
+                for err in exc.errors()
+            )
+            logger.warning(
+                "hosted: persisted record for %s is unreadable (%s); reattaching it with "
+                "default metadata rather than failing startup",
+                process_id,
+                bad or "unknown field",
+            )
+            return HostedManager._degraded_row(process_id, fields)
+
+    @staticmethod
+    def _degraded_row(process_id: str, fields: dict) -> RemoteControlInstance:
+        """Rebuild a row from only the record fields whose coercion cannot fail.
+
+        The salvage half of the guard above, and the reason it degrades rather than
+        skipping the record: reattach binds by ``claustrum_process_id`` alone, so the
+        row this returns still reattaches the live daemon session. Dropping it instead
+        would orphan a running agent — the exact failure hosted persistence exists to
+        prevent. What survives is what a reattach needs (the process id, the replay
+        cursor, the stop intent) plus the display strings when they are strings; every
+        field the model rejected falls back to its model default. Constructed from
+        checked types only, so this cannot itself raise.
+        """
+        project = fields.get("project")
+        label = fields.get("label")
+        return RemoteControlInstance(
+            project=project if isinstance(project, str) else "",
+            label=label if isinstance(label, str) else f"hosted:{process_id[:8]}",
+            channel="hosted",
+            claustrum_process_id=process_id,
+            daemon_last_seq=_coerce_seq(fields.get("daemon_last_seq")),
+            intentional_stop=bool(fields.get("intentional_stop", False)),
+            status=InstanceStatus.STARTING,
+        )
+
+    @staticmethod
+    def _row_from_record(process_id: str, fields: dict) -> RemoteControlInstance:
+        """Map a well-formed record onto the model; raises ``ValidationError`` if it isn't."""
         started_at = fields.get("started_at")
         parsed_start: datetime | None = None
         if isinstance(started_at, str):
@@ -1487,21 +1548,26 @@ class HostedManager:
         # of hitting the freshly-minted default_factory id (#841). Constructed
         # then set rather than passed to the constructor — a bare **fields unpack
         # would let heterogeneous/unknown persisted keys reach the model directly.
-        if fields.get("instance_id"):
-            instance.instance_id = fields["instance_id"]
+        # An assignment is NOT validated (the model does not set validate_assignment),
+        # so the `str` check is the only thing standing between a hand-edited record
+        # and a non-string key in the registry — the guard above would not catch it.
+        instance_id = fields.get("instance_id")
+        if isinstance(instance_id, str) and instance_id:
+            instance.instance_id = instance_id
         return instance
 
 
 def _coerce_seq(value: Any) -> int:
     """Coerce a persisted ``daemon_last_seq`` to an int, falling back to ``0``.
 
-    This makes :meth:`HostedManager._instance_from_record` total over **this one
-    field** of the on-disk ``hosted_state.json`` record map. A bare ``int(...)``
+    This keeps **this one field** of the on-disk ``hosted_state.json`` record map
+    out of the mapper's fallback path. A bare ``int(...)``
     was not: a non-numeric string (``ValueError``), a dict/list (``TypeError``),
     a NaN (``ValueError``) or an ``inf`` (``OverflowError``) each aborted the
-    whole reattach on restart. (The mapper's *other* persisted fields still reach
-    the model unguarded and can raise ``ValidationError`` — pre-existing, and not
-    something this helper should be read as having closed.) An uncoercible
+    whole reattach on restart. (The mapper's other persisted fields are covered
+    separately, by :meth:`HostedManager._instance_from_record`'s ``ValidationError``
+    guard — #1343. This helper is still the *only* thing that keeps a junk cursor
+    from costing the rest of the row its metadata.) An uncoercible
     cursor degrades to 0 — replay from the
     start of the retained window, the fail-*visible* direction: the client sees
     frames it may already have, rather than the session silently vanishing.

@@ -30,23 +30,23 @@ Three further properties, each a promise ``_coerce_seq`` makes in so many words:
 * ``instance_id`` is a non-empty ``str``, so a client that cached it before the restart
   still resolves through ``HostedManager._key_for``.
 
-⚠️ **``ValidationError`` is caught, and that is a documented boundary, not a bug this
-harness is hiding.** ``_coerce_seq``'s own docstring says it makes the mapper total over
-*that one field* and adds: *"The mapper's other persisted fields still reach the model
-unguarded and can raise ValidationError — pre-existing, and not something this helper
-should be read as having closed."* Fuzzing a ``{"project": {}}`` record into a crash would
-therefore re-report a known, deliberately-scoped limitation on every batch run rather than
-find anything. Every **other** exception is left uncaught and is a genuine finding — that
-is the ``TypeError``/``OverflowError``/``ValueError`` class ``_coerce_seq`` exists to
-close, and the class a future field would reopen.
+⚠️ **``ValidationError`` used to be caught here as a documented boundary; issue 1343
+closed the boundary, so the pin is inverted.** The mapper now degrades a record the
+model rejects to ``HostedManager._degraded_row`` and logs it, instead of raising
+through ``reattach_all`` and the lifespan — which is what made one hand-edited
+``{"project": {}}`` fail clauster's whole boot. A ``ValidationError`` reaching this
+oracle is therefore a real finding (the guard narrowed), and it is re-raised as an
+assertion so the batch report names it. Every other exception was, and stays,
+uncaught — that is the ``TypeError``/``OverflowError``/``ValueError`` class
+``_coerce_seq`` exists to close, and the class a future field would reopen.
 
 ⚠️ ``instance_id`` is generated as ``str | None`` (or absent) only, deliberately. The
 writer is ``_record``, which always projects a ``str``, so a non-string could not arrive
 from a record clauster wrote — and clauster owns ``hosted_state.json`` (invariant 5), so
-this is not an attacker-controlled field. It is worth noting that the mapper assigns it
-*after* construction and therefore outside pydantic's validation, so a hand-edited state
-file could put a non-string there; that is recorded as an observation on the PR rather
-than asserted, for the same reason as above.
+this is not an attacker-controlled field. The mapper assigns it *after* construction and
+therefore outside pydantic's validation; since issue 1343 it type-checks the value first,
+so a hand-edited state file can no longer put a non-string in the registry. The generator
+is left narrow anyway, because widening it would only re-prove that ``isinstance`` check.
 """
 
 import sys
@@ -157,8 +157,9 @@ def check(record: dict) -> None:
     manager = hosted.HostedManager
     try:
         instance = manager._instance_from_record(_PROCESS_ID, record)
-    except pydantic.ValidationError:
-        return  # documented boundary — see the module docstring
+    except pydantic.ValidationError as exc:
+        # No longer a boundary (issue 1343) — the mapper is total over the record map.
+        raise AssertionError(f"ValidationError escaped the mapper: {exc}") from exc
 
     seq = instance.daemon_last_seq
     assert isinstance(seq, int) and not isinstance(seq, bool), f"seq not an int: {seq!r}"
