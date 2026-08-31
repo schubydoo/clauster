@@ -13,14 +13,26 @@
 # interesting branches need structured tokens Atheris' random FDP never
 # synthesises — without seeds+dict they sit at a 0-element corpus. See fuzz/README.md.
 
-# The `pty` extra, not a bare install: pty_screen_feed_fuzzer drives the real PtyScreen,
-# which lazily imports pyte and raises PyteUnavailableError without it — so a bare install
-# would leave that harness failing on every input instead of fuzzing. On Linux the extra
-# resolves to pyte alone (pywinpty carries a win32 marker). pyte is LGPLv3 and is kept out
-# of [project.dependencies] and the Apache-2.0 frozen binary on purpose; this image is a
-# CI build container for the fuzzers and is never shipped or distributed, so installing it
-# here carries no relink obligation. If that ever changes, revisit pyproject.toml's note.
-pip3 install "$SRC/clauster[pty]"
+# Two steps so every registry download is hash-pinned (Scorecard Pinned-Dependencies,
+# alert 149): first the dependency set with --require-hashes, then clauster itself from
+# the local tree with --no-deps (a path install has no registry artifact to hash, and its
+# dependencies are already satisfied by step one).
+#
+# requirements.txt is GENERATED — regenerate it whenever uv.lock or the dependency set
+# changes:  uv export --frozen --no-emit-project --extra pty -o .clusterfuzzlite/requirements.txt
+# Drift fails CLOSED: a new dependency missing from the file makes --require-hashes (or
+# the import at fuzz time) fail loudly rather than silently installing unpinned.
+#
+# The `pty` extra is in that export, not a bare dependency set: pty_screen_feed_fuzzer
+# drives the real PtyScreen, which lazily imports pyte and raises PyteUnavailableError
+# without it — so a bare install would leave that harness failing on every input instead
+# of fuzzing. On Linux the extra resolves to pyte alone (pywinpty carries a win32
+# marker). pyte is LGPLv3 and is kept out of [project.dependencies] and the Apache-2.0
+# frozen binary on purpose; this image is a CI build container for the fuzzers and is
+# never shipped or distributed, so installing it here carries no relink obligation. If
+# that ever changes, revisit pyproject.toml's note.
+pip3 install --require-hashes -r "$SRC/clauster/.clusterfuzzlite/requirements.txt"
+pip3 install --no-deps "$SRC/clauster"
 
 for fuzzer in "$SRC"/clauster/fuzz/*_fuzzer.py; do
   compile_python_fuzzer "$fuzzer"
