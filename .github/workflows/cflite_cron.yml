@@ -45,9 +45,12 @@
 #   Those logs are the only fuzz-coverage signal we have; if the Python
 #   path stops producing them without yet producing a report, revert `language` on
 #   THIS job only — batch and PR need it for the reproduce timeout regardless.
-#   Wait for the cron rather than reaching for `workflow_dispatch`: a
-#   dispatch runs unmerged workflow code with the write PAT and pushes to the real
-#   `gh-pages`. Note the job passes either way — CFLite discards the coverage
+#   Wait for the cron rather than reaching for `workflow_dispatch`: a dispatch
+#   would run unmerged workflow code with the write PAT and push to the real
+#   `gh-pages`. Both jobs now carry an `if: github.ref == 'refs/heads/main'` gate that
+#   ENFORCES this rather than merely advising it — a dispatch from a feature branch is
+#   skipped outright, so the PAT is only ever reachable from merged code (issue 1348).
+#   Note the job passes either way — CFLite discards the coverage
 #   script's output — so a green run proves nothing; only `gh-pages` does.
 #   ⚠️ Expect the artefact SHAPE to change on the Python path even when it works:
 #   `<harness>.log` still gets written, but `_error.log` and the MERGE-INNER/OUTER
@@ -86,6 +89,10 @@ permissions: {}
 jobs:
   prune:
     name: prune corpus
+    # Schedule events already run on the default branch; this also constrains a manual
+    # dispatch to main, so the FUZZ_STORAGE_TOKEN write PAT below can never be handed to
+    # unmerged workflow code dispatched from an arbitrary ref.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # ≈ fuzz-seconds (a TOTAL, split across harnesses) + build. The ≈7 min was observed at a
     # smaller harness count; at 18 the build dominates and prune projects to ≈25 min.
@@ -129,6 +136,10 @@ jobs:
 
   coverage:
     name: coverage replay (per-harness edge stats)
+    # Same default-branch gate as `prune`: this job pushes replay artefacts to the corpus
+    # repo's `gh-pages` with the FUZZ_STORAGE_TOKEN write PAT, so a dispatch from an
+    # arbitrary ref must not reach it.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # Coverage build + full-corpus replay over every harness — the slow one, and the job
     # whose cost scales on BOTH axes with the harness count (a PyInstaller build each,

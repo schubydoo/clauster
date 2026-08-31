@@ -9,7 +9,7 @@
 # (schubydoo/clauster-fuzz-corpus, auth via the FUZZ_STORAGE_TOKEN PAT), fuzzes,
 # and pushes the grown corpus back — so coverage *compounds* across runs and
 # reaches the deeper bugs a from-seed run never finds. The write PAT lives ONLY
-# here (cron + workflow_dispatch, no fork exposure); cflite_pr.yml deliberately
+# here (cron + a main-only workflow_dispatch, no fork exposure); cflite_pr.yml deliberately
 # does NOT carry it (a fork PR with a write secret is an exfil surface). If the
 # PAT is ever rotated/expired, this job keeps passing but silently stops
 # accumulating. See https://google.github.io/clusterfuzzlite/.
@@ -36,6 +36,10 @@ permissions: {}
 jobs:
   batch-fuzzing:
     name: batch fuzzing
+    # Schedule events already run on the default branch; this also constrains a manual
+    # dispatch to main, so the FUZZ_STORAGE_TOKEN write PAT below can never be handed to
+    # unmerged workflow code dispatched from an arbitrary ref.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # ≈ fuzz-seconds + build. The ≈12 min was observed at 8 harnesses / 300s; at 18 the
     # build step dominates (~41s each) and the run projects to ≈25 min — still 2x headroom.
