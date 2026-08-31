@@ -228,6 +228,32 @@ def test_line_to_turn_tolerates_deeply_nested_json():
     assert turn is not None and turn["role"] == "user"
 
 
+def test_line_to_turn_redacts_the_timestamp():
+    # Invariant 4: every string field this reader returns reaches the browser, so every
+    # one of them is sanitized — including `timestamp`, which was returned verbatim
+    # (issue 1353). It is never validated as a date, and transcript bytes originate in
+    # model/tool output, so it carries whatever the record said. A real ISO-8601 stamp
+    # holds no identifier or secret shape, so sanitizing must not alter a legitimate one.
+    from clauster.usage import _line_to_turn
+
+    turn = _line_to_turn(
+        json.dumps(
+            {
+                "message": {"role": "user", "content": "hi"},
+                "timestamp": "session_01JFAKEFAKEFAKEFAKE",
+            }
+        )
+    )
+    assert turn is not None
+    assert turn["timestamp"] == "session_<redacted>"
+
+    for stamp in ("2026-08-31T12:34:56.789Z", "2026-08-31T12:34:56+00:00"):
+        kept = _line_to_turn(
+            json.dumps({"message": {"role": "user", "content": "hi"}, "timestamp": stamp})
+        )
+        assert kept is not None and kept["timestamp"] == stamp
+
+
 def test_parse_missing_file_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         parse_transcript(tmp_path / "nope.jsonl")
@@ -392,6 +418,29 @@ def test_recorded_cwd_gives_up_past_the_line_bound(short_tmp_root):
     )
     assert _recorded_cwd(path, max_lines=5) is None
     assert _recorded_cwd(path, max_lines=50) == "/srv/projects/late"
+
+
+def test_recorded_cwd_tolerates_deeply_nested_json(short_tmp_root):
+    # A deeply-nested line raised RecursionError out of json.loads — not a ValueError, so
+    # it escaped both handlers here. `_recorded_cwd` backs `_transcript_is_owned`, reached
+    # from the usage tally and the transcript viewer, and `app._list` catches only OSError:
+    # one hostile line 500'd those surfaces (issue 1341). The line must be skipped like any
+    # other corrupt one, and a later record must still be found.
+    from clauster.usage import _recorded_cwd, _transcript_is_owned
+
+    path = short_tmp_root / "deep.jsonl"
+    path.write_text(
+        "[" * 100_000 + "\n" + json.dumps({"type": "user", "cwd": "/srv/projects/found"}) + "\n",
+        encoding="utf-8",
+    )
+    assert _recorded_cwd(path) == "/srv/projects/found"
+
+    # A transcript that is ONLY the hostile line states no cwd, so ownership stays unproven
+    # — refused rather than raising, which is the fail-closed direction.
+    only_deep = short_tmp_root / "only-deep.jsonl"
+    only_deep.write_text("[" * 100_000 + "\n", encoding="utf-8")
+    assert _recorded_cwd(only_deep) is None
+    assert _transcript_is_owned(short_tmp_root / "proj", only_deep) is False
 
 
 def test_recorded_cwd_unreadable_transcript_is_unproven(short_tmp_root):
@@ -1159,6 +1208,23 @@ def test_is_subagent_transcript_ignores_malformed_and_non_dict_records(tmp_path)
     )
     # The junk lines are skipped, leaving a uniformly-sidechain transcript.
     assert _is_subagent_transcript(p) is True
+
+
+def test_is_subagent_transcript_tolerates_deeply_nested_json(tmp_path):
+    # Same escape as `_recorded_cwd` (issue 1341): a deeply-nested line raised
+    # RecursionError out of json.loads, which is not a ValueError, so it escaped the
+    # JSONDecodeError handler and 500'd the transcript listing instead of being skipped
+    # as the docstring promises. Skipping preserves the documented bias — the remaining
+    # records still decide, and a file that is nothing but junk reads as a conversation.
+    from clauster.usage import _is_subagent_transcript
+
+    p = tmp_path / "deep.jsonl"
+    p.write_text("[" * 100_000 + "\n" + json.dumps(_sidechain(True)) + "\n", encoding="utf-8")
+    assert _is_subagent_transcript(p) is True
+
+    only_deep = tmp_path / "only-deep.jsonl"
+    only_deep.write_text("[" * 100_000 + "\n", encoding="utf-8")
+    assert _is_subagent_transcript(only_deep) is False
 
 
 def test_is_subagent_transcript_true_for_a_headless_sdk_py_run(tmp_path):

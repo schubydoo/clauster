@@ -338,7 +338,15 @@ def _recorded_cwd(path: Path, max_lines: int = 200) -> str | None:
                     break
                 try:
                     record = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
+                except (json.JSONDecodeError, ValueError, RecursionError):
+                    # RecursionError: CPython's recursive scanner overflows on deeply-nested
+                    # JSON *before* json can raise JSONDecodeError, and it is not a
+                    # ValueError — so it escaped both handlers here. This helper backs
+                    # `_transcript_is_owned`, reached from the usage tally and the transcript
+                    # viewer via `transcript_paths_for`, and `app._list` catches only OSError:
+                    # one hostile line 500'd those surfaces. Skipping the line degrades to
+                    # "this record states no cwd", and a transcript with no proven cwd is
+                    # refused by `_transcript_is_owned` — the fail-closed direction.
                     continue
                 if isinstance(record, dict) and isinstance(record.get("cwd"), str):
                     if record["cwd"]:
@@ -464,7 +472,13 @@ def _line_to_turn(line: str) -> dict | None:
         "role": redact.sanitize_line(role),
         "content": redact.sanitize_line(text),
         "model": redact.sanitize_line(model) if isinstance(model, str) else None,
-        "timestamp": timestamp if isinstance(timestamp, str) else None,
+        # `timestamp` is not structurally validated as a date anywhere — it is whatever
+        # string the record carried, and transcript bytes originate in model/tool output,
+        # so it is as attacker-influenceable as `content`. It was returned verbatim, which
+        # broke both this docstring and invariant 4 (nothing reaches the browser
+        # unredacted). A real ISO-8601 stamp contains no identifier or secret shape, so
+        # sanitizing it is a no-op on every legitimate value.
+        "timestamp": redact.sanitize_line(timestamp) if isinstance(timestamp, str) else None,
     }
 
 
@@ -534,7 +548,13 @@ def _is_subagent_transcript(path: Path, max_records: int = 200) -> bool:
                     break
                 try:
                     record = json.loads(line)
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, RecursionError):
+                    # RecursionError: deeply-nested JSON overflows CPython's recursive
+                    # scanner before json can raise JSONDecodeError, and it is not a
+                    # ValueError — so it escaped this handler and broke the docstring's
+                    # "an unparseable line is skipped rather than raising", 500'ing the
+                    # transcript listing. Skipping keeps the documented bias intact: the
+                    # line carries no marker, so the file stays a "real conversation".
                     continue
                 if not isinstance(record, dict):
                     continue
