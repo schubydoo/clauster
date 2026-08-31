@@ -26,16 +26,41 @@ DRAFT_GUARD = "github.event.pull_request.draft != true"
 
 # A job whose `if:` already excludes pull_request entirely cannot run on a draft, so a
 # draft term there would be dead code (e.g. security.yml's trivy-image).
+#
+# ⚠️ This must be matched as a LEADING CONJUNCT, never as a substring. security.yml's
+# zizmor job reads `(github.event_name != 'pull_request' || github.event.action !=
+# 'synchronize') && <guard>` — there the string appears as a DISJUNCT, where it excludes
+# nothing and the job really does run on PR opened/reopened/ready_for_review. A substring
+# test skipped that job, so deleting its draft guard left this suite green.
 PR_EXCLUDED = "github.event_name != 'pull_request'"
 
-# `types: [closed]` fires only when a PR closes or merges. GitHub cannot merge a draft,
-# and these workflows already gate on `merged == true`, so a draft guard is dead code.
-MERGE_TIME_ONLY = frozenset({"knope-release.yml", "tap-sync-trigger.yml"})
+# The four workflows backing a required status context. They are evaluated per head SHA,
+# so dropping `synchronize` would leave a fixup push's head with no check run and hang
+# the PR at "Expected — waiting for status". osv-scanner and repo-config-drift trim
+# their types deliberately and are NOT in this set.
+REQUIRED_CTX_WORKFLOWS = frozenset({"ci.yml", "lint.yml", "security.yml", "pr-title.yml"})
+DEFAULT_PR_TYPES = frozenset({"opened", "reopened", "synchronize"})
 
-# ClusterFuzzLite's per-PR workflow is owned by a separate in-flight change; exempted so
-# the two don't conflict. Removing this entry once it carries the guard is a no-op —
-# the exemption permits the guard, it does not forbid it.
+# ClusterFuzzLite's per-PR workflow is exempt: a separate in-flight change owns that file,
+# so this branch must not edit it. It still fires its 18-harness build on a draft's
+# `opened`. The exemption PERMITS the guard rather than forbidding it, so adding
+# `if: github.event.pull_request.draft != true` to its `pr-fuzzing` job — which is what
+# it needs — will not break this test, and this entry can then be deleted.
 EXEMPT_WORKFLOWS = frozenset({"cflite_pr.yml"})
+
+
+def _is_merge_time_only(types):
+    """True for a `types: [closed]` trigger — a draft can never reach it.
+
+    Derived from the trigger rather than a filename allowlist, so a workflow that later
+    gains a non-close type stops being exempt instead of silently keeping a stale pass.
+    """
+    return bool(types) and set(types) <= {"closed"}
+
+
+def _is_pr_excluded(condition):
+    """True when an `if:` excludes `pull_request` events at the TOP level of an AND."""
+    return condition == PR_EXCLUDED or condition.startswith(f"{PR_EXCLUDED} &&")
 
 
 def _triggers(doc):
@@ -46,14 +71,18 @@ def _triggers(doc):
 
 def _pr_workflows():
     """Yield (filename, pull_request-trigger, jobs) for workflows this guard covers."""
-    for wf in sorted(WORKFLOWS.glob("*.yml")):
-        if wf.name in MERGE_TIME_ONLY or wf.name in EXEMPT_WORKFLOWS:
+    files = sorted([*WORKFLOWS.glob("*.yml"), *WORKFLOWS.glob("*.yaml")])
+    for wf in files:
+        if wf.name in EXEMPT_WORKFLOWS:
             continue
         doc = yaml.safe_load(wf.read_text(encoding="utf-8"))
         triggers = _triggers(doc)
         if "pull_request" not in triggers:
             continue
-        yield wf.name, triggers["pull_request"] or {}, doc.get("jobs") or {}
+        pull_request = triggers["pull_request"] or {}
+        if _is_merge_time_only(pull_request.get("types")):
+            continue
+        yield wf.name, pull_request, doc.get("jobs") or {}
 
 
 def _workflow_params():
@@ -89,13 +118,21 @@ def test_pull_request_trigger_lists_ready_for_review(workflow, pull_request, job
         f"{workflow} sets `types: {types}` without `ready_for_review` — a PR flipped "
         f"draft → ready would never re-dispatch it."
     )
+    if workflow in REQUIRED_CTX_WORKFLOWS:
+        missing = DEFAULT_PR_TYPES - set(types)
+        assert not missing, (
+            f"{workflow} backs a REQUIRED status context but dropped {sorted(missing)} "
+            f"from its types. Required checks are evaluated per head SHA, so without "
+            f"`synchronize` a fixup push leaves the new head with no check run and the "
+            f"PR hangs at 'Expected — waiting for status'."
+        )
 
 
 @pytest.mark.parametrize(("workflow", "job_id", "job"), _job_params())
 def test_every_pull_request_job_skips_drafts(workflow, job_id, job):
     """Every job reachable on a `pull_request` event carries the draft guard."""
     condition = " ".join(str(job.get("if", "")).split())
-    if PR_EXCLUDED in condition:
+    if _is_pr_excluded(condition):
         pytest.skip(f"{workflow}:{job_id} never runs on pull_request events")
     assert DRAFT_GUARD in condition, (
         f"{workflow}:{job_id} runs on draft PRs — its `if:` is {condition!r}. Add "

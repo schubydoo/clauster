@@ -31,9 +31,11 @@ jobs:
   # which is why these can't use a top-level `paths-ignore` (that would make the
   # required check never report and the PR hang "Expected — waiting").
   #
-  # DRAFT PRs: every job below (this one included) carries
+  # DRAFT PRs: every job below that is REACHABLE on a `pull_request` event carries
   # `github.event.pull_request.draft != true`, so a draft PR runs none of this
   # workflow — no CodeQL SARIF upload, no secret scan, no dependency review.
+  # (`trivy-image` is not in that set: it is already `github.event_name !=
+  # 'pull_request'`, so a draft term there would be unreachable.)
   # `!= true` (not `== false`) so push:main / the weekly cron — where `draft` is
   # null — fail-safe to running. `ready_for_review` is in the trigger types, so
   # flipping a draft ready re-dispatches the whole workflow on the current head
@@ -82,6 +84,13 @@ jobs:
     # analysis while drafting halves the CodeQL SARIF uploads a draft generates —
     # the shared GITHUB_TOKEN pool those uploads draw on is the reason this guard
     # exists. `ready_for_review` restores the merge-ref analysis before review.
+    #
+    # ⚠️ One coverage window this opens, stated rather than buried: a FORK's draft
+    # PR now gets NO CodeQL at all. codeql.yml's `on: push` fires in the fork's own
+    # repository, never here (see its header), so the head-SHA analysis that covers
+    # in-repo drafts cannot reach a fork — and this merge-ref job was the only thing
+    # that did. It returns on `ready_for_review`, and a draft cannot merge, so this
+    # is a deferral rather than a hole in the merge gate.
     if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 15

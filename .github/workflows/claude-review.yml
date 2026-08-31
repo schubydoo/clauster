@@ -76,6 +76,16 @@ jobs:
       # review was collateral. Read-only scopes: the three consuming steps only
       # LIST comments (issues + pulls) and READ one file's contents.
       #
+      # NO `|| github.token` fallback, deliberately. This step has no
+      # `continue-on-error`, so a failed mint fails the job here — the fallback
+      # would be unreachable code that merely READS as though it degrades. Worse,
+      # if anyone later adds `continue-on-error` it would silently escalate these
+      # steps from this read-only App token to the job's WRITE-scoped GITHUB_TOKEN
+      # (issues: write, pull-requests: write) and put them back on the very bucket
+      # this change exists to leave. Fail closed and loud: the App is now a hard
+      # dependency of the review path. Re-run the `@claude review` comment once the
+      # App is reachable again.
+      #
       # ⚠️ DO NOT hand this token to the `Review` step's claude-code-action below,
       # and do NOT add a `github_token:` input there. That action performs its own
       # OIDC exchange with the Claude GitHub App, and that is what makes the review
@@ -114,7 +124,7 @@ jobs:
       - name: Count what Claude has already posted
         id: before
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PR: ${{ steps.resolve.outputs.pr }}
         run: |
           set -euo pipefail
@@ -131,7 +141,7 @@ jobs:
       - name: Fetch the review instructions from the default branch
         id: rules
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
@@ -287,7 +297,7 @@ jobs:
         # that actually matters — whether the pull request gained a Claude comment.
         if: always() && steps.before.outcome == 'success'
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PR: ${{ steps.resolve.outputs.pr }}
           BEFORE: ${{ steps.before.outputs.count }}
         run: |
