@@ -1342,6 +1342,11 @@ class HostedManager:
                 else:
                     instance.error_detail = "daemon restarted; session lost"
                 continue
+            # A clean reattach: drop the salvage's "record was unreadable" note so it does
+            # not later render as this running session's ENDING reason (the WARNING logged at
+            # salvage time stays the durable record). Only that note is cleared.
+            if instance.error_detail == _UNREADABLE_RECORD_DETAIL:
+                instance.error_detail = None
             self._sessions[process_id] = session
         await self._persist()
         return [self._synced(inst) for inst in self._instances.values()]
@@ -1573,7 +1578,7 @@ class HostedManager:
             # same bytes and leave a degraded row without the CL-8 orphan evidence a
             # healthy one would have kept.
             agent_pid=_as_pid(fields.get("agent_pid")),
-            agent_proc_start=fields.get("agent_proc_start"),
+            agent_proc_start=_as_proc_start(fields.get("agent_proc_start")),
             started_at=_as_started_at(fields.get("started_at")),
             intentional_stop=bool(fields.get("intentional_stop", False)),
             status=InstanceStatus.STARTING,
@@ -1656,17 +1661,25 @@ def _as_permission_mode(value: Any) -> PermissionMode:
 def _as_proc_start(value: Any) -> float | None:
     """Coerce a persisted ``agent_proc_start`` to a float, falling back to ``None``.
 
-    For the salvage path only — the healthy mapping hands the raw value to pydantic,
-    which rejects an out-of-range int as a ``ValidationError`` (measured, not assumed)
-    and so routes it here with a warning. What must not happen is the *fallback*
-    raising: JSON can hold an int too large for a float, and a bare ``float()`` on it
-    raises ``OverflowError``, which the caller's ``except ValidationError`` does not
-    catch — that is the escape to the lifespan #1343 exists to close, reopened inside
-    its own fix. ``None`` means "unknown start time", which
-    :func:`procutil.is_killable_hosted` already treats as not-safely-killable: the
+    Used by BOTH mapping paths so they cannot disagree about the same bytes — the twin of
+    :func:`_as_pid` for the other half of the orphan-recovery evidence pair. Stricter than
+    pydantic's lax coercion on purpose: that would accept a numeric string (``"1234.5"`` →
+    ``1234.5``) and ``true`` → ``1.0``, so handing the raw value to pydantic on the healthy
+    path let it KEEP values the salvage path drops. ``_record`` only ever writes a float, so
+    nothing legitimate is refused; a refusal is logged. And the *fallback* must not raise:
+    JSON can hold an int too large for a float, and a bare ``float()`` on it raises
+    ``OverflowError``, which the caller's ``except ValidationError`` does not catch — the
+    escape #1343 exists to close, reopened inside its own fix. ``None`` means "unknown start
+    time", which :func:`procutil.is_killable_hosted` treats as not-safely-killable: the
     fail-closed direction for orphan recovery.
     """
     if isinstance(value, bool) or not isinstance(value, int | float):
+        if value is not None:
+            logger.warning(
+                "hosted: refusing a non-numeric agent_proc_start (%s) from a persisted "
+                "record; the row loses its orphan-recovery start-time evidence",
+                type(value).__name__,
+            )
         return None
     try:
         return float(value)
@@ -1695,11 +1708,22 @@ def _as_pid(value: Any) -> int | None:
     Used by both mapping paths so they cannot disagree about the same bytes. Stricter
     than pydantic's lax coercion on purpose: that accepts ``true`` as pid **1** — init
     on every POSIX host — and ``4242.0`` as 4242. ``_record`` only ever writes an int,
-    so nothing legitimate is refused. ``None`` means "no pid evidence", which
-    :meth:`HostedManager._is_orphan` reads as not-recoverable: the fail-closed
-    direction, since the alternative is offering Kill against a pid we cannot vouch for.
+    so nothing legitimate is refused; a refusal is logged. ``None`` means "no pid
+    evidence", which :meth:`HostedManager._is_orphan` reads as not-recoverable: the
+    fail-closed direction, since the alternative is offering Kill against a pid we cannot
+    vouch for. The WARNING matters because ``_persist`` writes the ``None`` back, so the
+    orphan evidence a prior release kept (lax ``"4242"`` → 4242) is dropped for good and a
+    row can start reading "session lost" with nothing else to explain it.
     """
-    return value if _is_plain_int(value) else None
+    if _is_plain_int(value):
+        return value
+    if value is not None:
+        logger.warning(
+            "hosted: refusing a non-integer agent_pid (%s) from a persisted record; the "
+            "row loses its orphan-recovery pid evidence",
+            type(value).__name__,
+        )
+    return None
 
 
 def _coerce_seq(value: Any) -> int:

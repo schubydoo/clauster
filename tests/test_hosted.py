@@ -2017,7 +2017,10 @@ _REJECTED_RECORDS = [
     # Truthy on purpose: an empty list is the one non-string `_synced` skips anyway, so
     # it would let the uuid path below pass vacuously.
     pytest.param({"claude_session_uuid": ["not-a-uuid"]}, id="uuid-not-a-string"),
-    pytest.param({"agent_proc_start": {}}, id="proc-start-not-a-float"),
+    # NB agent_proc_start is deliberately NOT here: like agent_pid, both mapping paths now
+    # coerce it via `_as_proc_start` (a junk value → None), so it never raises a
+    # ValidationError or triggers degradation. Its tolerance is pinned by
+    # test_a_junk_agent_proc_start_never_reaches_the_model_on_either_path.
 ]
 
 
@@ -2038,6 +2041,24 @@ def test_a_junk_agent_pid_never_reaches_the_model_on_either_path():
     kept = {"project": "proj", "label": "hosted:proj", "agent_pid": 4242}
     assert HostedManager._row_from_record(_PID, kept).agent_pid == 4242
     assert HostedManager._degraded_row(_PID, kept).agent_pid == 4242
+
+
+def test_a_junk_agent_proc_start_never_reaches_the_model_on_either_path():
+    """The twin of the pid test — the other half of the orphan-recovery evidence pair.
+
+    Left asymmetric (the healthy path handing the raw value to pydantic, the salvage using
+    `_as_proc_start`), a record degrading on an unrelated field would drop a numeric-string
+    proc_start that the healthy path would keep as a float — and `_persist` writes that loss
+    to disk, costing `_is_orphan` the second input it needs. `true` → `1.0` is the float twin
+    of the pid-1 case.
+    """
+    for junk in ("1234.5", True, {}):
+        record = {"project": "proj", "label": "hosted:proj", "agent_proc_start": junk}
+        assert HostedManager._row_from_record(_PID, record).agent_proc_start is None
+        assert HostedManager._degraded_row(_PID, record).agent_proc_start is None
+    kept = {"project": "proj", "label": "hosted:proj", "agent_proc_start": 1234.5}
+    assert HostedManager._row_from_record(_PID, kept).agent_proc_start == 1234.5
+    assert HostedManager._degraded_row(_PID, kept).agent_proc_start == 1234.5
 
 
 @pytest.mark.parametrize("junk", _REJECTED_RECORDS)
