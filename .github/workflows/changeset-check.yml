@@ -30,11 +30,11 @@ jobs:
       pull-requests: write # post/update the advisory sticky comment
     # Same-repo PRs only (fork PRs get a read-only token and can't comment), and
     # never on knope's own release PR (it deletes changesets as it prepares).
-    # Draft PRs skip too — `ready_for_review` re-fires the advisory on the flip.
+    # Runs on drafts too: a cheap App-token advisory comment, no SARIF — only the
+    # heavy / SARIF jobs skip drafts (see tests/test_workflow_draft_guard.py).
     if: >-
       ${{ github.event.pull_request.head.repo.full_name == github.repository
-          && github.head_ref != 'release'
-          && github.event.pull_request.draft != true }}
+          && github.head_ref != 'release' }}
     runs-on: ubuntu-slim
     timeout-minutes: 5
     steps:

@@ -31,9 +31,8 @@ concurrency:
 jobs:
   actionlint:
     name: actionlint
-    # Draft PRs skip; `ready_for_review` re-fires this. `!= true` (not `== false`)
-    # so push:main — where `draft` is null — fail-safes to running.
-    if: github.event.pull_request.draft != true
+    # Runs on drafts too: linting workflow YAML is cheap and uploads no SARIF, so
+    # only the heavy / SARIF jobs skip drafts (see tests/test_workflow_draft_guard.py).
     # ubuntu-latest ships shellcheck; actionlint lints run: blocks only when it is on PATH.
     runs-on: ubuntu-latest
     timeout-minutes: 5

@@ -27,8 +27,8 @@ on:
   # weekly cron remain the real drift gate. (The drift job's API reads are minted
   # onto the clauster-ci App pool below, so no path taxes the 1,000/hr
   # github-actions[bot] REST pool.)
-  # `ready_for_review` joins `opened` because the job below skips while the PR is a
-  # draft: without it, a PR opened as a draft would never get its one advisory run.
+  # `ready_for_review` joins `opened` so a draft → ready flip re-runs the one
+  # advisory even when that flip carries no push (there is no `synchronize` type).
   pull_request:
     types: [opened, ready_for_review]
   push:
@@ -46,10 +46,9 @@ concurrency:
 jobs:
   drift:
     name: repo-config drift (advisory)
-    # Draft PRs skip; `ready_for_review` re-fires this. `!= true` (not `== false`)
-    # so push:main / schedule / dispatch — where `draft` is null — fail-safe to
-    # running, which is where the real drift gate lives.
-    if: github.event.pull_request.draft != true
+    # Runs on drafts too: a cheap advisory, no SARIF — only the heavy / SARIF jobs
+    # skip drafts (see tests/test_workflow_draft_guard.py). push:main / schedule /
+    # dispatch remain where the real drift gate lives.
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

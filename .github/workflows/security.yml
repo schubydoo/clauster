@@ -31,11 +31,16 @@ jobs:
   # which is why these can't use a top-level `paths-ignore` (that would make the
   # required check never report and the PR hang "Expected — waiting").
   #
-  # DRAFT PRs: every job below that is REACHABLE on a `pull_request` event carries
-  # `github.event.pull_request.draft != true`, so a draft PR runs none of this
-  # workflow — no CodeQL SARIF upload, no secret scan, no dependency review.
-  # (`trivy-image` is not in that set: it is already `github.event_name !=
-  # 'pull_request'`, so a draft term there would be unreachable.)
+  # DRAFT PRs: every SARIF-uploading / expensive job below (codeql, zizmor,
+  # dependency-review, and the `changes` classifier they gate on) carries
+  # `github.event.pull_request.draft != true`, so a draft PR uploads no CodeQL or
+  # zizmor SARIF and runs no dependency review — the shared GITHUB_TOKEN pool those
+  # uploads draw on is what the skip protects. The ONE deliberate exception is
+  # `gitleaks` (secret scan): it runs on drafts because it uploads NO SARIF and
+  # mints its own App token, so a draft still gets a real secret scan (see its own
+  # note). (`trivy-image` is not in the guarded set either: it is already
+  # `github.event_name != 'pull_request'`, so a draft term there would be
+  # unreachable.)
   # `!= true` (not `== false`) so push:main / the weekly cron — where `draft` is
   # null — fail-safe to running. `ready_for_review` is in the trigger types, so
   # flipping a draft ready re-dispatches the whole workflow on the current head
@@ -120,10 +125,15 @@ jobs:
 
   gitleaks:
     name: secret scan
-    # Draft PRs skip; `ready_for_review` re-fires it (see the DRAFT PRs note at
-    # the top of `jobs:`). push:main + the weekly cron still scan every commit
-    # that reaches main, so nothing merges without a secret scan having run.
-    if: github.event.pull_request.draft != true
+    # Runs on drafts too — deliberately, and it is the one security job worth every
+    # draft push. It mints an App token (≥5,000/hr) and uploads NO SARIF, so it
+    # costs nothing from the shared GITHUB_TOKEN pool the draft skip exists to
+    # protect; catching a leaked credential on the FIRST draft push — before later
+    # commits bury it — is worth far more than the cheap run. (What actually keeps a
+    # leak out of `main` is that a draft cannot merge and `ready_for_review` re-fires
+    # the required aggregate before review — NOT the push:main / weekly-cron scans,
+    # which fire only after the merge commit exists and are post-hoc detection, a
+    # rotation event rather than a prevented leak.)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # Spelled out for parity with the other scanners (it would otherwise inherit

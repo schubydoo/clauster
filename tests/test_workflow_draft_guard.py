@@ -1,11 +1,20 @@
-# Guard for the draft-PR skip (CI + security suites must not run while a PR is a draft).
+# Guard for the draft-PR skip: the HEAVY / SARIF-uploading jobs must not run while a PR is
+# a draft, while a small allowlist of CHEAP jobs deliberately stays live on drafts.
 #
 # Two halves, and BOTH are needed — half a guard is worse than none:
 #   * the trigger must include `ready_for_review`, or a PR flipped draft → ready never
 #     re-dispatches and the work is skipped forever rather than deferred;
-#   * every job must carry `github.event.pull_request.draft != true`, or one unguarded
-#     job keeps burning the runner (and, for the analysers, the shared GITHUB_TOKEN
-#     SARIF-upload pool) on every draft push.
+#   * every job NOT on the RUNS_ON_DRAFTS allowlist must carry
+#     `github.event.pull_request.draft != true`, or one unguarded heavy job keeps burning
+#     the runner (and, for the analysers, the shared GITHUB_TOKEN SARIF-upload pool) on
+#     every draft push.
+#
+# Why an allowlist rather than "skip everything": skipping a CHEAP required check
+# (conventional PR title, lint) buys no runner/API time and leaves that required context
+# vacuously green on a draft — real coverage lost for nothing. And gitleaks is a security
+# scan that uploads no SARIF and mints its own App token, so running it on every draft
+# costs nothing the skip was protecting while catching a leaked credential early. So those
+# stay live; only the expensive / SARIF jobs defer to the ready flip.
 #
 # `!= true` rather than `== false` is deliberate: on push/schedule/workflow_dispatch the
 # `draft` field is null, and `null != true` fail-safes to RUNNING. A `== false` spelling
@@ -21,8 +30,27 @@ pytestmark = pytest.mark.repo_meta
 REPO = Path(__file__).resolve().parents[1]
 WORKFLOWS = REPO / ".github" / "workflows"
 
-# The exact job-level expression every PR-facing job must contain.
+# The exact job-level expression a draft-skipping job must contain, as an AND conjunct.
 DRAFT_GUARD = "github.event.pull_request.draft != true"
+
+# Cheap PR jobs that deliberately RUN on drafts instead of skipping — the exception, kept
+# minimal. Two admissible reasons only, both checked by eye when adding an entry:
+#   * a REQUIRED status context whose check would otherwise be vacuously green on a draft
+#     (conventional PR title, lint) — skipping it saves no runner/API time and drops real
+#     coverage; or
+#   * a security scan that is cheap AND uploads no SARIF, so a per-draft run costs nothing
+#     from the shared GITHUB_TOKEN pool the skip protects (gitleaks).
+# Every job NOT listed here must still carry the draft guard.
+RUNS_ON_DRAFTS = frozenset(
+    {
+        ("pr-title.yml", "validate"),
+        ("lint.yml", "lint"),
+        ("actionlint.yml", "actionlint"),
+        ("changeset-check.yml", "changeset"),
+        ("repo-config-drift.yml", "drift"),
+        ("security.yml", "gitleaks"),
+    }
+)
 
 # A job whose `if:` already excludes pull_request entirely cannot run on a draft, so a
 # draft term there would be dead code (e.g. security.yml's trivy-image).
@@ -61,6 +89,20 @@ def _is_merge_time_only(types):
 def _is_pr_excluded(condition):
     """True when an `if:` excludes `pull_request` events at the TOP level of an AND."""
     return condition == PR_EXCLUDED or condition.startswith(f"{PR_EXCLUDED} &&")
+
+
+def _has_draft_guard(condition):
+    """True when DRAFT_GUARD is present as a top-level AND conjunct, never as a disjunct.
+
+    The mirror of `_is_pr_excluded`'s leading-conjunct rule, and the reason a plain `in`
+    test is not enough: spelled as a disjunct — `<other> || <guard>` — the guard excludes
+    nothing and the job still runs on every draft, yet the substring is present. So a job
+    that reads `needs.x == 'true' || github.event.pull_request.draft != true` must FAIL
+    this, exactly as the exemption side rejects the same shape.
+    """
+    if DRAFT_GUARD not in condition:
+        return False
+    return f"|| {DRAFT_GUARD}" not in condition and f"{DRAFT_GUARD} ||" not in condition
 
 
 def _triggers(doc):
@@ -102,10 +144,13 @@ def _job_params():
 
 @pytest.mark.parametrize(("workflow", "pull_request", "jobs"), _workflow_params())
 def test_pull_request_trigger_lists_ready_for_review(workflow, pull_request, jobs):
-    """A draft-skipping workflow re-dispatches on the draft → ready flip.
+    """Every PR workflow re-dispatches on the draft → ready flip.
 
-    Setting any `types:` replaces the implicit opened/synchronize/reopened defaults, so
-    the list must be explicit AND must still carry whatever the workflow relied on.
+    Required for a draft-SKIPPING workflow (or its deferred work never runs); still
+    required for a RUNS_ON_DRAFTS one whose types drop `synchronize` (repo-config-drift),
+    so a ready flip carrying no push still re-runs it. Setting any `types:` replaces the
+    implicit opened/synchronize/reopened defaults, so the list must be explicit AND must
+    still carry whatever the workflow relied on.
     """
     assert jobs, f"{workflow} declares no jobs"
     types = pull_request.get("types")
@@ -129,13 +174,21 @@ def test_pull_request_trigger_lists_ready_for_review(workflow, pull_request, job
 
 
 @pytest.mark.parametrize(("workflow", "job_id", "job"), _job_params())
-def test_every_pull_request_job_skips_drafts(workflow, job_id, job):
-    """Every job reachable on a `pull_request` event carries the draft guard."""
+def test_every_pull_request_job_has_the_correct_draft_behavior(workflow, job_id, job):
+    """Heavy / SARIF jobs skip drafts (AND conjunct); the RUNS_ON_DRAFTS allowlist stays live."""
     condition = " ".join(str(job.get("if", "")).split())
     if _is_pr_excluded(condition):
         pytest.skip(f"{workflow}:{job_id} never runs on pull_request events")
-    assert DRAFT_GUARD in condition, (
+    if (workflow, job_id) in RUNS_ON_DRAFTS:
+        assert not _has_draft_guard(condition), (
+            f"{workflow}:{job_id} is on the RUNS_ON_DRAFTS allowlist (a cheap required "
+            f"context or a no-SARIF secret scan) but its `if:` still carries the draft "
+            f"guard — it should stay LIVE on drafts. Drop the guard, or remove the entry."
+        )
+        return
+    assert _has_draft_guard(condition), (
         f"{workflow}:{job_id} runs on draft PRs — its `if:` is {condition!r}. Add "
-        f"`{DRAFT_GUARD}` so drafts cost no CI, and keep `!= true` so push/schedule "
-        f"(null `draft`) still run."
+        f"`{DRAFT_GUARD}` as an AND conjunct so drafts cost no CI, and keep `!= true` so "
+        f"push/schedule (null `draft`) still run. If it is a cheap required check or a "
+        f"no-SARIF secret scan that SHOULD run on drafts, add it to RUNS_ON_DRAFTS instead."
     )
