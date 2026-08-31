@@ -193,22 +193,22 @@ def _drive(
     Both are pinned in ``tests/test_fuzz_harness_smoke.py``, so a pyte upgrade that fixes
     either one fails ``just check`` rather than passing unnoticed.
 
-    ⚠️ **The readers are guarded too, and unlike ``feed`` that one is NOT mirroring an
-    existing guard — it is standing in for a missing one.** Every reader below goes through
-    ``pyte``'s ``Screen.display``, and a wide (double-width) character left half-overwritten
-    makes it raise ``IndexError: string index out of range``. Minimal reproducer, 13 bytes::
+    ⚠️ **The readers are guarded too, and like ``feed`` that guard now mirrors a production
+    one.** Every reader below goes through ``pyte``'s ``Screen.display``, and a wide
+    (double-width) character left half-overwritten makes it raise ``IndexError: string index
+    out of range``. Minimal reproducer, 13 bytes::
 
         PtyScreen(cols=40, rows=6).feed(b"\\x1bH\\xad\\x80\\xe6\\x80\\xa0\\x1b[H\\xad\\x80\\xae")
         screen.find_authorize_url()          # -> IndexError
 
-    ``pty_keeper`` wraps ``frame()`` ("a render hiccup must never affect the bridge"), but
-    ``login_shepherd`` calls ``flow.screen.find_oauth_token()`` unwrapped, and
-    ``find_authorize_url`` likewise — so on the credential path this reaches the caller.
-    Reported as an open finding on the PR that introduced this harness and **not fixed
-    here**: adding a guard in ``pty_screen`` or at those call sites is a change on the
-    credential path and belongs in its own reviewed diff. Caught here so the harness can
-    still assert everything else instead of reporting one known defect forever; pinned in
-    the suite so the fix flips ``just check`` and sends the next reader back to widen this.
+    ``pty_keeper`` wraps ``frame()`` ("a render hiccup must never affect the bridge"), and
+    ``login_shepherd`` — which reached the caller on the CREDENTIAL path when this harness
+    first reported it — now reads both ``find_authorize_url`` and ``find_oauth_token``
+    through ``login_shepherd._read_screen`` (#1358), degrading the raise to "no match on
+    this frame". ``pyte`` still raises, so this carve-out stays: it skips every input that
+    trips the defect, which lets the harness assert everything else instead of reporting one
+    known defect forever. Pinned in the suite, so a ``pyte`` release that fixes the raise
+    fails ``just check`` and sends the next reader back to narrow this.
     """
     screen = pty_screen.PtyScreen(cols=cols, rows=rows, capture_osc8=capture_osc8)
     fed_cleanly = True

@@ -2415,3 +2415,148 @@ def test_teardown_still_uses_terminate_on_posix(shepherd, monkeypatch) -> None:
 
     assert killed == [], "POSIX teardown must not force-kill the tree"
     assert proc.terminated, "POSIX teardown must still send the graceful terminate()"
+
+
+# --- pyte render fault on the screen readers (#1358) --------------------------------
+#
+# `pyte`'s `Screen.display` raises `IndexError` when a double-width character is left
+# half-overwritten, and both screen readers this module uses go through `display` — on the
+# CREDENTIAL path. `_read_screen` degrades that to "no match on this frame" instead of
+# letting it reach the caller. The byte string below is the 13-byte reproducer recorded by
+# `fuzz/pty_screen_feed_fuzzer.py`: terminal control bytes and truncated UTF-8 only,
+# nothing that resembles a credential.
+_WIDE_CHAR_FAULT = b"\x1bH\xad\x80\xe6\x80\xa0\x1b[H\xad\x80\xae"
+
+
+def _faulted_screen() -> ls.PtyScreen:
+    """Build a REAL `PtyScreen` whose display readers raise pyte's `IndexError`."""
+    screen = ls.PtyScreen(cols=40, rows=6)
+    screen.feed(_WIDE_CHAR_FAULT)
+    return screen
+
+
+def test_the_render_fault_reproducer_is_a_positive_control() -> None:
+    """PIN: the fixture really makes pyte raise, through BOTH readers.
+
+    Every test below asserts that the guard absorbs this. If a `pyte` upgrade fixed the
+    defect and nothing pinned it, those tests would keep passing while asserting nothing —
+    the vacuous-green failure mode. This one fails instead, and sends the next reader to
+    re-check whether the guard is still earning its place.
+    """
+    screen = _faulted_screen()
+    with pytest.raises(IndexError):
+        screen.find_authorize_url()
+    with pytest.raises(IndexError):
+        screen.find_oauth_token()
+
+
+def test_read_screen_degrades_a_render_fault_to_no_match(caplog) -> None:
+    # The guard itself, over a REAL faulted screen (not a stub that raises on command):
+    # "no match on this frame" plus a recorded, LOGGED fault — never a silent skip.
+    flow = ls._Flow(mode="setup-token", proc=object(), screen=_faulted_screen())  # type: ignore[arg-type]
+    with caplog.at_level(logging.WARNING, logger="clauster.login_shepherd"):
+        assert ls._read_screen(flow, flow.screen.find_authorize_url) is None
+    assert flow.screen_scan_failed is True
+    assert "could not be rendered" in caplog.text
+
+
+def test_read_screen_warns_once_per_flow(caplog) -> None:
+    # The fault persists until a later `feed()` overwrites the broken cell, so the reader is
+    # re-run every poll (~10x/s). Warning on each one would bury the log in identical lines.
+    flow = ls._Flow(mode="setup-token", proc=object(), screen=_faulted_screen())  # type: ignore[arg-type]
+    with caplog.at_level(logging.WARNING, logger="clauster.login_shepherd"):
+        for _ in range(5):
+            assert ls._read_screen(flow, flow.screen.find_oauth_token) is None
+    assert caplog.text.count("could not be rendered") == 1
+
+
+def test_read_screen_passes_a_clean_read_through_untouched() -> None:
+    # The guard must not swallow a real match, and must not arm the fault flag for one.
+    flow = ls._Flow(mode="setup-token", proc=object(), screen=ls.PtyScreen())  # type: ignore[arg-type]
+    assert ls._read_screen(flow, lambda: "https://claude.com/cai/oauth/authorize") is not None
+    assert flow.screen_scan_failed is False
+
+
+def test_read_screen_never_swallows_a_non_indexerror() -> None:
+    # Narrow on purpose: only pyte's documented display defect is absorbed. Anything else is
+    # a genuine bug and must still reach the caller rather than look like "no match".
+    flow = ls._Flow(mode="setup-token", proc=object(), screen=ls.PtyScreen())  # type: ignore[arg-type]
+
+    def _boom() -> str | None:
+        raise RuntimeError("not the pyte defect")
+
+    with pytest.raises(RuntimeError):
+        ls._read_screen(flow, _boom)
+
+
+def _use_faulted_screen(monkeypatch) -> None:
+    """Make the setup-token spawn hand back a screen that is already rendering-faulted."""
+
+    real_cls = ls.PtyScreen  # captured before the patch, or the factory recurses into itself
+
+    def _factory(**kwargs):
+        screen = real_cls(**kwargs)
+        screen.feed(_WIDE_CHAR_FAULT)
+        return screen
+
+    monkeypatch.setattr(ls, "PtyScreen", _factory)
+
+
+def test_start_fails_closed_and_names_the_render_fault(shepherd, monkeypatch) -> None:
+    # THE issue's crash: `start()` scans for the authorize URL every poll, so an unguarded
+    # reader turned a hostile/odd terminal frame into an unhandled IndexError (a 500) that
+    # killed the shepherd mid-login. It must fail CLOSED instead — the same bounded wait and
+    # redacted message as "no URL appeared" — and name the render fault, so the operator
+    # isn't sent hunting a network or credential problem that isn't there.
+    monkeypatch.setattr(ls, "START_TIMEOUT_SECONDS", 0.5)
+    _use_conpty(monkeypatch, _make_fake_conpty(no_url=True))
+    _use_faulted_screen(monkeypatch)
+    with pytest.raises(ls.LoginShepherdError) as excinfo:
+        shepherd.start("setup-token")
+    message = str(excinfo.value)
+    assert "no authorize URL appeared" in message
+    assert ls._SCREEN_FAULT_NOTE.strip(" ()") in message
+    assert not shepherd.is_active(), "the failed start must leave no active flow behind"
+
+
+def _screen_class_faulting_on_the_token() -> type:
+    """A `PtyScreen` whose token reader faults but whose URL reader still works.
+
+    A real faulted screen breaks BOTH readers (they share `display`), so `start()` could
+    never reach the token path with one. Narrowing the fault to the token reader is what
+    lets the credential path be exercised end to end; the fault itself is pinned as real by
+    `test_the_render_fault_reproducer_is_a_positive_control`.
+    """
+
+    class _TokenFaultScreen(ls.PtyScreen):
+        def find_oauth_token(self):
+            raise IndexError("string index out of range")
+
+    return _TokenFaultScreen
+
+
+def test_submit_code_falls_back_to_the_buffer_when_the_token_scan_faults(
+    shepherd, monkeypatch
+) -> None:
+    # The credential half: `setup-token` prints its token exactly once, so a raise here used
+    # to lose it outright. Degraded to "no match", the captured-buffer regex still finds it.
+    monkeypatch.setattr(ls, "PtyScreen", _screen_class_faulting_on_the_token())
+    _use_conpty(monkeypatch, _make_fake_conpty(token="fault-fallback-token"))
+    shepherd.start("setup-token")
+    outcome = shepherd.submit_code("the-pasted-code")
+    assert outcome["ok"] is True
+    assert outcome["token"] == "fault-fallback-token"
+    assert not shepherd.is_active()
+
+
+def test_no_token_message_names_the_render_fault(shepherd, monkeypatch) -> None:
+    # Both scans came up empty and one of them faulted: the terminal result must say WHY,
+    # not just "no token was found" — the operator's next step differs.
+    monkeypatch.setattr(ls, "PtyScreen", _screen_class_faulting_on_the_token())
+    _use_conpty(monkeypatch, _make_fake_conpty(token=""))
+    shepherd.start("setup-token")
+    outcome = shepherd.submit_code("the-pasted-code")
+    assert outcome["ok"] is True
+    assert "no token was found" in outcome["message"]
+    assert ls._SCREEN_FAULT_NOTE.strip(" ()") in outcome["message"]
+    assert "token" not in outcome

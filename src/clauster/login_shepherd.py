@@ -104,6 +104,13 @@ IDLE_FLOW_TTL_SECONDS = 900.0
 #: blocked-on-stdin login rides out the full grace once — invisible against a human login.
 _URL_LIVENESS_GRACE_SECONDS = 0.25
 
+#: Clause appended to a fail-closed message when at least one `PtyScreen` scan degraded to
+#: "no match" because pyte could not render the screen (see `_read_screen`). Named rather
+#: than left implicit: "no authorize URL appeared" on its own sends the operator hunting a
+#: network or credential problem that is not there. Fixed text — no screen content, so
+#: nothing unredacted can ride out to the browser on it (invariant 4).
+_SCREEN_FAULT_NOTE = " (the terminal screen could not be rendered for scanning)"
+
 # `setup-token`'s printed long-lived credential (per the spike: `CLAUDE_CODE_OAUTH_TOKEN=...`).
 # Matched permissively (any non-whitespace value) since the exact real-binary format is
 # unverified — this is defensive, not assumed exact. Kept local (not shared with
@@ -271,6 +278,11 @@ class _Flow:
     paste box — without it a reload during a slow verification strands the one-time
     `setup-token` credential, since only `poll()`/`submit_code()` ever extract it.
 
+    ``screen_scan_failed`` records that at least one `PtyScreen` reader hit pyte's
+    half-overwritten-wide-character `IndexError` and was degraded to "no match" by
+    :func:`_read_screen` (#1358). It exists so that degradation is never silent: the
+    fail-closed messages below name the render fault instead of reporting only its symptom.
+
     ``last_active_at`` is a monotonic stamp — never wall clock, which a clock adjustment
     could run backwards — refreshed by every operator interaction (`submit_code`, `poll`).
     The idle expiry in `start()` measures against it, so the TTL means "untouched for N
@@ -292,6 +304,7 @@ class _Flow:
     pasted_secrets: list[str] = field(default_factory=list)
     authorize_url: str | None = None
     code_submitted: bool = False
+    screen_scan_failed: bool = False
     last_active_at: float = field(default_factory=time.monotonic)
 
     def touch(self) -> None:
@@ -627,12 +640,15 @@ class LoginShepherd:
             self._flow = flow
 
         condition: Callable[[str], str | None]
-        if flow.screen is not None:
+        screen = flow.screen
+        if screen is not None:
             # setup-token PTY path: require the authorize URL to be STABLE across two polls,
             # so a URL caught mid-render (split across the reader's `feed()` chunks) is never
             # trusted as final (#852). The plain-pipe `login` reader is line-buffered — a URL
             # line only appears in the buffer once whole — so it needs no such guard.
-            condition = _stable_match_finder(flow.screen.find_authorize_url)
+            # Read through `_read_screen`: a pyte render fault must degrade this poll to
+            # "no URL yet" and let the next one try again, never kill the request (#1358).
+            condition = _stable_match_finder(lambda: _read_screen(flow, screen.find_authorize_url))
         else:
             condition = _extract_authorize_url
         url, output, exited = _wait_for(flow, condition, timeout=START_TIMEOUT_SECONDS)
@@ -669,6 +685,8 @@ class LoginShepherd:
                 reason = "the process exited before printing an authorize URL"
             else:
                 reason = f"no authorize URL appeared within {START_TIMEOUT_SECONDS:.0f}s"
+                if flow.screen_scan_failed:
+                    reason += _SCREEN_FAULT_NOTE
             raise LoginShepherdError(
                 f"claude {mode} did not produce a usable login: {reason}. "
                 f"Captured output:\n{_redact(output, flow.pasted_secrets)}"
@@ -847,18 +865,25 @@ class LoginShepherd:
         (`flow.screen.find_oauth_token()`), the same reassembly `find_authorize_url` uses
         — the raw pty byte stream can fragment the token line with cursor-positioning
         escapes exactly like it does the authorize URL, so the plain-pipe regex-over-
-        buffer approach isn't reliable there. Never logs the token. Called only under
-        ``flow.submit_lock``.
+        buffer approach isn't reliable there. That scrape goes through :func:`_read_screen`,
+        so a pyte render fault degrades to the captured-buffer regex below rather than
+        losing the one-time credential to an unhandled `IndexError` (#1358). Never logs the
+        token. Called only under ``flow.submit_lock``.
         """
         if flow.reader_thread is not None:
             flow.reader_thread.join(timeout=2)
         output = flow.snapshot()
         ok = exit_code == 0
-        token = flow.screen.find_oauth_token() if flow.screen is not None else None
+        token = (
+            _read_screen(flow, flow.screen.find_oauth_token) if flow.screen is not None else None
+        )
         if token is None:
             token_match = _TOKEN_RE.search(output)
             token = token_match.group(1) if token_match else None
 
+        # Read before teardown so the "no token" message can name a render fault as the
+        # reason the screen scan found nothing (the buffer fallback above may also miss).
+        note = _SCREEN_FAULT_NOTE if flow.screen_scan_failed else ""
         self._teardown(flow)
 
         if ok:
@@ -868,8 +893,8 @@ class LoginShepherd:
                 else (
                     "Token created."
                     if token
-                    else "setup-token exited successfully, but no "
-                    "token was found in its output — check `claude auth status --json`."
+                    else "setup-token exited successfully, but no token was found in its "
+                    f"output{note} — check `claude auth status --json`."
                 )
             )
         else:
@@ -1082,6 +1107,40 @@ def _pump_conpty(flow: _Flow) -> None:
         except Exception as exc:  # noqa: BLE001 — a render hiccup must never kill the reader
             _log.debug("login_shepherd: conpty screen feed failed for %s: %s", flow.mode, exc)
         flow.append(data)
+
+
+def _read_screen(flow: _Flow, find: Callable[[], _T | None]) -> _T | None:
+    """Run one `PtyScreen` reader for `flow`, degrading a pyte render fault to "no match".
+
+    THE reader boundary for this module (#1358). `pyte`'s `Screen.display` raises
+    ``IndexError: string index out of range`` when a double-width character is left
+    half-overwritten, and a 13-byte stream reproduces it (found by
+    ``fuzz/pty_screen_feed_fuzzer.py``). Both readers used here — `find_authorize_url` and
+    `find_oauth_token` — go through `display`, and both sit on the CREDENTIAL path: an
+    unguarded raise strands the operator mid-login. `start()` would surface an unhandled
+    `IndexError` (a 500) instead of failing closed with its redacted message, and
+    `_finalize_exited` would lose `setup-token`'s one-time credential to that same error
+    rather than falling back to the captured-buffer scan.
+
+    The guard is deliberately narrow: only `IndexError`, only around the reader call, so a
+    genuine defect anywhere else still propagates. The degraded value is "no match on THIS
+    frame", not "give up" — the caller keeps polling and the next `feed()` usually
+    overwrites the broken cell, which is why a skip (not an immediate hard failure) is the
+    right bias here. It is never a SILENT skip: the fault is recorded on the flow so the
+    fail-closed messages name it, and logged once per flow — at poll cadence a persistent
+    fault would otherwise write hundreds of identical lines.
+    """
+    try:
+        return find()
+    except IndexError as exc:
+        if not flow.screen_scan_failed:
+            flow.screen_scan_failed = True
+            _log.warning(
+                "login_shepherd: %s screen could not be rendered for scanning: %s",
+                flow.mode,
+                exc,
+            )
+        return None
 
 
 def _stable_match_finder(find: Callable[[], _T | None]) -> Callable[[str], _T | None]:
