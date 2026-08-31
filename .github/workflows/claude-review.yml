@@ -68,6 +68,31 @@ jobs:
       id-token: write
       actions: read # REQUIRED for the mcp__github_ci__* tools; without it they are dead names
     steps:
+      # Mint a clauster-ci App installation token (≥5,000 REST req/hr) for this
+      # workflow's OWN `gh` steps, so the review plumbing draws on the App's pool
+      # instead of the shared github.token one. Run 33414323368 failed in "Count
+      # what Claude has already posted" with "API rate limit exceeded for
+      # installation" — the shared bucket had been drained by draft-PR CI, and the
+      # review was collateral. Read-only scopes: the three consuming steps only
+      # LIST comments (issues + pulls) and READ one file's contents.
+      #
+      # ⚠️ DO NOT hand this token to the `Review` step's claude-code-action below,
+      # and do NOT add a `github_token:` input there. That action performs its own
+      # OIDC exchange with the Claude GitHub App, and that is what makes the review
+      # post as claude[bot]. Overriding it changes the posting identity, which
+      # breaks this workflow's own comment-count check (it matches on a login
+      # containing "claude") plus every downstream filter keyed to that author.
+      # This mint is for the `gh` steps only — the migration is COMPLETE as written.
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.CLAUSTER_CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
+          permission-pull-requests: read # gh api repos/.../pulls/<n>/comments
+          permission-issues: read # gh api repos/.../issues/<n>/comments
+          permission-contents: read # gh api repos/.../contents/<review instructions>
+
       - name: Resolve the pull request
         id: resolve
         env:
@@ -89,7 +114,7 @@ jobs:
       - name: Count what Claude has already posted
         id: before
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           PR: ${{ steps.resolve.outputs.pr }}
         run: |
           set -euo pipefail
@@ -106,7 +131,7 @@ jobs:
       - name: Fetch the review instructions from the default branch
         id: rules
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
@@ -262,7 +287,7 @@ jobs:
         # that actually matters — whether the pull request gained a Claude comment.
         if: always() && steps.before.outcome == 'success'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           PR: ${{ steps.resolve.outputs.pr }}
           BEFORE: ${{ steps.before.outputs.count }}
         run: |
