@@ -119,6 +119,29 @@ def test_stripping_still_rejoins_an_identifier_split_by_a_color_escape():
     assert redact.sanitize_line("env_01ABCDEFG\x1b[0mHIJKLMNOP") == "env_<redacted>"
 
 
+def test_scrub_masks_a_shape_that_appears_both_cleanly_and_spliced():
+    # Guards the perf refactor of _scrub_spliced_shapes (a multiset COUNT, not a set
+    # difference). The same id occurs twice in one chunk: once with real boundaries, once
+    # welded by a stripped DCS sequence. A naive "shapes in the spaced view MINUS shapes in
+    # the deleted view" would see the id in the deleted view (from the clean occurrence) and
+    # skip it wholesale, leaking the welded one; the count comparison scrubs it. Low-entropy
+    # ULID-shaped id, not a real secret.
+    ident = "env_01ABCDEFGHIJKLMNOP"
+    line = f"{ident} then user\x1bPx\x07{ident}"
+    for out in (redact.redact_for_disk(line), redact.sanitize_line(line)):
+        assert ident not in out  # neither the clean nor the welded occurrence survives
+        assert "env_<redacted>" in out
+
+
+def test_scrub_leaves_an_already_masked_bounded_id_untouched():
+    # The not-spliced branch of the count gate: an id with real boundaries BESIDE (not welded
+    # by) a colour escape is masked by the first pass, and _scrub_spliced_shapes sees its
+    # space-view count equal its delete-view count and skips it — no re-scan, no double-mask.
+    assert redact.redact_for_disk("env_01ABCDEFGHIJKLMNOP \x1b[31mred\x1b[0m tail") == (
+        "env_<redacted> red tail"
+    )
+
+
 @pytest.mark.parametrize(
     "benign",
     [

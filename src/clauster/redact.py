@@ -9,6 +9,7 @@ anyone with ``env_<ULID>`` can open a New Session composer for that bridge).
 from __future__ import annotations
 
 import re
+from collections import Counter
 
 # CSI / escape sequences (colors, cursor moves, and the C1 *string* sequences).
 #
@@ -27,7 +28,13 @@ import re
 # literal `ESC P` in log text followed by a BEL LATER ON THE SAME LINE deletes what lies
 # between, which the CR/LF exclusion caps at one line. Taken because this module's job is to
 # strip, and a payload left readable is the defect being fixed; the same trade was accepted
-# for OSC in #1329. The 8-bit C1 forms (0x9B CSI / 0x9D OSC / 0x90 DCS / 0x9C ST …) are
+# for OSC in #1329. Note `strip_ansi` also feeds two NON-streaming readers —
+# `extract_authorize_url` (pty_screen) and login_shepherd's `_redact_captured` — where an
+# over-strip would cost the login URL / captured code rather than only colour. Accepted: a
+# DCS/SOS/PM/APC introducer plus a same-line BEL bracketing a printed authorize URL is not a
+# real terminal pattern (those C1 strings carry device/application data, never a printed URL),
+# so the streaming-safety win dominates; revisit only if a real login flow emits one.
+# The 8-bit C1 forms (0x9B CSI / 0x9D OSC / 0x90 DCS / 0x9C ST …) are
 # deliberately NOT matched. A raw C1 byte from the bridge never survives to get here — every
 # path into redact decodes with ``errors="replace"`` (logstream.py:118, runner.py:2346), which
 # turns a lone 0x9C into U+FFFD — and a deliberately UTF-8-encoded U+009C (`C2 9C` on the wire)
@@ -126,6 +133,22 @@ def redact_secrets(text: str) -> str:
     return out
 
 
+def _shape_hits(text: str):
+    r"""Yield ``(token, mask)`` for every id / UUID / secret shape found in ``text``.
+
+    ``token`` is the match's last whitespace-separated piece — the whole match for every
+    pattern but ``bearer\s+…``, where it is the credential rather than the keyword, and in
+    both cases whitespace-free (so a substituted space can never land inside it). The mask is
+    ``<prefix>_<redacted>`` for an id and ``<redacted>`` otherwise.
+    """
+    for rx in _SHAPE_RES:
+        for match in rx.finditer(text):
+            # `.split()[-1]` is never empty: every shape match is non-whitespace (even the
+            # bearer pattern's tail is its 12+-char credential), so no truthiness guard.
+            token = match.group(0).split()[-1]
+            yield token, (f"{match.group(1)}_{_REDACTED}" if rx is _ID_RE else _REDACTED)
+
+
 def _scrub_spliced_shapes(cleaned: str, text: str) -> str:
     r"""Mask shapes that survived only because stripping SPLICED two word characters.
 
@@ -149,13 +172,23 @@ def _scrub_spliced_shapes(cleaned: str, text: str) -> str:
     """
     if "\x1b" not in text:  # nothing was removed, so nothing can have been spliced
         return cleaned
-    spaced = _ANSI_RE.sub(" ", text)
-    for rx in _SHAPE_RES:
-        for match in rx.finditer(spaced):
-            token = match.group(0).split()[-1]
-            if token and token in cleaned:
-                mask = f"{match.group(1)}_{_REDACTED}" if rx is _ID_RE else _REDACTED
-                cleaned = cleaned.replace(token, mask)
+    # Only a shape the DELETE view HID needs the (full-length) `in cleaned` scan + replace;
+    # everything else is already masked in `cleaned`. A shape is hidden-by-splice iff the
+    # SPACE view (word boundaries intact) exposes it MORE times than the DELETE view
+    # (`strip_ansi`, which `cleaned` was redacted from) does — a strict COUNT, not a set
+    # difference, so a token that appears BOTH cleanly and spliced in one chunk is still
+    # scrubbed for its spliced occurrence rather than skipped. This keeps the loop off the
+    # already-handled majority: `redact_for_disk` runs this over the whole multi-line bridge
+    # log on every poll, where an O(matches x len) scan-per-shape was a real per-tick cost.
+    welded: Counter[str] = Counter(tok for tok, _ in _shape_hits(_ANSI_RE.sub("", text)))
+    spaced_masks: dict[str, str] = {}
+    spaced_counts: Counter[str] = Counter()
+    for tok, mask in _shape_hits(_ANSI_RE.sub(" ", text)):
+        spaced_counts[tok] += 1
+        spaced_masks[tok] = mask
+    for tok, count in spaced_counts.items():
+        if count > welded[tok] and tok in cleaned:
+            cleaned = cleaned.replace(tok, spaced_masks[tok])
     return cleaned
 
 
