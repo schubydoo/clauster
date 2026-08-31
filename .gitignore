@@ -15,6 +15,11 @@ node_modules/
 
 # --- Local tooling (not part of the project) ---
 # CLAUDE.md and AGENTS.md are committed; CLAUDE.local.md holds per-machine notes.
+# Bare name as well as the `/.claude/` form: in a spawned agent worktree `.claude` is a
+# SYMLINK to the main checkout, and a trailing-slash pattern matches only real
+# directories — so `git add -A` there would stage the symlink, leaking an absolute host
+# path into the repo and breaking `uv build` (sdists refuse external symlinks).
+/.claude
 /.claude/
 /.worktreeinclude
 .serena/
@@ -27,8 +32,16 @@ clauster.yml
 # --- All other local-only files live under one dir, so the repo root stays clean
 #     and no private filenames need to be enumerated here (planning/spec docs,
 #     session notes, UI screenshots, a11y snapshots, Playwright/MCP logs, etc.). ---
+# Bare name too — same worktree-symlink reason as `/.claude` above.
+/scratch
 scratch/
 .playwright-mcp/
+
+# Fuzzing reproducers Atheris/libFuzzer drop in the cwd on a local crash/leak/timeout —
+# never committed (a reproducer's bytes are by definition an input that breaks something).
+crash-*
+leak-*
+timeout-*
 
 # Stray root-level images (design/QA screenshots belong in scratch/ or, if curated
 # for the docs, docs/screenshots/) — guards against accidentally committing them.
