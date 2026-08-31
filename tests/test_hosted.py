@@ -12,8 +12,11 @@ import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime
+from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 import clauster.hosted as hosted
 from clauster.claustrum_client import ClaustrumClient, ClaustrumError, DaemonUnreachable
@@ -1978,8 +1981,10 @@ def test_instance_from_record_tolerates_junk_daemon_last_seq(junk):
     """A junk ``daemon_last_seq`` in ``hosted_state.json`` degrades to 0, never raises.
 
     This covers ``_instance_from_record``'s handling of that ONE field of the on-disk
-    record map — its other persisted fields still reach the model unguarded, which is
-    pre-existing and not what this test claims. The bare ``int(...)`` was not total:
+    record map; its other persisted fields are covered by the ValidationError guard
+    exercised below (#1343). Coercing the cursor here rather than leaning on that
+    guard is what keeps a junk cursor from costing the row the REST of its metadata.
+    The bare ``int(...)`` was not total:
     each value below aborted the whole reattach on restart with a different exception.
     0 means "replay from the start of the retained window" — the fail-visible
     direction, versus the session silently vanishing.
@@ -1998,6 +2003,323 @@ def test_instance_from_record_keeps_a_valid_daemon_last_seq():
             _PID, {"project": "proj", "label": "hosted:proj", "daemon_last_seq": value}
         )
         assert inst.daemon_last_seq == expected
+
+
+# -- #1343: a record the model rejects degrades its own row, not the whole boot ----
+
+
+#: Records whose value is well-formed JSON but the wrong type for the model. Each is a
+#: value a hand-edited (or partially-written) ``hosted_state.json`` can hold.
+_REJECTED_RECORDS = [
+    pytest.param({"project": {}}, id="project-not-a-string"),
+    pytest.param({"label": 7}, id="label-not-a-string"),
+    pytest.param({"permission_mode": "nope"}, id="permission-mode-not-in-the-literal"),
+    # Truthy on purpose: an empty list is the one non-string `_synced` skips anyway, so
+    # it would let the uuid path below pass vacuously.
+    pytest.param({"claude_session_uuid": ["not-a-uuid"]}, id="uuid-not-a-string"),
+    # NB agent_proc_start is deliberately NOT here: like agent_pid, both mapping paths now
+    # coerce it via `_as_proc_start` (a junk value → None), so it never raises a
+    # ValidationError or triggers degradation. Its tolerance is pinned by
+    # test_a_junk_agent_proc_start_never_reaches_the_model_on_either_path.
+]
+
+
+def test_a_junk_agent_pid_never_reaches_the_model_on_either_path():
+    """``agent_pid`` is coerced identically by both mappings, so they cannot disagree.
+
+    Defense in depth rather than a second guard for its own sake. Pydantic's lax
+    coercion accepts ``true`` as pid **1** — init on every POSIX host — and ``"4242"``
+    as 4242, while the salvage takes plain ints only. Left asymmetric, a record that
+    degraded for an unrelated reason would drop a pid the healthy path would have kept,
+    and ``_persist`` would then write that loss to disk — costing ``_is_orphan`` the
+    only evidence it has.
+    """
+    for junk in ("4242", True, 4242.0, {}):
+        record = {"project": "proj", "label": "hosted:proj", "agent_pid": junk}
+        assert HostedManager._row_from_record(_PID, record).agent_pid is None
+        assert HostedManager._degraded_row(_PID, record).agent_pid is None
+    kept = {"project": "proj", "label": "hosted:proj", "agent_pid": 4242}
+    assert HostedManager._row_from_record(_PID, kept).agent_pid == 4242
+    assert HostedManager._degraded_row(_PID, kept).agent_pid == 4242
+
+
+def test_a_junk_agent_proc_start_never_reaches_the_model_on_either_path():
+    """The twin of the pid test — the other half of the orphan-recovery evidence pair.
+
+    Left asymmetric (the healthy path handing the raw value to pydantic, the salvage using
+    `_as_proc_start`), a record degrading on an unrelated field would drop a numeric-string
+    proc_start that the healthy path would keep as a float — and `_persist` writes that loss
+    to disk, costing `_is_orphan` the second input it needs. `true` → `1.0` is the float twin
+    of the pid-1 case.
+    """
+    for junk in ("1234.5", True, {}):
+        record = {"project": "proj", "label": "hosted:proj", "agent_proc_start": junk}
+        assert HostedManager._row_from_record(_PID, record).agent_proc_start is None
+        assert HostedManager._degraded_row(_PID, record).agent_proc_start is None
+    kept = {"project": "proj", "label": "hosted:proj", "agent_proc_start": 1234.5}
+    assert HostedManager._row_from_record(_PID, kept).agent_proc_start == 1234.5
+    assert HostedManager._degraded_row(_PID, kept).agent_proc_start == 1234.5
+
+
+@pytest.mark.parametrize("junk", _REJECTED_RECORDS)
+def test_instance_from_record_tolerates_a_record_the_model_rejects(junk):
+    """A persisted value pydantic refuses degrades the row instead of raising (#1343).
+
+    ``ValidationError`` is not a ``ClaustrumError``, so pre-fix it escaped both
+    ``reattach_all``'s per-session handler and the lifespan's in ``app.py`` — one
+    corrupt record failed clauster's whole boot. The first assertion is the
+    reproducer: it pins that the raw mapping really does still reject the value, so
+    the second assertion cannot pass vacuously if the fixture stops being junk.
+    """
+    record = {"project": "proj", "label": "hosted:proj", **junk}
+    with pytest.raises(ValidationError):
+        HostedManager._row_from_record(_PID, record)
+
+    inst = HostedManager._instance_from_record(_PID, record)
+    assert inst.claustrum_process_id == _PID  # still reattachable — that is the point
+    assert inst.channel == "hosted"
+
+
+#: A record where every field is usable except ``project``. Low-entropy placeholder
+#: values throughout — a fixture is scanned by gitleaks like any other committed line.
+_ONE_BAD_FIELD = {
+    "project": {},  # the only value the model rejects
+    "label": "hosted:proj",
+    "permission_mode": "acceptEdits",
+    "claude_session_uuid": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    "daemon_last_seq": 12,
+    "hosted_log_path": "/tmp/proj/hosted.log",
+    "agent_pid": 4242,
+    "agent_proc_start": 1234.5,
+    "started_at": "2026-08-30T10:00:00",
+    "intentional_stop": True,
+    "instance_id": "11111111-2222-4333-8444-555555555555",
+}
+
+
+def test_degraded_row_salvages_every_field_the_model_did_not_reject():
+    """Only the rejected value is reset; the other ten survive.
+
+    Not cosmetic. ``reattach_all`` ends in a ``_persist`` that rewrites the record from
+    this row, so a wholesale default would DESTROY the recoverable fields on the first
+    boot after corruption — turning a repairable state file into an unrepairable one,
+    the opposite of fail-visible. ``agent_pid``/``agent_proc_start`` matter twice over:
+    they are the only evidence ``_is_orphan`` has (see the CL-8 test below).
+    """
+    inst = HostedManager._instance_from_record(_PID, _ONE_BAD_FIELD)
+    assert inst.project == ""  # the rejected field, and only it, falls back
+    assert inst.label == "hosted:proj"
+    assert inst.permission_mode == "acceptEdits"
+    assert inst.claude_session_uuid == "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    assert inst.daemon_last_seq == 12
+    assert inst.hosted_log_path == Path("/tmp/proj/hosted.log")
+    assert inst.agent_pid == 4242
+    assert inst.agent_proc_start == 1234.5
+    assert inst.started_at == datetime(2026, 8, 30, 10, 0)
+    assert inst.intentional_stop is True
+    assert inst.instance_id == "11111111-2222-4333-8444-555555555555"
+
+
+@pytest.mark.parametrize(
+    ("field", "junk", "expected"),
+    [
+        ("agent_pid", True, None),  # bool subclasses int — a persisted `true` is not pid 1
+        ("agent_pid", 1.5, None),
+        ("agent_proc_start", True, None),
+        ("agent_proc_start", 10**400, None),  # int too large for a float
+        ("claude_session_uuid", ["not-a-uuid"], None),
+        ("hosted_log_path", 7, None),
+        ("permission_mode", "nope", "default"),
+        ("permission_mode", {}, "default"),  # unhashable: `in frozenset` would raise
+        ("started_at", "not-a-date", None),
+        ("instance_id", "", None),  # falsy: a fresh id is minted instead
+    ],
+)
+def test_degraded_row_drops_a_value_it_cannot_type_check(field, junk, expected):
+    # The salvage is a type test per field, never a pass-through: a second junk value
+    # alongside the rejecting one is dropped rather than smuggled onto the model by
+    # an unvalidated assignment. Each expected value is the field's own model default,
+    # spelled out per case so a regression cannot hide behind a disjunction.
+    inst = HostedManager._instance_from_record(_PID, {**_ONE_BAD_FIELD, field: junk})
+    if field == "instance_id":
+        assert isinstance(inst.instance_id, str) and inst.instance_id
+        assert inst.instance_id != _ONE_BAD_FIELD["instance_id"]
+        return
+    assert getattr(inst, field) == expected
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        pytest.param({"permission_mode": {}}, id="unhashable-permission-mode"),
+        pytest.param({"permission_mode": ["acceptEdits"]}, id="unhashable-mode-list"),
+        pytest.param({"agent_proc_start": 10**400}, id="proc-start-overflows-a-float"),
+        pytest.param({"agent_proc_start": -(10**400)}, id="proc-start-underflows-a-float"),
+    ],
+)
+def test_degraded_row_cannot_raise_on_the_values_that_bypass_validation_error(record):
+    """The salvage must not reopen the escape it exists to close.
+
+    Two coercions in the salvage are not ``isinstance`` tests and can raise on a value
+    pydantic would merely reject: ``value in frozenset`` HASHES its operand
+    (``TypeError: unhashable type``) and ``float()`` overflows on a large int
+    (``OverflowError``). Neither is a ``ValidationError``, so neither is caught by
+    ``_instance_from_record``, ``reattach_all`` or the lifespan — a record holding one
+    would fail clauster's boot exactly as #1343 describes.
+    """
+    inst = HostedManager._instance_from_record(_PID, {**_ONE_BAD_FIELD, **record})
+    assert inst.claustrum_process_id == _PID
+
+
+def test_degraded_row_defaults_unusable_display_strings():
+    # Both required strings are junk, so both fall back — the label to the same
+    # `hosted:<pid prefix>` default the healthy mapping uses.
+    inst = HostedManager._instance_from_record(_PID, {"project": {}, "label": 7})
+    assert inst.project == ""
+    assert inst.label == f"hosted:{_PID[:8]}"
+
+
+def test_degraded_row_carries_the_reason_on_the_row():
+    # The journal warning is for whoever tails logs; error_detail is the same fact for
+    # whoever is looking at the dashboard. Degrading has to be visible on both.
+    inst = HostedManager._instance_from_record(_PID, {"project": {}, "label": "hosted:proj"})
+    assert "unreadable" in (inst.error_detail or "")
+
+
+def test_instance_from_record_logs_the_degradation(caplog):
+    """Degrading must be visible, never silent (invariant 1).
+
+    The warning names the process id and the offending field so an operator can find
+    the row, and carries pydantic's error CODE rather than the rejected value — a log
+    file is not a redacted surface, so the value must not travel into it.
+    """
+    with caplog.at_level(logging.WARNING, logger="clauster.hosted"):
+        HostedManager._instance_from_record(
+            _PID, {"project": {"placeholder-key": "placeholder-value"}, "label": "hosted:proj"}
+        )
+    assert len(caplog.records) == 1
+    message = caplog.records[0].getMessage()
+    assert _PID in message
+    assert "project" in message
+    assert "unreadable" in message
+    assert "placeholder-value" not in message  # the rejected value never reaches the log
+
+
+def test_instance_from_record_ignores_a_non_string_instance_id(caplog):
+    """A non-string ``instance_id`` is dropped — and said out loud, not dropped silently.
+
+    The mapper sets this one AFTER construction, so pydantic never sees it (the model
+    does not enable ``validate_assignment``) — the ValidationError guard cannot catch it
+    and a hand-edited record would otherwise put a non-string key in the registry.
+    Dropping it costs a client its cached id (#841), so it warrants a warning of its own.
+    """
+    with caplog.at_level(logging.WARNING, logger="clauster.hosted"):
+        inst = HostedManager._instance_from_record(
+            _PID, {"project": "proj", "label": "hosted:proj", "instance_id": {"x": 1}}
+        )
+    assert isinstance(inst.instance_id, str) and inst.instance_id
+    message = caplog.records[0].getMessage()
+    assert _PID in message
+    assert "dict" in message  # the TYPE, never the value
+
+
+async def test_manager_reattach_survives_one_unreadable_record(fake_claustrum, tmp_path):
+    """A corrupt record must not orphan the live session it belongs to, nor its peers.
+
+    The end-to-end shape of #1343: generation 1 spawns a real session, the persisted
+    record is then hand-corrupted, and generation 2 still reattaches it — pre-fix
+    ``reattach_all`` raised ``ValidationError`` out of the loop, so neither this
+    session nor any other was reattached and the daemon-owned agent was orphaned.
+    """
+    fake = await fake_claustrum()
+    store = HostedStateStore(tmp_path)
+    pid = await _spawn_gen1(fake, store)
+    records = store.load()
+    persisted_iid = records[pid]["instance_id"]
+    records[pid]["label"] = 7  # what a hand-edited state file can hold
+    records["01GONEPROCESS00000000000"] = {"project": "proj", "label": "hosted:b"}
+    store.save(records)
+
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        await mgr.reattach_all(client)
+        assert mgr.session(pid) is not None  # reattached despite the corrupt field
+        assert mgr.get_instance(pid).status is not InstanceStatus.CRASHED
+        # The healthy neighbour was processed too — one bad record is not global.
+        assert mgr.get_instance("01GONEPROCESS00000000000") is not None
+        await mgr.aclose()
+
+    # `reattach_all` persists, so the file is rewritten from the degraded row. Only
+    # the field that was junk may have changed — anything else being reset here would
+    # mean the first boot after corruption destroyed a recoverable value.
+    rewritten = store.load()[pid]
+    assert rewritten["label"] == f"hosted:{pid[:8]}"  # the junk one, reset to its default
+    assert rewritten["project"] == "proj"
+    assert rewritten["permission_mode"] == "acceptEdits"
+    assert rewritten["instance_id"] == persisted_iid
+    assert rewritten["daemon_last_seq"] >= 1  # the replay cursor survived intact
+
+
+async def test_manager_reattach_degraded_row_can_still_be_an_orphan(
+    fake_claustrum, tmp_path, monkeypatch
+):
+    """A degraded row keeps the CL-8 orphan evidence, so Resume/Kill stay reachable.
+
+    ``_is_orphan`` has only ``agent_pid`` + ``agent_proc_start`` to go on. If the
+    salvage dropped them, a survivor of a daemon restart would be filed as "session
+    lost" and ``forget`` — which refuses only for ``is_orphan`` rows — would then throw
+    away clauster's last record of a live ``claude`` process.
+    """
+    fake = await fake_claustrum()
+    store = HostedStateStore(tmp_path)
+    monkeypatch.setattr(hosted.procutil, "is_killable_hosted", lambda pid, start: True)
+    store.save(
+        {
+            "01GONEPROCESS00000000000": {
+                "project": {},  # rejected by the model → degraded row
+                "label": "hosted:proj",
+                "agent_pid": 4242,
+                "agent_proc_start": 1234.5,
+            }
+        }
+    )
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        await mgr.reattach_all(client)
+        inst = mgr.get_instance("01GONEPROCESS00000000000")
+        assert inst.status is InstanceStatus.CRASHED  # the daemon doesn't know it
+        assert inst.is_orphan is True  # ...but the pid evidence survived the degrade
+        assert "Resume to recover" in (inst.error_detail or "")
+
+
+async def test_manager_reattach_never_takes_the_session_uuid_from_the_raw_record(
+    fake_claustrum, tmp_path
+):
+    """A non-string persisted uuid must not reach the live session (invariant 2).
+
+    ``reattach_all`` used to read ``claude_session_uuid`` straight out of the record,
+    bypassing the mapper's type check and the model alike (assignments are
+    unvalidated). A truthy non-string then latched ``_capture_session_uuid`` shut — the
+    real id from the replayed init frame was discarded for the process lifetime — and
+    reached ``build_hosted_argv``'s ``--resume``, i.e. a rejected persisted value in
+    spawn argv.
+    """
+    fake = await fake_claustrum()
+    store = HostedStateStore(tmp_path)
+    pid = await _spawn_gen1(fake, store)
+    records = store.load()
+    records[pid]["claude_session_uuid"] = ["not-a-uuid"]
+    store.save(records)
+
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        await mgr.reattach_all(client)
+        assert mgr.session(pid).claude_session_uuid is None  # dropped, not smuggled
+        # ...so the latch is open and a replayed init frame still supplies the real id.
+        await fake.emit(pid, "stdout", b'{"type":"system","subtype":"init","session_id":"s-1"}\n')
+        await wait_until(lambda: mgr.session(pid).claude_session_uuid == "s-1")
+        await mgr.aclose()
+    assert store.load()[pid]["claude_session_uuid"] == "s-1"
 
 
 async def test_manager_reattach_restores_persisted_instance_id(fake_claustrum, tmp_path):

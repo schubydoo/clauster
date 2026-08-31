@@ -44,7 +44,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard, cast, get_args
+
+from pydantic import ValidationError
 
 from . import procutil
 from .claustrum_client import ClaustrumClient, ClaustrumError, ProcessStream, _Subscriber
@@ -1272,7 +1274,10 @@ class HostedManager:
         ``daemon_last_seq``. Found+running → a live, pumping session; found+exited →
         finalized via the replayed exit; not-found → a CRASHED "session lost" row.
         Tolerates a daemon error per session (records it, keeps going — one bad
-        reattach never blocks the rest or startup). Returns the restored instances.
+        reattach never blocks the rest or startup), and likewise an unreadable
+        persisted record: :meth:`_instance_from_record` degrades that one row to
+        defaults and logs it rather than raising through this loop (#1343).
+        Returns the restored instances.
 
         ``history_for`` resolves a row to its prior conversation, read from claude's
         on-disk transcript, so a reattached session's view isn't empty (#1045); the app
@@ -1284,7 +1289,11 @@ class HostedManager:
         for process_id, fields in records.items():
             instance = self._instance_from_record(process_id, fields)
             self._instances[process_id] = instance
-            if fields.get("intentional_stop"):
+            # From the row, not the raw record, for the same reason as the uuid below:
+            # the mapper is the one place a persisted value is type-checked. Both agree
+            # for every value today (`bool(...)` vs truthiness), so this is consistency,
+            # not a fix — but the raw-record read is the pattern that produced one.
+            if instance.intentional_stop:
                 instance.status = InstanceStatus.STOPPED
                 continue
             # reattach() never builds argv (it binds by process id), so the binary is
@@ -1295,7 +1304,15 @@ class HostedManager:
                 "",
                 on_permission_needed=self._on_permission_needed,
             )
-            session.claude_session_uuid = fields.get("claude_session_uuid")
+            # From the rebuilt row, NOT the raw record: `_instance_from_record` is the
+            # one place a persisted value is type-checked, and this assignment is not
+            # validated (no `validate_assignment` on the model). Reading `fields` here
+            # let a non-string uuid past the mapper, where it (a) latched
+            # `_capture_session_uuid` shut so the real id from the replayed init frame
+            # was discarded for the process lifetime, and (b) reached `--resume` in
+            # `build_hosted_argv` — a persisted value the model rejected arriving in
+            # spawn argv, which invariant 2 forbids.
+            session.claude_session_uuid = instance.claude_session_uuid
             # A loader, not a pre-read list: reattach runs it AFTER the RPC has fixed
             # the daemon's lastSeq. Reading first would suppress frames emitted during
             # the read — see HostedSession._rehydrate.
@@ -1325,6 +1342,11 @@ class HostedManager:
                 else:
                     instance.error_detail = "daemon restarted; session lost"
                 continue
+            # A clean reattach: drop the salvage's "record was unreadable" note so it does
+            # not later render as this running session's ENDING reason (the WARNING logged at
+            # salvage time stays the durable record). Only that note is cleared.
+            if instance.error_detail == _UNREADABLE_RECORD_DETAIL:
+                instance.error_detail = None
             self._sessions[process_id] = session
         await self._persist()
         return [self._synced(inst) for inst in self._instances.values()]
@@ -1458,15 +1480,91 @@ class HostedManager:
 
     @staticmethod
     def _instance_from_record(process_id: str, fields: dict) -> RemoteControlInstance:
-        """Rebuild a hosted instance row from a persisted record (inverse of _record)."""
-        started_at = fields.get("started_at")
-        parsed_start: datetime | None = None
-        if isinstance(started_at, str):
-            try:
-                parsed_start = datetime.fromisoformat(started_at)
-            except ValueError:
-                parsed_start = None
-        log_path = fields.get("hosted_log_path")
+        """Rebuild a hosted instance row from a persisted record (inverse of _record).
+
+        Total over the record map (#1343). :func:`_coerce_seq` made one field total;
+        every *other* persisted field still reached the model unguarded, so a junk
+        ``project``/``label``/``permission_mode``/``agent_pid``/… raised
+        ``ValidationError`` — which is not a :class:`ClaustrumError`, so it escaped
+        both :meth:`reattach_all`'s per-session handler and the lifespan's in
+        ``app.py``: one corrupt record failed the whole app boot. Such a record now
+        degrades to :meth:`_degraded_row` and is logged at WARNING — visibly, not
+        silently, and per-record, so the other sessions still reattach.
+        """
+        try:
+            return HostedManager._row_from_record(process_id, fields)
+        except ValidationError as exc:
+            # Field names + pydantic's error *codes* only. The values are what the
+            # daemon and claude wrote; echoing them into the log would put session
+            # metadata in a file redaction never sees.
+            bad = ", ".join(
+                f"{'.'.join(str(part) for part in err['loc'])}:{err['type']}"
+                for err in exc.errors()
+            )
+            logger.warning(
+                "hosted: persisted record for %s is unreadable (%s); reattaching it with "
+                "default metadata rather than failing startup",
+                process_id,
+                bad or "unknown field",
+            )
+            return HostedManager._degraded_row(process_id, fields)
+
+    @staticmethod
+    def _degraded_row(process_id: str, fields: dict) -> RemoteControlInstance:
+        """Rebuild the row field by field, keeping every value that checks out.
+
+        The salvage half of the guard above, and the reason a rejected record degrades
+        rather than being skipped: reattach binds by ``claustrum_process_id``, so the
+        row this returns still reattaches the live daemon session. Dropping it would
+        orphan a running agent — the failure hosted persistence exists to prevent.
+
+        Per field rather than wholesale, because ``reattach_all`` ends in a
+        :meth:`_persist` that rewrites the record from this row: defaulting the other
+        ten fields because one is junk would *destroy* them on the first boot after
+        corruption, leaving nothing to repair by hand. Two of them are load-bearing
+        beyond display — ``agent_pid``/``agent_proc_start`` are the only evidence
+        :meth:`_is_orphan` has, so losing them downgrades a recoverable CL-8 survivor
+        to "session lost" and lets ``forget`` drop clauster's last record of a live
+        process. Only the value the model actually rejected falls back to its default.
+
+        This function must not raise, or it reopens the very escape it exists to close
+        (its caller catches ``ValidationError`` and nothing else). Every value is
+        therefore type-tested against the model's own annotation — which
+        ``RemoteControlInstance`` constrains no further — and the two coercions that
+        can fail on a well-typed value, :func:`_as_permission_mode` (a membership test
+        *hashes*) and :func:`_as_proc_start` (``float()`` overflows), swallow their own
+        errors. Verified by sweeping every field against every JSON shape, not asserted.
+        """
+        project = fields.get("project")
+        label = fields.get("label")
+        mode = fields.get("permission_mode")
+        session_uuid = fields.get("claude_session_uuid")
+        agent_pid = fields.get("agent_pid")
+        proc_start = fields.get("agent_proc_start")
+        instance = RemoteControlInstance(
+            project=project if isinstance(project, str) else "",
+            label=label if isinstance(label, str) else f"hosted:{process_id[:8]}",
+            channel="hosted",
+            permission_mode=_as_permission_mode(mode),
+            claustrum_process_id=process_id,
+            # Empty string normalized away: it is `not None`, so it would latch
+            # `HostedSession._capture_session_uuid` shut and the real id from the
+            # replayed init frame would never be recorded.
+            claude_session_uuid=session_uuid if _is_text(session_uuid) else None,
+            daemon_last_seq=_coerce_seq(fields.get("daemon_last_seq")),
+            hosted_log_path=_as_log_path(fields.get("hosted_log_path")),
+            agent_pid=_as_pid(agent_pid),
+            agent_proc_start=_as_proc_start(proc_start),
+            started_at=_as_started_at(fields.get("started_at")),
+            intentional_stop=bool(fields.get("intentional_stop", False)),
+            status=InstanceStatus.STARTING,
+            error_detail=_UNREADABLE_RECORD_DETAIL,
+        )
+        return HostedManager._restore_instance_id(instance, fields)
+
+    @staticmethod
+    def _row_from_record(process_id: str, fields: dict) -> RemoteControlInstance:
+        """Map a well-formed record onto the model; raises ``ValidationError`` if it isn't."""
         instance = RemoteControlInstance(
             project=fields.get("project", ""),
             label=fields.get("label", f"hosted:{process_id[:8]}"),
@@ -1475,33 +1573,170 @@ class HostedManager:
             claustrum_process_id=process_id,
             claude_session_uuid=fields.get("claude_session_uuid"),
             daemon_last_seq=_coerce_seq(fields.get("daemon_last_seq")),
-            hosted_log_path=Path(log_path) if isinstance(log_path, str) and log_path else None,
-            agent_pid=fields.get("agent_pid"),
-            agent_proc_start=fields.get("agent_proc_start"),
-            started_at=parsed_start,
+            hosted_log_path=_as_log_path(fields.get("hosted_log_path")),
+            # Both paths coerce the pid identically, so they cannot disagree about the
+            # same bytes and leave a degraded row without the CL-8 orphan evidence a
+            # healthy one would have kept.
+            agent_pid=_as_pid(fields.get("agent_pid")),
+            agent_proc_start=_as_proc_start(fields.get("agent_proc_start")),
+            started_at=_as_started_at(fields.get("started_at")),
             intentional_stop=bool(fields.get("intentional_stop", False)),
             status=InstanceStatus.STARTING,
         )
-        # Restore the per-runtime instance_id (#834/#840) so a client that cached
-        # it before the restart still resolves via HostedManager._key_for instead
-        # of hitting the freshly-minted default_factory id (#841). Constructed
-        # then set rather than passed to the constructor — a bare **fields unpack
-        # would let heterogeneous/unknown persisted keys reach the model directly.
-        if fields.get("instance_id"):
-            instance.instance_id = fields["instance_id"]
+        return HostedManager._restore_instance_id(instance, fields)
+
+    @staticmethod
+    def _restore_instance_id(
+        instance: RemoteControlInstance, fields: dict
+    ) -> RemoteControlInstance:
+        """Reinstate the persisted per-runtime ``instance_id`` on a rebuilt row.
+
+        Restores it (#834/#840) so a client that cached the id before the restart still
+        resolves via :meth:`HostedManager._key_for` instead of hitting the freshly-minted
+        ``default_factory`` id (#841). Set after construction rather than passed to it —
+        a bare ``**fields`` unpack would let heterogeneous/unknown persisted keys reach
+        the model directly. An assignment is NOT validated (the model does not set
+        ``validate_assignment``), so this ``str`` check is the only thing standing between
+        a hand-edited record and a non-string key in the registry; the
+        ``ValidationError`` guard cannot see an assignment. A dropped id is logged, since
+        it costs a client its cached handle.
+        """
+        instance_id = fields.get("instance_id")
+        if isinstance(instance_id, str) and instance_id:
+            instance.instance_id = instance_id
+        elif instance_id is not None:
+            logger.warning(
+                "hosted: persisted instance_id for %s is unusable (%s); minting a "
+                "fresh one — a client's cached id will no longer resolve",
+                instance.claustrum_process_id,
+                "empty string" if isinstance(instance_id, str) else type(instance_id).__name__,
+            )
         return instance
+
+
+#: The permission modes the model accepts, read off the ``Literal`` itself so a mode
+#: added to the config can never silently become "unsalvageable" here.
+_PERMISSION_MODES = frozenset(get_args(PermissionMode))
+
+#: Carried on a row rebuilt by :meth:`HostedManager._degraded_row`, so the degradation
+#: travels with the API row and not only in the journal warning. Deliberately says
+#: nothing about the reattach outcome: the row this lands on may go on to be reattached,
+#: rebuilt as an intentionally-stopped row, or CRASHED — and in the last two cases
+#: ``reattach_all`` overwrites this detail with the more actionable message anyway.
+#: (No template renders a *running* hosted row's ``error_detail`` today; a stopped or
+#: ended row's live view does. Treat the log line as the reliable channel.)
+_UNREADABLE_RECORD_DETAIL = (
+    "part of this session's saved record was unreadable and was reset to defaults"
+)
+
+
+def _as_started_at(value: Any) -> datetime | None:
+    """Parse a persisted ISO-8601 ``started_at``; ``None`` if absent or unparseable."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _as_permission_mode(value: Any) -> PermissionMode:
+    """Keep a persisted permission mode only if the config still defines it.
+
+    Anything else becomes ``"default"`` — the restrictive direction, so a junk mode can
+    never widen what the reattached session is allowed to do without asking.
+
+    The ``isinstance`` is load-bearing, not belt-and-braces: ``x in frozenset`` *hashes*
+    ``x``, so a persisted ``{}``/``[]`` would raise ``TypeError: unhashable type`` — an
+    exception the caller's ``except ValidationError`` does not catch, i.e. the same
+    escape to the lifespan that #1343 exists to close.
+    """
+    if isinstance(value, str) and value in _PERMISSION_MODES:
+        # The membership test IS the validation — `_PERMISSION_MODES` is built from the
+        # Literal's own members, so a hit is one of them by construction.
+        return cast(PermissionMode, value)
+    return "default"
+
+
+def _as_proc_start(value: Any) -> float | None:
+    """Coerce a persisted ``agent_proc_start`` to a float, falling back to ``None``.
+
+    Used by BOTH mapping paths so they cannot disagree about the same bytes — the twin of
+    :func:`_as_pid` for the other half of the orphan-recovery evidence pair. Stricter than
+    pydantic's lax coercion on purpose: that would accept a numeric string (``"1234.5"`` →
+    ``1234.5``) and ``true`` → ``1.0``, so handing the raw value to pydantic on the healthy
+    path let it KEEP values the salvage path drops. ``_record`` only ever writes a float, so
+    nothing legitimate is refused; a refusal is logged. And the *fallback* must not raise:
+    JSON can hold an int too large for a float, and a bare ``float()`` on it raises
+    ``OverflowError``, which the caller's ``except ValidationError`` does not catch — the
+    escape #1343 exists to close, reopened inside its own fix. ``None`` means "unknown start
+    time", which :func:`procutil.is_killable_hosted` treats as not-safely-killable: the
+    fail-closed direction for orphan recovery.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        if value is not None:
+            logger.warning(
+                "hosted: refusing a non-numeric agent_proc_start (%s) from a persisted "
+                "record; the row loses its orphan-recovery start-time evidence",
+                type(value).__name__,
+            )
+        return None
+    try:
+        return float(value)
+    except (OverflowError, ValueError):
+        return None
+
+
+def _as_log_path(value: Any) -> Path | None:
+    """Rebuild a persisted ``hosted_log_path``; ``None`` unless it is a non-empty string."""
+    return Path(value) if isinstance(value, str) and value else None
+
+
+def _is_plain_int(value: Any) -> TypeGuard[int]:
+    """Report whether ``value`` is an ``int`` and not a ``bool`` (which subclasses ``int``)."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_text(value: Any) -> TypeGuard[str]:
+    """Report whether ``value`` is a non-empty ``str``."""
+    return isinstance(value, str) and bool(value)
+
+
+def _as_pid(value: Any) -> int | None:
+    """Coerce a persisted ``agent_pid`` to an int, falling back to ``None``.
+
+    Used by both mapping paths so they cannot disagree about the same bytes. Stricter
+    than pydantic's lax coercion on purpose: that accepts ``true`` as pid **1** — init
+    on every POSIX host — and ``4242.0`` as 4242. ``_record`` only ever writes an int,
+    so nothing legitimate is refused; a refusal is logged. ``None`` means "no pid
+    evidence", which :meth:`HostedManager._is_orphan` reads as not-recoverable: the
+    fail-closed direction, since the alternative is offering Kill against a pid we cannot
+    vouch for. The WARNING matters because ``_persist`` writes the ``None`` back, so the
+    orphan evidence a prior release kept (lax ``"4242"`` → 4242) is dropped for good and a
+    row can start reading "session lost" with nothing else to explain it.
+    """
+    if _is_plain_int(value):
+        return value
+    if value is not None:
+        logger.warning(
+            "hosted: refusing a non-integer agent_pid (%s) from a persisted record; the "
+            "row loses its orphan-recovery pid evidence",
+            type(value).__name__,
+        )
+    return None
 
 
 def _coerce_seq(value: Any) -> int:
     """Coerce a persisted ``daemon_last_seq`` to an int, falling back to ``0``.
 
-    This makes :meth:`HostedManager._instance_from_record` total over **this one
-    field** of the on-disk ``hosted_state.json`` record map. A bare ``int(...)``
+    This keeps **this one field** of the on-disk ``hosted_state.json`` record map
+    out of the mapper's fallback path. A bare ``int(...)``
     was not: a non-numeric string (``ValueError``), a dict/list (``TypeError``),
     a NaN (``ValueError``) or an ``inf`` (``OverflowError``) each aborted the
-    whole reattach on restart. (The mapper's *other* persisted fields still reach
-    the model unguarded and can raise ``ValidationError`` — pre-existing, and not
-    something this helper should be read as having closed.) An uncoercible
+    whole reattach on restart. (The mapper's other persisted fields are covered
+    separately, by :meth:`HostedManager._instance_from_record`'s ``ValidationError``
+    guard — #1343. This helper is still the *only* thing that keeps a junk cursor
+    from costing the rest of the row its metadata.) An uncoercible
     cursor degrades to 0 — replay from the
     start of the retained window, the fail-*visible* direction: the client sees
     frames it may already have, rather than the session silently vanishing.

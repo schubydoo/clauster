@@ -490,6 +490,29 @@ def test_hosted_instance_from_record_seq_oracle_fires(monkeypatch: pytest.Monkey
         harness.check({"daemon_last_seq": -5})
 
 
+def test_hosted_instance_from_record_validation_oracle_fires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``ValidationError`` escaping the mapper must fail the harness (issue 1343).
+
+    It used to be caught as a documented boundary. Now the mapper degrades such a
+    record instead, so the pin is inverted — narrowing the guard has to show up as a
+    finding. Narrowing it is simulated by breaking the salvage half, which is the
+    realistic regression: the ``except`` stays, its fallback stops being total.
+    """
+    from clauster import hosted
+
+    harness = _load("hosted_instance_from_record_fuzzer.py")
+    harness.check({"project": {}})  # unbroken: degrades, no assertion
+
+    def _no_longer_total(process_id: str, fields: dict) -> object:
+        return hosted.RemoteControlInstance(project={}, label="L", channel="hosted")
+
+    monkeypatch.setattr(hosted.HostedManager, "_degraded_row", staticmethod(_no_longer_total))
+    with pytest.raises(AssertionError, match="^ValidationError escaped the mapper"):
+        harness.check({"project": {}})
+
+
 def test_hosted_instance_from_record_generator_reaches_the_iso_branch() -> None:
     """The composed timestamps must actually parse, or the accept branch is never fuzzed.
 
