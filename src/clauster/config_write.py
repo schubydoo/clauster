@@ -55,6 +55,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, Literal
 
+import yaml
 from fastapi import HTTPException
 
 from .claude_json import locked_replace_json_file, update_claude_json
@@ -159,10 +160,6 @@ def _mask_interps(body: str, sentinel: str) -> str:
 
 
 _SECRETISH_URL_RE = re.compile(r"^[a-z][a-z0-9+.\-]*://[^/@\s]+@", re.IGNORECASE)
-# The line-scanning (non-anchored) twin of _SECRETISH_URL_RE, for masking a
-# credential-bearing URL that appears *anywhere* in a line of free text (see
-# redact_secret_lines), not just when the whole value is the URL.
-_SECRETISH_URL_INLINE_RE = re.compile(r"[a-z][a-z0-9+.\-]*://[^/@\s]+@", re.IGNORECASE)
 # A `key: value` / `key = value` line (the shape of a settings.json-adjacent config
 # line, a frontmatter field, or a shell-style env assignment) — used to mask the value
 # side of a secret-shaped key in free text that has no JSON/dict structure to recurse.
@@ -700,6 +697,83 @@ def capability_status(config: ClausterConfig) -> dict[str, bool]:
 # ---------------------------------------------------------------------------
 # Shared helpers used by child surfaces (MCP #688, permissions #689, hooks #690)
 # ---------------------------------------------------------------------------
+
+
+#: The ONE ``---``-delimited frontmatter fence for the whole write tier, shared by
+#: :mod:`clauster.config_write_subagents` and :mod:`clauster.config_write_skills`.
+#: Both surfaces are code-executing (a header becomes a subagent's ``tools`` or a
+#: skill's ``allowed-tools``), so a file must not parse in one and be rejected — or
+#: split differently — in the other. It lived as two near-identical copies until they
+#: drifted on trailing spaces/tabs after a ``---``, in both directions (#1352): on the
+#: OPENING fence the skill copy rejected what the subagent copy accepted, so one file
+#: was a 422 on one surface and a write on the other; on the CLOSING fence both
+#: matched, but the skill copy handed the whitespace back as the head of the body, so
+#: ``---\na: 1\n--- \nbody`` split as ``'body'`` here and ``' \nbody'`` there. One
+#: object, aliased by both modules, makes that class of drift structurally impossible
+#: rather than merely tested for. The tolerant direction is deliberate: an editor that
+#: strips nothing on save is the common case, and rejecting such a file helps no one.
+#:
+#: Mechanics: DOTALL so ``.`` spans newlines inside the captured YAML; non-greedy so the
+#: FIRST closing ``---`` ends the block (a body that itself contains a ``---`` line is
+#: not swallowed into the header).
+FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*\r?\n?", re.DOTALL)
+
+
+def load_frontmatter_yaml(header: str, *, what: str) -> Any:
+    """``safe_load`` a frontmatter ``header``, mapping every failure to a rejection.
+
+    The shared YAML seam behind both ``parse_frontmatter`` implementations, for the same
+    reason :data:`FRONTMATTER_RE` is shared: each surface names itself via ``what``
+    (``"frontmatter"`` / ``"SKILL.md frontmatter"``) but the *contract* — only
+    :class:`InvalidCandidateError` escapes — is enforced in one place.
+
+    ``safe_load`` never evaluates the document (no ``python/object`` construction), but
+    the composer and ``SafeConstructor`` can raise outside :class:`yaml.YAMLError`, and
+    each escape used to reach the route as a 500 on a path documented to fail as a 422:
+
+    * ``RecursionError`` — deeply-nested flow collections overflow the composer before it
+      can raise ``YAMLError`` (#1326).
+    * A resolvable **explicit tag** whose scalar does not fit it (#1354): ``!!int x`` and
+      ``!!float x`` raise ``ValueError``, ``!!bool x`` a ``KeyError``, ``!!timestamp x``
+      an ``AttributeError`` (``construct_yaml_timestamp`` calls ``.groupdict()`` on an
+      unchecked ``re.match``), and an **empty or all-underscore scalar** under ``!!int``
+      / ``!!float`` an ``IndexError`` — both constructors index the scalar before
+      parsing it. Every *other* tag already fails as a ``ConstructorError``, which is a
+      ``YAMLError``. Caught only around the ``safe_load`` call itself, so nothing beyond
+      the parse is swallowed.
+
+    The bullets record where each class was SEEN, not a proof of exhaustiveness — the
+    fuzz harness (``fuzz/parse_frontmatter_fuzzer.py``) is what hunts for members this
+    tuple is still missing; a new one belongs in the tuple below, not in a wider
+    blanket ``except``.
+
+    All of them are the same structural verdict — we could not parse the header, so we
+    refuse to act on it. Fails closed: this only ever converts a crash into a rejection,
+    never a rejection into an accept.
+    """
+    try:
+        return yaml.safe_load(header)
+    except yaml.YAMLError as exc:
+        raise InvalidCandidateError(f"{what} is not valid YAML: {exc}") from exc
+    except RecursionError as exc:
+        raise InvalidCandidateError(f"{what} is nested too deeply to parse") from exc
+    except (ValueError, KeyError, AttributeError, IndexError) as exc:
+        # The class name ONLY — never the exception's payload. PyYAML embeds the offending
+        # scalar in the unfitting-value shapes ("KeyError('<the value>')"), and this message is
+        # surfaced to the browser as a skill's ``frontmatter_error``, so echoing it would
+        # put a credential pasted into a frontmatter value straight onto the dashboard:
+        # :func:`redact_secret_lines` scans line-anchored ``key: value`` pairs, and a bare
+        # payload sits mid-line where that scanner cannot reach it.
+        #
+        # The ``YAMLError`` branch above still interpolates ``exc`` because its mark
+        # usually re-emits the source line with its key intact, which the redactor does
+        # mask. That is the common shape, NOT a guarantee — PyYAML also writes the token
+        # into message *prose* ("found undefined alias 'X'", duplicate anchor, unknown
+        # tag), which is mid-line and unmasked. Pre-existing on that branch and tracked
+        # separately; do not read it as a precedent for echoing an exception here.
+        raise InvalidCandidateError(
+            f"{what} has a YAML tag its value does not satisfy ({type(exc).__name__})"
+        ) from exc
 
 
 def load_settings_json_obj(raw: bytes) -> dict[str, Any]:

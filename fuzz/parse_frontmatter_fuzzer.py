@@ -11,9 +11,11 @@ Per parser, per input:
 
 * **Only ``InvalidCandidateError`` escapes.** Both docstrings promise that a missing or
   malformed block, invalid YAML, and a non-mapping header are all rejected as that one
-  error. ``yaml.YAMLError`` and the ``RecursionError`` #1326 closed are handled inside;
-  anything else reaching the caller is a 500 on a path that is about to write a file.
-  The harness catches only ``InvalidCandidateError``, so every other escape is a crash.
+  error. ``yaml.YAMLError``, the ``RecursionError`` #1326 closed, and the explicit-tag
+  ``ValueError``/``KeyError``/``AttributeError`` #1354 closed are all handled inside
+  ``config_write.load_frontmatter_yaml``; anything else reaching the caller is a 500 on a
+  path that is about to write a file. The harness catches only ``InvalidCandidateError``,
+  so every other escape is a crash.
 * **The body is returned verbatim.** Both promise it — for subagents in so many words
   ("returned verbatim ... never parsed or executed"). Asserted as ``text.endswith(body)``,
   i.e. the returned body is a genuine suffix of the input, so nothing was re-encoded,
@@ -23,29 +25,26 @@ Per parser, per input:
 
 And across the pair:
 
-* **No header drift.** *When both accept the same text, they must return the same
-  mapping.* The header is the part that matters: it is where a subagent's ``tools`` and a
-  skill's ``allowed-tools`` come from, so two parsers reading one file into two different
-  grants is the divergence with consequences. Stated as an implication rather than as
-  equality of the accept sets, deliberately — the two do not accept the same inputs today
-  and this harness must not rule on which is right.
+* **No drift, header or body.** *When both accept the same text, they must return the
+  same mapping and the same body.* The header is the part with the most consequence — it
+  is where a subagent's ``tools`` and a skill's ``allowed-tools`` come from, so two
+  parsers reading one file into two different grants is the divergence that matters — but
+  the body is the file the operator is shown and re-submits, so a byte of disagreement
+  there is a silent edit. Stated as an implication rather than as equality of the accept
+  sets, deliberately: the two surfaces still differ on what they *accept* (skills rejects
+  a non-mapping header that subagents reads as ``{}``) and this harness must not rule on
+  which is right.
 
 ⚠️ Mapping equality goes through :func:`_same`, which falls back to ``repr``. YAML's
 ``.nan`` is real input here and ``float('nan') != float('nan')``, so a plain ``==`` would
 report two identical mappings as a divergence on the fuzzer's first ``.nan``.
 
-**Body equality is deliberately NOT asserted, because it does not hold today.** The first
-run of this harness found it on its own seed corpus, and the divergence is systematic
-rather than incidental: subagents' fence pattern ends ``---[ \\t]*\\r?\\n?`` and skills'
-ends ``---\\r?\\n?``, so anything trailing the closing ``---`` is swallowed by one parser
-and handed to the caller as the start of the body by the other. ``---\\na: 1\\n--- \\nbody``
-yields a body of ``'body'`` from subagents and ``' \\nbody'`` from skills. That is reported
-as an open finding on the PR that introduced this harness — **not** accepted here as
-correct, and **not** silently excluded: ``tests/test_fuzz_harness_smoke.py`` pins the
-current divergence, so whoever converges the two parsers gets a failing ``just check``
-pointing straight at this paragraph rather than a green suite. Asserting it in the harness
-instead would mean a red SARIF on every batch run, which is what the issue 1322 audit
-deferred these harnesses to avoid.
+Body equality was **not** asserted when this harness landed: the first run found a
+systematic divergence on its own seed corpus, because the two fence patterns disagreed on
+trailing whitespace (``---\\na: 1\\n--- \\nbody`` gave ``'body'`` from subagents and
+``' \\nbody'`` from skills). #1352 converged them onto one shared pattern —
+``config_write.FRONTMATTER_RE``, aliased by both modules — so the property now holds and
+is asserted here.
 
 Not asserted: any particular parse of the YAML itself. Both call ``yaml.safe_load``; the
 harness is about the framing around it, not about re-implementing a YAML parser.
@@ -62,54 +61,6 @@ with atheris.instrument_imports():
     import yaml  # noqa: F401  — instrumented for coverage; the targets do the loading
 
     from clauster import config_write, config_write_skills, config_write_subagents
-
-
-#: Explicit YAML tags whose constructors raise something that is **not** a ``YAMLError``,
-#: so they escape both parsers' documented "only ``InvalidCandidateError``" contract.
-#: Measured against PyYAML 6.x's ``SafeLoader``:
-#:
-#: * ``!!int x``        -> ``ValueError``
-#: * ``!!float x``      -> ``ValueError``
-#: * ``!!bool x``       -> ``KeyError``
-#: * ``!!timestamp x``  -> ``AttributeError`` (``construct_yaml_timestamp`` calls
-#:   ``.groupdict()`` on an unchecked ``re.match``)
-#:
-#: This is the same class #1326 closed for ``RecursionError`` and it is still open for
-#: these four: a ``SKILL.md`` or subagent file arriving with a cloned repository can make
-#: the **code-executing write tier** raise out of a path documented to fail as a 422.
-#: Reported as an open finding on the PR that added this harness; **not fixed here**,
-#: because widening the ``except`` in two parsers is a change on the write tier and wants
-#: its own review. Inputs carrying one are skipped entirely rather than having the
-#: exception swallowed — swallowing would hide the *next*, unknown escape class too, and
-#: the point of this harness is to find those. Pinned in the suite so the fix flips
-#: ``just check`` and sends the next reader here to delete this tuple.
-_YAML_UNCONTRACTED_TAGS = ("!!int", "!!float", "!!bool", "!!timestamp")
-
-
-def _header_region(text: str) -> str:
-    """The text either parser would hand to ``yaml.safe_load``, for the tag scan above.
-
-    Taken from **the parsers' own fence regexes**, not from a hand-rolled split. A
-    ``text.partition("\\n---")`` heuristic looks equivalent and is not: a header whose first
-    line itself starts with ``---`` truncates the region to the opening fence, so
-    ``"---\\n---x: 1\\nk: !!int z\\n---\\nbody\\n"`` slipped past the scan and raised the very
-    ``ValueError`` this exclusion exists to keep out of the Security tab.
-
-    The union of both groups is used because the two regexes do not accept the same inputs
-    (skills rejects a fence with trailing whitespace, subagents does not), and a tag inside
-    a region *either* parser will load is enough to reach the escape. On no match, the whole
-    text is returned — the conservative direction: a skipped input costs one iteration,
-    while a missed one costs a false crash on every batch run.
-    """
-    regions = [
-        match.group(1)
-        for pattern in (
-            config_write_subagents._FRONTMATTER_RE,
-            config_write_skills._FRONTMATTER_RE,
-        )
-        if (match := pattern.match(text)) is not None
-    ]
-    return "\n".join(regions) if regions else text
 
 
 def _same(a: object, b: object) -> bool:
@@ -136,9 +87,6 @@ def check(text: str) -> None:
     the oracle from the suite: fuzz/README.md asks for proof that an assertion *can*
     fire, and an oracle that has never fired is indistinguishable from no oracle at all.
     """
-    if any(tag in _header_region(text) for tag in _YAML_UNCONTRACTED_TAGS):
-        return  # open finding — see _YAML_UNCONTRACTED_TAGS
-
     results = {}
     for label, parser in (
         ("subagents", config_write_subagents.parse_frontmatter),
@@ -154,9 +102,9 @@ def check(text: str) -> None:
         results[label] = (header, body)
 
     if len(results) == 2:
-        # Headers only — see the module docstring on why body equality is not asserted.
-        head_a, head_b = results["subagents"][0], results["skills"][0]
+        (head_a, body_a), (head_b, body_b) = results["subagents"], results["skills"]
         assert _same(head_a, head_b), f"drift: headers differ for {text!r}: {head_a!r} {head_b!r}"
+        assert body_a == body_b, f"drift: bodies differ for {text!r}: {body_a!r} {body_b!r}"
 
 
 def TestOneInput(data: bytes) -> None:

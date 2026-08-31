@@ -351,25 +351,49 @@ def test_parse_frontmatter_header_oracle_fires_on_a_broken_implementation(
         harness.check(text)
 
 
-def test_parse_frontmatter_body_divergence_is_still_open() -> None:
-    """PIN: the two parsers return different BODIES for a fence with trailing whitespace.
+def test_parse_frontmatter_bodies_no_longer_diverge() -> None:
+    """The two parsers agree on the BODY for a fence with trailing whitespace (#1352).
 
-    ``parse_frontmatter_fuzzer`` deliberately does not assert body equality, because it
-    does not hold — subagents' fence pattern ends ``---[ \\t]*\\r?\\n?`` and skills' ends
-    ``---\\r?\\n?``, so anything trailing the closing ``---`` is swallowed by one parser and
-    handed to the caller as the start of the body by the other. Reported as an open finding
-    rather than accepted as correct; this test exists so whoever converges the two gets a
-    failing ``just check`` pointing at the harness docstring, instead of a green suite and a
-    silently dead exclusion.
+    Was pinned here as an open finding: subagents' fence pattern ended ``---[ \\t]*\\r?\\n?``
+    and skills' ended ``---\\r?\\n?``, so anything trailing the closing ``---`` was swallowed
+    by one parser and handed back as the start of the body by the other (``'body\\n'`` vs
+    ``' \\nbody\\n'``) — and a file with a trailing space was accepted on one surface of the
+    write tier and 422'd on the other. Both modules now alias ONE pattern object, which is
+    what this asserts: convergence by construction, not by two copies agreeing today.
     """
-    from clauster import config_write_skills, config_write_subagents
+    from clauster import config_write, config_write_skills, config_write_subagents
+
+    assert config_write_subagents._FRONTMATTER_RE is config_write.FRONTMATTER_RE
+    assert config_write_skills._FRONTMATTER_RE is config_write.FRONTMATTER_RE
 
     text = "---\ndescription: d\n--- \nbody\n"
-    _, sub_body = config_write_subagents.parse_frontmatter(text)
-    _, skill_body = config_write_skills.parse_frontmatter(text)
-    assert sub_body == "body\n"
-    assert skill_body == " \nbody\n"
-    assert sub_body != skill_body, "bodies converged — widen parse_frontmatter_fuzzer"
+    assert config_write_subagents.parse_frontmatter(text) == ({"description": "d"}, "body\n")
+    assert config_write_skills.parse_frontmatter(text) == ({"description": "d"}, "body\n")
+
+
+def test_parse_frontmatter_body_oracle_fires_on_a_broken_implementation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Make the two parsers disagree on the BODY; the harness must notice.
+
+    The body oracle only became assertable once #1352 converged the fences, so it needs the
+    same proof-it-can-fire the header oracle has. The broken body is a genuine suffix of
+    the input, so the per-parser suffix assertion passes and the *drift* assertion is what
+    fires.
+    """
+    from clauster import config_write_skills
+
+    harness = _load("parse_frontmatter_fuzzer.py")
+    text = "---\nname: a\ndescription: d\n---\nbody\n"
+    harness.check(text)  # unbroken: passes
+
+    monkeypatch.setattr(
+        config_write_skills,
+        "parse_frontmatter",
+        lambda content: ({"name": "a", "description": "d"}, "ody\n"),
+    )
+    with pytest.raises(AssertionError, match="^drift: bodies differ"):
+        harness.check(text)
 
 
 # --- hosted_redact_obj_fuzzer --------------------------------------------------------
@@ -683,20 +707,21 @@ def test_usage_line_to_turn_timestamp_is_still_unsanitized() -> None:
     assert turn["timestamp"] == ident, "timestamp is now sanitized — widen _SANITIZED_FIELDS"
 
 
-def test_yaml_tags_still_escape_the_frontmatter_contract() -> None:
-    """PIN: four explicit YAML tags raise non-``YAMLError`` out of both parsers.
+def test_yaml_tags_are_inside_the_frontmatter_contract() -> None:
+    """Four explicit YAML tags used to raise non-``YAMLError`` out of both parsers (#1354).
 
-    ``parse_frontmatter_fuzzer`` skips inputs carrying one of these rather than asserting
-    on them, and that exclusion is only honest while the escape is real. Both parsers
-    document "only ``InvalidCandidateError``" and catch ``YAMLError`` + ``RecursionError``;
-    these four constructors raise outside that set, so a file arriving with a cloned repo
-    produces a 500 on the code-executing write tier instead of the documented 422. Same
-    class the parser-contract work closed for ``RecursionError``, still open for these.
+    ``!!int``/``!!float`` raise ``ValueError``, ``!!bool`` a ``KeyError`` and
+    ``!!timestamp`` an ``AttributeError`` (``construct_yaml_timestamp`` calls
+    ``.groupdict()`` on an unchecked ``re.match``) — none of them a ``YAMLError``, so each
+    escaped both parsers' documented "only ``InvalidCandidateError``" contract and produced
+    a 500 on the code-executing write tier for a file that arrived with a cloned repo.
+    Same class the parser-contract work closed for ``RecursionError``.
 
-    Reported as an open finding, not fixed. When it is fixed this test fails, which is the
-    signal to delete ``_YAML_UNCONTRACTED_TAGS`` and let the harness assert on them again.
+    ``parse_frontmatter_fuzzer`` used to *skip* inputs carrying one; now that the escape is
+    closed it asserts on them like any other input, so this checks both halves — the
+    parsers reject cleanly, and the harness no longer carries the exclusion.
     """
-    from clauster import config_write_skills, config_write_subagents
+    from clauster import config_write, config_write_skills, config_write_subagents
 
     expected = {
         "!!int": ValueError,
@@ -705,18 +730,21 @@ def test_yaml_tags_still_escape_the_frontmatter_contract() -> None:
         "!!timestamp": AttributeError,
     }
     harness = _load("parse_frontmatter_fuzzer.py")
-    assert set(harness._YAML_UNCONTRACTED_TAGS) == set(expected), (
-        "the harness's exclusion list drifted from the tags proven to escape here"
+    assert not hasattr(harness, "_YAML_UNCONTRACTED_TAGS"), (
+        "the harness exclusion is back — these tags are contracted, so it would hide the "
+        "next escape class instead of the known one"
     )
 
-    for tag, exc in expected.items():
+    for tag, cause in expected.items():
         text = f"---\nname: {tag} x\ndescription: d\n---\nbody\n"
         for parser in (
             config_write_subagents.parse_frontmatter,
             config_write_skills.parse_frontmatter,
         ):
-            with pytest.raises(exc):
+            with pytest.raises(config_write.InvalidCandidateError) as excinfo:
                 parser(text)
+            assert isinstance(excinfo.value.__cause__, cause)
+        harness.check(text)  # asserted on now, not skipped
 
 
 def test_pyte_render_is_still_chunk_dependent() -> None:
@@ -797,32 +825,29 @@ def test_osc8_regex_still_swallows_a_later_opener() -> None:
     assert retained([stream[i : i + 1] for i in range(len(stream))]) == [url]
 
 
-def test_parse_frontmatter_tag_skip_covers_a_fence_leading_header() -> None:
-    """The tag exclusion must use the parsers' fences, not a `"\\n---"` split.
+def test_parse_frontmatter_handles_a_fence_leading_header() -> None:
+    """A header whose first line itself starts with ``---`` reaches the tag, and rejects.
 
-    Regression for a hole found in review: a header whose first line itself starts with
-    ``---`` truncated a ``text.partition("\\n---")`` head to the opening fence, so the
-    ``!!int`` slipped past the skip and raised the very ``ValueError`` the exclusion exists
-    to keep out of the Security tab. ``_header_region`` takes the region from
-    ``config_write_subagents._FRONTMATTER_RE`` / ``config_write_skills._FRONTMATTER_RE``
-    instead.
+    While the tag escape was open the harness had to *skip* such inputs, and the skip's
+    first implementation missed this one: a ``text.partition("\\n---")`` head truncated to
+    the opening fence, so the ``!!int`` slipped past and raised the very ``ValueError`` the
+    exclusion existed to keep out of the Security tab. #1354 removed the exclusion
+    entirely, so the input is now parsed like any other — and rejected inside the contract.
+    Kept as a regression because it is the shape that defeated the heuristic.
     """
+    from clauster import config_write, config_write_skills, config_write_subagents
+
     harness = _load("parse_frontmatter_fuzzer.py")
     tricky = "---\n---x: 1\nk: !!int z\n---\nbody\n"
 
     assert "!!int" not in tricky.partition("\n---")[0], "the old heuristic's hole is gone"
-    assert "!!int" in harness._header_region(tricky), "the region must reach the tag"
-    harness.check(tricky)  # must skip, not raise
-
-    # Ordinary shapes. Both fences match a well-formed file, so the region is the union
-    # of the two groups — deliberately, since a tag in a region EITHER parser would load
-    # is enough to reach the escape.
-    assert harness._header_region("---\na: 1\n---\nbody\n") == "a: 1\na: 1"
-    # A trailing-whitespace closing fence: both still MATCH (they differ on the body,
-    # which is finding 1), so the header region is the union again.
-    assert harness._header_region("---\na: 1\n--- \nbody\n") == "a: 1\na: 1"
-    # No fence at all -> the conservative fallback, the whole text.
-    assert harness._header_region("no frontmatter here") == "no frontmatter here"
+    for parser in (
+        config_write_subagents.parse_frontmatter,
+        config_write_skills.parse_frontmatter,
+    ):
+        with pytest.raises(config_write.InvalidCandidateError):
+            parser(tricky)
+    harness.check(tricky)  # asserted on, not skipped — and nothing escapes
 
 
 def test_pty_screen_feed_seeds_decode_to_a_non_empty_payload() -> None:

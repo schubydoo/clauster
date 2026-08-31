@@ -90,6 +90,66 @@ def test_parse_frontmatter_rejects_deeply_nested_yaml() -> None:
         sk.parse_frontmatter(f"---\ndescription: {deep}\n---\nbody\n")
 
 
+@pytest.mark.parametrize(
+    ("tag", "raised"),
+    [
+        ("!!int", ValueError),
+        ("!!float", ValueError),
+        ("!!bool", KeyError),
+        ("!!timestamp", AttributeError),
+    ],
+)
+def test_parse_frontmatter_rejects_explicit_tag_with_an_unfitting_value(
+    tag: str, raised: type[Exception]
+) -> None:
+    # #1354: PyYAML's SafeConstructor raises these four OUTSIDE yaml.YAMLError for a
+    # resolvable explicit tag whose value does not fit it, so each escaped the documented
+    # InvalidCandidateError contract — a 500 on this code-executing write tier, from a
+    # SKILL.md that arrived with a cloned repository. The input is the fuzzer's;
+    # `__cause__` pins WHICH class was caught. Kept in lockstep with the subagents parser
+    # (one shared handler, config_write.load_frontmatter_yaml).
+    with pytest.raises(cw.InvalidCandidateError, match="YAML tag") as excinfo:
+        sk.parse_frontmatter(f"---\nname: {tag} x\ndescription: d\n---\nbody\n")
+    assert isinstance(excinfo.value.__cause__, raised)
+
+
+@pytest.mark.parametrize("value", ["!!int", "!!float", "!!int __"])
+def test_parse_frontmatter_rejects_explicit_int_tag_with_an_empty_scalar(value: str) -> None:
+    # Review catch on the first fix for issue 1354: construct_yaml_int/float INDEX the
+    # scalar before parsing it, so an empty (or all-underscore, which strips to empty)
+    # scalar raises IndexError — none of the unfitting-value trio above — and still
+    # escaped as a 500 until IndexError joined the shared handler's tuple.
+    with pytest.raises(cw.InvalidCandidateError, match="YAML tag") as excinfo:
+        sk.parse_frontmatter(f"---\nname: {value}\ndescription: d\n---\nbody\n")
+    assert isinstance(excinfo.value.__cause__, IndexError)
+
+
+def test_parse_frontmatter_tag_rejection_does_not_echo_the_value() -> None:
+    # Invariant 4. PyYAML embeds the offending scalar in all four of these exceptions
+    # ("KeyError('<the value>')"), and list_skills surfaces this message to the browser as
+    # `frontmatter_error`. redact_secret_lines cannot save it: its key/value scanner is
+    # line-anchored, so a payload sitting mid-message is unreachable. So the handler names
+    # the exception CLASS and never its payload. The value below is low-entropy padding on
+    # purpose (a secret-shaped literal in any commit fails the gitleaks gate).
+    secret = "FAKEFAKEFAKEFAKEFAKEfake42"
+    with pytest.raises(cw.InvalidCandidateError) as excinfo:
+        sk.parse_frontmatter(f"---\napi_key: !!bool {secret}\n---\nbody\n")
+    message = str(excinfo.value)
+    assert secret.lower() not in message.lower()
+    assert secret.lower() not in cw.redact_secret_lines(message).lower()
+    assert "KeyError" in message
+
+
+def test_parse_frontmatter_tolerates_trailing_whitespace_on_a_fence() -> None:
+    # #1352: this parser used to REJECT a fence carrying a trailing space while the
+    # subagents parser accepted it, so the same file parsed on one surface of the write
+    # tier and 422'd on the other. Both now alias one pattern; the cross-parser assertion
+    # lives in tests/test_fuzz_harness_smoke.py.
+    frontmatter, body = sk.parse_frontmatter("--- \ndescription: y\n---\t\nbody\n")
+    assert frontmatter == {"description": "y"}
+    assert body == "body\n"
+
+
 def test_validate_frontmatter_requires_description() -> None:
     with pytest.raises(cw.InvalidCandidateError, match="description"):
         sk.validate_frontmatter({})

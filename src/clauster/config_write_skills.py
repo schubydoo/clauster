@@ -85,8 +85,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from . import config_file_writer as fw
 from . import config_write as cw
 
@@ -110,7 +108,9 @@ MAX_SKILL_MD_BYTES = 64 * 1024
 MAX_FILE_BYTES = 256 * 1024
 MAX_TOTAL_BYTES = 2 * 1024 * 1024
 
-_FRONTMATTER_RE = re.compile(r"\A---\r?\n(.*?)\r?\n---\r?\n?(.*)\Z", re.DOTALL)
+# THE SAME OBJECT config_write_subagents uses — an alias, not a copy, so the two
+# parsers on this write tier cannot drift apart again (#1352). Change it in config_write.
+_FRONTMATTER_RE = cw.FRONTMATTER_RE
 
 #: See the module docstring's "Plugin skills are read-only" section.
 _PLUGIN_ROOT_MARKER = "CLAUDE_PLUGIN_ROOT"
@@ -150,29 +150,27 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     Returns ``(frontmatter, body)``. STRUCTURE ONLY — the YAML is loaded with
     ``safe_load`` and never evaluated/executed; a missing/malformed frontmatter block
     raises :class:`~clauster.config_write.InvalidCandidateError`.
+
+    The fence and the YAML load are both shared with
+    :func:`clauster.config_write_subagents.parse_frontmatter` (see
+    :data:`~clauster.config_write.FRONTMATTER_RE` and
+    :func:`~clauster.config_write.load_frontmatter_yaml`) — the two parsers guard the
+    same code-executing write tier and must not drift. One deliberate difference
+    remains: an empty header (YAML ``None``) is rejected here as a non-mapping, while
+    the subagents parser reads it as an empty mapping and lets its own validator
+    reject it for the missing keys.
     """
     match = _FRONTMATTER_RE.match(content)
     if not match:
         raise cw.InvalidCandidateError(
             f"{SKILL_FILENAME} must start with a '---' YAML frontmatter block"
         )
-    try:
-        data = yaml.safe_load(match.group(1))
-    except yaml.YAMLError as exc:
-        raise cw.InvalidCandidateError(
-            f"{SKILL_FILENAME} frontmatter is not valid YAML: {exc}"
-        ) from exc
-    except RecursionError as exc:
-        # Deeply-nested YAML overflows the composer before it can raise YAMLError, and
-        # RecursionError is not a YAMLError — surface it as the same rejection. Kept
-        # byte-for-byte in step with config_write_subagents.parse_frontmatter: the two
-        # parsers guard the same write tier and must not drift.
-        raise cw.InvalidCandidateError(
-            f"{SKILL_FILENAME} frontmatter is nested too deeply to parse"
-        ) from exc
+    data = cw.load_frontmatter_yaml(match.group(1), what=f"{SKILL_FILENAME} frontmatter")
     if not isinstance(data, dict):
         raise cw.InvalidCandidateError(f"{SKILL_FILENAME} frontmatter must be a YAML mapping")
-    return data, match.group(2)
+    # The shared fence has no trailing capture group; the body is whatever follows the
+    # match, exactly as config_write_subagents.parse_frontmatter takes it.
+    return data, content[match.end() :]
 
 
 def validate_frontmatter(candidate: Any) -> None:

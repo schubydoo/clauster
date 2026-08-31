@@ -89,8 +89,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from . import config_file_writer as fw
 from . import config_write as cw
 from .config_write_hooks import validate_hooks
@@ -122,11 +120,10 @@ _PLUGIN_ROOT_MARKER = "CLAUDE_PLUGIN_ROOT"
 #: Frontmatter keys required on every subagent (Claude Code's own requirement).
 _REQUIRED_FRONTMATTER_KEYS = frozenset({"name", "description"})
 
-# A frontmatter block: ``---`` on its own line, the YAML body, then a closing ``---``
-# on its own line (optionally followed by the rest of the file). DOTALL so `.` spans
-# newlines inside the captured YAML; non-greedy so the FIRST closing `---` ends the
-# block (a body that itself contains a `---` line is not swallowed into the header).
-_FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*\r?\n?", re.DOTALL)
+# THE SAME OBJECT config_write_skills uses — an alias, not a copy, so the two parsers
+# on this write tier cannot drift apart again (#1352). The pattern, its mechanics and
+# its tolerance decisions are documented at the definition — change it in config_write.
+_FRONTMATTER_RE = cw.FRONTMATTER_RE
 
 
 class AgentNotFoundError(cw.ConfigWriteError):
@@ -242,21 +239,21 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     non-mapping frontmatter all raise :class:`~clauster.config_write.InvalidCandidateError`.
     The body is returned verbatim (never parsed or executed — it is the subagent's
     freeform system prompt).
+
+    The fence and the YAML load are both shared with
+    :func:`clauster.config_write_skills.parse_frontmatter` (see
+    :data:`~clauster.config_write.FRONTMATTER_RE` and
+    :func:`~clauster.config_write.load_frontmatter_yaml`) — the two guard the same
+    code-executing tier and must not drift. One deliberate difference remains: an empty
+    header (YAML ``None``) is an empty mapping here and a rejection there, so the two
+    still differ on what they ACCEPT even though they now split identically.
     """
     match = _FRONTMATTER_RE.match(text)
     if not match:
         raise cw.InvalidCandidateError(
             "subagent content must start with a YAML frontmatter block ('---' ... '---')"
         )
-    try:
-        data = yaml.safe_load(match.group(1))
-    except yaml.YAMLError as exc:
-        raise cw.InvalidCandidateError(f"frontmatter is not valid YAML: {exc}") from exc
-    except RecursionError as exc:
-        # Deeply-nested YAML (e.g. thousands of nested flow sequences) overflows the
-        # composer before it can raise YAMLError, and RecursionError is not a YAMLError
-        # — surface it as the same "invalid YAML" rejection the contract promises.
-        raise cw.InvalidCandidateError("frontmatter is nested too deeply to parse") from exc
+    data = cw.load_frontmatter_yaml(match.group(1), what="frontmatter")
     if data is None:
         data = {}
     if not isinstance(data, dict):

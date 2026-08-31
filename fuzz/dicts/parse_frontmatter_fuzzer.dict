@@ -4,7 +4,7 @@
 # FuzzedDataProvider synthesises: without this dict (and the seed corpus) every input
 # lands on the "must start with a frontmatter block" rejection. See fuzz/README.md.
 
-# the fence, in the shapes the two regexes differ on
+# the fence, in the shapes the one shared regex accepts (see config_write.FRONTMATTER_RE)
 "---"
 "---\x0a"
 "---\x0d\x0a"
@@ -50,16 +50,18 @@
 "<<: *a"
 "&a [*a]"
 
-# tags safe_load accepts, and one it must refuse. NB the four tags whose constructors
-# raise outside YAMLError (!!int/!!float/!!bool/!!timestamp) are deliberately ABSENT:
-# check() discards inputs carrying them in the header (an open finding — see the
-# harness's _YAML_UNCONTRACTED_TAGS), so seeding them would steer the mutator toward
-# inputs that are thrown away. Put them BACK when that finding is fixed: once the
-# parsers raise InvalidCandidateError for them, check() stops discarding and the
-# tokens become useful again for reaching the constructors.
+# tags safe_load accepts, and one it must refuse. The four whose constructors raise
+# outside YAMLError (!!int/!!float/!!bool/!!timestamp) were absent while that escape was
+# an open finding and check() discarded any input carrying one; #1354 mapped them to
+# InvalidCandidateError, so they are back — they reach constructor code no other token
+# does, and the reject path is now part of the contract rather than a skipped input.
 "!!str "
 "!!binary "
 "!!set"
+"!!int "
+"!!float "
+"!!bool "
+"!!timestamp "
 "!!python/object:os.system"
 
 # the real frontmatter keys both surfaces validate
