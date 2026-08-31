@@ -750,11 +750,17 @@ def load_frontmatter_yaml(header: str, *, what: str) -> Any:
     except (ValueError, KeyError, AttributeError) as exc:
         # The class name ONLY — never the exception's payload. PyYAML embeds the offending
         # scalar in all four of these ("KeyError('<the value>')"), and this message is
-        # surfaced to the browser as a skill's ``frontmatter_error``. Unlike a YAMLError,
-        # whose mark puts the source on its own indented ``key: value`` line that
-        # :func:`redact_secret_lines` masks, a bare payload lands mid-line where the
-        # line-anchored key/value scanner cannot reach it — so echoing it would leak a
-        # credential pasted into a frontmatter value straight onto the dashboard.
+        # surfaced to the browser as a skill's ``frontmatter_error``, so echoing it would
+        # put a credential pasted into a frontmatter value straight onto the dashboard:
+        # :func:`redact_secret_lines` scans line-anchored ``key: value`` pairs, and a bare
+        # payload sits mid-line where that scanner cannot reach it.
+        #
+        # The ``YAMLError`` branch above still interpolates ``exc`` because its mark
+        # usually re-emits the source line with its key intact, which the redactor does
+        # mask. That is the common shape, NOT a guarantee — PyYAML also writes the token
+        # into message *prose* ("found undefined alias 'X'", duplicate anchor, unknown
+        # tag), which is mid-line and unmasked. Pre-existing on that branch and tracked
+        # separately; do not read it as a precedent for echoing an exception here.
         raise InvalidCandidateError(
             f"{what} has a YAML tag its value does not satisfy ({type(exc).__name__})"
         ) from exc

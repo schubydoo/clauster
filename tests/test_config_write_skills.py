@@ -117,10 +117,9 @@ def test_parse_frontmatter_tag_rejection_does_not_echo_the_value() -> None:
     # Invariant 4. PyYAML embeds the offending scalar in all four of these exceptions
     # ("KeyError('<the value>')"), and list_skills surfaces this message to the browser as
     # `frontmatter_error`. redact_secret_lines cannot save it: its key/value scanner is
-    # line-anchored, so a payload sitting mid-message is unreachable — unlike a YAMLError,
-    # whose mark puts the source on its own indented `key: value` line. So the handler
-    # names the exception CLASS and never its payload. The value below is low-entropy
-    # padding on purpose (a secret-shaped literal in any commit fails the gitleaks gate).
+    # line-anchored, so a payload sitting mid-message is unreachable. So the handler names
+    # the exception CLASS and never its payload. The value below is low-entropy padding on
+    # purpose (a secret-shaped literal in any commit fails the gitleaks gate).
     secret = "FAKEFAKEFAKEFAKEFAKEfake42"
     with pytest.raises(cw.InvalidCandidateError) as excinfo:
         sk.parse_frontmatter(f"---\napi_key: !!bool {secret}\n---\nbody\n")
