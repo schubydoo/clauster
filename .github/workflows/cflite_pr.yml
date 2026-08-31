@@ -19,6 +19,11 @@ on:
       - "fuzz/**"
       - "pyproject.toml"
       - "uv.lock"
+      # The build image + script + pinned requirement exports: a change here rewrites
+      # how the fuzzers are BUILT, and without this entry nothing pre-merge executes
+      # it (found on the PR that hash-pinned the installs — its rewritten build.sh
+      # was never run by CI because this filter skipped the job).
+      - ".clusterfuzzlite/**"
 
 permissions: {}
 
