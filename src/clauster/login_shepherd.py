@@ -104,12 +104,15 @@ IDLE_FLOW_TTL_SECONDS = 900.0
 #: blocked-on-stdin login rides out the full grace once — invisible against a human login.
 _URL_LIVENESS_GRACE_SECONDS = 0.25
 
-#: Clause appended to a fail-closed message when at least one `PtyScreen` scan degraded to
-#: "no match" because pyte could not render the screen (see `_read_screen`). Named rather
-#: than left implicit: "no authorize URL appeared" on its own sends the operator hunting a
-#: network or credential problem that is not there. Fixed text — no screen content, so
-#: nothing unredacted can ride out to the browser on it (invariant 4).
-_SCREEN_FAULT_NOTE = " (the terminal screen could not be rendered for scanning)"
+#: Clause appended to EVERY fail-closed "could not find X" message when at least one
+#: `PtyScreen` scan anywhere in this flow degraded to "no match" because pyte could not
+#: render a frame (see `_read_screen`, which arms `flow.screen_scan_failed`). The wording is
+#: deliberately flow-level, not per-scan: the flag is armed by ANY reader fault, so the note
+#: only says that a frame in this login failed to render — a hint that a not-found result may
+#: be spurious — never that this particular scan faulted. Without it, "no authorize URL
+#: appeared" sends the operator hunting a network or credential problem that is not there.
+#: Fixed text — no screen content, so nothing unredacted rides out to the browser (invariant 4).
+_SCREEN_FAULT_NOTE = " (a screen frame could not be rendered in this login, hiding a match)"
 
 # `setup-token`'s printed long-lived credential (per the spike: `CLAUDE_CODE_OAUTH_TOKEN=...`).
 # Matched permissively (any non-whitespace value) since the exact real-binary format is
@@ -679,14 +682,15 @@ class LoginShepherd:
                 # captured — refresh the snapshot so the error message shows the real
                 # last output.
                 output = flow.snapshot()
+            note = _SCREEN_FAULT_NOTE if flow.screen_scan_failed else ""
             if exited and url is not None:
                 reason = "the process exited before the login could proceed"
             elif exited:
-                reason = "the process exited before printing an authorize URL"
+                # A render fault can hide a URL the process DID print before exiting, so the
+                # note belongs on this branch too, not only on the timeout branch below.
+                reason = f"the process exited before printing an authorize URL{note}"
             else:
-                reason = f"no authorize URL appeared within {START_TIMEOUT_SECONDS:.0f}s"
-                if flow.screen_scan_failed:
-                    reason += _SCREEN_FAULT_NOTE
+                reason = f"no authorize URL appeared within {START_TIMEOUT_SECONDS:.0f}s{note}"
             raise LoginShepherdError(
                 f"claude {mode} did not produce a usable login: {reason}. "
                 f"Captured output:\n{_redact(output, flow.pasted_secrets)}"
