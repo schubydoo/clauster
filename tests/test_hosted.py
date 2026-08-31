@@ -258,6 +258,25 @@ async def test_non_dict_json_forwarded_as_text(fake_claustrum):
         assert "[1, 2, 3]" in event["text"]
 
 
+async def test_deeply_nested_stdout_line_does_not_kill_the_pump(fake_claustrum):
+    """A frame too deep for ``json.loads`` degrades to text; the pump keeps running.
+
+    ``json.loads`` raises RecursionError — not a ValueError — on a deeply-nested line,
+    so it escaped ``_on_line``'s handler into ``_pump``, which catches only
+    CancelledError/ClaustrumError. The pump task died and the session went dark with
+    **no** ``lost`` event: the fail-silent invariant 1 forbids. The scanner's ceiling is
+    version-dependent (~994 on the 3.11 floor), so a ~40 KB line reaches it everywhere.
+    """
+    async with _session(fake_claustrum) as (fake, session):
+        queue = session.subscribe()
+        deep = ("[" * 20_000 + "]" * 20_000).encode()
+        await fake.emit(_PID, "stdout", deep + b"\n")
+        assert (await _drain_until(queue, "text"))["text"].startswith("[[[")
+        # The pump survived: a normal frame after the hostile one still arrives.
+        await fake.emit(_PID, "stdout", (json.dumps({"type": "user", "n": 1}) + "\n").encode())
+        assert (await _drain_until(queue, "frame"))["frame"]["n"] == 1
+
+
 async def test_session_uuid_not_overwritten(fake_claustrum):
     async with _session(fake_claustrum) as (fake, session):
         queue = session.subscribe()
@@ -1880,6 +1899,35 @@ async def test_manager_reattach_restores_running_session(fake_claustrum, tmp_pat
         await mgr.aclose()
 
 
+async def test_manager_reattach_all_survives_a_junk_persisted_cursor(fake_claustrum, tmp_path):
+    """A junk ``daemon_last_seq`` on disk must not abort reattach — or the app boot.
+
+    ``reattach_all`` re-derived the cursor from the raw record with a bare ``int()``,
+    so a persisted ``"abc"`` raised ValueError. That is not a ClaustrumError, so it
+    escaped both the handler here and the lifespan's in ``app.py``: clauster failed to
+    start. The cursor now comes from the already-coerced instance (one coercion site),
+    degrading to 0 — replay the whole retained window rather than lose the session.
+    """
+    fake = await fake_claustrum()
+    store = HostedStateStore(tmp_path)
+    pid = await _spawn_gen1(fake, store)
+    records = store.load()
+    records[pid]["daemon_last_seq"] = "abc"  # e.g. a legacy import that kept it as TEXT
+    store.save(records)
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        restored = await mgr.reattach_all(client)  # the regression: this used to raise
+        assert [i.claustrum_process_id for i in restored] == [pid]
+        inst = mgr.get_instance(pid)
+        assert inst.status is InstanceStatus.RUNNING
+        # Pins the semantics, not just the absence of a raise: the junk cursor coerced
+        # to 0, so reattach replayed the WHOLE retained window — generation 1's frame
+        # comes back — rather than resuming from a guessed position.
+        init = {"type": "system", "subtype": "init"}
+        await wait_until(lambda: _frames(mgr.session(pid)) == [init])
+        await mgr.aclose()
+
+
 def test_record_projects_instance_id():
     """``_record`` includes ``instance_id`` so a save doesn't drop it (#841)."""
     inst = RemoteControlInstance(
@@ -1911,6 +1959,45 @@ def test_instance_from_record_without_instance_id_mints_a_fresh_one():
     inst = HostedManager._instance_from_record(_PID, {"project": "proj", "label": "hosted:proj"})
     assert inst.instance_id  # minted, non-empty
     assert inst.instance_id != "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+
+
+@pytest.mark.parametrize(
+    "junk",
+    [
+        "abc",  # ValueError: invalid literal for int()
+        {"x": 1},  # TypeError: int() argument must be a string...
+        [1, 2],  # TypeError
+        float("nan"),  # ValueError: cannot convert float NaN to integer
+        float("inf"),  # OverflowError: cannot convert float infinity to integer
+        True,  # bool subclasses int; `true` would read as seq 1 and SKIP frame 1
+        -5,  # a negative cursor makes _note_replay_gap report a fabricated eviction
+        "-5",
+    ],
+)
+def test_instance_from_record_tolerates_junk_daemon_last_seq(junk):
+    """A junk ``daemon_last_seq`` in ``hosted_state.json`` degrades to 0, never raises.
+
+    This covers ``_instance_from_record``'s handling of that ONE field of the on-disk
+    record map — its other persisted fields still reach the model unguarded, which is
+    pre-existing and not what this test claims. The bare ``int(...)`` was not total:
+    each value below aborted the whole reattach on restart with a different exception.
+    0 means "replay from the start of the retained window" — the fail-visible
+    direction, versus the session silently vanishing.
+    """
+    inst = HostedManager._instance_from_record(
+        _PID, {"project": "proj", "label": "hosted:proj", "daemon_last_seq": junk}
+    )
+    assert inst.daemon_last_seq == 0
+
+
+def test_instance_from_record_keeps_a_valid_daemon_last_seq():
+    # The guard must not flatten a real cursor: an int and its digit-string form both
+    # survive, so a legitimate reattach still resumes where it left off.
+    for value, expected in ((42, 42), ("42", 42), (None, 0), (0, 0)):
+        inst = HostedManager._instance_from_record(
+            _PID, {"project": "proj", "label": "hosted:proj", "daemon_last_seq": value}
+        )
+        assert inst.daemon_last_seq == expected
 
 
 async def test_manager_reattach_restores_persisted_instance_id(fake_claustrum, tmp_path):
@@ -2547,3 +2634,42 @@ def test_redact_obj_passes_through_bare_scalars():
     assert _redact_obj(True) is True
     assert _redact_obj(None) is None
     assert "sk-" not in _redact_obj("token sk-ABCDEFGHIJKLMNOPQRST rest")
+
+
+def test_redact_obj_truncates_past_the_depth_cap_instead_of_raising():
+    """A frame nested past the cap is truncated, never a RecursionError.
+
+    ``json.loads`` in ``_on_line`` parses frames nested far deeper than this recursive
+    walker could descend, so a deeply-nested frame raised RecursionError inside
+    ``_pump`` — which catches only ``CancelledError``/``ClaustrumError``. The pump task
+    died and the session went dark with **no** ``lost`` event: a fail-silent, which
+    invariant 1 forbids. The redactor must still return a value (invariant 4: nothing
+    unredacted may reach a subscriber), so the over-deep subtree is replaced wholesale.
+    """
+    frame: dict = {}
+    cursor = frame
+    for _ in range(5_000):  # far past both the cap and CPython's recursion limit
+        cursor["next"] = {"leak": "session_01ZZZZZZZZZZZZZZZZZZZZZZ"}
+        cursor = cursor["next"]
+
+    out = _redact_obj(frame)  # the regression: this used to raise RecursionError
+
+    # Walk down to the cap: every level within it is a real dict whose leaf is masked.
+    cursor = out
+    for _ in range(hosted._REDACT_MAX_DEPTH - 1):
+        cursor = cursor["next"]
+        assert "session_01" not in cursor["leak"]
+    # One level further is the constant marker — no input bytes survive past the cap.
+    assert cursor["next"] == hosted._REDACT_TOO_DEEP
+
+
+def test_redact_obj_leaves_a_realistic_frame_untruncated():
+    # The cap sits orders of magnitude above real stream-json nesting, so a normal
+    # frame is redacted in full and the marker never appears.
+    frame = {
+        "type": "assistant",
+        "message": {"content": [{"text": "env_01BCDEFGHIJKLMNOPQRSTUVWX"}]},
+    }
+    out = _redact_obj(frame)
+    assert hosted._REDACT_TOO_DEEP not in json.dumps(out)
+    assert "env_01" not in out["message"]["content"][0]["text"]

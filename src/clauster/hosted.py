@@ -744,8 +744,16 @@ class HostedSession:
             return
         try:
             frame = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
             # Not NDJSON — forward as opaque text rather than dropping it silently.
+            # RecursionError: a deeply-nested line overflows CPython's recursive JSON
+            # scanner, and it is not a ValueError — so it escaped this handler into
+            # `_pump`, which catches only CancelledError/ClaustrumError. The pump task
+            # died and the session went dark with no `lost` event (a fail-silent that
+            # invariant 1 forbids). The scanner's ceiling is version-dependent — ~994 on
+            # the 3.11 floor (a ~1 KB line), ~3000 on Windows and ~10000 elsewhere from
+            # 3.12 — and the agent output line is unbounded, so every leg is reachable.
+            # Degrading to opaque text isolates the bad frame instead of the stream.
             self._emit({"type": "text", "text": sanitize_line(line)})
             return
         if not isinstance(frame, dict):
@@ -1293,9 +1301,12 @@ class HostedManager:
             # the read — see HostedSession._rehydrate.
             loader = partial(self._load_history, history_for, instance)
             try:
-                result = await session.reattach(
-                    int(fields.get("daemon_last_seq") or 0), history_loader=loader
-                )
+                # Reuse the cursor `_instance_from_record` already coerced rather than
+                # re-deriving it from the raw record: a bare `int()` here raised
+                # ValueError/TypeError/OverflowError on a junk persisted value, which is
+                # not a ClaustrumError, so it escaped the handler below AND the lifespan's
+                # (app.py) — a junk cursor failed the whole app boot. One coercion site.
+                result = await session.reattach(instance.daemon_last_seq, history_loader=loader)
             except ClaustrumError as exc:
                 instance.status = InstanceStatus.ERROR
                 instance.error_detail = f"reattach failed: {exc}"
@@ -1463,7 +1474,7 @@ class HostedManager:
             permission_mode=fields.get("permission_mode", "default"),
             claustrum_process_id=process_id,
             claude_session_uuid=fields.get("claude_session_uuid"),
-            daemon_last_seq=int(fields.get("daemon_last_seq") or 0),
+            daemon_last_seq=_coerce_seq(fields.get("daemon_last_seq")),
             hosted_log_path=Path(log_path) if isinstance(log_path, str) and log_path else None,
             agent_pid=fields.get("agent_pid"),
             agent_proc_start=fields.get("agent_proc_start"),
@@ -1481,18 +1492,68 @@ class HostedManager:
         return instance
 
 
-def _redact_obj(obj: Any) -> Any:
+def _coerce_seq(value: Any) -> int:
+    """Coerce a persisted ``daemon_last_seq`` to an int, falling back to ``0``.
+
+    This makes :meth:`HostedManager._instance_from_record` total over **this one
+    field** of the on-disk ``hosted_state.json`` record map. A bare ``int(...)``
+    was not: a non-numeric string (``ValueError``), a dict/list (``TypeError``),
+    a NaN (``ValueError``) or an ``inf`` (``OverflowError``) each aborted the
+    whole reattach on restart. (The mapper's *other* persisted fields still reach
+    the model unguarded and can raise ``ValidationError`` — pre-existing, and not
+    something this helper should be read as having closed.) An uncoercible
+    cursor degrades to 0 — replay from the
+    start of the retained window, the fail-*visible* direction: the client sees
+    frames it may already have, rather than the session silently vanishing.
+
+    ``bool`` is rejected for the same reason :func:`_as_seq` rejects it: it
+    subclasses ``int``, so a persisted ``true`` would read as seq 1 and *skip*
+    frame 1 — a silent missed frame, the one direction this must not fail in.
+    A negative cursor is clamped to 0 rather than passed through, so
+    :meth:`HostedSession._note_replay_gap` cannot report a fabricated eviction
+    range for frames that never existed.
+    """
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+# Depth cap for the recursive walk in :func:`_redact_obj`. `json.loads` in `_on_line`
+# parses frames nested far deeper than this walker can descend, so an unguarded
+# recursion raised RecursionError inside `_pump` — which catches only CancelledError
+# and ClaustrumError. The pump task died and the hosted session went dark with no
+# `lost` event: a fail-*silent*, which invariant 1 forbids. Real stream-json frames
+# nest a handful of levels; this cap is orders of magnitude above that and far below
+# CPython's recursion limit, so a legitimate frame can never reach it.
+_REDACT_MAX_DEPTH = 100
+
+# What a past-the-cap subtree is replaced by. A constant carrying no input bytes: the
+# redactor must still return a value (the frame has to reach the browser), and dropping
+# the subtree wholesale is the only way to keep invariant 4 — no unredacted leaf escapes.
+_REDACT_TOO_DEEP = "<clauster: frame nesting too deep to redact>"
+
+
+def _redact_obj(obj: Any, _depth: int = 0) -> Any:
     """Recursively sanitize every string leaf of a parsed JSON frame.
 
     Defense-in-depth over the structured stream: the same redaction the WS bridge
     log applies (ANSI strip + id/secret masking via :func:`sanitize_line`) is run
     on each string value, so a session/env identifier or obvious secret embedded
     anywhere in tool output or assistant text never reaches a browser subscriber.
+
+    Never raises on a deeply-nested frame: a container nested past
+    :data:`_REDACT_MAX_DEPTH` is replaced by :data:`_REDACT_TOO_DEEP` rather than
+    recursed into. ``_depth`` is internal bookkeeping — callers pass one argument.
     """
     if isinstance(obj, str):
         return sanitize_line(obj)
-    if isinstance(obj, dict):
-        return {k: _redact_obj(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_redact_obj(v) for v in obj]
+    if isinstance(obj, dict | list):
+        if _depth >= _REDACT_MAX_DEPTH:
+            return _REDACT_TOO_DEEP
+        if isinstance(obj, dict):
+            return {k: _redact_obj(v, _depth + 1) for k, v in obj.items()}
+        return [_redact_obj(v, _depth + 1) for v in obj]
     return obj

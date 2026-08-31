@@ -252,6 +252,11 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
         data = yaml.safe_load(match.group(1))
     except yaml.YAMLError as exc:
         raise cw.InvalidCandidateError(f"frontmatter is not valid YAML: {exc}") from exc
+    except RecursionError as exc:
+        # Deeply-nested YAML (e.g. thousands of nested flow sequences) overflows the
+        # composer before it can raise YAMLError, and RecursionError is not a YAMLError
+        # — surface it as the same "invalid YAML" rejection the contract promises.
+        raise cw.InvalidCandidateError("frontmatter is nested too deeply to parse") from exc
     if data is None:
         data = {}
     if not isinstance(data, dict):

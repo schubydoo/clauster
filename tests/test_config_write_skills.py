@@ -80,6 +80,16 @@ def test_parse_frontmatter_rejects_bad_shape(content: str) -> None:
         sk.validate_frontmatter(frontmatter)
 
 
+def test_parse_frontmatter_rejects_deeply_nested_yaml() -> None:
+    # Deeply-nested flow sequences overflow PyYAML's recursive composer, which raises
+    # RecursionError — not a YAMLError — so it escaped the handler and this
+    # code-executing write tier raised outside its documented InvalidCandidateError
+    # contract. Kept in lockstep with the subagents parser (same test, same tier).
+    deep = "[" * 5_000 + "]" * 5_000
+    with pytest.raises(cw.InvalidCandidateError, match="too deeply"):
+        sk.parse_frontmatter(f"---\ndescription: {deep}\n---\nbody\n")
+
+
 def test_validate_frontmatter_requires_description() -> None:
     with pytest.raises(cw.InvalidCandidateError, match="description"):
         sk.validate_frontmatter({})

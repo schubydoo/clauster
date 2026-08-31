@@ -73,7 +73,12 @@ def _is_session_not_found(raw: bytes) -> bool:
     """
     try:
         body = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+        # RecursionError: deeply-nested JSON overflows CPython's recursive scanner
+        # before json can raise JSONDecodeError, and it is not a ValueError — so a
+        # hostile/garbled 404 body from the remote API would escape this handler.
+        # Degrades to the same "not a resource-not-found body" answer as any other
+        # unparseable response, which is the fail-closed one: pointers stay put.
         return False
     if not isinstance(body, dict):
         return False

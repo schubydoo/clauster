@@ -69,6 +69,16 @@ def test_parse_frontmatter_rejects_invalid_yaml() -> None:
         sub.parse_frontmatter("---\nname: [unterminated\n---\nbody\n")
 
 
+def test_parse_frontmatter_rejects_deeply_nested_yaml() -> None:
+    # Deeply-nested flow sequences overflow PyYAML's recursive composer, which raises
+    # RecursionError — not a YAMLError — so it escaped the handler and this
+    # code-executing write tier raised outside its documented InvalidCandidateError
+    # contract. Kept in lockstep with the SKILL.md parser (same test, same tier).
+    deep = "[" * 5_000 + "]" * 5_000
+    with pytest.raises(cw.InvalidCandidateError, match="too deeply"):
+        sub.parse_frontmatter(f"---\nname: {deep}\n---\nbody\n")
+
+
 def test_parse_frontmatter_rejects_non_mapping() -> None:
     with pytest.raises(cw.InvalidCandidateError, match="mapping"):
         sub.parse_frontmatter("---\n- a\n- b\n---\nbody\n")

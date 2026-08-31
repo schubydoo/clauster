@@ -70,6 +70,18 @@ def test_anchor_health_404_route_not_found_is_unknown():
         assert c.anchor_health("cse_x") is AnchorHealth.UNKNOWN
 
 
+def test_is_session_not_found_tolerates_deeply_nested_body():
+    # The contract is "returns False on anything unparseable", and the input is real
+    # remote bytes from api.anthropic.com. A deeply-nested body raises RecursionError
+    # out of CPython's recursive JSON scanner before json can raise JSONDecodeError,
+    # and RecursionError is not a ValueError — so it escaped the handler. Degrading to
+    # False is the fail-closed answer: a garbled 404 never clears healthy pointers.
+    deep = b"[" * 100_000
+    assert code_sessions._is_session_not_found(deep) is False
+    c = CodeSessionsClient(CREDS, transport=_transport(404, deep))
+    assert c.anchor_health("cse_x") is AnchorHealth.UNKNOWN
+
+
 def test_anchor_health_non_object_2xx_body_is_unknown():
     # A bare null/list/scalar 2xx body must be UNKNOWN, never raise (fail-safe contract).
     for body in (b"null", b"[]", b'"a string"', b"42"):

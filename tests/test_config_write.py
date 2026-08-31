@@ -192,6 +192,31 @@ def test_validate_candidate_preserves_invalid_candidate_error() -> None:
         cw.validate_candidate({}, validator)
 
 
+# --- load_settings_json_obj (shared existing-file parse) ---------------------------
+
+
+def test_load_settings_json_obj_parses_object_and_empty() -> None:
+    assert cw.load_settings_json_obj(b'{"a": 1}') == {"a": 1}
+    assert cw.load_settings_json_obj(b"   \n ") == {}
+
+
+@pytest.mark.parametrize("raw", [b"[]", b"5", b'"x"', b"null"])
+def test_load_settings_json_obj_rejects_non_object(raw: bytes) -> None:
+    with pytest.raises(cw.InvalidCandidateError):
+        cw.load_settings_json_obj(raw)
+
+
+def test_load_settings_json_obj_rejects_deeply_nested_json() -> None:
+    # The contract is InvalidCandidateError only (the caller maps it to 422: "we will
+    # not overwrite a file we could not parse"). A deeply-nested settings file — which
+    # can arrive with a cloned repository — raises RecursionError out of CPython's
+    # recursive JSON scanner before json can raise JSONDecodeError, and RecursionError
+    # is not a ValueError, so it escaped the handler and left this code-executing write
+    # tier raising outside its contract. It must fail closed as a structural error.
+    with pytest.raises(cw.InvalidCandidateError, match="too deeply"):
+        cw.load_settings_json_obj(b"[" * 100_000)
+
+
 # --- stale-hash external-edit guard (409) ------------------------------------------
 
 

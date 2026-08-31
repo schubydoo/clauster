@@ -218,8 +218,16 @@ def parse_transcript(path: Path) -> TranscriptUsage:
             continue
         try:
             record = json.loads(line)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, RecursionError):
+            # RecursionError: CPython's recursive scanner overflows on deeply-nested
+            # JSON *before* json can raise JSONDecodeError, and it is not a ValueError
+            # — so it escaped this handler and 500'd the whole project's usage tally.
             continue  # skip a corrupt line rather than abort the whole tally
+        if not isinstance(record, dict):
+            # Valid JSON that isn't an object (`5`, `null`, `[1,2]`) has no `.get`;
+            # skip it like any other malformed record instead of raising AttributeError.
+            # Mirrors the guard :func:`_line_to_turn` already carries.
+            continue
         message = record.get("message")
         if not isinstance(message, dict):
             continue
@@ -434,7 +442,10 @@ def _line_to_turn(line: str) -> dict | None:
         return None
     try:
         record = json.loads(line)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
+        # RecursionError (deeply-nested JSON, raised by CPython's recursive scanner
+        # before json can raise JSONDecodeError) is not a ValueError, so it would
+        # escape and break the "never raises on a malformed line" contract above.
         return None  # skip a corrupt line rather than abort the whole page
     if not isinstance(record, dict):
         return None
