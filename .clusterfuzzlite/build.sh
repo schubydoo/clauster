@@ -27,9 +27,12 @@
 #   build (whenever pyproject's [build-system] or the hatchling pin moves):
 #     echo "hatchling==<ver>" | uv pip compile - --generate-hashes --no-annotate \
 #       -o .clusterfuzzlite/build-requirements.txt
-# An ADDED dependency missing from the export fails closed (--require-hashes, or the
-# import at fuzz time); a version BUMP not re-exported is caught by `pip3 check` below,
-# which compares every installed distribution against every declared requirement.
+# Drift guards, one per failure mode: an ADDED dependency missing from the export is
+# caught by `pip3 check` below (the installed clauster dist's Requires-Dist names it,
+# and a non-zero exit aborts under -eu) — loudly, at build time. A version BUMP not
+# re-exported is NOT caught here (pyproject's ranges are unbounded minimums the stale
+# pins still satisfy); tests/test_ci_change_filter.py's freshness guard compares the
+# committed export against uv.lock on every suite run instead.
 #
 # The `pty` extra is in that export, not a bare dependency set: pty_screen_feed_fuzzer
 # drives the real PtyScreen, which lazily imports pyte and raises PyteUnavailableError

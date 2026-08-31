@@ -1,16 +1,24 @@
 # actionlint configuration.
 #
-# The ignores below exist because actionlint (≤ v1.7.12, the latest as of 2026-08-31)
+# The ignore below exists because actionlint (≤ v1.7.12, the latest as of 2026-08-31)
 # does not yet understand GitHub's `$/` self-repository `uses:` syntax (July 2026) and
-# reports it as an invalid action/workflow reference. The syntax is deliberate — it is
-# immune to runtime filesystem substitution and GitHub treats it as pinned — so the two
-# messages are suppressed rather than the migration reverted. Scoped to exactly those
-# message shapes; everything else actionlint checks still applies.
+# reports it as an invalid action reference. The syntax is deliberate — it is immune to
+# runtime filesystem substitution and GitHub treats it as pinned — so this one message
+# shape is suppressed rather than the migration reverted.
+#
+# ⚠️ Suppressing the format error also silences actionlint's local-action call checks
+# for the `$/` sites (input-name typos, missing required inputs) — those are gated on
+# the `./` prefix internally. `tests/test_workflow_local_actions.py` re-asserts exactly
+# that validation, so the coverage is moved, not lost.
+#
+# The one deliberate exception: `knope-release.yml`'s JOB-level reusable-workflow call
+# stays `./` — that grammar is exercised only at release time (nothing pre-merge runs
+# it), and the release path is not the place to prove out new syntax. Hence no
+# reusable-workflow ignore pattern here.
 #
 # ⚠️ Remove this file (and close clauster issue 1361) once rhysd/actionlint issue 711
 # ships `$/` support and the pinned actionlint is bumped past it.
 paths:
   .github/workflows/**/*.{yaml,yml}:
     ignore:
-      - 'reusable workflow call "\$/.+" at "uses" is not following the format'
       - 'specifying action "\$/.+" in invalid format because ref is missing'
