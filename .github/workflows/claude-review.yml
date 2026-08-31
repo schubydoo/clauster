@@ -161,6 +161,11 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           trigger_phrase: "@claude review"
+          # Claude Code settings for the review runs (inline JSON, per the action's
+          # docs/usage.md). `Concise` keeps the review output tight — findings, not
+          # narration. ⚠️ Remember the banner: this input only takes effect once the
+          # workflow lands on the default branch; it cannot be trialled from a PR.
+          settings: '{"outputStyle": "Concise"}'
           # NO `prompt:` — see the banner. Guidance goes through the system prompt.
           #
           # Keep the other reporters out of Claude's context:
