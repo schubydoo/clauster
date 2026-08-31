@@ -2017,9 +2017,27 @@ _REJECTED_RECORDS = [
     # Truthy on purpose: an empty list is the one non-string `_synced` skips anyway, so
     # it would let the uuid path below pass vacuously.
     pytest.param({"claude_session_uuid": ["not-a-uuid"]}, id="uuid-not-a-string"),
-    pytest.param({"agent_pid": "not-a-pid"}, id="agent-pid-not-an-int"),
     pytest.param({"agent_proc_start": {}}, id="proc-start-not-a-float"),
 ]
+
+
+def test_a_junk_agent_pid_never_reaches_the_model_on_either_path():
+    """``agent_pid`` is coerced identically by both mappings, so they cannot disagree.
+
+    Defense in depth rather than a second guard for its own sake. Pydantic's lax
+    coercion accepts ``true`` as pid **1** — init on every POSIX host — and ``"4242"``
+    as 4242, while the salvage takes plain ints only. Left asymmetric, a record that
+    degraded for an unrelated reason would drop a pid the healthy path would have kept,
+    and ``_persist`` would then write that loss to disk — costing ``_is_orphan`` the
+    only evidence it has.
+    """
+    for junk in ("4242", True, 4242.0, {}):
+        record = {"project": "proj", "label": "hosted:proj", "agent_pid": junk}
+        assert HostedManager._row_from_record(_PID, record).agent_pid is None
+        assert HostedManager._degraded_row(_PID, record).agent_pid is None
+    kept = {"project": "proj", "label": "hosted:proj", "agent_pid": 4242}
+    assert HostedManager._row_from_record(_PID, kept).agent_pid == 4242
+    assert HostedManager._degraded_row(_PID, kept).agent_pid == 4242
 
 
 @pytest.mark.parametrize("junk", _REJECTED_RECORDS)
@@ -2082,24 +2100,54 @@ def test_degraded_row_salvages_every_field_the_model_did_not_reject():
 
 
 @pytest.mark.parametrize(
-    ("field", "junk"),
+    ("field", "junk", "expected"),
     [
-        ("agent_pid", True),  # bool subclasses int — a persisted `true` is not pid 1
-        ("agent_pid", 1.5),
-        ("agent_proc_start", True),
-        ("claude_session_uuid", ["not-a-uuid"]),
-        ("hosted_log_path", 7),
-        ("permission_mode", "nope"),
-        ("started_at", "not-a-date"),
+        ("agent_pid", True, None),  # bool subclasses int — a persisted `true` is not pid 1
+        ("agent_pid", 1.5, None),
+        ("agent_proc_start", True, None),
+        ("agent_proc_start", 10**400, None),  # int too large for a float
+        ("claude_session_uuid", ["not-a-uuid"], None),
+        ("hosted_log_path", 7, None),
+        ("permission_mode", "nope", "default"),
+        ("permission_mode", {}, "default"),  # unhashable: `in frozenset` would raise
+        ("started_at", "not-a-date", None),
+        ("instance_id", "", None),  # falsy: a fresh id is minted instead
     ],
 )
-def test_degraded_row_drops_a_value_it_cannot_type_check(field, junk):
+def test_degraded_row_drops_a_value_it_cannot_type_check(field, junk, expected):
     # The salvage is a type test per field, never a pass-through: a second junk value
     # alongside the rejecting one is dropped rather than smuggled onto the model by
-    # an unvalidated assignment.
+    # an unvalidated assignment. Each expected value is the field's own model default,
+    # spelled out per case so a regression cannot hide behind a disjunction.
     inst = HostedManager._instance_from_record(_PID, {**_ONE_BAD_FIELD, field: junk})
-    value = getattr(inst, field)
-    assert value in (None, "default")  # the model default for each of these fields
+    if field == "instance_id":
+        assert isinstance(inst.instance_id, str) and inst.instance_id
+        assert inst.instance_id != _ONE_BAD_FIELD["instance_id"]
+        return
+    assert getattr(inst, field) == expected
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        pytest.param({"permission_mode": {}}, id="unhashable-permission-mode"),
+        pytest.param({"permission_mode": ["acceptEdits"]}, id="unhashable-mode-list"),
+        pytest.param({"agent_proc_start": 10**400}, id="proc-start-overflows-a-float"),
+        pytest.param({"agent_proc_start": -(10**400)}, id="proc-start-underflows-a-float"),
+    ],
+)
+def test_degraded_row_cannot_raise_on_the_values_that_bypass_validation_error(record):
+    """The salvage must not reopen the escape it exists to close.
+
+    Two coercions in the salvage are not ``isinstance`` tests and can raise on a value
+    pydantic would merely reject: ``value in frozenset`` HASHES its operand
+    (``TypeError: unhashable type``) and ``float()`` overflows on a large int
+    (``OverflowError``). Neither is a ``ValidationError``, so neither is caught by
+    ``_instance_from_record``, ``reattach_all`` or the lifespan — a record holding one
+    would fail clauster's boot exactly as #1343 describes.
+    """
+    inst = HostedManager._instance_from_record(_PID, {**_ONE_BAD_FIELD, **record})
+    assert inst.claustrum_process_id == _PID
 
 
 def test_degraded_row_defaults_unusable_display_strings():
@@ -2136,17 +2184,22 @@ def test_instance_from_record_logs_the_degradation(caplog):
     assert "placeholder-value" not in message  # the rejected value never reaches the log
 
 
-def test_instance_from_record_ignores_a_non_string_instance_id():
-    """A non-string ``instance_id`` is dropped, not assigned.
+def test_instance_from_record_ignores_a_non_string_instance_id(caplog):
+    """A non-string ``instance_id`` is dropped — and said out loud, not dropped silently.
 
     The mapper sets this one AFTER construction, so pydantic never sees it (the model
-    does not enable ``validate_assignment``) — the guard above cannot catch it and a
-    hand-edited record would otherwise put a non-string key in the registry.
+    does not enable ``validate_assignment``) — the ValidationError guard cannot catch it
+    and a hand-edited record would otherwise put a non-string key in the registry.
+    Dropping it costs a client its cached id (#841), so it warrants a warning of its own.
     """
-    inst = HostedManager._instance_from_record(
-        _PID, {"project": "proj", "label": "hosted:proj", "instance_id": {"x": 1}}
-    )
+    with caplog.at_level(logging.WARNING, logger="clauster.hosted"):
+        inst = HostedManager._instance_from_record(
+            _PID, {"project": "proj", "label": "hosted:proj", "instance_id": {"x": 1}}
+        )
     assert isinstance(inst.instance_id, str) and inst.instance_id
+    message = caplog.records[0].getMessage()
+    assert _PID in message
+    assert "dict" in message  # the TYPE, never the value
 
 
 async def test_manager_reattach_survives_one_unreadable_record(fake_claustrum, tmp_path):
@@ -2162,7 +2215,7 @@ async def test_manager_reattach_survives_one_unreadable_record(fake_claustrum, t
     pid = await _spawn_gen1(fake, store)
     records = store.load()
     persisted_iid = records[pid]["instance_id"]
-    records[pid]["agent_pid"] = "not-a-pid"  # what a hand-edited state file can hold
+    records[pid]["label"] = 7  # what a hand-edited state file can hold
     records["01GONEPROCESS00000000000"] = {"project": "proj", "label": "hosted:b"}
     store.save(records)
 
@@ -2179,11 +2232,11 @@ async def test_manager_reattach_survives_one_unreadable_record(fake_claustrum, t
     # the field that was junk may have changed — anything else being reset here would
     # mean the first boot after corruption destroyed a recoverable value.
     rewritten = store.load()[pid]
-    assert rewritten["agent_pid"] is None  # the junk one, reset
+    assert rewritten["label"] == f"hosted:{pid[:8]}"  # the junk one, reset to its default
     assert rewritten["project"] == "proj"
-    assert rewritten["label"] == "hosted:proj"
     assert rewritten["permission_mode"] == "acceptEdits"
     assert rewritten["instance_id"] == persisted_iid
+    assert rewritten["daemon_last_seq"] >= 1  # the replay cursor survived intact
 
 
 async def test_manager_reattach_degraded_row_can_still_be_an_orphan(

@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from typing import Any, TypeGuard, get_args
+from typing import Any, TypeGuard, cast, get_args
 
 from pydantic import ValidationError
 
@@ -1289,7 +1289,11 @@ class HostedManager:
         for process_id, fields in records.items():
             instance = self._instance_from_record(process_id, fields)
             self._instances[process_id] = instance
-            if fields.get("intentional_stop"):
+            # From the row, not the raw record, for the same reason as the uuid below:
+            # the mapper is the one place a persisted value is type-checked. Both agree
+            # for every value today (`bool(...)` vs truthiness), so this is consistency,
+            # not a fix — but the raw-record read is the pattern that produced one.
+            if instance.intentional_stop:
                 instance.status = InstanceStatus.STOPPED
                 continue
             # reattach() never builds argv (it binds by process id), so the binary is
@@ -1518,8 +1522,13 @@ class HostedManager:
         to "session lost" and lets ``forget`` drop clauster's last record of a live
         process. Only the value the model actually rejected falls back to its default.
 
-        Every check below is a type test against the model's own annotation, so this
-        cannot itself raise (``RemoteControlInstance`` constrains no field further).
+        This function must not raise, or it reopens the very escape it exists to close
+        (its caller catches ``ValidationError`` and nothing else). Every value is
+        therefore type-tested against the model's own annotation — which
+        ``RemoteControlInstance`` constrains no further — and the two coercions that
+        can fail on a well-typed value, :func:`_as_permission_mode` (a membership test
+        *hashes*) and :func:`_as_proc_start` (``float()`` overflows), swallow their own
+        errors. Verified by sweeping every field against every JSON shape, not asserted.
         """
         project = fields.get("project")
         label = fields.get("label")
@@ -1533,12 +1542,14 @@ class HostedManager:
             channel="hosted",
             permission_mode=_as_permission_mode(mode),
             claustrum_process_id=process_id,
-            claude_session_uuid=session_uuid if isinstance(session_uuid, str) else None,
+            # Empty string normalized away: it is `not None`, so it would latch
+            # `HostedSession._capture_session_uuid` shut and the real id from the
+            # replayed init frame would never be recorded.
+            claude_session_uuid=session_uuid if _is_text(session_uuid) else None,
             daemon_last_seq=_coerce_seq(fields.get("daemon_last_seq")),
             hosted_log_path=_as_log_path(fields.get("hosted_log_path")),
-            # `bool` subclasses `int`, so a persisted `true` would otherwise read as pid 1.
-            agent_pid=agent_pid if _is_plain_int(agent_pid) else None,
-            agent_proc_start=float(proc_start) if _is_plain_number(proc_start) else None,
+            agent_pid=_as_pid(agent_pid),
+            agent_proc_start=_as_proc_start(proc_start),
             started_at=_as_started_at(fields.get("started_at")),
             intentional_stop=bool(fields.get("intentional_stop", False)),
             status=InstanceStatus.STARTING,
@@ -1558,7 +1569,10 @@ class HostedManager:
             claude_session_uuid=fields.get("claude_session_uuid"),
             daemon_last_seq=_coerce_seq(fields.get("daemon_last_seq")),
             hosted_log_path=_as_log_path(fields.get("hosted_log_path")),
-            agent_pid=fields.get("agent_pid"),
+            # Both paths coerce the pid identically, so they cannot disagree about the
+            # same bytes and leave a degraded row without the CL-8 orphan evidence a
+            # healthy one would have kept.
+            agent_pid=_as_pid(fields.get("agent_pid")),
             agent_proc_start=fields.get("agent_proc_start"),
             started_at=_as_started_at(fields.get("started_at")),
             intentional_stop=bool(fields.get("intentional_stop", False)),
@@ -1587,10 +1601,10 @@ class HostedManager:
             instance.instance_id = instance_id
         elif instance_id is not None:
             logger.warning(
-                "hosted: persisted instance_id for %s is not a string (%s); minting a "
+                "hosted: persisted instance_id for %s is unusable (%s); minting a "
                 "fresh one — a client's cached id will no longer resolve",
                 instance.claustrum_process_id,
-                type(instance_id).__name__,
+                "empty string" if isinstance(instance_id, str) else type(instance_id).__name__,
             )
         return instance
 
@@ -1599,12 +1613,15 @@ class HostedManager:
 #: added to the config can never silently become "unsalvageable" here.
 _PERMISSION_MODES = frozenset(get_args(PermissionMode))
 
-#: Shown on a row rebuilt by :meth:`HostedManager._degraded_row`. The WARNING log is in
-#: the journal; this is the same fact on the row itself, so the degradation is visible
-#: to whoever is looking at the dashboard rather than only to whoever tails the logs.
+#: Carried on a row rebuilt by :meth:`HostedManager._degraded_row`, so the degradation
+#: travels with the API row and not only in the journal warning. Deliberately says
+#: nothing about the reattach outcome: the row this lands on may go on to be reattached,
+#: rebuilt as an intentionally-stopped row, or CRASHED — and in the last two cases
+#: ``reattach_all`` overwrites this detail with the more actionable message anyway.
+#: (No template renders a *running* hosted row's ``error_detail`` today; a stopped or
+#: ended row's live view does. Treat the log line as the reliable channel.)
 _UNREADABLE_RECORD_DETAIL = (
-    "part of this session's saved record was unreadable and was reset to defaults; "
-    "the session itself reattached normally"
+    "part of this session's saved record was unreadable and was reset to defaults"
 )
 
 
@@ -1623,8 +1640,38 @@ def _as_permission_mode(value: Any) -> PermissionMode:
 
     Anything else becomes ``"default"`` — the restrictive direction, so a junk mode can
     never widen what the reattached session is allowed to do without asking.
+
+    The ``isinstance`` is load-bearing, not belt-and-braces: ``x in frozenset`` *hashes*
+    ``x``, so a persisted ``{}``/``[]`` would raise ``TypeError: unhashable type`` — an
+    exception the caller's ``except ValidationError`` does not catch, i.e. the same
+    escape to the lifespan that #1343 exists to close.
     """
-    return value if value in _PERMISSION_MODES else "default"
+    if isinstance(value, str) and value in _PERMISSION_MODES:
+        # The membership test IS the validation — `_PERMISSION_MODES` is built from the
+        # Literal's own members, so a hit is one of them by construction.
+        return cast(PermissionMode, value)
+    return "default"
+
+
+def _as_proc_start(value: Any) -> float | None:
+    """Coerce a persisted ``agent_proc_start`` to a float, falling back to ``None``.
+
+    For the salvage path only — the healthy mapping hands the raw value to pydantic,
+    which rejects an out-of-range int as a ``ValidationError`` (measured, not assumed)
+    and so routes it here with a warning. What must not happen is the *fallback*
+    raising: JSON can hold an int too large for a float, and a bare ``float()`` on it
+    raises ``OverflowError``, which the caller's ``except ValidationError`` does not
+    catch — that is the escape to the lifespan #1343 exists to close, reopened inside
+    its own fix. ``None`` means "unknown start time", which
+    :func:`procutil.is_killable_hosted` already treats as not-safely-killable: the
+    fail-closed direction for orphan recovery.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    try:
+        return float(value)
+    except (OverflowError, ValueError):
+        return None
 
 
 def _as_log_path(value: Any) -> Path | None:
@@ -1637,9 +1684,22 @@ def _is_plain_int(value: Any) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _is_plain_number(value: Any) -> TypeGuard[int | float]:
-    """Report whether ``value`` is an ``int``/``float`` and not a ``bool``."""
-    return isinstance(value, int | float) and not isinstance(value, bool)
+def _is_text(value: Any) -> TypeGuard[str]:
+    """Report whether ``value`` is a non-empty ``str``."""
+    return isinstance(value, str) and bool(value)
+
+
+def _as_pid(value: Any) -> int | None:
+    """Coerce a persisted ``agent_pid`` to an int, falling back to ``None``.
+
+    Used by both mapping paths so they cannot disagree about the same bytes. Stricter
+    than pydantic's lax coercion on purpose: that accepts ``true`` as pid **1** — init
+    on every POSIX host — and ``4242.0`` as 4242. ``_record`` only ever writes an int,
+    so nothing legitimate is refused. ``None`` means "no pid evidence", which
+    :meth:`HostedManager._is_orphan` reads as not-recoverable: the fail-closed
+    direction, since the alternative is offering Kill against a pid we cannot vouch for.
+    """
+    return value if _is_plain_int(value) else None
 
 
 def _coerce_seq(value: Any) -> int:
