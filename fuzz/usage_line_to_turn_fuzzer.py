@@ -57,19 +57,15 @@ _LEAK = re.compile(r"\b(env|session|cse)_[A-Za-z0-9]{6,}\b")
 _TURN_KEYS = {"role", "content", "model", "timestamp"}
 
 #: The fields the leak property is asserted over — the ones ``_line_to_turn`` actually
-#: routes through ``redact.sanitize_line``.
+#: routes through ``redact.sanitize_line``, which is now every string field it returns.
 #:
-#: ⚠️ ``timestamp`` is absent, and that is an open finding rather than a design decision.
-#: The docstring promises "``{role, content, model, timestamp}`` with **every free-text
-#: field** passed through :func:`redact.sanitize_line`", but the code returns
-#: ``timestamp if isinstance(timestamp, str) else None`` — unsanitized. This harness found
-#: it: a transcript record whose ``timestamp`` string carries an ``env_``/``session_``/
-#: ``cse_`` identifier renders it to the browser verbatim, which is what invariant 4 and
-#: that docstring both say cannot happen. Reported on the PR that added this harness and
-#: **not fixed here** — the fix is a one-line change on the redaction path and belongs in
-#: its own reviewed diff. Pinned by ``tests/test_fuzz_harness_smoke.py`` so wrapping the
-#: field flips ``just check`` red and sends the next reader here to widen this tuple.
-_SANITIZED_FIELDS = ("role", "content", "model")
+#: ``timestamp`` was absent until issue 1353: this harness found that the docstring
+#: promised "``{role, content, model, timestamp}`` with **every free-text field** passed
+#: through :func:`redact.sanitize_line`" while the code returned it verbatim, so a record
+#: whose ``timestamp`` carried an ``env_``/``session_``/``cse_`` identifier rendered it to
+#: the browser — what invariant 4 and that docstring both say cannot happen. The field is
+#: sanitized now, so the leak property covers it too.
+_SANITIZED_FIELDS = ("role", "content", "model", "timestamp")
 
 
 def _reference_is_renderable(line: str) -> bool:

@@ -684,15 +684,15 @@ def test_pty_screen_frame_width_refit_cannot_expose_an_identifier() -> None:
     assert delivered.endswith("cse_<redacte"), delivered
 
 
-def test_usage_line_to_turn_timestamp_is_still_unsanitized() -> None:
-    """PIN: ``_line_to_turn`` returns ``timestamp`` unredacted, against its own docstring.
+def test_usage_line_to_turn_sanitizes_every_returned_string_field() -> None:
+    """``_line_to_turn`` redacts ``timestamp`` too, as its docstring has always promised.
 
-    The docstring promises ``{role, content, model, timestamp}`` "with every free-text
-    field passed through :func:`redact.sanitize_line`", but the timestamp is returned as-is
-    — so an identifier in that field reaches the browser. ``usage_line_to_turn_fuzzer``
-    therefore asserts its leak property over ``_SANITIZED_FIELDS`` only. Reported as an open
-    finding rather than accepted; this pin fails the moment the field is wrapped, which is
-    the signal to add ``timestamp`` back to that tuple.
+    This was the inverted pin: the docstring promised ``{role, content, model, timestamp}``
+    "with every free-text field passed through :func:`redact.sanitize_line`" while the code
+    returned the timestamp as-is, so an identifier in that field reached the browser
+    (issue 1353, found by ``usage_line_to_turn_fuzzer``). The field is sanitized now and
+    the harness's ``_SANITIZED_FIELDS`` was widened to match — this test holds both sides
+    together, so narrowing either one fails ``just check``.
     """
     from clauster import usage
 
@@ -702,7 +702,11 @@ def test_usage_line_to_turn_timestamp_is_still_unsanitized() -> None:
     )
     assert turn is not None
     assert turn["content"] == "session_<redacted>", "content redaction changed"
-    assert turn["timestamp"] == ident, "timestamp is now sanitized — widen _SANITIZED_FIELDS"
+    assert turn["timestamp"] == "session_<redacted>", "timestamp reached the browser unredacted"
+    harness = _load("usage_line_to_turn_fuzzer.py")
+    assert "timestamp" in harness._SANITIZED_FIELDS, (
+        "the leak property must cover every sanitized field — widen _SANITIZED_FIELDS"
+    )
 
 
 def test_yaml_tags_are_inside_the_frontmatter_contract() -> None:
