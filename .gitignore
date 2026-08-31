@@ -15,7 +15,13 @@ node_modules/
 
 # --- Local tooling (not part of the project) ---
 # CLAUDE.md and AGENTS.md are committed; CLAUDE.local.md holds per-machine notes.
-/.claude/
+# Bare name, no trailing slash, on purpose: in a spawned agent worktree `.claude` is a
+# SYMLINK to the main checkout, and a trailing-slash pattern matches only real
+# directories — so `git add -A` there would stage the symlink, leaking an absolute host
+# path into the repo and breaking `uv build` (sdists refuse external symlinks). The bare
+# form matches the directory, the symlink, and a plain file alike, so no `/.claude/`
+# entry is needed alongside it.
+/.claude
 /.worktreeinclude
 .serena/
 .vscode/settings.json
@@ -27,8 +33,22 @@ clauster.yml
 # --- All other local-only files live under one dir, so the repo root stays clean
 #     and no private filenames need to be enumerated here (planning/spec docs,
 #     session notes, UI screenshots, a11y snapshots, Playwright/MCP logs, etc.). ---
+# Root-anchored bare name for the worktree SYMLINK (same reason as `/.claude` above);
+# the unanchored `scratch/` keeps its distinct job of matching a real scratch directory
+# at any depth.
+/scratch
 scratch/
 .playwright-mcp/
+
+# Fuzzing reproducers Atheris/libFuzzer drop in the cwd — never committed (a
+# reproducer's bytes are by definition an input that breaks something). All five of
+# libFuzzer's artifact prefixes: crash/leak/timeout plus oom (-rss_limit_mb defaults on)
+# and slow-unit (-report_slow_units defaults on).
+crash-*
+leak-*
+timeout-*
+oom-*
+slow-unit-*
 
 # Stray root-level images (design/QA screenshots belong in scratch/ or, if curated
 # for the docs, docs/screenshots/) — guards against accidentally committing them.
