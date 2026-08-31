@@ -12,6 +12,10 @@ name: Binary dep pins
 # touch these paths stuck "waiting" for a status that never posts.
 on:
   pull_request:
+    # Explicit list = the implicit defaults (opened/synchronize/reopened) PLUS
+    # `ready_for_review`, which re-fires the job on the draft → ready flip —
+    # setting any `types:` replaces the defaults (#623).
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "src/clauster/deps.py"
       - "scripts/check_binary_dep_pins.py"
@@ -31,6 +35,9 @@ concurrency:
 jobs:
   pins:
     name: binary-dep pin checksums
+    # Draft PRs skip; `ready_for_review` re-fires this. `!= true` (not `== false`)
+    # so push:main — where `draft` is null — fail-safes to running.
+    if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

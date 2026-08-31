@@ -30,8 +30,20 @@ jobs:
   # job as passing), so the required context keeps reporting on docs-only PRs —
   # which is why these can't use a top-level `paths-ignore` (that would make the
   # required check never report and the PR hang "Expected — waiting").
+  #
+  # DRAFT PRs: every job below (this one included) carries
+  # `github.event.pull_request.draft != true`, so a draft PR runs none of this
+  # workflow — no CodeQL SARIF upload, no secret scan, no dependency review.
+  # `!= true` (not `== false`) so push:main / the weekly cron — where `draft` is
+  # null — fail-safe to running. `ready_for_review` is in the trigger types, so
+  # flipping a draft ready re-dispatches the whole workflow on the current head
+  # SHA. A job skipped by its `if:` reports a check run whose conclusion is
+  # SUCCESS, so `security required checks passed` resolves on a draft rather than
+  # hanging (the "Expected — waiting" failure mode comes from a workflow-level
+  # `paths:` filter suppressing the check run, not from a job-level `if:`).
   changes:
     name: classify changes
+    if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -62,6 +74,15 @@ jobs:
     # here vs refs/heads/<branch> there). Do NOT skip this on `synchronize` as
     # "already covered by codeql.yml" without accepting the loss of the
     # merge-commit PR-diff annotations (the more accurate of the two).
+    #
+    # The one exception to "ALWAYS run" is a DRAFT PR, and it is safe precisely
+    # BECAUSE of that parallel workflow: codeql.yml still analyses every push to
+    # the branch's head SHA, and the `code_scanning` rule honours a head-SHA
+    # analysis, so a draft is never left without results. Skipping the merge-ref
+    # analysis while drafting halves the CodeQL SARIF uploads a draft generates —
+    # the shared GITHUB_TOKEN pool those uploads draw on is the reason this guard
+    # exists. `ready_for_review` restores the merge-ref analysis before review.
+    if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -90,6 +111,10 @@ jobs:
 
   gitleaks:
     name: secret scan
+    # Draft PRs skip; `ready_for_review` re-fires it (see the DRAFT PRs note at
+    # the top of `jobs:`). push:main + the weekly cron still scan every commit
+    # that reaches main, so nothing merges without a secret scan having run.
+    if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # Spelled out for parity with the other scanners (it would otherwise inherit
@@ -183,7 +208,11 @@ jobs:
     # re-running every push just taxes the 1,000/hr pool. Runs on PR
     # open/reopen/ready-for-review + push:main + weekly cron; `security required
     # checks passed` (if: always()) counts a skip as passing.
-    if: github.event_name != 'pull_request' || github.event.action != 'synchronize'
+    # …and skip on a DRAFT PR for the same reason (the SARIF upload taxes the
+    # shared GITHUB_TOKEN pool); `ready_for_review` re-fires it on the flip.
+    if: >-
+      (github.event_name != 'pull_request' || github.event.action != 'synchronize')
+      && github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -227,9 +256,14 @@ jobs:
 
   dependency-review:
     name: dependency review
-    # PR-only, and only when the diff actually changes code/deps.
+    # PR-only, and only when the diff actually changes code/deps. Draft PRs skip
+    # (`changes` is skipped there too, so its output would be empty anyway — the
+    # explicit term keeps the reason readable rather than incidental).
     needs: changes
-    if: github.event_name == 'pull_request' && needs.changes.outputs.code == 'true'
+    if: >-
+      github.event_name == 'pull_request'
+      && github.event.pull_request.draft != true
+      && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -262,7 +296,10 @@ jobs:
 
   security-required-checks-passed:
     name: security required checks passed
-    if: always()
+    # `always()` so a failed/skipped need still lets this job evaluate them; the
+    # draft term skips the whole aggregator on a draft PR, matching its upstreams
+    # (see the DRAFT PRs note at the top of `jobs:`).
+    if: always() && github.event.pull_request.draft != true
     needs:
       - changes
       - codeql

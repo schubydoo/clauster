@@ -24,6 +24,12 @@ jobs:
     # Runs ruff (check + format), pyright, and the Markdown + YAML doc-lint
     # (scripts/lint-docs.sh).
     name: lint
+    # Draft PRs skip; `ready_for_review` (already in the trigger types above)
+    # re-fires this on the flip. `!= true` (not `== false`) so push:main — where
+    # `draft` is null — fail-safes to running. GitHub reports a skipped job's
+    # check run as success, so the required `lint` context still resolves on a
+    # draft rather than hanging at "Expected — waiting for status".
+    if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

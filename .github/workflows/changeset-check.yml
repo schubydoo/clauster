@@ -10,7 +10,10 @@ name: Changeset check
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    # `labeled`/`unlabeled` so toggling `no-changelog` re-evaluates the advisory
+    # immediately; `ready_for_review` so the job fires on the draft → ready flip
+    # (the job itself skips while the PR is a draft).
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
 
 # No token needed at the workflow level; the single job grants itself the minimum.
 permissions: {}
@@ -27,9 +30,11 @@ jobs:
       pull-requests: write # post/update the advisory sticky comment
     # Same-repo PRs only (fork PRs get a read-only token and can't comment), and
     # never on knope's own release PR (it deletes changesets as it prepares).
+    # Draft PRs skip too — `ready_for_review` re-fires the advisory on the flip.
     if: >-
       ${{ github.event.pull_request.head.repo.full_name == github.repository
-          && github.head_ref != 'release' }}
+          && github.head_ref != 'release'
+          && github.event.pull_request.draft != true }}
     runs-on: ubuntu-slim
     timeout-minutes: 5
     steps:
