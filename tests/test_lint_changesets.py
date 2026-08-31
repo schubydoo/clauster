@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 
 import pytest
@@ -267,6 +268,127 @@ def test_main_rejects_a_changeset_readme(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(lint_changesets, "_CHANGESET_DIR", cdir)
     monkeypatch.setattr(lint_changesets, "_KNOPE_TOML", str(_KNOPE_TOML))
     assert lint_changesets.main() == 1
+
+
+# --- layout rule (#1332): knope reads `.changeset/*.md` and nothing else -------------------
+
+
+@pytest.fixture
+def changeset_dir(tmp_path, monkeypatch) -> Path:
+    """Point the linter at a throwaway `.changeset/` holding one valid fragment.
+
+    Strays must never be committed into the repo's real `.changeset/` — that would trip
+    this very linter (and knope) on every branch.
+    """
+    cdir = tmp_path / ".changeset"
+    cdir.mkdir()
+    _write(cdir / "good.md", "---\ndefault: patch\n---\n\nA clean one-line summary.\n")
+    monkeypatch.setattr(lint_changesets, "_CHANGESET_DIR", cdir)
+    monkeypatch.setattr(lint_changesets, "_KNOPE_TOML", str(_KNOPE_TOML))
+    return cdir
+
+
+def test_a_lone_valid_fragment_passes(changeset_dir: Path) -> None:
+    # The control: the fixture's own fragment must pass, or the failures below prove nothing.
+    assert lint_changesets.main() == 0
+
+
+@pytest.mark.parametrize(
+    "name", [".gitkeep", ".DS_Store", "Thumbs.db", ".good.md.swp", ".good.md.swn", "a~"]
+)
+def test_housekeeping_entries_are_allowed(changeset_dir: Path, name: str, capsys) -> None:
+    # `.gitkeep` keeps the directory in git; `.DS_Store`/`Thumbs.db` appear from merely
+    # OPENING the folder on macOS/Windows and a vim swap file exists while a fragment is
+    # being edited — none is a lost changeset, and failing on them would red only local runs.
+    # `.swn` pins the swap-name CASCADE (`.swp` → `.swo` → `.swn` → …), which vim reaches
+    # whenever a stale swap file from a crash still occupies the earlier name.
+    # Asserting the COUNT too: a regression that counted these as fragments would still
+    # exit 0, and the point is that they are not fragments.
+    _write(changeset_dir / name, "")
+    assert lint_changesets.main() == 0
+    assert "1 fragment(s) OK" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("name", ["a.txt", "a.MD", "a.md.bak", "changeset", "a.markdown"])
+def test_non_md_stray_file_rejected(changeset_dir: Path, name: str, capsys) -> None:
+    # A fragment that lands under the wrong extension is invisible to knope — no changelog
+    # entry, no version bump, no error. `a.MD` is rejected on every OS: the release runs on
+    # Linux, where the glob is case-sensitive and the file is simply dropped.
+    _write(changeset_dir / name, "---\ndefault: patch\n---\n\nA clean one-line summary.\n")
+    assert lint_changesets.main() == 1
+    out = capsys.readouterr().out
+    # The PATH, not the bare name: for the extensionless "changeset" param the bare name
+    # is already boilerplate in every failure line, so it proves nothing about which
+    # file was flagged.
+    assert f"{changeset_dir.name}{os.sep}{name}" in out
+    assert "not a `*.md` fragment" in out
+
+
+def test_nested_fragment_rejected(changeset_dir: Path, capsys) -> None:
+    # knope's `*.md` glob does not recurse, so `.changeset/sub/a.md` is dropped silently.
+    sub = changeset_dir / "sub"
+    sub.mkdir()
+    _write(sub / "a.md", "---\ndefault: patch\n---\n\nA clean one-line summary.\n")
+    assert lint_changesets.main() == 1
+    out = capsys.readouterr().out
+    assert "sub: a directory" in out
+    assert "does not recurse" in out
+
+
+def test_stray_is_reported_alongside_a_valid_fragment(changeset_dir: Path, capsys) -> None:
+    # The stray must not be masked by the valid fragment sitting next to it (the realistic
+    # shape: a PR adds one good changeset and one misnamed one).
+    _write(changeset_dir / "a.txt", "---\ndefault: patch\n---\n\nA clean one-line summary.\n")
+    assert lint_changesets.main() == 1
+    assert "a.txt" in capsys.readouterr().out
+
+
+def test_changeset_path_that_is_not_a_directory_is_rejected(tmp_path, monkeypatch, capsys) -> None:
+    # The one shape where the "absent is fine" allowance could become this script's OWN
+    # silent pass: a regular file at `.changeset` would otherwise report 0 fragments OK.
+    stub = tmp_path / ".changeset"
+    _write(stub, "not a directory\n")
+    monkeypatch.setattr(lint_changesets, "_CHANGESET_DIR", stub)
+    monkeypatch.setattr(lint_changesets, "_KNOPE_TOML", str(_KNOPE_TOML))
+    assert lint_changesets.main() == 1
+    assert "not a directory" in capsys.readouterr().out
+
+
+def test_dangling_changeset_symlink_is_rejected(tmp_path, monkeypatch, capsys) -> None:
+    # `Path.exists()` follows the link, so a dead `.changeset -> /nowhere` reads as "absent"
+    # and would take the legitimate release-checkout pass — the same silent pass by a
+    # slightly different route.
+    link = tmp_path / ".changeset"
+    try:
+        link.symlink_to(tmp_path / "nowhere", target_is_directory=True)
+    except (OSError, NotImplementedError):  # Windows without developer mode / admin
+        pytest.skip("this platform does not permit creating symlinks")
+    monkeypatch.setattr(lint_changesets, "_CHANGESET_DIR", link)
+    monkeypatch.setattr(lint_changesets, "_KNOPE_TOML", str(_KNOPE_TOML))
+    assert lint_changesets.main() == 1
+    assert "not a directory" in capsys.readouterr().out
+
+
+def test_unlistable_changeset_dir_is_reported_not_a_traceback(
+    changeset_dir: Path, monkeypatch, capsys
+) -> None:
+    # A permission error on the directory must produce the script's own message, like every
+    # other error path here, rather than exiting on a bare traceback.
+    def _boom(_self) -> None:
+        raise PermissionError("Permission denied")
+
+    monkeypatch.setattr(lint_changesets.Path, "iterdir", _boom)
+    assert lint_changesets.main() == 1
+    assert "could not list" in capsys.readouterr().out
+
+
+def test_absent_changeset_dir_passes(tmp_path, monkeypatch, capsys) -> None:
+    # knope deletes every fragment while preparing a release and git does not track the
+    # emptied directory, so an absent `.changeset/` is legitimate — not a stray to fail on.
+    monkeypatch.setattr(lint_changesets, "_CHANGESET_DIR", tmp_path / "nope")
+    monkeypatch.setattr(lint_changesets, "_KNOPE_TOML", str(_KNOPE_TOML))
+    assert lint_changesets.main() == 0
+    assert "0 fragment(s) OK" in capsys.readouterr().out
 
 
 def test_main_fails_closed_on_a_misshapen_knope_toml(tmp_path, monkeypatch) -> None:
