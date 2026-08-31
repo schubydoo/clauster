@@ -47,6 +47,13 @@ jobs:
         id: run
         uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
         with:
+          # Must be set on the RUN step too, not just the build: this input defaults
+          # to `c++`, and it becomes FUZZING_LANGUAGE in the runner. At the default,
+          # crash reproduction gets DEFAULT_REPRODUCE_TIME_SECONDS (30s) instead of
+          # the 120s python entry in oss-fuzz's PER_LANGUAGE_REPRODUCE_TIMEOUTS, so a
+          # genuine Atheris crash that is slow to re-trigger is silently written off
+          # as unreproducible and never reported.
+          language: python
           github-token: ${{ secrets.GITHUB_TOKEN }}
           fuzz-seconds: 180
           mode: code-change
