@@ -633,12 +633,15 @@ def test_pty_screen_feed_raises_on_ordinary_escape_sequences() -> None:
 
 
 def test_pty_screen_display_readers_raise_on_a_half_overwritten_wide_char() -> None:
-    """PIN: the screen READERS raise, and that path is not guarded in production.
+    """PIN: the screen READERS still raise — the guard is at the caller, not in ``pyte``.
 
-    ``login_shepherd`` calls ``flow.screen.find_oauth_token()`` and ``find_authorize_url()``
-    unwrapped, so this reaches the caller on the credential path. Reported as an open
-    finding and caught in the harness so it can still assert everything else; pinned here
-    so the fix flips the suite red rather than passing unnoticed.
+    ``login_shepherd`` now reads both of them through ``login_shepherd._read_screen``
+    (#1358), which degrades this ``IndexError`` to "no match on this frame" so it cannot
+    reach the credential path. The raise itself is unchanged and is what that guard exists
+    for, so it stays pinned here: if a ``pyte`` upgrade fixes it, this fails and sends the
+    next reader to re-check whether the guard is still earning its place — and to widen
+    ``pty_screen_feed_fuzzer``'s ``except IndexError`` carve-out, which is still skipping
+    every input that trips it.
     """
     pty_screen = pytest.importorskip("clauster.pty_screen")
 
