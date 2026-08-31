@@ -218,7 +218,7 @@ def parse_transcript(path: Path) -> TranscriptUsage:
             continue
         try:
             record = json.loads(line)
-        except (json.JSONDecodeError, RecursionError):
+        except (json.JSONDecodeError, ValueError, RecursionError):
             # RecursionError: CPython's recursive scanner overflows on deeply-nested
             # JSON *before* json can raise JSONDecodeError, and it is not a ValueError
             # — so it escaped this handler and 500'd the whole project's usage tally.
@@ -339,10 +339,13 @@ def _recorded_cwd(path: Path, max_lines: int = 200) -> str | None:
                 try:
                     record = json.loads(line)
                 except (json.JSONDecodeError, ValueError, RecursionError):
-                    # `ValueError` is pre-existing and redundant (`JSONDecodeError` subclasses
-                    # it); it is kept rather than tidied away so this stays the widest of the
-                    # module's four loads sites, which is the right direction for the only one
-                    # feeding a security decision. RecursionError is the actual fix.
+                    # `ValueError` is NOT redundant with `JSONDecodeError`: `json.loads` has a
+                    # second `ValueError` path that is not a decode error — the base-10
+                    # integer-string-conversion limit (CVE-2020-10735), on by default for a
+                    # >4300-digit int literal on every supported interpreter (>=3.11). All four
+                    # `json.loads` sites in this module catch the same trio now (not just this
+                    # security-decision one), so a hostile line degrades to skip-the-line
+                    # everywhere rather than 500-ing whichever surface reads it.
                     # RecursionError: CPython's recursive scanner overflows on deeply-nested
                     # JSON *before* json can raise JSONDecodeError, and it is not a
                     # ValueError — so it escaped both handlers here. This helper backs
@@ -454,7 +457,7 @@ def _line_to_turn(line: str) -> dict | None:
         return None
     try:
         record = json.loads(line)
-    except (json.JSONDecodeError, RecursionError):
+    except (json.JSONDecodeError, ValueError, RecursionError):
         # RecursionError (deeply-nested JSON, raised by CPython's recursive scanner
         # before json can raise JSONDecodeError) is not a ValueError, so it would
         # escape and break the "never raises on a malformed line" contract above.
@@ -552,7 +555,7 @@ def _is_subagent_transcript(path: Path, max_records: int = 200) -> bool:
                     break
                 try:
                     record = json.loads(line)
-                except (json.JSONDecodeError, RecursionError):
+                except (json.JSONDecodeError, ValueError, RecursionError):
                     # RecursionError: deeply-nested JSON overflows CPython's recursive
                     # scanner before json can raise JSONDecodeError, and it is not a
                     # ValueError — so it escaped this handler and broke the docstring's

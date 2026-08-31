@@ -228,6 +228,18 @@ def test_line_to_turn_tolerates_deeply_nested_json():
     assert turn is not None and turn["role"] == "user"
 
 
+def test_line_to_turn_tolerates_the_int_string_conversion_limit():
+    # json.loads has a SECOND ValueError path that is not a JSONDecodeError: the base-10
+    # integer-string-conversion limit (CVE-2020-10735), on by default (>4300 digits) for
+    # every supported interpreter (>=3.11). A transcript line with such an int must skip
+    # like any other corrupt line, not 500 the viewer. All four json.loads sites in
+    # usage.py now catch it; this pins the browser-facing one.
+    from clauster.usage import _line_to_turn
+
+    line = '{"message": {"role": "user", "content": "hi"}, "n": ' + "9" * 4301 + "}"
+    assert _line_to_turn(line) is None
+
+
 def test_line_to_turn_redacts_the_timestamp():
     # Invariant 4: every string field this reader returns reaches the browser, so every
     # one of them is sanitized — including `timestamp`, which was returned verbatim
