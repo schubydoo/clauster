@@ -79,6 +79,40 @@ def test_parse_frontmatter_rejects_deeply_nested_yaml() -> None:
         sub.parse_frontmatter(f"---\nname: {deep}\n---\nbody\n")
 
 
+@pytest.mark.parametrize(
+    ("tag", "raised"),
+    [
+        ("!!int", ValueError),
+        ("!!float", ValueError),
+        ("!!bool", KeyError),
+        ("!!timestamp", AttributeError),
+    ],
+)
+def test_parse_frontmatter_rejects_explicit_tag_with_an_unfitting_value(
+    tag: str, raised: type[Exception]
+) -> None:
+    # #1354: PyYAML's SafeConstructor raises these four OUTSIDE yaml.YAMLError for a
+    # resolvable explicit tag whose value does not fit it, so each escaped the documented
+    # InvalidCandidateError contract — a 500 on this code-executing write tier, from a
+    # file that arrived with a cloned repository. The input is the fuzzer's; `__cause__`
+    # pins WHICH class was caught, so a handler that stopped covering one would fail here
+    # rather than silently passing on a different rejection. Same test in the SKILL.md
+    # parser's module — one shared handler (config_write.load_frontmatter_yaml).
+    with pytest.raises(cw.InvalidCandidateError, match="YAML tag") as excinfo:
+        sub.parse_frontmatter(f"---\nname: {tag} x\ndescription: d\n---\nbody\n")
+    assert isinstance(excinfo.value.__cause__, raised)
+
+
+def test_parse_frontmatter_tolerates_trailing_whitespace_on_a_fence() -> None:
+    # #1352: the fence pattern accepts trailing spaces/tabs on either `---` line, and the
+    # whitespace belongs to the fence rather than to the body. Shared byte-for-byte with
+    # the SKILL.md parser (one regex object); the cross-parser assertion lives in
+    # tests/test_fuzz_harness_smoke.py.
+    frontmatter, body = sub.parse_frontmatter("--- \nname: x\ndescription: y\n---\t\nbody\n")
+    assert frontmatter == {"name": "x", "description": "y"}
+    assert body == "body\n"
+
+
 def test_parse_frontmatter_rejects_non_mapping() -> None:
     with pytest.raises(cw.InvalidCandidateError, match="mapping"):
         sub.parse_frontmatter("---\n- a\n- b\n---\nbody\n")

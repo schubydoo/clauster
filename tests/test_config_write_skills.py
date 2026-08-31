@@ -90,6 +90,39 @@ def test_parse_frontmatter_rejects_deeply_nested_yaml() -> None:
         sk.parse_frontmatter(f"---\ndescription: {deep}\n---\nbody\n")
 
 
+@pytest.mark.parametrize(
+    ("tag", "raised"),
+    [
+        ("!!int", ValueError),
+        ("!!float", ValueError),
+        ("!!bool", KeyError),
+        ("!!timestamp", AttributeError),
+    ],
+)
+def test_parse_frontmatter_rejects_explicit_tag_with_an_unfitting_value(
+    tag: str, raised: type[Exception]
+) -> None:
+    # #1354: PyYAML's SafeConstructor raises these four OUTSIDE yaml.YAMLError for a
+    # resolvable explicit tag whose value does not fit it, so each escaped the documented
+    # InvalidCandidateError contract — a 500 on this code-executing write tier, from a
+    # SKILL.md that arrived with a cloned repository. The input is the fuzzer's;
+    # `__cause__` pins WHICH class was caught. Kept in lockstep with the subagents parser
+    # (one shared handler, config_write.load_frontmatter_yaml).
+    with pytest.raises(cw.InvalidCandidateError, match="YAML tag") as excinfo:
+        sk.parse_frontmatter(f"---\nname: {tag} x\ndescription: d\n---\nbody\n")
+    assert isinstance(excinfo.value.__cause__, raised)
+
+
+def test_parse_frontmatter_tolerates_trailing_whitespace_on_a_fence() -> None:
+    # #1352: this parser used to REJECT a fence carrying a trailing space while the
+    # subagents parser accepted it, so the same file parsed on one surface of the write
+    # tier and 422'd on the other. Both now alias one pattern; the cross-parser assertion
+    # lives in tests/test_fuzz_harness_smoke.py.
+    frontmatter, body = sk.parse_frontmatter("--- \ndescription: y\n---\t\nbody\n")
+    assert frontmatter == {"description": "y"}
+    assert body == "body\n"
+
+
 def test_validate_frontmatter_requires_description() -> None:
     with pytest.raises(cw.InvalidCandidateError, match="description"):
         sk.validate_frontmatter({})
