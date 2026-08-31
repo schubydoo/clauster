@@ -436,11 +436,23 @@ def test_recorded_cwd_tolerates_deeply_nested_json(short_tmp_root):
     assert _recorded_cwd(path) == "/srv/projects/found"
 
     # A transcript that is ONLY the hostile line states no cwd, so ownership stays unproven
-    # — refused rather than raising, which is the fail-closed direction.
+    # — refused rather than raising, which is the fail-closed direction. The project and its
+    # worktree dir are created and proven to grant ownership to a transcript that DOES state
+    # a cwd, so the refusal below is caused by the unproven cwd and not by a missing path.
+    from clauster.usage import WORKTREE_SUBDIR
+
+    project = short_tmp_root / "proj"
+    worktree = project / WORKTREE_SUBDIR / "wt"
+    worktree.mkdir(parents=True)
+
+    owned = short_tmp_root / "owned.jsonl"
+    owned.write_text(json.dumps({"type": "user", "cwd": str(worktree)}) + "\n", encoding="utf-8")
+    assert _transcript_is_owned(project, owned) is True
+
     only_deep = short_tmp_root / "only-deep.jsonl"
     only_deep.write_text("[" * 100_000 + "\n", encoding="utf-8")
     assert _recorded_cwd(only_deep) is None
-    assert _transcript_is_owned(short_tmp_root / "proj", only_deep) is False
+    assert _transcript_is_owned(project, only_deep) is False
 
 
 def test_recorded_cwd_unreadable_transcript_is_unproven(short_tmp_root):

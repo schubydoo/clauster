@@ -339,6 +339,10 @@ def _recorded_cwd(path: Path, max_lines: int = 200) -> str | None:
                 try:
                     record = json.loads(line)
                 except (json.JSONDecodeError, ValueError, RecursionError):
+                    # `ValueError` is pre-existing and redundant (`JSONDecodeError` subclasses
+                    # it); it is kept rather than tidied away so this stays the widest of the
+                    # module's four loads sites, which is the right direction for the only one
+                    # feeding a security decision. RecursionError is the actual fix.
                     # RecursionError: CPython's recursive scanner overflows on deeply-nested
                     # JSON *before* json can raise JSONDecodeError, and it is not a
                     # ValueError — so it escaped both handlers here. This helper backs
