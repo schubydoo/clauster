@@ -161,6 +161,17 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           trigger_phrase: "@claude review"
+          # Claude Code settings for the review runs (inline JSON, per the action's
+          # docs/usage.md). `Concise` keeps the review output tight — findings, not
+          # narration. ⚠️ This input takes effect only after merge: GitHub runs the
+          # DEFAULT BRANCH copy of a workflow for `issue_comment`, so the PR's copy of
+          # this line is never loaded at all — it cannot be trialled from a PR.
+          # ⚠️ Version coupling: `Concise` is a built-in style only in CLI ≥ 2.1.237ish
+          # (recent relative to the 2.1.251 this action SHA hardcodes), and a style name
+          # that does not resolve DEGRADES SILENTLY to the default — no warning, no
+          # failure. Re-verify the style still exists whenever the action pin or a
+          # `path_to_claude_code_executable` override changes the CLI version.
+          settings: '{"outputStyle": "Concise"}'
           # NO `prompt:` — see the banner. Guidance goes through the system prompt.
           #
           # Keep the other reporters out of Claude's context:
