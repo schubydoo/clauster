@@ -1,0 +1,48 @@
+# libFuzzer dictionary for hosted_redact_obj_fuzzer (hosted._redact_obj).
+# The frame's SHAPE is generated structurally from the fuzzer's bytes, so this dictionary
+# is only about the string leaves: the redaction branches are gated on literal identifier
+# and secret prefixes that Atheris' FuzzedDataProvider never synthesises. Without them the
+# leak oracle only ever sees the nothing-to-mask path. See fuzz/README.md.
+
+# the identifier prefixes redact._ID_RE masks (invariant 4's core)
+"session_"
+"env_"
+"cse_"
+"session_01JABCDEFGHJKMNPQ"
+"env_9x8y7z6w5v"
+"cse_01JABCDEFGH"
+# just under the {6,} tail bound, the boundary the leak matcher is restated to hold
+"session_abcde"
+"session_abcdef"
+
+# ANSI, which sanitize_line strips BEFORE matching ids — an escape spliced into an
+# identifier is the smuggling shape the strip-then-redact order exists to defeat
+"\x1b"
+"\x1b["
+"\x1b[0m"
+"\x1b[32m"
+"\x1b]8;;"
+"\x07"
+
+# secret shapes redact_secrets masks
+"sk-ant-"
+"sk-ant-api03-"
+"Bearer "
+"ghp_"
+"github_pat_"
+"xoxb-"
+"AKIA"
+"AIza"
+
+# stream-json frame vocabulary, so the generated keys drift toward real frames
+"type"
+"assistant"
+"tool_use"
+"tool_result"
+"content"
+"text"
+"session_id"
+"uuid"
+"parent_tool_use_id"
+"result"
+"is_error"

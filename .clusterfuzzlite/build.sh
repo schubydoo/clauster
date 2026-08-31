@@ -13,7 +13,14 @@
 # interesting branches need structured tokens Atheris' random FDP never
 # synthesises — without seeds+dict they sit at a 0-element corpus. See fuzz/README.md.
 
-pip3 install "$SRC/clauster"
+# The `pty` extra, not a bare install: pty_screen_feed_fuzzer drives the real PtyScreen,
+# which lazily imports pyte and raises PyteUnavailableError without it — so a bare install
+# would leave that harness failing on every input instead of fuzzing. On Linux the extra
+# resolves to pyte alone (pywinpty carries a win32 marker). pyte is LGPLv3 and is kept out
+# of [project.dependencies] and the Apache-2.0 frozen binary on purpose; this image is a
+# CI build container for the fuzzers and is never shipped or distributed, so installing it
+# here carries no relink obligation. If that ever changes, revisit pyproject.toml's note.
+pip3 install "$SRC/clauster[pty]"
 
 for fuzzer in "$SRC"/clauster/fuzz/*_fuzzer.py; do
   compile_python_fuzzer "$fuzzer"

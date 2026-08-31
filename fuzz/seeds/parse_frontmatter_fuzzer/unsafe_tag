@@ -1,0 +1,4 @@
+---
+name: !!python/object:os.system 'echo pwned'
+---
+body

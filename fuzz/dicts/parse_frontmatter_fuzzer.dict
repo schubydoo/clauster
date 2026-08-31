@@ -1,0 +1,80 @@
+# libFuzzer dictionary for parse_frontmatter_fuzzer (config_write_subagents /
+# config_write_skills parse_frontmatter). Everything past the first regex is gated on the
+# literal `---` fence and on YAML's own punctuation, none of which Atheris'
+# FuzzedDataProvider synthesises: without this dict (and the seed corpus) every input
+# lands on the "must start with a frontmatter block" rejection. See fuzz/README.md.
+
+# the fence, in the shapes the two regexes differ on
+"---"
+"---\x0a"
+"---\x0d\x0a"
+"--- \x0a"
+"---\x09\x0a"
+"---\x0a---\x0a"
+
+# YAML mapping structure
+":"
+": "
+"- "
+"?"
+"key: value"
+"a:\x0a  b: 1"
+
+# flow collections — the nesting the composer recurses through
+"{"
+"}"
+"["
+"]"
+"{}"
+"[]"
+"[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[["
+
+# scalars that are NOT mappings, the non-mapping rejection both parsers make
+"null"
+"~"
+"true"
+"'a'"
+"\"a\""
+"|"
+">"
+
+# the float YAML builds a real NaN from, which `==` cannot compare
+".nan"
+".inf"
+"-.inf"
+
+# anchors, aliases and merge keys — safe_load resolves these, and an alias cycle is the
+# shape that reaches the composer's recursion guard
+"&a "
+"*a"
+"<<: *a"
+"&a [*a]"
+
+# tags safe_load accepts, and one it must refuse. NB the four tags whose constructors
+# raise outside YAMLError (!!int/!!float/!!bool/!!timestamp) are deliberately ABSENT:
+# check() discards inputs carrying them in the header (an open finding — see the
+# harness's _YAML_UNCONTRACTED_TAGS), so seeding them would steer the mutator toward
+# inputs that are thrown away. Put them BACK when that finding is fixed: once the
+# parsers raise InvalidCandidateError for them, check() stops discarding and the
+# tokens become useful again for reaching the constructors.
+"!!str "
+"!!binary "
+"!!set"
+"!!python/object:os.system"
+
+# the real frontmatter keys both surfaces validate
+"name:"
+"description:"
+"tools:"
+"model:"
+"allowed-tools:"
+"argument-hint:"
+"disable-model-invocation:"
+"user-invocable:"
+
+# the plugin-root marker config_write_skills fails closed on
+"CLAUDE_PLUGIN_ROOT"
+"${CLAUDE_PLUGIN_ROOT}"
+
+# a tab, which YAML rejects as indentation — a cheap YAMLError generator
+"\x09"

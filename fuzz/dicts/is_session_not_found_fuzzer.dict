@@ -1,0 +1,52 @@
+# libFuzzer dictionary for is_session_not_found_fuzzer (code_sessions._is_session_not_found).
+# The only path that returns True is gated on two exact string literals inside a JSON
+# object. Atheris' FuzzedDataProvider synthesises neither, so without this dict (and the
+# seed corpus) the harness proves only that malformed bodies return False and never
+# exercises the branch that clears a pointer. See fuzz/README.md.
+
+# the two signals, and the near-misses the "require BOTH" rule exists to reject
+"not_found_error"
+"resource_type"
+"session"
+"\"type\""
+"\"type\":\"not_found_error\""
+"\"resource_type\":\"session\""
+"not_found"
+"session_not_found"
+"invalid_request_error"
+"authentication_error"
+"permission_error"
+"rate_limit_error"
+"api_error"
+"overloaded_error"
+"message"
+"environment"
+"organization"
+
+# the wrapper the target unwraps before looking, plus the fallback to the top level
+"\"error\""
+"{\"error\":{"
+
+# JSON structure
+"{"
+"}"
+"["
+"]"
+":"
+","
+"{}"
+"[]"
+"null"
+"true"
+
+# non-JSON bodies a route-level 404 really returns — an HTML error page and a bare string
+"<!DOCTYPE html>"
+"<html>"
+"404 page not found"
+"Not Found"
+
+# invalid UTF-8 and deep nesting: the two decoder failure modes the contract must
+# degrade to False rather than raise on
+"\xff\xfe"
+"\x80"
+"[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[["

@@ -1,0 +1,73 @@
+# libFuzzer dictionary for pty_screen_feed_fuzzer (the stateful PtyScreen.feed seam).
+# Everything this harness cares about is gated on literal escape sequences and URL text
+# that Atheris' FuzzedDataProvider never synthesises from random bytes: with neither this
+# dict nor the seed corpus the screen renders noise, `_scan_osc8` never records a
+# hyperlink, and the chunk-invariance oracle compares two empty lists forever.
+# Largely shared with pty_login_scan_fuzzer.dict, plus the cursor-addressing sequences
+# that only matter once a real terminal emulator is in the loop. See fuzz/README.md.
+
+# OSC 8 hyperlinks — the opener, both terminators, and the empty-URI closer
+"\x1b]8;;"
+"\x1b]8;id=1;"
+"\x07"
+"\x1b\\"
+"\x1b]8;;\x07"
+"\x1b]8;;https://claude.com/cai/oauth/authorize?client_id=x\x07label\x1b]8;;\x07"
+
+# the URL text both the visible and the hidden path select over
+"https://"
+"claude.com"
+"claude.ai"
+"console.anthropic.com"
+"platform.claude.com"
+"docs.anthropic.com"
+"/cai/oauth/authorize"
+"/oauth/authorize"
+"/authorize"
+"?client_id="
+"&redirect_uri="
+
+# the keeper's connect URL, whose session id find_session_id scrapes
+"https://claude.ai/code/session_"
+"session_01JABCDEFGHJKMNPQ"
+"code/"
+
+# setup-token's printed credential
+"CLAUDE_CODE_OAUTH_TOKEN="
+"sk-ant-oat01-"
+
+# identifiers frame() must mask
+"env_"
+"cse_"
+
+# CSI cursor addressing and erasure — the positioning that fragments a URL across the raw
+# byte stream and is the whole reason a terminal emulator sits in this path (#665)
+"\x1b["
+"\x1b[H"
+"\x1b[2J"
+"\x1b[K"
+"\x1b[1;1H"
+"\x1b[10;40H"
+"\x1b[0m"
+"\x1b[?25l"
+"\x1b[6n"
+"\x1b[999C"
+
+# other string-introducers pyte tracks state through
+"\x1b]0;"
+"\x1bP"
+"\x1b^"
+"\x1b_"
+
+# line discipline, incl. the wrap boundary _unwrap_display reassembles across
+"\x0d\x0a"
+"\x0a"
+"\x0d"
+"\x08"
+"\x09"
+
+# the control and combining shapes pyte renders chunk-dependently (see the module
+# docstring): kept so the corpus retains them for the properties still asserted on them
+"\x03"
+"\xc2\x93"
+"\xde\xa7"

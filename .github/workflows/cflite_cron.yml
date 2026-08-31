@@ -87,7 +87,9 @@ jobs:
   prune:
     name: prune corpus
     runs-on: ubuntu-latest
-    timeout-minutes: 55 # ≈ fuzz-seconds (a TOTAL, split across harnesses) + build; observed ≈7 min
+    # ≈ fuzz-seconds (a TOTAL, split across harnesses) + build. The ≈7 min was observed at a
+    # smaller harness count; at 18 the build dominates and prune projects to ≈25 min.
+    timeout-minutes: 55
     permissions:
       contents: read # checkout + build the harnesses
       security-events: write # prune writes a SARIF regardless of findings (see header)
@@ -113,12 +115,12 @@ jobs:
           # Where the 120s-vs-30s actually bites is batch and PR (see cflite_pr.yml).
           language: python
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          # 413, matching cflite_batch.yml, for the same 10 -> 11 harness-count reason:
+          # 666, matching cflite_batch.yml, for the same 11 -> 18 harness-count reason:
           # prune runs the same divide-across-targets loop, and here the per-target slice
           # is a MERGE TIMEOUT that raises (clusterfuzz's libFuzzer engine raises
           # TimeoutError on a timed-out merge, and nothing catches it), not a fuzz
           # duration that simply ends. Holding the slice at ~37s keeps that headroom.
-          fuzz-seconds: 413
+          fuzz-seconds: 666
           mode: prune
           sanitizer: address
           output-sarif: true
@@ -128,7 +130,13 @@ jobs:
   coverage:
     name: coverage replay (per-harness edge stats)
     runs-on: ubuntu-latest
-    timeout-minutes: 60 # coverage build + full-corpus replay over every harness — the slow one
+    # Coverage build + full-corpus replay over every harness — the slow one, and the job
+    # whose cost scales on BOTH axes with the harness count (a PyInstaller build each,
+    # ~41s, and a replay each). Re-checked at 18 harnesses rather than assumed: the last
+    # three runs took 12.1, 12.1 and 12.3 min at 8, so scaling both halves 8 -> 18 projects
+    # to ≈27 min. That leaves ≈2.2x headroom, so 60 stands — but this is the number to
+    # re-derive first if the harness count grows again, since it has the least slack.
+    timeout-minutes: 60
     permissions:
       contents: read # builds + replays only; the logs are pushed via the storage PAT
     concurrency:
