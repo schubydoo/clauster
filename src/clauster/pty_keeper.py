@@ -229,7 +229,68 @@ class _KeeperDrain:
         self._last_write = 0.0
         self._buf = bytearray()
         self._url_found = False
+        self._screen_scan_failed = False
         self._deadline = time.monotonic() + _URL_TIMEOUT
+
+    def _scan_session_id(self) -> str | None:
+        """Run one connect-URL scrape, degrading a pyte render fault to "no match yet".
+
+        THE reader boundary for this module — the keeper-path sibling of
+        `login_shepherd._read_screen` (#1358 / PR #1375, which named the credential path
+        only). `pyte`'s ``Screen.display`` raises ``IndexError: string index out of range``
+        when a double-width character is left half-overwritten, and a 13-byte stream
+        reproduces it (found by ``fuzz/pty_screen_feed_fuzzer.py``).
+        :meth:`PtyScreen.find_session_id` goes through ``display``, and
+        :meth:`feed` guards only ``screen.feed`` — so that ``IndexError`` escaped the scrape,
+        escaped both drain loops (the POSIX one catches ``OSError``/``BlockingIOError``, the
+        ConPTY one guards only its read), and killed the keeper. That is worse than losing a
+        deep link: :meth:`finish` never runs, so the discovery sidecar is stranded at
+        ``starting``/``ready`` while the bridge is orphaned — a lifecycle error collapsing
+        into a misleading state (invariant 1).
+
+        Reachability differs by backend, and the ConPTY one is the worse of the two. POSIX
+        builds a screen only when a live view was requested (:func:`_make_screen` is gated on
+        ``screen_sidecar``), so the fault needed the tap on; :func:`_run_keeper_conpty` builds
+        ``PtyScreen()`` unconditionally — precisely because the raw scrape rarely survives
+        ConPTY — so on Windows the scrape ran on every chunk of every keeper and the crash
+        needed nothing but the wrong bytes. Both are covered here: the two backends share
+        this drain.
+
+        The guard is deliberately narrow: only ``IndexError``, and only around the scrape
+        helper, so a genuine defect anywhere else still propagates. (It spans
+        ``_scan_connect_url`` whole rather than just its screen leg — a compiled regex
+        ``search`` over a bytearray cannot raise ``IndexError``, so the wider span costs
+        nothing and keeps the call site a single expression.) The degraded value is "no match
+        on THIS chunk", not "give up" — ``_buf`` keeps accumulating and the next chunk retries,
+        which usually works because the next ``feed`` overwrites the broken cell. The screen
+        is NOT disabled, unlike the ``screen.feed`` failure above: a feed failure means the
+        emulator itself is unusable, while a render fault is per-frame and transient.
+
+        Never a silent skip: the fault is recorded on the drain and reported once to the
+        keeper's stderr, which is captured to ``<sidecar>.log`` — the same file the escaping
+        traceback used to land in. Once per *run* of faults, not per chunk: at drain cadence a
+        persistent fault would otherwise fill that file, so the flag suppresses the repeat —
+        but a scrape that renders cleanly clears it again, or a transient fault in the first
+        second of a long-lived keeper would permanently silence a genuinely different one
+        later, leaving the log describing a fault that recovered and nothing about the one
+        that did not. The text carries no screen content, only the exception's own fixed
+        message, so nothing unredacted rides out (invariant 4).
+        """
+        try:
+            session_id = _scan_connect_url(self._buf, self._screen)
+        except IndexError as exc:
+            if not self._screen_scan_failed:
+                self._screen_scan_failed = True
+                print(
+                    f"clauster.pty_keeper: screen could not be rendered for the connect-URL "
+                    f"scrape, retrying on later output: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            return None
+        # A clean render, whether or not it found a URL — the next fault is a new one.
+        self._screen_scan_failed = False
+        return session_id
 
     def feed(self, chunk: bytes) -> None:
         """Feed one drained chunk into the pyte screen + the connect-URL scrape."""
@@ -250,7 +311,7 @@ class _KeeperDrain:
                 self._screen = None
         if not self._url_found:
             self._buf.extend(chunk)
-            session_id = _scan_connect_url(self._buf, self._screen)
+            session_id = self._scan_session_id()
             if session_id is not None:
                 self._base.update(
                     connect_url=f"https://claude.ai/code/{session_id}",
