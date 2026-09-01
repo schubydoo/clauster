@@ -124,6 +124,22 @@ def proc_start_ticks(pid: int) -> int | None:
         return None
 
 
+def start_time_is_drift_prone() -> bool:
+    """Whether this platform's process create-time moves when the wall clock is corrected.
+
+    True on Linux only. psutil derives ``create_time`` there as ``starttime/CLK_TCK +
+    boot_time()``, re-reading ``/proc/stat`` btime every call — and btime tracks the live
+    realtime-vs-uptime offset, so NTP slew shifts it under a process that never restarted
+    (#1399). macOS and Windows record an absolute timestamp at exec (``proc_pidinfo`` /
+    ``GetProcessTimes``) and hand back the same value forever, so a start-time mismatch
+    there really does mean a different process.
+
+    Callers use it to tell a *conclusive* "not our process" from an *inconclusive* one, which
+    matters wherever the answer drives a destructive action.
+    """
+    return sys.platform == "linux"
+
+
 def jiffies_to_epoch(jiffies: int) -> float | None:
     """Convert a Linux starttime (jiffies since boot) to an epoch timestamp.
 

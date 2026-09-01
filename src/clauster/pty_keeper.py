@@ -199,6 +199,29 @@ def _proc_start(pid: int) -> float | None:
         return None
 
 
+def _proc_start_pair(pid: int) -> tuple[float | None, int | None]:
+    """Return the bridge's ``(epoch, boot-relative ticks)`` start pair from ONE /proc read.
+
+    Derived rather than sampled twice (#1399): two independent reads can straddle the
+    bridge's death and a pid recycle, and the sidecar would then describe two different
+    processes — a pair the reattach's 1-hour epoch conjunct would happily authenticate on
+    the recycled occupant. Deriving the epoch from the ticks makes them agree by
+    construction, and it is the same arithmetic psutil does.
+
+    Falls back to sampling the epoch directly where the tick read is unavailable (non-Linux,
+    unreadable ``/proc``), which is the pre-#1399 behaviour.
+    """
+    ticks = _proc_start_ticks(pid)
+    if ticks is None:
+        return _proc_start(pid), None
+    try:
+        from clauster import procutil
+
+        return procutil.jiffies_to_epoch(ticks), ticks
+    except Exception:  # noqa: BLE001 — discovery aid only; never fatal
+        return None, ticks
+
+
 def _proc_start_ticks(pid: int) -> int | None:
     """Return the bridge's boot-relative start ticks, the drift-immune half of the pair.
 
@@ -441,8 +464,7 @@ def _run_keeper_conpty(
         return 71
 
     base["bridge_pid"] = proc.pid
-    base["bridge_proc_start"] = _proc_start(proc.pid)
-    base["bridge_start_ticks"] = _proc_start_ticks(proc.pid)
+    base["bridge_proc_start"], base["bridge_start_ticks"] = _proc_start_pair(proc.pid)
     _write_sidecar(sidecar, base)
 
     drain = _KeeperDrain(base, sidecar, screen, screen_sidecar)
@@ -597,8 +619,7 @@ def run_keeper(
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
 
     base["bridge_pid"] = proc.pid
-    base["bridge_proc_start"] = _proc_start(proc.pid)
-    base["bridge_start_ticks"] = _proc_start_ticks(proc.pid)
+    base["bridge_proc_start"], base["bridge_start_ticks"] = _proc_start_pair(proc.pid)
     _write_sidecar(sidecar, base)
 
     flags = fcntl.fcntl(master, fcntl.F_GETFL)

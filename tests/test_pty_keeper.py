@@ -268,6 +268,31 @@ def test_proc_start_ticks_returns_none_on_error(monkeypatch) -> None:
     assert pty_keeper._proc_start_ticks(1234) is None
 
 
+def test_proc_start_pair_is_derived_from_one_read_and_degrades_together(monkeypatch) -> None:
+    """The sidecar's two start values come from ONE /proc read, and fail as a unit.
+
+    Two independent samples can straddle a death plus pid recycle and describe different
+    processes — a pair the reattach's 1-hour epoch conjunct would then authenticate on the
+    recycled occupant (#1399).
+    """
+    from clauster import pty_keeper
+
+    monkeypatch.setattr("clauster.procutil.proc_start_ticks", lambda _pid: 770579)
+    monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", lambda ticks: 1000.0 + ticks)
+    assert pty_keeper._proc_start_pair(1234) == (770579 + 1000.0, 770579)
+
+    def _boom(_ticks):
+        raise RuntimeError("boot_time exploded")
+
+    monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", _boom)
+    assert pty_keeper._proc_start_pair(1234) == (None, 770579)
+
+    # No ticks (non-Linux, unreadable /proc) -> the pre-#1399 direct epoch sample.
+    monkeypatch.setattr("clauster.procutil.proc_start_ticks", lambda _pid: None)
+    monkeypatch.setattr("clauster.procutil.proc_create_time", lambda _pid: 555.0)
+    assert pty_keeper._proc_start_pair(1234) == (555.0, None)
+
+
 def test_write_sidecar_swallows_oserror(tmp_path: Path) -> None:
     """A sidecar write into a missing directory must never take the bridge down."""
     from clauster import pty_keeper

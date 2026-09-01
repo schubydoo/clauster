@@ -368,7 +368,7 @@ async def test_second_restart_still_hides_the_pid_less_row_of_a_live_pty_session
     monkeypatch.setattr(
         "clauster.runner.procutil.is_live_bridge", lambda pid, proc_start=None, **_kw: pid == 4242
     )
-    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s: 5555)
+    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s, **_kw: 5555)
     monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: 777.0)
     monkeypatch.setattr("clauster.runner.pointers.pointer_for_project", lambda path: None)
 
@@ -500,7 +500,7 @@ async def test_rediscover_drops_a_keeper_pid_that_is_no_longer_a_keeper(
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
     # No sidecar correlates a keeper to THIS bridge, so none may be adopted: the row's
     # keeper pid is not trusted on its own, because `stop()` force-kills that pid's tree.
-    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s: None)
+    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s, **_kw: None)
     await runner.rediscover(persist=False)
 
     inst = runner.get_instance("iid-a")
@@ -1036,7 +1036,7 @@ async def test_reattach_records_the_keeper_start_time_with_its_pid(runner_config
     _stub_connect(monkeypatch)
     runner.persistence.state_store().save({"iid-pty": _row("alpha", pid=5002)})
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
-    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s: 5555)
+    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s, **_kw: 5555)
     monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: 777.0)
 
     await runner.rediscover(persist=False)
@@ -1052,7 +1052,7 @@ def test_recovery_rejects_a_pid_recycled_mid_snapshot(runner_config, monkeypatch
     # it, and a keeper-shaped occupant strands forget with InstanceStillLive. A process
     # created AFTER validation began cannot be the keeper validation saw.
     runner = _make_runner(runner_config)
-    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s: 5555)
+    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s, **_kw: 5555)
     monkeypatch.setattr(
         "clauster.runner.procutil.proc_create_time", lambda pid: time.time() + 100.0
     )
@@ -1082,7 +1082,7 @@ async def test_pointer_walk_reattach_records_the_keeper_start_time_too(runner_co
     )
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
     monkeypatch.setattr("clauster.runner.pointers.pointer_for_project", lambda *a, **k: ptr)
-    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s: 6666)
+    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s, **_kw: 6666)
     monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: 888.0)
 
     await runner.rediscover(persist=False)
@@ -1116,7 +1116,7 @@ async def test_resync_replaces_the_keeper_pair_together(runner_config, monkeypat
         "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None, **_kw: pid == 4402
     )
     _stub_connect(monkeypatch)
-    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s: 2222)
+    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s, **_kw: 2222)
     monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: 222.0)
 
     await runner.poll_once()
@@ -1739,7 +1739,7 @@ async def test_adoption_does_not_promote_an_unready_bridge_to_running(runner_con
     runner = _make_runner(runner_config)
     runner.persistence.state_store().save({"iid-a": _row("alpha", pid=6601)})
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
-    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s: None)
+    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s, **_kw: None)
     monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
     await runner.poll_once()  # no pointer, no sidecar -> no readiness evidence
 
@@ -2259,7 +2259,7 @@ async def test_pty_sidecar_must_be_ready_and_pid_correlated(runner_config, monke
         )
     )
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
-    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s: None)
+    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s, **_kw: None)
     await runner.rediscover(persist=False)
 
     inst = runner.get_instance("iid-a")
@@ -2292,7 +2292,7 @@ async def test_adoption_does_not_overwrite_an_instance_a_lock_holder_created(
     runner.persistence.state_store().save({"iid-a": _row("alpha", pid=3401)})
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
     monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
-    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s: None)
+    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s, **_kw: None)
 
     winner = RemoteControlInstance(
         instance_id="iid-a", project="alpha", label="from-adopt", status=InstanceStatus.RUNNING

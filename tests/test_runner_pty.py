@@ -1682,6 +1682,48 @@ def test_recover_keeper_pid_skips_foreign_and_corrupt_sidecars(runner_config) ->
     assert runner._recover_keeper_pid("gamma", bridge_pid=2222, bridge_proc_start=100.0) is None
 
 
+def test_recover_keeper_pid_prefers_ticks_over_a_drifted_epoch(runner_config) -> None:
+    # #1399. The pointer walk recomputes its epoch with TODAY's btime while the sidecar's
+    # was frozen at spawn, so a clock correction bigger than _PROC_START_TOLERANCE (2.0s;
+    # a 4s spread was measured on the dogfood host) made a live keeper fail to match its
+    # own bridge. The keeper pid was then lost, and stop() never cleaned up its tree.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    runner._log_dir.mkdir(parents=True, exist_ok=True)
+    (runner._log_dir / "gamma-1700000000000-0.keeper.json").write_text(
+        json.dumps(
+            {
+                "keeper_pid": 7777,
+                "bridge_pid": 2222,
+                "bridge_proc_start": 100.0,
+                "bridge_start_ticks": 770579,
+            }
+        )
+    )
+    # Epoch 4s adrift, ticks identical -> matched on the drift-immune half.
+    assert (
+        runner._recover_keeper_pid(
+            "gamma", bridge_pid=2222, bridge_proc_start=104.0, bridge_start_ticks=770579
+        )
+        == 7777
+    )
+    # Ticks genuinely different -> a real PID-reuse, still rejected however close the
+    # epochs are. This is the branch the exact compare buys over the 2.0s slack.
+    assert (
+        runner._recover_keeper_pid(
+            "gamma", bridge_pid=2222, bridge_proc_start=100.0, bridge_start_ticks=770580
+        )
+        is None
+    )
+    # A sidecar from a pre-#1399 keeper has no ticks -> the epoch arm still decides.
+    assert (
+        runner._recover_keeper_pid(
+            "gamma", bridge_pid=2222, bridge_proc_start=104.0, bridge_start_ticks=None
+        )
+        is None
+    )
+
+
 @_POSIX_ONLY
 async def test_spawn_pty_error_surfaces_keeper_error_detail(
     runner_config, tmp_path, monkeypatch

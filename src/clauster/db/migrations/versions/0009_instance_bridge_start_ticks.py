@@ -20,9 +20,11 @@ PID-reuse defense, now genuinely exact rather than nearly-tight), coarse on the 
 
 Additive and nullable, mirroring ``keeper_proc_start`` in 3a5e9c81d47b: a row written by an
 older build loads with the column absent and the comparison degrades to exactly today's
-epoch-only behaviour. That degradation still drifts, so it is deliberately paired with the
-prune no longer resting on this predicate — a row is re-stamped on its next spawn, and until
-then the failure is a stale card rather than a deleted one.
+epoch-only behaviour, which still drifts. What keeps that degradation from being destructive
+is a separate guard rather than this column: the phantom-prune treats a verdict reached
+WITHOUT the drift-immune half as inconclusive and refuses to delete a card on the strength of
+its own project's pid. So a pre-#1399 row can still show a stale Stopped card until its next
+spawn re-stamps it, but it can no longer be deleted for it.
 
 Revision ID: 8e2d05b7a913
 Revises: 3a5e9c81d47b

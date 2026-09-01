@@ -3902,6 +3902,16 @@ async def test_poll_prune_spares_a_live_bridges_card_when_its_own_pid_is_the_evi
         "a bridge's own pid must never be the evidence that deletes its own card"
     )
 
+    # A SECOND tick is the real test. The first attempt at this fix keyed the exclusion on
+    # "was RUNNING when the tick started", which held for exactly one poll: `_reconcile_status`
+    # only ever demotes, so by tick 2 the victim was already STOPPED, dropped out again, and
+    # the card was deleted one poll later — the same bug, moved. Being inconclusive is a
+    # property of the evidence, not of when we looked, so it does not expire.
+    await runner.poll_once()
+    assert runner.get_instance(victim.instance_id) is not None, (
+        "the exclusion must not expire after the tick that demoted the instance"
+    )
+
 
 async def test_poll_prune_still_fires_for_a_genuinely_unmanaged_bridge_at_a_projects_cwd(
     runner_config, monkeypatch
@@ -3944,11 +3954,14 @@ async def test_poll_prune_still_uses_a_long_dead_cards_recycled_pid_at_its_own_c
 ):
     # The same-project variant of `test_poll_prune_ignores_a_recycled_pid_from_a_stopped_
     # instance`, which sits in a different project and so never covered this. Scoping the
-    # #1399 exclusion per project must not let a card that was ALREADY stopped before the
-    # tick began shield its own stale pid: once the OS recycles that pid onto a genuinely
-    # unmanaged bridge at the same cwd, discarding the evidence leaves a phantom card up
-    # offering a Resume that double-spawns. Only an instance this tick believed it was
-    # holding is excluded.
+    # #1399 exclusion per project must not let a card shield its own stale pid once the OS
+    # recycles it onto a genuinely unmanaged bridge at the same cwd — that leaves a phantom
+    # card up offering a Resume that double-spawns.
+    #
+    # This card records `bridge_start_ticks`, so its "not our process" verdict was reached
+    # on the drift-immune half and is CONCLUSIVE. That is the whole discriminator: only an
+    # inconclusive verdict (epoch-only, on a platform whose create-time drifts) buys the
+    # exclusion, because only there can a False mean "the clock moved".
     config = runner_config[0]
     runner = _make_runner(runner_config)
     phantom = RemoteControlInstance(
@@ -3958,6 +3971,7 @@ async def test_poll_prune_still_uses_a_long_dead_cards_recycled_pid_at_its_own_c
         resume_mode="standard",
         bridge_pid=555000,
         bridge_proc_start=111.0,
+        bridge_start_ticks=111000,
     )
     runner._instances[phantom.instance_id] = phantom
     sess = WorkingSession(
