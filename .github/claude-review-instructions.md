@@ -158,3 +158,8 @@ fix cannot reach round seven on style.
   important findings" plainly when that is the case.
 - Use a committable ```suggestion``` block only when committing it fixes the issue
   **entirely**. If follow-up work is needed, describe the fix instead.
+- **Findings keep their calibration.** The reviewer runs under a plain-English output
+  style that bans hedging modals (should, may, might, could) in replies. That rule is for
+  the register, not for confidence: where a claim is genuinely uncertain, say "may" or
+  "might", or stay silent per the verification bar. Never promote a hedge to "must" to
+  satisfy the style.
