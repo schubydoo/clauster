@@ -118,12 +118,48 @@ _TOKEN_RE = re.compile(r"CLAUDE_CODE_OAUTH_TOKEN=(\S+)")
 # the operator was shown no link at all — on the ConPTY path (#905) the only recoverable copy.
 # Whether that happened depended on where a ``read()`` landed, since ``_scan_osc8``'s carry
 # restarts at the last opener; excluding ESC ends a stray opener at the next escape instead,
-# the same discipline ``redact._ANSI_RE`` adopted for OSC bodies in #1329. Note this covers
-# the PARAMS run only: the URI capture two characters later still admits ``;``, CR and LF, so
-# an unterminated hyperlink can still take a following line's text into its URI. Pre-existing
-# and out of scope for #1356 — the host + authorize-path filter in
-# :meth:`PtyScreen.find_authorize_url` is what stands between that and an operator.
-_OSC8_RE = re.compile(rb"\x1b\]8;[^;\x1b\x07\r\n]*;([^\x1b\x07]*)(?:\x1b\\|\x07)")
+# the same discipline ``redact._ANSI_RE`` adopted for OSC bodies in #1329.
+#
+# ⚠️ The URI run is bounded the same way (#1382). It used to be ``[^\x1b\x07]*``, which admits
+# CR, LF, space and every byte above ``\x7f``, so an *unterminated* opener swallowed following
+# text into its URI until some later BEL closed it. The damaging shape is the real link losing
+# its own terminator: ``ESC]8;;<authorize-url>`` CRLF ``<next line>`` BEL captured
+# ``https://claude.com/cai/oauth/authorize?…\r\nnext line``, which still starts with
+# ``https://`` (so ``_scan_osc8`` keeps it) and — because ``urlsplit`` strips CR/LF/TAB per
+# WHATWG — still parsed to the known host and the authorize path, so it cleared
+# :meth:`find_authorize_url`'s strict hidden-target bar and was handed to the operator as a
+# corrupted URL that cannot be opened. A stray high byte did the same through a different
+# door: ``ascii``/``replace`` turns it into ``�``, and ``a�b.claude.com`` still
+# ``endswith(".claude.com")``, so an unresolvable host cleared the bar too.
+#
+# The bound is the URI grammar itself: RFC 3986 §2 makes a URI ASCII-only and admits no C0/DEL
+# control and no space (all MUST be percent-encoded), and the OSC 8 spec says the same — so
+# excluding ``\x00-\x20`` and ``\x7f-\xff`` cannot truncate a legal URI. It subsumes the old
+# ESC/BEL exclusions and is monotonic: because BOTH runs exclude ESC, a match can never span a
+# later opener, so matches are per-opener and independent and a narrower run can only match
+# less, never more. That is also why ``_scan_osc8``'s carry is unaffected — the whole
+# opener→terminator span always sits inside the carry window, so the per-opener verdict is the
+# same at any chunking.
+#
+# ``;`` is deliberately NOT excluded even though the params run excludes it: ``;`` is a legal
+# RFC 3986 sub-delimiter, so excluding it would truncate a legitimate URI and drop the
+# hyperlink entirely — the exact harm this fixes.
+#
+# What dropping a malformed hyperlink costs, honestly. It differs by shape, and only the
+# CR/LF one is free — do not carry "this loses nothing" past it:
+#
+#   * CR/LF weld: nothing lost. ``redact._ANSI_RE``'s OSC branch also excludes CR/LF, so the
+#     sequence falls through to its bare ``ESC ]`` branch with the payload intact and the URL
+#     still reaches the operator in `login_shepherd`'s fail-closed ``Captured output:``.
+#   * SPACE weld (``ESC]8;;<url>Setup interrupted BEL`` — the same lost terminator, just with
+#     ordinary prose before any CR/LF or ESC): strictly worse. ``_ANSI_RE``'s OSC body ALLOWS
+#     space, so the sequence matches that branch and ``strip_ansi`` deletes it whole — the URL
+#     is gone from ``Captured output:`` too, and on the ConPTY path (#905) nothing is left.
+#
+# The trade is taken deliberately even so: a silently-wrong URL that LOOKS right is worse for
+# the operator than an explicit "no link found". The space shape is no more "a broken emitter"
+# than the CR/LF one — both are one lost terminator — it just degrades further.
+_OSC8_RE = re.compile(rb"\x1b\]8;[^;\x1b\x07\r\n]*;([^\x00-\x20\x7f-\xff]*)(?:\x1b\\|\x07)")
 
 # Bound on the raw-byte tail carried between :meth:`PtyScreen.feed` calls so a hyperlink
 # split across a chunk boundary still matches — comfortably larger than the ~450-char
@@ -286,8 +322,9 @@ def _select_authorize_url(candidates: Iterable[str]) -> str | None:
 def extract_osc8_hyperlinks(data: bytes) -> list[str]:
     """Return the URIs of every complete OSC 8 hyperlink *open*-sequence in ``data``.
 
-    The closing sequence (``ESC ] 8 ; ; ST``) carries an empty URI and is skipped. OSC 8
-    URIs are ASCII per spec; a stray non-ASCII byte is replaced rather than raising. Used to
+    The closing sequence (``ESC ] 8 ; ; ST``) carries an empty URI and is skipped. OSC 8 URIs
+    are ASCII per spec, and :data:`_OSC8_RE` now enforces that (#1382), so the
+    decode-with-replacement here is belt-and-braces rather than load-bearing. Used to
     recover ``claude setup-token``'s authorize URL under a ConPTY, where it is emitted as a
     hyperlink whose target pyte does not render (see :data:`_OSC8_RE`).
     """

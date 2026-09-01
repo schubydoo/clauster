@@ -227,6 +227,90 @@ def test_extract_osc8_hyperlinks_params_never_span_a_line():
     assert extract_osc8_hyperlinks(b"\x1b]8;id=1\nnot-a-link;https://evil.example/\x07") == []
 
 
+@pytest.mark.parametrize(
+    ("label", "injected"),
+    [
+        # #1382, the sibling of the params-run bound above. The URI run used to be
+        # `[^\x1b\x07]*`, which admits CR/LF, space and every byte above \x7f, so an
+        # unterminated opener kept eating text until some later BEL closed it. RFC 3986 §2
+        # makes a URI ASCII-only and admits no control and no space — all MUST be
+        # percent-encoded — so ending the run at any of them cannot truncate a legal URI.
+        ("crlf", b"\r\nnext line of output"),
+        ("lf", b"\nnext line of output"),
+        ("space", b" and then some prose"),
+        # `ascii`/`replace` turns a stray high byte into U+FFFD, and `a�b.claude.com`
+        # still endswith(".claude.com") — so an unresolvable host cleared the known-host bar.
+        ("high byte", b"\xffmore"),
+        ("del", b"\x7fmore"),
+    ],
+)
+def test_extract_osc8_hyperlinks_uri_stops_at_a_byte_no_uri_may_contain(
+    label: str, injected: bytes
+):
+    uri = b"https://claude.com/cai/oauth/authorize"
+    # Positive control FIRST, so a green test can never mean "the regex matched nothing".
+    assert extract_osc8_hyperlinks(b"\x1b]8;;" + uri + b"\x07") == [uri.decode()], label
+    assert extract_osc8_hyperlinks(b"\x1b]8;;" + uri + injected + b"\x07") == [], label
+
+
+def test_extract_osc8_hyperlinks_uri_keeps_a_legal_semicolon():
+    # `;` is excluded from the PARAMS run but must NOT be excluded from the URI run: it is a
+    # legal RFC 3986 sub-delimiter, so excluding it would truncate the URI, fail the
+    # terminator match, and drop the hyperlink entirely — the exact harm #1382 fixes.
+    uri = b"https://claude.com/cai/oauth/authorize;v=2?a=1"
+    assert extract_osc8_hyperlinks(b"\x1b]8;;" + uri + b"\x07") == [uri.decode()]
+
+
+def test_find_authorize_url_osc8_unterminated_link_is_not_handed_over_corrupted():
+    # The operator-visible half of #1382. An unterminated opener carrying the REAL authorize
+    # URL used to capture it welded to the next line; `urlsplit` strips CR/LF per WHATWG, so
+    # the weld still parsed to the known host and the authorize path and cleared
+    # find_authorize_url's strict hidden-target bar — the operator was handed a URL that
+    # cannot be opened. Nothing is lost by refusing it: `redact._ANSI_RE`'s OSC branch also
+    # excludes CR/LF, so the sequence keeps its payload through `strip_ansi` and the URL still
+    # reaches the operator in login_shepherd's fail-closed "Captured output:" message.
+    scr = PtyScreen(cols=200, rows=6, capture_osc8=True)
+    scr.feed(b"\x1b]8;;" + _OSC8_AUTH.encode() + b"\r\nSetup interrupted\x07")
+    assert scr.find_authorize_url() is None
+
+
+def test_extract_osc8_hyperlinks_a_dropped_uri_does_not_cost_the_next_link():
+    # The load-bearing safety claim of #1382 is monotonicity: a narrower URI run can only
+    # match LESS, never more, and dropping a malformed opener must not take a later valid link
+    # with it. #1356 proves the opposite failure is real in this exact regex — a malformed
+    # opener costing the real link that follows it — so it is pinned rather than argued. The
+    # first opener's run stops at the space, its next byte is not a terminator, the match
+    # fails, and the scan resumes at the second opener.
+    uri = b"https://claude.com/cai/oauth/authorize"
+    stream = b"\x1b]8;;https://a b\x07label\x1b]8;;" + uri + b"\x07"
+    assert extract_osc8_hyperlinks(stream) == [uri.decode()]
+
+
+def test_osc8_crlf_weld_is_chunk_invariant():
+    # The property that regressed last time (#1356): the same bytes must give the same answer
+    # however a read() splits them, because `_scan_osc8`'s carry restarts at the last opener.
+    # Both runs of `_OSC8_RE` exclude ESC, so a match can never span a later opener — matches
+    # are per-opener, the whole opener->terminator span sits inside the carry window, and the
+    # verdict cannot depend on the chunking. Pinned here for the #1382 bound as well.
+    #
+    # The well-formed hyperlink in front is the positive control: without it both sides assert
+    # `[]` and the test stays green under ANY change that makes `_scan_osc8` retain nothing —
+    # a broken `capture_osc8` wiring, a regex that stops matching at all. With it, a broken
+    # carry shows up as a DIFFERENCE between the two chunkings, and a regressed weld shows up
+    # as a second entry.
+    weld = b"\x1b]8;;" + _OSC8_AUTH.encode() + b"\r\nSetup interrupted\x07"
+    stream = _osc8(_OSC8_AUTH, bel=True) + weld
+
+    def retained(chunks):
+        scr = PtyScreen(cols=200, rows=6, capture_osc8=True)
+        for chunk in chunks:
+            scr.feed(chunk)
+        return scr._osc8_urls
+
+    assert retained([stream]) == [_OSC8_AUTH]
+    assert retained([stream[i : i + 1] for i in range(len(stream))]) == [_OSC8_AUTH]
+
+
 def test_find_authorize_url_recovers_conpty_osc8_hyperlink():
     # The URL is ONLY inside the hyperlink escape — the visible display shows just "Open link".
     scr = PtyScreen(cols=100, rows=6, capture_osc8=True)
