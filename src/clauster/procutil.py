@@ -283,6 +283,29 @@ def proc_create_time(pid: int) -> float | None:
         return None
 
 
+def proc_start_pair(pid: int) -> tuple[float | None, int | None]:
+    """Both halves of a process's start identity, from ONE read (#1399).
+
+    ``(epoch, boot-relative ticks)``. Sampling them separately puts a suspension point
+    between two ``/proc`` reads, and a process that dies in that window can have its pid
+    recycled — leaving a pair whose halves describe DIFFERENT processes. That pair then
+    authenticates the recycled occupant, because :func:`is_live_process` matches the ticks
+    exactly (they are the new process's) and the epoch only within
+    ``_DRIFT_EPOCH_TOLERANCE``. On a destructive path (``stop`` signals and force-kills the
+    tree behind this pair) that is strictly worse than the pre-#1399 tight epoch bound,
+    which rejected the mismatch.
+
+    Deriving the epoch FROM the ticks makes the halves agree by construction — it is the
+    same arithmetic psutil does on Linux. Where ticks are unavailable (non-Linux, unreadable
+    ``/proc``) it falls back to sampling the epoch directly, which is the pre-#1399 shape and
+    has no second read to straddle.
+    """
+    ticks = proc_start_ticks(pid)
+    if ticks is None:
+        return proc_create_time(pid), None
+    return jiffies_to_epoch(ticks), ticks
+
+
 def proc_cwd(pid: int) -> Path | None:
     """Return ``pid``'s current working directory, or ``None`` when it can't be read.
 

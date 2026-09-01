@@ -281,13 +281,22 @@ def test_proc_start_pair_is_derived_from_one_read_and_degrades_together(monkeypa
     monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", lambda ticks: 1000.0 + ticks)
     assert pty_keeper._proc_start_pair(1234) == (770579 + 1000.0, 770579)
 
-    def _boom(_ticks):
-        raise RuntimeError("boot_time exploded")
-
-    monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", _boom)
+    # A host that cannot express boot time: `jiffies_to_epoch` answers None, and the ticks
+    # still travel — they are the half that matters, and a pair with no epoch simply skips
+    # the start-time check the way it always did.
+    monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", lambda _ticks: None)
     assert pty_keeper._proc_start_pair(1234) == (None, 770579)
 
+    # An UNEXPECTED raise degrades to the honest unknown rather than aborting the keeper's
+    # first sidecar write — the reason this wrapper exists at all.
+    def _boom(_pid):
+        raise RuntimeError("psutil exploded")
+
+    monkeypatch.setattr("clauster.procutil.proc_start_pair", _boom)
+    assert pty_keeper._proc_start_pair(1234) == (None, None)
+
     # No ticks (non-Linux, unreadable /proc) -> the pre-#1399 direct epoch sample.
+    monkeypatch.undo()
     monkeypatch.setattr("clauster.procutil.proc_start_ticks", lambda _pid: None)
     monkeypatch.setattr("clauster.procutil.proc_create_time", lambda _pid: 555.0)
     assert pty_keeper._proc_start_pair(1234) == (555.0, None)

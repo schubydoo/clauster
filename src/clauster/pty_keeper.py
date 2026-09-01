@@ -202,24 +202,22 @@ def _proc_start(pid: int) -> float | None:
 def _proc_start_pair(pid: int) -> tuple[float | None, int | None]:
     """Return the bridge's ``(epoch, boot-relative ticks)`` start pair from ONE /proc read.
 
-    Derived rather than sampled twice (#1399): two independent reads can straddle the
-    bridge's death and a pid recycle, and the sidecar would then describe two different
-    processes — a pair the reattach's 1-hour epoch conjunct would happily authenticate on
-    the recycled occupant. Deriving the epoch from the ticks makes them agree by
-    construction, and it is the same arithmetic psutil does.
+    Thin wrapper over :func:`clauster.procutil.proc_start_pair`, which owns the rule and
+    the reasoning — derived rather than sampled twice, so a death plus pid recycle between
+    two reads cannot leave a pair describing different processes (#1399). Shared with the
+    runner's own spawn stamp so the sidecar and the registry cannot disagree about what a
+    start pair means.
 
-    Falls back to sampling the epoch directly where the tick read is unavailable (non-Linux,
-    unreadable ``/proc``), which is the pre-#1399 behaviour.
+    Wrapped like its siblings here: the keeper must never raise out of its startup path, and
+    an import or psutil failure degrades to the honest unknown rather than aborting the first
+    sidecar write.
     """
-    ticks = _proc_start_ticks(pid)
-    if ticks is None:
-        return _proc_start(pid), None
     try:
         from clauster import procutil
 
-        return procutil.jiffies_to_epoch(ticks), ticks
+        return procutil.proc_start_pair(pid)
     except Exception:  # noqa: BLE001 — discovery aid only; never fatal
-        return None, ticks
+        return None, None
 
 
 def _proc_start_ticks(pid: int) -> int | None:

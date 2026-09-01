@@ -2043,11 +2043,15 @@ class SessionRunner:
             return SpawnOutcome(instance=instance, created=True, warnings=spawn_warnings)
         self._procs[instance.instance_id] = proc
         instance.bridge_pid = proc.pid
-        instance.bridge_proc_start = await asyncio.to_thread(procutil.proc_create_time, proc.pid)
-        # The drift-immune half of the same pair (#1399), stamped in the same breath so the
-        # two can never describe different processes. ``None`` off Linux, where the epoch
-        # above is already stable.
-        instance.bridge_start_ticks = await asyncio.to_thread(procutil.proc_start_ticks, proc.pid)
+        # ONE sample for both halves (#1399). Two `to_thread` hops would put a full
+        # suspension point between them, and a bridge that dies in that window — a startup
+        # failure, which is exactly what this runs before `_await_ready` to catch — can have
+        # its pid recycled, leaving a pair describing two processes. `stop()` signals and
+        # force-kills the tree behind that pair. The keeper states the same rule for its
+        # sidecar; both now go through the one helper so they cannot drift apart.
+        instance.bridge_proc_start, instance.bridge_start_ticks = await asyncio.to_thread(
+            procutil.proc_start_pair, proc.pid
+        )
 
         markers = await asyncio.to_thread(self._await_ready, raw_path, proc)
         self._apply_markers(instance, markers, proc)
@@ -3493,7 +3497,10 @@ class SessionRunner:
                 twice = instance.resume_mode == "pty"
                 await asyncio.to_thread(self._signal_stop, pid, twice=twice)
                 await self._await_exit(
-                    project_name, pid, instance.bridge_proc_start, instance.bridge_start_ticks
+                    project_name,
+                    pid,
+                    instance.bridge_proc_start,
+                    start_ticks=instance.bridge_start_ticks,
                 )
             if keeper_pid is not None:  # pragma: skip-on-win
                 await asyncio.to_thread(self._cleanup_keeper, keeper_pid)
@@ -3690,7 +3697,12 @@ class SessionRunner:
             _log.debug("stop signal to pid %s was a no-op: %s", pid, exc)
 
     async def _await_exit(
-        self, name: str, pid: int, proc_start: float | None, start_ticks: int | None
+        self,
+        name: str,
+        pid: int,
+        proc_start: float | None,
+        *,
+        start_ticks: int | None,  # keyword-required — see _recover_keeper_pid (#1399)
     ) -> None:
         """Wait out the shutdown grace, then force the tree down and reap the child.
 
@@ -3870,6 +3882,11 @@ class SessionRunner:
             status=InstanceStatus.STOPPED,
             bridge_pid=None,
             bridge_proc_start=None,
+            # Named rather than left to the model default: this is a deliberate ZEROING of
+            # the identity, so all three fields of the pair belong here together. Relying on
+            # the default would let a future default change silently carry a stale tick count
+            # onto a dead card, where a pid reuse could read as the bridge coming back.
+            bridge_start_ticks=None,
             keeper_pid=None,
         )
 
@@ -4158,13 +4175,20 @@ class SessionRunner:
         # HAVE a pid, so one whose pid was unknown at snapshot (the mid-`_popen` window)
         # yields None below and is skipped rather than clobbered.
         gen = {
-            iid: (i.bridge_pid, i.bridge_proc_start, i.status, i.intentional_stop)
+            iid: (
+                i.bridge_pid,
+                i.bridge_proc_start,
+                i.status,
+                i.intentional_stop,
+                i.bridge_start_ticks,
+            )
             for iid, i in self._instances.items()
             if i.bridge_pid is not None
         }
-        ours = {
-            iid: (g[0], g[1], self._instances[iid].bridge_start_ticks) for iid, g in gen.items()
-        }
+        # Read in the SAME pass as `gen` rather than re-indexing `self._instances`: correct
+        # either way today (no await separates them), but this removes the implicit invariant
+        # instead of trusting a future editor not to insert one.
+        ours = {iid: (g[0], g[1], g[4]) for iid, g in gen.items()}
         live = await asyncio.to_thread(
             lambda: {
                 key: {
@@ -4201,7 +4225,7 @@ class SessionRunner:
         inst: RemoteControlInstance,
         saved: dict,
         pair: tuple[int, float | None, int | None],
-        ours_generation: tuple[int | None, float | None, InstanceStatus, bool] | None,
+        ours_generation: tuple[int | None, float | None, InstanceStatus, bool, int | None] | None,
         discovered: dict[str, Project],
     ) -> None:
         """Take over the pids another process resumed this instance with (#1088).
@@ -4285,6 +4309,7 @@ class SessionRunner:
                 current.bridge_proc_start,
                 current.status,
                 current.intentional_stop,
+                current.bridge_start_ticks,
             ) != ours_generation:
                 # Status and intent are in the tuple deliberately — see the docstring: a
                 # completed `stop()` leaves `bridge_pid` set, so a pid-only compare would
@@ -4563,6 +4588,11 @@ class SessionRunner:
             # card, where a later reuse of that pid could read as this bridge coming back.
             bridge_pid=None,
             bridge_proc_start=None,
+            # Named rather than left to the model default: this is a deliberate ZEROING of
+            # the identity, so all three fields of the pair belong here together. Relying on
+            # the default would let a future default change silently carry a stale tick count
+            # onto a dead card, where a pid reuse could read as the bridge coming back.
+            bridge_start_ticks=None,
             keeper_pid=None,
         )
 
@@ -5404,6 +5434,14 @@ class SessionRunner:
         # Only where the epoch was the sole evidence can a False mean "the clock moved", and
         # there the destructive reading is the one we refuse.
         #
+        # ⚠️ For those tick-less rows this DOES re-admit the shape the `managed_pids`
+        # paragraph above calls indefensible: a long-dead card's stale pid, recycled onto a
+        # genuinely unmanaged bridge at the same cwd, cancels that bridge as evidence and its
+        # phantom card lingers. That trade is deliberate and bounded — it applies only where
+        # we cannot tell drift from reuse, and the alternative there is deleting a running
+        # session's card. Read that paragraph as absolute for a row WITH ticks, which is
+        # every row a current build writes.
+        #
         # Deliberately NOT "was live when this tick started". That covered the demotion tick
         # only: `_reconcile_status` never promotes back, so on the NEXT tick the victim is
         # already STOPPED, drops out again, and the card is deleted one poll later — the same
@@ -5413,17 +5451,17 @@ class SessionRunner:
         # Keyed by resolved cwd rather than by project NAME so there is no sentinel to get
         # wrong for a row whose `project` degraded to "" — an absent cwd simply has no
         # entry, and a project we cannot locate contributes no exclusion.
+        cwd_of_project = {name: Path(proj.path).resolve() for name, proj in discovered.items()}
         own_project_pids: dict[Path, set[int]] = {}
         for inst in self._instances.values():
-            proj = discovered.get(inst.project)
-            if proj is None or not (
+            proj_cwd = cwd_of_project.get(inst.project)
+            if proj_cwd is None or not (
                 inst.bridge_start_ticks is None and procutil.start_time_is_drift_prone()
             ):
                 continue
-            cwd = Path(proj.path).resolve()
             for pid in (inst.bridge_pid, inst.keeper_pid):
                 if pid is not None:
-                    own_project_pids.setdefault(cwd, set()).add(pid)
+                    own_project_pids.setdefault(proj_cwd, set()).add(pid)
         # ANY unmanaged owner makes the cwd evidence — the remainder non-empty. A managed
         # owner sharing the cwd neither creates evidence nor cancels it.
         external_cwds = {
@@ -5463,10 +5501,7 @@ class SessionRunner:
             # record is no longer RUNNING by the time we get here.
             if inst.status in (InstanceStatus.RUNNING, InstanceStatus.STARTING):
                 continue
-            if (
-                inst.project in discovered
-                and Path(discovered[inst.project].path).resolve() in external_cwds
-            ):
+            if inst.project in cwd_of_project and cwd_of_project[inst.project] in external_cwds:
                 candidates.setdefault(inst.project, []).append(n)
         for project, ids in candidates.items():
             # One external bridge can only be ONE of these rows. With several candidates
@@ -5482,7 +5517,7 @@ class SessionRunner:
                 )
                 continue
             n = ids[0]
-            cwd = Path(discovered[project].path).resolve()
+            cwd = cwd_of_project[project]
             # INFO, not debug: this DELETES a resumable card, and the row it leaves behind
             # is only re-materialized by `rediscover` — i.e. on restart, not next tick. The
             # skip above was logged while the destructive branch was silent, which is

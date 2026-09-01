@@ -4002,12 +4002,23 @@ async def test_poll_prune_still_uses_a_long_dead_cards_recycled_pid_at_its_own_c
 async def test_spawn_stamps_both_halves_of_the_bridge_start_pair(runner_config, monkeypatch):
     # #1399: coverage alone proves the line ran, not that the value lands on the instance —
     # and a NULL here silently degrades every later comparison back to the drifting epoch.
+    #
+    # Pinned as ONE sample, not two. Two `to_thread` hops would put a suspension point
+    # between the halves, and a bridge dying in that window (a startup failure — precisely
+    # what this runs before `_await_ready` to catch) can have its pid recycled, leaving a
+    # pair describing two processes. `stop()` force-kills the tree behind that pair.
     runner = _make_runner(runner_config)
-    monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: 1000.0)
-    monkeypatch.setattr("clauster.runner.procutil.proc_start_ticks", lambda pid: 770579)
+    calls = []
+
+    def _one_sample(pid):
+        calls.append(pid)
+        return 1000.0, 770579
+
+    monkeypatch.setattr("clauster.runner.procutil.proc_start_pair", _one_sample)
     inst = await runner.spawn("alpha")
     assert inst.bridge_proc_start == 1000.0
     assert inst.bridge_start_ticks == 770579, "the drift-immune half must be stamped at spawn"
+    assert len(calls) == 1, "both halves must come from a single sample, not two reads"
 
 
 async def test_bridge_start_ticks_round_trips_through_the_store(runner_config, monkeypatch):
@@ -4015,8 +4026,7 @@ async def test_bridge_start_ticks_round_trips_through_the_store(runner_config, m
     # is stamped at spawn and silently lost on the first restart — which is indistinguishable
     # from the pre-#1399 behaviour it exists to replace.
     runner = _make_runner(runner_config)
-    monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: 1000.0)
-    monkeypatch.setattr("clauster.runner.procutil.proc_start_ticks", lambda pid: 770579)
+    monkeypatch.setattr("clauster.runner.procutil.proc_start_pair", lambda pid: (1000.0, 770579))
     inst = await runner.spawn("alpha")
     await runner._persist()
 
