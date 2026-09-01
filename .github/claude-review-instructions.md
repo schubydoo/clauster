@@ -139,19 +139,28 @@ fix cannot reach round seven on style.
   **exactly one submitted review**. Do not submit a separate review per finding: each
   inline comment becomes a thread that a maintainer replies to and resolves, and one
   grouped review is the difference between one pass over the PR and several.
-- **How to submit it, exactly.** Only one command shape gets through the tool
-  permissions, and it is the one that groups. Use it and nothing else:
+- **How to submit it, exactly.** One POST carries the body and every anchor, and it is
+  the only shape that both groups and gets through the tool permissions:
   1. Use the `Write` tool to create `review.json` in the workspace root with the
      payload: `commit_id` (the PR head SHA), `event: "COMMENT"`, `body` (the summary),
-     and a `comments` array of `{path, line, side: "RIGHT", body}` entries.
+     and a `comments` array of `{path, line, side: "RIGHT", body}` entries, one per
+     finding.
   2. Run `gh api repos/<owner>/<repo>/pulls/<n>/reviews --input review.json`.
-  3. Delete `review.json` afterwards.
+
+  Leave `review.json` where it is: no allowed tool can delete it, and the workspace is
+  discarded when the job ends.
+
+  **Never post a standalone inline comment.** GitHub wraps each standalone review
+  comment (`POST .../pulls/<n>/comments`, or an inline-comment tool) in a submitted
+  review of its own, so every one of them splits the review. That is what produced the
+  four-review splits on earlier runs. Every anchor rides in the `comments` array of the
+  single POST above, and a clarification after the fact is a reply on the thread, not a
+  new comment.
 
   These are refused, so do not reach for them: JSON inline on the command line, shell
-  redirects (`> file`), compound commands (`;`, `&&`, `||`), `python3`, `ls`, `git`.
-  `gh pr review` cannot attach inline comments. A refused attempt is a denial the
-  workflow counts, and each retry that falls back to a separate review turns one review
-  into several.
+  redirects (`> file`), compound commands (`;`, `&&`, `||`), `python3`, `ls`, `git`,
+  `rm`. `gh pr review` cannot attach inline comments. A refused attempt is a denial the
+  workflow counts.
 - Put the **summary table** — every finding with its file and line — in the **body of
   the submitted review**, and nowhere else. That table is what makes the review readable
   without opening the diff, and it is what survives inline anchors going stale (once the
