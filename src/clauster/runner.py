@@ -1950,7 +1950,7 @@ class SessionRunner:
             # session's uncommitted work.
             instance.worktree_name = resume_target.worktree_name
         # Register under instance_id — the stable UUID minted by RemoteControlInstance
-        # (via _new_instance_id default_factory) or carried over from the instance
+        # (via new_instance_id default_factory) or carried over from the instance
         # being resumed, NOT the project name.
         self._instances[instance.instance_id] = instance  # on the loop
 

@@ -813,8 +813,11 @@
         // "resumable" in the label must mean resumable NOW: a group whose every bridge is
         // blocked by the one-live-standard-bridge cap offers no Resume that can do
         // anything, so the label would promise an action none of the rows can perform.
+        // `h.project` alongside the uuid for the same reason (#1381): a hosted row whose
+        // saved record lost its project can never respawn, the row offers no Resume button,
+        // and counting it here would put "/ resumable" on a group that has none.
         return this.endedBridges().some((i) => !this.resumeBlockedReason(i.rk))
-          || this.endedHosted().some((h) => h.claude_session_uuid);
+          || this.endedHosted().some((h) => h.claude_session_uuid && h.project);
       },
       // Status -> left-rail colour: the rail encodes liveness/attention, NOT mode (mode is
       // already the badge). live=green · starting=azure · attention=yellow · ended=grey.
@@ -4986,7 +4989,17 @@
         const base = (h && phrasing[h.status]) || fallback ||
           (h ? "This session is no longer live." : "This session is no longer available.");
         const detail = h && h.error_detail ? " " + h.error_detail : "";
-        const resume = h && h.claude_session_uuid ? " Use Resume above to continue it." : "";
+        // Both halves of the Resume gate, matching the row's `x-if` (#1381). Pointing at a
+        // Resume button that is not rendered is worse than the 409 the button used to
+        // produce, so a project-less row is told WHY instead — this panel is the one place
+        // that already surfaces `error_detail`, which makes it the right home for the reason.
+        let resume = "";
+        if (h && h.claude_session_uuid && h.project) {
+          resume = " Use Resume above to continue it.";
+        } else if (h && h.claude_session_uuid) {
+          resume = " It cannot be resumed: its saved record was unreadable and its project is" +
+            " unknown. Kill it and start a new session in the right project.";
+        }
         return base + detail + resume;
       },
       _renderHostedEvent(id, e) {
