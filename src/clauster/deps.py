@@ -526,7 +526,7 @@ _SHAWL_VERSION = "v1.9.0"
 # are the release's checksums.txt asset digests (refreshed by scripts/check_binary_dep_pins.py and
 # fail-closed at install, exactly like Shawl above). Same `# renovate:` customManager pattern.
 # renovate: datasource=github-releases depName=schubydoo/claustrum
-_CLAUSTRUM_VERSION = "v1.9.0"
+_CLAUSTRUM_VERSION = "v1.10.0"
 _CLAUSTRUM_VER_BARE = _CLAUSTRUM_VERSION.removeprefix("v")  # tag "v1.7.1" -> asset infix "1.7.1"
 
 # (platform_marker, GoReleaser OS token, arch_marker, archive ext, sha256 of the archive)
@@ -536,42 +536,42 @@ _CLAUSTRUM_VARIANTS: tuple[tuple[str, str, str, str, str], ...] = (
         "Linux",
         "x86_64",
         "tar.gz",
-        "3a843cc4c6b46b29443c3f4dbcc2e8add31aa9769a60e1add7cc0380c6e16cda",
+        "a2b082ff6b3bd7770d09002cfbad286902dd15c723e43cb70e6ca815e298c558",
     ),
     (
         "linux",
         "Linux",
         "arm64",
         "tar.gz",
-        "d9d8b44bc47f3c398db7def9c5d8d401705fa769ef7efecf1711731045a828d0",
+        "9932ed0999a5c0cee3e0efb79615e69f6e70e7694e687ff5ca9038070cfab4fa",
     ),
     (
         "darwin",
         "Darwin",
         "x86_64",
         "tar.gz",
-        "ef61cfcc72aeeeb2eafd22ff522145e60b522c49bd1b637309f3b2a58caefeaf",
+        "b8952475bd0ce07e0ef8d60872b448c23b647ded6e4913f34b0032380384f187",
     ),
     (
         "darwin",
         "Darwin",
         "arm64",
         "tar.gz",
-        "fa705d05f4a732999b94e0910dc1702ae61024f69d9bbbe6dbd44be8b6b79c91",
+        "8d324c79289fe8dc3ae7a2a768f0d8b0523a3495f8f4bca8baa063ead95364cc",
     ),
     (
         "win32",
         "Windows",
         "x86_64",
         "zip",
-        "b84fcee5679e1085d103a29a8fad31d0e35f6eacb53aaf6b4cdb28bd09948b05",
+        "1abb9ccd5c83af836a87a31b0a6f2c2137866ae564e62477d41b73574debe424",
     ),
     (
         "win32",
         "Windows",
         "arm64",
         "zip",
-        "bc41899916d870d05c9410c01e01852441b51f7bb6d5cb079a21b20637d0b71b",
+        "b182c769aa9e9cc8e48b5ddf4e64a619360d4eac31d68937068605931169a21d",
     ),
 )
 
