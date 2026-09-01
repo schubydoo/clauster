@@ -779,7 +779,83 @@ def _is_self_referential(value: Any) -> bool:
     return False
 
 
-def load_frontmatter_yaml(header: str, *, what: str) -> Any:
+def _yaml_error_where(exc: yaml.YAMLError, line_offset: int = 0) -> str:
+    """Describe *where* a ``YAMLError`` happened, using nothing derived from the document.
+
+    The rejection message reaches the browser — ``list_skills`` surfaces it as a skill's
+    ``frontmatter_error`` — so it must satisfy invariant 4. Interpolating ``str(exc)`` did
+    not: PyYAML writes the offending token into the message **prose** for at least three
+    shapes, where it sits mid-line with no key anchor::
+
+        found undefined alias 'sk-live-…'
+        found duplicate anchor 'sk-live-…'; first occurrence …
+        could not determine a constructor for the tag '!sk-live-…'
+
+    :func:`redact_secret_lines` is line-anchored (it masks a ``key: value`` whose KEY looks
+    secret-shaped), so it cannot reach a bare mid-line payload. Verified: all three survive
+    it unmasked. A credential pasted into frontmatter therefore reached the dashboard.
+
+    So this builds the message from the exception's **positions only** — the integer
+    ``.line``/``.column`` off a mark, or ``ReaderError.position``, plus PyYAML's own class as
+    the category (``ScannerError``, ``ComposerError``, …). Nothing here is derived from the
+    document text, which makes it fail-closed by construction rather than by a predicate that
+    has to be right about every message PyYAML will ever emit. Masking the quoted run instead
+    was considered and rejected: an unquoted token in a future release would leak, and an
+    unanchored sweep over the prose over-masks the useful part — the same dead end #1379
+    records.
+
+    ⚠️ **Only ``.line`` and ``.column`` are safe to touch on a mark.** A ``yaml.error.Mark``
+    is an object, not an offset: it holds ``.buffer`` — the WHOLE document — and its
+    ``__str__``/``get_snippet()`` render a source snippet. Interpolating the mark itself
+    (``f"{mark}"``) would re-leak everything this function exists to withhold.
+
+    ``line_offset`` shifts the reported line so it names the line in the FILE, not in the
+    header slice: both callers hand us ``FRONTMATTER_RE.group(1)``, which begins after the
+    opening ``---`` fence. Without it every message pointed one line above the fault, and with
+    the prose gone that number is all the operator has.
+
+    The cost is the ``problem`` phrase. The operator still gets the category, the position,
+    and ``content`` in the editor beside it. Positions are reported 1-based to match PyYAML's
+    own ``str()`` and any editor.
+    """
+    kind = type(exc).__name__
+    mark = getattr(exc, "problem_mark", None)
+    if mark is None:
+        # Defence, not a live alternative: every error `safe_load` can raise sets
+        # `problem_mark` (scanner/parser/composer/constructor all use the 4-arg
+        # MarkedYAMLError form). The short-arg raises live in the emitter/representer/
+        # serializer/resolver, which `safe_load` never touches.
+        mark = getattr(exc, "context_mark", None)
+    if mark is not None:
+        where = f"line {mark.line + 1 + line_offset}, column {mark.column + 1}"
+        other = getattr(exc, "context_mark", None)
+        if other is not None and (other.line, other.column) != (mark.line, mark.column):
+            # `context_mark` means different things per shape and this seam deliberately does
+            # not know which error it is holding — that is what makes it trustworthy. For an
+            # unterminated quote it is where the construct opened; for a duplicate anchor it is
+            # the FIRST occurrence. So the label is shape-neutral: "started at" would be a lie
+            # on the duplicate-anchor shape, which is one of the three this fix exists for.
+            # Both numbers are the ones the operator needs either way.
+            line, column = other.line + 1 + line_offset, other.column + 1
+            where += f" (see also line {line}, column {column})"
+        return f" ({kind} at {where})"
+    position = getattr(exc, "position", None)
+    if isinstance(position, int):
+        # `ReaderError` is the real no-mark shape, and not hypothetical: a control character
+        # pasted into frontmatter (terminal output, an escape sequence) raises it. It carries
+        # a plain character offset instead of a mark — positions-only by definition.
+        #
+        # Named as an offset into the FRONTMATTER BLOCK, not the file, because that is what it
+        # is: `.position` indexes the string handed to `safe_load`, i.e. the header slice, and
+        # `line_offset` cannot convert it — the shift is the length of the opening fence, which
+        # varies (`---\n` vs `---\r\n`, plus the trailing whitespace `FRONTMATTER_RE` tolerates)
+        # and this seam does not see it. Saying which coordinate space it is beats sending an
+        # operator counting from the top of the file a few characters wrong.
+        return f" ({kind} at character {position} of the frontmatter block)"
+    return f" ({kind})"
+
+
+def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> Any:
     """``safe_load`` a frontmatter ``header``, mapping every failure to a rejection.
 
     The shared YAML seam behind both ``parse_frontmatter`` implementations, for the same
@@ -814,11 +890,18 @@ def load_frontmatter_yaml(header: str, *, what: str) -> Any:
     One rejection is NOT a parse failure: a header that parses fine but builds a
     self-referential structure (:func:`_is_self_referential`) is refused after the load,
     because no consumer can finish walking it.
+
+    ``line_offset`` is added to any line number the rejection reports, so a caller passing a
+    slice of a larger file can have the message name the line in the FILE. Both
+    ``parse_frontmatter`` implementations pass ``1``: they hand us ``FRONTMATTER_RE.group(1)``,
+    which begins after the opening ``---`` fence — exactly one line in.
     """
     try:
         value = yaml.safe_load(header)
     except yaml.YAMLError as exc:
-        raise InvalidCandidateError(f"{what} is not valid YAML: {exc}") from exc
+        raise InvalidCandidateError(
+            f"{what} is not valid YAML{_yaml_error_where(exc, line_offset)}"
+        ) from exc
     except RecursionError as exc:
         raise InvalidCandidateError(f"{what} is nested too deeply to parse") from exc
     except (ValueError, KeyError, AttributeError, IndexError) as exc:
@@ -829,12 +912,12 @@ def load_frontmatter_yaml(header: str, *, what: str) -> Any:
         # :func:`redact_secret_lines` scans line-anchored ``key: value`` pairs, and a bare
         # payload sits mid-line where that scanner cannot reach it.
         #
-        # The ``YAMLError`` branch above still interpolates ``exc`` because its mark
-        # usually re-emits the source line with its key intact, which the redactor does
-        # mask. That is the common shape, NOT a guarantee — PyYAML also writes the token
-        # into message *prose* ("found undefined alias 'X'", duplicate anchor, unknown
-        # tag), which is mid-line and unmasked. Pre-existing on that branch and tracked
-        # separately; do not read it as a precedent for echoing an exception here.
+        # The ``YAMLError`` branch above no longer interpolates ``exc`` either (#1369): it
+        # used to, on the theory that its mark re-emits the source line with its key intact
+        # for the redactor to mask — the common shape, but not a guarantee. PyYAML also
+        # writes the token into message *prose* ("found undefined alias 'X'", duplicate
+        # anchor, unknown tag), mid-line and unreachable by the line-anchored scanner. Both
+        # branches are now positions-and-class-name only; see :func:`_yaml_error_where`.
         raise InvalidCandidateError(
             f"{what} has a YAML tag its value does not satisfy ({type(exc).__name__})"
         ) from exc

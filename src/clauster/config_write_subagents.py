@@ -253,7 +253,9 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
         raise cw.InvalidCandidateError(
             "subagent content must start with a YAML frontmatter block ('---' ... '---')"
         )
-    data = cw.load_frontmatter_yaml(match.group(1), what="frontmatter")
+    # `line_offset=1`: the header slice starts after the opening `---` fence, so a raw mark
+    # names the line one above the fault in the FILE the operator is looking at.
+    data = cw.load_frontmatter_yaml(match.group(1), what="frontmatter", line_offset=1)
     if data is None:
         data = {}
     if not isinstance(data, dict):

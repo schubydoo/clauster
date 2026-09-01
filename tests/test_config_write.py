@@ -422,6 +422,115 @@ def test_load_frontmatter_yaml_does_not_blow_up_on_an_alias_pyramid() -> None:
     assert time.perf_counter() - started < 0.5
 
 
+# --- #1369: a YAMLError's prose must not echo the offending token -------------------------
+#
+# The rejection message reaches the browser (`list_skills` surfaces it as a skill's
+# `frontmatter_error`), so it is bound by invariant 4. Interpolating `str(exc)` did not
+# satisfy it: PyYAML writes the offending token into the message PROSE for these shapes, where
+# it sits mid-line with no `key:` anchor and `redact_secret_lines` -- which masks a `key: value`
+# whose KEY looks secret-shaped -- structurally cannot reach it.
+# Low-entropy padding on purpose, matching the sibling test's convention: a genuinely
+# secret-shaped literal in any commit fails the gitleaks gate. What matters here is only that
+# the token is distinctive and that PyYAML copies it into the prose verbatim.
+_LEAK_TOKEN = "FAKEFAKEFAKEFAKEFAKEfake42"
+_TOKEN_IN_PROSE = [
+    pytest.param(f"name: x\nextra: *{_LEAK_TOKEN}\n", id="undefined-alias"),
+    pytest.param(f"a: &{_LEAK_TOKEN} 1\nb: &{_LEAK_TOKEN} 2\n", id="duplicate-anchor"),
+    pytest.param(f"a: !{_LEAK_TOKEN} 1\n", id="unknown-tag"),
+]
+
+
+@pytest.mark.parametrize("header", _TOKEN_IN_PROSE)
+def test_the_yaml_prose_leak_reproducer_is_a_positive_control(header: str) -> None:
+    """PIN: PyYAML really does put the token in the prose, and the redactor really misses it.
+
+    Both halves matter. If a PyYAML release stopped embedding the token, the assertions below
+    would pass while asserting nothing; if `redact_secret_lines` grew mid-line masking, the
+    fix would be belt-and-braces rather than the thing standing between a pasted credential
+    and the dashboard. Either way the next reader should be sent back here.
+    """
+    with pytest.raises(yaml.YAMLError) as raised:
+        yaml.safe_load(header)
+    # Against the PROSE attributes, not `str(exc)`. `MarkedYAMLError.__str__` also renders the
+    # mark's snippet -- the offending SOURCE LINE -- which carries the token too, so asserting
+    # on the full string would still pass if PyYAML dropped the token from the prose tomorrow.
+    # That is the vacuous green this control exists to prevent. Duplicate-anchor puts the token
+    # in `context`, the other two in `problem`; either can be None.
+    prose = f"{raised.value.context or ''} {raised.value.problem or ''}"
+    assert _LEAK_TOKEN in prose
+    # This half is right to stay on the full string: it is about what the redactor can reach
+    # across the whole message, snippet included.
+    assert _LEAK_TOKEN in cw.redact_secret_lines(str(raised.value))
+
+
+@pytest.mark.parametrize("header", _TOKEN_IN_PROSE)
+def test_load_frontmatter_yaml_never_echoes_the_offending_token(header: str) -> None:
+    # The message is built from POSITIONS only -- the class name plus problem_mark/context_mark
+    # integers -- so it is fail-closed by construction rather than by a predicate that has to
+    # be right about every message PyYAML will ever emit.
+    with pytest.raises(cw.InvalidCandidateError) as raised:
+        cw.load_frontmatter_yaml(header, what="frontmatter")
+    message = str(raised.value)
+    assert _LEAK_TOKEN not in message
+    assert "line " in message and "column " in message  # ...and it still says WHERE
+
+
+def test_load_frontmatter_yaml_reports_a_useful_position_and_category() -> None:
+    # What replaces the prose has to earn its place: the operator gets PyYAML's own error
+    # category and a 1-based line/column that matches what their editor shows, next to the
+    # `content` they are already looking at. Marks are 0-based internally, hence the +1.
+    with pytest.raises(cw.InvalidCandidateError) as raised:
+        cw.load_frontmatter_yaml("name: x\n\tbad: 1\n", what="frontmatter")
+    assert "ScannerError at line 2, column 1" in str(raised.value)
+
+
+def test_load_frontmatter_yaml_names_the_reader_error_coordinate_space() -> None:
+    # `ReaderError` is the real no-mark shape and it is not hypothetical: a control character
+    # pasted into frontmatter (terminal output, an escape sequence) raises it. It carries a
+    # plain character offset instead of a mark, which is positions-only by definition -- so
+    # the message must still say WHERE rather than degrading to a bare category. Driven by a
+    # genuine production shape, not a monkeypatched exception, so it also pins that PyYAML's
+    # no-mark class stays handled.
+    with pytest.raises(cw.InvalidCandidateError) as raised:
+        cw.load_frontmatter_yaml("a: \x08SECRETVALUE\n", what="frontmatter")
+    message = str(raised.value)
+    # "of the frontmatter block" is load-bearing: `.position` indexes the header slice, while
+    # the line/column arm is shifted to name the FILE. Two coordinate spaces in one function,
+    # so the one that is not file-relative has to say so.
+    assert "ReaderError at character " in message
+    assert "of the frontmatter block" in message
+    assert "SECRETVALUE" not in message
+
+
+def test_yaml_error_where_degrades_to_the_category_alone_with_no_position() -> None:
+    # The last arm of `_yaml_error_where`, exercised DIRECTLY because it is unreachable
+    # through the seam: every error `safe_load` raises sets `problem_mark`, and the one that
+    # does not (`ReaderError`) carries `.position`. So a YAMLError with neither cannot be
+    # produced by `load_frontmatter_yaml` -- which is exactly why the arm exists. It is the
+    # defence that keeps a future PyYAML shape degrading to the category instead of raising
+    # an AttributeError out of the handler whose whole job is preventing 500s.
+    assert cw._yaml_error_where(yaml.YAMLError("no marks here")) == " (YAMLError)"
+    # ...and, like every other arm, it carries nothing derived from the document.
+    assert "no marks here" not in cw._yaml_error_where(yaml.YAMLError("no marks here"))
+
+
+def test_load_frontmatter_yaml_reports_the_second_position_when_it_differs() -> None:
+    # An unterminated quote puts `problem_mark` at end-of-stream, which on its own points the
+    # operator at the wrong place; `context_mark` holds the opening quote. Both are integer
+    # pairs, so both are reported when they differ.
+    #
+    # The label is shape-neutral on purpose. `context_mark` means something different per
+    # shape -- for a duplicate anchor it is the FIRST occurrence, not where anything "started"
+    # -- and this seam deliberately does not know which error it is holding.
+    with pytest.raises(cw.InvalidCandidateError) as raised:
+        cw.load_frontmatter_yaml('name: x\nbad: "unterminated\n', what="frontmatter")
+    assert "see also line " in str(raised.value)
+
+    with pytest.raises(cw.InvalidCandidateError) as dup:
+        cw.load_frontmatter_yaml("a: &m 1\nb: &m 2\n", what="frontmatter")
+    assert "see also line " in str(dup.value)
+
+
 def test_merge_redacted_scalar_sentinel_keeps_stored() -> None:
     assert cw.merge_redacted(cw.REDACTION_SENTINEL, "kept") == "kept"
 

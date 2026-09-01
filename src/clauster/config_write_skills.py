@@ -165,7 +165,11 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
         raise cw.InvalidCandidateError(
             f"{SKILL_FILENAME} must start with a '---' YAML frontmatter block"
         )
-    data = cw.load_frontmatter_yaml(match.group(1), what=f"{SKILL_FILENAME} frontmatter")
+    # `line_offset=1`: the header slice starts after the opening `---` fence, so a raw mark
+    # names the line one above the fault in the FILE the operator is looking at.
+    data = cw.load_frontmatter_yaml(
+        match.group(1), what=f"{SKILL_FILENAME} frontmatter", line_offset=1
+    )
     if not isinstance(data, dict):
         raise cw.InvalidCandidateError(f"{SKILL_FILENAME} frontmatter must be a YAML mapping")
     # The shared fence has no trailing capture group; the body is whatever follows the

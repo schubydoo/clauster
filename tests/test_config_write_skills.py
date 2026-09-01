@@ -564,20 +564,67 @@ def test_list_skills_redacts_secret_in_description(tmp_path: Path) -> None:
     assert cw.REDACTION_SENTINEL in listing[0]["description"]
 
 
-def test_list_skills_redacts_secret_in_frontmatter_error(tmp_path: Path) -> None:
-    # A YAML parse error can echo a fragment of the offending line back; a secret
-    # interpolation in that fragment must be masked in the error string too.
+def test_list_skills_frontmatter_error_never_leaks_a_token_from_yaml_prose(
+    tmp_path: Path,
+) -> None:
+    # #1369 end to end, at the surface the issue names. PyYAML writes the offending token
+    # into the message PROSE for an undefined alias / duplicate anchor / unknown tag, where it
+    # sits mid-line with no `key:` anchor -- so `redact_secret_lines`, whose scanner is
+    # line-anchored, structurally cannot mask it and a credential pasted into frontmatter
+    # reached the dashboard. Low-entropy padding, per the convention above.
+    token = "FAKEFAKEFAKEFAKEFAKEfake42"
+    skills_root = tmp_path / "skills"
+    for i, header in enumerate(
+        (f"name: x\nextra: *{token}\n", f"a: &{token} 1\nb: &{token} 2\n", f"a: !{token} 1\n")
+    ):
+        bad = skills_root / f"broken{i}"
+        bad.mkdir(parents=True)
+        (bad / sk.SKILL_FILENAME).write_text(f"---\n{header}---\nbody\n")
+
+    listing = sk.list_skills(tmp_path)
+
+    assert len(listing) == 3
+    for item in listing:
+        err = item["frontmatter_error"]
+        assert token.lower() not in err.lower(), err
+        assert "line " in err and "column " in err, err  # ...and it still says where
+
+
+def test_list_skills_frontmatter_error_line_matches_the_file_not_the_header(
+    tmp_path: Path,
+) -> None:
+    # The line number is now the ONLY locator the operator gets, so it has to be the line in
+    # the FILE. `parse_frontmatter` hands the shared seam `FRONTMATTER_RE.group(1)`, which
+    # begins after the opening `---` fence, so a raw PyYAML mark names the line one ABOVE the
+    # fault. The tab below is on file line 3; without `line_offset=1` the message said 2.
     skills_root = tmp_path / "skills"
     bad = skills_root / "broken"
     bad.mkdir(parents=True)
-    # Malformed YAML (unbalanced bracket) whose error message quotes the secret line.
+    (bad / sk.SKILL_FILENAME).write_text("---\nname: x\n\tbad: 1\n---\nbody\n")
+
+    err = sk.list_skills(tmp_path)[0]["frontmatter_error"]
+
+    assert "line 3, column 1" in err, err
+
+
+def test_list_skills_frontmatter_error_carries_no_document_text(tmp_path: Path) -> None:
+    # A YAML parse error used to echo a fragment of the offending line back, and
+    # `redact_secret_lines` masked the `${...}` interpolation in it -- so this asserted both
+    # "secret absent" and "sentinel present". #1369 stopped interpolating the exception at
+    # all: the message is now built from the error's POSITIONS only, so no document text
+    # reaches the browser and there is nothing left to mask. The secret-absent half is
+    # therefore stronger than it was; the sentinel half no longer applies.
+    skills_root = tmp_path / "skills"
+    bad = skills_root / "broken"
+    bad.mkdir(parents=True)
     (bad / sk.SKILL_FILENAME).write_bytes(
         b"---\ndescription: [unclosed ${SUPER_SECRET_VALUE}\n---\nbody"
     )
     listing = sk.list_skills(tmp_path)
     err = listing[0]["frontmatter_error"]
     assert "SUPER_SECRET_VALUE" not in err
-    assert cw.REDACTION_SENTINEL in err
+    assert "unclosed" not in err  # no quoted source line at all, masked or otherwise
+    assert "line " in err and "column " in err  # ...but it still says where to look
 
 
 def test_list_skills_reports_frontmatter_error_without_raising(tmp_path: Path) -> None:
