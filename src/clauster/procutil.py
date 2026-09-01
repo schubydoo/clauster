@@ -149,11 +149,16 @@ def jiffies_to_epoch(jiffies: int) -> float | None:
     try:
         return psutil.boot_time() + (jiffies / _clk_tck())
     except (OSError, AttributeError, RuntimeError):
-        # RuntimeError is psutil's raise when `/proc/stat` carries no `btime` line — exactly
-        # the "host can't express boot time" case this docstring promises to answer None for,
-        # and it was escaping. It escaped through `_expected_epoch` into every liveness
-        # caller, and through `proc_start_pair` into the keeper, where the sidecar then lost
-        # BOTH halves of the pair and `_recover_keeper_pid` fell through to a pid-only match.
+        # RuntimeError is psutil's raise when `/proc/stat` carries no `btime` line (an
+        # emulated procfs — gVisor, some container runtimes, WSL1) — exactly the "host can't
+        # express boot time" case this docstring promises to answer None for, and it was
+        # escaping into the pointer paths and, via `proc_start_pair`, into the keeper, where
+        # the sidecar then lost BOTH halves of the pair and `_recover_keeper_pid` fell
+        # through to a pid-only match. `proc_create_time` and `is_live_process` absorb the
+        # same raise for the same reason — psutil's `create_time()` ends in
+        # `self._ctime + boot_time()`, so on those hosts they hit it FIRST, before this
+        # function is ever consulted. One rule for the family, not three.
+        _log.debug("host cannot express boot time; start-time checks degrade to cmdline+alive")
         return None
 
 
@@ -286,6 +291,14 @@ def proc_create_time(pid: int) -> float | None:
         return proc.create_time()
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, ValueError):
         return None
+    except RuntimeError:
+        # psutil's `create_time()` ends in `self._ctime + boot_time()`, and `boot_time()`
+        # raises a bare RuntimeError on a procfs with no `btime` line — not wrapped by
+        # psutil's own exception decorator, so it reaches us as-is. Uncaught it left
+        # `poll_once` aborting on every tick (crash detection, adoption and the prune all
+        # dead for the process's lifetime) and `stop()` skipping its grace + force-kill.
+        # See :func:`jiffies_to_epoch`, which states the rule for the family.
+        return None
 
 
 def proc_start_pair(pid: int) -> tuple[float | None, int | None]:
@@ -376,9 +389,18 @@ def is_live_process(
         cmdline = proc.cmdline()
         create_time = proc.create_time()
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, ValueError):
-        # ValueError: psutil's raise for a non-positive pid. `is_live_bridge` is handed pids
+        # RuntimeError below, not here: it is a HOST capability failure, not a fact about
+        # this pid, and it wants its own comment. ValueError: psutil's raise for a
+        # non-positive pid. `is_live_bridge` is handed pids
         # from persisted rows and bridge pointers, so this is the same untrusted-int path the
         # rest of the family absorbs — it must answer "not live", not raise into the caller.
+        return False
+    except RuntimeError:
+        # A procfs with no `btime` line: `create_time()` ends in `self._ctime + boot_time()`,
+        # which raises bare and unwrapped. This is the FIRST place the family touches it —
+        # `_expected_epoch` below is never reached — and uncaught it aborted `poll_once` on
+        # every tick and made `stop()` skip its grace and force-kill. Answer "not live",
+        # which is the same conservative direction the arm above takes.
         return False
 
     if require_cmdline is not None and not require_cmdline(cmdline):

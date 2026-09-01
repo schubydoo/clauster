@@ -1278,3 +1278,44 @@ def test_unreadable_ticks_fall_back_to_the_epoch_comparison(monkeypatch):
     monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: None)
     assert procutil.is_live_bridge(1234, 1000.0, start_ticks=770579) is True
     assert procutil.is_live_bridge(1234, 1004.0, start_ticks=770579) is False
+
+
+def test_a_btime_less_procfs_degrades_instead_of_raising(monkeypatch):
+    """A procfs with no ``btime`` line must not raise out of the liveness family (#1399).
+
+    psutil's ``boot_time()`` raises a bare, undecorated ``RuntimeError`` there, and
+    ``create_time()`` ends in ``self._ctime + boot_time()`` — so it reaches the FIRST call,
+    not the ``jiffies_to_epoch`` most of the family goes through. Uncaught it aborted
+    ``poll_once`` on every tick (crash detection, adoption and the prune all dead for the
+    process's lifetime) and made ``stop()`` skip its grace loop and ``force_kill_tree``.
+    Emulated procfs is where this lives: gVisor, some container runtimes, WSL1.
+    """
+
+    def _no_btime():
+        raise RuntimeError("line 'btime' not found in /proc/stat")
+
+    class _BtimelessProc:
+        def __init__(self, pid):
+            pass
+
+        def status(self):
+            return psutil.STATUS_RUNNING
+
+        def cmdline(self):
+            return ["claude", "remote-control"]
+
+        def create_time(self):
+            # psutil's real Linux shape: `self._ctime + boot_time()`, so the same raise
+            # surfaces here rather than only from `jiffies_to_epoch`.
+            return 1000.0 + procutil.psutil.boot_time()
+
+    monkeypatch.setattr(procutil.psutil, "boot_time", _no_btime)
+    monkeypatch.setattr(procutil.psutil, "Process", _BtimelessProc)
+
+    assert procutil.jiffies_to_epoch(770579) is None
+    assert procutil._expected_epoch("770579") is None
+    assert procutil.proc_start_pair(os.getpid())[0] is None
+    assert procutil.proc_create_time(1234) is None
+    # The two that reach the raise before any of the above are consulted.
+    assert procutil.is_live_process(1234, 1000.0) is False
+    assert procutil.is_live_bridge(1234, 1000.0) is False
