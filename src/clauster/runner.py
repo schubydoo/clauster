@@ -369,8 +369,9 @@ def _ticks_on_exact_match(pid: int, proc_start: float | None) -> int | None:
     but the first mismatch still demotes its card to STOPPED, and ``_reconcile_status``
     never promotes back. Slew oscillates, though, so the epoch keeps returning to an exact
     match (one sample in five on the dogfood host), and each such moment is an
-    opportunity to read the drift-immune half and stamp it, after which the pair is
-    immune for good.
+    opportunity to read the drift-immune half and stamp it. The callers persist a stamp
+    (startup through ``rediscover``'s final write, the poll loop with its own), after
+    which the pair is immune across restarts too.
 
     Deliberately NOT healed from any other source. A fresh tick read agrees with whatever
     holds the pid by construction, and the project's pointer names whatever bridge is at
@@ -2925,9 +2926,17 @@ class SessionRunner:
             # because `stop()` never learns a keeper pid to clean up. The sidecar and the
             # pointer both carry raw field-22 ticks, so that comparison is exact and immune.
             ps = info.get("bridge_proc_start")
-            sidecar_epoch = (
-                float(ps) if isinstance(ps, (int, float)) and not isinstance(ps, bool) else None
-            )
+            try:
+                sidecar_epoch = (
+                    float(ps)
+                    if isinstance(ps, (int, float)) and not isinstance(ps, bool)
+                    else None
+                )
+            except OverflowError:
+                # A sidecar is an on-disk file (see the negative-pid note in the reattach
+                # leg): a hand-edited int wider than a float must read as "no comparable
+                # epoch", not raise out of `rediscover`.
+                sidecar_epoch = None
             epoch_gap = (
                 abs(sidecar_epoch - bridge_proc_start)
                 if sidecar_epoch is not None and bridge_proc_start is not None
@@ -4380,9 +4389,10 @@ class SessionRunner:
     ) -> tuple[int | None, bool]:
         """Judge a row's liveness; stamp a tick-less live row's ticks while its epoch matches.
 
-        Returns ``(ticks, alive)`` from one thread hop. The stamp rides on the verdict: the
-        exact-epoch match that made ``alive`` True is the only evidence
-        :func:`_ticks_on_exact_match` accepts, so it is read in the same breath.
+        Returns ``(ticks, alive)`` from one thread hop. The stamp does not consume the
+        verdict's evidence: :func:`_ticks_on_exact_match` re-derives its own exact match
+        from one fresh read, so it is equally sound from the poll loop's separate hop.
+        ``alive`` merely says a stamp is worth attempting.
         """
         alive = procutil.is_live_bridge(pid, proc_start, start_ticks=ticks)
         if alive and ticks is None:
@@ -4519,9 +4529,12 @@ class SessionRunner:
                 status=status,
                 bridge_pid=pid,
                 bridge_proc_start=proc_start,
-                # Carried from the row alongside its epoch, never re-measured here: a fresh
+                # Carried from the row alongside its epoch, never re-measured HERE: a fresh
                 # `proc_start_ticks` read would agree with the live process by construction
-                # and so could authenticate a recycled pid the row's own pair rejects.
+                # and so could authenticate a recycled pid the row's own pair rejects. The
+                # one sanctioned re-measure is `_judge_row` above, which runs only after the
+                # row's own pair ACCEPTED the process and accepts the read only inside the
+                # exact 0.05s bound (`_ticks_on_exact_match`), so it cannot admit more.
                 bridge_start_ticks=start_ticks,
                 keeper_pid=keeper_pid,
                 keeper_proc_start=keeper_proc_start,
@@ -5197,6 +5210,11 @@ class SessionRunner:
         # without a second psutil pass — and without blocking the event loop, where it has
         # to resolve its managed-pid exclusion post-await.
         pid_is_ours: dict[str, bool] = {}
+        # Whether a pre-#1399 instance gained its `bridge_start_ticks` this tick (see the
+        # stamp below): the only thing in this loop that must reach the store on its own,
+        # because nothing else on the poll path writes and a restart would otherwise
+        # re-open the same lottery.
+        stamped = False
         for instance in list(self._instances.values()):
             pid = instance.bridge_pid
             # A pty keeper is Clauster's direct child and self-exits with its bridge;
@@ -5223,9 +5241,14 @@ class SessionRunner:
                 # This tick matched exactly, which is the one moment the drift-immune half
                 # can be read safely — see `_ticks_on_exact_match`. Gated on the platform
                 # here as well, so a host that never drifts never pays the extra hop.
-                instance.bridge_start_ticks = await asyncio.to_thread(
+                # Assigned only on success: the hop is a suspension point, and an
+                # unconditional write could put None over a value set meanwhile.
+                ticks = await asyncio.to_thread(
                     _ticks_on_exact_match, pid, instance.bridge_proc_start
                 )
+                if ticks is not None:
+                    instance.bridge_start_ticks = ticks
+                    stamped = True
             # The running `claude` release for the card (#1275). Re-derived every tick
             # rather than memoized: it is one `exe` readlink for a live bridge, it is never
             # persisted, and re-reading is what guarantees the label can only ever describe
@@ -5264,6 +5287,11 @@ class SessionRunner:
         # Deliberately ABOVE the cross-check, which returns early whenever `agents --json`
         # is degraded: a bridge pinned at STARTING must not stay pinned for as long as that
         # probe keeps failing.
+        if stamped and side_effects:
+            # At most once per tick-less row, ever: after this the row carries ticks and the
+            # stamp never fires for it again. Skipped when observing, like every other
+            # write on this path; the live service's own loop will stamp and persist.
+            await self._persist()
         await self._promote_ready_unwatched(pid_is_ours, side_effects=side_effects)
 
         try:

@@ -2696,10 +2696,56 @@ async def test_poll_stamps_a_tracked_tick_less_instance_on_an_exact_match(
 
     await runner.poll_once()
     assert inst.bridge_start_ticks == 770579
+    # ...and it reaches the store: nothing else on the poll path writes, and a stamp that
+    # lives only in memory re-opens the same lottery on the next restart.
+    assert await runner._refresh_persisted()
+    assert runner._persisted["iid-old"]["bridge_start_ticks"] == 770579
 
     _drifted(monkeypatch)
     await runner.poll_once()
     assert inst.status is InstanceStatus.RUNNING, "a drifted epoch must not demote a stamped card"
+
+
+async def test_observation_only_poll_stamps_in_memory_but_does_not_write(
+    runner_config, monkeypatch
+):
+    # `side_effects=False` is write-free: the reader still SEES the healed pair (so its own
+    # next verdict is right), but the store is left to the live service's loop.
+    runner = _make_runner(runner_config)
+    _stub_poll_env(monkeypatch)
+    inst = _tick_less_running(runner)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    writes: list[object] = []
+    monkeypatch.setattr(SessionRunner, "_persist", lambda self, **kw: _record(writes))
+
+    await runner.poll_once(side_effects=False)
+
+    assert inst.bridge_start_ticks == 770579
+    assert writes == [], "an observation-only poll must not write the store"
+
+
+async def _record(sink: list) -> None:
+    sink.append(True)
+
+
+async def test_startup_stamp_is_off_where_create_time_does_not_drift(runner_config, monkeypatch):
+    # The startup path relies on `_ticks_on_exact_match`'s OWN platform guard (the poll site
+    # has a second one in front of it). Off Linux the epoch is conclusive and a read could
+    # only ever authenticate a recycled pid, so the row is left exactly as it was.
+    runner = _make_runner(runner_config)
+    _stub_connect(monkeypatch)
+    _stub_poll_env(monkeypatch)
+    monkeypatch.setattr("clauster.runner.procutil.start_time_is_drift_prone", lambda: False)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    runner.persistence.state_store().save(
+        {"iid-old": _row("alpha", pid=5001, proc_start=1000.0, resume_mode="standard")}
+    )
+
+    await runner.rediscover(persist=False)
+
+    inst = runner.get_instance("iid-old")
+    assert inst is not None and inst.status is InstanceStatus.RUNNING
+    assert inst.bridge_start_ticks is None
 
 
 @pytest.mark.parametrize(

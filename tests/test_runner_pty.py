@@ -1707,6 +1707,24 @@ def test_recover_keeper_pid_skips_foreign_and_corrupt_sidecars(runner_config) ->
     )
 
 
+def test_recover_keeper_pid_treats_an_unfloatable_sidecar_epoch_as_absent(runner_config) -> None:
+    # A sidecar is an on-disk file: `json.loads` hands back a Python int for any width, and
+    # `float()` of one wider than a double raises OverflowError. That must read as "no
+    # comparable epoch" (the pid-only fallback), never raise out of `rediscover`.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    runner._log_dir.mkdir(parents=True, exist_ok=True)
+    (runner._log_dir / "gamma-1700000000000-0.keeper.json").write_text(
+        json.dumps({"keeper_pid": 7777, "bridge_pid": 2222, "bridge_proc_start": 10**400})
+    )
+    assert (
+        runner._recover_keeper_pid(
+            "gamma", bridge_pid=2222, bridge_proc_start=100.0, bridge_start_ticks=None
+        )
+        == 7777
+    )
+
+
 def test_recover_keeper_pid_prefers_ticks_over_a_drifted_epoch(runner_config) -> None:
     # #1399. The pointer walk recomputes its epoch with TODAY's btime while the sidecar's
     # was frozen at spawn, so a clock correction bigger than _PROC_START_TOLERANCE (2.0s;
