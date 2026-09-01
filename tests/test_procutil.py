@@ -1336,3 +1336,25 @@ def test_ticks_decide_alone_when_no_epoch_was_recorded(monkeypatch):
     assert procutil.is_live_bridge(1234, None, start_ticks=770579) is True
     assert procutil.is_live_bridge(1234, None, start_ticks=770580) is False
     assert procutil.is_live_bridge(1234, None) is True
+
+
+def test_process_vanishing_between_cmdline_and_create_time_is_not_live(monkeypatch):
+    # `create_time()` is read in its own try so a btime-less host can be told apart from a
+    # pid that died mid-check. The second arm must still answer "not live", not raise: a
+    # process can exit between the cmdline read and the create-time read.
+    class _VanishingProc:
+        def __init__(self, pid):
+            pass
+
+        def status(self):
+            return psutil.STATUS_RUNNING
+
+        def cmdline(self):
+            return ["claude", "remote-control"]
+
+        def create_time(self):
+            raise psutil.NoSuchProcess(1234)
+
+    monkeypatch.setattr(procutil.psutil, "Process", _VanishingProc)
+    assert procutil.is_live_bridge(1234, 1000.0) is False
+    assert procutil.is_live_bridge(1234, 1000.0, start_ticks=770579) is False
