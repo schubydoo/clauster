@@ -1521,11 +1521,12 @@ class HostedManager:
         Per field rather than wholesale, because ``reattach_all`` ends in a
         :meth:`_persist` that rewrites the record from this row: defaulting the other
         ten fields because one is junk would *destroy* them on the first boot after
-        corruption, leaving nothing to repair by hand. Two of them are load-bearing
+        corruption, leaving nothing to repair by hand. Three of them are load-bearing
         beyond display — ``agent_pid``/``agent_proc_start`` are the only evidence
         :meth:`_is_orphan` has, so losing them downgrades a recoverable CL-8 survivor
         to "session lost" and lets ``forget`` drop clauster's last record of a live
-        process. Only the value the model actually rejected falls back to its default.
+        process, and ``claude_session_uuid`` is what drives ``--resume``. Only the value
+        the model actually rejected falls back to its default.
 
         This function must not raise, or it reopens the very escape it exists to close
         (its caller catches ``ValidationError`` and nothing else). Every value is
@@ -1547,10 +1548,7 @@ class HostedManager:
             channel="hosted",
             permission_mode=_as_permission_mode(mode),
             claustrum_process_id=process_id,
-            # Empty string normalized away: it is `not None`, so it would latch
-            # `HostedSession._capture_session_uuid` shut and the real id from the
-            # replayed init frame would never be recorded.
-            claude_session_uuid=session_uuid if _is_text(session_uuid) else None,
+            claude_session_uuid=_as_session_uuid(session_uuid),
             daemon_last_seq=_coerce_seq(fields.get("daemon_last_seq")),
             hosted_log_path=_as_log_path(fields.get("hosted_log_path")),
             agent_pid=_as_pid(agent_pid),
@@ -1571,12 +1569,12 @@ class HostedManager:
             channel="hosted",
             permission_mode=fields.get("permission_mode", "default"),
             claustrum_process_id=process_id,
-            claude_session_uuid=fields.get("claude_session_uuid"),
+            # Every evidence field below is coerced by the SAME helper on both paths, so
+            # they cannot disagree about the same bytes and leave a degraded row without the
+            # CL-8 orphan evidence (or the resume uuid) a healthy one would have kept.
+            claude_session_uuid=_as_session_uuid(fields.get("claude_session_uuid")),
             daemon_last_seq=_coerce_seq(fields.get("daemon_last_seq")),
             hosted_log_path=_as_log_path(fields.get("hosted_log_path")),
-            # Both paths coerce the pid identically, so they cannot disagree about the
-            # same bytes and leave a degraded row without the CL-8 orphan evidence a
-            # healthy one would have kept.
             agent_pid=_as_pid(fields.get("agent_pid")),
             agent_proc_start=_as_proc_start(fields.get("agent_proc_start")),
             started_at=_as_started_at(fields.get("started_at")),
@@ -1685,6 +1683,37 @@ def _as_proc_start(value: Any) -> float | None:
         return float(value)
     except (OverflowError, ValueError):
         return None
+
+
+def _as_session_uuid(value: Any) -> str | None:
+    """Coerce a persisted ``claude_session_uuid`` to a non-empty str, else ``None``.
+
+    Used by BOTH mapping paths so they cannot disagree about the same bytes — the third of
+    the :func:`_as_pid` / :func:`_as_proc_start` family, and the last evidence field that was
+    not symmetric (#1380). The salvage path always normalized ``""`` away while the healthy
+    path handed the raw value to pydantic, which accepts ``""`` for a ``str | None`` field.
+    An empty uuid is ``not None``, so it latched :meth:`HostedSession._capture_session_uuid`
+    shut and the real id from the replayed init frame was discarded for the process lifetime
+    — taking ``--resume`` with it.
+
+    Stricter than pydantic on purpose, for the same reason as the siblings: lax validation
+    lets the healthy path KEEP a value the salvage path drops. ``_capture_session_uuid``
+    stores only a non-empty ``str``, so nothing legitimate is refused; a refusal is logged,
+    because ``_persist`` writes the ``None`` back and a resume the row could once have
+    offered disappears with nothing else to explain it.
+    """
+    if _is_text(value):
+        return value
+    if value is not None:
+        logger.warning(
+            "hosted: refusing a claude_session_uuid (%s) from a persisted record; the row "
+            "loses its resume evidence",
+            # Named, not typed: the empty string IS a str, so a bare type name would read as
+            # a type complaint about the one case this helper exists for. Same distinction
+            # `_restore_instance_id` already draws for a falsy instance_id.
+            "empty string" if isinstance(value, str) else type(value).__name__,
+        )
+    return None
 
 
 def _as_log_path(value: Any) -> Path | None:
