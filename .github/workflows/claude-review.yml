@@ -202,7 +202,11 @@ jobs:
         # the review path, and a pull request cannot alter it (separate repo, fixed ref).
         # Like `pr-head/` it is a nested repo beside the workspace root, which the
         # action's own PR-head checkout leaves alone. Bump the SHA by hand — Renovate
-        # does not track a `ref:` under `with:`.
+        # does not track a `ref:` under `with:` — and READ THE HOOK SOURCES at the new
+        # SHA first: this is the one pin whose code runs inside the review step, which
+        # holds `CLAUDE_CODE_OAUTH_TOKEN`, and no tooling forces that diff in front of
+        # anyone. At v2.0.0 they are benign (the SessionStart hook prints a prompt file,
+        # the lint hook reads the edited file and exits 0).
         #
         # What runs from it on the runner: the SessionStart hook (node) and the Stop
         # hook (python3, advisory only). Its PostToolUse hook matches Write|Edit, which
@@ -230,10 +234,20 @@ jobs:
           # PR's copy of this line is never loaded at all — it cannot be trialled from a
           # PR. ⚠️ A style name that does not resolve DEGRADES SILENTLY to the default —
           # no warning, no failure. `<plugin>:<style>` is how a `--plugin-dir` plugin's
-          # style is named (verified on CLI 2.1.257: `claude --plugin-dir <dir> plugin
-          # list` loads it as `simple-english@inline`); re-verify it still resolves
-          # whenever the action pin (CLI 2.1.252 at this SHA), the plugin SHA, or a
-          # `path_to_claude_code_executable` override changes.
+          # style is selected. Verified on CLI 2.1.257 by asking the model to quote its
+          # output-style instructions:
+          #   claude -p --setting-sources "" --plugin-dir <dir> \
+          #     --settings '{"outputStyle":"simple-english:simple-english"}' "<quote it>"
+          # quotes the style's first sentence; the same command WITHOUT `--plugin-dir`
+          # quotes the built-in default, which is what the silent degrade looks like.
+          # Re-verify whenever the action pin (it installs CLI 2.1.252: the
+          # `CLAUDE_CODE_VERSION` in base-action/action.yml at that SHA), the plugin SHA,
+          # or a `path_to_claude_code_executable` override changes.
+          #
+          # The style bans hedging modals (should/may/might/could) in replies. That rule
+          # is for the register, not for a finding's calibration: the review instructions
+          # tell the reviewer to keep an honest "may" on an uncertain claim, and they
+          # outrank the style.
           settings: '{"outputStyle": "simple-english:simple-english"}'
           # NO `prompt:` — see the banner. Guidance goes through the system prompt.
           #
