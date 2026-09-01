@@ -189,16 +189,6 @@ class _ScreenTap:
     sidecar: Path
 
 
-def _proc_start(pid: int) -> float | None:
-    """Return the bridge's process start time for Clauster's PID-reuse defense, or None."""
-    try:
-        from clauster import procutil
-
-        return procutil.proc_create_time(pid)
-    except Exception:  # noqa: BLE001 — discovery aid only; never fatal
-        return None
-
-
 def _proc_start_pair(pid: int) -> tuple[float | None, int | None]:
     """Return the bridge's ``(epoch, boot-relative ticks)`` start pair from ONE /proc read.
 
@@ -208,9 +198,9 @@ def _proc_start_pair(pid: int) -> tuple[float | None, int | None]:
     runner's own spawn stamp so the sidecar and the registry cannot disagree about what a
     start pair means.
 
-    Wrapped like its siblings here: the keeper must never raise out of its startup path, and
-    an import or psutil failure degrades to the honest unknown rather than aborting the first
-    sidecar write.
+    Wrapped, because the keeper must never raise out of its startup path: an import or
+    psutil failure degrades to the honest unknown rather than aborting the first sidecar
+    write.
     """
     try:
         from clauster import procutil
@@ -218,22 +208,6 @@ def _proc_start_pair(pid: int) -> tuple[float | None, int | None]:
         return procutil.proc_start_pair(pid)
     except Exception:  # noqa: BLE001 — discovery aid only; never fatal
         return None, None
-
-
-def _proc_start_ticks(pid: int) -> int | None:
-    """Return the bridge's boot-relative start ticks, the drift-immune half of the pair.
-
-    Written beside ``bridge_proc_start`` so the reattach that reads this sidecar can compare
-    a value NTP cannot move (#1399). Without it a pty bridge is judged on the epoch alone,
-    which after a clock correction reads as a dead bridge — and a pty row rebuilt as STOPPED
-    zeroes its pids, which is exactly how a live bridge's card became prunable.
-    """
-    try:
-        from clauster import procutil
-
-        return procutil.proc_start_ticks(pid)
-    except Exception:  # noqa: BLE001 — discovery aid only; never fatal
-        return None
 
 
 class _KeeperDrain:

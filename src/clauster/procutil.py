@@ -148,7 +148,12 @@ def jiffies_to_epoch(jiffies: int) -> float | None:
     """
     try:
         return psutil.boot_time() + (jiffies / _clk_tck())
-    except (OSError, AttributeError):
+    except (OSError, AttributeError, RuntimeError):
+        # RuntimeError is psutil's raise when `/proc/stat` carries no `btime` line — exactly
+        # the "host can't express boot time" case this docstring promises to answer None for,
+        # and it was escaping. It escaped through `_expected_epoch` into every liveness
+        # caller, and through `proc_start_pair` into the keeper, where the sidecar then lost
+        # BOTH halves of the pair and `_recover_keeper_pid` fell through to a pid-only match.
         return None
 
 
@@ -296,9 +301,17 @@ def proc_start_pair(pid: int) -> tuple[float | None, int | None]:
     which rejected the mismatch.
 
     Deriving the epoch FROM the ticks makes the halves agree by construction — it is the
-    same arithmetic psutil does on Linux. Where ticks are unavailable (non-Linux, unreadable
+    same arithmetic psutil does on Linux, so the epoch is bit-identical to what
+    :func:`proc_create_time` would return. Where ticks are unavailable (non-Linux, unreadable
     ``/proc``) it falls back to sampling the epoch directly, which is the pre-#1399 shape and
     has no second read to straddle.
+
+    ⚠️ One asymmetry with :func:`proc_create_time`, which filters zombies: a zombie still has
+    a readable ``/proc/<pid>/stat``, so on Linux this returns a real pair for one where that
+    function answers ``None``. Deliberate — the pair is an IDENTITY, not a liveness claim,
+    and every gate rejects zombies separately before comparing it. It is also the stricter
+    direction: a ``(None, ticks)`` pair made :func:`is_live_process` skip the start-time
+    check entirely and trust cmdline+alive, which a recycled pid passes.
     """
     ticks = proc_start_ticks(pid)
     if ticks is None:

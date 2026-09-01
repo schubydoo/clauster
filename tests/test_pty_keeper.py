@@ -242,32 +242,6 @@ def test_main_requires_bridge_argv_inprocess(tmp_path: Path) -> None:
         pty_keeper.main(["--sidecar", str(tmp_path / "k.json")])
 
 
-def test_proc_start_returns_none_on_error(monkeypatch) -> None:
-    """A failure resolving the bridge's start time degrades to None, never raises."""
-    from clauster import pty_keeper
-
-    def _boom(_pid):
-        raise RuntimeError("psutil exploded")
-
-    monkeypatch.setattr("clauster.procutil.proc_create_time", _boom)
-    assert pty_keeper._proc_start(1234) is None
-
-
-def test_proc_start_ticks_returns_none_on_error(monkeypatch) -> None:
-    """The drift-immune half degrades to None on the same terms as its epoch sibling.
-
-    Both halves are written into the sidecar together, so a raise here would abort the
-    keeper's first sidecar write and strand the bridge as unreattachable (#1399).
-    """
-    from clauster import pty_keeper
-
-    def _boom(_pid):
-        raise RuntimeError("psutil exploded")
-
-    monkeypatch.setattr("clauster.procutil.proc_start_ticks", _boom)
-    assert pty_keeper._proc_start_ticks(1234) is None
-
-
 def test_proc_start_pair_is_derived_from_one_read_and_degrades_together(monkeypatch) -> None:
     """The sidecar's two start values come from ONE /proc read, and fail as a unit.
 

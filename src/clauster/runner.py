@@ -4251,9 +4251,12 @@ class SessionRunner:
         is always safe (the row is not going anywhere). But the lock only covers a
         *concurrent* mutation — one that COMPLETED while we were in the liveness probe holds
         no lock by the time we look. That is what ``ours_generation`` is for: pid,
-        proc-start, status AND intent are compared against the live object, so a finished
-        ``stop()`` (which changes the latter two and deliberately leaves ``bridge_pid``
-        alone) is detected and left alone. An instance whose pid was unknown at snapshot
+        proc-start, status, intent AND start-ticks are compared against the live object, so a
+        finished ``stop()`` (which changes the middle two and deliberately leaves
+        ``bridge_pid`` alone) is detected and left alone. Not to be confused with the ROW
+        compare in :meth:`_adopt_rows_from_store`, which deliberately excludes ticks — a
+        pre-#1399 row and the object it was adopted into can differ on them without being a
+        different process generation. An instance whose pid was unknown at snapshot
         time (``ours_generation is None`` — precisely the mid-``_popen`` window) is skipped
         rather than overwritten.
 
@@ -5451,7 +5454,14 @@ class SessionRunner:
         # Keyed by resolved cwd rather than by project NAME so there is no sentinel to get
         # wrong for a row whose `project` degraded to "" — an absent cwd simply has no
         # entry, and a project we cannot locate contributes no exclusion.
-        cwd_of_project = {name: Path(proj.path).resolve() for name, proj in discovered.items()}
+        # Only projects with a live registry entry: this is N `realpath` syscalls per poll on
+        # the hot path (and `resolve()` is materially costlier on Windows), and a project with
+        # no instance can contribute neither an exclusion nor a prune candidate.
+        cwd_of_project = {
+            name: Path(discovered[name].path).resolve()
+            for name in {i.project for i in self._instances.values()}
+            if name in discovered
+        }
         own_project_pids: dict[Path, set[int]] = {}
         for inst in self._instances.values():
             proj_cwd = cwd_of_project.get(inst.project)
