@@ -377,49 +377,62 @@ def is_live_process(
     ticks and fails exactly, where the 0.05s epoch bound was only ever *nearly* tight
     enough.
 
-    Used only when BOTH values are present. With ``proc_start`` absent the answer stays
-    the documented "no comparable start-time → trust cmdline+alive", rather than newly
-    rejecting on ticks alone: this function gates destructive callers, so a path that can
-    only ever answer "not ours" more often than before needs its own justification.
+    With the epoch absent or unavailable (``proc_start`` is None, or the host has no
+    ``btime`` so ``create_time()`` itself cannot be derived) recorded ticks decide ALONE:
+    exact, with no same-boot conjunct to lean on. That is stricter than the cmdline+alive
+    answer this gave before, and on a btime-less host it is the only PID-reuse defense
+    there is; without ticks such a host still answers "not live". With neither an epoch
+    nor ticks recorded the answer stays the documented "no comparable start-time → trust
+    cmdline+alive".
     """
     try:
         proc = psutil.Process(pid)
         if proc.status() == psutil.STATUS_ZOMBIE:
             return False
         cmdline = proc.cmdline()
-        create_time = proc.create_time()
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, ValueError):
-        # RuntimeError below, not here: it is a HOST capability failure, not a fact about
-        # this pid, and it wants its own comment. ValueError: psutil's raise for a
-        # non-positive pid. `is_live_bridge` is handed pids
+        # ValueError: psutil's raise for a non-positive pid. `is_live_bridge` is handed pids
         # from persisted rows and bridge pointers, so this is the same untrusted-int path the
         # rest of the family absorbs — it must answer "not live", not raise into the caller.
+        return False
+    create_time: float | None
+    try:
+        create_time = proc.create_time()
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
         return False
     except RuntimeError:
         # A procfs with no `btime` line: `create_time()` ends in `self._ctime + boot_time()`,
         # which raises bare and unwrapped. This is the FIRST place the family touches it —
         # `_expected_epoch` below is never reached — and uncaught it aborted `poll_once` on
-        # every tick and made `stop()` skip its grace and force-kill. Answer "not live",
-        # which is the same conservative direction the arm above takes.
-        return False
+        # every tick and made `stop()` skip its grace and force-kill. A HOST capability
+        # failure, not a fact about this pid: the boot-relative ticks are still readable
+        # there, so recorded ticks decide below; without them the answer is "not live".
+        create_time = None
 
     if require_cmdline is not None and not require_cmdline(cmdline):
         return False
 
     expected = _expected_epoch(proc_start)
-    if expected is None:
-        # No comparable start-time (skip or non-Linux pointer): cmdline+alive is
-        # the best available trust signal.
-        return True
     if start_ticks is not None:
         observed_ticks = proc_start_ticks(pid)
         if observed_ticks is not None:
+            if create_time is None or expected is None:
+                # Ticks are the only comparable half. Exact on them, with no same-boot
+                # conjunct available — stricter than the cmdline+alive answer this gave
+                # before, and on a btime-less host the only defense there is.
+                return observed_ticks == start_ticks
             # Exact on the drift-immune value, coarse on the drifting one — see the
             # docstring for why the two swap roles once both are available.
             return (
                 observed_ticks == start_ticks
                 and abs(create_time - expected) <= _DRIFT_EPOCH_TOLERANCE
             )
+    if create_time is None:
+        return False  # btime-less host and no ticks to fall back on: not provably ours
+    if expected is None:
+        # No comparable start-time (skip or non-Linux pointer): cmdline+alive is
+        # the best available trust signal.
+        return True
     # A float is our own exact create_time; a string is a pointer's jiffies.
     exact = isinstance(proc_start, (int, float)) and not isinstance(proc_start, bool)
     bound = _EXACT_PROC_START_TOLERANCE if exact else tolerance

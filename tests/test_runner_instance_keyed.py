@@ -1700,6 +1700,13 @@ async def test_connect_facts_survive_clock_drift_but_still_reject_a_recycled_pid
     facts = runner._connect_facts_for(proj, "standard", 8701, 1004.0, start_ticks=770580)
     assert facts == {}, "a recycled pid must not inherit the old environment"
 
+    # Ticks alone are not enough: they restart at zero each boot, so a pointer that survived
+    # a reboot can collide on pid AND ticks. The coarse epoch conjunct rejects that, the same
+    # pairing `is_live_process` and `_recover_keeper_pid` keep.
+    monkeypatch.setattr("clauster.runner.procutil._expected_epoch", lambda _s: 9_000_000.0)
+    facts = runner._connect_facts_for(proj, "standard", 8701, 1000.0, start_ticks=770579)
+    assert facts == {}, "an exact tick match from a different boot must not hand over the link"
+
 
 async def test_pty_sidecar_without_a_session_id_still_yields_the_url(runner_config, monkeypatch):
     # The sidecar is raw JSON written by the keeper, so unlike the pointer its fields really
@@ -2224,7 +2231,7 @@ async def test_resync_refuses_an_instance_that_is_no_longer_the_registered_one(r
         stale,
         {"project_name": "alpha"},
         (4402, 200.0, 4402000),
-        (4401, 100.0, InstanceStatus.STOPPED, False),
+        (4401, 100.0, InstanceStatus.STOPPED, False, None),
         runner._discovered(),
     )
 

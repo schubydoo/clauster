@@ -4619,17 +4619,23 @@ class SessionRunner:
         # treating unknown as mismatch would strip the connect link on any platform where the
         # jiffies form isn't comparable, reintroducing the bug this recovers from.
         pointer_ticks = _pointer_start_ticks(ptr.proc_start)
+        expected = procutil._expected_epoch(ptr.proc_start)
+        epoch_gap = (
+            abs(expected - proc_start) if expected is not None and proc_start is not None else None
+        )
         if start_ticks is not None and pointer_ticks is not None:
-            if pointer_ticks != start_ticks:
-                return {}
-        else:
-            expected = procutil._expected_epoch(ptr.proc_start)
-            if (
-                proc_start is not None
-                and expected is not None
-                and abs(expected - proc_start) > procutil._EXACT_PROC_START_TOLERANCE
+            # Exact on the ticks, coarse on the epoch: the same pairing `is_live_process`
+            # and `_recover_keeper_pid` use, for the same reason. Ticks restart at zero each
+            # boot, so a pointer that survived a reboot can collide on pid AND ticks, and
+            # the epoch rejects that for free. Every caller gates on `is_live_bridge` first,
+            # which already carries this conjunct for the same pid; the helper keeps its own
+            # copy so a future caller without that gate cannot inherit a weaker rule.
+            if pointer_ticks != start_ticks or (
+                epoch_gap is not None and epoch_gap > procutil._DRIFT_EPOCH_TOLERANCE
             ):
                 return {}
+        elif epoch_gap is not None and epoch_gap > procutil._EXACT_PROC_START_TOLERANCE:
+            return {}
         # No presence guards: `BridgePointer` declares both as required `str`, so a parsed
         # pointer always carries them — a guard here would be unreachable, not defensive.
         return {
@@ -5284,14 +5290,14 @@ class SessionRunner:
                     # loop, and a read must not write into the instance's log set.
                     await asyncio.to_thread(self._flush_redacted_mirror, instance)
 
-        # Deliberately ABOVE the cross-check, which returns early whenever `agents --json`
-        # is degraded: a bridge pinned at STARTING must not stay pinned for as long as that
-        # probe keeps failing.
         if stamped and side_effects:
             # At most once per tick-less row, ever: after this the row carries ticks and the
             # stamp never fires for it again. Skipped when observing, like every other
             # write on this path; the live service's own loop will stamp and persist.
             await self._persist()
+        # Deliberately ABOVE the cross-check, which returns early whenever `agents --json`
+        # is degraded: a bridge pinned at STARTING must not stay pinned for as long as that
+        # probe keeps failing.
         await self._promote_ready_unwatched(pid_is_ours, side_effects=side_effects)
 
         try:

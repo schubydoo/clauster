@@ -1319,3 +1319,20 @@ def test_a_btime_less_procfs_degrades_instead_of_raising(monkeypatch):
     # The two that reach the raise before any of the above are consulted.
     assert procutil.is_live_process(1234, 1000.0) is False
     assert procutil.is_live_bridge(1234, 1000.0) is False
+    # Recorded ticks are the one half such a host CAN compare, so they decide alone: the
+    # `(None, ticks)` pair `proc_start_pair` persists there keeps a PID-reuse defense.
+    monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: 770579)
+    assert procutil.is_live_bridge(1234, None, start_ticks=770579) is True
+    assert procutil.is_live_bridge(1234, None, start_ticks=770580) is False
+    assert procutil.is_live_bridge(1234, 1000.0, start_ticks=770579) is True
+
+
+def test_ticks_decide_alone_when_no_epoch_was_recorded(monkeypatch):
+    # A `(None, ticks)` pair on an ordinary host. Before, a missing epoch returned True on
+    # cmdline+alive before the ticks were ever consulted, discarding the half that works.
+    # Exact on the ticks now, which is strictly stricter; without ticks the old answer stands.
+    monkeypatch.setattr(procutil.psutil, "Process", _fake_proc(ct=1000.0))
+    monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: 770579)
+    assert procutil.is_live_bridge(1234, None, start_ticks=770579) is True
+    assert procutil.is_live_bridge(1234, None, start_ticks=770580) is False
+    assert procutil.is_live_bridge(1234, None) is True
