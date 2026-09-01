@@ -2014,13 +2014,11 @@ _REJECTED_RECORDS = [
     pytest.param({"project": {}}, id="project-not-a-string"),
     pytest.param({"label": 7}, id="label-not-a-string"),
     pytest.param({"permission_mode": "nope"}, id="permission-mode-not-in-the-literal"),
-    # Truthy on purpose: an empty list is the one non-string `_synced` skips anyway, so
-    # it would let the uuid path below pass vacuously.
-    pytest.param({"claude_session_uuid": ["not-a-uuid"]}, id="uuid-not-a-string"),
-    # NB agent_proc_start is deliberately NOT here: like agent_pid, both mapping paths now
-    # coerce it via `_as_proc_start` (a junk value → None), so it never raises a
-    # ValidationError or triggers degradation. Its tolerance is pinned by
-    # test_a_junk_agent_proc_start_never_reaches_the_model_on_either_path.
+    # NB agent_pid, agent_proc_start and claude_session_uuid are deliberately NOT here: all
+    # three are coerced by the SAME helper on both mapping paths (a junk value → None), so
+    # none raises a ValidationError or triggers degradation. Their tolerance is pinned by the
+    # three `..._never_reaches_the_model_on_either_path` tests below. claude_session_uuid was
+    # the last one still listed here — it joined the family in #1380.
 ]
 
 
@@ -2059,6 +2057,52 @@ def test_a_junk_agent_proc_start_never_reaches_the_model_on_either_path():
     kept = {"project": "proj", "label": "hosted:proj", "agent_proc_start": 1234.5}
     assert HostedManager._row_from_record(_PID, kept).agent_proc_start == 1234.5
     assert HostedManager._degraded_row(_PID, kept).agent_proc_start == 1234.5
+
+
+def test_a_junk_claude_session_uuid_never_reaches_the_model_on_either_path():
+    """The third of the family — the resume evidence, and the last field left asymmetric.
+
+    The salvage always normalized `""` away while the healthy path handed the raw value to
+    pydantic, which accepts `""` for a `str | None` field. An empty uuid is `not None`, so it
+    latched `HostedSession._capture_session_uuid` shut and the real id from the replayed init
+    frame was discarded for the process lifetime — taking `--resume` with it. Left
+    asymmetric, a record degrading on an unrelated field would ALSO drop a uuid the healthy
+    path kept, and `_persist` writes that loss to disk (#1380).
+    """
+    for junk in ("", ["not-a-uuid"], 7, True, {}):
+        record = {"project": "proj", "label": "hosted:proj", "claude_session_uuid": junk}
+        assert HostedManager._row_from_record(_PID, record).claude_session_uuid is None
+        assert HostedManager._degraded_row(_PID, record).claude_session_uuid is None
+    uuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    kept = {"project": "proj", "label": "hosted:proj", "claude_session_uuid": uuid}
+    assert HostedManager._row_from_record(_PID, kept).claude_session_uuid == uuid
+    assert HostedManager._degraded_row(_PID, kept).claude_session_uuid == uuid
+
+
+def test_a_refused_claude_session_uuid_is_named_not_typed_in_the_log(caplog) -> None:
+    """`_as_session_uuid` is the one member of the family whose message branches.
+
+    An empty string IS a `str`, so logging a bare type name would read as a type complaint
+    about the one shape this helper exists for -- an operator grepping for a non-string uuid
+    could not tell the two apart. `_restore_instance_id` draws the same distinction and pins
+    it with a test; without one here, a later edit could collapse the branch back to
+    `type(value).__name__` and nothing would fail.
+    """
+    record = {"project": "proj", "label": "hosted:proj"}
+    with caplog.at_level(logging.WARNING, logger="clauster.hosted"):
+        HostedManager._row_from_record(_PID, {**record, "claude_session_uuid": ""})
+    assert "empty string" in caplog.text
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="clauster.hosted"):
+        HostedManager._row_from_record(_PID, {**record, "claude_session_uuid": 7})
+    assert "(int)" in caplog.text and "empty string" not in caplog.text
+
+    # ...and a legitimate uuid says nothing at all.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="clauster.hosted"):
+        HostedManager._row_from_record(_PID, {**record, "claude_session_uuid": "a-real-uuid"})
+    assert "claude_session_uuid" not in caplog.text
 
 
 @pytest.mark.parametrize("junk", _REJECTED_RECORDS)
@@ -2292,10 +2336,11 @@ async def test_manager_reattach_degraded_row_can_still_be_an_orphan(
         assert "Resume to recover" in (inst.error_detail or "")
 
 
+@pytest.mark.parametrize("bad_uuid", ["", ["not-a-uuid"]], ids=["empty-string", "not-a-string"])
 async def test_manager_reattach_never_takes_the_session_uuid_from_the_raw_record(
-    fake_claustrum, tmp_path
+    fake_claustrum, tmp_path, bad_uuid
 ):
-    """A non-string persisted uuid must not reach the live session (invariant 2).
+    """A junk persisted uuid must not reach the live session (invariant 2).
 
     ``reattach_all`` used to read ``claude_session_uuid`` straight out of the record,
     bypassing the mapper's type check and the model alike (assignments are
@@ -2303,12 +2348,17 @@ async def test_manager_reattach_never_takes_the_session_uuid_from_the_raw_record
     real id from the replayed init frame was discarded for the process lifetime — and
     reached ``build_hosted_argv``'s ``--resume``, i.e. a rejected persisted value in
     spawn argv.
+
+    Parametrized over the empty string too (#1380): mechanically both now traverse identical
+    code, but ``""`` is the shape that ACTUALLY latched the healthy path shut (pydantic
+    accepts it for a ``str | None`` field, so it never degraded the row), and this is the
+    only end-to-end pin of the whole pipeline — record, reattach, latch, init frame, persist.
     """
     fake = await fake_claustrum()
     store = HostedStateStore(tmp_path)
     pid = await _spawn_gen1(fake, store)
     records = store.load()
-    records[pid]["claude_session_uuid"] = ["not-a-uuid"]
+    records[pid]["claude_session_uuid"] = bad_uuid
     store.save(records)
 
     async with ClaustrumClient(fake.socket_path, fake.token) as client:
