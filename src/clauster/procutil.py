@@ -71,6 +71,18 @@ _EXACT_PROC_START_TOLERANCE = 0.05
 # comparable within one boot, and after a reboot an unrelated process could hold both the
 # same pid and the same tick count. Wide enough to absorb any plausible clock correction,
 # far narrower than the gap a reboot puts between two epochs.
+#
+# ⚠️ Both limits of this bound are real, and neither is fixed by widening or narrowing it:
+#   * it CAPS the fix at ~1h of correction. A clock STEP larger than that (a VM snapshot
+#     restore, an RTC-less board syncing long after boot) fails this conjunct even on an
+#     exact tick match, and #1399 returns for that host.
+#   * it is the one place the PID-reuse defense is laxer than the 0.05s bound: across a
+#     reboot the epoch gap is (previous uptime + downtime), so a host that reboots inside
+#     an hour could admit a process holding BOTH the same pid and the same tick count.
+# The discriminator that settles both is `/proc/sys/kernel/random/boot_id` — persist it
+# beside the ticks and this conjunct can go away entirely. Deliberately not done here:
+# it is a second new column for a residue that needs a reboot, a pid collision AND a tick
+# collision at once, where what shipped fixes a fault seen 19 times in 2.5 hours.
 _DRIFT_EPOCH_TOLERANCE = 3600.0
 
 

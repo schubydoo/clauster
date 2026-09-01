@@ -199,6 +199,22 @@ def _proc_start(pid: int) -> float | None:
         return None
 
 
+def _proc_start_ticks(pid: int) -> int | None:
+    """Return the bridge's boot-relative start ticks, the drift-immune half of the pair.
+
+    Written beside ``bridge_proc_start`` so the reattach that reads this sidecar can compare
+    a value NTP cannot move (#1399). Without it a pty bridge is judged on the epoch alone,
+    which after a clock correction reads as a dead bridge — and a pty row rebuilt as STOPPED
+    zeroes its pids, which is exactly how a live bridge's card became prunable.
+    """
+    try:
+        from clauster import procutil
+
+        return procutil.proc_start_ticks(pid)
+    except Exception:  # noqa: BLE001 — discovery aid only; never fatal
+        return None
+
+
 class _KeeperDrain:
     """Shared drain/publish logic for both keeper backends (POSIX pty + Windows ConPTY).
 
@@ -383,6 +399,7 @@ def _run_keeper_conpty(
         "keeper_pid": os.getpid(),
         "bridge_pid": None,
         "bridge_proc_start": None,
+        "bridge_start_ticks": None,
         "connect_url": None,
         "session_id": None,
         "worktree_name": _worktree_from_argv(bridge_argv),
@@ -425,6 +442,7 @@ def _run_keeper_conpty(
 
     base["bridge_pid"] = proc.pid
     base["bridge_proc_start"] = _proc_start(proc.pid)
+    base["bridge_start_ticks"] = _proc_start_ticks(proc.pid)
     _write_sidecar(sidecar, base)
 
     drain = _KeeperDrain(base, sidecar, screen, screen_sidecar)
@@ -502,6 +520,7 @@ def run_keeper(
         "keeper_pid": keeper_pid,
         "bridge_pid": None,
         "bridge_proc_start": None,
+        "bridge_start_ticks": None,
         "connect_url": None,
         "session_id": None,
         "worktree_name": _worktree_from_argv(bridge_argv),
@@ -579,6 +598,7 @@ def run_keeper(
 
     base["bridge_pid"] = proc.pid
     base["bridge_proc_start"] = _proc_start(proc.pid)
+    base["bridge_start_ticks"] = _proc_start_ticks(proc.pid)
     _write_sidecar(sidecar, base)
 
     flags = fcntl.fcntl(master, fcntl.F_GETFL)

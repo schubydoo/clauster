@@ -253,6 +253,21 @@ def test_proc_start_returns_none_on_error(monkeypatch) -> None:
     assert pty_keeper._proc_start(1234) is None
 
 
+def test_proc_start_ticks_returns_none_on_error(monkeypatch) -> None:
+    """The drift-immune half degrades to None on the same terms as its epoch sibling.
+
+    Both halves are written into the sidecar together, so a raise here would abort the
+    keeper's first sidecar write and strand the bridge as unreattachable (#1399).
+    """
+    from clauster import pty_keeper
+
+    def _boom(_pid):
+        raise RuntimeError("psutil exploded")
+
+    monkeypatch.setattr("clauster.procutil.proc_start_ticks", _boom)
+    assert pty_keeper._proc_start_ticks(1234) is None
+
+
 def test_write_sidecar_swallows_oserror(tmp_path: Path) -> None:
     """A sidecar write into a missing directory must never take the bridge down."""
     from clauster import pty_keeper
