@@ -38,7 +38,7 @@ def _stub_connect(monkeypatch, facts=None):
     monkeypatch.setattr(
         SessionRunner,
         "_connect_facts_for",
-        lambda self, proj, mode, pid, start: dict(
+        lambda self, proj, mode, pid, start, **_kw: dict(
             facts or {"url": "https://claude.ai/code?environment=env_STUB"}
         ),
     )
@@ -834,14 +834,14 @@ async def test_a_sibling_projects_keeper_is_never_read_as_this_projects(
 
     assert runner._keeper_sidecars_for("alpha") == []
     assert runner._has_unclaimed_live_keeper("alpha", set()) is False
-    assert runner._recover_keeper_pid("alpha", 4242, None) is None
+    assert runner._recover_keeper_pid("alpha", 4242, None, bridge_start_ticks=None) is None
 
     # Differential control: the sibling is a real project with a real live keeper, so
     # querying under its OWN name must still find it. Without this the assertions above
     # would also pass if the anchor rejected everything.
     assert len(runner._keeper_sidecars_for("alpha-staging")) == 1
     assert runner._has_unclaimed_live_keeper("alpha-staging", set()) is True
-    assert runner._recover_keeper_pid("alpha-staging", 4242, None) == 9999
+    assert runner._recover_keeper_pid("alpha-staging", 4242, None, bridge_start_ticks=None) == 9999
 
 
 def test_keeper_sidecars_are_anchored_to_the_real_spawn_stem(runner_config):
@@ -1056,11 +1056,17 @@ def test_recovery_rejects_a_pid_recycled_mid_snapshot(runner_config, monkeypatch
     monkeypatch.setattr(
         "clauster.runner.procutil.proc_create_time", lambda pid: time.time() + 100.0
     )
-    assert runner._recover_keeper_identity("alpha", 4242, 222.0) == (None, None)
+    assert runner._recover_keeper_identity("alpha", 4242, 222.0, bridge_start_ticks=None) == (
+        None,
+        None,
+    )
 
     # Control: a create-time from before validation is the keeper we validated.
     monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: 777.0)
-    assert runner._recover_keeper_identity("alpha", 4242, 222.0) == (5555, 777.0)
+    assert runner._recover_keeper_identity("alpha", 4242, 222.0, bridge_start_ticks=None) == (
+        5555,
+        777.0,
+    )
 
 
 async def test_pointer_walk_reattach_records_the_keeper_start_time_too(runner_config, monkeypatch):
@@ -1661,6 +1667,40 @@ async def test_connect_facts_reject_a_pointer_whose_start_time_differs(runner_co
     assert inst.environment_id is None, "a recycled pid must not inherit the old environment"
 
 
+async def test_connect_facts_survive_clock_drift_but_still_reject_a_recycled_pid(
+    runner_config, monkeypatch
+):
+    # #1399. This comparison is frozen-vs-live: the row's `bridge_proc_start` was measured at
+    # spawn, while `_expected_epoch(ptr.proc_start)` is re-derived with TODAY's btime. Under
+    # drift they differ by seconds against a 0.05s bound, and the row then gets NO connect
+    # facts — so it stays STARTING and `_promote_ready_unwatched` can never promote it. The
+    # card sticks on "preparing connect link…" for as long as the drift lasts.
+    #
+    # Both sides carry raw field-22 ticks, so compare those: exact, and drift-free.
+    from clauster import pointers
+
+    runner = _make_runner(runner_config)
+    ptr = pointers.BridgePointer(
+        pid=8701,
+        proc_start="770579",
+        source="test",
+        environment_id="env_LIVE",
+        session_id="s",
+    )
+    monkeypatch.setattr("clauster.runner.pointers.pointer_for_project", lambda *a, **k: ptr)
+    # The epoch is 4s adrift — the measured dogfood spread — so the epoch arm would reject.
+    monkeypatch.setattr("clauster.runner.procutil._expected_epoch", lambda _s: 1004.0)
+    proj = runner._discovered()["alpha"]
+
+    facts = runner._connect_facts_for(proj, "standard", 8701, 1000.0, start_ticks=770579)
+    assert facts.get("environment_id") == "env_LIVE", "clock drift must not strip the link"
+
+    # A genuinely different process: same pid, different ticks. Still rejected, and the
+    # epochs here are identical — the tick compare is what catches it.
+    facts = runner._connect_facts_for(proj, "standard", 8701, 1004.0, start_ticks=770580)
+    assert facts == {}, "a recycled pid must not inherit the old environment"
+
+
 async def test_pty_sidecar_without_a_session_id_still_yields_the_url(runner_config, monkeypatch):
     # The sidecar is raw JSON written by the keeper, so unlike the pointer its fields really
     # can be absent — a bridge that is up but has not yet minted a session has a connect URL
@@ -2100,7 +2140,7 @@ async def test_resync_aborts_when_the_row_is_forgotten_while_recovering_facts(
         "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None, **_kw: pid == 4402
     )
 
-    def _forget_mid_flight(self, proj, mode, pid, start):
+    def _forget_mid_flight(self, proj, mode, pid, start, **_kw):
         self._persisted.pop("iid-a", None)  # another process's `clauster forget`
         return {"url": "https://claude.ai/code?environment=env_STUB"}
 
@@ -2298,7 +2338,7 @@ async def test_adoption_does_not_overwrite_an_instance_a_lock_holder_created(
         instance_id="iid-a", project="alpha", label="from-adopt", status=InstanceStatus.RUNNING
     )
 
-    def _land_concurrently(self, proj, mode, pid, start):
+    def _land_concurrently(self, proj, mode, pid, start, **_kw):
         # Simulates the lock-holder committing during one of the awaits above the insert.
         self._instances["iid-a"] = winner
         return {"url": "https://claude.ai/code?environment=env_STUB"}
@@ -2491,7 +2531,7 @@ async def test_promotion_skips_a_row_whose_generation_changed_mid_probe(
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
     inst = _adopted_starting(runner)
 
-    def _resume_lands(self, proj, mode, pid, start):
+    def _resume_lands(self, proj, mode, pid, start, **_kw):
         inst.bridge_pid, inst.bridge_proc_start = 9999, 500.0
         return {"url": "https://claude.ai/code?environment=env_OLD"}
 
@@ -2515,7 +2555,7 @@ async def test_promotion_skips_a_bridge_that_died_during_the_evidence_read(
     monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
     state = {"read": False}
 
-    def _dies_during_read(self, proj, mode, pid, start):
+    def _dies_during_read(self, proj, mode, pid, start, **_kw):
         state["read"] = True
         return {"url": "https://claude.ai/code?environment=env_DEAD"}
 

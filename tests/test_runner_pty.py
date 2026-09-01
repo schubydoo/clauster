@@ -627,9 +627,19 @@ def test_keeper_pid_skips_sidecar_with_mismatched_proc_start(runner_config) -> N
     )
 
     # same pid, but proc-start off by far more than _PROC_START_TOLERANCE (2.0s)
-    assert runner._recover_keeper_pid("alpha", bridge_pid=4242, bridge_proc_start=1000.0) is None
+    assert (
+        runner._recover_keeper_pid(
+            "alpha", bridge_pid=4242, bridge_proc_start=1000.0, bridge_start_ticks=None
+        )
+        is None
+    )
     # the in-tolerance lookup still resolves the keeper, proving the skip is the proc-start guard
-    assert runner._recover_keeper_pid("alpha", bridge_pid=4242, bridge_proc_start=100.5) == 5555
+    assert (
+        runner._recover_keeper_pid(
+            "alpha", bridge_pid=4242, bridge_proc_start=100.5, bridge_start_ticks=None
+        )
+        == 5555
+    )
 
 
 def test_recover_keeper_pid_returns_none_when_keeper_pid_missing(runner_config) -> None:
@@ -642,7 +652,12 @@ def test_recover_keeper_pid_returns_none_when_keeper_pid_missing(runner_config) 
         json.dumps({"keeper_pid": None, "bridge_pid": 4242, "bridge_proc_start": 100.0})
     )
 
-    assert runner._recover_keeper_pid("beta", bridge_pid=4242, bridge_proc_start=100.0) is None
+    assert (
+        runner._recover_keeper_pid(
+            "beta", bridge_pid=4242, bridge_proc_start=100.0, bridge_start_ticks=None
+        )
+        is None
+    )
 
 
 def _states_until_keeper_ready(tmp_path, monkeypatch, argv) -> list:
@@ -1664,7 +1679,12 @@ def test_recover_keeper_pid_none_without_bridge_pid(runner_config) -> None:
     # the lookup returns None instead of guessing a keeper to signal.
     config, claude_json = runner_config
     runner = SessionRunner(config, claude_json=claude_json)
-    assert runner._recover_keeper_pid("alpha", bridge_pid=None, bridge_proc_start=None) is None
+    assert (
+        runner._recover_keeper_pid(
+            "alpha", bridge_pid=None, bridge_proc_start=None, bridge_start_ticks=None
+        )
+        is None
+    )
 
 
 def test_recover_keeper_pid_skips_foreign_and_corrupt_sidecars(runner_config) -> None:
@@ -1679,7 +1699,12 @@ def test_recover_keeper_pid_skips_foreign_and_corrupt_sidecars(runner_config) ->
     )
     (runner._log_dir / "gamma-1700000000000-1.keeper.json").write_text("not json {{{")
 
-    assert runner._recover_keeper_pid("gamma", bridge_pid=2222, bridge_proc_start=100.0) is None
+    assert (
+        runner._recover_keeper_pid(
+            "gamma", bridge_pid=2222, bridge_proc_start=100.0, bridge_start_ticks=None
+        )
+        is None
+    )
 
 
 def test_recover_keeper_pid_prefers_ticks_over_a_drifted_epoch(runner_config) -> None:

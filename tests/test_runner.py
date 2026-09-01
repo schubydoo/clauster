@@ -3891,6 +3891,10 @@ async def test_poll_prune_spares_a_live_bridges_card_when_its_own_pid_is_the_evi
         local_uuid="u-drift",
     )
     monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
+    # Pinned, not inherited from the host: the exclusion only engages where create-time
+    # actually drifts, so on the macOS and Windows CI legs this would otherwise delete the
+    # card on tick 1 and the test would be asserting nothing about the discriminator.
+    monkeypatch.setattr("clauster.runner.procutil.start_time_is_drift_prone", lambda: True)
     # The clock moved, so the pair no longer matches — the bridge is alive regardless.
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
     # ...and the session's ancestry resolves to that same still-running bridge.
@@ -3982,6 +3986,9 @@ async def test_poll_prune_still_uses_a_long_dead_cards_recycled_pid_at_its_own_c
         local_uuid="u-ext",
     )
     monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
+    # True, so the test exercises the conclusive-verdict discriminator rather than passing
+    # because the exclusion is switched off wholesale (which is what happens off Linux).
+    monkeypatch.setattr("clauster.runner.procutil.start_time_is_drift_prone", lambda: True)
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
     monkeypatch.setattr("clauster.runner.procutil.bridge_ancestor", lambda pid, **k: 555000)
 

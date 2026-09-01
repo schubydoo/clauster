@@ -2842,7 +2842,11 @@ class SessionRunner:
         name: str,
         bridge_pid: int | None,
         bridge_proc_start: float | None,
-        bridge_start_ticks: int | None = None,
+        *,
+        # Keyword-REQUIRED, no default (#1399). Threading this by hand is how two review
+        # rounds each found a caller silently left on the drifting epoch arm; without a
+        # default a missed call site is a type error instead.
+        bridge_start_ticks: int | None,
     ) -> int | None:
         """Find a rediscovered pty bridge's keeper pid from its sidecar.
 
@@ -2856,10 +2860,13 @@ class SessionRunner:
         so stop()/poll_once can never reap an unrelated process tree. The keeper is
         alive iff the bridge is (it holds its terminal), already confirmed before this.
 
-        proc-start is compared with the same slack as :func:`procutil.is_live_bridge`
-        (the pointer's stored value and the sidecar's psutil create-time are derived
-        independently, so exact float equality would be brittle); when either side
-        is unknown, fall back to the pid-only match.
+        ``bridge_start_ticks`` decides when the caller AND the sidecar both carry it: both
+        are raw ``/proc/<pid>/stat`` field-22 counts, so the match is exact and immune to the
+        clock drift that moves every epoch on this host (#1399) — paired with a coarse epoch
+        conjunct, because ticks restart at zero each boot. Otherwise proc-start falls back to
+        the same slack :func:`procutil.is_live_bridge` uses (the pointer's stored value and
+        the sidecar's psutil create-time are derived independently, so exact float equality
+        would be brittle); when either side is unknown, fall back to the pid-only match.
         """
         if bridge_pid is None:
             return None
@@ -2898,7 +2905,8 @@ class SessionRunner:
         name: str,
         bridge_pid: int | None,
         bridge_proc_start: float | None,
-        bridge_start_ticks: int | None = None,
+        *,
+        bridge_start_ticks: int | None,  # keyword-required — see _recover_keeper_pid
     ) -> tuple[int | None, float | None]:
         """Return the ``(keeper_pid, keeper_proc_start)`` PAIR for this bridge (#1178).
 
@@ -4217,7 +4225,7 @@ class SessionRunner:
         proj = discovered.get(inst.project)
         if proj is None:
             return  # project vanished from discovery; nothing to attribute it to
-        pid, proc_start, _start_ticks = pair  # ticks re-applied from `pair` at assignment
+        pid, proc_start, start_ticks = pair
         # Resolved BEFORE the lock. All three are pure filesystem reads keyed entirely on
         # snapshot values (project, pid, proc_start) — none reads live mutable state — so
         # holding the project's spawn lock across them would stall every spawn/resume/stop
@@ -4225,12 +4233,23 @@ class SessionRunner:
         # row, per tick, for no correctness gain. What must be inside the lock is the
         # re-check plus the mutation, and that block contains no ``await`` at all.
         keeper_pid, keeper_proc_start = (
-            await asyncio.to_thread(self._recover_keeper_identity, inst.project, pid, proc_start)
+            await asyncio.to_thread(
+                self._recover_keeper_identity,
+                inst.project,
+                pid,
+                proc_start,
+                bridge_start_ticks=start_ticks,
+            )
             if inst.resume_mode == "pty"
             else (None, None)
         )
         connect = await asyncio.to_thread(
-            self._connect_facts_for, proj, inst.resume_mode, pid, proc_start
+            self._connect_facts_for,
+            proj,
+            inst.resume_mode,
+            pid,
+            proc_start,
+            start_ticks=start_ticks,
         )
         log_path = await asyncio.to_thread(self._latest_debug_log_for, inst.project)
 
@@ -4349,7 +4368,13 @@ class SessionRunner:
             # `keeper_pid` to `_cleanup_keeper`, which force-kills the whole tree. A recycled
             # pid landing on another instance's keeper would reap a stranger's processes.
             keeper_pid, keeper_proc_start = (
-                await asyncio.to_thread(self._recover_keeper_identity, proj.name, pid, proc_start)
+                await asyncio.to_thread(
+                    self._recover_keeper_identity,
+                    proj.name,
+                    pid,
+                    proc_start,
+                    bridge_start_ticks=start_ticks,
+                )
                 if resume_mode == "pty"
                 else (None, None)
             )
@@ -4359,7 +4384,12 @@ class SessionRunner:
             # dashboard sits on "Preparing connect link…" forever for every reattached or
             # adopted bridge, which is the whole point of having the bridge.
             connect = await asyncio.to_thread(
-                self._connect_facts_for, proj, resume_mode, pid, proc_start
+                self._connect_facts_for,
+                proj,
+                resume_mode,
+                pid,
+                proc_start,
+                start_ticks=start_ticks,
             )
             # Re-check across the awaits above. This runs lock-free on the poll loop, so a
             # lock-holding adopt()/spawn() can have registered this id — overwriting it would
@@ -4404,7 +4434,13 @@ class SessionRunner:
         return claimed, stopped_projects
 
     def _connect_facts_for(
-        self, proj: Project, resume_mode: ResumeMode, pid: int, proc_start: float | None
+        self,
+        proj: Project,
+        resume_mode: ResumeMode,
+        pid: int,
+        proc_start: float | None,
+        *,
+        start_ticks: int | None,  # keyword-required — see _recover_keeper_pid (#1399)
     ) -> dict:
         """Recover a reattached bridge's connect URL / env id / starter session (#1088).
 
@@ -4451,21 +4487,36 @@ class SessionRunner:
             return {}
         # Same pid AND same start time, or a recycled pid could hand over its environment.
         #
-        # Compared with a tolerance, not `!=`: our `proc_start` is psutil's `create_time()`
-        # while the pointer's is `boot_time + jiffies/CLK_TCK` — two independent derivations
-        # that agree on Linux today only because the rounding happens to coincide. Every
-        # other proc-start comparison in the codebase uses a tolerance for exactly this
-        # reason. An UNKNOWN expected value (unparseable / non-Linux `procStart`) skips the
-        # check rather than failing it, matching `is_live_process` and `_recover_keeper_pid`
-        # — treating unknown as mismatch would strip the connect link on any platform where
-        # the jiffies form isn't comparable, reintroducing the bug this recovers from.
-        expected = procutil._expected_epoch(ptr.proc_start)
-        if (
-            proc_start is not None
-            and expected is not None
-            and abs(expected - proc_start) > procutil._EXACT_PROC_START_TOLERANCE
-        ):
-            return {}
+        # ⚠️ The tolerance arm below is the #1399 comparison: our `proc_start` is FROZEN
+        # (psutil's create_time at spawn, persisted) while `_expected_epoch(ptr.proc_start)`
+        # is re-derived with TODAY's btime — so after a clock correction they differ by the
+        # drift and the 0.05s bound rejects a bridge that never restarted. The consequence is
+        # not a wrong link but NO link: the row gets no connect facts, stays STARTING, and
+        # `_promote_ready_unwatched` (which calls this) can never promote it, so the card is
+        # stuck on "preparing connect link…" for as long as the drift lasts.
+        #
+        # An earlier version of this comment claimed the two derivations "agree on Linux
+        # today only because the rounding happens to coincide". They do not agree; #1399 is
+        # exactly them disagreeing. Both sides carry raw field-22 ticks, so compare THOSE
+        # when both are available — an exact, drift-free match — and keep the epoch arm only
+        # as the fallback for a row or pointer that has none.
+        #
+        # An UNKNOWN expected value (unparseable / non-Linux `procStart`) skips the check
+        # rather than failing it, matching `is_live_process` and `_recover_keeper_pid` —
+        # treating unknown as mismatch would strip the connect link on any platform where the
+        # jiffies form isn't comparable, reintroducing the bug this recovers from.
+        pointer_ticks = _pointer_start_ticks(ptr.proc_start)
+        if start_ticks is not None and pointer_ticks is not None:
+            if pointer_ticks != start_ticks:
+                return {}
+        else:
+            expected = procutil._expected_epoch(ptr.proc_start)
+            if (
+                proc_start is not None
+                and expected is not None
+                and abs(expected - proc_start) > procutil._EXACT_PROC_START_TOLERANCE
+            ):
+                return {}
         # No presence guards: `BridgePointer` declares both as required `str`, so a parsed
         # pointer always carries them — a guard here would be unreachable, not defensive.
         return {
@@ -5313,8 +5364,11 @@ class SessionRunner:
         }
         # ⚠️ #1399: `managed_pids` alone is not enough, because `pid_is_ours` IS
         # `is_live_bridge` and that predicate has a false-negative mode this delete cannot
-        # absorb. Where the start-time pair degrades to the epoch alone — a pre-#1399 row, or
-        # any non-Linux host — an NTP correction makes a LIVE bridge answer False. Both halves
+        # absorb. Where the start-time pair degrades to the epoch alone AND the platform's
+        # create-time drifts — a pre-#1399 row on Linux — an NTP correction makes a LIVE
+        # bridge answer False. (macOS and Windows record an absolute create-time at exec and
+        # never drift, which is why the exclusion below asks `start_time_is_drift_prone`
+        # rather than assuming every host is exposed.) Both halves
         # of the prune then fail together: the instance is demoted to STOPPED so it becomes a
         # candidate, AND its own pid drops out of the set above so its own bridge becomes the
         # "unmanaged" evidence against it. Observed 19 times in 2.5 hours on the dogfood host,
@@ -5499,7 +5553,7 @@ class SessionRunner:
         facts = await asyncio.to_thread(
             lambda: {
                 iid: (
-                    self._connect_facts_for(*args[:4]),
+                    self._connect_facts_for(*args[:4], start_ticks=args[4]),
                     procutil.is_live_bridge(args[2], args[3], start_ticks=args[4]),
                 )
                 for iid, args in pending.items()
