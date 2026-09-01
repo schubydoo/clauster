@@ -2105,6 +2105,115 @@ def test_a_refused_claude_session_uuid_is_named_not_typed_in_the_log(caplog) -> 
     assert "claude_session_uuid" not in caplog.text
 
 
+def test_unique_instance_id_keeps_the_first_and_mints_for_a_duplicate(caplog) -> None:
+    """`_restore_instance_id` type-checks an id but cannot check uniqueness (#1381).
+
+    It sees one record at a time; uniqueness is a property of the whole file. Two records
+    sharing an `instance_id` both restored it, and `_key_for` returns the FIRST scan match --
+    so a client that cached the id could be handed the wrong session, and every lifecycle
+    call keyed by it (stop, kill, resume, input) would land there. Silently, since "first" is
+    the insertion order of a file the operator hand-edited.
+    """
+    shared = "11111111-2222-4333-8444-555555555555"
+    first = HostedManager._row_from_record("pid-a", {"instance_id": shared})
+    second = HostedManager._row_from_record("pid-b", {"instance_id": shared})
+    assert first.instance_id == second.instance_id  # the collision the file really holds
+
+    seen: set[str] = set()
+    with caplog.at_level(logging.WARNING, logger="clauster.hosted"):
+        HostedManager._unique_instance_id(first, seen)
+        HostedManager._unique_instance_id(second, seen)
+
+    assert first.instance_id == shared  # keep-first: a cached client handle still resolves
+    assert second.instance_id != shared
+    assert second.instance_id  # ...and it is a real id, not blank
+    assert "already in use" in caplog.text
+    assert shared not in caplog.text  # the hand-edited value is never echoed
+
+
+def test_unique_instance_id_covers_the_process_id_namespace_too() -> None:
+    # `_key_for` tries the registry KEYS first and only then scans instance_ids, so an
+    # instance_id equal to ANOTHER row's claustrum_process_id misroutes exactly like a
+    # duplicate instance_id -- checking ids against ids alone leaves that half open.
+    keys = ["pid-a", "pid-b"]
+    row = HostedManager._row_from_record("pid-b", {"instance_id": "pid-a"})
+    HostedManager._unique_instance_id(row, set(), keys)
+    assert row.instance_id != "pid-a"
+
+    # ...but a row whose instance_id is its OWN key is harmless -- `_key_for` returns that
+    # same row either way -- so it must be left alone rather than churned on every boot.
+    same = HostedManager._row_from_record("pid-a", {"instance_id": "pid-a"})
+    HostedManager._unique_instance_id(same, set(), keys)
+    assert same.instance_id == "pid-a"
+
+
+async def test_reattach_all_breaks_an_instance_id_collision(fake_claustrum, tmp_path) -> None:
+    # End to end: the collision must not survive into the registry, because that is where
+    # `_key_for` reads it. Both rows still reattach -- reattach binds by
+    # claustrum_process_id, so only the cached handle is lost, never the session.
+    fake = await fake_claustrum()
+    store = HostedStateStore(tmp_path)
+    shared = "11111111-2222-4333-8444-555555555555"
+    # Both sessions in ONE generation: `aclose` persists the manager's whole registry, so two
+    # separate generations would leave only the second row on disk.
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        for _ in range(2):
+            inst = await mgr.spawn(
+                client,
+                project="proj",
+                label="hosted:proj",
+                cwd="/tmp/proj",
+                claude_binary=_BIN,
+                permission_mode="acceptEdits",
+            )
+            pid = inst.claustrum_process_id
+            await fake.emit(pid, "stdout", b'{"type":"system","subtype":"init"}\n')
+            await wait_until(lambda p=pid: mgr.get_instance(p).daemon_last_seq > 0)
+        await mgr.aclose()
+
+    records = store.load()
+    assert len(records) == 2
+    first_pid = next(iter(records))
+    for fields in records.values():
+        fields["instance_id"] = shared
+    store.save(records)
+
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        instances = await mgr.reattach_all(client)
+        ids = [inst.instance_id for inst in instances]
+        assert len(ids) == 2
+        assert len(set(ids)) == 2  # no duplicate reached the registry
+        # Keep-FIRST specifically, not just "one of them kept it": the earlier record is the
+        # one a client may already have cached, so it is the one that must still resolve.
+        assert mgr._key_for(shared) == first_pid
+        await mgr.aclose()
+
+    # ...and the repair is durable. `reattach_all` ends in a `_persist`, so the next boot
+    # does not have to redo it -- and would not warn again.
+    assert len({fields["instance_id"] for fields in store.load().values()}) == 2
+
+
+async def test_reattach_all_twice_does_not_churn_instance_ids(fake_claustrum, tmp_path) -> None:
+    # `seen_instance_ids` is seeded from the live registry so a second pass cannot mint an id
+    # belonging to a row it is not touching -- but it must EXCLUDE the rows these records are
+    # about to replace. Seeded naively, a re-run finds every row's own id already in `seen`,
+    # re-mints all of them, warns a false collision each time, and persists the churn --
+    # destroying exactly the cached client handles the keep-first rule exists to protect.
+    fake = await fake_claustrum()
+    store = HostedStateStore(tmp_path)
+    await _spawn_gen1(fake, store)
+
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        first = [inst.instance_id for inst in await mgr.reattach_all(client)]
+        second = [inst.instance_id for inst in await mgr.reattach_all(client)]
+        await mgr.aclose()
+
+    assert first == second  # stable across passes, not re-minted
+
+
 @pytest.mark.parametrize("junk", _REJECTED_RECORDS)
 def test_instance_from_record_tolerates_a_record_the_model_rejects(junk):
     """A persisted value pydantic refuses degrades the row instead of raising (#1343).
@@ -2307,12 +2416,18 @@ async def test_manager_reattach_survives_one_unreadable_record(fake_claustrum, t
 async def test_manager_reattach_degraded_row_can_still_be_an_orphan(
     fake_claustrum, tmp_path, monkeypatch
 ):
-    """A degraded row keeps the CL-8 orphan evidence, so Resume/Kill stay reachable.
+    """A degraded row keeps the CL-8 orphan evidence, so Kill stays reachable.
 
     ``_is_orphan`` has only ``agent_pid`` + ``agent_proc_start`` to go on. If the
     salvage dropped them, a survivor of a daemon restart would be filed as "session
     lost" and ``forget`` — which refuses only for ``is_orphan`` rows — would then throw
     away clauster's last record of a live ``claude`` process.
+
+    This row is BOTH an orphan and project-less: the per-field salvage keeps the pid
+    evidence while a model-rejected ``project`` falls back to empty. It used to be told
+    "Resume to recover", which #1381 showed was a promise nothing could keep — the
+    dashboard does not render Resume for such a row and the route answers 409. The detail
+    now names only the action that works, so the assertion below is the corrected one.
     """
     fake = await fake_claustrum()
     store = HostedStateStore(tmp_path)
@@ -2333,7 +2448,9 @@ async def test_manager_reattach_degraded_row_can_still_be_an_orphan(
         inst = mgr.get_instance("01GONEPROCESS00000000000")
         assert inst.status is InstanceStatus.CRASHED  # the daemon doesn't know it
         assert inst.is_orphan is True  # ...but the pid evidence survived the degrade
-        assert "Resume to recover" in (inst.error_detail or "")
+        assert inst.project == ""  # the shape: orphan AND project-less at once
+        assert "Kill to clean up" in (inst.error_detail or "")
+        assert "Resume" not in (inst.error_detail or "")  # never offered where it cannot work
 
 
 @pytest.mark.parametrize("bad_uuid", ["", ["not-a-uuid"]], ids=["empty-string", "not-a-string"])
@@ -2703,6 +2820,29 @@ async def test_manager_resume_without_uuid_raises(fake_claustrum):
         await wait_until(lambda: mgr.get_instance(pid).status is InstanceStatus.CRASHED)
         with pytest.raises(HostedSessionError):
             await mgr.resume(client, pid, cwd="/tmp/proj", claude_binary=_BIN)
+
+
+async def test_manager_resume_without_a_project_raises_and_says_why(fake_claustrum):
+    # #1381: a record that degraded on `project` gets `project=""`. It still reattaches --
+    # that binds by claustrum_process_id -- but it can never respawn, because the caller
+    # resolves the spawn cwd from the project name. Without this guard an empty name reached
+    # project resolution and came back as a 404, which reads as "that project is gone" and
+    # sends the operator looking in the wrong place. Kill still works, and the dashboard
+    # hides Resume for such a row on the same condition.
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        inst = await _spawn(mgr, client)
+        pid = inst.claustrum_process_id
+        await fake.emit(pid, "stdout", b'{"type":"system","subtype":"init","session_id":"s-1"}\n')
+        await wait_until(lambda: mgr.get_instance(pid).claude_session_uuid == "s-1")
+        await fake.emit_exit(pid, 1)
+        await wait_until(lambda: mgr.get_instance(pid).status is InstanceStatus.CRASHED)
+        mgr.get_instance(pid).project = ""  # what `_degraded_row` leaves behind
+
+        spawned_before = len(fake.spawned)
+        with pytest.raises(HostedSessionError, match="project is unknown"):
+            await mgr.resume(client, pid, cwd="/tmp/proj", claude_binary=_BIN)
+        # ...and it refused BEFORE spawning, so there is no orphan process to clean up.
+        assert len(fake.spawned) == spawned_before
 
 
 async def test_manager_aclose_detaches_without_killing(fake_claustrum, tmp_path):

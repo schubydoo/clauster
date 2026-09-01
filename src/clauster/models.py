@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field, computed_field
 from .config import PermissionMode, ResumeMode, SandboxMode, SessionChannel, SpawnMode
 
 
-def _new_instance_id() -> str:
+def new_instance_id() -> str:
     """Generate a fresh RFC 4122 UUID for a new managed instance."""
     return str(uuid.uuid4())
 
@@ -69,7 +69,7 @@ class RemoteControlInstance(BaseModel):
     persisted so a restart can reconstruct the same key.
     """
 
-    instance_id: str = Field(default_factory=_new_instance_id)
+    instance_id: str = Field(default_factory=new_instance_id)
     project: str
     label: str  # passed as --name to claude remote-control
     bridge_pid: int | None = None  # bridge parent PID (matches bridge-pointer pid)

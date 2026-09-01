@@ -74,7 +74,7 @@ from .discovery import (
     is_valid_project_name,
 )
 from .engine import ClausterEngine, ambiguity_hint
-from .hosted import HostedManager, HostedSessionError
+from .hosted import NO_PROJECT_RESUME_DETAIL, HostedManager, HostedSessionError
 from .models import (
     BackgroundJob,
     ClaudeMdDoc,
@@ -4724,9 +4724,16 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         """Resume a lost/ended hosted session by id, respawning with ``--resume <uuid>``.
 
         ``instance`` is the row the route already fetched. Maps the engine's
-        :class:`HostedSessionError` (unknown / still-running / no-uuid) to 409 and a
-        daemon spawn failure to 502.
+        :class:`HostedSessionError` (unknown / still-running / no-uuid / no-project) to 409
+        and a daemon spawn failure to 502.
         """
+        if not instance.project:
+            # BEFORE `_hosted_prereqs`, which resolves the project path: a row whose saved
+            # record degraded on `project` carries `project=""`, and an empty name 404s there
+            # as "project '' not found" — which reads as "that project is gone" and sends the
+            # operator looking in the wrong place. `_resume_locked` refuses it too, but only
+            # a caller that is not this route would ever reach that guard (#1381).
+            raise HTTPException(status_code=409, detail=NO_PROJECT_RESUME_DETAIL)
         client, path, binary = await _hosted_prereqs(instance.project)
         try:
             return await app.state.hosted.resume(

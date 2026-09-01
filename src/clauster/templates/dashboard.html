@@ -386,10 +386,24 @@
                 <span class="badge bg-secondary-lt me-1"
                       title="Hosted sessions stream live here only — unlike bridges, they are not attachable from claude.ai/code or the Claude mobile app">local live-view only</span>
                 <span class="badge me-1" :class="hostedStatusBadge(h.status)"><span class="status-dot" :class="hostedStatusDot(h.status)" aria-hidden="true"></span><span class="text-capitalize" x-text="h.status"></span></span>
+                {# The title names Resume only when the row can actually offer it: a salvaged
+                   row can be an orphan AND have lost its `project`, and the Resume button is
+                   not rendered for those (#1381). Mirrors the same branch in `reattach_all`'s
+                   orphan `error_detail`. #}
                 <span class="badge bg-orange-lt me-1" x-show="h.is_orphan" x-cloak
-                      title="Survived a daemon restart — Resume to recover or Kill to clean up">orphan</span>
-                <span class="fw-medium me-1" x-text="h.project"></span>
+                      :title="h.project ? 'Survived a daemon restart — Resume to recover or Kill to clean up' : 'Survived a daemon restart — Kill to clean up (it cannot be resumed: its project is unknown)'">orphan</span>
+                {# `|| h.label` because a row whose saved record degraded on `project` carries
+                   `project: ""` (#1381) and would otherwise render nameless. Same fallback
+                   idiom `forgetHosted` already uses for its confirm prompt. #}
+                <span class="fw-medium me-1" x-text="h.project || h.label"></span>
                 <span class="text-secondary small me-1" x-text="permLabel(h.permission_mode)"></span>
+                {# The reason the Resume button below is absent for this row. Without it the
+                   row shows only Kill and no explanation, which is the "fails opaquely" half
+                   of #1381 moved rather than fixed. Shown only where Resume would otherwise
+                   have been offered, so a healthy row is unaffected. #}
+                <span class="text-secondary small me-1" x-cloak
+                      x-show="['crashed', 'stopped', 'error'].includes(h.status) && h.claude_session_uuid && !h.project"
+                      title="This session's saved record was unreadable and its project is unknown, so it cannot be respawned. Kill it and start a new session in the right project.">resume unavailable — project unknown</span>
                 {# `:disabled` is coerced with `!!` on every busy-state binding below. These
                    buttons live in an x-for clone and the busy maps (hostedStopping/hostedResuming/
                    agentStopping) start without the row's key. Alpine 3.15.x renders a bare
@@ -398,7 +412,16 @@
                    the key exists. `!!` yields a concrete false for a missing key, which renders
                    enabled. The sibling `x-text` ternaries are unaffected (undefined → 'Stop'). #}
                 <span class="ms-auto d-flex gap-1">
-                  <template x-if="['crashed', 'stopped', 'error'].includes(h.status) && h.claude_session_uuid">
+                  {# `h.project` joins the uuid gate (#1381): a row whose saved record degraded
+                     on `project` still reattaches (that binds by process id) but can never
+                     respawn, because the spawn cwd is resolved from the project name. The
+                     resume route refuses it with a 409 that says so (and `_resume_locked`
+                     refuses it again for any non-route caller), so offering the button could
+                     only ever produce that error. Same shape as the uuid gate beside it, and
+                     the two mirror the engine's two guards. The reason is rendered above and
+                     in the View panel's ended banner; Kill stays available below, which is
+                     the honest set of actions for such a row. #}
+                  <template x-if="['crashed', 'stopped', 'error'].includes(h.status) && h.claude_session_uuid && h.project">
                     <button type="button" class="btn btn-sm btn-success"
                             :disabled="!!hostedResuming[h.claustrum_process_id]" @click="resumeHosted(h)">
                       <span x-text="hostedResuming[h.claustrum_process_id] ? 'Resuming…' : 'Resume'">Resume</span>

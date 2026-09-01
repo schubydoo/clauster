@@ -552,6 +552,29 @@ def test_resume_hosted_session_error_is_409(write_config, projects_root, monkeyp
     assert r.status_code == 409
 
 
+def test_resume_hosted_with_a_degraded_project_is_409_not_404(
+    write_config, projects_root, monkeypatch
+):
+    # #1381. A record that degraded on `project` carries `project=""`. The route resolves the
+    # project path BEFORE calling the engine, so an empty name used to 404 as "project ''
+    # not found" -- which reads as "that project is gone" and sends the operator looking in
+    # the wrong place. The check is hoisted above `_hosted_prereqs` so the answer is a 409
+    # that says what actually happened, and the engine keeps its own guard for a non-route
+    # caller. The dashboard hides Resume on the same condition, so this is the API contract
+    # for a client that asks anyway.
+    monkeypatch.setattr(app_module, "is_trusted", lambda *a, **k: True)
+    monkeypatch.setattr(app_module.claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
+    manager = _StubManager()
+    manager.seed().project = ""  # what `_degraded_row` leaves behind
+    app = _app(write_config, manager=manager, daemon=_StubDaemon())
+    with TestClient(app) as client:
+        r = client.post(f"/api/instances/{_HID}/resume")
+
+    assert r.status_code == 409
+    assert "project is unknown" in r.json()["detail"]
+    assert manager.resumed == []  # refused before reaching the engine at all
+
+
 def test_resume_hosted_daemon_error_is_502(write_config, projects_root, monkeypatch):
     monkeypatch.setattr(app_module, "is_trusted", lambda *a, **k: True)
     monkeypatch.setattr(app_module.claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")

@@ -39,7 +39,7 @@ import json
 import logging
 import uuid
 from collections import deque
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
@@ -52,7 +52,7 @@ from . import procutil
 from .claustrum_client import ClaustrumClient, ClaustrumError, ProcessStream, _Subscriber
 from .config import INHERIT_PERMISSION_MODE, PermissionMode
 from .hosted_events import GapRangeEvent, HostedEvent, StdinFrame
-from .models import InstanceStatus, RemoteControlInstance
+from .models import InstanceStatus, RemoteControlInstance, new_instance_id
 from .redact import sanitize_line
 from .state import KeyedStore
 
@@ -1079,8 +1079,10 @@ class HostedManager:
         this starts a *fresh* process with ``--resume <uuid>`` to reload the
         conversation — keyed by a new ``claustrum_process_id``; the dead row is retired
         once the resumed one is live. Raises :class:`HostedSessionError` if the session
-        is unknown, still running, or has no captured uuid to resume from. A
-        :class:`ClaustrumError` from the spawn propagates (the caller maps it).
+        is unknown, still running, has no captured uuid to resume from, or has no
+        ``project`` to respawn into — the last of which is what a record that degraded on
+        ``project`` leaves behind (#1381). A :class:`ClaustrumError` from the spawn
+        propagates (the caller maps it).
 
         Serialized per id (see :meth:`_lock_for`): two concurrent resume(id) can't
         both pass the running-check and both spawn — the second blocks at the lock,
@@ -1117,6 +1119,17 @@ class HostedManager:
         resume_uuid = old.claude_session_uuid
         if not resume_uuid:
             raise HostedSessionError("no captured session uuid to resume from")
+        if not old.project:
+            # A record that degraded on `project` gets `project=""` (`_degraded_row`). It
+            # still reattaches — that binds by claustrum_process_id — but a respawn cannot:
+            # the caller resolves the spawn cwd from this name, and the row below would carry
+            # an empty project forward (#1381).
+            #
+            # The HTTP route checks this FIRST, before it resolves the project path, because
+            # otherwise an empty name 404s there as "project '' not found" — which reads as
+            # "that project is gone" and sends the operator looking in the wrong place. This
+            # guard is the defence-in-depth half, for a caller that is not that route.
+            raise HostedSessionError(NO_PROJECT_RESUME_DETAIL)
         # Spawn the fresh process FIRST, without persisting — a spawn failure then
         # leaves the dead row untouched and retryable.
         instance = await self._spawn_session(
@@ -1276,7 +1289,10 @@ class HostedManager:
         Tolerates a daemon error per session (records it, keeps going — one bad
         reattach never blocks the rest or startup), and likewise an unreadable
         persisted record: :meth:`_instance_from_record` degrades that one row to
-        defaults and logs it rather than raising through this loop (#1343).
+        defaults and logs it rather than raising through this loop (#1343). One
+        cross-record repair happens here rather than in the mapper, because it needs
+        the whole file: :meth:`_unique_instance_id` breaks an ``instance_id`` collision
+        that would otherwise make :meth:`_key_for` resolve to the wrong session (#1381).
         Returns the restored instances.
 
         ``history_for`` resolves a row to its prior conversation, read from claude's
@@ -1286,8 +1302,17 @@ class HostedManager:
         treats any failure as "no history" — rehydration must never fail a reattach.
         """
         records = self._store.load() if self._store is not None else {}
+        # Seeded from the live registry rather than empty, so a second call cannot mint an id
+        # that already belongs to a row this pass is not touching. Rows these records are
+        # about to REPLACE are excluded, or a re-run would find every row's own id in `seen`,
+        # re-mint all of them, warn a false collision each time, and persist the churn —
+        # destroying exactly the cached client handles the keep-first rule protects.
+        seen_instance_ids = {
+            inst.instance_id for pid, inst in self._instances.items() if pid not in records
+        }
         for process_id, fields in records.items():
             instance = self._instance_from_record(process_id, fields)
+            self._unique_instance_id(instance, seen_instance_ids, records.keys())
             self._instances[process_id] = instance
             # From the row, not the raw record, for the same reason as the uuid below:
             # the mapper is the one place a persisted value is type-checked. Both agree
@@ -1336,8 +1361,15 @@ class HostedManager:
                 instance.status = InstanceStatus.CRASHED
                 if self._is_orphan(instance):
                     instance.is_orphan = True
+                    # A salvaged row can be an orphan AND have lost its `project` — the
+                    # per-field salvage keeps the pid evidence while a model-rejected project
+                    # falls back to empty. Naming Resume for such a row points at a button the
+                    # dashboard does not render and an endpoint that answers 409 (#1381), so
+                    # the offer is dropped and only the action that works is named.
                     instance.error_detail = (
                         "survived a daemon restart — Resume to recover, or Kill"
+                        if instance.project
+                        else "survived a daemon restart — Kill to clean up"
                     )
                 else:
                     instance.error_detail = "daemon restarted; session lost"
@@ -1584,6 +1616,54 @@ class HostedManager:
         return HostedManager._restore_instance_id(instance, fields)
 
     @staticmethod
+    def _unique_instance_id(
+        instance: RemoteControlInstance, seen: set[str], keys: Collection[str] = ()
+    ) -> None:
+        """Mint a fresh ``instance_id`` for ``instance`` if it would be ambiguous.
+
+        :meth:`_restore_instance_id` type-checks a persisted id but cannot check
+        UNIQUENESS: it sees one record at a time, and uniqueness is a property of the whole
+        file. A hand-edited ``hosted_state.json`` with two records sharing an ``instance_id``
+        therefore restored both, and :meth:`_key_for` resolves that id by scanning
+        ``_instances`` and returning the FIRST match — so a client that cached the id could
+        be handed the wrong session, and every lifecycle call keyed by it (stop, kill, resume,
+        input) would land on that wrong session. Silently, since dict iteration order makes
+        "first" the insertion order of a file the operator hand-edited (#1381).
+
+        BOTH halves of the namespace :meth:`_key_for` searches are checked, not just the id
+        one. That method tries the registry KEYS first, so an ``instance_id`` equal to another
+        row's ``claustrum_process_id`` misroutes exactly the same way — and the two formats
+        colliding is only implausible, not impossible, in a file someone edited by hand.
+        ``keys`` carries the record keys, which ``reattach_all`` knows upfront. A row matching
+        its OWN key is harmless (``_key_for`` returns that same row) and is left alone.
+
+        Keep-first, mint-for-the-rest: the earlier record keeps the id a client may already
+        hold. Minting rather than dropping the row matters for the same reason
+        :meth:`_degraded_row` exists — reattach binds by ``claustrum_process_id``, so the row
+        still reattaches its live daemon session; only the cached handle is lost, which is
+        exactly what :meth:`_restore_instance_id` already warns about for an unusable id. The
+        repair is durable: ``reattach_all`` ends in a :meth:`_persist` that writes the new id
+        back, so the collision does not return on the next boot.
+
+        Mutates in place and warns; the caller owns ``seen``.
+        """
+        own_key = instance.claustrum_process_id
+        shadows_a_key = instance.instance_id in keys and instance.instance_id != own_key
+        if instance.instance_id in seen or shadows_a_key:
+            instance.instance_id = new_instance_id()
+            # The colliding value is not echoed because it adds nothing: the process id below
+            # is what identifies the row an operator has to go and fix, and the id they wrote
+            # is already in front of them in the file. (It is not a redaction claim — the key
+            # logged here comes from the same operator-editable store.)
+            logger.warning(
+                "hosted: the persisted instance_id for %s is already in use by another record "
+                "or is another record's process id; minting a fresh one — a client's cached "
+                "id will no longer resolve to this session",
+                instance.claustrum_process_id,
+            )
+        seen.add(instance.instance_id)
+
+    @staticmethod
     def _restore_instance_id(
         instance: RemoteControlInstance, fields: dict
     ) -> RemoteControlInstance:
@@ -1611,6 +1691,16 @@ class HostedManager:
             )
         return instance
 
+
+#: Why a hosted row whose persisted ``project`` degraded to ``""`` cannot be resumed (#1381).
+#: One constant because two layers must agree on it: the HTTP route checks before resolving
+#: the project path (an empty name would 404 there as "project '' not found", which reads as
+#: "that project is gone"), and :meth:`HostedManager._resume_locked` checks again for any
+#: caller that is not that route. Carries no persisted value — fixed text only.
+NO_PROJECT_RESUME_DETAIL = (
+    "cannot resume: this session's saved record was unreadable and its project is unknown — "
+    "Kill it and start a new session in the right project"
+)
 
 #: The permission modes the model accepts, read off the ``Literal`` itself so a mode
 #: added to the config can never silently become "unsalvageable" here.
