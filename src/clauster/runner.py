@@ -361,6 +361,41 @@ def _pointer_start_ticks(proc_start: str | None) -> int | None:
     return ticks if 0 <= ticks < 2**63 else None
 
 
+def _ticks_on_exact_match(pid: int, proc_start: float | None) -> int | None:
+    """Recover a tick-less pair's boot-relative ticks at a moment its epoch matches exactly.
+
+    A row written before ``bridge_start_ticks`` existed carries only the drifting epoch, so
+    on Linux every verdict on it is inconclusive (#1399): the prune refuses to delete it,
+    but the first mismatch still demotes its card to STOPPED, and ``_reconcile_status``
+    never promotes back. Slew oscillates, though, so the epoch keeps returning to an exact
+    match (one sample in five on the dogfood host), and each such moment is an
+    opportunity to read the drift-immune half and stamp it, after which the pair is
+    immune for good.
+
+    Deliberately NOT healed from any other source. A fresh tick read agrees with whatever
+    holds the pid by construction, and the project's pointer names whatever bridge is at
+    that cwd now, so neither can tell this row's process from a recycled pid inside the
+    coarse ``_DRIFT_EPOCH_TOLERANCE`` (which a same-project bridge on a recycled pid
+    passes) and a wrong guess overwrites a resumable record. The exact 0.05s bound is the
+    one the code trusted for ``stop`` and ``forget`` before ticks existed, so stamping only
+    where it holds makes nothing laxer. ONE read via :func:`procutil.proc_start_pair`, so
+    the epoch that matched and the ticks stamped describe the same process.
+
+    ``None`` where the bound does not hold this instant, where ticks are unreadable, and
+    where create-time does not drift at all (nothing to heal, and a read there could only
+    authenticate a recycled pid). A host whose clock STEPPED once never re-matches, so it
+    never heals; that is the residue issue 1401 tracks.
+    """
+    if proc_start is None or not procutil.start_time_is_drift_prone():
+        return None
+    epoch, ticks = procutil.proc_start_pair(pid)
+    if ticks is None or epoch is None:
+        return None
+    if abs(epoch - proc_start) > procutil._EXACT_PROC_START_TOLERANCE:
+        return None
+    return ticks
+
+
 def _row_float(value: object) -> float | None:
     """Coerce a persisted-row field to ``float``, or ``None`` if it isn't one (#1088).
 
@@ -2890,10 +2925,13 @@ class SessionRunner:
             # because `stop()` never learns a keeper pid to clean up. The sidecar and the
             # pointer both carry raw field-22 ticks, so that comparison is exact and immune.
             ps = info.get("bridge_proc_start")
-            comparable_epoch = (
-                bridge_proc_start is not None
-                and isinstance(ps, (int, float))
-                and not isinstance(ps, bool)
+            sidecar_epoch = (
+                float(ps) if isinstance(ps, (int, float)) and not isinstance(ps, bool) else None
+            )
+            epoch_gap = (
+                abs(sidecar_epoch - bridge_proc_start)
+                if sidecar_epoch is not None and bridge_proc_start is not None
+                else None
             )
             sidecar_ticks = _row_int(info.get("bridge_start_ticks"))
             if bridge_start_ticks is not None and sidecar_ticks is not None:
@@ -2908,11 +2946,10 @@ class SessionRunner:
                 # different live keeper on that pid passes the cmdline gate and takes another
                 # session's bridge down with it.
                 if sidecar_ticks != bridge_start_ticks or (
-                    comparable_epoch
-                    and abs(float(ps) - bridge_proc_start) > procutil._DRIFT_EPOCH_TOLERANCE  # type: ignore[arg-type]
+                    epoch_gap is not None and epoch_gap > procutil._DRIFT_EPOCH_TOLERANCE
                 ):
                     continue
-            elif comparable_epoch and abs(float(ps) - bridge_proc_start) > _PROC_START_TOLERANCE:  # type: ignore[arg-type]
+            elif epoch_gap is not None and epoch_gap > _PROC_START_TOLERANCE:
                 continue
             keeper_pid = info.get("keeper_pid")
             if isinstance(keeper_pid, int) and not isinstance(keeper_pid, bool):
@@ -4337,6 +4374,21 @@ class SessionRunner:
             )
             current.status = InstanceStatus.RUNNING if connect else InstanceStatus.STARTING
 
+    @staticmethod
+    def _judge_row(
+        pid: int, proc_start: float | None, ticks: int | None
+    ) -> tuple[int | None, bool]:
+        """Judge a row's liveness; stamp a tick-less live row's ticks while its epoch matches.
+
+        Returns ``(ticks, alive)`` from one thread hop. The stamp rides on the verdict: the
+        exact-epoch match that made ``alive`` True is the only evidence
+        :func:`_ticks_on_exact_match` accepts, so it is read in the same breath.
+        """
+        alive = procutil.is_live_bridge(pid, proc_start, start_ticks=ticks)
+        if alive and ticks is None:
+            ticks = _ticks_on_exact_match(pid, proc_start)
+        return ticks, alive
+
     async def _reattach_rows_with_pids(
         self,
         discovered: dict[str, Project],
@@ -4382,13 +4434,17 @@ class SessionRunner:
                 continue  # already tracked in this process (a spawn we own)
             proc_start = _row_float(saved.get("bridge_proc_start"))
             start_ticks = _row_int(saved.get("bridge_start_ticks"))
-            alive = (
-                liveness[iid]
-                if liveness is not None and iid in liveness
-                else await asyncio.to_thread(
-                    procutil.is_live_bridge, pid, proc_start, start_ticks=start_ticks
+            # Startup judges each row itself and may stamp a pre-#1399 row's ticks on the
+            # spot (`_judge_row`); the instance built below must then carry the SAME ticks
+            # the verdict used, or its very next poll re-judges the bridge on the epoch
+            # alone. A poll-time caller hands in verdicts it already has, and the poll loop
+            # stamps a tick-less adopted instance itself on its next exact match.
+            if liveness is not None and iid in liveness:
+                alive = liveness[iid]
+            else:
+                start_ticks, alive = await asyncio.to_thread(
+                    self._judge_row, pid, proc_start, start_ticks
                 )
-            )
             if not alive:
                 if live_only:
                     continue  # poll-time adoption never resurrects dead cards
@@ -5157,6 +5213,19 @@ class SessionRunner:
                 start_ticks=instance.bridge_start_ticks,
             )
             pid_is_ours[instance.instance_id] = alive
+            if (
+                alive
+                and instance.bridge_start_ticks is None
+                and procutil.start_time_is_drift_prone()
+            ):
+                # A pre-#1399 row claimed or adopted on an epoch match is still judged on
+                # that epoch every tick, and the first correction demotes it for good.
+                # This tick matched exactly, which is the one moment the drift-immune half
+                # can be read safely — see `_ticks_on_exact_match`. Gated on the platform
+                # here as well, so a host that never drifts never pays the extra hop.
+                instance.bridge_start_ticks = await asyncio.to_thread(
+                    _ticks_on_exact_match, pid, instance.bridge_proc_start
+                )
             # The running `claude` release for the card (#1275). Re-derived every tick
             # rather than memoized: it is one `exe` readlink for a live bridge, it is never
             # persisted, and re-reading is what guarantees the label can only ever describe

@@ -2622,3 +2622,106 @@ async def test_promotion_announces_the_transition_once(runner_config, monkeypatc
 
     assert inst.status is InstanceStatus.RUNNING
     assert emitted == ["ready"]
+
+
+# --- pre-#1399 rows: stamping the drift-immune half at an exact epoch match ------------
+
+
+def _stub_poll_env(monkeypatch, *, pair=(1000.0, 770579)):
+    """A drifting Linux host; `proc_start_pair` answers `pair` for the bridge pid."""
+    monkeypatch.setattr("clauster.runner.procutil.start_time_is_drift_prone", lambda: True)
+    monkeypatch.setattr("clauster.runner.procutil.proc_start_pair", lambda pid: pair)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+
+
+def _drifted(monkeypatch):
+    """The clock moved: the epoch alone now reads dead, the ticks still read live."""
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge",
+        lambda pid, ps=None, *, start_ticks=None, **_kw: start_ticks == 770579,
+    )
+
+
+def _tick_less_running(runner) -> RemoteControlInstance:
+    inst = RemoteControlInstance(
+        instance_id="iid-old",
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.RUNNING,
+        resume_mode="standard",
+        bridge_pid=5001,
+        bridge_proc_start=1000.0,
+    )
+    runner._instances[inst.instance_id] = inst
+    return inst
+
+
+async def test_rediscover_stamps_a_tick_less_rows_ticks_on_an_exact_match(
+    runner_config, monkeypatch
+):
+    # The deploy case for #1399 itself: the row of a bridge spawned by an older build has no
+    # `bridge_start_ticks`. Claimed at startup on an exact epoch match, it used to stay
+    # tick-less, so the first later correction demoted it to STOPPED with no way back and no
+    # managed card for a running bridge. The exact match IS the moment to read the ticks.
+    runner = _make_runner(runner_config)
+    _stub_connect(monkeypatch)
+    _stub_poll_env(monkeypatch)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    runner.persistence.state_store().save(
+        {"iid-old": _row("alpha", pid=5001, proc_start=1000.0, resume_mode="standard")}
+    )
+
+    await runner.rediscover(persist=False)
+
+    inst = runner.get_instance("iid-old")
+    assert inst is not None and inst.status is InstanceStatus.RUNNING
+    assert inst.bridge_start_ticks == 770579, "the stamped ticks must reach the card"
+
+    # The real test: the clock moves on the next tick, and the card survives it.
+    _drifted(monkeypatch)
+    await runner.poll_once()
+    assert inst.status is InstanceStatus.RUNNING, "a drifted epoch must not demote a stamped card"
+
+
+async def test_poll_stamps_a_tracked_tick_less_instance_on_an_exact_match(
+    runner_config, monkeypatch
+):
+    # Same fault for an instance already in the registry (claimed or adopted earlier, before
+    # the exact match came round): the poll loop stamps it on the tick that matches, so the
+    # next correction cannot demote it.
+    runner = _make_runner(runner_config)
+    _stub_poll_env(monkeypatch)
+    inst = _tick_less_running(runner)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+
+    await runner.poll_once()
+    assert inst.bridge_start_ticks == 770579
+
+    _drifted(monkeypatch)
+    await runner.poll_once()
+    assert inst.status is InstanceStatus.RUNNING, "a drifted epoch must not demote a stamped card"
+
+
+@pytest.mark.parametrize(
+    ("pair", "drift_prone", "why"),
+    [
+        ((1003.0, 770579), True, "the pair read does not match the row's epoch exactly"),
+        ((None, None), True, "the host cannot express a start pair"),
+        ((1000.0, 770579), False, "create-time does not drift here, so nothing is healed"),
+    ],
+)
+async def test_stamp_refuses_anything_but_an_exact_pair_on_a_drifting_host(
+    runner_config, monkeypatch, pair, drift_prone, why
+):
+    # Positive control. The stamp must never be laxer than the exact pair the code trusted
+    # before ticks existed: a recycled pid inside the coarse tolerance, an unreadable pair,
+    # or a platform whose epoch is already conclusive all leave the row exactly as it was.
+    runner = _make_runner(runner_config)
+    _stub_poll_env(monkeypatch, pair=pair)
+    monkeypatch.setattr("clauster.runner.procutil.start_time_is_drift_prone", lambda: drift_prone)
+    inst = _tick_less_running(runner)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+
+    await runner.poll_once()
+
+    assert inst.bridge_start_ticks is None, why
