@@ -11,9 +11,11 @@ under the autouse HOME-isolation fixture — the live account is never touched.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
+import yaml
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
@@ -347,6 +349,77 @@ def test_merge_redacted_dict_over_none_stored_drops_sentinel() -> None:
     assert "API_TOKEN" not in merged
     assert merged["HOST"] == "h"
     assert cw.REDACTION_SENTINEL not in str(merged)
+
+
+# --- #1368: a self-referential YAML alias ------------------------------------------------
+#
+# `yaml.safe_load` builds a recursive structure for `extra: &a [*a]` without complaint, so the
+# parse seam accepted it and the crash landed on an unguarded consumer: `redact_secrets` walked
+# it forever and a GET raised RecursionError -- a 500 on the code-executing tier whose parse
+# errors are contracted to 422. Rejecting at the seam is the fail-closed direction and stops
+# such a document reaching disk; a document an EARLIER release already wrote is already handled,
+# because `_read_agent` catches InvalidCandidateError around the parse and degrades
+# `frontmatter` to `{}` while still surfacing `content` (verified, not assumed).
+_SELF_REF_HEADER = "name: x\ndescription: d\nextra: &a [*a]\n"
+
+
+def test_the_self_referential_alias_reproducer_is_a_positive_control() -> None:
+    """PIN: `safe_load` really does build a cycle here, and it really did break the walk."""
+    value = yaml.safe_load(_SELF_REF_HEADER)
+    assert value["extra"][0] is value["extra"]  # the list contains itself
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        pytest.param(_SELF_REF_HEADER, id="list-contains-itself"),
+        pytest.param("a: &m {k: *m}\n", id="mapping-contains-itself"),
+        pytest.param("a: &m {k: [{j: *m}]}\n", id="cycle-several-levels-down"),
+        # `!!omap`/`!!pairs` construct a list of TUPLES, so the cycle runs through a tuple.
+        # A walk that treats a tuple as a scalar accepts these -- and they do not even reach
+        # `redact_secrets`: `jsonable_encoder` hits the cycle first, so the 500 lands on the
+        # same route with a different traceback.
+        pytest.param("extra: &a !!omap\n  - k: *a\n", id="omap-cycle-through-a-tuple"),
+        pytest.param("extra: &a !!pairs\n  - k: *a\n", id="pairs-cycle-through-a-tuple"),
+    ],
+)
+def test_load_frontmatter_yaml_rejects_a_self_referential_alias(header: str) -> None:
+    # Fail closed at the parse seam: the write is refused, so the document never reaches disk.
+    with pytest.raises(cw.InvalidCandidateError, match="self-referential"):
+        cw.load_frontmatter_yaml(header, what="frontmatter")
+
+
+def test_load_frontmatter_yaml_accepts_a_non_recursive_alias() -> None:
+    # Cycle detection, NOT alias rejection. A plain alias is ordinary, legitimate YAML that
+    # every consumer handles; refusing it would reject valid frontmatter -- `fuzz/seeds/
+    # parse_frontmatter_fuzzer/alias_merge` is one. Asserting the IDENTITY, not just
+    # not-None: a diamond really is the same object under two keys, which is exactly the
+    # shape a naive "seen this id before" check would misread as a cycle.
+    lists = cw.load_frontmatter_yaml("a: &x [1, 2]\nb: *x\n", what="frontmatter")
+    assert lists["b"] is lists["a"]
+    maps = cw.load_frontmatter_yaml("a: &x {k: v}\nb: *x\nc: *x\n", what="frontmatter")
+    assert maps["b"] is maps["a"] and maps["c"] is maps["a"]
+    omap = cw.load_frontmatter_yaml("extra: !!omap\n  - k: v\n", what="frontmatter")
+    assert omap["extra"] == [("k", "v")]  # a tuple container, but acyclic
+    deep = cw.load_frontmatter_yaml("[" * 40 + "]" * 40, what="frontmatter")
+    assert deep is not None  # deep but finite
+
+
+def test_load_frontmatter_yaml_does_not_blow_up_on_an_alias_pyramid() -> None:
+    # A billion-laughs header: no cycle, so it must be ACCEPTED -- but each alias multiplies
+    # the number of distinct paths, and a walk without a "fully explored" memo is O(paths).
+    # Measured before the memo: safe_load parses this 304-byte header in 0.7ms while the
+    # check took 1.64s, and a 424-byte one never finished. That runs at the WRITE seam,
+    # synchronously, in a threadpool slot, on attacker-supplied bytes. The bound below is
+    # ~4 orders of magnitude above the memoized cost (~20us), so it is not a timing flake.
+    lines = ["a0: &a0 x"]
+    for i in range(1, 8):
+        lines.append(f"a{i}: &a{i} [" + ",".join([f"*a{i - 1}"] * 8) + "]")
+    header = "\n".join(lines) + "\n"
+
+    started = time.perf_counter()
+    assert cw.load_frontmatter_yaml(header, what="frontmatter") is not None
+    assert time.perf_counter() - started < 0.5
 
 
 def test_merge_redacted_scalar_sentinel_keeps_stored() -> None:

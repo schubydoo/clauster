@@ -1409,6 +1409,26 @@ def test_read_agent_treats_a_directory_as_absent_not_a_500(tmp_path: Path) -> No
         sub._read_agent(root, "sneaky", "project")
 
 
+def test_read_agent_degrades_a_self_referential_file_an_earlier_release_wrote(
+    tmp_path: Path,
+) -> None:
+    # #1368 refuses a self-referential YAML alias at the parse seam, so no NEW file can hold
+    # one -- but a release before the fix accepted the write. This pins the property that
+    # makes a second guard in `redact_secrets` unnecessary (and it was measured, not assumed,
+    # before that guard was dropped from the fix): GET degrades `frontmatter` to `{}` and
+    # still surfaces `content` verbatim, so the operator can see and repair the file. Written
+    # with raw bytes, deliberately bypassing the write path, because that is how it got there.
+    root = tmp_path / "agents"
+    root.mkdir()
+    raw = b"---\nname: legacy\ndescription: d\nextra: &a [*a]\n---\nbody\n"
+    (root / "legacy.md").write_bytes(raw)
+
+    doc = sub._read_agent(root, "legacy", "project")  # must not raise RecursionError
+
+    assert doc["frontmatter"] == {}  # the derived display field degrades...
+    assert doc["content"] == raw.decode()  # ...and the raw text is still returned to fix
+
+
 def test_read_agent_frontmatter_does_not_use_a_server_name_as_a_secret_hint(
     tmp_path: Path,
 ) -> None:

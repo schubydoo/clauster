@@ -1,0 +1,7 @@
+---
+name: x
+description: d
+extra: &a !!omap
+  - k: *a
+---
+body

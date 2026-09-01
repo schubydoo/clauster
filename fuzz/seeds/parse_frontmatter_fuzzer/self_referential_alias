@@ -1,0 +1,6 @@
+---
+name: x
+description: d
+extra: &a [*a]
+---
+body
