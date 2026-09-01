@@ -719,6 +719,66 @@ def capability_status(config: ClausterConfig) -> dict[str, bool]:
 FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*\r?\n?", re.DOTALL)
 
 
+def _is_self_referential(value: Any) -> bool:
+    """Whether ``value`` contains a container that is reachable from itself.
+
+    ``yaml.safe_load`` builds a *recursive* structure without complaint for a
+    self-referential alias (``extra: &a [*a]`` — a list whose only element is itself). It is
+    well-formed YAML and never raises, so the parse seam accepted it and the crash landed on
+    an unguarded consumer instead: :func:`redact_secrets` walked it forever and a GET raised
+    ``RecursionError`` — a 500 on the code-executing tier whose parse errors are contracted
+    to 422 (#1368).
+
+    Cycle detection, NOT alias rejection. A non-recursive alias is ordinary, legitimate YAML
+    (``a: &x [1,2]`` / ``b: *x`` yields the same object under two keys) and every consumer
+    handles it fine, so refusing aliases outright would reject valid frontmatter — the repo's
+    own fuzz corpus carries a merge-key seed that uses one. Only a container reachable from
+    *itself* is refused, which is exactly the shape no consumer can finish walking.
+
+    ``tuple`` is in the container set alongside ``dict``/``list`` because ``safe_load`` builds
+    one: ``!!omap`` and ``!!pairs`` construct a list of **tuples**, so ``extra: &a !!omap [{k:
+    *a}]`` routes its cycle through a tuple. Skipping tuples as scalars left that shape
+    accepted, and it does not even reach ``redact_secrets`` — ``jsonable_encoder`` hits it
+    first, so the 500 lands on the same route with a different traceback.
+
+    Iterative, not recursive, on purpose: this runs immediately after a ``safe_load`` whose
+    own ``RecursionError`` the caller catches, so a recursive checker would add stack frames
+    to a structure already near the limit and reintroduce the escape it exists to close.
+
+    Two id sets, and both are load-bearing. ``on_path`` is scoped to the current path — added
+    on descent, dropped on the way back up — so a diamond (the same object under two sibling
+    keys) is not mistaken for a cycle. ``done`` records containers already fully explored, so
+    each is entered once: O(nodes + edges). Without it the walk is O(*paths*), which a
+    billion-laughs header turns exponential — a 310-byte alias pyramid that ``safe_load``
+    parses in 0.7 ms took 1.6 s to check, and a 430-byte one did not finish. That runs at the
+    WRITE seam, synchronously, in a threadpool slot, on attacker-supplied bytes.
+
+    Dict keys are not walked: ``safe_load`` builds keys only from hashable scalars, and a
+    tuple holding a dict or list is itself unhashable, so a key cannot be a recursive
+    container either.
+    """
+    stack: list[tuple[Any, bool]] = [(value, False)]
+    on_path: set[int] = set()
+    done: set[int] = set()
+    while stack:
+        node, leaving = stack.pop()
+        if leaving:
+            on_path.discard(id(node))
+            done.add(id(node))
+            continue
+        if not isinstance(node, dict | list | tuple):
+            continue
+        if id(node) in on_path:
+            return True
+        if id(node) in done:
+            continue  # already proven acyclic; re-walking it is what makes this exponential
+        on_path.add(id(node))
+        stack.append((node, True))  # popped after this node's children: the "ascend" marker
+        children = node.values() if isinstance(node, dict) else node
+        stack.extend((child, False) for child in children)
+    return False
+
+
 def load_frontmatter_yaml(header: str, *, what: str) -> Any:
     """``safe_load`` a frontmatter ``header``, mapping every failure to a rejection.
 
@@ -750,9 +810,13 @@ def load_frontmatter_yaml(header: str, *, what: str) -> Any:
     All of them are the same structural verdict — we could not parse the header, so we
     refuse to act on it. Fails closed: this only ever converts a crash into a rejection,
     never a rejection into an accept.
+
+    One rejection is NOT a parse failure: a header that parses fine but builds a
+    self-referential structure (:func:`_is_self_referential`) is refused after the load,
+    because no consumer can finish walking it.
     """
     try:
-        return yaml.safe_load(header)
+        value = yaml.safe_load(header)
     except yaml.YAMLError as exc:
         raise InvalidCandidateError(f"{what} is not valid YAML: {exc}") from exc
     except RecursionError as exc:
@@ -774,6 +838,15 @@ def load_frontmatter_yaml(header: str, *, what: str) -> Any:
         raise InvalidCandidateError(
             f"{what} has a YAML tag its value does not satisfy ({type(exc).__name__})"
         ) from exc
+    if _is_self_referential(value):
+        # Well-formed YAML that no consumer can finish walking — see :func:`_is_self_referential`.
+        # Rejecting here is the fail-closed direction: it stops the write, so such a document
+        # never reaches disk. A document an EARLIER release wrote still reads back — `_read_agent`,
+        # `_list_agents` and `list_skills` each catch this error around the parse and degrade the
+        # derived frontmatter field while still surfacing `content`, so the operator can see and
+        # repair the file. That is why no second guard is needed in `redact_secrets`.
+        raise InvalidCandidateError(f"{what} contains a self-referential YAML alias")
+    return value
 
 
 def load_settings_json_obj(raw: bytes) -> dict[str, Any]:
