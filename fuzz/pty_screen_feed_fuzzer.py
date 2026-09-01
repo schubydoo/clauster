@@ -201,14 +201,17 @@ def _drive(
         PtyScreen(cols=40, rows=6).feed(b"\\x1bH\\xad\\x80\\xe6\\x80\\xa0\\x1b[H\\xad\\x80\\xae")
         screen.find_authorize_url()          # -> IndexError
 
-    ``pty_keeper`` wraps ``frame()`` ("a render hiccup must never affect the bridge"), and
-    ``login_shepherd`` — which reached the caller on the CREDENTIAL path when this harness
-    first reported it — now reads both ``find_authorize_url`` and ``find_oauth_token``
-    through ``login_shepherd._read_screen`` (#1358), degrading the raise to "no match on
-    this frame". ``pyte`` still raises, so this carve-out stays: it skips every input that
-    trips the defect, which lets the harness assert everything else instead of reporting one
-    known defect forever. Pinned in the suite, so a ``pyte`` release that fixes the raise
-    fails ``just check`` and sends the next reader back to narrow this.
+    Every production reader is guarded now. ``pty_keeper`` wraps ``frame()`` ("a render
+    hiccup must never affect the bridge") and reads ``find_session_id`` through
+    ``_KeeperDrain._scan_session_id`` (#1376 — unguarded, that raise escaped both drain loops
+    and killed the keeper); ``login_shepherd`` — which reached the caller on the CREDENTIAL
+    path when this harness first reported it — reads both ``find_authorize_url`` and
+    ``find_oauth_token`` through ``login_shepherd._read_screen`` (#1358). All of them degrade
+    the raise to "no match on this frame/chunk". ``pyte`` still raises, so this carve-out
+    stays: it skips every input that trips the defect, which lets the harness assert
+    everything else instead of reporting one known defect forever. Pinned in the suite, so a
+    ``pyte`` release that fixes the raise fails ``just check`` and sends the next reader back
+    to narrow this.
     """
     screen = pty_screen.PtyScreen(cols=cols, rows=rows, capture_osc8=capture_osc8)
     fed_cleanly = True

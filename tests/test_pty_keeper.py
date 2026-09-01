@@ -652,6 +652,194 @@ def test_keeper_drain_feed_failure_without_tap_disables_screen(tmp_path: Path) -
     assert not (tmp_path / "k.json").exists()  # no sidecar write on a non-URL chunk
 
 
+# --- pyte render fault on the keeper's connect-URL scrape (#1376) ----------------------
+#
+# `pyte`'s `Screen.display` raises `IndexError` when a double-width character is left
+# half-overwritten. `PtyScreen.find_session_id` goes through `display`, and `_KeeperDrain.feed`
+# guarded only `screen.feed` — so the fault escaped the scrape, escaped both drain loops, and
+# killed the keeper. The byte string below is the 13-byte reproducer recorded by
+# `fuzz/pty_screen_feed_fuzzer.py` (the same one PR #1375 used for the credential path):
+# terminal control bytes and truncated UTF-8 only.
+_WIDE_CHAR_FAULT = b"\x1bH\xad\x80\xe6\x80\xa0\x1b[H\xad\x80\xae"
+_KEEPER_URL = b"Continue at https://claude.ai/code/session_01FAULTAAAAAAAAAAAAAA\r\n"
+# The same URL, fragmented by a cursor reposition the way claude really prints it at the TUI
+# winsize (#665, same shape as test_run_keeper_scrapes_url_from_screen_when_raw_fragments_it):
+# the raw-bytes regex misses it, so ONLY the pyte-reassembled screen can scrape it. That is
+# what makes it usable to pin the screen retry -- `_scan_connect_url` tries the raw regex
+# first, so a contiguous URL never reaches `find_session_id` at all.
+_KEEPER_URL_SCREEN_ONLY = (
+    b"start\r\nhttps://claude.ai/codX\x1b[22Ge/session_01FAULTAAAAAAAAAAAAAA\r\n"
+)
+
+
+def _fresh_screen():  # noqa: ANN202 — test helper
+    """A REAL `PtyScreen` at the production geometry (SCREEN_COLS x SCREEN_ROWS)."""
+    from clauster.pty_screen import PtyScreen
+
+    return PtyScreen()
+
+
+class _ScriptedFaultScreen:
+    """A screen that faults exactly when fed the reproducer, for multi-fault sequences.
+
+    A REAL screen cannot express these: the reproducer only breaks a cell on the FIRST feed,
+    and a second identical chunk moves the cursor and renders cleanly (measured). So "report
+    once across many faults" and "report again after a clean render in between" both need a
+    screen whose fault is scriptable. The trigger is the real reproducer rather than a flag,
+    so the stub still reads as the thing it stands in for.
+    """
+
+    def __init__(self) -> None:
+        """Start clean; each `feed` decides whether the next scrape faults."""
+        self.faulting = False
+
+    def feed(self, data: bytes) -> None:  # noqa: D102 — test stub
+        self.faulting = data == _WIDE_CHAR_FAULT
+
+    def find_session_id(self) -> str | None:  # noqa: D102 — test stub
+        if self.faulting:
+            raise IndexError("string index out of range")
+        return None
+
+
+def test_the_keeper_render_fault_reproducer_is_a_positive_control() -> None:
+    """PIN: the reproducer really makes `find_session_id` raise.
+
+    The tests below assert the guard absorbs this. If a `pyte` upgrade fixed the defect and
+    nothing pinned it, they would keep passing while asserting nothing — the vacuous-green
+    failure mode. This one fails instead.
+    """
+    screen = _fresh_screen()
+    screen.feed(_WIDE_CHAR_FAULT)
+    with pytest.raises(IndexError):
+        screen.find_session_id()
+
+
+def test_keeper_drain_degrades_a_render_fault_to_no_match(tmp_path: Path, capsys) -> None:  # noqa: ANN001
+    """The scrape fault is absorbed, recorded, and reported — never a silent skip.
+
+    The reproducer is fed AS the chunk, which is the real shape: `feed` runs `screen.feed`
+    first, so it is the chunk that breaks the cell and the scrape immediately after it that
+    trips over the half-overwritten character.
+    """
+    from clauster import pty_keeper
+
+    base: dict[str, object] = {"state": "starting"}
+    drain = pty_keeper._KeeperDrain(base, tmp_path / "k.json", _fresh_screen(), None)
+
+    drain.feed(_WIDE_CHAR_FAULT)  # would have raised IndexError out of feed()
+
+    assert drain._screen_scan_failed is True
+    assert drain._screen is not None  # NOT disabled: a render fault is transient, unlike feed()
+    assert base["state"] == "starting"  # no URL, so no promotion
+    err = capsys.readouterr().err
+    assert "could not be rendered" in err and "IndexError" in err
+
+
+def test_keeper_drain_reports_a_render_fault_once(tmp_path: Path, capsys) -> None:  # noqa: ANN001
+    """At drain cadence a persistent fault must not fill the keeper log with duplicates."""
+    from clauster import pty_keeper
+
+    drain = pty_keeper._KeeperDrain({}, tmp_path / "k.json", _ScriptedFaultScreen(), None)
+    for _ in range(5):
+        drain.feed(_WIDE_CHAR_FAULT)
+
+    assert drain._screen_scan_failed is True
+    assert capsys.readouterr().err.count("could not be rendered") == 1
+
+
+def test_keeper_drain_still_finds_the_url_after_a_render_fault(tmp_path: Path) -> None:
+    """The degraded value is "no match on THIS chunk", not "give up" — the next one retries.
+
+    The URL is the cursor-fragmented shape on purpose. `_scan_connect_url` tries the raw-bytes
+    regex FIRST, so a contiguous URL would be found without `find_session_id` ever being
+    called and this would pin only "the guard did not wedge the drain" — true, but weaker than
+    the claim. Fragmented, the screen is the only leg that can produce the id, so a green test
+    means the repaired screen really did recover.
+    """
+    from clauster import pty_keeper
+
+    # Positive control: prove the raw leg cannot answer, so the assertions below can only be
+    # satisfied through the screen.
+    assert pty_keeper._RE_CONNECT_URL.search(_WIDE_CHAR_FAULT + _KEEPER_URL_SCREEN_ONLY) is None
+
+    sidecar = tmp_path / "k.json"
+    base: dict[str, object] = {"state": "starting"}
+    drain = pty_keeper._KeeperDrain(base, sidecar, _fresh_screen(), None)
+
+    drain.feed(_WIDE_CHAR_FAULT)
+    assert drain._screen_scan_failed is True
+    drain.feed(_KEEPER_URL_SCREEN_ONLY)
+
+    assert base["session_id"] == "session_01FAULTAAAAAAAAAAAAAA"
+    assert base["state"] == "ready"
+    assert _read(sidecar)["connect_url"].endswith("session_01FAULTAAAAAAAAAAAAAA")
+    assert drain._screen_scan_failed is False  # a clean render clears the report latch
+
+
+def test_keeper_drain_reports_a_second_fault_after_a_clean_render(tmp_path: Path, capsys) -> None:  # noqa: ANN001
+    """The report latch is per RUN of faults, not per keeper.
+
+    Never cleared, a transient fault in the first second of a long-lived keeper would
+    permanently silence a genuinely different one later — the log would describe a fault that
+    recovered and say nothing about the one that did not.
+    """
+    from clauster import pty_keeper
+
+    drain = pty_keeper._KeeperDrain({}, tmp_path / "k.json", _ScriptedFaultScreen(), None)
+
+    drain.feed(_WIDE_CHAR_FAULT)  # fault 1
+    drain.feed(b"ordinary output\r\n")  # clean render -> latch clears
+    assert drain._screen_scan_failed is False
+    drain.feed(_WIDE_CHAR_FAULT)  # fault 2, a new one
+
+    assert capsys.readouterr().err.count("could not be rendered") == 2
+
+
+def test_keeper_survives_a_bridge_that_triggers_the_render_fault(
+    tmp_path: Path, capsys, _restore_sighup
+) -> None:  # noqa: ANN001
+    """End to end: the keeper must reach its terminal `exited` sidecar, not die mid-drain.
+
+    Losing the deep link is the cheap half. Before the guard the keeper process died, so
+    `finish()` never ran and the discovery sidecar was stranded at `starting`/`ready` while
+    the bridge was orphaned — a lifecycle error collapsing into a misleading state
+    (invariant 1). The screen only exists when the live view is requested, so
+    `screen_sidecar` is what makes this path reachable at all.
+    """
+    from clauster import pty_keeper
+
+    bridge = tmp_path / "faulting_bridge.py"
+    # The sleep is load-bearing: written back to back the two payloads land in ONE 65536-byte
+    # read, so `screen.feed` sees the URL bytes too and repairs the cell before the scrape
+    # runs -- the fault never happens and the test passes with or without the guard. Verified
+    # by bypassing the guard: without the sleep this test still passed, with it the keeper
+    # died mid-drain. The scrape must run on a chunk that ENDS in the half-overwritten cell.
+    bridge.write_text(
+        "import sys, time\n"
+        f"sys.stdout.buffer.write({_WIDE_CHAR_FAULT!r})\n"
+        "sys.stdout.buffer.flush()\n"
+        "time.sleep(0.3)\n"
+        f"sys.stdout.buffer.write({_KEEPER_URL!r})\n"
+        "sys.stdout.buffer.flush()\n"
+    )
+    sidecar = tmp_path / "k.json"
+    rc = pty_keeper.run_keeper(
+        [sys.executable, str(bridge)],
+        sidecar,
+        cwd=str(tmp_path),
+        screen_sidecar=tmp_path / "screen.json",
+    )
+
+    assert rc == 0
+    assert _read(sidecar)["state"] == "exited"
+    # Positive control. Without it a coalesced read would make this test pass while testing
+    # nothing -- the vacuous-green mode, and the only one of these tests that could not pin
+    # its own precondition through `drain._screen_scan_failed`. This also exercises the exact
+    # stderr -> `<sidecar>.log` channel the guard reports through.
+    assert "could not be rendered" in capsys.readouterr().err
+
+
 # -- Windows ConPTY backend (#892) -----------------------------------------------------
 # Driven on POSIX against a scriptable fake pywinpty PtyProcess injected through the
 # _load_pty_process seam, so the ConPTY drain/scrape/exit path is covered on the Linux
