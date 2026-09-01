@@ -1204,7 +1204,7 @@ def test_running_claude_version_absorbs_a_raw_oserror_from_child_enumeration(mon
 
 def test_proc_start_ticks_reads_the_boot_relative_start_of_a_live_process():
     ticks = procutil.proc_start_ticks(os.getpid())
-    if sys.platform != "linux":  # pragma: no cover - exercised on the Linux matrix leg
+    if sys.platform != "linux":  # pragma: no cover - only the macOS/Windows legs take this
         assert ticks is None
         return
     assert isinstance(ticks, int) and ticks > 0

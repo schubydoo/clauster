@@ -353,8 +353,12 @@ def _pointer_start_ticks(proc_start: str | None) -> int | None:
     # OverflowError out of `_persist`, which catches only OSError. A negative one cannot
     # authenticate a wrong process — it can only ever fail the exact compare — but it fails
     # in the #1399 direction, so reject it here rather than record a value that means
-    # "permanently not live".
-    return ticks if 0 <= ticks < 2**31 else None
+    # "permanently not live". The bound is the COLUMN's limit, deliberately, not a guess at a
+    # plausible uptime: at CLK_TCK=100 a 2**31 cap starts discarding real tick counts after
+    # 248 days up, silently dropping drift protection on exactly the long-lived hosts that
+    # have accumulated the most correction — and `_spawn`'s own `proc_start_ticks` stamp is
+    # uncapped, so the two halves of one column would disagree about what is valid.
+    return ticks if 0 <= ticks < 2**63 else None
 
 
 def _row_float(value: object) -> float | None:
@@ -588,20 +592,20 @@ class SessionRunner:
             return None
         start = inst.bridge_proc_start
         if start is not None:
-            cur = await asyncio.to_thread(procutil.proc_create_time, pid)
-            # bridge_proc_start is OUR OWN proc_create_time() measurement of this
-            # same pid (set at spawn), so a live match is near-exact — use the tight
-            # _EXACT_PROC_START_TOLERANCE that procutil.is_live_process applies to a
-            # self-measured float, not the loose pointer-jiffies slack. The loose
-            # 2.0s left a wide window in which a recycled pid that started up to two
-            # seconds later still passed and got mis-attributed to the bridge.
             # Via the shared identity core rather than a hand-rolled epoch compare, so this
             # cannot disagree with the poll loop about the same bridge: an epoch-only
             # comparison here blanked the CPU/RAM chip of every RUNNING card after a clock
-            # correction (#1399). `is_live_process`, NOT `is_live_bridge` — the cmdline gate
-            # is a liveness question this guard has never asked, and adding it here would
-            # widen the change past the drift fix.
-            if cur is None or not await asyncio.to_thread(
+            # correction (#1399). It keeps the tight bound the hand-rolled version used —
+            # `bridge_proc_start` is our OWN measurement of this pid, so a live match is
+            # near-exact, and the loose 2.0s slack left a window in which a pid recycled two
+            # seconds later still passed. `is_live_process`, NOT `is_live_bridge`: the
+            # cmdline gate is a liveness question this guard has never asked.
+            #
+            # No separate `proc_create_time is None` pre-check: it absorbs the same psutil
+            # exception set and treats a zombie the same way, so it could only ever agree —
+            # at the cost of a second thread hop and a second psutil pass per bridge, per
+            # metrics tick.
+            if not await asyncio.to_thread(
                 procutil.is_live_process, pid, start, start_ticks=inst.bridge_start_ticks
             ):
                 return None  # PID reused onto an unrelated process — skip
@@ -2881,19 +2885,31 @@ class SessionRunner:
             # fail to match its own bridge — and the rediscovered pty bridge then orphans it,
             # because `stop()` never learns a keeper pid to clean up. The sidecar and the
             # pointer both carry raw field-22 ticks, so that comparison is exact and immune.
+            ps = info.get("bridge_proc_start")
+            comparable_epoch = (
+                bridge_proc_start is not None
+                and isinstance(ps, (int, float))
+                and not isinstance(ps, bool)
+            )
             sidecar_ticks = _row_int(info.get("bridge_start_ticks"))
             if bridge_start_ticks is not None and sidecar_ticks is not None:
-                if sidecar_ticks != bridge_start_ticks:
-                    continue
-            else:
-                ps = info.get("bridge_proc_start")
-                if (
-                    bridge_proc_start is not None
-                    and isinstance(ps, (int, float))
-                    and not isinstance(ps, bool)
-                    and abs(float(ps) - bridge_proc_start) > _PROC_START_TOLERANCE
+                # Exact on the ticks, coarse on the epoch — the same pairing
+                # :func:`procutil.is_live_process` uses, and for the same reason. Ticks
+                # restart at zero each boot, so on their own they cannot rule out a STALE
+                # sidecar that survived a reboot and happens to collide on both the bridge
+                # pid and the tick count. The epoch arm below rejected that for free (a
+                # reboot moves it by uptime + downtime), so dropping the conjunct here would
+                # NARROW the PID-reuse defense this change otherwise strengthens — and the
+                # recovered keeper pid reaches `_cleanup_keeper`'s `force_kill_tree`, where a
+                # different live keeper on that pid passes the cmdline gate and takes another
+                # session's bridge down with it.
+                if sidecar_ticks != bridge_start_ticks or (
+                    comparable_epoch
+                    and abs(float(ps) - bridge_proc_start) > procutil._DRIFT_EPOCH_TOLERANCE  # type: ignore[arg-type]
                 ):
                     continue
+            elif comparable_epoch and abs(float(ps) - bridge_proc_start) > _PROC_START_TOLERANCE:  # type: ignore[arg-type]
+                continue
             keeper_pid = info.get("keeper_pid")
             if isinstance(keeper_pid, int) and not isinstance(keeper_pid, bool):
                 return keeper_pid

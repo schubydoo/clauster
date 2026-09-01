@@ -1747,6 +1747,17 @@ def test_recover_keeper_pid_prefers_ticks_over_a_drifted_epoch(runner_config) ->
         )
         is None
     )
+    # Ticks alone are NOT enough: they restart at zero each boot, so a stale sidecar that
+    # survived a reboot can collide on both the bridge pid and the tick count. The epoch arm
+    # rejected that for free (a reboot moves it by uptime + downtime), so the tick arm keeps
+    # a coarse same-boot conjunct — without it this change would NARROW the PID-reuse
+    # defense, and the recovered pid reaches `_cleanup_keeper`'s force_kill_tree.
+    assert (
+        runner._recover_keeper_pid(
+            "gamma", bridge_pid=2222, bridge_proc_start=9_000_000.0, bridge_start_ticks=770579
+        )
+        is None
+    )
 
 
 @_POSIX_ONLY
