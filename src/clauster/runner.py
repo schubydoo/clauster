@@ -332,6 +332,71 @@ def _row_int(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+def _pointer_start_ticks(proc_start: str | None) -> int | None:
+    """Coerce a bridge pointer's ``procStart`` to boot-relative ticks, or ``None`` (#1399).
+
+    A pointer records Linux ``starttime`` jiffies **as a string**, which is already the
+    drift-immune quantity ``bridge_start_ticks`` wants — so a pointer-walked or adopted
+    bridge can carry the same PID-reuse defense a spawned one gets, instead of being judged
+    on the epoch ``_expected_epoch`` derives from it (that conversion bakes in today's
+    ``/proc/stat`` btime, which NTP then moves out from under the comparison).
+
+    Not ``_row_int``: that is for persisted-row fields, which hold real ints, and it would
+    silently answer ``None`` for every pointer here — a no-op fix that still looked applied.
+    """
+    try:
+        ticks = int(str(proc_start))
+    except (TypeError, ValueError):
+        return None
+    # Bounded, because this value reaches an INTEGER column: a pointer is an untrusted
+    # on-disk file (this module already treats it that way), and a value past 2**63 raises
+    # OverflowError out of `_persist`, which catches only OSError. A negative one cannot
+    # authenticate a wrong process — it can only ever fail the exact compare — but it fails
+    # in the #1399 direction, so reject it here rather than record a value that means
+    # "permanently not live". The bound is the COLUMN's limit, deliberately, not a guess at a
+    # plausible uptime: at CLK_TCK=100 a 2**31 cap starts discarding real tick counts after
+    # 248 days up, silently dropping drift protection on exactly the long-lived hosts that
+    # have accumulated the most correction — and `_spawn`'s own `proc_start_ticks` stamp is
+    # uncapped, so the two halves of one column would disagree about what is valid.
+    return ticks if 0 <= ticks < 2**63 else None
+
+
+def _ticks_on_exact_match(pid: int, proc_start: float | None) -> int | None:
+    """Recover a tick-less pair's boot-relative ticks at a moment its epoch matches exactly.
+
+    A row written before ``bridge_start_ticks`` existed carries only the drifting epoch, so
+    on Linux every verdict on it is inconclusive (#1399): the prune refuses to delete it,
+    but the first mismatch still demotes its card to STOPPED, and ``_reconcile_status``
+    never promotes back. Slew oscillates, though, so the epoch keeps returning to an exact
+    match (one sample in five on the dogfood host), and each such moment is an
+    opportunity to read the drift-immune half and stamp it. The callers persist a stamp
+    (startup through ``rediscover``'s final write, the poll loop with its own), after
+    which the pair is immune across restarts too.
+
+    Deliberately NOT healed from any other source. A fresh tick read agrees with whatever
+    holds the pid by construction, and the project's pointer names whatever bridge is at
+    that cwd now, so neither can tell this row's process from a recycled pid inside the
+    coarse ``_DRIFT_EPOCH_TOLERANCE`` (which a same-project bridge on a recycled pid
+    passes) and a wrong guess overwrites a resumable record. The exact 0.05s bound is the
+    one the code trusted for ``stop`` and ``forget`` before ticks existed, so stamping only
+    where it holds makes nothing laxer. ONE read via :func:`procutil.proc_start_pair`, so
+    the epoch that matched and the ticks stamped describe the same process.
+
+    ``None`` where the bound does not hold this instant, where ticks are unreadable, and
+    where create-time does not drift at all (nothing to heal, and a read there could only
+    authenticate a recycled pid). A host whose clock STEPPED once never re-matches, so it
+    never heals; that is the residue issue 1401 tracks.
+    """
+    if proc_start is None or not procutil.start_time_is_drift_prone():
+        return None
+    epoch, ticks = procutil.proc_start_pair(pid)
+    if ticks is None or epoch is None:
+        return None
+    if abs(epoch - proc_start) > procutil._EXACT_PROC_START_TOLERANCE:
+        return None
+    return ticks
+
+
 def _row_float(value: object) -> float | None:
     """Coerce a persisted-row field to ``float``, or ``None`` if it isn't one (#1088).
 
@@ -563,14 +628,22 @@ class SessionRunner:
             return None
         start = inst.bridge_proc_start
         if start is not None:
-            cur = await asyncio.to_thread(procutil.proc_create_time, pid)
-            # bridge_proc_start is OUR OWN proc_create_time() measurement of this
-            # same pid (set at spawn), so a live match is near-exact — use the tight
-            # _EXACT_PROC_START_TOLERANCE that procutil.is_live_process applies to a
-            # self-measured float, not the loose pointer-jiffies slack. The loose
-            # 2.0s left a wide window in which a recycled pid that started up to two
-            # seconds later still passed and got mis-attributed to the bridge.
-            if cur is None or abs(cur - start) > procutil._EXACT_PROC_START_TOLERANCE:
+            # Via the shared identity core rather than a hand-rolled epoch compare, so this
+            # cannot disagree with the poll loop about the same bridge: an epoch-only
+            # comparison here blanked the CPU/RAM chip of every RUNNING card after a clock
+            # correction (#1399). It keeps the tight bound the hand-rolled version used —
+            # `bridge_proc_start` is our OWN measurement of this pid, so a live match is
+            # near-exact, and the loose 2.0s slack left a window in which a pid recycled two
+            # seconds later still passed. `is_live_process`, NOT `is_live_bridge`: the
+            # cmdline gate is a liveness question this guard has never asked.
+            #
+            # No separate `proc_create_time is None` pre-check: it absorbs the same psutil
+            # exception set and treats a zombie the same way, so it could only ever agree —
+            # at the cost of a second thread hop and a second psutil pass per bridge, per
+            # metrics tick.
+            if not await asyncio.to_thread(
+                procutil.is_live_process, pid, start, start_ticks=inst.bridge_start_ticks
+            ):
                 return None  # PID reused onto an unrelated process — skip
         return await asyncio.to_thread(
             metrics.sample_tree,
@@ -966,7 +1039,7 @@ class SessionRunner:
     # ----- persistence (state.json, D14) ----------------------------------
 
     def _persisted_liveness(self, inst: RemoteControlInstance) -> dict:
-        """Return the ``bridge_pid``/``bridge_proc_start`` pair to persist for ``inst``.
+        """Return the ``bridge_pid``/``bridge_proc_start``/``bridge_start_ticks`` set to persist.
 
         A live instance publishes its own pair, and so does an operator-stopped one:
         :meth:`stop` records the intent and sets STOPPED **without** clearing ``bridge_pid``
@@ -1005,6 +1078,7 @@ class SessionRunner:
             return {
                 "bridge_pid": inst.bridge_pid,
                 "bridge_proc_start": inst.bridge_proc_start,
+                "bridge_start_ticks": inst.bridge_start_ticks,
             }
         # Normalized through the row coercers, not passed through raw: this value is
         # round-tripping from the store, where a hand-edited row can hold junk.
@@ -1012,8 +1086,17 @@ class SessionRunner:
         pid = _row_int(prior.get("bridge_pid"))
         proc_start = _row_float(prior.get("bridge_proc_start"))
         if pid is None or proc_start is None:
-            return {"bridge_pid": None, "bridge_proc_start": None}
-        return {"bridge_pid": pid, "bridge_proc_start": proc_start}
+            return {"bridge_pid": None, "bridge_proc_start": None, "bridge_start_ticks": None}
+        # Ticks ride along with the pair rather than gating it (#1399): they are Linux-only
+        # and absent from every pre-#1399 row, so requiring them here would clear exactly the
+        # rows this helper exists to preserve. A row that keeps the pair but not the ticks
+        # compares on the epoch alone — the pre-#1399 behaviour — which is why the prune no
+        # longer rests on that comparison.
+        return {
+            "bridge_pid": pid,
+            "bridge_proc_start": proc_start,
+            "bridge_start_ticks": _row_int(prior.get("bridge_start_ticks")),
+        }
 
     def _persist_subset(self) -> dict[str, dict]:
         """Build the record to persist, keyed by instance id.
@@ -1996,7 +2079,15 @@ class SessionRunner:
             return SpawnOutcome(instance=instance, created=True, warnings=spawn_warnings)
         self._procs[instance.instance_id] = proc
         instance.bridge_pid = proc.pid
-        instance.bridge_proc_start = await asyncio.to_thread(procutil.proc_create_time, proc.pid)
+        # ONE sample for both halves (#1399). Two `to_thread` hops would put a full
+        # suspension point between them, and a bridge that dies in that window — a startup
+        # failure, which is exactly what this runs before `_await_ready` to catch — can have
+        # its pid recycled, leaving a pair describing two processes. `stop()` signals and
+        # force-kills the tree behind that pair. The keeper states the same rule for its
+        # sidecar; both now go through the one helper so they cannot drift apart.
+        instance.bridge_proc_start, instance.bridge_start_ticks = await asyncio.to_thread(
+            procutil.proc_start_pair, proc.pid
+        )
 
         markers = await asyncio.to_thread(self._await_ready, raw_path, proc)
         self._apply_markers(instance, markers, proc)
@@ -2791,7 +2882,15 @@ class SessionRunner:
             return None
 
     def _recover_keeper_pid(
-        self, name: str, bridge_pid: int | None, bridge_proc_start: float | None
+        self,
+        name: str,
+        bridge_pid: int | None,
+        bridge_proc_start: float | None,
+        *,
+        # Keyword-REQUIRED, no default (#1399). Threading this by hand is how two review
+        # rounds each found a caller silently left on the drifting epoch arm; without a
+        # default a missed call site is a type error instead.
+        bridge_start_ticks: int | None,
     ) -> int | None:
         """Find a rediscovered pty bridge's keeper pid from its sidecar.
 
@@ -2805,10 +2904,13 @@ class SessionRunner:
         so stop()/poll_once can never reap an unrelated process tree. The keeper is
         alive iff the bridge is (it holds its terminal), already confirmed before this.
 
-        proc-start is compared with the same slack as :func:`procutil.is_live_bridge`
-        (the pointer's stored value and the sidecar's psutil create-time are derived
-        independently, so exact float equality would be brittle); when either side
-        is unknown, fall back to the pid-only match.
+        ``bridge_start_ticks`` decides when the caller AND the sidecar both carry it: both
+        are raw ``/proc/<pid>/stat`` field-22 counts, so the match is exact and immune to the
+        clock drift that moves every epoch on this host (#1399) — paired with a coarse epoch
+        conjunct, because ticks restart at zero each boot. Otherwise proc-start falls back to
+        the same slack :func:`procutil.is_live_bridge` uses (the pointer's stored value and
+        the sidecar's psutil create-time are derived independently, so exact float equality
+        would be brittle); when either side is unknown, fall back to the pid-only match.
         """
         if bridge_pid is None:
             return None
@@ -2816,13 +2918,47 @@ class SessionRunner:
             info = self._read_sidecar(sidecar)
             if info is None or info.get("bridge_pid") != bridge_pid:
                 continue
+            # Ticks first when BOTH sides have them (#1399). The epoch arm below compares
+            # the sidecar's frozen `psutil.create_time` against a value the pointer walk
+            # recomputes with TODAY's btime, so a clock correction larger than
+            # `_PROC_START_TOLERANCE` (2.0s; a 4s spread was measured) makes a live keeper
+            # fail to match its own bridge — and the rediscovered pty bridge then orphans it,
+            # because `stop()` never learns a keeper pid to clean up. The sidecar and the
+            # pointer both carry raw field-22 ticks, so that comparison is exact and immune.
             ps = info.get("bridge_proc_start")
-            if (
-                bridge_proc_start is not None
-                and isinstance(ps, (int, float))
-                and not isinstance(ps, bool)
-                and abs(float(ps) - bridge_proc_start) > _PROC_START_TOLERANCE
-            ):
+            try:
+                sidecar_epoch = (
+                    float(ps)
+                    if isinstance(ps, (int, float)) and not isinstance(ps, bool)
+                    else None
+                )
+            except OverflowError:
+                # A sidecar is an on-disk file (see the negative-pid note in the reattach
+                # leg): a hand-edited int wider than a float must read as "no comparable
+                # epoch", not raise out of `rediscover`.
+                sidecar_epoch = None
+            epoch_gap = (
+                abs(sidecar_epoch - bridge_proc_start)
+                if sidecar_epoch is not None and bridge_proc_start is not None
+                else None
+            )
+            sidecar_ticks = _row_int(info.get("bridge_start_ticks"))
+            if bridge_start_ticks is not None and sidecar_ticks is not None:
+                # Exact on the ticks, coarse on the epoch — the same pairing
+                # :func:`procutil.is_live_process` uses, and for the same reason. Ticks
+                # restart at zero each boot, so on their own they cannot rule out a STALE
+                # sidecar that survived a reboot and happens to collide on both the bridge
+                # pid and the tick count. The epoch arm below rejected that for free (a
+                # reboot moves it by uptime + downtime), so dropping the conjunct here would
+                # NARROW the PID-reuse defense this change otherwise strengthens — and the
+                # recovered keeper pid reaches `_cleanup_keeper`'s `force_kill_tree`, where a
+                # different live keeper on that pid passes the cmdline gate and takes another
+                # session's bridge down with it.
+                if sidecar_ticks != bridge_start_ticks or (
+                    epoch_gap is not None and epoch_gap > procutil._DRIFT_EPOCH_TOLERANCE
+                ):
+                    continue
+            elif epoch_gap is not None and epoch_gap > _PROC_START_TOLERANCE:
                 continue
             keeper_pid = info.get("keeper_pid")
             if isinstance(keeper_pid, int) and not isinstance(keeper_pid, bool):
@@ -2831,7 +2967,12 @@ class SessionRunner:
         return None
 
     def _recover_keeper_identity(
-        self, name: str, bridge_pid: int | None, bridge_proc_start: float | None
+        self,
+        name: str,
+        bridge_pid: int | None,
+        bridge_proc_start: float | None,
+        *,
+        bridge_start_ticks: int | None,  # keyword-required — see _recover_keeper_pid
     ) -> tuple[int | None, float | None]:
         """Return the ``(keeper_pid, keeper_proc_start)`` PAIR for this bridge (#1178).
 
@@ -2856,7 +2997,9 @@ class SessionRunner:
         recovery reports "no keeper" — honest, since the validated keeper is gone.
         """
         validated_at = time.time()
-        keeper_pid = self._recover_keeper_pid(name, bridge_pid, bridge_proc_start)
+        keeper_pid = self._recover_keeper_pid(
+            name, bridge_pid, bridge_proc_start, bridge_start_ticks=bridge_start_ticks
+        )
         if keeper_pid is None:
             return None, None
         created = procutil.proc_create_time(keeper_pid)
@@ -2888,6 +3031,11 @@ class SessionRunner:
             ps = info.get("bridge_proc_start")
             if isinstance(ps, (int, float)) and not isinstance(ps, bool):
                 instance.bridge_proc_start = float(ps)
+            # From the SIDECAR, never re-measured off the live pid (#1399): a fresh
+            # `proc_start_ticks` read would agree with whatever holds that pid by
+            # construction, so it could authenticate a recycled process the sidecar's own
+            # pair rejects. The keeper writes both halves in one breath for this reason.
+            instance.bridge_start_ticks = _row_int(info.get("bridge_start_ticks"))
         if sid := info.get("session_id"):
             instance.starter_session_id = sid
         if url := info.get("connect_url"):
@@ -3384,12 +3532,22 @@ class SessionRunner:
                 return instance
 
             # Re-validate identity immediately before signalling (TOCTOU / PID reuse).
-            if await asyncio.to_thread(procutil.is_live_bridge, pid, instance.bridge_proc_start):
+            if await asyncio.to_thread(
+                procutil.is_live_bridge,
+                pid,
+                instance.bridge_proc_start,
+                start_ticks=instance.bridge_start_ticks,
+            ):
                 # The flag-form (pty) bridge's TUI treats the first SIGINT as "press
                 # again to exit"; a second confirms. The subcommand bridge stops on one.
                 twice = instance.resume_mode == "pty"
                 await asyncio.to_thread(self._signal_stop, pid, twice=twice)
-                await self._await_exit(project_name, pid, instance.bridge_proc_start)
+                await self._await_exit(
+                    project_name,
+                    pid,
+                    instance.bridge_proc_start,
+                    start_ticks=instance.bridge_start_ticks,
+                )
             if keeper_pid is not None:  # pragma: skip-on-win
                 await asyncio.to_thread(self._cleanup_keeper, keeper_pid)
             instance.status = InstanceStatus.STOPPED
@@ -3484,7 +3642,10 @@ class SessionRunner:
                 # as "not provably alive", and never "simplify" one call site to match the
                 # other's assumptions.
                 if instance.bridge_pid is not None and await asyncio.to_thread(
-                    procutil.is_live_bridge, instance.bridge_pid, instance.bridge_proc_start
+                    procutil.is_live_bridge,
+                    instance.bridge_pid,
+                    instance.bridge_proc_start,
+                    start_ticks=instance.bridge_start_ticks,
                 ):
                     raise InstanceStillLive(
                         f"{instance_id!r} still has a live bridge — Stop it first"
@@ -3509,6 +3670,7 @@ class SessionRunner:
                     procutil.is_live_bridge,
                     row_bridge_pid,
                     _row_float(row.get("bridge_proc_start")),
+                    start_ticks=_row_int(row.get("bridge_start_ticks")),
                 ):
                     raise InstanceStillLive(
                         f"{instance_id!r} still has a live bridge — Stop it first"
@@ -3580,14 +3742,30 @@ class SessionRunner:
             # poll and force-kill fallback handle the outcome; don't raise out of stop().
             _log.debug("stop signal to pid %s was a no-op: %s", pid, exc)
 
-    async def _await_exit(self, name: str, pid: int, proc_start: float | None) -> None:
+    async def _await_exit(
+        self,
+        name: str,
+        pid: int,
+        proc_start: float | None,
+        *,
+        start_ticks: int | None,  # keyword-required — see _recover_keeper_pid (#1399)
+    ) -> None:
         """Wait out the shutdown grace, then force the tree down and reap the child.
 
         ``name`` is not read: the wait is entirely on the (``pid``, ``proc_start``) pair,
         and no per-project lock or flock is taken here despite the call site passing one.
+
+        ``start_ticks`` must be whatever the caller's own liveness check used (#1399). The
+        two asking different questions is worse than either being wrong: :meth:`stop`
+        signals only a bridge it judged LIVE, so a wait that judges the same pid dead breaks
+        on the first iteration and skips both the grace AND ``force_kill_tree`` — leaving a
+        bridge that ignored the signal running, under a card marked STOPPED that
+        ``_reconcile_status`` will never promote back.
         """
         for _ in range(20):  # ~5s grace for a clean shutdown
-            alive = await asyncio.to_thread(procutil.is_live_bridge, pid, proc_start)
+            alive = await asyncio.to_thread(
+                procutil.is_live_bridge, pid, proc_start, start_ticks=start_ticks
+            )
             if not alive:
                 break
             await asyncio.sleep(0.25)
@@ -3750,6 +3928,11 @@ class SessionRunner:
             status=InstanceStatus.STOPPED,
             bridge_pid=None,
             bridge_proc_start=None,
+            # Named rather than left to the model default: this is a deliberate ZEROING of
+            # the identity, so all three fields of the pair belong here together. Relying on
+            # the default would let a future default change silently carry a stale tick count
+            # onto a dead card, where a pid reuse could read as the bridge coming back.
+            bridge_start_ticks=None,
             keeper_pid=None,
         )
 
@@ -3865,7 +4048,7 @@ class SessionRunner:
             # Same PID-reuse defense as the reattach: keeper by cmdline AND the bridge
             # matched on its pid + proc-start pair.
             if procutil.is_keeper_process(keeper_pid) and procutil.is_live_bridge(
-                bridge_pid, proc_start
+                bridge_pid, proc_start, start_ticks=_row_int(info.get("bridge_start_ticks"))
             ):
                 return True
         return False
@@ -3942,7 +4125,10 @@ class SessionRunner:
             # recycled pid can never reattach an unrelated process tree.
             if not procutil.is_keeper_process(keeper_pid):
                 continue
-            if not procutil.is_live_bridge(bridge_pid, bridge_proc_start):
+            bridge_start_ticks = _row_int(info.get("bridge_start_ticks"))
+            if not procutil.is_live_bridge(
+                bridge_pid, bridge_proc_start, start_ticks=bridge_start_ticks
+            ):
                 continue
             # Re-bind the live tail to the log this bridge is still writing. The sidecar
             # shares its spawn-set stem with the bridge's log (`_sidecar_path_for` is just
@@ -3969,6 +4155,12 @@ class SessionRunner:
                 permission_mode=permission_mode,
                 resume_mode=resume_mode,
                 status=InstanceStatus.RUNNING,
+                # Carried onto the instance, not just used for the gate above: without it
+                # `rediscover` accepts this bridge on a tick match and the very first
+                # `poll_once` then rejects it on the epoch alone. `_reconcile_status` never
+                # promotes back, so the card sticks STOPPED under a running keeper — the
+                # whole #1399 failure, reproduced on a fully-upgraded host.
+                bridge_start_ticks=bridge_start_ticks,
                 intentional_stop=False,
                 keeper_pid=keeper_pid,
                 # Snapshotted here, right after `is_keeper_process` classified this pid as
@@ -4012,7 +4204,11 @@ class SessionRunner:
             return  # store read failed; keep the old base rather than acting on nothing
         rows = dict(self._persisted)
         row_pairs = {
-            iid: (pid, _row_float(saved.get("bridge_proc_start")))
+            iid: (
+                pid,
+                _row_float(saved.get("bridge_proc_start")),
+                _row_int(saved.get("bridge_start_ticks")),
+            )
             for iid, saved in rows.items()
             if (pid := _row_int(saved.get("bridge_pid"))) is not None
         }
@@ -4025,15 +4221,25 @@ class SessionRunner:
         # HAVE a pid, so one whose pid was unknown at snapshot (the mid-`_popen` window)
         # yields None below and is skipped rather than clobbered.
         gen = {
-            iid: (i.bridge_pid, i.bridge_proc_start, i.status, i.intentional_stop)
+            iid: (
+                i.bridge_pid,
+                i.bridge_proc_start,
+                i.status,
+                i.intentional_stop,
+                i.bridge_start_ticks,
+            )
             for iid, i in self._instances.items()
             if i.bridge_pid is not None
         }
-        ours = {iid: (g[0], g[1]) for iid, g in gen.items()}
+        # Read in the SAME pass as `gen` rather than re-indexing `self._instances`: correct
+        # either way today (no await separates them), but this removes the implicit invariant
+        # instead of trusting a future editor not to insert one.
+        ours = {iid: (g[0], g[1], g[4]) for iid, g in gen.items()}
         live = await asyncio.to_thread(
             lambda: {
                 key: {
-                    iid: procutil.is_live_bridge(pid, start) for iid, (pid, start) in pairs.items()
+                    iid: procutil.is_live_bridge(pid, start, start_ticks=ticks)
+                    for iid, (pid, start, ticks) in pairs.items()
                 }
                 for key, pairs in (("row", row_pairs), ("ours", ours))
             }
@@ -4044,7 +4250,11 @@ class SessionRunner:
             if inst is None:
                 continue
             pair = row_pairs.get(iid)
-            if pair == (inst.bridge_pid, inst.bridge_proc_start):
+            # Ticks are NOT in this generation compare (#1399): the row and the live object
+            # can legitimately disagree on them — a row written by a pre-#1399 build has
+            # none while the object we adopted it into does — and that is not a different
+            # process generation. pid + proc_start remain the identity.
+            if pair is not None and pair[:2] == (inst.bridge_pid, inst.bridge_proc_start):
                 # Same process generation: the row is describing the bridge we hold, so its
                 # recorded intent is ours too. `stop()` writes the intent BEFORE the process
                 # exits, so without this an adopted bridge stopped from the CLI reconciles to
@@ -4060,8 +4270,8 @@ class SessionRunner:
         iid: str,
         inst: RemoteControlInstance,
         saved: dict,
-        pair: tuple[int, float | None],
-        ours_generation: tuple[int | None, float | None, InstanceStatus, bool] | None,
+        pair: tuple[int, float | None, int | None],
+        ours_generation: tuple[int | None, float | None, InstanceStatus, bool, int | None] | None,
         discovered: dict[str, Project],
     ) -> None:
         """Take over the pids another process resumed this instance with (#1088).
@@ -4087,9 +4297,12 @@ class SessionRunner:
         is always safe (the row is not going anywhere). But the lock only covers a
         *concurrent* mutation — one that COMPLETED while we were in the liveness probe holds
         no lock by the time we look. That is what ``ours_generation`` is for: pid,
-        proc-start, status AND intent are compared against the live object, so a finished
-        ``stop()`` (which changes the latter two and deliberately leaves ``bridge_pid``
-        alone) is detected and left alone. An instance whose pid was unknown at snapshot
+        proc-start, status, intent AND start-ticks are compared against the live object, so a
+        finished ``stop()`` (which changes the middle two and deliberately leaves
+        ``bridge_pid`` alone) is detected and left alone. Not to be confused with the ROW
+        compare in :meth:`_adopt_rows_from_store`, which deliberately excludes ticks — a
+        pre-#1399 row and the object it was adopted into can differ on them without being a
+        different process generation. An instance whose pid was unknown at snapshot
         time (``ours_generation is None`` — precisely the mid-``_popen`` window) is skipped
         rather than overwritten.
 
@@ -4101,7 +4314,7 @@ class SessionRunner:
         proj = discovered.get(inst.project)
         if proj is None:
             return  # project vanished from discovery; nothing to attribute it to
-        pid, proc_start = pair
+        pid, proc_start, start_ticks = pair
         # Resolved BEFORE the lock. All three are pure filesystem reads keyed entirely on
         # snapshot values (project, pid, proc_start) — none reads live mutable state — so
         # holding the project's spawn lock across them would stall every spawn/resume/stop
@@ -4109,12 +4322,23 @@ class SessionRunner:
         # row, per tick, for no correctness gain. What must be inside the lock is the
         # re-check plus the mutation, and that block contains no ``await`` at all.
         keeper_pid, keeper_proc_start = (
-            await asyncio.to_thread(self._recover_keeper_identity, inst.project, pid, proc_start)
+            await asyncio.to_thread(
+                self._recover_keeper_identity,
+                inst.project,
+                pid,
+                proc_start,
+                bridge_start_ticks=start_ticks,
+            )
             if inst.resume_mode == "pty"
             else (None, None)
         )
         connect = await asyncio.to_thread(
-            self._connect_facts_for, proj, inst.resume_mode, pid, proc_start
+            self._connect_facts_for,
+            proj,
+            inst.resume_mode,
+            pid,
+            proc_start,
+            start_ticks=start_ticks,
         )
         log_path = await asyncio.to_thread(self._latest_debug_log_for, inst.project)
 
@@ -4134,12 +4358,17 @@ class SessionRunner:
                 current.bridge_proc_start,
                 current.status,
                 current.intentional_stop,
+                current.bridge_start_ticks,
             ) != ours_generation:
                 # Status and intent are in the tuple deliberately — see the docstring: a
                 # completed `stop()` leaves `bridge_pid` set, so a pid-only compare would
                 # revert the operator's Stop to RUNNING, permanently.
                 return
-            current.bridge_pid, current.bridge_proc_start = pair
+            # All three together, the same rule the keeper pair states below: a
+            # `bridge_start_ticks` left over from the generation we just replaced would be
+            # compared against the NEW pid's ticks and never match, reporting the bridge we
+            # just adopted as dead on the very next poll (#1399).
+            current.bridge_pid, current.bridge_proc_start, current.bridge_start_ticks = pair
             # Both halves of the keeper pair, together (#1178): leaving the old
             # `keeper_proc_start` beside a NEW `keeper_pid` would make the live keeper of
             # the generation we just adopted read as gone.
@@ -4153,6 +4382,22 @@ class SessionRunner:
                 self._raw_log_path_for(log_path) if log_path is not None else None
             )
             current.status = InstanceStatus.RUNNING if connect else InstanceStatus.STARTING
+
+    @staticmethod
+    def _judge_row(
+        pid: int, proc_start: float | None, ticks: int | None
+    ) -> tuple[int | None, bool]:
+        """Judge a row's liveness; stamp a tick-less live row's ticks while its epoch matches.
+
+        Returns ``(ticks, alive)`` from one thread hop. The stamp does not consume the
+        verdict's evidence: :func:`_ticks_on_exact_match` re-derives its own exact match
+        from one fresh read, so it is equally sound from the poll loop's separate hop.
+        ``alive`` merely says a stamp is worth attempting.
+        """
+        alive = procutil.is_live_bridge(pid, proc_start, start_ticks=ticks)
+        if alive and ticks is None:
+            ticks = _ticks_on_exact_match(pid, proc_start)
+        return ticks, alive
 
     async def _reattach_rows_with_pids(
         self,
@@ -4198,11 +4443,18 @@ class SessionRunner:
             if iid in self._instances:
                 continue  # already tracked in this process (a spawn we own)
             proc_start = _row_float(saved.get("bridge_proc_start"))
-            alive = (
-                liveness[iid]
-                if liveness is not None and iid in liveness
-                else await asyncio.to_thread(procutil.is_live_bridge, pid, proc_start)
-            )
+            start_ticks = _row_int(saved.get("bridge_start_ticks"))
+            # Startup judges each row itself and may stamp a pre-#1399 row's ticks on the
+            # spot (`_judge_row`); the instance built below must then carry the SAME ticks
+            # the verdict used, or its very next poll re-judges the bridge on the epoch
+            # alone. A poll-time caller hands in verdicts it already has, and the poll loop
+            # stamps a tick-less adopted instance itself on its next exact match.
+            if liveness is not None and iid in liveness:
+                alive = liveness[iid]
+            else:
+                start_ticks, alive = await asyncio.to_thread(
+                    self._judge_row, pid, proc_start, start_ticks
+                )
             if not alive:
                 if live_only:
                     continue  # poll-time adoption never resurrects dead cards
@@ -4226,7 +4478,13 @@ class SessionRunner:
             # `keeper_pid` to `_cleanup_keeper`, which force-kills the whole tree. A recycled
             # pid landing on another instance's keeper would reap a stranger's processes.
             keeper_pid, keeper_proc_start = (
-                await asyncio.to_thread(self._recover_keeper_identity, proj.name, pid, proc_start)
+                await asyncio.to_thread(
+                    self._recover_keeper_identity,
+                    proj.name,
+                    pid,
+                    proc_start,
+                    bridge_start_ticks=start_ticks,
+                )
                 if resume_mode == "pty"
                 else (None, None)
             )
@@ -4236,7 +4494,12 @@ class SessionRunner:
             # dashboard sits on "Preparing connect link…" forever for every reattached or
             # adopted bridge, which is the whole point of having the bridge.
             connect = await asyncio.to_thread(
-                self._connect_facts_for, proj, resume_mode, pid, proc_start
+                self._connect_facts_for,
+                proj,
+                resume_mode,
+                pid,
+                proc_start,
+                start_ticks=start_ticks,
             )
             # Re-check across the awaits above. This runs lock-free on the poll loop, so a
             # lock-holding adopt()/spawn() can have registered this id — overwriting it would
@@ -4266,6 +4529,13 @@ class SessionRunner:
                 status=status,
                 bridge_pid=pid,
                 bridge_proc_start=proc_start,
+                # Carried from the row alongside its epoch, never re-measured HERE: a fresh
+                # `proc_start_ticks` read would agree with the live process by construction
+                # and so could authenticate a recycled pid the row's own pair rejects. The
+                # one sanctioned re-measure is `_judge_row` above, which runs only after the
+                # row's own pair ACCEPTED the process and accepts the read only inside the
+                # exact 0.05s bound (`_ticks_on_exact_match`), so it cannot admit more.
+                bridge_start_ticks=start_ticks,
                 keeper_pid=keeper_pid,
                 keeper_proc_start=keeper_proc_start,
                 bridge_debug_log_path=log_path,
@@ -4277,7 +4547,13 @@ class SessionRunner:
         return claimed, stopped_projects
 
     def _connect_facts_for(
-        self, proj: Project, resume_mode: ResumeMode, pid: int, proc_start: float | None
+        self,
+        proj: Project,
+        resume_mode: ResumeMode,
+        pid: int,
+        proc_start: float | None,
+        *,
+        start_ticks: int | None,  # keyword-required — see _recover_keeper_pid (#1399)
     ) -> dict:
         """Recover a reattached bridge's connect URL / env id / starter session (#1088).
 
@@ -4324,20 +4600,41 @@ class SessionRunner:
             return {}
         # Same pid AND same start time, or a recycled pid could hand over its environment.
         #
-        # Compared with a tolerance, not `!=`: our `proc_start` is psutil's `create_time()`
-        # while the pointer's is `boot_time + jiffies/CLK_TCK` — two independent derivations
-        # that agree on Linux today only because the rounding happens to coincide. Every
-        # other proc-start comparison in the codebase uses a tolerance for exactly this
-        # reason. An UNKNOWN expected value (unparseable / non-Linux `procStart`) skips the
-        # check rather than failing it, matching `is_live_process` and `_recover_keeper_pid`
-        # — treating unknown as mismatch would strip the connect link on any platform where
-        # the jiffies form isn't comparable, reintroducing the bug this recovers from.
+        # ⚠️ The tolerance arm below is the #1399 comparison: our `proc_start` is FROZEN
+        # (psutil's create_time at spawn, persisted) while `_expected_epoch(ptr.proc_start)`
+        # is re-derived with TODAY's btime — so after a clock correction they differ by the
+        # drift and the 0.05s bound rejects a bridge that never restarted. The consequence is
+        # not a wrong link but NO link: the row gets no connect facts, stays STARTING, and
+        # `_promote_ready_unwatched` (which calls this) can never promote it, so the card is
+        # stuck on "preparing connect link…" for as long as the drift lasts.
+        #
+        # An earlier version of this comment claimed the two derivations "agree on Linux
+        # today only because the rounding happens to coincide". They do not agree; #1399 is
+        # exactly them disagreeing. Both sides carry raw field-22 ticks, so compare THOSE
+        # when both are available — an exact, drift-free match — and keep the epoch arm only
+        # as the fallback for a row or pointer that has none.
+        #
+        # An UNKNOWN expected value (unparseable / non-Linux `procStart`) skips the check
+        # rather than failing it, matching `is_live_process` and `_recover_keeper_pid` —
+        # treating unknown as mismatch would strip the connect link on any platform where the
+        # jiffies form isn't comparable, reintroducing the bug this recovers from.
+        pointer_ticks = _pointer_start_ticks(ptr.proc_start)
         expected = procutil._expected_epoch(ptr.proc_start)
-        if (
-            proc_start is not None
-            and expected is not None
-            and abs(expected - proc_start) > procutil._EXACT_PROC_START_TOLERANCE
-        ):
+        epoch_gap = (
+            abs(expected - proc_start) if expected is not None and proc_start is not None else None
+        )
+        if start_ticks is not None and pointer_ticks is not None:
+            # Exact on the ticks, coarse on the epoch: the same pairing `is_live_process`
+            # and `_recover_keeper_pid` use, for the same reason. Ticks restart at zero each
+            # boot, so a pointer that survived a reboot can collide on pid AND ticks, and
+            # the epoch rejects that for free. Every caller gates on `is_live_bridge` first,
+            # which already carries this conjunct for the same pid; the helper keeps its own
+            # copy so a future caller without that gate cannot inherit a weaker rule.
+            if pointer_ticks != start_ticks or (
+                epoch_gap is not None and epoch_gap > procutil._DRIFT_EPOCH_TOLERANCE
+            ):
+                return {}
+        elif epoch_gap is not None and epoch_gap > procutil._EXACT_PROC_START_TOLERANCE:
             return {}
         # No presence guards: `BridgePointer` declares both as required `str`, so a parsed
         # pointer always carries them — a guard here would be unreachable, not defensive.
@@ -4369,6 +4666,11 @@ class SessionRunner:
             # card, where a later reuse of that pid could read as this bridge coming back.
             bridge_pid=None,
             bridge_proc_start=None,
+            # Named rather than left to the model default: this is a deliberate ZEROING of
+            # the identity, so all three fields of the pair belong here together. Relying on
+            # the default would let a future default change silently carry a stale tick count
+            # onto a dead card, where a pid reuse could read as the bridge coming back.
+            bridge_start_ticks=None,
             keeper_pid=None,
         )
 
@@ -4505,6 +4807,7 @@ class SessionRunner:
             # Mirrors is_live_bridge, so the liveness check and this construction can't
             # disagree. Computed once: reused for keeper matching AND the instance.
             bridge_proc_start = procutil._expected_epoch(ptr.proc_start)
+            bridge_start_ticks = _pointer_start_ticks(ptr.proc_start)
             # A "pty" bridge is held by a detached keeper that outlives a Clauster
             # restart; recover its pid from the sidecar so stop()/poll_once can reap
             # it — otherwise a rediscovered pty bridge would leak its keeper. The log
@@ -4514,7 +4817,11 @@ class SessionRunner:
             # would persist a row whose forget gate degrades to cmdline-only.
             keeper_pid, keeper_proc_start = (
                 await asyncio.to_thread(
-                    self._recover_keeper_identity, proj.name, ptr.pid, bridge_proc_start
+                    self._recover_keeper_identity,
+                    proj.name,
+                    ptr.pid,
+                    bridge_proc_start,
+                    bridge_start_ticks=bridge_start_ticks,
                 )
                 if resume_mode == "pty"
                 else (None, None)
@@ -4530,6 +4837,7 @@ class SessionRunner:
                 permission_mode=permission_mode,
                 resume_mode=resume_mode,
                 bridge_proc_start=bridge_proc_start,
+                bridge_start_ticks=bridge_start_ticks,
                 keeper_pid=keeper_pid,
                 keeper_proc_start=keeper_proc_start,
                 bridge_debug_log_path=log_path,
@@ -4671,6 +4979,7 @@ class SessionRunner:
         bridge_proc_start: float | None,
         keeper_pid: int | None,
         keeper_proc_start: float | None = None,
+        bridge_start_ticks: int | None = None,
         bridge_debug_log_path: Path | None = None,
         bridge_raw_log_path: Path | None = None,
         instance_id: str | None = None,
@@ -4716,6 +5025,11 @@ class SessionRunner:
             status=InstanceStatus.RUNNING,
             bridge_pid=ptr.pid,
             bridge_proc_start=bridge_proc_start,
+            # A pointer's ``procStart`` IS the boot-relative tick count, and converting it to
+            # an epoch (as ``bridge_proc_start`` above does) is precisely what freezes today's
+            # btime into the row and hands the result to a 0.05s bound. Carrying the original
+            # keeps the immune value the pointer already gave us (#1399).
+            bridge_start_ticks=bridge_start_ticks,
             bridge_debug_log_path=bridge_debug_log_path,
             bridge_raw_log_path=bridge_raw_log_path,
             environment_id=ptr.environment_id,
@@ -4821,6 +5135,7 @@ class SessionRunner:
             permission_mode=permission_mode,
             resume_mode="standard",
             bridge_proc_start=procutil._expected_epoch(ptr.proc_start),
+            bridge_start_ticks=_pointer_start_ticks(ptr.proc_start),
             keeper_pid=None,
         )
         self._instances[instance.instance_id] = instance
@@ -4901,6 +5216,11 @@ class SessionRunner:
         # without a second psutil pass — and without blocking the event loop, where it has
         # to resolve its managed-pid exclusion post-await.
         pid_is_ours: dict[str, bool] = {}
+        # Whether a pre-#1399 instance gained its `bridge_start_ticks` this tick (see the
+        # stamp below): the only thing in this loop that must reach the store on its own,
+        # because nothing else on the poll path writes and a restart would otherwise
+        # re-open the same lottery.
+        stamped = False
         for instance in list(self._instances.values()):
             pid = instance.bridge_pid
             # A pty keeper is Clauster's direct child and self-exits with its bridge;
@@ -4911,9 +5231,30 @@ class SessionRunner:
                 continue
             await asyncio.to_thread(procutil.reap_if_exited, pid)
             alive = await asyncio.to_thread(
-                procutil.is_live_bridge, pid, instance.bridge_proc_start
+                procutil.is_live_bridge,
+                pid,
+                instance.bridge_proc_start,
+                start_ticks=instance.bridge_start_ticks,
             )
             pid_is_ours[instance.instance_id] = alive
+            if (
+                alive
+                and instance.bridge_start_ticks is None
+                and procutil.start_time_is_drift_prone()
+            ):
+                # A pre-#1399 row claimed or adopted on an epoch match is still judged on
+                # that epoch every tick, and the first correction demotes it for good.
+                # This tick matched exactly, which is the one moment the drift-immune half
+                # can be read safely — see `_ticks_on_exact_match`. Gated on the platform
+                # here as well, so a host that never drifts never pays the extra hop.
+                # Assigned only on success: the hop is a suspension point, and an
+                # unconditional write could put None over a value set meanwhile.
+                ticks = await asyncio.to_thread(
+                    _ticks_on_exact_match, pid, instance.bridge_proc_start
+                )
+                if ticks is not None:
+                    instance.bridge_start_ticks = ticks
+                    stamped = True
             # The running `claude` release for the card (#1275). Re-derived every tick
             # rather than memoized: it is one `exe` readlink for a live bridge, it is never
             # persisted, and re-reading is what guarantees the label can only ever describe
@@ -4949,6 +5290,11 @@ class SessionRunner:
                     # loop, and a read must not write into the instance's log set.
                     await asyncio.to_thread(self._flush_redacted_mirror, instance)
 
+        if stamped and side_effects:
+            # At most once per tick-less row, ever: after this the row carries ticks and the
+            # stamp never fires for it again. Skipped when observing, like every other
+            # write on this path; the live service's own loop will stamp and persist.
+            await self._persist()
         # Deliberately ABOVE the cross-check, which returns early whenever `agents --json`
         # is degraded: a bridge pinned at STARTING must not stay pinned for as long as that
         # probe keeps failing.
@@ -5160,6 +5506,7 @@ class SessionRunner:
         # its pair, so it stays excluded and cannot prune its own project. Default True for an
         # instance the loop above never saw — one adopted DURING the walk — which is the
         # post-await TOCTOU case; assuming ours there is the non-destructive direction.
+        #
         managed_pids = {
             pid
             for inst in self._instances.values()
@@ -5167,9 +5514,74 @@ class SessionRunner:
             for pid in (inst.bridge_pid, inst.keeper_pid)
             if pid is not None
         }
-        # ANY unmanaged owner makes the cwd evidence — `owners - managed_pids` non-empty.
-        # A managed owner sharing the cwd neither creates evidence nor cancels it.
-        external_cwds = {cwd for cwd, owners in owners_by_cwd.items() if owners - managed_pids}
+        # ⚠️ #1399: `managed_pids` alone is not enough, because `pid_is_ours` IS
+        # `is_live_bridge` and that predicate has a false-negative mode this delete cannot
+        # absorb. Where the start-time pair degrades to the epoch alone AND the platform's
+        # create-time drifts — a pre-#1399 row on Linux — an NTP correction makes a LIVE
+        # bridge answer False. (macOS and Windows record an absolute create-time at exec and
+        # never drift, which is why the exclusion below asks `start_time_is_drift_prone`
+        # rather than assuming every host is exposed.) Both halves
+        # of the prune then fail together: the instance is demoted to STOPPED so it becomes a
+        # candidate, AND its own pid drops out of the set above so its own bridge becomes the
+        # "unmanaged" evidence against it. Observed 19 times in 2.5 hours on the dogfood host,
+        # every log line naming clauster's own bridge pid.
+        #
+        # The fix is to scope ownership evidence to the project it is evidence ABOUT: a pid
+        # held by an instance OF THIS PROJECT cannot demonstrate an *unmanaged* bridge at that
+        # project's cwd, because the prune's premise is "some bridge here is alive and we do
+        # not have it" and we demonstrably do have it.
+        #
+        # Restricted to instances whose liveness verdict is INCONCLUSIVE, which is what keeps
+        # it from reopening the hazard the paragraph above protects. A verdict is conclusive
+        # when the pair could be judged on the drift-immune half — ticks recorded, or a
+        # platform whose create-time does not drift at all
+        # (:func:`procutil.start_time_is_drift_prone`) — and a conclusive "not our process"
+        # is exactly what it says, so that pid stays evidence even at its own project's cwd.
+        # Only where the epoch was the sole evidence can a False mean "the clock moved", and
+        # there the destructive reading is the one we refuse.
+        #
+        # ⚠️ For those tick-less rows this DOES re-admit the shape the `managed_pids`
+        # paragraph above calls indefensible: a long-dead card's stale pid, recycled onto a
+        # genuinely unmanaged bridge at the same cwd, cancels that bridge as evidence and its
+        # phantom card lingers. That trade is deliberate and bounded — it applies only where
+        # we cannot tell drift from reuse, and the alternative there is deleting a running
+        # session's card. Read that paragraph as absolute for a row WITH ticks, which is
+        # every row a current build writes.
+        #
+        # Deliberately NOT "was live when this tick started". That covered the demotion tick
+        # only: `_reconcile_status` never promotes back, so on the NEXT tick the victim is
+        # already STOPPED, drops out again, and the card is deleted one poll later — the same
+        # bug, one tick down the road. Being inconclusive is a property of the evidence, not
+        # of when we looked, so it does not expire.
+        #
+        # Keyed by resolved cwd rather than by project NAME so there is no sentinel to get
+        # wrong for a row whose `project` degraded to "" — an absent cwd simply has no
+        # entry, and a project we cannot locate contributes no exclusion.
+        # Only projects with a live registry entry: this is N `realpath` syscalls per poll on
+        # the hot path (and `resolve()` is materially costlier on Windows), and a project with
+        # no instance can contribute neither an exclusion nor a prune candidate.
+        cwd_of_project = {
+            name: Path(discovered[name].path).resolve()
+            for name in {i.project for i in self._instances.values()}
+            if name in discovered
+        }
+        own_project_pids: dict[Path, set[int]] = {}
+        for inst in self._instances.values():
+            proj_cwd = cwd_of_project.get(inst.project)
+            if proj_cwd is None or not (
+                inst.bridge_start_ticks is None and procutil.start_time_is_drift_prone()
+            ):
+                continue
+            for pid in (inst.bridge_pid, inst.keeper_pid):
+                if pid is not None:
+                    own_project_pids.setdefault(proj_cwd, set()).add(pid)
+        # ANY unmanaged owner makes the cwd evidence — the remainder non-empty. A managed
+        # owner sharing the cwd neither creates evidence nor cancels it.
+        external_cwds = {
+            cwd
+            for cwd, owners in owners_by_cwd.items()
+            if owners - managed_pids - own_project_pids.get(cwd, set())
+        }
         # No _persist() after this delete, by design: the ROW survives, so the deletion is
         # recoverable. Persisting would be a no-op anyway: _persist_subset overlays `live`
         # onto the retained `_persisted` map, which keeps the record (intentionally — it
@@ -5202,10 +5614,7 @@ class SessionRunner:
             # record is no longer RUNNING by the time we get here.
             if inst.status in (InstanceStatus.RUNNING, InstanceStatus.STARTING):
                 continue
-            if (
-                inst.project in discovered
-                and Path(discovered[inst.project].path).resolve() in external_cwds
-            ):
+            if inst.project in cwd_of_project and cwd_of_project[inst.project] in external_cwds:
                 candidates.setdefault(inst.project, []).append(n)
         for project, ids in candidates.items():
             # One external bridge can only be ONE of these rows. With several candidates
@@ -5221,6 +5630,7 @@ class SessionRunner:
                 )
                 continue
             n = ids[0]
+            cwd = cwd_of_project[project]
             # INFO, not debug: this DELETES a resumable card, and the row it leaves behind
             # is only re-materialized by `rediscover` — i.e. on restart, not next tick. The
             # skip above was logged while the destructive branch was silent, which is
@@ -5234,8 +5644,7 @@ class SessionRunner:
                 # Only the UNMANAGED owners: those are the evidence this delete rests on.
                 # A managed owner sharing the cwd is not why the card is going.
                 sorted(
-                    owners_by_cwd.get(Path(discovered[project].path).resolve(), set())
-                    - managed_pids
+                    owners_by_cwd.get(cwd, set()) - managed_pids - own_project_pids.get(cwd, set())
                 )
                 or "?",
             )
@@ -5284,13 +5693,19 @@ class SessionRunner:
         if not stuck:
             return
         discovered = self._discovered()
-        pending: dict[str, tuple[Project, ResumeMode, int, float | None]] = {}
+        pending: dict[str, tuple[Project, ResumeMode, int, float | None, int | None]] = {}
         for inst in stuck:
             proj = discovered.get(inst.project)
             pid = inst.bridge_pid
             if proj is None or pid is None:
                 continue  # project gone from discovery: nothing to read the evidence from
-            pending[inst.instance_id] = (proj, inst.resume_mode, pid, inst.bridge_proc_start)
+            pending[inst.instance_id] = (
+                proj,
+                inst.resume_mode,
+                pid,
+                inst.bridge_proc_start,
+                inst.bridge_start_ticks,
+            )
         if not pending:
             return
         # One thread hop for the whole tick's worth of pointer reads / sidecar globs,
@@ -5302,8 +5717,8 @@ class SessionRunner:
         facts = await asyncio.to_thread(
             lambda: {
                 iid: (
-                    self._connect_facts_for(*args),
-                    procutil.is_live_bridge(args[2], args[3]),
+                    self._connect_facts_for(*args[:4], start_ticks=args[4]),
+                    procutil.is_live_bridge(args[2], args[3], start_ticks=args[4]),
                 )
                 for iid, args in pending.items()
             }

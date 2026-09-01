@@ -3860,3 +3860,177 @@ def test_resolve_bridge_id_does_not_treat_an_idle_project_name_as_a_prefix(
     assert runner.resolve_bridge_id("cafe") is None, "an idle project must not borrow a bridge"
     assert runner.bridge_id_candidates("cafe") == [], "not ambiguous -- it has no instance"
     assert runner.resolve_bridge_id("cafe0") == other, "the id stays reachable"
+
+
+async def test_poll_prune_spares_a_live_bridges_card_when_its_own_pid_is_the_evidence(
+    runner_config, monkeypatch
+):
+    # #1399. `is_live_bridge` false-negatives under NTP slew (psutil's create_time is
+    # btime-derived and btime moves), and BOTH halves of the prune then fail together: the
+    # instance is demoted to STOPPED so it becomes a candidate, and its pid drops out of
+    # `managed_pids` so its own live bridge becomes the "unmanaged" evidence against it.
+    # Observed 19 times in 2.5 hours on the dogfood host, every log line naming clauster's
+    # own bridge pid. Ownership evidence is now scoped to the project it is evidence about.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    victim = RemoteControlInstance(
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.RUNNING,
+        resume_mode="standard",
+        spawn_mode="session",
+        bridge_pid=58343,
+        bridge_proc_start=1788244068.79,
+    )
+    runner._instances[victim.instance_id] = victim
+    sess = WorkingSession(
+        pid=58400,
+        cwd=config.projects_root / "alpha",
+        kind="interactive",
+        started_at=1,
+        local_uuid="u-drift",
+    )
+    monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
+    # Pinned, not inherited from the host: the exclusion only engages where create-time
+    # actually drifts, so on the macOS and Windows CI legs this would otherwise delete the
+    # card on tick 1 and the test would be asserting nothing about the discriminator.
+    monkeypatch.setattr("clauster.runner.procutil.start_time_is_drift_prone", lambda: True)
+    # The clock moved, so the pair no longer matches — the bridge is alive regardless.
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    # ...and the session's ancestry resolves to that same still-running bridge.
+    monkeypatch.setattr("clauster.runner.procutil.bridge_ancestor", lambda pid, **k: 58343)
+
+    await runner.poll_once()
+
+    assert runner.get_instance(victim.instance_id) is not None, (
+        "a bridge's own pid must never be the evidence that deletes its own card"
+    )
+
+    # A SECOND tick is the real test. The first attempt at this fix keyed the exclusion on
+    # "was RUNNING when the tick started", which held for exactly one poll: `_reconcile_status`
+    # only ever demotes, so by tick 2 the victim was already STOPPED, dropped out again, and
+    # the card was deleted one poll later — the same bug, moved. Being inconclusive is a
+    # property of the evidence, not of when we looked, so it does not expire.
+    await runner.poll_once()
+    assert runner.get_instance(victim.instance_id) is not None, (
+        "the exclusion must not expire after the tick that demoted the instance"
+    )
+
+
+async def test_poll_prune_still_fires_for_a_genuinely_unmanaged_bridge_at_a_projects_cwd(
+    runner_config, monkeypatch
+):
+    # The positive control for the test above: scoping the exclusion per project must not
+    # turn the prune off. An owner pid that NO instance of this project holds is still
+    # evidence, and the phantom card still goes.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    phantom = RemoteControlInstance(
+        project="alpha",
+        label="phantom",
+        status=InstanceStatus.STOPPED,
+        resume_mode="standard",
+        bridge_pid=4401,
+        bridge_proc_start=100.0,
+    )
+    runner._instances[phantom.instance_id] = phantom
+    sess = WorkingSession(
+        pid=800,
+        cwd=config.projects_root / "alpha",
+        kind="interactive",
+        started_at=1,
+        local_uuid="u-ext",
+    )
+    monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    # 999999 belongs to no instance of this project — a real unmanaged bridge.
+    monkeypatch.setattr("clauster.runner.procutil.bridge_ancestor", lambda pid, **k: 999999)
+
+    await runner.poll_once()
+
+    assert runner.get_instance(phantom.instance_id) is None, (
+        "a genuinely unmanaged bridge at the project cwd must still prune the phantom"
+    )
+
+
+async def test_poll_prune_still_uses_a_long_dead_cards_recycled_pid_at_its_own_cwd(
+    runner_config, monkeypatch
+):
+    # The same-project variant of `test_poll_prune_ignores_a_recycled_pid_from_a_stopped_
+    # instance`, which sits in a different project and so never covered this. Scoping the
+    # #1399 exclusion per project must not let a card shield its own stale pid once the OS
+    # recycles it onto a genuinely unmanaged bridge at the same cwd — that leaves a phantom
+    # card up offering a Resume that double-spawns.
+    #
+    # This card records `bridge_start_ticks`, so its "not our process" verdict was reached
+    # on the drift-immune half and is CONCLUSIVE. That is the whole discriminator: only an
+    # inconclusive verdict (epoch-only, on a platform whose create-time drifts) buys the
+    # exclusion, because only there can a False mean "the clock moved".
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    phantom = RemoteControlInstance(
+        project="alpha",
+        label="phantom",
+        status=InstanceStatus.STOPPED,  # already dead when the tick starts
+        resume_mode="standard",
+        bridge_pid=555000,
+        bridge_proc_start=111.0,
+        bridge_start_ticks=111000,
+    )
+    runner._instances[phantom.instance_id] = phantom
+    sess = WorkingSession(
+        pid=800,
+        cwd=config.projects_root / "alpha",
+        kind="interactive",
+        started_at=1,
+        local_uuid="u-ext",
+    )
+    monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
+    # True, so the test exercises the conclusive-verdict discriminator rather than passing
+    # because the exclusion is switched off wholesale (which is what happens off Linux).
+    monkeypatch.setattr("clauster.runner.procutil.start_time_is_drift_prone", lambda: True)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    monkeypatch.setattr("clauster.runner.procutil.bridge_ancestor", lambda pid, **k: 555000)
+
+    await runner.poll_once()
+
+    assert runner.get_instance(phantom.instance_id) is None, (
+        "a stopped card's recycled pid must not shield it, even at its own project's cwd"
+    )
+
+
+async def test_spawn_stamps_both_halves_of_the_bridge_start_pair(runner_config, monkeypatch):
+    # #1399: coverage alone proves the line ran, not that the value lands on the instance —
+    # and a NULL here silently degrades every later comparison back to the drifting epoch.
+    #
+    # Pinned as ONE sample, not two. Two `to_thread` hops would put a suspension point
+    # between the halves, and a bridge dying in that window (a startup failure — precisely
+    # what this runs before `_await_ready` to catch) can have its pid recycled, leaving a
+    # pair describing two processes. `stop()` force-kills the tree behind that pair.
+    runner = _make_runner(runner_config)
+    calls = []
+
+    def _one_sample(pid):
+        calls.append(pid)
+        return 1000.0, 770579
+
+    monkeypatch.setattr("clauster.runner.procutil.proc_start_pair", _one_sample)
+    inst = await runner.spawn("alpha")
+    assert inst.bridge_proc_start == 1000.0
+    assert inst.bridge_start_ticks == 770579, "the drift-immune half must be stamped at spawn"
+    assert len(calls) == 1, "both halves must come from a single sample, not two reads"
+
+
+async def test_bridge_start_ticks_round_trips_through_the_store(runner_config, monkeypatch):
+    # The column, the store field list and `_persisted_liveness` have to agree, or the value
+    # is stamped at spawn and silently lost on the first restart — which is indistinguishable
+    # from the pre-#1399 behaviour it exists to replace.
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr("clauster.runner.procutil.proc_start_pair", lambda pid: (1000.0, 770579))
+    inst = await runner.spawn("alpha")
+    await runner._persist()
+
+    reloaded = _make_runner(runner_config)
+    assert await reloaded._refresh_persisted()
+    row = reloaded._persisted[inst.instance_id]
+    assert row["bridge_start_ticks"] == 770579

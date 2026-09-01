@@ -242,15 +242,38 @@ def test_main_requires_bridge_argv_inprocess(tmp_path: Path) -> None:
         pty_keeper.main(["--sidecar", str(tmp_path / "k.json")])
 
 
-def test_proc_start_returns_none_on_error(monkeypatch) -> None:
-    """A failure resolving the bridge's start time degrades to None, never raises."""
+def test_proc_start_pair_is_derived_from_one_read_and_degrades_together(monkeypatch) -> None:
+    """The sidecar's two start values come from ONE /proc read, and fail as a unit.
+
+    Two independent samples can straddle a death plus pid recycle and describe different
+    processes — a pair the reattach's 1-hour epoch conjunct would then authenticate on the
+    recycled occupant (#1399).
+    """
     from clauster import pty_keeper
 
+    monkeypatch.setattr("clauster.procutil.proc_start_ticks", lambda _pid: 770579)
+    monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", lambda ticks: 1000.0 + ticks)
+    assert pty_keeper._proc_start_pair(1234) == (770579 + 1000.0, 770579)
+
+    # A host that cannot express boot time: `jiffies_to_epoch` answers None, and the ticks
+    # still travel — they are the half that matters, and a pair with no epoch simply skips
+    # the start-time check the way it always did.
+    monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", lambda _ticks: None)
+    assert pty_keeper._proc_start_pair(1234) == (None, 770579)
+
+    # An UNEXPECTED raise degrades to the honest unknown rather than aborting the keeper's
+    # first sidecar write — the reason this wrapper exists at all.
     def _boom(_pid):
         raise RuntimeError("psutil exploded")
 
-    monkeypatch.setattr("clauster.procutil.proc_create_time", _boom)
-    assert pty_keeper._proc_start(1234) is None
+    monkeypatch.setattr("clauster.procutil.proc_start_pair", _boom)
+    assert pty_keeper._proc_start_pair(1234) == (None, None)
+
+    # No ticks (non-Linux, unreadable /proc) -> the pre-#1399 direct epoch sample.
+    monkeypatch.undo()
+    monkeypatch.setattr("clauster.procutil.proc_start_ticks", lambda _pid: None)
+    monkeypatch.setattr("clauster.procutil.proc_create_time", lambda _pid: 555.0)
+    assert pty_keeper._proc_start_pair(1234) == (555.0, None)
 
 
 def test_write_sidecar_swallows_oserror(tmp_path: Path) -> None:

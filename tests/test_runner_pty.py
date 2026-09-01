@@ -627,9 +627,19 @@ def test_keeper_pid_skips_sidecar_with_mismatched_proc_start(runner_config) -> N
     )
 
     # same pid, but proc-start off by far more than _PROC_START_TOLERANCE (2.0s)
-    assert runner._recover_keeper_pid("alpha", bridge_pid=4242, bridge_proc_start=1000.0) is None
+    assert (
+        runner._recover_keeper_pid(
+            "alpha", bridge_pid=4242, bridge_proc_start=1000.0, bridge_start_ticks=None
+        )
+        is None
+    )
     # the in-tolerance lookup still resolves the keeper, proving the skip is the proc-start guard
-    assert runner._recover_keeper_pid("alpha", bridge_pid=4242, bridge_proc_start=100.5) == 5555
+    assert (
+        runner._recover_keeper_pid(
+            "alpha", bridge_pid=4242, bridge_proc_start=100.5, bridge_start_ticks=None
+        )
+        == 5555
+    )
 
 
 def test_recover_keeper_pid_returns_none_when_keeper_pid_missing(runner_config) -> None:
@@ -642,7 +652,12 @@ def test_recover_keeper_pid_returns_none_when_keeper_pid_missing(runner_config) 
         json.dumps({"keeper_pid": None, "bridge_pid": 4242, "bridge_proc_start": 100.0})
     )
 
-    assert runner._recover_keeper_pid("beta", bridge_pid=4242, bridge_proc_start=100.0) is None
+    assert (
+        runner._recover_keeper_pid(
+            "beta", bridge_pid=4242, bridge_proc_start=100.0, bridge_start_ticks=None
+        )
+        is None
+    )
 
 
 def _states_until_keeper_ready(tmp_path, monkeypatch, argv) -> list:
@@ -1664,7 +1679,12 @@ def test_recover_keeper_pid_none_without_bridge_pid(runner_config) -> None:
     # the lookup returns None instead of guessing a keeper to signal.
     config, claude_json = runner_config
     runner = SessionRunner(config, claude_json=claude_json)
-    assert runner._recover_keeper_pid("alpha", bridge_pid=None, bridge_proc_start=None) is None
+    assert (
+        runner._recover_keeper_pid(
+            "alpha", bridge_pid=None, bridge_proc_start=None, bridge_start_ticks=None
+        )
+        is None
+    )
 
 
 def test_recover_keeper_pid_skips_foreign_and_corrupt_sidecars(runner_config) -> None:
@@ -1679,7 +1699,83 @@ def test_recover_keeper_pid_skips_foreign_and_corrupt_sidecars(runner_config) ->
     )
     (runner._log_dir / "gamma-1700000000000-1.keeper.json").write_text("not json {{{")
 
-    assert runner._recover_keeper_pid("gamma", bridge_pid=2222, bridge_proc_start=100.0) is None
+    assert (
+        runner._recover_keeper_pid(
+            "gamma", bridge_pid=2222, bridge_proc_start=100.0, bridge_start_ticks=None
+        )
+        is None
+    )
+
+
+def test_recover_keeper_pid_treats_an_unfloatable_sidecar_epoch_as_absent(runner_config) -> None:
+    # A sidecar is an on-disk file: `json.loads` hands back a Python int for any width, and
+    # `float()` of one wider than a double raises OverflowError. That must read as "no
+    # comparable epoch" (the pid-only fallback), never raise out of `rediscover`.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    runner._log_dir.mkdir(parents=True, exist_ok=True)
+    (runner._log_dir / "gamma-1700000000000-0.keeper.json").write_text(
+        json.dumps({"keeper_pid": 7777, "bridge_pid": 2222, "bridge_proc_start": 10**400})
+    )
+    assert (
+        runner._recover_keeper_pid(
+            "gamma", bridge_pid=2222, bridge_proc_start=100.0, bridge_start_ticks=None
+        )
+        == 7777
+    )
+
+
+def test_recover_keeper_pid_prefers_ticks_over_a_drifted_epoch(runner_config) -> None:
+    # #1399. The pointer walk recomputes its epoch with TODAY's btime while the sidecar's
+    # was frozen at spawn, so a clock correction bigger than _PROC_START_TOLERANCE (2.0s;
+    # a 4s spread was measured on the dogfood host) made a live keeper fail to match its
+    # own bridge. The keeper pid was then lost, and stop() never cleaned up its tree.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    runner._log_dir.mkdir(parents=True, exist_ok=True)
+    (runner._log_dir / "gamma-1700000000000-0.keeper.json").write_text(
+        json.dumps(
+            {
+                "keeper_pid": 7777,
+                "bridge_pid": 2222,
+                "bridge_proc_start": 100.0,
+                "bridge_start_ticks": 770579,
+            }
+        )
+    )
+    # Epoch 4s adrift, ticks identical -> matched on the drift-immune half.
+    assert (
+        runner._recover_keeper_pid(
+            "gamma", bridge_pid=2222, bridge_proc_start=104.0, bridge_start_ticks=770579
+        )
+        == 7777
+    )
+    # Ticks genuinely different -> a real PID-reuse, still rejected however close the
+    # epochs are. This is the branch the exact compare buys over the 2.0s slack.
+    assert (
+        runner._recover_keeper_pid(
+            "gamma", bridge_pid=2222, bridge_proc_start=100.0, bridge_start_ticks=770580
+        )
+        is None
+    )
+    # A sidecar from a pre-#1399 keeper has no ticks -> the epoch arm still decides.
+    assert (
+        runner._recover_keeper_pid(
+            "gamma", bridge_pid=2222, bridge_proc_start=104.0, bridge_start_ticks=None
+        )
+        is None
+    )
+    # Ticks alone are NOT enough: they restart at zero each boot, so a stale sidecar that
+    # survived a reboot can collide on both the bridge pid and the tick count. The epoch arm
+    # rejected that for free (a reboot moves it by uptime + downtime), so the tick arm keeps
+    # a coarse same-boot conjunct — without it this change would NARROW the PID-reuse
+    # defense, and the recovered pid reaches `_cleanup_keeper`'s force_kill_tree.
+    assert (
+        runner._recover_keeper_pid(
+            "gamma", bridge_pid=2222, bridge_proc_start=9_000_000.0, bridge_start_ticks=770579
+        )
+        is None
+    )
 
 
 @_POSIX_ONLY

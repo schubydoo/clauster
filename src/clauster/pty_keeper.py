@@ -189,14 +189,25 @@ class _ScreenTap:
     sidecar: Path
 
 
-def _proc_start(pid: int) -> float | None:
-    """Return the bridge's process start time for Clauster's PID-reuse defense, or None."""
+def _proc_start_pair(pid: int) -> tuple[float | None, int | None]:
+    """Return the bridge's ``(epoch, boot-relative ticks)`` start pair from ONE /proc read.
+
+    Thin wrapper over :func:`clauster.procutil.proc_start_pair`, which owns the rule and
+    the reasoning — derived rather than sampled twice, so a death plus pid recycle between
+    two reads cannot leave a pair describing different processes (#1399). Shared with the
+    runner's own spawn stamp so the sidecar and the registry cannot disagree about what a
+    start pair means.
+
+    Wrapped, because the keeper must never raise out of its startup path: an import or
+    psutil failure degrades to the honest unknown rather than aborting the first sidecar
+    write.
+    """
     try:
         from clauster import procutil
 
-        return procutil.proc_create_time(pid)
+        return procutil.proc_start_pair(pid)
     except Exception:  # noqa: BLE001 — discovery aid only; never fatal
-        return None
+        return None, None
 
 
 class _KeeperDrain:
@@ -383,6 +394,7 @@ def _run_keeper_conpty(
         "keeper_pid": os.getpid(),
         "bridge_pid": None,
         "bridge_proc_start": None,
+        "bridge_start_ticks": None,
         "connect_url": None,
         "session_id": None,
         "worktree_name": _worktree_from_argv(bridge_argv),
@@ -424,7 +436,7 @@ def _run_keeper_conpty(
         return 71
 
     base["bridge_pid"] = proc.pid
-    base["bridge_proc_start"] = _proc_start(proc.pid)
+    base["bridge_proc_start"], base["bridge_start_ticks"] = _proc_start_pair(proc.pid)
     _write_sidecar(sidecar, base)
 
     drain = _KeeperDrain(base, sidecar, screen, screen_sidecar)
@@ -502,6 +514,7 @@ def run_keeper(
         "keeper_pid": keeper_pid,
         "bridge_pid": None,
         "bridge_proc_start": None,
+        "bridge_start_ticks": None,
         "connect_url": None,
         "session_id": None,
         "worktree_name": _worktree_from_argv(bridge_argv),
@@ -578,7 +591,7 @@ def run_keeper(
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
 
     base["bridge_pid"] = proc.pid
-    base["bridge_proc_start"] = _proc_start(proc.pid)
+    base["bridge_proc_start"], base["bridge_start_ticks"] = _proc_start_pair(proc.pid)
     _write_sidecar(sidecar, base)
 
     flags = fcntl.fcntl(master, fcntl.F_GETFL)

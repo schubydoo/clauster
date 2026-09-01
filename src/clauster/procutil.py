@@ -54,7 +54,36 @@ KEEPER_SUBCOMMAND = "__pty-keeper__"
 # started later, carries a measurably later create_time, so this tight bound
 # rejects it. (A pointer's jiffies epoch is derived independently and keeps the
 # caller's looser ``tolerance``.)
+#
+# ⚠️ Only sound while the epoch is the SOLE evidence. psutil derives create_time on
+# Linux as ``starttime/CLK_TCK + boot_time()``, and ``boot_time()`` re-reads
+# ``/proc/stat`` btime on every call — btime tracks the live realtime-vs-uptime offset,
+# so NTP slew moves it under a process that never restarted (#1399: five distinct btime
+# values, a 4-second spread, inside 3.5 minutes on a drifting host). Against 0.05s that
+# reads as "not our process". Where a boot-relative tick count is also recorded,
+# :func:`is_live_process` prefers it and applies `_DRIFT_EPOCH_TOLERANCE` below instead.
 _EXACT_PROC_START_TOLERANCE = 0.05
+
+# The epoch bound used when an exact boot-relative tick match is ALSO available. It has
+# a different job from the tolerance above: the ticks already supply the PID-reuse
+# defense (a pid recycled a second later differs by CLK_TCK ticks and fails exactly), so
+# the epoch is demoted to a coarse "same boot?" discriminator — ticks are only
+# comparable within one boot, and after a reboot an unrelated process could hold both the
+# same pid and the same tick count. Wide enough to absorb any plausible clock correction,
+# far narrower than the gap a reboot puts between two epochs.
+#
+# ⚠️ Both limits of this bound are real, and neither is fixed by widening or narrowing it:
+#   * it CAPS the fix at ~1h of correction. A clock STEP larger than that (a VM snapshot
+#     restore, an RTC-less board syncing long after boot) fails this conjunct even on an
+#     exact tick match, and #1399 returns for that host.
+#   * it is the one place the PID-reuse defense is laxer than the 0.05s bound: across a
+#     reboot the epoch gap is (previous uptime + downtime), so a host that reboots inside
+#     an hour could admit a process holding BOTH the same pid and the same tick count.
+# The discriminator that settles both is `/proc/sys/kernel/random/boot_id` — persist it
+# beside the ticks and this conjunct can go away entirely. Deliberately not done here:
+# it is a second new column for a residue that needs a reboot, a pid collision AND a tick
+# collision at once, where what shipped fixes a fault seen 19 times in 2.5 hours.
+_DRIFT_EPOCH_TOLERANCE = 3600.0
 
 
 def _clk_tck() -> int:
@@ -65,6 +94,52 @@ def _clk_tck() -> int:
         return 100
 
 
+def proc_start_ticks(pid: int) -> int | None:
+    """Boot-relative start time of ``pid`` in clock ticks, or ``None`` where unavailable.
+
+    Field 22 of ``/proc/<pid>/stat`` — the same quantity a bridge pointer's ``procStart``
+    carries. Unlike :func:`proc_create_time` this is measured against the boot instant, not
+    the wall clock, so it does not move when NTP corrects the clock (#1399). That makes it
+    the trustworthy half of the PID-reuse pair: within one boot, two different processes at
+    the same pid have different tick counts, and re-reading a live process always returns
+    the value it was born with.
+
+    ``None`` on any host without ``/proc`` (macOS, Windows) and on any read failure —
+    caller falls back to the epoch comparison, which on those platforms is *stable*
+    anyway: their create-times come from the kernel as absolute timestamps recorded at
+    exec, not re-derived from a moving boot-time baseline.
+
+    Parsed from the last ``)`` rather than by splitting the whole line: field 2 is the
+    executable name, unquoted and free to contain spaces AND parentheses, so a
+    left-to-right split miscounts every later field for a process named ``foo) bar``.
+    """
+    try:
+        stat = Path(f"/proc/{int(pid)}/stat").read_text(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        return None
+    try:
+        # Fields after comm: index 0 is state, so starttime (field 22) is index 19.
+        return int(stat[stat.rindex(")") + 1 :].split()[19])
+    except (ValueError, IndexError):
+        return None
+
+
+def start_time_is_drift_prone() -> bool:
+    """Whether this platform's process create-time moves when the wall clock is corrected.
+
+    True on Linux only. psutil derives ``create_time`` there as ``starttime/CLK_TCK +
+    boot_time()``, re-reading ``/proc/stat`` btime every call — and btime tracks the live
+    realtime-vs-uptime offset, so NTP slew shifts it under a process that never restarted
+    (#1399). macOS and Windows record an absolute timestamp at exec (``proc_pidinfo`` /
+    ``GetProcessTimes``) and hand back the same value forever, so a start-time mismatch
+    there really does mean a different process.
+
+    Callers use it to tell a *conclusive* "not our process" from an *inconclusive* one, which
+    matters wherever the answer drives a destructive action.
+    """
+    return sys.platform == "linux"
+
+
 def jiffies_to_epoch(jiffies: int) -> float | None:
     """Convert a Linux starttime (jiffies since boot) to an epoch timestamp.
 
@@ -73,7 +148,17 @@ def jiffies_to_epoch(jiffies: int) -> float | None:
     """
     try:
         return psutil.boot_time() + (jiffies / _clk_tck())
-    except (OSError, AttributeError):
+    except (OSError, AttributeError, RuntimeError):
+        # RuntimeError is psutil's raise when `/proc/stat` carries no `btime` line (an
+        # emulated procfs — gVisor, some container runtimes, WSL1) — exactly the "host can't
+        # express boot time" case this docstring promises to answer None for, and it was
+        # escaping into the pointer paths and, via `proc_start_pair`, into the keeper, where
+        # the sidecar then lost BOTH halves of the pair and `_recover_keeper_pid` fell
+        # through to a pid-only match. `proc_create_time` and `is_live_process` absorb the
+        # same raise for the same reason — psutil's `create_time()` ends in
+        # `self._ctime + boot_time()`, so on those hosts they hit it FIRST, before this
+        # function is ever consulted. One rule for the family, not three.
+        _log.debug("host cannot express boot time; start-time checks degrade to cmdline+alive")
         return None
 
 
@@ -206,6 +291,45 @@ def proc_create_time(pid: int) -> float | None:
         return proc.create_time()
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, ValueError):
         return None
+    except RuntimeError:
+        # psutil's `create_time()` ends in `self._ctime + boot_time()`, and `boot_time()`
+        # raises a bare RuntimeError on a procfs with no `btime` line — not wrapped by
+        # psutil's own exception decorator, so it reaches us as-is. Uncaught it left
+        # `poll_once` aborting on every tick (crash detection, adoption and the prune all
+        # dead for the process's lifetime) and `stop()` skipping its grace + force-kill.
+        # See :func:`jiffies_to_epoch`, which states the rule for the family.
+        return None
+
+
+def proc_start_pair(pid: int) -> tuple[float | None, int | None]:
+    """Both halves of a process's start identity, from ONE read (#1399).
+
+    ``(epoch, boot-relative ticks)``. Sampling them separately puts a suspension point
+    between two ``/proc`` reads, and a process that dies in that window can have its pid
+    recycled — leaving a pair whose halves describe DIFFERENT processes. That pair then
+    authenticates the recycled occupant, because :func:`is_live_process` matches the ticks
+    exactly (they are the new process's) and the epoch only within
+    ``_DRIFT_EPOCH_TOLERANCE``. On a destructive path (``stop`` signals and force-kills the
+    tree behind this pair) that is strictly worse than the pre-#1399 tight epoch bound,
+    which rejected the mismatch.
+
+    Deriving the epoch FROM the ticks makes the halves agree by construction — it is the
+    same arithmetic psutil does on Linux, so the epoch is bit-identical to what
+    :func:`proc_create_time` would return. Where ticks are unavailable (non-Linux, unreadable
+    ``/proc``) it falls back to sampling the epoch directly, which is the pre-#1399 shape and
+    has no second read to straddle.
+
+    ⚠️ One asymmetry with :func:`proc_create_time`, which filters zombies: a zombie still has
+    a readable ``/proc/<pid>/stat``, so on Linux this returns a real pair for one where that
+    function answers ``None``. Deliberate — the pair is an IDENTITY, not a liveness claim,
+    and every gate rejects zombies separately before comparing it. It is also the stricter
+    direction: a ``(None, ticks)`` pair made :func:`is_live_process` skip the start-time
+    check entirely and trust cmdline+alive, which a recycled pid passes.
+    """
+    ticks = proc_start_ticks(pid)
+    if ticks is None:
+        return proc_create_time(pid), None
+    return jiffies_to_epoch(ticks), ticks
 
 
 def proc_cwd(pid: int) -> Path | None:
@@ -230,6 +354,7 @@ def is_live_process(
     *,
     tolerance: float = 2.0,
     require_cmdline: Callable[[list[str]], bool] | None = None,
+    start_ticks: int | None = None,
 ) -> bool:
     """Whether ``pid`` is alive, non-zombie, and its start-time matches ``proc_start``.
 
@@ -240,23 +365,70 @@ def is_live_process(
     start-time match. A float we measured ourselves matches the same process
     near-exactly, so it uses the tight ``_EXACT_PROC_START_TOLERANCE`` (closing the
     PID-reuse window); a jiffies string keeps the looser ``tolerance``.
+
+    ``start_ticks`` is the boot-relative half of the same pair (:func:`proc_start_ticks`),
+    and when it is recorded AND readable for this pid it decides the PID-reuse question
+    instead: the ticks must match **exactly** and the epoch only within
+    ``_DRIFT_EPOCH_TOLERANCE``. That inverts which value carries which job, because each
+    covers the other's blind spot — ticks cannot survive a reboot (they restart at zero,
+    so an unrelated later process can hold the same pid and the same count), and the epoch
+    cannot survive an NTP correction (#1399). The pair is strictly stricter than the epoch
+    alone within a boot: a pid recycled a second later differs by a whole ``CLK_TCK`` of
+    ticks and fails exactly, where the 0.05s epoch bound was only ever *nearly* tight
+    enough.
+
+    With the epoch absent or unavailable (``proc_start`` is None, or the host has no
+    ``btime`` so ``create_time()`` itself cannot be derived) recorded ticks decide ALONE:
+    exact, with no same-boot conjunct to lean on. That is stricter than the cmdline+alive
+    answer this gave before, and on a btime-less host it is the only PID-reuse defense
+    there is; without ticks such a host still answers "not live". With neither an epoch
+    nor ticks recorded the answer stays the documented "no comparable start-time → trust
+    cmdline+alive".
     """
     try:
         proc = psutil.Process(pid)
         if proc.status() == psutil.STATUS_ZOMBIE:
             return False
         cmdline = proc.cmdline()
-        create_time = proc.create_time()
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, ValueError):
         # ValueError: psutil's raise for a non-positive pid. `is_live_bridge` is handed pids
         # from persisted rows and bridge pointers, so this is the same untrusted-int path the
         # rest of the family absorbs — it must answer "not live", not raise into the caller.
         return False
+    create_time: float | None
+    try:
+        create_time = proc.create_time()
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        return False
+    except RuntimeError:
+        # A procfs with no `btime` line: `create_time()` ends in `self._ctime + boot_time()`,
+        # which raises bare and unwrapped. This is the FIRST place the family touches it —
+        # `_expected_epoch` below is never reached — and uncaught it aborted `poll_once` on
+        # every tick and made `stop()` skip its grace and force-kill. A HOST capability
+        # failure, not a fact about this pid: the boot-relative ticks are still readable
+        # there, so recorded ticks decide below; without them the answer is "not live".
+        create_time = None
 
     if require_cmdline is not None and not require_cmdline(cmdline):
         return False
 
     expected = _expected_epoch(proc_start)
+    if start_ticks is not None:
+        observed_ticks = proc_start_ticks(pid)
+        if observed_ticks is not None:
+            if create_time is None or expected is None:
+                # Ticks are the only comparable half. Exact on them, with no same-boot
+                # conjunct available — stricter than the cmdline+alive answer this gave
+                # before, and on a btime-less host the only defense there is.
+                return observed_ticks == start_ticks
+            # Exact on the drift-immune value, coarse on the drifting one — see the
+            # docstring for why the two swap roles once both are available.
+            return (
+                observed_ticks == start_ticks
+                and abs(create_time - expected) <= _DRIFT_EPOCH_TOLERANCE
+            )
+    if create_time is None:
+        return False  # btime-less host and no ticks to fall back on: not provably ours
     if expected is None:
         # No comparable start-time (skip or non-Linux pointer): cmdline+alive is
         # the best available trust signal.
@@ -267,13 +439,31 @@ def is_live_process(
     return abs(create_time - expected) <= bound
 
 
-def is_live_bridge(pid: int, proc_start: str | float | None, *, tolerance: float = 2.0) -> bool:
+def is_live_bridge(
+    pid: int,
+    proc_start: str | float | None,
+    *,
+    tolerance: float = 2.0,
+    start_ticks: int | None = None,
+) -> bool:
     """Whether ``pid`` is a trustworthy, currently-running managed *bridge*.
 
     Thin wrapper over :func:`is_live_process` with the bridge cmdline gate — alive,
     non-zombie, start-time matches, AND a ``claude … remote-control`` cmdline.
+
+    ``start_ticks`` is the persisted ``bridge_start_ticks`` and makes the start-time half
+    immune to clock drift; see :func:`is_live_process`. Passing it matters most here of
+    the whole family, because a false "not live" from this predicate does not merely
+    mislead: it demotes the instance to STOPPED and thereby hands its still-running card
+    to the phantom-prune, which deletes it (#1399).
     """
-    return is_live_process(pid, proc_start, tolerance=tolerance, require_cmdline=is_bridge_cmdline)
+    return is_live_process(
+        pid,
+        proc_start,
+        tolerance=tolerance,
+        require_cmdline=is_bridge_cmdline,
+        start_ticks=start_ticks,
+    )
 
 
 def is_live_standard_bridge(

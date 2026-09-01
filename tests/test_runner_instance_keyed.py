@@ -38,7 +38,7 @@ def _stub_connect(monkeypatch, facts=None):
     monkeypatch.setattr(
         SessionRunner,
         "_connect_facts_for",
-        lambda self, proj, mode, pid, start: dict(
+        lambda self, proj, mode, pid, start, **_kw: dict(
             facts or {"url": "https://claude.ai/code?environment=env_STUB"}
         ),
     )
@@ -93,7 +93,7 @@ async def test_rediscover_judges_each_row_on_its_own_liveness(runner_config, mon
         }
     )
     monkeypatch.setattr(
-        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None: pid == 5001
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None, **_kw: pid == 5001
     )
     monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda *a, **k: True)
 
@@ -226,7 +226,7 @@ async def test_stopped_row_does_not_hide_a_live_detached_keeper(runner_config, m
     )
     # Live: the keeper and the bridge IT holds. The row's own pid stays dead.
     monkeypatch.setattr(
-        "clauster.runner.procutil.is_live_bridge", lambda pid, proc_start=None: pid == 4242
+        "clauster.runner.procutil.is_live_bridge", lambda pid, proc_start=None, **_kw: pid == 4242
     )
     monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda pid: pid == 5555)
     monkeypatch.setattr("clauster.runner.pointers.pointer_for_project", lambda path: None)
@@ -274,7 +274,7 @@ async def test_a_standard_row_ordered_first_does_not_hide_the_pty_keeper(
         )
     )
     monkeypatch.setattr(
-        "clauster.runner.procutil.is_live_bridge", lambda pid, proc_start=None: pid == 4242
+        "clauster.runner.procutil.is_live_bridge", lambda pid, proc_start=None, **_kw: pid == 4242
     )
     monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda pid: pid == 5555)
     monkeypatch.setattr("clauster.runner.pointers.pointer_for_project", lambda path: None)
@@ -323,7 +323,7 @@ async def test_keeper_reattach_does_not_card_itself_under_a_pid_less_rows_id(
         )
     )
     monkeypatch.setattr(
-        "clauster.runner.procutil.is_live_bridge", lambda pid, proc_start=None: pid == 4242
+        "clauster.runner.procutil.is_live_bridge", lambda pid, proc_start=None, **_kw: pid == 4242
     )
     monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda pid: pid == 5555)
     monkeypatch.setattr("clauster.runner.pointers.pointer_for_project", lambda path: None)
@@ -366,9 +366,9 @@ async def test_second_restart_still_hides_the_pid_less_row_of_a_live_pty_session
         }
     )
     monkeypatch.setattr(
-        "clauster.runner.procutil.is_live_bridge", lambda pid, proc_start=None: pid == 4242
+        "clauster.runner.procutil.is_live_bridge", lambda pid, proc_start=None, **_kw: pid == 4242
     )
-    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s: 5555)
+    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s, **_kw: 5555)
     monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: 777.0)
     monkeypatch.setattr("clauster.runner.pointers.pointer_for_project", lambda path: None)
 
@@ -390,7 +390,7 @@ async def test_rediscover_rejects_a_recycled_pid(runner_config, monkeypatch):
     runner.persistence.state_store().save({"iid-a": _row("alpha", pid=6001, proc_start=100.0)})
     seen: list[tuple] = []
 
-    def _fake_is_live(pid, proc_start=None):
+    def _fake_is_live(pid, proc_start=None, **_kw):
         seen.append((pid, proc_start))
         return False  # same pid, different start time -> not our bridge
 
@@ -454,7 +454,7 @@ async def test_rediscover_survives_a_pid_with_no_proc_start(runner_config, monke
     )
     seen: list[tuple] = []
 
-    def _fake_is_live(pid, proc_start=None):
+    def _fake_is_live(pid, proc_start=None, **_kw):
         seen.append((pid, proc_start))
         return True
 
@@ -500,7 +500,7 @@ async def test_rediscover_drops_a_keeper_pid_that_is_no_longer_a_keeper(
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
     # No sidecar correlates a keeper to THIS bridge, so none may be adopted: the row's
     # keeper pid is not trusted on its own, because `stop()` force-kills that pid's tree.
-    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s: None)
+    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s, **_kw: None)
     await runner.rediscover(persist=False)
 
     inst = runner.get_instance("iid-a")
@@ -834,14 +834,14 @@ async def test_a_sibling_projects_keeper_is_never_read_as_this_projects(
 
     assert runner._keeper_sidecars_for("alpha") == []
     assert runner._has_unclaimed_live_keeper("alpha", set()) is False
-    assert runner._recover_keeper_pid("alpha", 4242, None) is None
+    assert runner._recover_keeper_pid("alpha", 4242, None, bridge_start_ticks=None) is None
 
     # Differential control: the sibling is a real project with a real live keeper, so
     # querying under its OWN name must still find it. Without this the assertions above
     # would also pass if the anchor rejected everything.
     assert len(runner._keeper_sidecars_for("alpha-staging")) == 1
     assert runner._has_unclaimed_live_keeper("alpha-staging", set()) is True
-    assert runner._recover_keeper_pid("alpha-staging", 4242, None) == 9999
+    assert runner._recover_keeper_pid("alpha-staging", 4242, None, bridge_start_ticks=None) == 9999
 
 
 def test_keeper_sidecars_are_anchored_to_the_real_spawn_stem(runner_config):
@@ -1036,7 +1036,7 @@ async def test_reattach_records_the_keeper_start_time_with_its_pid(runner_config
     _stub_connect(monkeypatch)
     runner.persistence.state_store().save({"iid-pty": _row("alpha", pid=5002)})
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
-    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s: 5555)
+    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s, **_kw: 5555)
     monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: 777.0)
 
     await runner.rediscover(persist=False)
@@ -1052,15 +1052,21 @@ def test_recovery_rejects_a_pid_recycled_mid_snapshot(runner_config, monkeypatch
     # it, and a keeper-shaped occupant strands forget with InstanceStillLive. A process
     # created AFTER validation began cannot be the keeper validation saw.
     runner = _make_runner(runner_config)
-    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s: 5555)
+    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s, **_kw: 5555)
     monkeypatch.setattr(
         "clauster.runner.procutil.proc_create_time", lambda pid: time.time() + 100.0
     )
-    assert runner._recover_keeper_identity("alpha", 4242, 222.0) == (None, None)
+    assert runner._recover_keeper_identity("alpha", 4242, 222.0, bridge_start_ticks=None) == (
+        None,
+        None,
+    )
 
     # Control: a create-time from before validation is the keeper we validated.
     monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: 777.0)
-    assert runner._recover_keeper_identity("alpha", 4242, 222.0) == (5555, 777.0)
+    assert runner._recover_keeper_identity("alpha", 4242, 222.0, bridge_start_ticks=None) == (
+        5555,
+        777.0,
+    )
 
 
 async def test_pointer_walk_reattach_records_the_keeper_start_time_too(runner_config, monkeypatch):
@@ -1082,7 +1088,7 @@ async def test_pointer_walk_reattach_records_the_keeper_start_time_too(runner_co
     )
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
     monkeypatch.setattr("clauster.runner.pointers.pointer_for_project", lambda *a, **k: ptr)
-    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s: 6666)
+    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s, **_kw: 6666)
     monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: 888.0)
 
     await runner.rediscover(persist=False)
@@ -1113,10 +1119,10 @@ async def test_resync_replaces_the_keeper_pair_together(runner_config, monkeypat
         {"iid-pty": _row("alpha", pid=4402, proc_start=200.0)}  # another process's live bridge
     )
     monkeypatch.setattr(
-        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None: pid == 4402
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None, **_kw: pid == 4402
     )
     _stub_connect(monkeypatch)
-    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s: 2222)
+    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s, **_kw: 2222)
     monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: 222.0)
 
     await runner.poll_once()
@@ -1149,7 +1155,7 @@ async def test_a_standard_resync_clears_the_keeper_pair(runner_config, monkeypat
         {"iid-std": _row("alpha", pid=4402, proc_start=200.0, resume_mode="standard")}
     )
     monkeypatch.setattr(
-        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None: pid == 4402
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None, **_kw: pid == 4402
     )
     _stub_connect(monkeypatch)
 
@@ -1661,6 +1667,47 @@ async def test_connect_facts_reject_a_pointer_whose_start_time_differs(runner_co
     assert inst.environment_id is None, "a recycled pid must not inherit the old environment"
 
 
+async def test_connect_facts_survive_clock_drift_but_still_reject_a_recycled_pid(
+    runner_config, monkeypatch
+):
+    # #1399. This comparison is frozen-vs-live: the row's `bridge_proc_start` was measured at
+    # spawn, while `_expected_epoch(ptr.proc_start)` is re-derived with TODAY's btime. Under
+    # drift they differ by seconds against a 0.05s bound, and the row then gets NO connect
+    # facts — so it stays STARTING and `_promote_ready_unwatched` can never promote it. The
+    # card sticks on "preparing connect link…" for as long as the drift lasts.
+    #
+    # Both sides carry raw field-22 ticks, so compare those: exact, and drift-free.
+    from clauster import pointers
+
+    runner = _make_runner(runner_config)
+    ptr = pointers.BridgePointer(
+        pid=8701,
+        proc_start="770579",
+        source="test",
+        environment_id="env_LIVE",
+        session_id="s",
+    )
+    monkeypatch.setattr("clauster.runner.pointers.pointer_for_project", lambda *a, **k: ptr)
+    # The epoch is 4s adrift — the measured dogfood spread — so the epoch arm would reject.
+    monkeypatch.setattr("clauster.runner.procutil._expected_epoch", lambda _s: 1004.0)
+    proj = runner._discovered()["alpha"]
+
+    facts = runner._connect_facts_for(proj, "standard", 8701, 1000.0, start_ticks=770579)
+    assert facts.get("environment_id") == "env_LIVE", "clock drift must not strip the link"
+
+    # A genuinely different process: same pid, different ticks. Still rejected, and the
+    # epochs here are identical — the tick compare is what catches it.
+    facts = runner._connect_facts_for(proj, "standard", 8701, 1004.0, start_ticks=770580)
+    assert facts == {}, "a recycled pid must not inherit the old environment"
+
+    # Ticks alone are not enough: they restart at zero each boot, so a pointer that survived
+    # a reboot can collide on pid AND ticks. The coarse epoch conjunct rejects that, the same
+    # pairing `is_live_process` and `_recover_keeper_pid` keep.
+    monkeypatch.setattr("clauster.runner.procutil._expected_epoch", lambda _s: 9_000_000.0)
+    facts = runner._connect_facts_for(proj, "standard", 8701, 1000.0, start_ticks=770579)
+    assert facts == {}, "an exact tick match from a different boot must not hand over the link"
+
+
 async def test_pty_sidecar_without_a_session_id_still_yields_the_url(runner_config, monkeypatch):
     # The sidecar is raw JSON written by the keeper, so unlike the pointer its fields really
     # can be absent — a bridge that is up but has not yet minted a session has a connect URL
@@ -1739,7 +1786,7 @@ async def test_adoption_does_not_promote_an_unready_bridge_to_running(runner_con
     runner = _make_runner(runner_config)
     runner.persistence.state_store().save({"iid-a": _row("alpha", pid=6601)})
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
-    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s: None)
+    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s, **_kw: None)
     monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
     await runner.poll_once()  # no pointer, no sidecar -> no readiness evidence
 
@@ -1797,7 +1844,7 @@ async def test_pids_resync_when_another_process_resumed_the_bridge(runner_config
     )
     store.save({"iid-a": _row("alpha", pid=4402, proc_start=200.0)})  # theirs: live
     monkeypatch.setattr(
-        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None: pid == 4402
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None, **_kw: pid == 4402
     )
     # Readiness evidence for the ADOPTED generation: since MF-3 the re-sync recomputes the
     # connect facts instead of keeping the dead generation's, and RUNNING requires them.
@@ -1831,7 +1878,7 @@ async def test_resync_replaces_the_dead_generations_connect_facts(runner_config,
     )
     store.save({"iid-a": _row("alpha", pid=4402, proc_start=200.0)})
     monkeypatch.setattr(
-        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None: pid == 4402
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None, **_kw: pid == 4402
     )
     # No pointer and no ready sidecar => no connect evidence for the new generation.
     monkeypatch.setattr(SessionRunner, "_connect_facts_for", lambda *a, **k: {})
@@ -1867,7 +1914,7 @@ async def test_resync_keeps_a_pid_published_during_the_liveness_probe(runner_con
     store.save({"iid-a": _row("alpha", pid=4402, proc_start=200.0)})  # another process's live
     _stub_connect(monkeypatch)
 
-    def _is_live(pid, _s=None):
+    def _is_live(pid, _s=None, **_kw):
         # Stand in for resume() landing mid-probe and publishing its fresh live pid.
         inst = runner._instances.get("iid-a")
         if inst is not None and inst.bridge_pid == 4401:
@@ -1901,7 +1948,7 @@ async def test_resync_skips_an_instance_replaced_during_the_probe(runner_config,
     store.save({"iid-a": _row("alpha", pid=4402, proc_start=200.0)})
     _stub_connect(monkeypatch)
 
-    def _is_live(pid, _s=None):
+    def _is_live(pid, _s=None, **_kw):
         if runner._instances["iid-a"].bridge_pid == 4401:
             runner._instances["iid-a"] = RemoteControlInstance(
                 instance_id="iid-a",
@@ -1947,7 +1994,7 @@ async def test_resync_skips_a_row_whose_project_is_no_longer_discovered(
     )
     store.save({"iid-gone": _row("deleted-project", pid=4402, proc_start=200.0)})
     monkeypatch.setattr(
-        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None: pid == 4402
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None, **_kw: pid == 4402
     )
 
     with caplog.at_level(logging.ERROR, logger="clauster.runner"):
@@ -1998,7 +2045,7 @@ async def test_resync_takes_the_keeper_from_the_sidecar_not_the_row(runner_confi
         )
     )
     monkeypatch.setattr(
-        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None: pid == 7010
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None, **_kw: pid == 7010
     )
 
     await runner.poll_once()
@@ -2037,7 +2084,7 @@ async def test_resync_clears_a_stale_stop_intent_the_peer_already_undid(
         }
     )
     monkeypatch.setattr(
-        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None: pid == 7020
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None, **_kw: pid == 7020
     )
 
     await runner.poll_once()
@@ -2097,10 +2144,10 @@ async def test_resync_aborts_when_the_row_is_forgotten_while_recovering_facts(
     )
     store.save({"iid-a": _row("alpha", pid=4402, proc_start=200.0)})
     monkeypatch.setattr(
-        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None: pid == 4402
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None, **_kw: pid == 4402
     )
 
-    def _forget_mid_flight(self, proj, mode, pid, start):
+    def _forget_mid_flight(self, proj, mode, pid, start, **_kw):
         self._persisted.pop("iid-a", None)  # another process's `clauster forget`
         return {"url": "https://claude.ai/code?environment=env_STUB"}
 
@@ -2136,7 +2183,7 @@ async def test_resync_does_not_revert_a_stop_that_completed_during_the_probe(
     store.save({"iid-a": _row("alpha", pid=4402, proc_start=200.0)})
     _stub_connect(monkeypatch)
 
-    def _is_live(pid, _s=None):
+    def _is_live(pid, _s=None, **_kw):
         inst = runner._instances["iid-a"]
         if inst.status is InstanceStatus.RUNNING:
             # stop() lands and finishes while we are in the probe.
@@ -2183,8 +2230,8 @@ async def test_resync_refuses_an_instance_that_is_no_longer_the_registered_one(r
         "iid-a",
         stale,
         {"project_name": "alpha"},
-        (4402, 200.0),
-        (4401, 100.0, InstanceStatus.STOPPED, False),
+        (4402, 200.0, 4402000),
+        (4401, 100.0, InstanceStatus.STOPPED, False, None),
         runner._discovered(),
     )
 
@@ -2210,7 +2257,7 @@ async def test_resync_skips_a_project_whose_spawn_lock_is_held(runner_config, mo
     )
     store.save({"iid-a": _row("alpha", pid=4402, proc_start=200.0)})
     monkeypatch.setattr(
-        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None: pid == 4402
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None, **_kw: pid == 4402
     )
     _stub_connect(monkeypatch)
 
@@ -2259,7 +2306,7 @@ async def test_pty_sidecar_must_be_ready_and_pid_correlated(runner_config, monke
         )
     )
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
-    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s: None)
+    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s, **_kw: None)
     await runner.rediscover(persist=False)
 
     inst = runner.get_instance("iid-a")
@@ -2292,13 +2339,13 @@ async def test_adoption_does_not_overwrite_an_instance_a_lock_holder_created(
     runner.persistence.state_store().save({"iid-a": _row("alpha", pid=3401)})
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
     monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
-    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s: None)
+    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s, **_kw: None)
 
     winner = RemoteControlInstance(
         instance_id="iid-a", project="alpha", label="from-adopt", status=InstanceStatus.RUNNING
     )
 
-    def _land_concurrently(self, proj, mode, pid, start):
+    def _land_concurrently(self, proj, mode, pid, start, **_kw):
         # Simulates the lock-holder committing during one of the awaits above the insert.
         self._instances["iid-a"] = winner
         return {"url": "https://claude.ai/code?environment=env_STUB"}
@@ -2345,7 +2392,7 @@ async def test_resolve_bridge_id_refuses_ambiguous_project_name(runner_config, m
         }
     )
     monkeypatch.setattr(
-        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None: pid == 5001
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None, **_kw: pid == 5001
     )
     monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda *a, **k: True)
 
@@ -2491,7 +2538,7 @@ async def test_promotion_skips_a_row_whose_generation_changed_mid_probe(
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
     inst = _adopted_starting(runner)
 
-    def _resume_lands(self, proj, mode, pid, start):
+    def _resume_lands(self, proj, mode, pid, start, **_kw):
         inst.bridge_pid, inst.bridge_proc_start = 9999, 500.0
         return {"url": "https://claude.ai/code?environment=env_OLD"}
 
@@ -2515,7 +2562,7 @@ async def test_promotion_skips_a_bridge_that_died_during_the_evidence_read(
     monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
     state = {"read": False}
 
-    def _dies_during_read(self, proj, mode, pid, start):
+    def _dies_during_read(self, proj, mode, pid, start, **_kw):
         state["read"] = True
         return {"url": "https://claude.ai/code?environment=env_DEAD"}
 
@@ -2582,3 +2629,152 @@ async def test_promotion_announces_the_transition_once(runner_config, monkeypatc
 
     assert inst.status is InstanceStatus.RUNNING
     assert emitted == ["ready"]
+
+
+# --- pre-#1399 rows: stamping the drift-immune half at an exact epoch match ------------
+
+
+def _stub_poll_env(monkeypatch, *, pair=(1000.0, 770579)):
+    """A drifting Linux host; `proc_start_pair` answers `pair` for the bridge pid."""
+    monkeypatch.setattr("clauster.runner.procutil.start_time_is_drift_prone", lambda: True)
+    monkeypatch.setattr("clauster.runner.procutil.proc_start_pair", lambda pid: pair)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+
+
+def _drifted(monkeypatch):
+    """The clock moved: the epoch alone now reads dead, the ticks still read live."""
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge",
+        lambda pid, ps=None, *, start_ticks=None, **_kw: start_ticks == 770579,
+    )
+
+
+def _tick_less_running(runner) -> RemoteControlInstance:
+    inst = RemoteControlInstance(
+        instance_id="iid-old",
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.RUNNING,
+        resume_mode="standard",
+        bridge_pid=5001,
+        bridge_proc_start=1000.0,
+    )
+    runner._instances[inst.instance_id] = inst
+    return inst
+
+
+async def test_rediscover_stamps_a_tick_less_rows_ticks_on_an_exact_match(
+    runner_config, monkeypatch
+):
+    # The deploy case for #1399 itself: the row of a bridge spawned by an older build has no
+    # `bridge_start_ticks`. Claimed at startup on an exact epoch match, it used to stay
+    # tick-less, so the first later correction demoted it to STOPPED with no way back and no
+    # managed card for a running bridge. The exact match IS the moment to read the ticks.
+    runner = _make_runner(runner_config)
+    _stub_connect(monkeypatch)
+    _stub_poll_env(monkeypatch)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    runner.persistence.state_store().save(
+        {"iid-old": _row("alpha", pid=5001, proc_start=1000.0, resume_mode="standard")}
+    )
+
+    await runner.rediscover(persist=False)
+
+    inst = runner.get_instance("iid-old")
+    assert inst is not None and inst.status is InstanceStatus.RUNNING
+    assert inst.bridge_start_ticks == 770579, "the stamped ticks must reach the card"
+
+    # The real test: the clock moves on the next tick, and the card survives it.
+    _drifted(monkeypatch)
+    await runner.poll_once()
+    assert inst.status is InstanceStatus.RUNNING, "a drifted epoch must not demote a stamped card"
+
+
+async def test_poll_stamps_a_tracked_tick_less_instance_on_an_exact_match(
+    runner_config, monkeypatch
+):
+    # Same fault for an instance already in the registry (claimed or adopted earlier, before
+    # the exact match came round): the poll loop stamps it on the tick that matches, so the
+    # next correction cannot demote it.
+    runner = _make_runner(runner_config)
+    _stub_poll_env(monkeypatch)
+    inst = _tick_less_running(runner)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+
+    await runner.poll_once()
+    assert inst.bridge_start_ticks == 770579
+    # ...and it reaches the store: nothing else on the poll path writes, and a stamp that
+    # lives only in memory re-opens the same lottery on the next restart.
+    assert await runner._refresh_persisted()
+    assert runner._persisted["iid-old"]["bridge_start_ticks"] == 770579
+
+    _drifted(monkeypatch)
+    await runner.poll_once()
+    assert inst.status is InstanceStatus.RUNNING, "a drifted epoch must not demote a stamped card"
+
+
+async def test_observation_only_poll_stamps_in_memory_but_does_not_write(
+    runner_config, monkeypatch
+):
+    # `side_effects=False` is write-free: the reader still SEES the healed pair (so its own
+    # next verdict is right), but the store is left to the live service's loop.
+    runner = _make_runner(runner_config)
+    _stub_poll_env(monkeypatch)
+    inst = _tick_less_running(runner)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    writes: list[object] = []
+    monkeypatch.setattr(SessionRunner, "_persist", lambda self, **kw: _record(writes))
+
+    await runner.poll_once(side_effects=False)
+
+    assert inst.bridge_start_ticks == 770579
+    assert writes == [], "an observation-only poll must not write the store"
+
+
+async def _record(sink: list) -> None:
+    sink.append(True)
+
+
+async def test_startup_stamp_is_off_where_create_time_does_not_drift(runner_config, monkeypatch):
+    # The startup path relies on `_ticks_on_exact_match`'s OWN platform guard (the poll site
+    # has a second one in front of it). Off Linux the epoch is conclusive and a read could
+    # only ever authenticate a recycled pid, so the row is left exactly as it was.
+    runner = _make_runner(runner_config)
+    _stub_connect(monkeypatch)
+    _stub_poll_env(monkeypatch)
+    monkeypatch.setattr("clauster.runner.procutil.start_time_is_drift_prone", lambda: False)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    runner.persistence.state_store().save(
+        {"iid-old": _row("alpha", pid=5001, proc_start=1000.0, resume_mode="standard")}
+    )
+
+    await runner.rediscover(persist=False)
+
+    inst = runner.get_instance("iid-old")
+    assert inst is not None and inst.status is InstanceStatus.RUNNING
+    assert inst.bridge_start_ticks is None
+
+
+@pytest.mark.parametrize(
+    ("pair", "drift_prone", "why"),
+    [
+        ((1003.0, 770579), True, "the pair read does not match the row's epoch exactly"),
+        ((None, None), True, "the host cannot express a start pair"),
+        ((1000.0, 770579), False, "create-time does not drift here, so nothing is healed"),
+    ],
+)
+async def test_stamp_refuses_anything_but_an_exact_pair_on_a_drifting_host(
+    runner_config, monkeypatch, pair, drift_prone, why
+):
+    # Positive control. The stamp must never be laxer than the exact pair the code trusted
+    # before ticks existed: a recycled pid inside the coarse tolerance, an unreadable pair,
+    # or a platform whose epoch is already conclusive all leave the row exactly as it was.
+    runner = _make_runner(runner_config)
+    _stub_poll_env(monkeypatch, pair=pair)
+    monkeypatch.setattr("clauster.runner.procutil.start_time_is_drift_prone", lambda: drift_prone)
+    inst = _tick_less_running(runner)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+
+    await runner.poll_once()
+
+    assert inst.bridge_start_ticks is None, why
