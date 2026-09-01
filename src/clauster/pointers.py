@@ -58,9 +58,32 @@ def load_pointer(path: Path) -> BridgePointer | None:
     """Parse a bridge-pointer.json, or None if missing/malformed."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError, OSError):
-        # UnicodeDecodeError (a ValueError, not an OSError) for a non-UTF-8 file
-        # must still honor the malformed -> None contract.
+    except (ValueError, OSError, RecursionError) as exc:
+        # ValueError covers three distinct failures, only one of which is a decode
+        # error: UnicodeDecodeError for a non-UTF-8 file, JSONDecodeError for bad
+        # syntax, and a *bare* ValueError from the base-10 integer-string-conversion
+        # limit (CVE-2020-10735), on by default for a >4300-digit int literal on every
+        # supported interpreter (>=3.11). RecursionError is neither a ValueError nor an
+        # OSError: CPython's recursive scanner overflows on deeply-nested JSON before
+        # json can raise JSONDecodeError, so it used to escape and propagate out of the
+        # documented malformed -> None contract. `usage` catches the same
+        # (JSONDecodeError, ValueError, RecursionError) trio at all four of its
+        # json.loads sites (PR 1372); OSError is this seam's own, because the read
+        # happens inside the same try.
+        #
+        # The exception is in the message because these are not one failure: an OSError
+        # is an unreadable file (permissions, IO), not malformed content, and it is the
+        # arm actually worth diagnosing. They all degrade the same way, so the
+        # distinction can only ever live in the log. Formatted with `str`, never `repr`:
+        # `UnicodeDecodeError.args[1]` is the whole decoded buffer, so `%r` would put the
+        # entire file on one log line (measured: 420 KB for a 200 KB pointer), while `str`
+        # gives the bounded "codec can't decode byte 0xff in position N" form.
+        _log.debug(
+            "ignoring unreadable or malformed bridge pointer %s: %s: %s",
+            path,
+            type(exc).__name__,
+            exc,
+        )
         return None
     try:
         return BridgePointer.model_validate(data)
