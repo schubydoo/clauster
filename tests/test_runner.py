@@ -3860,3 +3860,80 @@ def test_resolve_bridge_id_does_not_treat_an_idle_project_name_as_a_prefix(
     assert runner.resolve_bridge_id("cafe") is None, "an idle project must not borrow a bridge"
     assert runner.bridge_id_candidates("cafe") == [], "not ambiguous -- it has no instance"
     assert runner.resolve_bridge_id("cafe0") == other, "the id stays reachable"
+
+
+async def test_poll_prune_spares_a_live_bridges_card_when_its_own_pid_is_the_evidence(
+    runner_config, monkeypatch
+):
+    # #1399. `is_live_bridge` false-negatives under NTP slew (psutil's create_time is
+    # btime-derived and btime moves), and BOTH halves of the prune then fail together: the
+    # instance is demoted to STOPPED so it becomes a candidate, and its pid drops out of
+    # `managed_pids` so its own live bridge becomes the "unmanaged" evidence against it.
+    # Observed 19 times in 2.5 hours on the dogfood host, every log line naming clauster's
+    # own bridge pid. Ownership evidence is now scoped to the project it is evidence about.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    victim = RemoteControlInstance(
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.RUNNING,
+        resume_mode="standard",
+        spawn_mode="session",
+        bridge_pid=58343,
+        bridge_proc_start=1788244068.79,
+    )
+    runner._instances[victim.instance_id] = victim
+    sess = WorkingSession(
+        pid=58400,
+        cwd=config.projects_root / "alpha",
+        kind="interactive",
+        started_at=1,
+        local_uuid="u-drift",
+    )
+    monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
+    # The clock moved, so the pair no longer matches — the bridge is alive regardless.
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    # ...and the session's ancestry resolves to that same still-running bridge.
+    monkeypatch.setattr("clauster.runner.procutil.bridge_ancestor", lambda pid, **k: 58343)
+
+    await runner.poll_once()
+
+    assert runner.get_instance(victim.instance_id) is not None, (
+        "a bridge's own pid must never be the evidence that deletes its own card"
+    )
+
+
+async def test_poll_prune_still_fires_for_a_genuinely_unmanaged_bridge_at_a_projects_cwd(
+    runner_config, monkeypatch
+):
+    # The positive control for the test above: scoping the exclusion per project must not
+    # turn the prune off. An owner pid that NO instance of this project holds is still
+    # evidence, and the phantom card still goes.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    phantom = RemoteControlInstance(
+        project="alpha",
+        label="phantom",
+        status=InstanceStatus.STOPPED,
+        resume_mode="standard",
+        bridge_pid=4401,
+        bridge_proc_start=100.0,
+    )
+    runner._instances[phantom.instance_id] = phantom
+    sess = WorkingSession(
+        pid=800,
+        cwd=config.projects_root / "alpha",
+        kind="interactive",
+        started_at=1,
+        local_uuid="u-ext",
+    )
+    monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    # 999999 belongs to no instance of this project — a real unmanaged bridge.
+    monkeypatch.setattr("clauster.runner.procutil.bridge_ancestor", lambda pid, **k: 999999)
+
+    await runner.poll_once()
+
+    assert runner.get_instance(phantom.instance_id) is None, (
+        "a genuinely unmanaged bridge at the project cwd must still prune the phantom"
+    )

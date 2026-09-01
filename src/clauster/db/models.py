@@ -130,8 +130,16 @@ class Instance(Base, TimestampMixin):
     # the pids most likely to be reused by another keeper. NULL keeps the pre-#1178
     # cmdline-only behaviour, so an older build's row stays forgettable rather than
     # becoming permanently "still live".
+    #
+    # ``bridge_start_ticks`` is the drift-immune half of the bridge pair (#1399).
+    # ``bridge_proc_start`` is psutil's ``create_time``, which on Linux is re-derived from
+    # ``/proc/stat`` btime on every read — and btime moves with NTP, so the epoch of a
+    # process that never restarted wanders by seconds. The tick count is measured against
+    # the boot instant and does not. Neither is sufficient alone (ticks restart at zero each
+    # boot), so ``procutil.is_live_process`` uses both; see it for which carries which job.
     bridge_pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
     bridge_proc_start: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bridge_start_ticks: Mapped[int | None] = mapped_column(Integer, nullable=True)
     keeper_pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # A pty session's git-worktree name, stored ONLY when it is not derivable from this
     # row's own instance_id (#1241) — i.e. a session a keeper-only reattach had to card

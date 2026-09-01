@@ -1005,6 +1005,7 @@ class SessionRunner:
             return {
                 "bridge_pid": inst.bridge_pid,
                 "bridge_proc_start": inst.bridge_proc_start,
+                "bridge_start_ticks": inst.bridge_start_ticks,
             }
         # Normalized through the row coercers, not passed through raw: this value is
         # round-tripping from the store, where a hand-edited row can hold junk.
@@ -1012,8 +1013,17 @@ class SessionRunner:
         pid = _row_int(prior.get("bridge_pid"))
         proc_start = _row_float(prior.get("bridge_proc_start"))
         if pid is None or proc_start is None:
-            return {"bridge_pid": None, "bridge_proc_start": None}
-        return {"bridge_pid": pid, "bridge_proc_start": proc_start}
+            return {"bridge_pid": None, "bridge_proc_start": None, "bridge_start_ticks": None}
+        # Ticks ride along with the pair rather than gating it (#1399): they are Linux-only
+        # and absent from every pre-#1399 row, so requiring them here would clear exactly the
+        # rows this helper exists to preserve. A row that keeps the pair but not the ticks
+        # compares on the epoch alone — the pre-#1399 behaviour — which is why the prune no
+        # longer rests on that comparison.
+        return {
+            "bridge_pid": pid,
+            "bridge_proc_start": proc_start,
+            "bridge_start_ticks": _row_int(prior.get("bridge_start_ticks")),
+        }
 
     def _persist_subset(self) -> dict[str, dict]:
         """Build the record to persist, keyed by instance id.
@@ -1997,6 +2007,10 @@ class SessionRunner:
         self._procs[instance.instance_id] = proc
         instance.bridge_pid = proc.pid
         instance.bridge_proc_start = await asyncio.to_thread(procutil.proc_create_time, proc.pid)
+        # The drift-immune half of the same pair (#1399), stamped in the same breath so the
+        # two can never describe different processes. ``None`` off Linux, where the epoch
+        # above is already stable.
+        instance.bridge_start_ticks = await asyncio.to_thread(procutil.proc_start_ticks, proc.pid)
 
         markers = await asyncio.to_thread(self._await_ready, raw_path, proc)
         self._apply_markers(instance, markers, proc)
@@ -3384,7 +3398,12 @@ class SessionRunner:
                 return instance
 
             # Re-validate identity immediately before signalling (TOCTOU / PID reuse).
-            if await asyncio.to_thread(procutil.is_live_bridge, pid, instance.bridge_proc_start):
+            if await asyncio.to_thread(
+                procutil.is_live_bridge,
+                pid,
+                instance.bridge_proc_start,
+                start_ticks=instance.bridge_start_ticks,
+            ):
                 # The flag-form (pty) bridge's TUI treats the first SIGINT as "press
                 # again to exit"; a second confirms. The subcommand bridge stops on one.
                 twice = instance.resume_mode == "pty"
@@ -3484,7 +3503,10 @@ class SessionRunner:
                 # as "not provably alive", and never "simplify" one call site to match the
                 # other's assumptions.
                 if instance.bridge_pid is not None and await asyncio.to_thread(
-                    procutil.is_live_bridge, instance.bridge_pid, instance.bridge_proc_start
+                    procutil.is_live_bridge,
+                    instance.bridge_pid,
+                    instance.bridge_proc_start,
+                    start_ticks=instance.bridge_start_ticks,
                 ):
                     raise InstanceStillLive(
                         f"{instance_id!r} still has a live bridge — Stop it first"
@@ -3509,6 +3531,7 @@ class SessionRunner:
                     procutil.is_live_bridge,
                     row_bridge_pid,
                     _row_float(row.get("bridge_proc_start")),
+                    start_ticks=_row_int(row.get("bridge_start_ticks")),
                 ):
                     raise InstanceStillLive(
                         f"{instance_id!r} still has a live bridge — Stop it first"
@@ -4012,7 +4035,11 @@ class SessionRunner:
             return  # store read failed; keep the old base rather than acting on nothing
         rows = dict(self._persisted)
         row_pairs = {
-            iid: (pid, _row_float(saved.get("bridge_proc_start")))
+            iid: (
+                pid,
+                _row_float(saved.get("bridge_proc_start")),
+                _row_int(saved.get("bridge_start_ticks")),
+            )
             for iid, saved in rows.items()
             if (pid := _row_int(saved.get("bridge_pid"))) is not None
         }
@@ -4029,11 +4056,14 @@ class SessionRunner:
             for iid, i in self._instances.items()
             if i.bridge_pid is not None
         }
-        ours = {iid: (g[0], g[1]) for iid, g in gen.items()}
+        ours = {
+            iid: (g[0], g[1], self._instances[iid].bridge_start_ticks) for iid, g in gen.items()
+        }
         live = await asyncio.to_thread(
             lambda: {
                 key: {
-                    iid: procutil.is_live_bridge(pid, start) for iid, (pid, start) in pairs.items()
+                    iid: procutil.is_live_bridge(pid, start, start_ticks=ticks)
+                    for iid, (pid, start, ticks) in pairs.items()
                 }
                 for key, pairs in (("row", row_pairs), ("ours", ours))
             }
@@ -4044,7 +4074,11 @@ class SessionRunner:
             if inst is None:
                 continue
             pair = row_pairs.get(iid)
-            if pair == (inst.bridge_pid, inst.bridge_proc_start):
+            # Ticks are NOT in this generation compare (#1399): the row and the live object
+            # can legitimately disagree on them — a row written by a pre-#1399 build has
+            # none while the object we adopted it into does — and that is not a different
+            # process generation. pid + proc_start remain the identity.
+            if pair is not None and pair[:2] == (inst.bridge_pid, inst.bridge_proc_start):
                 # Same process generation: the row is describing the bridge we hold, so its
                 # recorded intent is ours too. `stop()` writes the intent BEFORE the process
                 # exits, so without this an adopted bridge stopped from the CLI reconciles to
@@ -4060,7 +4094,7 @@ class SessionRunner:
         iid: str,
         inst: RemoteControlInstance,
         saved: dict,
-        pair: tuple[int, float | None],
+        pair: tuple[int, float | None, int | None],
         ours_generation: tuple[int | None, float | None, InstanceStatus, bool] | None,
         discovered: dict[str, Project],
     ) -> None:
@@ -4101,7 +4135,7 @@ class SessionRunner:
         proj = discovered.get(inst.project)
         if proj is None:
             return  # project vanished from discovery; nothing to attribute it to
-        pid, proc_start = pair
+        pid, proc_start, _start_ticks = pair  # ticks re-applied from `pair` at assignment
         # Resolved BEFORE the lock. All three are pure filesystem reads keyed entirely on
         # snapshot values (project, pid, proc_start) — none reads live mutable state — so
         # holding the project's spawn lock across them would stall every spawn/resume/stop
@@ -4139,7 +4173,11 @@ class SessionRunner:
                 # completed `stop()` leaves `bridge_pid` set, so a pid-only compare would
                 # revert the operator's Stop to RUNNING, permanently.
                 return
-            current.bridge_pid, current.bridge_proc_start = pair
+            # All three together, the same rule the keeper pair states below: a
+            # `bridge_start_ticks` left over from the generation we just replaced would be
+            # compared against the NEW pid's ticks and never match, reporting the bridge we
+            # just adopted as dead on the very next poll (#1399).
+            current.bridge_pid, current.bridge_proc_start, current.bridge_start_ticks = pair
             # Both halves of the keeper pair, together (#1178): leaving the old
             # `keeper_proc_start` beside a NEW `keeper_pid` would make the live keeper of
             # the generation we just adopted read as gone.
@@ -4198,10 +4236,13 @@ class SessionRunner:
             if iid in self._instances:
                 continue  # already tracked in this process (a spawn we own)
             proc_start = _row_float(saved.get("bridge_proc_start"))
+            start_ticks = _row_int(saved.get("bridge_start_ticks"))
             alive = (
                 liveness[iid]
                 if liveness is not None and iid in liveness
-                else await asyncio.to_thread(procutil.is_live_bridge, pid, proc_start)
+                else await asyncio.to_thread(
+                    procutil.is_live_bridge, pid, proc_start, start_ticks=start_ticks
+                )
             )
             if not alive:
                 if live_only:
@@ -4266,6 +4307,10 @@ class SessionRunner:
                 status=status,
                 bridge_pid=pid,
                 bridge_proc_start=proc_start,
+                # Carried from the row alongside its epoch, never re-measured here: a fresh
+                # `proc_start_ticks` read would agree with the live process by construction
+                # and so could authenticate a recycled pid the row's own pair rejects.
+                bridge_start_ticks=start_ticks,
                 keeper_pid=keeper_pid,
                 keeper_proc_start=keeper_proc_start,
                 bridge_debug_log_path=log_path,
@@ -4911,7 +4956,10 @@ class SessionRunner:
                 continue
             await asyncio.to_thread(procutil.reap_if_exited, pid)
             alive = await asyncio.to_thread(
-                procutil.is_live_bridge, pid, instance.bridge_proc_start
+                procutil.is_live_bridge,
+                pid,
+                instance.bridge_proc_start,
+                start_ticks=instance.bridge_start_ticks,
             )
             pid_is_ours[instance.instance_id] = alive
             # The running `claude` release for the card (#1275). Re-derived every tick
@@ -5160,6 +5208,7 @@ class SessionRunner:
         # its pair, so it stays excluded and cannot prune its own project. Default True for an
         # instance the loop above never saw — one adopted DURING the walk — which is the
         # post-await TOCTOU case; assuming ours there is the non-destructive direction.
+        #
         managed_pids = {
             pid
             for inst in self._instances.values()
@@ -5167,9 +5216,44 @@ class SessionRunner:
             for pid in (inst.bridge_pid, inst.keeper_pid)
             if pid is not None
         }
-        # ANY unmanaged owner makes the cwd evidence — `owners - managed_pids` non-empty.
-        # A managed owner sharing the cwd neither creates evidence nor cancels it.
-        external_cwds = {cwd for cwd, owners in owners_by_cwd.items() if owners - managed_pids}
+        # ⚠️ #1399: `managed_pids` alone is not enough, because `pid_is_ours` IS
+        # `is_live_bridge` and that predicate has a false-negative mode this delete cannot
+        # absorb. Where the start-time pair degrades to the epoch alone — a pre-#1399 row, or
+        # any non-Linux host — an NTP correction makes a LIVE bridge answer False. Both halves
+        # of the prune then fail together: the instance is demoted to STOPPED so it becomes a
+        # candidate, AND its own pid drops out of the set above so its own bridge becomes the
+        # "unmanaged" evidence against it. Observed 19 times in 2.5 hours on the dogfood host,
+        # every log line naming clauster's own bridge pid.
+        #
+        # The fix is to scope ownership evidence to the project it is evidence ABOUT, rather
+        # than to widen the global set. A pid held by an instance OF THIS PROJECT cannot
+        # demonstrate an *unmanaged* bridge at this project's cwd, whatever the pair says: the
+        # prune's premise is "some bridge here is alive and we don't have it", and we
+        # demonstrably do have it. Judged per project, it costs nothing that the global set
+        # buys — a stale pid recycled onto a genuinely unmanaged bridge in a DIFFERENT
+        # project still counts as evidence there, which is the hazard the paragraph above
+        # exists to keep (pinned by
+        # `test_poll_prune_ignores_a_recycled_pid_from_a_stopped_instance`).
+        #
+        # Keyed by resolved cwd rather than by project NAME so there is no sentinel to get
+        # wrong for a row whose `project` degraded to "" — an absent cwd simply has no
+        # entry, and a project we cannot locate contributes no exclusion.
+        own_project_pids: dict[Path, set[int]] = {}
+        for inst in self._instances.values():
+            proj = discovered.get(inst.project)
+            if proj is None:
+                continue
+            cwd = Path(proj.path).resolve()
+            for pid in (inst.bridge_pid, inst.keeper_pid):
+                if pid is not None:
+                    own_project_pids.setdefault(cwd, set()).add(pid)
+        # ANY unmanaged owner makes the cwd evidence — the remainder non-empty. A managed
+        # owner sharing the cwd neither creates evidence nor cancels it.
+        external_cwds = {
+            cwd
+            for cwd, owners in owners_by_cwd.items()
+            if owners - managed_pids - own_project_pids.get(cwd, set())
+        }
         # No _persist() after this delete, by design: the ROW survives, so the deletion is
         # recoverable. Persisting would be a no-op anyway: _persist_subset overlays `live`
         # onto the retained `_persisted` map, which keeps the record (intentionally — it
@@ -5284,13 +5368,19 @@ class SessionRunner:
         if not stuck:
             return
         discovered = self._discovered()
-        pending: dict[str, tuple[Project, ResumeMode, int, float | None]] = {}
+        pending: dict[str, tuple[Project, ResumeMode, int, float | None, int | None]] = {}
         for inst in stuck:
             proj = discovered.get(inst.project)
             pid = inst.bridge_pid
             if proj is None or pid is None:
                 continue  # project gone from discovery: nothing to read the evidence from
-            pending[inst.instance_id] = (proj, inst.resume_mode, pid, inst.bridge_proc_start)
+            pending[inst.instance_id] = (
+                proj,
+                inst.resume_mode,
+                pid,
+                inst.bridge_proc_start,
+                inst.bridge_start_ticks,
+            )
         if not pending:
             return
         # One thread hop for the whole tick's worth of pointer reads / sidecar globs,
@@ -5302,8 +5392,8 @@ class SessionRunner:
         facts = await asyncio.to_thread(
             lambda: {
                 iid: (
-                    self._connect_facts_for(*args),
-                    procutil.is_live_bridge(args[2], args[3]),
+                    self._connect_facts_for(*args[:4]),
+                    procutil.is_live_bridge(args[2], args[3], start_ticks=args[4]),
                 )
                 for iid, args in pending.items()
             }

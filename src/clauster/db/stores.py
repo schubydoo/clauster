@@ -72,6 +72,10 @@ _INSTANCE_FIELDS = (
     # pointer/sidecar lookup, exactly as it behaved before the columns existed.
     "bridge_pid",
     "bridge_proc_start",
+    # The drift-immune half of the bridge pair (#1399). ``_present`` drops the NULL for a
+    # row from an older build, which then compares on the epoch alone — the pre-#1399
+    # behaviour, re-stamped on that bridge's next spawn.
+    "bridge_start_ticks",
     "keeper_pid",
     # Set only when the pty worktree name is NOT derivable from this row's instance_id
     # (#1241); ``_present`` drops the NULL for every ordinary row, which derives it.

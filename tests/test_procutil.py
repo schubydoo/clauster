@@ -1197,3 +1197,84 @@ def test_running_claude_version_absorbs_a_raw_oserror_from_child_enumeration(mon
 
     monkeypatch.setattr(procutil.psutil, "Process", _RawErrno)
     assert procutil.running_claude_version(99) is None
+
+
+# ----- #1399: boot-relative start ticks vs. a wall clock that moves ---------------------
+
+
+def test_proc_start_ticks_reads_the_boot_relative_start_of_a_live_process():
+    ticks = procutil.proc_start_ticks(os.getpid())
+    if sys.platform != "linux":  # pragma: no cover - exercised on the Linux matrix leg
+        assert ticks is None
+        return
+    assert isinstance(ticks, int) and ticks > 0
+    # The whole point: re-reading returns the value the process was born with, so it is
+    # stable in a way psutil's create_time (btime + ticks, btime re-read per call) is not.
+    assert procutil.proc_start_ticks(os.getpid()) == ticks
+
+
+def test_proc_start_ticks_fails_closed_on_a_pid_that_cannot_name_a_process():
+    assert procutil.proc_start_ticks(-1) is None
+    assert procutil.proc_start_ticks(2_000_000_000) is None
+
+
+def test_proc_start_ticks_survives_a_comm_containing_spaces_and_parens(tmp_path, monkeypatch):
+    # Field 2 is the executable name, unquoted and free to hold ')' and spaces. A
+    # left-to-right split would miscount every later field and return the wrong number —
+    # silently, as a plausible tick count, which is the dangerous way to be wrong here.
+    fields = " ".join(str(i) for i in range(1, 51))
+    monkeypatch.setattr(
+        procutil.Path, "read_text", lambda self, **kw: f"77 (evil) proc name) S {fields}"
+    )
+    # After comm: "S" is index 0, so index 19 is the 19th of the numbered run -> 19.
+    assert procutil.proc_start_ticks(77) == 19
+
+
+def test_proc_start_ticks_returns_none_for_a_truncated_stat_line(monkeypatch):
+    monkeypatch.setattr(procutil.Path, "read_text", lambda self, **kw: "77 (claude) S 1 2 3")
+    assert procutil.proc_start_ticks(77) is None
+    monkeypatch.setattr(procutil.Path, "read_text", lambda self, **kw: "no parens here")
+    assert procutil.proc_start_ticks(77) is None
+
+
+def test_clock_drift_no_longer_reads_a_live_bridge_as_dead(monkeypatch):
+    # THE #1399 regression. psutil's create_time is `starttime/CLK_TCK + boot_time()`, and
+    # boot_time() re-reads /proc/stat btime every call — NTP slew moves it under a process
+    # that never restarted. Measured on the dogfood host: five distinct btime values, a
+    # 4-second spread, inside 3.5 minutes, against a 0.05s bound.
+    monkeypatch.setattr(procutil.psutil, "Process", _fake_proc(ct=1000.0))
+    monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: 770579)
+
+    # Epoch-only (a pre-#1399 row, or a non-Linux host): the drift IS the bug.
+    assert procutil.is_live_bridge(1234, 1004.0) is False
+    # With the boot-relative half recorded, the same drift is absorbed.
+    assert procutil.is_live_bridge(1234, 1004.0, start_ticks=770579) is True
+    assert procutil.is_live_bridge(1234, 996.0, start_ticks=770579) is True
+
+
+def test_ticks_still_reject_a_recycled_pid_the_epoch_bound_would_have_admitted(monkeypatch):
+    # The tight epoch bound exists to close the PID-reuse window, so the replacement must
+    # not be laxer. It is strictly tighter: a pid recycled even 10ms later differs by a
+    # whole tick, where 0.05s of epoch slack admitted it.
+    monkeypatch.setattr(procutil.psutil, "Process", _fake_proc(ct=1000.0))
+    monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: 770580)
+    assert procutil.is_live_bridge(1234, 1000.0, start_ticks=770579) is False
+    assert procutil.is_live_bridge(1234, 1000.01) is True  # what the epoch alone allowed
+
+
+def test_ticks_do_not_authenticate_a_process_from_a_different_boot(monkeypatch):
+    # Ticks restart at zero each boot, so an exact match across a reboot means nothing. The
+    # epoch is kept precisely to discriminate that — coarsely, but a reboot moves it far
+    # further than any clock correction does.
+    monkeypatch.setattr(procutil.psutil, "Process", _fake_proc(ct=9_000_000.0))
+    monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: 770579)
+    assert procutil.is_live_bridge(1234, 1000.0, start_ticks=770579) is False
+
+
+def test_unreadable_ticks_fall_back_to_the_epoch_comparison(monkeypatch):
+    # Non-Linux, or /proc unreadable. The epoch is the only evidence left, so the tight
+    # bound applies exactly as it did before #1399 — no silent widening.
+    monkeypatch.setattr(procutil.psutil, "Process", _fake_proc(ct=1000.0))
+    monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: None)
+    assert procutil.is_live_bridge(1234, 1000.0, start_ticks=770579) is True
+    assert procutil.is_live_bridge(1234, 1004.0, start_ticks=770579) is False
