@@ -135,8 +135,13 @@ jobs:
                 --jq '[.[] | select(.user.login | test("claude"; "i"))] | length' | awk '{s+=$1} END{print s+0}')
           M=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/comments" --paginate \
                 --jq '[.[] | select(.user.login | test("claude"; "i"))] | length' | awk '{s+=$1} END{print s+0}')
-          echo "count=$((N + M))" >> "$GITHUB_OUTPUT"
-          echo "::notice::Claude comments before the review: $((N + M))"
+          # Submitted REVIEWS too (issue 1406): one run should add exactly one. The delta
+          # is what tells a grouped review from one that split into a review per finding,
+          # which the comment counts above cannot see — both shapes add comments.
+          R=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/reviews" --paginate \
+                --jq '[.[] | select(.user.login | test("claude"; "i"))] | length' | awk '{s+=$1} END{print s+0}')
+          { echo "count=$((N + M))"; echo "reviews=$R"; } >> "$GITHUB_OUTPUT"
+          echo "::notice::Claude comments before the review: $((N + M)); submitted reviews: $R"
 
       - name: Fetch the review instructions from the default branch
         id: rules
@@ -208,9 +213,11 @@ jobs:
         # anyone. At v2.0.0 they are benign (the SessionStart hook prints a prompt file,
         # the lint hook reads the edited file and exits 0).
         #
-        # What runs from it on the runner: the SessionStart hook (node) and the Stop
-        # hook (python3, advisory only). Its PostToolUse hook matches Write|Edit, which
-        # the reviewer is not allowed, so it never fires.
+        # What runs from it on the runner: the SessionStart hook (node), the Stop hook
+        # (python3, advisory only), and its PostToolUse hook on Write|Edit — the reviewer
+        # DOES have `Write` (the action grants it regardless of `--allowedTools`; run
+        # 33569148143 used it for `review.json`), but the hook only lints Markdown paths,
+        # so it is inert for the JSON payload the review recipe writes.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: AminBlg/SimpleEnglish
@@ -278,6 +285,14 @@ jobs:
           # back to one standalone review per finding — five threads instead of one, and
           # no review body to hold the summary table.
           #
+          # The ONE shape that both groups and passes the permission matcher (issue 1406,
+          # from the debug artifact of run 33569148143): `Write` the payload to
+          # `review.json` in the workspace, then `gh api .../pulls/<n>/reviews --input
+          # review.json`. Inline JSON, `> file` redirects, `;`/`&&` compounds, `python3`,
+          # `ls` and `git` are all refused by the matcher, and a reviewer that tries them
+          # and gives up posts one review per finding. The recipe lives in the instructions
+          # file; the guard step below detects a split review by counting reviews.
+          #
           # ⚠️ `Bash(gh pr review:*)` and `Bash(gh pr comment:*)` are still LOAD-BEARING,
           # not convenience. Without them the reviewer can find things and then be unable
           # to publish them at all: on run 30312406402 it reported "both `gh pr review`
@@ -343,6 +358,7 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PR: ${{ steps.resolve.outputs.pr }}
           BEFORE: ${{ steps.before.outputs.count }}
+          REVIEWS_BEFORE: ${{ steps.before.outputs.reviews }}
         run: |
           set -euo pipefail
           N=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate \
@@ -351,6 +367,19 @@ jobs:
                 --jq '[.[] | select(.user.login | test("claude"; "i"))] | length' | awk '{s+=$1} END{print s+0}')
           AFTER=$((N + M))
           echo "::notice::Claude comments after the review: $AFTER (was $BEFORE)"
+          # Issue 1406: a SPLIT review — one submitted review per finding instead of one
+          # grouped review — is invisible to the comment counts (both shapes add
+          # comments) and to the denial count below (grouped runs log 2-7 denials too:
+          # redirects, compound commands, tools outside --allowedTools). The delta in
+          # submitted reviews is the only honest tell: one run must add exactly one.
+          R=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/reviews" --paginate \
+                --jq '[.[] | select(.user.login | test("claude"; "i"))] | length' | awk '{s+=$1} END{print s+0}')
+          ADDED=$((R - REVIEWS_BEFORE))
+          case "$ADDED" in
+            1) echo "::notice::one grouped review submitted" ;;
+            0) echo "::warning::no review was SUBMITTED — findings, if any, went out as plain comments and carry no inline anchors or resolvable threads" ;;
+            *) echo "::warning::the review SPLIT into $ADDED submitted reviews (PRs 1397 and 1405 did this) — the reviewer did not use the Write review.json + 'gh api --input' recipe in the instructions; see issue 1406" ;;
+          esac
           # Posted-something is necessary but not sufficient: a review that is blocked from
           # SUBMITTING falls back to a plain comment, which passes the count check while
           # quietly losing the inline anchors and the resolvable threads. Denials are the
@@ -392,7 +421,7 @@ jobs:
               case "$D" in
                 0) : ;;  # the only silent path: parsed, and genuinely zero
                 "?") echo "::warning::result record parsed but carries neither permission_denials nor permission_denials_count — the log format may have changed upstream" ;;
-                *) echo "::warning::$D tool call(s) were denied. A review blocked from SUBMITTING falls back to one standalone review per finding (or a plain comment) — you get N threads instead of one review, and no body for the summary table. Check --allowedTools covers what it reached for; note \`gh pr review\` cannot attach inline comments, only \`gh api\` POST .../reviews can." ;;
+                *) echo "::warning::$D tool call(s) were denied. Denials are routine on a GOOD run too (redirects, compound commands, tools outside --allowedTools: 2-7 per run measured), so this is not by itself a split review — the submitted-review delta above is the tell for that. Re-run with '@claude review debug' to see the denied commands." ;;
               esac
             fi
           fi

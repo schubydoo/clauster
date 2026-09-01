@@ -139,6 +139,19 @@ fix cannot reach round seven on style.
   **exactly one submitted review**. Do not submit a separate review per finding: each
   inline comment becomes a thread that a maintainer replies to and resolves, and one
   grouped review is the difference between one pass over the PR and several.
+- **How to submit it, exactly.** Only one command shape gets through the tool
+  permissions, and it is the one that groups. Use it and nothing else:
+  1. Use the `Write` tool to create `review.json` in the workspace root with the
+     payload: `commit_id` (the PR head SHA), `event: "COMMENT"`, `body` (the summary),
+     and a `comments` array of `{path, line, side: "RIGHT", body}` entries.
+  2. Run `gh api repos/<owner>/<repo>/pulls/<n>/reviews --input review.json`.
+  3. Delete `review.json` afterwards.
+
+  These are refused, so do not reach for them: JSON inline on the command line, shell
+  redirects (`> file`), compound commands (`;`, `&&`, `||`), `python3`, `ls`, `git`.
+  `gh pr review` cannot attach inline comments. A refused attempt is a denial the
+  workflow counts, and each retry that falls back to a separate review turns one review
+  into several.
 - Put the **summary table** — every finding with its file and line — in the **body of
   the submitted review**, and nowhere else. That table is what makes the review readable
   without opening the diff, and it is what survives inline anchors going stale (once the
