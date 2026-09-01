@@ -51,6 +51,33 @@ def test_load_pointer_non_utf8_returns_none(tmp_path: Path):
     assert pointers.load_pointer(bad) is None
 
 
+def test_load_pointer_deeply_nested_json_returns_none(tmp_path: Path):
+    # Deeply-nested JSON overflows CPython's recursive scanner, which raises
+    # RecursionError *before* json can raise JSONDecodeError. RecursionError is not a
+    # ValueError, so it used to escape the handler and break the malformed -> None
+    # contract, propagating to whatever surface called it.
+    bad = tmp_path / "nested.json"
+    bad.write_text("[" * 100_000)
+    assert pointers.load_pointer(bad) is None
+
+
+def test_load_pointer_oversized_int_literal_returns_none(tmp_path: Path):
+    # The base-10 integer-string-conversion limit (CVE-2020-10735) makes json.loads
+    # raise a bare ValueError -- not a JSONDecodeError -- for a >4300-digit int.
+    payload = "1" * 5000
+    # Pin the precondition: the limit is settable at runtime (sys.set_int_max_str_digits,
+    # PYTHONINTMAXSTRDIGITS), and with it disabled json.loads would return an int and the
+    # assertion below would pass through model_validate instead -- green for the wrong
+    # reason. Proving the arm is reachable is what makes this a regression test.
+    with pytest.raises(ValueError) as raised:
+        json.loads(payload)
+    assert not isinstance(raised.value, json.JSONDecodeError)
+
+    bad = tmp_path / "bigint.json"
+    bad.write_text(payload)
+    assert pointers.load_pointer(bad) is None
+
+
 def test_load_pointer_valid_json_wrong_shape_returns_none(tmp_path: Path):
     # Parseable JSON whose shape doesn't satisfy BridgePointer (missing required
     # fields) raises a pydantic ValidationError (a ValueError) on model_validate;
@@ -135,6 +162,22 @@ def test_clear_pointer_removes_malformed(tmp_path: Path):
     path.write_text("{not json")
     assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path) is True
     assert not path.exists()
+
+
+def test_clear_pointer_removes_a_hostile_pointer(tmp_path: Path):
+    # The one behavioural delta of the malformed -> None widening, and the sibling the test
+    # above cannot cover: `{not json` already returned None before the change. A hostile
+    # payload used to raise out of load_pointer, clear_pointer propagated it, and the file
+    # survived to wedge the next bridge start. Now it degrades to None, the PointerStillLive
+    # guard is skipped (no derivable liveness), and the file is backed up and removed.
+    proj = Path("/mnt/nas/projects/alpha")
+    path = pointers.pointer_path_for(proj, tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text("[" * 100_000)
+
+    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path) is True
+    assert not path.exists()
+    assert path.with_name(path.name + ".bak").exists()  # recoverable
 
 
 def test_clear_pointer_backup_failure_still_deletes(
