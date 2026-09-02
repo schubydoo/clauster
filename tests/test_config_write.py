@@ -222,6 +222,20 @@ def test_load_settings_json_obj_rejects_deeply_nested_json() -> None:
         cw.load_settings_json_obj(b"[" * 100_000)
 
 
+def test_load_settings_json_obj_rejects_recursion_overflow_on_any_interpreter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Pins the RecursionError handler directly, independent of which CPython runs the
+    # suite: on 3.14.7+ the real deep-nesting input above no longer reaches it, and the
+    # handler still matters for an interpreter without the C scanner.
+    def _overflow(_text: str) -> None:
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(cw.json, "loads", _overflow)
+    with pytest.raises(cw.InvalidCandidateError, match="too deeply"):
+        cw.load_settings_json_obj(b"[[1]]")
+
+
 # --- stale-hash external-edit guard (409) ------------------------------------------
 
 
