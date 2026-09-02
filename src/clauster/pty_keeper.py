@@ -503,10 +503,11 @@ def _run_keeper_conpty(
                 data = proc.read(65536)  # str; "" when no data (PYWINPTY_BLOCK=0)
             except EOFError:
                 # End-of-stream, or an idle non-blocking read some pywinpty builds surface as
-                # EOFError: a still-alive bridge is idle (keep polling); a dead one is drained.
-                alive, loop_error = _conpty_alive(proc)
-                if not alive:
-                    break
+                # EOFError. Which one it is, is exactly the question the empty-read branch below
+                # already answers, so fold this into "no data" and let the single `_conpty_alive`
+                # there decide: a still-alive bridge is idle (keep polling), a dead one is closed
+                # and drained (break). Checking here as well would query the handle twice per
+                # idle poll for one answer.
                 data = ""
             except Exception as exc:  # noqa: BLE001 — see below: ANY read fault is fail-closed
                 # A genuine read-channel error, NOT mere idle — the ConPTY is unusable, so the

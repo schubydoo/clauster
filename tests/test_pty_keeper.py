@@ -1209,8 +1209,9 @@ def test_run_keeper_conpty_isalive_failure_on_eof_fails_closed(
 ) -> None:
     from clauster import pty_keeper
 
-    # The OTHER `isalive()` arm — the EOFError one. Both call sites take the same guard; a fix
-    # applied to only one would leave this half of the pair stranding the sidecar.
+    # The same guard reached the OTHER way. A read that raises EOFError is folded into "no
+    # data", so the one `_conpty_alive` below decides for both — this pins that the EOF route
+    # really does land on the guarded check, rather than keeping a second unguarded one.
     fake = _fake_conpty(chunks=["boot\r\n"], read_eof=True, isalive_raises_at={1})
     monkeypatch.setattr(pty_keeper, "_load_pty_process", lambda: fake)
     sidecar = tmp_path / "b.keeper.json"

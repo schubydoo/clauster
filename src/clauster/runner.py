@@ -3111,7 +3111,7 @@ class SessionRunner:
             # Surface whatever the keeper recorded (openpty/spawn failure); the
             # bridge's own failure reason, if any, is in its --debug-file on disk.
             #
-            # Redact + bound it exactly as `_read_stderr_tail` does for the other
+            # Redact + bound it exactly as `_capture_error_detail` does for the other
             # error_detail writer (invariant 4): this field is rendered inline on the
             # dashboard card, and the keeper interpolates arbitrary exception text into
             # it (`pty_keeper`'s conpty read/liveness/wait/abort reasons, #1389) — text
