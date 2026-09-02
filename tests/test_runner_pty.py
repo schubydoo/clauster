@@ -564,6 +564,29 @@ def test_apply_pty_info_ready_without_url_is_running(runner_config) -> None:
     assert inst.notice is None  # ... and no advisory: nothing said WHY, so we claim nothing
 
 
+def test_apply_pty_info_stamps_the_current_boot_id_beside_the_ticks(runner_config, monkeypatch):
+    # #1401: a pty spawn folds the sidecar through `_apply_pty_info`, not `_spawn_locked`'s own
+    # stamp, so the boot id must land here beside the ticks. Without it a pty bridge persists
+    # boot-id-less and keeps the coarse-epoch comparison until a later reattach re-stamps it.
+    from clauster.models import RemoteControlInstance
+
+    runner, _ = _pty_runner(runner_config)
+    monkeypatch.setattr("clauster.runner.procutil.proc_boot_id", lambda: "spawn-boot-uuid")
+    inst = RemoteControlInstance(project="alpha", label="alpha")
+    runner._apply_pty_info(
+        inst,
+        {
+            "bridge_pid": 7,
+            "bridge_proc_start": 1.0,
+            "bridge_start_ticks": 770579,
+            "state": "ready",
+        },
+        _FakeProc(alive=True),
+    )
+    assert inst.bridge_start_ticks == 770579
+    assert inst.bridge_boot_id == "spawn-boot-uuid", "the pty spawn must stamp the boot id too"
+
+
 # -- #1390: the keeper's advisory `note` reaches the card as `notice` -------------------
 
 

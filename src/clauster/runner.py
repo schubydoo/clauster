@@ -3120,6 +3120,12 @@ class SessionRunner:
             # construction, so it could authenticate a recycled process the sidecar's own
             # pair rejects. The keeper writes both halves in one breath for this reason.
             instance.bridge_start_ticks = _row_int(info.get("bridge_start_ticks"))
+            # The keeper spawned this pty bridge in THIS process, so it is running in the
+            # current boot (#1401). The sidecar records no boot id, so stamp the live one
+            # beside the ticks — otherwise a pty spawn (which returns before `_spawn_locked`'s
+            # own stamp) persists boot-id-less and keeps the coarse-epoch fallback until a
+            # later reattach re-stamps it.
+            instance.bridge_boot_id = procutil.proc_boot_id()
         if sid := info.get("session_id"):
             instance.starter_session_id = sid
         if url := info.get("connect_url"):
@@ -4255,9 +4261,9 @@ class SessionRunner:
                 float(ps) if isinstance(ps, (int, float)) and not isinstance(ps, bool) else None
             )
             # Same PID-reuse defense as the reattach: keeper by cmdline AND the bridge
-            # matched on its pid + proc-start pair. No `boot_id`: the sidecar records none
-            # (`pty_keeper` writes it), and a live keeper already proves the current boot, so
-            # the exact tick match is complete here (#1401).
+            # matched on its pid + proc-start pair. No `boot_id` (the sidecar records none),
+            # so `is_live_bridge` pairs the exact tick match with the coarse epoch fallback —
+            # the same "same boot?" guard `_recover_keeper_pid` keeps for this carrier (#1401).
             if procutil.is_keeper_process(keeper_pid) and procutil.is_live_bridge(
                 bridge_pid, proc_start, start_ticks=_row_int(info.get("bridge_start_ticks"))
             ):
@@ -4337,10 +4343,11 @@ class SessionRunner:
             if not procutil.is_keeper_process(keeper_pid):
                 continue
             bridge_start_ticks = _row_int(info.get("bridge_start_ticks"))
-            # No `boot_id` in the gate: the sidecar records none, and a live keeper (checked
-            # above) proves the current boot, so the exact tick match is complete here (#1401).
-            # The reattached instance below is then STAMPED with the current boot id, so the
-            # persisted row keeps the cross-boot defense across the next restart.
+            # No `boot_id` in the gate (the sidecar records none), so `is_live_bridge` pairs the
+            # exact tick match with the coarse epoch fallback — the same guard
+            # `_recover_keeper_pid` keeps for this carrier (#1401). The reattached instance below
+            # is then STAMPED with the current boot id, so the persisted row gains the stronger
+            # cross-boot defense across the next restart.
             if not procutil.is_live_bridge(
                 bridge_pid, bridge_proc_start, start_ticks=bridge_start_ticks
             ):
@@ -5562,6 +5569,22 @@ class SessionRunner:
                 )
                 if ticks is not None:
                     instance.bridge_start_ticks = ticks
+                    stamped = True
+            if (
+                alive
+                and instance.bridge_start_ticks is not None
+                and instance.bridge_boot_id is None
+                and procutil.start_time_is_drift_prone()
+            ):
+                # The row has (or just healed, above) its drift-immune ticks and matched them
+                # this tick, so it is our process in the CURRENT boot (#1401). Stamp the live
+                # boot id, which then supersedes the coarse-epoch fallback across the next
+                # restart — the same evidence the reattach stamp relies on, taken for free here.
+                # Gated on the ticks so a tick-less row judged only on the drifting epoch never
+                # reaches it. Assigned only on success, like the tick stamp above.
+                boot = await asyncio.to_thread(procutil.proc_boot_id)
+                if boot is not None:
+                    instance.bridge_boot_id = boot
                     stamped = True
             # The running `claude` release for the card (#1275). Re-derived every tick
             # rather than memoized: it is one `exe` readlink for a live bridge, it is never
