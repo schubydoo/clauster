@@ -883,8 +883,11 @@ def test_mask_applies_longer_needles_first() -> None:
     """A shorter needle must not eat a longer one's tail and strand its prefix (#1395)."""
     from clauster.config_editor import _mask_echoed_input
 
-    long_secret = "supersecrettoken12345"
-    short_secret = "secrettoken12345"  # a boundary-aligned suffix of the longer one
+    # `short_secret` sits inside `long_secret` preceded by `/`, a non-word character, so the
+    # `(?<!\w)` edge does NOT refuse it. Shortest-first therefore masks the short needle and
+    # strands the longer one's `/var/` prefix, so deleting the sort makes this assertion fail.
+    long_secret = "/var/secrettoken12345"
+    short_secret = "secrettoken12345"  # a non-boundary-aligned suffix of the longer one
     needles = [long_secret, short_secret]
     masked = _mask_echoed_input("auth.token", f"rejected {long_secret}", needles)
     assert masked == "rejected ********"

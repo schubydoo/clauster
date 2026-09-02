@@ -235,7 +235,8 @@ a unit using defaults.
 
 **Most likely cause:** no `clauster.yml` where Clauster looks for one, or a
 mistake inside it. The three details separate the cases, which is what tells you
-where to look:
+where to look. `config is not valid YAML` covers two rows below. One row carries
+a position. The other states a fixed verdict:
 
 | Detail | What is wrong | Where the message points |
 | --- | --- | --- |
