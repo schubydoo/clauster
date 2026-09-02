@@ -180,6 +180,15 @@ class HostedSession(Base, TimestampMixin):
     hosted_log_path: Mapped[str | None] = mapped_column(String(4096), nullable=True)
     agent_pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
     agent_proc_start: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # The hosted twin of ``Instance.bridge_start_ticks`` (#1404). ``agent_proc_start`` is
+    # psutil's ``create_time``, which on Linux is ``starttime/CLK_TCK + boot_time()`` — and
+    # ``boot_time()`` re-reads ``/proc/stat`` btime every call, so NTP slew moves the epoch
+    # under an agent that never restarted. Against the 0.05s bound ``is_killable_hosted``
+    # uses, a survived agent then reads as lost rather than as a recoverable orphan, and
+    # ``kill_if_match`` refuses its kill. The tick count is boot-relative and does not move.
+    # NULL for a row written by an older build, which compares on the epoch alone — the
+    # pre-#1404 behaviour, re-stamped on that session's next spawn.
+    agent_start_ticks: Mapped[int | None] = mapped_column(Integer, nullable=True)
     started_at: Mapped[str | None] = mapped_column(String(64), nullable=True)
     intentional_stop: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     # The per-runtime RemoteControlInstance.instance_id (#834/#840), persisted so a

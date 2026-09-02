@@ -42,6 +42,12 @@ _PERSISTED_FIELDS = (
     "hosted_log_path",
     "agent_pid",
     "agent_proc_start",
+    # The drift-immune half of the agent pair (#1404). No file this module was ever the
+    # live store for can contain it, so the import path gains nothing — it is listed to
+    # keep this whitelist the exact mirror of ``db.stores._HOSTED_FIELDS``, which is the
+    # property that keeps a field from being persisted by one store and dropped by the
+    # other. Absent from a record simply stays absent, as every field here does.
+    "agent_start_ticks",
     "started_at",
     "intentional_stop",
     "instance_id",

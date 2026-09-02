@@ -157,6 +157,13 @@ class RemoteControlInstance(BaseModel):
     # daemon startTime token, which is daemon-internal). Backs CL-8 orphan validation:
     # a not-found reattach whose (pid, this) still matches a live process is a survivor.
     agent_proc_start: float | None = None
+    # The drift-immune half of the same pair (#1404), the hosted twin of
+    # `bridge_start_ticks`. `agent_proc_start` is psutil's create_time, which on Linux is
+    # re-derived from /proc/stat btime on every read — btime moves with NTP, so the epoch
+    # of an agent that never restarted wanders by seconds and the 0.05s compare reads a
+    # survivor as lost. Ticks are measured from the boot instant and do not move. Neither
+    # half suffices alone (ticks restart at zero each boot); see procutil.is_live_process.
+    agent_start_ticks: int | None = None
     claude_session_uuid: str | None = None  # RFC 4122 from the init frame; drives --resume
     daemon_last_seq: int = 0  # highest daemon frame seq seen; reattach cursor across restarts
     hosted_log_path: Path | None = None  # redacted on-disk mirror of the hosted stream
