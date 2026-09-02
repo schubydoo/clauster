@@ -807,15 +807,18 @@
       recentCount() { return this.endedHosted().length + this.endedBridges().length + this.endedAgents().length; },
       // Whether the Recent group actually holds a *resumable* item, so the label doesn't
       // imply resume for a set of ended background agents (which are never resumable):
-      // ended bridges are resumable by definition (isResumable), ended hosted only with a
-      // claude_session_uuid, ended detached agents never. (#333 Option B)
+      // ended bridges are resumable by definition (isResumable), ended hosted only with
+      // BOTH a claude_session_uuid and a project, ended detached agents never. (#333
+      // Option B)
       hasResumable() {
         // "resumable" in the label must mean resumable NOW: a group whose every bridge is
         // blocked by the one-live-standard-bridge cap offers no Resume that can do
         // anything, so the label would promise an action none of the rows can perform.
         // `h.project` alongside the uuid for the same reason (#1381): a hosted row whose
         // saved record lost its project can never respawn, the row offers no Resume button,
-        // and counting it here would put "/ resumable" on a group that has none.
+        // and counting it here would put "/ resumable" on a group that has none. The uuid
+        // half is the same shape and this is the fifth mirror of that gate — #1392 widened
+        // the set of rows that lose it, so all five must keep testing both halves.
         return this.endedBridges().some((i) => !this.resumeBlockedReason(i.rk))
           || this.endedHosted().some((h) => h.claude_session_uuid && h.project);
       },
@@ -4966,7 +4969,8 @@
       },
       // Surface a terminal hosted session in the live view: explain why it ended (with the
       // server's error_detail when present) and stop the reconnect loop. Resume (when the
-      // session kept its uuid) stays the recovery path, shown on the row above.
+      // session kept BOTH the uuid and the project) stays the recovery path, shown on the
+      // row above.
       _markHostedEnded(id, h, fallback) {
         const v = this.hostedView[id];
         if (!v) return;
@@ -4993,12 +4997,29 @@
         // Resume button that is not rendered is worse than the 409 the button used to
         // produce, so a project-less row is told WHY instead — this panel is the one place
         // that already surfaces `error_detail`, which makes it the right home for the reason.
+        // Every combination, not just two of three (#1392). The uuid half can be missing on
+        // its own now — `_as_session_uuid` drops a value that is not session-shaped, and a
+        // session that ended before its init frame never captured one at all — so a row with
+        // a project and no uuid used to fall through both branches and explain nothing,
+        // which is the "fails opaquely" failure the row chip exists to prevent. Four branches,
+        // not three: the halves are salvaged independently, so "neither" is a real state.
         let resume = "";
         if (h && h.claude_session_uuid && h.project) {
           resume = " Use Resume above to continue it.";
+        } else if (h && h.project) {
+          // No follow-up action named, for the reason the chip gives (dashboard.html): on an
+          // orphan row this sentence lands beside one telling the operator to Kill, and two
+          // consecutive sentences naming different actions is worse than naming none.
+          resume = " It cannot be resumed: no usable conversation id was saved for it.";
         } else if (h && h.claude_session_uuid) {
-          resume = " It cannot be resumed: its saved record was unreadable and its project is" +
-            " unknown. Kill it and start a new session in the right project.";
+          resume = " It cannot be resumed: its project is unknown, so there is nowhere to" +
+            " respawn it. Start a new session in the right project instead.";
+        } else if (h) {
+          // Both halves at once. `_degraded_row` salvages per FIELD, so one tampered record
+          // drops the uuid and the project independently -- falling to the project-only
+          // wording here would have the operator repair one field and hit the same wall.
+          resume = " It cannot be resumed: it has neither a project nor a usable conversation" +
+            " id saved. Start a new session in the right project instead.";
         }
         return base + detail + resume;
       },

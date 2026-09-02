@@ -399,6 +399,60 @@ def test_dashboard_shows_hosted_panel_when_enabled(write_config, projects_root, 
     assert ':class="hostedStatusDot(h.status)"' in body  # the hosted row wires the status-dot
 
 
+def test_hosted_resume_gate_says_the_same_thing_in_all_five_places(
+    write_config, projects_root, monkeypatch
+):
+    """Five front-end mirrors of one backend branch, each pinned, each written the same way.
+
+    `reattach_all` names Resume in a row's `error_detail` only when BOTH halves survive.
+    The mirrors are the Resume button, the orphan badge's tooltip, the "resume unavailable"
+    chip, `hasResumable` (the Recent group label), and `_hostedEndedReason` (the View
+    panel's ended banner). #1381 aligned the project half; #1392 widened the set of rows
+    that lose the *uuid* half well past the empty string, so every one of them has to test
+    both -- and all five spell the gate `h.claude_session_uuid && h.project`, in that order,
+    so a reader comparing them is comparing identical text.
+
+    Substring pins in the style of `resumeBlockedReason` above: brittle by design, so a
+    reflow forces a re-read instead of passing silently.
+    """
+    monkeypatch.setattr(app_module, "ClaustrumDaemon", _NoopDaemon)
+    config = load_config(write_config("claustrum:\n  enabled: true\n"))
+    app = create_app(config)
+    app.state.hosted = _StubManager()
+    with TestClient(app) as client:
+        body = client.get("/").text
+    # 1. the Resume button. The pin carries its status list because the bare gate is also a
+    # SUBSTRING of the chip's negation, of `hasResumable` and of `_hostedEndedReason` -- on
+    # its own it would stay green with the Resume `x-if` deleted outright.
+    assert (
+        "['crashed', 'stopped', 'error'].includes(h.status) && h.claude_session_uuid"
+        " && h.project" in body
+    )
+    # 2. the orphan badge's tooltip, 3. the "resume unavailable" chip.
+    assert "h.claude_session_uuid && h.project ?" in body
+    assert "!(h.claude_session_uuid && h.project)" in body
+    # 4. `hasResumable`, the Recent group label. Mutation-verified as the one mirror with no
+    # pin: dropping its `&& h.project` left the whole suite green.
+    assert "endedHosted().some((h) => h.claude_session_uuid && h.project)" in body
+    # The chip's reason is VISIBLE text, not a tooltip: a title never fires on touch, and
+    # this is a phone-first product. Same contract as the bridge rows' `resume-blocked`.
+    assert 'data-test="hosted-resume-blocked"' in body
+    assert "resume unavailable — conversation id unknown" in body
+    # ...and the case where BOTH halves are gone. `_degraded_row` salvages per field, so one
+    # tampered record can drop the uuid and the project independently; falling back to the
+    # project-only wording would have the operator repair one field and hit the same wall.
+    assert "resume unavailable — project and conversation id unknown" in body
+    assert "resume unavailable — project unknown" in body
+    # 5. the View panel's ended banner: a project-ful, uuid-less row used to fall through
+    # every branch and explain nothing -- the "fails opaquely" failure one layer down.
+    assert "no usable conversation id was saved for it" in body
+    # Pinned on the banner's OWN wording, not the shared phrase: the chip's `:title` also
+    # says "neither a project nor a usable conversation id saved", so the shorter substring
+    # passed with this branch deleted (caught by mutating it). "It cannot be resumed: it
+    # has ..." is contiguous in `_hostedEndedReason` and appears nowhere else.
+    assert "It cannot be resumed: it has neither a project nor a usable conversation" in body
+
+
 def test_hosted_status_badge_colors_match_bridge(write_config, projects_root, monkeypatch):
     # #430: the hosted badge map must speak the same colour-to-meaning language as
     # the bridge STATUS_BADGE in the shared Active list. The three divergent
@@ -673,6 +727,25 @@ def test_spawn_hosted_daemon_error_is_502(write_config, projects_root, monkeypat
     with TestClient(app) as client:
         r = client.post("/api/instances", json={"project": "alpha", "channel": "hosted"})
     assert r.status_code == 502
+
+
+def test_spawn_hosted_session_error_is_409_not_a_daemon_502(
+    write_config, projects_root, monkeypatch
+):
+    # `HostedSessionError` subclasses `ClaustrumError`, so without its own arm above the
+    # 502 one it would render as "hosted spawn failed" — which reads as the daemon being
+    # down and sends the operator to the wrong place. `build_hosted_argv` raising on a
+    # refused resume session id (#1392) is a second way `start()` can produce this class.
+    monkeypatch.setattr(app_module, "is_trusted", lambda *a, **k: True)
+    monkeypatch.setattr(app_module.claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
+    manager = _StubManager()
+    manager.spawn_error = HostedSessionError("refusing an unusable resume session id: int")
+    app = _app(write_config, manager=manager, daemon=_StubDaemon())
+    with TestClient(app) as client:
+        r = client.post("/api/instances", json={"project": "alpha", "channel": "hosted"})
+    assert r.status_code == 409
+    assert "unusable resume session id" in r.json()["detail"]
+    assert "hosted spawn failed" not in r.json()["detail"]
 
 
 def test_message_wrong_state_is_409(write_config, projects_root):
