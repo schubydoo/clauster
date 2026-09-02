@@ -48,6 +48,7 @@ The gate ordering the children must follow (each step aborts before the write)::
 from __future__ import annotations
 
 import contextvars
+import datetime
 import hashlib
 import json
 import re
@@ -410,6 +411,24 @@ def guard_unchanged(path: Path, expected_hash: str | None) -> bytes:
     return data
 
 
+#: Every container ``yaml.safe_load`` can build, and every container ``jsonable_encoder``
+#: expands: ``!!omap``/``!!pairs`` construct a list of **tuples** and ``!!set`` a **set**,
+#: which the encoder emits as a JSON array, one entry per member.
+#:
+#: ONE enumeration, deliberately, because both walks over a parsed header must agree on what
+#: a container is and they disagreed for different reasons. :func:`_expands_beyond` has to
+#: count exactly what the serializer emits, or a ``!!set`` leaf counted as a single scalar
+#: walks past the size cap. :func:`redact_secrets` has to *descend* exactly what the
+#: serializer emits, or a secret inside a tuple is returned by identity and reaches the
+#: browser unmasked (#1393) — which it did: ``auth: !!omap [{token: sk-live-…}]`` was served
+#: verbatim by ``config_write_subagents._read_agent``.
+#:
+#: :func:`_is_self_referential` keeps its own NARROWER set and that is correct, not drift: it
+#: hunts cycles, and a ``set``/``frozenset`` holds only hashables, so a cycle cannot route
+#: through one. Its docstring says so.
+_YAML_CONTAINERS = dict | list | tuple | set | frozenset
+
+
 def _is_secretish(key: str, value: Any) -> bool:
     """Whether ``(key, value)`` should be masked (structural secret detection)."""
     if not isinstance(value, str) or not value:
@@ -423,34 +442,107 @@ def _is_secretish(key: str, value: Any) -> bool:
     return False
 
 
-def redact_secrets(data: Any, _key: str = "") -> Any:
+def redact_secrets(
+    data: Any, _key: str = "", _memo: dict[tuple[int, bool], Any] | None = None
+) -> Any:
     """Return a deep copy of ``data`` with secret-shaped values masked from the start.
 
     Redaction is **structural, not a post-filter**: a secret-shaped leaf is emitted as
     :data:`REDACTION_SENTINEL` while building the display value, so the live secret is
-    never assembled into the response in the first place. Recurses dicts and lists;
-    non-secret scalars pass through unchanged. Mirrors ``config_editor.editable_values``
-    (read only what's safe to surface).
+    never assembled into the response in the first place. Recurses every container in
+    :data:`_YAML_CONTAINERS`; non-secret scalars pass through unchanged. Mirrors
+    ``config_editor.editable_values`` (read only what's safe to surface).
+
+    A ``tuple``/``set``/``frozenset`` is emitted as a **list**, because that is what
+    ``jsonable_encoder`` was already going to do with it and this field is display-only (a PUT
+    round-trips ``content``, never ``frontmatter``, so nothing here is written back). Walking
+    them is not cosmetic: ``dict | list`` alone returned an ``!!omap`` tuple by IDENTITY, so
+    ``auth: !!omap [{token: sk-live-…}]`` reached the browser unmasked past all three
+    detection rules — key-name, ``${interp}`` and credential-URL alike — and the "deep copy"
+    promise in this docstring's first line did not hold for a mutable value under a tuple.
+    A ``set``'s iteration order is not defined, so the emitted list's order is not either;
+    that is not new (``jsonable_encoder`` already iterated the raw set) and it carries no
+    information, since redaction maps every distinct secret in it to one sentinel.
 
     Hint scope: a secret-shaped key marks its **whole subtree** secret. The hint reaches its
     own scalar leaf, the elements of a list value, and every value nested beneath it at any
     depth — so ``{"auth": {"value": "sk-live-…"}}`` is masked. Masking is deliberately wider
     than the key that triggered it: over-masking costs a resend, under-masking leaks.
+
+    A key is a key whichever way the document spells it. An ``!!omap``/``!!pairs`` entry is a
+    two-element tuple whose first element IS the mapping key, so it gives the hint for the
+    second exactly as a dict key does. Without that, redaction was spelling-dependent on
+    identical data — ``auth: {token: sk-live-…}`` masked and
+    ``mcpServers: !!omap [{token: sk-live-…}]`` did not, because only the benign outer key
+    was ever consulted. ``safe_load`` builds a 2-tuple from those two tags and nothing else,
+    so treating one as a pair cannot mis-read a plain sequence.
+
+    Memoized per container, because a YAML alias makes the parsed structure a DAG rather than
+    a tree and an unmemoized walk re-expands every distinct *path* to a node. A non-recursive
+    ``&a``/``*a`` pyramid — legal, acyclic YAML that :func:`_is_self_referential` neither does
+    nor should reject — makes that exponential in the header's BYTE length: a 346-byte header
+    ``safe_load`` parses in 0.8 ms took 0.72 s to redact, and a 472-byte one did not finish,
+    with ``config_write_subagents._read_agent`` holding an ``asyncio.to_thread`` worker for
+    the whole walk (#1393). The memo takes both under 0.1 ms. Same fix, for the same reason,
+    as the ``done`` set in :func:`_is_self_referential`.
+
+    The memo key's second half is a BOOLEAN, not the hint string, and both halves are
+    load-bearing. The hint reaches behaviour only through ``_SECRET_KEY_RE.search`` (in
+    :func:`_is_secretish`, and where a child key decides whether to replace it), so two
+    secret-shaped hints are interchangeable and so are two benign ones — but a secret one and
+    a benign one are not. Keying on ``id`` alone would let one aliased object reached under
+    both ``token:`` and ``name:`` reuse the unmasked result and **under-mask**. Keying on the
+    hint STRING would be correct but unbounded: a header carrying many distinct secret-shaped
+    keys would multiply the memo, where the predicate keeps it O(nodes).
+
+    Two consequences worth stating. An aliased input yields ONE shared output object per
+    ``(node, hint-is-secret)`` pair, so the result is a deep copy but not a fully expanded
+    tree — callers replace whole keys on it (``config_write_settings._redact_misc``,
+    ``config_write_subagents._read_agent``) and must not mutate a nested value in place. And
+    an entry is recorded only AFTER its children are done, so a self-referential structure
+    still recurses to ``RecursionError`` exactly as before rather than yielding a
+    self-referential result: :func:`load_frontmatter_yaml` refuses those, and the read path
+    degrades on the error. ``id`` reuse is not a hazard — every memoized node stays reachable
+    from ``data`` for the whole walk.
     """
-    if isinstance(data, dict):
-        out: dict[Any, Any] = {}
-        for k, v in data.items():
-            # Inherit the ancestor's hint unless this key introduces its own. Re-deriving the
-            # hint purely from the child's keys is what let a nested secret through: a dict
-            # value never satisfies _is_secretish (it only matches non-empty str), so the
-            # parent's "this subtree is secret" signal was dropped at every dict boundary.
-            # {"auth": {"value": "sk-live-…"}} is not exotic — it is how a lot of MCP server
-            # configs and settings blobs are written.
-            hint = str(k) if _SECRET_KEY_RE.search(str(k)) else _key
-            out[k] = REDACTION_SENTINEL if _is_secretish(hint, v) else redact_secrets(v, hint)
+    memo = {} if _memo is None else _memo
+    if isinstance(data, _YAML_CONTAINERS):
+        memo_key = (id(data), bool(_SECRET_KEY_RE.search(_key)))
+        cached = memo.get(memo_key)
+        if cached is not None:
+            return cached
+        out: Any
+        if isinstance(data, dict):
+            out = {}
+            for k, v in data.items():
+                # Inherit the ancestor's hint unless this key introduces its own. Re-deriving
+                # the hint purely from the child's keys is what let a nested secret through: a
+                # dict value never satisfies _is_secretish (it only matches non-empty str), so
+                # the parent's "this subtree is secret" signal was dropped at every dict
+                # boundary. {"auth": {"value": "sk-live-…"}} is not exotic — it is how a lot
+                # of MCP server configs and settings blobs are written.
+                hint = str(k) if _SECRET_KEY_RE.search(str(k)) else _key
+                out[k] = (
+                    REDACTION_SENTINEL if _is_secretish(hint, v) else redact_secrets(v, hint, memo)
+                )
+        elif isinstance(data, tuple) and len(data) == 2:
+            # An `!!omap`/`!!pairs` ENTRY. ``safe_load`` builds a 2-tuple from those two tags
+            # and from nothing else, and both mean (key, value) — so element 0 is a KEY and
+            # must act as the secret hint for element 1, exactly as a dict key does. Without
+            # this, redaction was spelling-dependent on the same data: `auth: {token: …}`
+            # masked while `mcpServers: !!omap [{token: …}]` did not, because only the benign
+            # OUTER key was ever a hint. Element 0 itself keeps the AMBIENT hint rather than
+            # its own, so it is never masked by its own name — matching the dict branch, which
+            # never masks a key by itself. Element 0 DOES mask under a secret-shaped ancestor,
+            # where a dict key would not: over-masking, which is the safe direction.
+            hint = str(data[0]) if _SECRET_KEY_RE.search(str(data[0])) else _key
+            out = [redact_secrets(data[0], _key, memo), redact_secrets(data[1], hint, memo)]
+        else:
+            # list, tuple, set and frozenset all iterate their members, and all four are
+            # emitted as a list — see the docstring for why a tuple must not pass by identity.
+            out = [redact_secrets(v, _key, memo) for v in data]
+        memo[memo_key] = out
         return out
-    if isinstance(data, list):
-        return [redact_secrets(v, _key) for v in data]
     if _is_secretish(_key, data):
         return REDACTION_SENTINEL
     return data
@@ -779,6 +871,155 @@ def _is_self_referential(value: Any) -> bool:
     return False
 
 
+#: Cap on the characters a parsed frontmatter expands to once its YAML aliases are followed
+#: — roughly the length of the JSON a route would serialize it to. It exists to fire on alias
+#: AMPLIFICATION and never on an alias-free document, and the margin for that is measured, not
+#: assumed. The densest alias-free expansion is a ``!!timestamp``: ``2001-12-14,`` is 11 source
+#: bytes and :data:`_TIMESTAMP_CHARS` counted characters, i.e. **2.909x**, ahead of a hex
+#: integer's 1.2x and a string's 1.0x. Both surfaces cap the written FILE at 64 KiB
+#: (``config_write_subagents.MAX_BYTES``, ``config_write_skills.MAX_SKILL_MD_BYTES``), so an
+#: alias-free header a write could have produced tops out at ~190_625 — inside this cap, but
+#: by 1.31x, not by the order of magnitude the byte figures suggest.
+#:
+#: ⚠️ That makes the two constants COUPLED: ``MAX_BYTES * 2.91`` must stay below this. Raising
+#: the file cap to 128 KiB reads as safe and is not — it would put an alias-free document at
+#: 381k and have this guard reject it as an alias pyramid.
+#:
+#: Not "never on an ordinary document", either: the READ path applies no byte cap
+#: (``_read_agent`` reads whatever is on disk), so an alias-free header over ~86 KB degrades to
+#: ``frontmatter: {}`` rather than serving. That is not a shape a subagent header takes, and it
+#: degrades rather than fails.
+MAX_EXPANDED_CHARS = 250_000
+
+#: Characters an ISO-8601 ``!!timestamp`` serializes to, worst case
+#: (``2001-12-14T21:59:43.100000+05:00``). Counted rather than folded into the one-character
+#: default because a ``date``/``datetime`` is the highest-amplification leaf a pyramid can
+#: alias: at one character each, a 500-byte header of timestamp leaves was still an accepted
+#: 4 MB response. A ``float`` is counted by its own ``repr`` rather than by this, because its
+#: SOURCE spelling can be much shorter (``1.``) and a flat 32 would then over-count an
+#: alias-free document past :data:`MAX_EXPANDED_CHARS` — see :func:`_scalar_chars`. Only
+#: ``bool`` and ``None`` are left at one character.
+_TIMESTAMP_CHARS = 32
+
+
+def _scalar_chars(node: Any) -> int:
+    """Approximate the characters a *non-container* ``node`` serializes to (at least one).
+
+    A count of *values* would be the wrong metric, because a value's serialized length is not
+    bounded: one 30 KB string aliased into a pyramid's 46_656 leaf slots is 67_184 values but
+    1.4 GB of JSON, and an integer is a string of digits with no length limit either. Both
+    walk straight past a value-count cap; length is what the consumer actually pays.
+
+    An int is counted by its DECIMAL digits, derived from ``bit_length`` (``log10(2)`` as a
+    ratio of integers, rounded up, so the estimate is never short — the minus sign on a
+    negative int is the one character it does not carry, a constant, like the scalars below).
+    ``len(str(n))`` would be exact but CPython refuses ``str(int)`` above 4300 digits, which
+    would turn this guard into a fresh ``ValueError`` — and a hex literal reaches that size
+    without ``safe_load``'s own decimal-literal limit firing. Counting the BITS instead was the
+    first attempt and was wrong in the other direction: it over-states by 3.3x, which rejected
+    an alias-free ``n: 0x<65500 digits>`` header — a false rejection, and the exact property
+    the cap claims not to have.
+
+    A ``float`` is counted by its actual ``repr`` length, which runs to 23
+    (``1.7976931348623157e+308``) and is the widest counted-vs-emitted gap otherwise left.
+    ``repr`` and not a flat :data:`_TIMESTAMP_CHARS`, because a float's source spelling can be
+    far SHORTER than a timestamp's: ``1.`` is two characters, so a flat 32 would count an
+    alias-free list of them at **10.67x** its source — 698_915 characters for a 64 KiB header,
+    past :data:`MAX_EXPANDED_CHARS`, falsely rejecting a document with no alias in it. Measured,
+    and note ``test_byte_caps_stay_under_the_expansion_cap`` would NOT have caught it: that gate
+    checks the byte caps against 3x, the timestamp ceiling. ``repr`` keeps a float at 1.0x, so
+    the alias-free ceiling stays where the timestamp puts it. A float's repr is bounded, so this
+    carries none of the ``str(int)`` digit-limit hazard above.
+
+    The only scalars left counted as one are ``bool`` and ``None``, whose reprs are 4 and 5
+    characters. The non-finite floats are the widest of these constants: ``repr`` gives
+    ``inf``/``-inf``/``nan`` where ``json.dumps`` emits ``Infinity``/``-Infinity``/``NaN``,
+    an under-count of at most 2.67x. Every one of them is a per-node constant, not a factor
+    that grows with the document, which is the only property the cap needs.
+    """
+    if isinstance(node, str | bytes):
+        return len(node)
+    if isinstance(node, int):  # bool included: both bit_lengths floor to a single digit
+        return node.bit_length() * 30_103 // 100_000 + 1
+    if isinstance(node, float):  # bounded repr, so `repr` is safe here where `str(int)` is not
+        return len(repr(node))
+    if isinstance(node, datetime.date):  # `!!timestamp` — `datetime` is a `date` subclass
+        return _TIMESTAMP_CHARS
+    return 1
+
+
+def _emitted_children(node: Any) -> Iterator[Any]:
+    """Yield everything a serializer emits for container ``node`` — a dict's KEYS included."""
+    if isinstance(node, dict):
+        yield from node.keys()
+        yield from node.values()
+    else:
+        yield from node
+
+
+def _expands_beyond(value: Any, limit: int) -> bool:
+    """Whether ``value`` expands past ``limit`` characters once its YAML aliases are followed.
+
+    Memoizing :func:`redact_secrets` stops the *redaction* re-expanding an alias pyramid, but
+    it does not make the document servable: the redacted view is then a DAG, and the next
+    unguarded consumer — ``jsonable_encoder`` plus ``json.dumps`` on the route's response, in
+    the event loop rather than a worker thread — expands it right back. Measured (#1393): a
+    346-byte pyramid redacts in 0.04 ms and then spends **6.7–7.0 s in ``jsonable_encoder``
+    plus 0.60 s in ``json.dumps``** to reach 101 MB. The encoder, not the dump, is the bulk —
+    an earlier draft of this docstring quoted the 0.6 s dump alone and understated the block by
+    an order of magnitude. A 472-byte pyramid redacts in 0.05 ms and never finishes. The
+    expansion is inherent to the document, so the only fix is to refuse it, at the seam, the
+    way a cycle is refused.
+
+    Rejection is by expanded SIZE, not by alias count or depth. A plain alias is ordinary YAML
+    (:func:`_is_self_referential` says why refusing aliases outright is wrong) and a depth cap
+    was measured and does not work — the blow-up is in breadth, and capping depth left the
+    346-byte case at 1.94 s. Size, in turn, is characters and not values: see
+    :func:`_scalar_chars` for the two aliased-scalar shapes that slip past a value count, and
+    :data:`_YAML_CONTAINERS` for the two container types that do.
+
+    Requires an acyclic ``value``, which is why it runs only after :func:`_is_self_referential`
+    has passed: a cycle would keep re-entering a node that never finishes and never gets a
+    size. Acyclicity is also what bounds the walk — a node can never be re-encountered from
+    inside its own subtree, so its "ascend" marker is always popped before any duplicate entry
+    beneath it.
+
+    Iterative, not recursive, for the same reason as the cycle check: it runs right after a
+    ``safe_load`` whose own ``RecursionError`` the caller catches, so adding stack frames to a
+    structure already near the limit would reintroduce the escape this seam exists to close.
+
+    An approximation, and deliberately so: it counts the PARSED document, while what a route
+    serializes is the *redacted* view, where a short secret-shaped value grows into the
+    8-character :data:`REDACTION_SENTINEL`. That, and the bounded-repr scalars
+    :func:`_scalar_chars` counts as one, put the true response size within a small constant
+    factor of the count — a factor that does not grow with the document, which is the only
+    property the cap needs. Being off by 32x on an exotic header is a slow response; being off
+    by a factor that grows with the byte length is the unbounded hang this guard exists for.
+    """
+    sizes: dict[int, int] = {}
+    stack: list[tuple[Any, bool]] = [(value, False)]
+    while stack:
+        node, leaving = stack.pop()
+        if not isinstance(node, _YAML_CONTAINERS):
+            continue
+        if leaving:
+            total = 1  # the brackets/braces the container itself costs
+            for child in _emitted_children(node):
+                # A container's own total is already memoized, because this marker pops only
+                # after every child has ascended; anything else is a scalar, counted by length.
+                counted = sizes.get(id(child))
+                total += _scalar_chars(child) if counted is None else counted
+                if total > limit:
+                    return True
+            sizes[id(node)] = total
+            continue
+        if id(node) in sizes:
+            continue  # counted once, then reused: this is what keeps the walk linear
+        stack.append((node, True))  # popped after this node's children: the "ascend" marker
+        stack.extend((child, False) for child in _emitted_children(node))
+    return False
+
+
 def _yaml_error_where(exc: yaml.YAMLError, line_offset: int = 0) -> str:
     """Describe *where* a ``YAMLError`` happened, using nothing derived from the document.
 
@@ -887,9 +1128,11 @@ def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> An
     refuse to act on it. Fails closed: this only ever converts a crash into a rejection,
     never a rejection into an accept.
 
-    One rejection is NOT a parse failure: a header that parses fine but builds a
+    Two rejections are NOT parse failures. A header that parses fine but builds a
     self-referential structure (:func:`_is_self_referential`) is refused after the load,
-    because no consumer can finish walking it.
+    because no consumer can finish walking it; so is one that parses fine but expands past
+    :data:`MAX_EXPANDED_CHARS` through its aliases (:func:`_expands_beyond`), because no
+    consumer can finish serializing it.
 
     ``line_offset`` is added to any line number the rejection reports, so a caller passing a
     slice of a larger file can have the message name the line in the FILE. Both
@@ -929,6 +1172,20 @@ def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> An
         # derived frontmatter field while still surfacing `content`, so the operator can see and
         # repair the file. That is why no second guard is needed in `redact_secrets`.
         raise InvalidCandidateError(f"{what} contains a self-referential YAML alias")
+    if _expands_beyond(value, MAX_EXPANDED_CHARS):
+        # Acyclic, so the check above passes it, and a few hundred bytes long, so every byte
+        # cap passes it — but a `&a`/`*a` pyramid expands to more than any consumer can walk or
+        # serialize (#1393). Same fail-closed shape and same degradation on read as the cycle
+        # rejection above; see :func:`_expands_beyond` for why memoizing the consumers is not
+        # enough on its own.
+        # Names the cap, like every sibling cap on this tier (`content is N bytes, over the
+        # M byte cap`). The counted SIZE is deliberately not named: `_expands_beyond`
+        # short-circuits the moment it passes the limit, so it does not have one to report,
+        # and finishing the count to produce a nicer message is the work this guard exists to
+        # refuse. Nothing here comes from the document — invariant 4.
+        raise InvalidCandidateError(
+            f"{what} expands past the {MAX_EXPANDED_CHARS} character cap through its YAML aliases"
+        )
     return value
 
 

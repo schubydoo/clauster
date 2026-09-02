@@ -10,6 +10,7 @@ under the autouse HOME-isolation fixture — the live account is never touched.
 
 from __future__ import annotations
 
+import datetime
 import json
 import time
 from pathlib import Path
@@ -20,6 +21,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from clauster import config_write as cw
+from clauster import config_write_skills, config_write_subagents
 from clauster.app import create_app
 from clauster.config import ClausterConfig, load_config
 
@@ -313,6 +315,110 @@ def test_redact_does_not_over_mask_outside_a_secret_subtree() -> None:
     assert red == {"name": "hello", "port": 8080, "nested": {"k": "plain"}}
 
 
+# --- #1393: the containers `safe_load` builds that the redactor used to walk straight past --
+#
+# `redact_secrets` recursed `dict | list` while `safe_load` also builds a TUPLE (`!!omap`,
+# `!!pairs`) and a SET (`!!set`). A tuple/set was neither masked nor copied -- returned by
+# identity, then rendered as a JSON array by `jsonable_encoder`. All three detection rules
+# leaked through it (secret-shaped key, `${interp}`, credential URL), and the "deep copy"
+# promise did not hold for a mutable value underneath one. Reproduced end to end through
+# `_read_agent` before the fix; `_YAML_CONTAINERS` is now the single enumeration both this
+# walk and `_expands_beyond` use.
+_TUPLE_SET_HEADERS = [
+    pytest.param("auth: !!omap\n  - token: sk-live-AAA\n", id="omap-under-secret-key"),
+    pytest.param("auth: !!pairs\n  - token: sk-live-AAA\n", id="pairs-under-secret-key"),
+    pytest.param("token: !!set\n  ? sk-live-AAA\n", id="set-under-secret-key"),
+    pytest.param("x: !!omap\n  - k: ${sk-live-AAA}\n", id="omap-holding-an-interp"),
+    pytest.param("x: !!pairs\n  - k: slack://sk-live-AAA@chan\n", id="pairs-holding-a-url"),
+    pytest.param("x: !!set\n  ? ${sk-live-AAA}\n", id="set-holding-an-interp"),
+]
+
+
+def _every_value(node: object) -> list[object]:
+    """Flatten a parsed header into every value it holds, the containers themselves included."""
+    out: list[object] = [node]
+    children = node.values() if isinstance(node, dict) else node
+    if isinstance(node, dict | list | tuple | set):
+        for child in children:
+            out += _every_value(child)
+    return out
+
+
+@pytest.mark.parametrize("header", _TUPLE_SET_HEADERS)
+def test_the_tuple_and_set_redaction_reproducer_is_a_positive_control(header: str) -> None:
+    """PIN: `safe_load` really builds a tuple/set here, which is why the walk must cover them."""
+    value = yaml.safe_load(header)
+    built = {type(v) for v in _every_value(value)}
+    assert built & {tuple, set}, built
+    assert "sk-live-AAA" in json.dumps(value, default=list)  # the secret really is in there
+
+
+@pytest.mark.parametrize("header", _TUPLE_SET_HEADERS)
+def test_redact_masks_a_secret_inside_an_omap_pairs_or_set(header: str) -> None:
+    red = cw.redact_secrets(yaml.safe_load(header))
+    # `default=` is not needed any more, and that is half the point: a tuple/set is emitted as
+    # a list, so the redacted view is plain JSON rather than something the encoder reshapes.
+    assert "sk-live-AAA" not in json.dumps(red)
+    assert cw.REDACTION_SENTINEL in json.dumps(red)
+
+
+def test_redact_deep_copies_a_mutable_value_reached_through_a_tuple() -> None:
+    # The docstring's first line promises a deep copy. A tuple returned by identity broke that
+    # promise for anything mutable underneath it: mutating the caller's input then changed the
+    # redacted view it had already handed out.
+    inner = {"port": 8080}
+    red = cw.redact_secrets({"x": [("k", inner)]})
+    assert red["x"][0][1] is not inner
+    inner["port"] = 9090
+    assert red["x"][0][1] == {"port": 8080}  # the display value did not move with it
+
+
+def test_redact_reuses_an_aliased_node_instead_of_re_expanding_every_path_to_it() -> None:
+    # #1393: a YAML alias makes the parsed structure a DAG, and an unmemoized walk re-expands
+    # every distinct PATH to a node -- exponential in the header's byte length. Asserting the
+    # output IDENTITY is the falsifiable form: without the memo the walk still finishes here
+    # (the input is tiny) but returns two independent copies, so dropping the memo fails this
+    # line rather than hanging the suite. The cost side is pinned at the parse seam, where a
+    # header far too large to walk twice is what proves the memo is doing the work.
+    shared = {"k": ["v"]}
+    red = cw.redact_secrets({"a": shared, "b": shared})
+    assert red["a"] is red["b"]
+    assert red["a"] == {"k": ["v"]}
+
+
+def test_redact_output_shares_an_aliased_node_so_a_nested_mutation_moves_its_sibling() -> None:
+    # The FOOTGUN the memo introduces, made visible rather than left as docstring prose. The
+    # result is a deep copy of the input but NOT a fully expanded tree: one aliased input node
+    # becomes one shared output object. Every caller today replaces a whole key on the ROOT
+    # (`config_write_settings._redact_misc`, `config_write_subagents._read_agent`), which is
+    # safe because an acyclic root can never also be a nested node. Mutating a NESTED value in
+    # place is not safe, and this is what that looks like.
+    shared = {"port": 8080}
+    red = cw.redact_secrets({"a": shared, "b": shared})
+
+    red["a"]["port"] = 9090  # a caller "adjusting" one branch...
+
+    assert red["b"]["port"] == 9090  # ...moved the other one too
+    # Replacing the whole key, which is what the real callers do, does NOT reach the sibling.
+    red["a"] = {"port": 7070}
+    assert red["b"]["port"] == 9090
+
+
+def test_redact_memo_keys_on_the_secret_hint_so_an_aliased_node_is_not_under_masked() -> None:
+    # The hint is half the memo key, and dropping it would UNDER-MASK: the same aliased object
+    # reached under a benign key and under a secret-shaped one must redact differently, and an
+    # id()-only cache would serve whichever was walked first to both. Asserted in both orders,
+    # because a cache bug is order-dependent by nature.
+    shared = {"value": "sk-live-AAA"}
+    for label, root in (
+        ("benign first", {"name": shared, "auth": shared}),
+        ("secret first", {"auth": shared, "name": shared}),
+    ):
+        red = cw.redact_secrets(root)
+        assert red["name"] == {"value": "sk-live-AAA"}, label  # benign hint: not masked
+        assert red["auth"] == {"value": cw.REDACTION_SENTINEL}, label  # secret hint: masked
+
+
 def test_redact_top_level_scalar_masked_by_key_hint() -> None:
     # A scalar redacted directly (not via a dict) under a secret-shaped key.
     assert cw.redact_secrets("sk-live", "api_token") == cw.REDACTION_SENTINEL
@@ -422,21 +528,162 @@ def test_load_frontmatter_yaml_accepts_a_non_recursive_alias() -> None:
     assert deep is not None  # deep but finite
 
 
-def test_load_frontmatter_yaml_does_not_blow_up_on_an_alias_pyramid() -> None:
-    # A billion-laughs header: no cycle, so it must be ACCEPTED -- but each alias multiplies
-    # the number of distinct paths, and a walk without a "fully explored" memo is O(paths).
-    # Measured before the memo: safe_load parses this 304-byte header in 0.7ms while the
-    # check took 1.64s, and a 424-byte one never finished. That runs at the WRITE seam,
-    # synchronously, in a threadpool slot, on attacker-supplied bytes. The bound below is
-    # ~4 orders of magnitude above the memoized cost (~20us), so it is not a timing flake.
-    lines = ["a0: &a0 x"]
-    for i in range(1, 8):
-        lines.append(f"a{i}: &a{i} [" + ",".join([f"*a{i - 1}"] * 8) + "]")
-    header = "\n".join(lines) + "\n"
+# --- #1393: a billion-laughs alias pyramid -----------------------------------------------
+#
+# The same anchor referenced many times per level is legal, ACYCLIC YAML, so the #1368 cycle
+# guard neither does nor should reject it -- but each level multiplies the number of distinct
+# paths to a node, so every unmemoized walk is exponential in the header's BYTE length. Two
+# consumers were: `_is_self_referential` (fixed with its `done` set when it was written) and
+# `redact_secrets`, which held an `asyncio.to_thread` worker on a GET for as long as it ran.
+#
+# Memoizing `redact_secrets` is necessary and not sufficient: the redacted view is then a DAG,
+# and `jsonable_encoder` + `json.dumps` on the route's response -- in the event loop, not a
+# worker -- expand it right back. Measured on this host: the 8x8 header below redacts in
+# 0.04ms and serializes to 101 MB in 0.5s; a 472-byte 10x9 one redacts in 0.05ms and does not
+# finish serializing. The expansion is inherent to the document, so the seam refuses it by
+# expanded SIZE, exactly as it refuses a cycle -- and, exactly as for a cycle, a file an
+# earlier release already wrote still reads back with `frontmatter` degraded to `{}`.
 
+
+def _alias_pyramid(*, levels: int, refs: int, leaf: str = "x") -> str:
+    """Build a `&a`/`*a` header of `levels` levels, each aliasing the one below `refs` times."""
+    lines = [f"a0: &a0 {leaf}"]
+    for i in range(1, levels + 1):
+        lines.append(f"a{i}: &a{i} [" + ",".join([f"*a{i - 1}"] * refs) + "]")
+    return "\n".join(lines) + "\n"
+
+
+def test_the_alias_pyramid_reproducer_is_a_positive_control() -> None:
+    """PIN: a few hundred bytes really do alias (not copy) into millions of values."""
+    header = _alias_pyramid(levels=8, refs=8)
+    assert len(header.encode()) < 400  # three orders of magnitude under every byte cap
+    value = yaml.safe_load(header)  # and `safe_load` itself never expands it
+    assert value["a8"][0] is value["a8"][1]  # one shared object per level, not 8 copies
+    assert cw._expands_beyond(value, 10_000_000)  # 21_913_116 characters from 346 bytes
+
+
+def test_load_frontmatter_yaml_accepts_an_alias_pyramid_that_stays_under_the_cap() -> None:
+    # Rejection is by expanded SIZE, never by alias count or depth: a pyramid whose expansion
+    # fits is ordinary YAML and must still be accepted. Getting there must also not cost
+    # O(distinct paths) -- measured before `_is_self_referential` grew its memo, an 8x8 header
+    # `safe_load` parses in 0.7ms took 1.64s to check. The bound below is orders of magnitude
+    # above the memoized cost, so it is not a timing flake.
+    header = _alias_pyramid(levels=6, refs=6)  # 67_198 characters, under MAX_EXPANDED_CHARS
     started = time.perf_counter()
-    assert cw.load_frontmatter_yaml(header, what="frontmatter") is not None
+    parsed = cw.load_frontmatter_yaml(header, what="frontmatter")
     assert time.perf_counter() - started < 0.5
+    assert parsed["a6"][0] is parsed["a6"][1]  # accepted WITH its aliases intact
+
+
+def test_load_frontmatter_yaml_rejects_an_alias_pyramid_that_expands_past_the_cap() -> None:
+    # Fail closed at the parse seam, the same shape as the cycle rejection: the write is
+    # refused, so such a document never reaches disk, and the message names nothing from the
+    # document (invariant 4 -- it reaches the browser as a skill's `frontmatter_error`).
+    header = _alias_pyramid(levels=8, refs=8)
+    started = time.perf_counter()
+    with pytest.raises(cw.InvalidCandidateError, match="expands past the .* character cap"):
+        cw.load_frontmatter_yaml(header, what="frontmatter")
+    assert time.perf_counter() - started < 0.5  # the guard short-circuits AT the cap
+
+
+def test_load_frontmatter_yaml_rejects_a_pyramid_whose_leaf_is_one_long_scalar() -> None:
+    # A cap on the number of VALUES is the wrong metric and this is the counterexample: a
+    # value's serialized length is not bounded, so a 30_000-character leaf aliased into a
+    # 6x6 pyramid's 46_656 slots is the same 67_198 values that the test above accepts -- and
+    # ~1.4 GB of JSON in the event loop. Both files are inside every byte cap, so this is a
+    # WRITE the tier would otherwise take, not only a file that arrived with a clone.
+    header = _alias_pyramid(levels=6, refs=6, leaf='"' + "A" * 30_000 + '"')
+    assert len(header.encode()) < config_write_subagents.MAX_BYTES  # accepted by the byte cap
+    with pytest.raises(cw.InvalidCandidateError, match="expands past the .* character cap"):
+        cw.load_frontmatter_yaml(header, what="frontmatter")
+
+
+def test_load_frontmatter_yaml_rejects_a_pyramid_whose_leaf_is_a_yaml_set() -> None:
+    # `safe_load` builds a `set` for `!!set`, and `jsonable_encoder` emits one JSON entry per
+    # member -- so a set counted as a single scalar is the same bypass as the long string.
+    # `_is_self_referential` is right to leave sets out (a set holds only hashables, so it
+    # cannot carry a cycle); a SIZE check is the opposite case and must walk them.
+    members = "\n".join(f"  k{i:04d}:" for i in range(1_000))
+    header = f"s: &s !!set\n{members}\n" + "\n".join(
+        f"a{i}: &a{i} [" + ",".join([f"*{'s' if i == 1 else f'a{i - 1}'}"] * 6) + "]"
+        for i in range(1, 7)
+    )
+    parsed = yaml.safe_load(header)
+    assert isinstance(parsed["s"], set) and len(parsed["s"]) == 1_000  # positive control
+    with pytest.raises(cw.InvalidCandidateError, match="expands past the .* character cap"):
+        cw.load_frontmatter_yaml(header, what="frontmatter")
+
+
+def test_load_frontmatter_yaml_accepts_a_huge_alias_free_hex_integer() -> None:
+    # The cap's whole claim is that it fires on alias AMPLIFICATION and never on an alias-free
+    # document, and a hex integer is the densest alias-free expansion there is: `safe_load`
+    # turns 65_500 hex digits into ~78_900 decimal ones. Counting an int's BITS -- the first
+    # attempt -- over-stated that by 3.3x (262_000) and rejected this header, which carries no
+    # alias at all. `safe_load` itself refuses the same value spelled in decimal (CPython caps
+    # int(str) at 4300 digits), so hex is the only spelling that gets this far.
+    # DELIBERATE, not an oversight: this header is accepted here and still 500s further down,
+    # where `json.dumps` refuses an int of that many digits. That failure pre-dates this guard
+    # and has nothing to do with aliases -- it is issue #1415, with `.nan` and a non-UTF-8
+    # `!!binary`. Do not "fix" it by turning this assertion into a rejection: the size cap must
+    # keep accepting an alias-free document, and #1415 is where that 500 gets closed.
+    header = "n: 0x" + "f" * 65_500 + "\n"
+    assert len(header.encode()) < config_write_subagents.MAX_BYTES
+    assert cw.load_frontmatter_yaml(header, what="frontmatter")["n"].bit_length() == 262_000
+
+
+def test_byte_caps_stay_under_the_expansion_cap() -> None:
+    # The two constants are COUPLED and the coupling is invisible from either side, so this is
+    # the gate rather than a comment. `MAX_EXPANDED_CHARS` claims it can only fire on alias
+    # AMPLIFICATION, never on an alias-free document -- but the densest alias-free expansion
+    # measured is a `!!timestamp` at 2.909x (`2001-12-14,` is 11 source bytes and 32 counted
+    # characters). At the 64 KiB file cap that is 190_625, inside the cap by 1.31x, NOT by the
+    # order of magnitude the byte figures suggest. 3x here is the measured ceiling rounded up.
+    # Raising a file cap to 128 KiB reads as safe and is not: it would put an alias-free header
+    # at 381k and have the guard reject it. Raise `MAX_EXPANDED_CHARS` in the same PR.
+    for label, byte_cap in (
+        ("subagent", config_write_subagents.MAX_BYTES),
+        ("skill SKILL.md", config_write_skills.MAX_SKILL_MD_BYTES),
+    ):
+        assert byte_cap * 3 < cw.MAX_EXPANDED_CHARS, label
+    # The `byte_cap * 3` line above is necessary and NOT sufficient, so each scalar kind that
+    # could beat 2.909x is also filled to the byte cap and measured against the real cap. A
+    # float is the one that made this necessary: counting it as a flat `_TIMESTAMP_CHARS`
+    # rather than by its own repr puts `1.` at 10.67x -- 698_915 characters for a 64 KiB
+    # alias-free header -- while the 3x line above still passes. Densest first.
+    for label, item, count in (
+        ("timestamps", "2001-12-14", 5_957),  # 2.909x, the ceiling
+        ("short floats", "1.", 21_841),  # 1.0x by repr; 10.67x under a flat 32
+        ("hex ints", "0xffff", 9_361),  # 1.204x
+        ("strings", "aaaaaaaaaa", 5_957),  # 1.0x
+    ):
+        filled = "d: [" + ",".join([item] * count) + "]\n"
+        assert len(filled.encode()) < config_write_subagents.MAX_BYTES, label
+        assert not cw._expands_beyond(yaml.safe_load(filled), cw.MAX_EXPANDED_CHARS), label
+
+
+def test_expands_beyond_counts_a_diamond_once_and_sizes_scalars_by_length() -> None:
+    # The memo is what keeps the walk linear, and it must not turn a diamond -- the same
+    # object under two keys -- into a double count that rejects an ordinary document. Every
+    # container `safe_load` builds is walked (`!!omap` makes tuples, `!!set` makes sets), and
+    # a dict's KEYS count too: the serializer emits them at every alias slot as well.
+    shared = ["x", "y", "z"]
+    assert not cw._expands_beyond({"a": shared, "b": shared}, 11)  # 1 + 2 keys + 2x(1+3) = 11
+    assert cw._expands_beyond({"a": shared, "b": shared}, 10)
+    assert not cw._expands_beyond("scalar", 0)  # a non-container is not walked at all
+    assert cw._expands_beyond({"t": ("x", "y", "z")}, 5)  # 1 + 1 + (1+3) = 6, via a tuple
+    assert cw._expands_beyond({"s": {"x", "y", "z"}}, 5)  # ...and the same via a set
+    assert cw._expands_beyond({"k": "A" * 50}, 51)  # a string costs its LENGTH, not one
+    assert cw._expands_beyond({"k": 10**60}, 51)  # ...and an int its 61 decimal digits
+    assert not cw._expands_beyond({"k": 10**60}, 63)  # 1 + 1 + 61 = 63, never OVER-counted
+    assert not cw._expands_beyond({"n": None, "b": True}, 5)  # 1 + 2 keys + 1 + 1 = 5
+    # A `!!timestamp` is the longest bounded repr and is counted, not defaulted: at one
+    # character each, a 500-byte pyramid of timestamp leaves was an accepted 4 MB response.
+    assert cw._expands_beyond({"t": datetime.date(2001, 12, 14)}, 33)  # 1 + 1 + 32 = 34
+    # A float is counted by its OWN repr, not by the timestamp constant. Its source spelling
+    # can be far shorter than a timestamp's, so a flat 32 would over-count an alias-free
+    # document -- see the ceiling assertion in test_byte_caps_stay_under_the_expansion_cap.
+    assert cw._expands_beyond({"f": 1.7976931348623157e308}, 24)  # 1 + 1 + 23 = 25
+    assert not cw._expands_beyond({"f": 1.0}, 5)  # 1 + 1 + len("1.0") = 5, not 34
 
 
 # --- #1369: a YAMLError's prose must not echo the offending token -------------------------
