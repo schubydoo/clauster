@@ -2571,14 +2571,17 @@ user under systemd) does not own the state directory (default <code>~/.clauster<
 service</a>.</p>
 <h3 id="no-config-found-invalid-config">"no config found" / "invalid config"<a class="headerlink" href="#no-config-found-invalid-config" title="Permanent link">&para;</a></h3>
 <p><strong>What you see:</strong> <code>doctor</code> fails the <code>config</code> row with one of three details —
-<code>no config found: ...</code>, <code>invalid config: ...</code>, or <code>config is not valid YAML: ...</code>
-— and most other verbs exit <code>2</code> with a one-line <code>clauster: config error:</code>
-message. Three behave differently: <code>doctor</code> itself exits <code>1</code> with the table
-above, <code>clauster run</code> with no config at all opens the setup wizard rather than
-failing, and <code>install-service</code> still renders a unit using defaults.</p>
+<code>no config found: ...</code>, <code>invalid config: ...</code>, or <code>config is not valid YAML
+...</code> — and most other verbs exit <code>2</code> with a <code>clauster: config error:</code> message.
+That message carries the raw parser or validation error, except for the two
+fixed verdicts in the table below. Three verbs behave differently: <code>doctor</code>
+itself exits <code>1</code> with the table above, <code>clauster run</code> with no config at all
+opens the setup wizard rather than failing, and <code>install-service</code> still renders
+a unit using defaults.</p>
 <p><strong>Most likely cause:</strong> no <code>clauster.yml</code> where Clauster looks for one, or a
 mistake inside it. The three details separate the cases, which is what tells you
-where to look:</p>
+where to look. <code>config is not valid YAML</code> covers two rows below. One row carries
+a position. The other states a fixed verdict:</p>
 <table>
 <thead>
 <tr>
@@ -2594,19 +2597,36 @@ where to look:</p>
 <td>The search order</td>
 </tr>
 <tr>
-<td><code>config is not valid YAML</code></td>
+<td><code>config is not valid YAML (...)</code></td>
 <td>The file does not parse — a stray tab, an unclosed quote</td>
-<td>A line and column</td>
+<td>The error's class, plus a line and column. When the parser knows where the construct opened, a second position follows. A control character gives a character offset instead</td>
+</tr>
+<tr>
+<td><code>config is not valid YAML: ...</code></td>
+<td>A value no type can be built from (<code>a: 2020-13-45</code>), or a file nested too deep</td>
+<td>A fixed sentence, with no position. The rejected value is withheld (see below)</td>
 </tr>
 <tr>
 <td><code>invalid config</code></td>
 <td>The file parses but a value is rejected</td>
-<td>The offending key — or, for a root that is not a mapping, only the file</td>
+<td>One <code>key.path: reason</code> entry per rejected key — or, for a root that is not a mapping, the root's type and the file</td>
 </tr>
 </tbody>
 </table>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a>clauster<span class="w"> </span>doctor<span class="w"> </span>-c<span class="w"> </span>/path/to/clauster.yml<span class="w">   </span><span class="c1"># same file the service uses</span>
 </code></pre></div>
+<p><strong>The detail points at the fault. It never echoes the offending source line, and
+never the whole parsed mapping.</strong> The dashboard serves these same rows over
+<code>/api/doctor</code>. A <code>clauster.yml</code> whose <code>auth.token</code> line is the broken one would
+otherwise put that token in the browser. That is also why <code>a: 2020-13-45</code>
+reports a fixed sentence, not "month must be in 1..12". The same code path
+produces <code>invalid literal for int() with base 10: '&lt;your token&gt;'</code>, and nothing
+there can tell the two apart. A validator that rejects a path still names that
+path. Open the file at the reported line to read the offending text.</p>
+<p>⚠️ <strong>The guarantee covers the <code>doctor</code> detail, which the browser can reach. It
+does not cover the CLI.</strong> <code>clauster: config error:</code> goes to the terminal and the
+service log of the host that holds the file, and it still quotes the offending
+line and the parsed mapping.</p>
 <p><strong>Mechanism:</strong> <a href="../guides/configuration/#loading-overrides">Configuration — loading &amp;
 overrides</a>.</p>
 <h3 id="database-migration-failed-refusing-to-start">"database migration failed; refusing to start"<a class="headerlink" href="#database-migration-failed-refusing-to-start" title="Permanent link">&para;</a></h3>
@@ -2862,7 +2882,7 @@ present in every run:</p>
 <tr>
 <td><code>config</code></td>
 <td><code>clauster.yml</code> found and valid</td>
-<td><code>no config found: ...</code> / <code>config is not valid YAML: ...</code> / <code>invalid config: ...</code></td>
+<td><code>no config found: ...</code> / <code>config is not valid YAML ...</code> / <code>invalid config: ...</code> (the "no config found" section above breaks these down)</td>
 </tr>
 <tr>
 <td><code>claude</code></td>
