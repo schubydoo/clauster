@@ -80,7 +80,15 @@ class KeyedJsonStore:
             return {}
         try:
             data = json.loads(raw)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
+            # Two parse failures are NOT JSONDecodeError: a *bare* ValueError from the
+            # base-10 integer-string-conversion limit (CVE-2020-10735), on by default
+            # for a >4300-digit int literal on every supported interpreter (>=3.11), and
+            # RecursionError, which is not a ValueError at all — CPython’s recursive
+            # scanner overflows on deeply-nested JSON before json can raise. Both used
+            # to escape and propagate; this store is read at startup, so that took the
+            # app down instead of degrading. `pointers.load_pointer` and `usage` catch
+            # the same pair. No `OSError` here: the read is its own try above.
             return {}
         if not isinstance(data, dict):
             return {}
