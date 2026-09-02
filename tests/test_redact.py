@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import bisect
+import random
+import re
 import time
 
 import pytest
@@ -90,7 +93,10 @@ def test_redact_for_disk_never_swallows_lines_past_a_stray_osc_introducer():
     out = redact.redact_for_disk(chunk)
     assert "line2 important" in out
     assert "line3 bell" in out
-    assert out == "line1 stray\nline2 important\nline3 bell\x07 tail\nline4\n"
+    # The stray BEL itself is now cut from the redaction view (#1370) — it renders as
+    # nothing, so keeping it only hid an identifier split across it. CR/LF are never cut,
+    # so the line structure this test guards is unchanged.
+    assert out == "line1 stray\nline2 important\nline3 bell tail\nline4\n"
 
 
 def test_redact_ids_keeps_prefix():
@@ -220,3 +226,452 @@ def test_sanitize_redacts_secret_split_by_ansi_even_when_strip_disabled():
     assert "env_01ABCDEFGHIJKLMNOP" not in out
     assert "env_<redacted>" in out
     assert "\x1b" not in out  # fell back to the safe stripped form for this line
+
+
+# ---------------------------------------------------------------------------
+# #1379 / #1344 / #1370 — the escape-weld + control-char-split family.
+#
+# `strip_ansi` removes a sequence and leaves no trace of WHERE it was, so after
+# stripping a welded id (`user<ESC>[32menv_<ULID>`) is byte-identical to legitimate
+# compound text (`userenv_production`). The fix records the cut offsets and re-tries the
+# masks anchored at each one. These pin both directions: the weld/split shapes must mask,
+# and text with no escapes must be byte-identical to what main produced.
+# ---------------------------------------------------------------------------
+
+_ULID = "01ABCDEFGHJKMNPQRSTVWXYZ01"
+
+
+@pytest.mark.parametrize(
+    ("shape", "line"),
+    [
+        # The one that leaks on main through the single most common escape there is.
+        ("csi weld", f"agent\x1b[32menv_{_ULID}\x1b[0m done"),
+        ("dcs weld", f"user\x1bPq junk\x07env_{_ULID} x"),
+        ("sos weld", f"user\x1bXsos\x07env_{_ULID} x"),
+        ("pm weld", f"user\x1b^pm\x1b\\env_{_ULID} x"),
+        ("apc weld", f"user\x1b_apc\x07env_{_ULID} x"),
+        ("osc 8 hyperlink weld", f"a\x1b]8;;https://e/x\x07env_{_ULID}\x1b]8;;\x07 b"),
+        ("bare C0 weld, no ESC", f"user\x07env_{_ULID} x"),
+        ("DEL weld", f"user\x7fenv_{_ULID} x"),
+        ("lone ESC weld", f"user\x1benv_{_ULID} x"),
+        ("8-bit C1 weld", f"user\x9benv_{_ULID} x"),
+        ("nested sequences", f"a\x1b[1m\x1b]0;title\x07env_{_ULID} x"),
+        ("adjacent sequences", f"a\x1b[1m\x1b[32menv_{_ULID} x"),
+        # Split shapes: the id's own start is still a real word boundary, but the
+        # control char inside it used to break the {6,} run into two short fragments.
+        ("csi split", "env_01ABCDEFG\x1b[0mHIJKLMNOP tail"),
+        ("bare C0 split, no ESC (#1370)", "env_01AB\x07CDEFGH"),
+        ("8-bit C1 split", "env_01AB\x9bCDEFGH"),
+        # Two sequences in opposite directions on one token: one welds the start away,
+        # the other splits the body.
+        ("weld + split", "a\x1b[32menv_01ABCDEFG\x1b[0mHIJKLMNOP tail"),
+    ],
+)
+def test_sanitize_line_masks_a_welded_or_split_identifier(shape, line):
+    out = redact.sanitize_line(line)
+    assert "env_<redacted>" in out, shape
+    assert _ULID not in out and "01ABCDEFG" not in out, shape
+
+
+@pytest.mark.parametrize(
+    ("shape", "line", "gone"),
+    [
+        ("uuid weld", "user\x1b[32m2d783407-cd32-4951-bba5-47fd9b82b8dc x", "2d783407"),
+        ("ghp weld", "user\x1b[32mghp_abcdefghijklmnopqrstuvwxyz0123 x", "ghp_abcdef"),
+        ("AKIA split", "AKIAIOSF\x07ODNN7EXAMPLE x", "AKIAIOSF"),
+        ("bearer weld", "hdr:\x1b[1mBearer abcdef0123456789xyz x", "abcdef0123456789xyz"),
+    ],
+)
+def test_sanitize_line_masks_a_welded_or_split_uuid_or_secret(shape, line, gone):
+    # The cut-anchored pass covers every mask in the module, not only `_ID_RE` — a UUID or
+    # a listed token shape welded by an escape is the same bug with a different pattern.
+    out = redact.sanitize_line(line)
+    assert "<redacted>" in out, shape
+    assert gone not in out, shape
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "userenv_production is fine",  # the documented residue: no escape, no cut
+        "myenv_foobarbaz ran",
+        "a normal INFO line with no escapes at all",
+        "path/to/xcse_foobarbaz.log",
+    ],
+)
+def test_no_escape_means_byte_identical_output(text):
+    # The regression bound: with no escapes there are no cuts, so the cut-anchored pass is
+    # the identity and the output is exactly what the `\b`-anchored masks alone produce.
+    # This is also what rules out the over-masking of the rejected unanchored re-scan.
+    assert redact.sanitize_line(text) == redact.redact_secrets(redact.redact_ids(text))
+    assert redact.sanitize_line(text) == text
+
+
+def test_a_cut_inside_an_already_masked_span_is_not_re_scanned():
+    # Two cuts land inside one identifier: the first anchors the mask, the second falls
+    # inside the span it consumed. Re-scanning from there would emit a second, overlapping
+    # replacement and corrupt the line, so later cuts inside a masked span are skipped.
+    line = "user\x1b[32menv_01ABCDEF\x1b[0mGHIJKLMN\x1b[0mOPQRST tail"
+    out = redact.sanitize_line(line)
+    assert out == "userenv_<redacted> tail"
+
+
+def test_a_second_welded_identifier_after_a_cut_bounded_span_is_masked():
+    # Only a span that ended at a real `\b` may skip the cuts inside it. Here `session_AAAcse`
+    # fullmatches to the cut before `_` (no real trailing `\b`), and `cse_AAAAAA` is welded to
+    # start at an interior cut. Skipping past a cut-bounded span dropped the `cse` mask and
+    # streamed its core `AAAAAA` — a reachable identifier left partly readable (#1379).
+    out = redact.sanitize_line("x\x1b[msession_AAA\x1b[mcse\x1b[m_AAAAAA z")
+    assert "AAAAAA" not in out
+    assert out == "xsession_<redacted><redacted> z"
+
+
+def test_strip_ansi_removes_the_c1_string_sequences_whole():
+    # #1344: DCS/SOS/PM/APC lost only their two-character introducer, so the payload
+    # reached the stream as readable junk exactly as OSC did before #1329.
+    for sequence in (
+        "\x1bPq payload\x1b\\",
+        "\x1bXpayload\x07",
+        "\x1b^payload\x1b\\",
+        "\x1b_payload\x07",
+    ):
+        assert redact.strip_ansi(f"before {sequence}after") == "before after"
+
+
+def test_strip_ansi_keeps_an_unterminated_c1_string_payload():
+    # Same discipline as the unterminated OSC: with no terminator there is no sequence to
+    # remove, so only the two-character introducer goes.
+    assert redact.strip_ansi("\x1bPq never terminated") == "q never terminated"
+
+
+def test_strip_ansi_is_linear_on_the_c1_string_introducers():
+    # The #1329 ReDoS guard, re-run over the introducers #1344 added to the same branch.
+    hostile = "\x1b_" * 20_000
+    start = time.monotonic()
+    assert redact.strip_ansi(hostile) == ""
+    assert time.monotonic() - start < 1.0
+
+
+def test_strip_ansi_leaves_bare_control_characters_alone():
+    # `strip_ansi` is the DISPLAY strip other modules scan against (pty_screen,
+    # login_shepherd). Only the redaction view removes invisible controls, so widening
+    # this one would silently change what those scanners see.
+    assert redact.strip_ansi("a\x07b\x9bc\x7fd") == "a\x07b\x9bc\x7fd"
+
+
+def test_views_report_ascending_deduplicated_cuts():
+    # The cut offsets are positions in the VISIBLE view, ascending, with adjacent sequences
+    # collapsing to one cut — anchoring twice at the same offset is wasted work. Cuts from
+    # the escape strip and from the invisible-control strip land in one sorted tuple.
+    stripped, visible, cuts, _ = redact._views("ab\x1b[1m\x1b[32mcd\x07ef")
+    assert stripped == "abcd\x07ef"
+    assert visible == "abcdef"
+    assert cuts == (2, 4)
+    assert redact._views("no escapes here")[2] == ()
+
+
+def test_redact_for_disk_keeps_line_structure_while_cutting_invisible_controls():
+    # CR/LF and TAB are visible separators and are never cut, so the multi-line chunk this
+    # feeds (the public log mirror, `error_detail`) keeps its shape while a welded id in it
+    # is still masked.
+    chunk = f"col1\tcol2\r\nrow \x1b[32menv_{_ULID}\x1b[0m\r\ntail\n"
+    out = redact.redact_for_disk(chunk)
+    assert out == "col1\tcol2\r\nrow env_<redacted>\r\ntail\n"
+
+
+def test_sanitize_line_falls_back_when_a_weld_only_shows_in_the_stripped_view():
+    # With ANSI stripping disabled the colored line is kept only if it is provably as
+    # redacted as the rendered view. A weld is invisible to the colored pass (`\b` still
+    # holds around the escape), so the guard must fall back rather than stream the id.
+    out = redact.sanitize_line(f"agent\x1b[32menv_{_ULID}\x1b[0m done", strip_ansi_seq=False)
+    assert _ULID not in out
+    assert "env_<redacted>" in out
+    assert "\x1b" not in out
+
+
+def test_cut_masks_cannot_drift_from_the_anchored_ones():
+    # Each mask is written once as a bare core and compiled three ways: `\b`core`\b` for the
+    # base passes, core`\b` for a cut-supplied start, core alone for cut-supplied ends. If a
+    # future edit adds a shape to only one tuple, this fails rather than leaving a welded
+    # instance of that shape unmasked.
+    expected = [redact._ID_RE, redact._UUID_RE, *redact._SECRET_RES]
+    assert len(expected) == len(redact._MASKS)
+    for wanted, (anchored, opened, closed, _kp, _sr) in zip(expected, redact._MASKS, strict=True):
+        assert anchored is wanted
+        assert anchored.pattern == rf"\b{opened.pattern}\b"
+        assert closed.pattern == rf"{opened.pattern}\b"
+        assert anchored.flags == opened.flags == closed.flags
+
+
+def test_single_run_flag_excludes_the_fixed_and_whitespace_cores():
+    # `single_run` marks a core `_cut_spans` may mask a whole run of and skip. It MUST be
+    # False for the fixed-length cores (a second match can start inside one run and end past
+    # it) and for bearer (internal whitespace lets a match resume past the run) — #1379.
+    single = {opened.pattern: sr for _a, opened, _c, _kp, sr in redact._MASKS}
+    assert single[redact._UUID_CORE] is False
+    assert single[r"AKIA[0-9A-Z]{16}"] is False
+    assert single[r"bearer\s+[A-Za-z0-9._-]{12,}"] is False
+    assert single[redact._ID_CORE] is True
+    assert single[r"sk-[A-Za-z0-9_-]{16,}"] is True
+
+
+@pytest.mark.parametrize(
+    ("shape", "line"),
+    [
+        # A cut deletes the boundary that USED to END the identifier just as effectively as
+        # the one before it: every mask ends in `\b`, so `session_<ULID><BEL>_x` was masked
+        # before this change and the joined `session_<ULID>_x` is not. Covering only the
+        # leading side would have made the fix itself introduce a leak — found by
+        # `fuzz/redact_fuzzer.py`'s render oracle, not by review.
+        ("bare C0 before an underscore", "session_01ABCDEF\x07_x"),
+        ("OSC before an underscore", "env_01ABCDEFGH\x1b]0;t\x07_x"),
+        ("weld at the start AND at the end", "u\x1b[1menv_01ABCDEFGH\x07_x"),
+        ("split, then a weld at the end", "env_01AB\x07CDEFGH\x07_x"),
+    ],
+)
+def test_a_cut_also_supplies_the_trailing_boundary(shape, line):
+    out = redact.sanitize_line(line)
+    assert "01ABCDEF" not in out, shape
+    assert "env_<redacted>" in out or "session_<redacted>" in out, shape
+
+
+def test_masking_never_drops_below_the_pre_change_pipeline():
+    # The parity property as a test rather than a comment: the third span source in `_mask`
+    # is the old strip-then-mask view, so whatever it masked is still masked. This is the
+    # exact line the fuzzer caught the fix regressing.
+    line = "session_01ABCDEF\x07_x"
+    assert "<redacted>" in redact.redact_secrets(redact.redact_ids(redact.strip_ansi(line)))
+    assert "<redacted>" in redact.sanitize_line(line)
+
+
+def test_an_identifier_the_attacker_wrote_mid_token_is_documented_residue():
+    # The residue `_sanitize` states: the id's start is neither a word boundary nor a cut,
+    # so nothing distinguishes it from ordinary compound text. Escapes elsewhere on the line
+    # do not manufacture a boundary for it.
+    out = redact.sanitize_line("\x1b[32mprefix\x1b[0m userenv_01ABCDEFGHIJ tail")
+    assert out == "prefix userenv_01ABCDEFGHIJ tail"
+
+
+def test_sanitize_line_is_linear_in_the_number_of_cuts():
+    # The cut machinery adds a second scan and a bisect per mask. Both are linear, but the
+    # obvious alternative — walking back from each cut to find a match that ends there —
+    # is quadratic when one long token holds thousands of cuts, which is trivial for a
+    # bridge to emit. Measured ~0.15s for this N and growing 2x per doubling; the bound is
+    # loose enough not to flake on a slow CI runner but tight enough to fail a quadratic
+    # regression, and small enough that it fails the assert rather than tripping the
+    # suite-wide `--timeout` (which kills the whole xdist worker).
+    hostile = ("env_01ABCDEFGH\x07" + "x" * 10) * 20_000
+    start = time.monotonic()
+    redact.sanitize_line(hostile)
+    assert time.monotonic() - start < 5.0
+
+
+@pytest.mark.parametrize(
+    ("shape", "line", "expected"),
+    [
+        # Welded at the start, but the run then continues into a longer token with no cut
+        # to end it: the trailing `\b` fails and no cut can stand in for it, so this stays
+        # residue rather than masking a prefix of somebody's compound word.
+        ("no usable cut end", "a\x1b[1menv_01ABCDEFGH_x", "aenv_01ABCDEFGH_x"),
+        # A cut IS in range this time, but the run it would end is only two characters
+        # long — below the mask's `{6,}` — so shrinking to it does not produce an
+        # identifier either.
+        ("cut end too short", "a\x1b[1menv_01\x07CDEFGH_x", "aenv_01CDEFGH_x"),
+    ],
+)
+def test_a_cut_start_without_a_usable_end_masks_nothing(shape, line, expected):
+    assert redact.sanitize_line(line) == expected, shape
+
+
+def _legacy(text: str) -> str:
+    """The pre-#1379 pipeline, as the visible text it produced."""
+    return redact._INVISIBLE_RE.sub(
+        "", redact.redact_secrets(redact.redact_ids(redact.strip_ansi(text)))
+    )
+
+
+@pytest.mark.parametrize(
+    ("shape", "line", "canary"),
+    [
+        # A short id span landing INSIDE a long token span. Resolving the overlap by
+        # dropping the long span left everything past the id unmasked — masking LESS than
+        # the pipeline this replaces, which is the one thing the design must never do.
+        # `_apply_spans` clips instead, so both are covered.
+        (
+            "id nested in a longer token",
+            "clauster_pat_" + "H" * 16 + "\x1b[menv_AAAAAA-Xenv_BBBBBB",
+            "env_BBBBBB",
+        ),
+        (
+            "token grown across a cut",
+            "ghp_" + "A" * 16 + "\x0cglpat-" + "B" * 16,
+            "B" * 16,
+        ),
+    ],
+)
+def test_an_overlapping_span_is_clipped_not_dropped(shape, line, canary):
+    assert canary not in _legacy(line), f"{shape}: the control is not a parity case"
+    assert canary not in redact.sanitize_line(line), shape
+
+
+#: Tokens split on every character no mask can span, so a leak inside a longer run of
+#: punctuation-joined text is still seen. A coarser split hides exactly the defect these
+#: pin: the leaked `env_BBBBBB` above sits inside one `-`-joined 50-character token.
+_TOKEN_RE = re.compile(r"[A-Za-z0-9_]{6,}")
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "clauster_pat_" + "H" * 16 + "\x1b[menv_AAAAAA-Xenv_BBBBBB",
+        "\x1b[32menv_01ABCDEFGH\x1b[0m and session_01ZZZZZZZZ\x07_tail",
+        "Bearer " + "J" * 20 + "\x1b]0;t\x07AKIAIOSFODNN7EXAMPLE",
+        "user\x9b2d783407-cd32-4951-bba5-47fd9b82b8dc\x7fsk-abcdefghijklmnop0123456789",
+        "\x1bPq p\x1b\\ghp_abcdefghijklmnopqrstuvwxyz0123\x00xoxb-0123456789-abcdefABCDEF",
+    ],
+)
+def test_sanitize_line_never_masks_less_than_the_pipeline_it_replaces(line):
+    # The parity floor, stated as a property: the fourth span source in `_sanitize` is the
+    # old strip-then-mask view, so every token that pipeline removed is still removed. The
+    # same property held over 400,000 randomly assembled lines while this was written.
+    old = _legacy(line)
+    new = redact.sanitize_line(line)
+    for token in _TOKEN_RE.findall(redact._INVISIBLE_RE.sub("", redact.strip_ansi(line))):
+        if token not in old:
+            assert token not in new, f"{token!r} was masked before this change and is not now"
+
+
+def test_a_cut_at_every_greedy_match_start_stays_linear():
+    # Each cut anchors a match, and `sk-[A-Za-z0-9_-]{16,}` is greedy, so without the
+    # already-covered skip in `_cut_spans` every cut scans to the end of the input: 640 KB
+    # of this shape took 8.3 seconds. `redact_for_disk` is handed a whole bridge log
+    # (`bridge_log_max_size_mb`, 10 MB by default), so the input size is the bridge's to
+    # choose. Measured ~0.2s for this N and growing 2x per doubling.
+    hostile = ("\x01sk-" + "A" * 16) * 40_000
+    start = time.monotonic()
+    redact.sanitize_line(hostile)
+    assert time.monotonic() - start < 5.0
+
+
+def _cut_spans_anchoring_every_cut(visible, cuts, opened, closed, keeps_prefix, _single_run):
+    """Reference `_cut_spans` with no already-covered skip: anchor at every cut in turn."""
+    spans = []
+    for cut in cuts:
+        hit = closed.match(visible, cut)
+        if hit is not None:
+            spans.append(redact._span(hit, hit.end(), keeps_prefix))
+            continue
+        loose = opened.match(visible, cut)
+        if loose is None:
+            continue
+        candidate = bisect.bisect_right(cuts, loose.end()) - 1
+        if candidate < 0 or cuts[candidate] <= cut:
+            continue
+        hit = opened.fullmatch(visible, cut, cuts[candidate])
+        if hit is not None:
+            spans.append(redact._span(hit, cuts[candidate], keeps_prefix))
+    return spans
+
+
+def _mask_coverage(cut_spans_fn, text):
+    """Return the bytearray of visible offsets any mask span covers, using `cut_spans_fn`."""
+    _stripped, visible, cuts, invisible = redact._views(text)
+    covered = bytearray(len(visible))
+    for anchored, opened, closed, keeps_prefix, single_run in redact._MASKS:
+        spans = [redact._span(m, m.end(), keeps_prefix) for m in anchored.finditer(visible)]
+        spans += cut_spans_fn(visible, cuts, opened, closed, keeps_prefix, single_run)
+        spans += redact._trailing_cut_spans(visible, cuts, opened, keeps_prefix)
+        spans += [
+            (redact._map_offset(m.start(), invisible), redact._map_offset(m.end(), invisible), "")
+            for m in anchored.finditer(_stripped)
+        ]
+        for start, end, _replacement in spans:
+            covered[start:end] = b"\x01" * (end - start)
+    return covered
+
+
+def _never_masks_less(line):
+    """Assert production covers every character anchoring at every cut would (no under-mask)."""
+    reference = _mask_coverage(_cut_spans_anchoring_every_cut, line)
+    production = _mask_coverage(redact._cut_spans, line)
+    assert len(reference) == len(production)
+    missed = [i for i, (r, p) in enumerate(zip(reference, production, strict=True)) if r and not p]
+    assert not missed, f"production masks less at {missed} for {line!r}"
+
+
+# Deterministic reproducers, each a cut-bounded run whose interior cut starts a second welded
+# identifier the buggy `reach` skip dropped. The first three are the `session_AAAcse` fullmatch
+# family; the fourth is the `closed`-backtrack family a `-`-bearing class exposes; the fifth is
+# the fixed-length family (two UUIDs sharing eight hex digits, welded), where `opened`'s end is
+# not the class-run end so a whole-run mask must NOT be used.
+_REACH_UNDERMASK_LINES = [
+    "x\x1b[msession_AAA\x1b[mcse\x1b[m_AAAAAA z",
+    "\x1b[msession_AAA\x1b[mcse\x1b[m_BBBBBB\x1b[menv_CCCCCC ",
+    "u\x01session_AAA\x01cse\x01_DDDDDD\x01env_EEEEEE tail",
+    "Z\x1b[mxoxb-" + "A" * 10 + "-\x1b[mxoxb-" + "B" * 10 + "\x1b[m_x",
+    "\x1b[2maaaaaaaa-bbbb-cccc-dddd-abcd\x1b[0m2d783407-cd32-4951-bba5-47fd9b82b8dc",
+]
+
+
+@pytest.mark.parametrize("line", _REACH_UNDERMASK_LINES)
+def test_reach_skip_deterministic_undermask_shapes(line):
+    # The `reach` skip must never mask less than anchoring at every cut would.
+    _never_masks_less(line)
+
+
+def test_reach_skip_backtracked_boundary_does_not_drop_a_second_token():
+    # `closed` for a `-`-bearing class backtracks its trailing `\b` onto an interior `-`, which
+    # is NOT a hard stop. Masking only to there and skipping past dropped the second welded
+    # `xoxb-` token and streamed its body (#1379 review). The fix masks the whole greedy run.
+    out = redact.sanitize_line("Z\x1b[mxoxb-" + "A" * 10 + "-\x1b[mxoxb-" + "B" * 10 + "\x1b[m_x")
+    assert "BBBBBBBBBB" not in out
+
+
+def test_reach_skip_does_not_whole_run_mask_a_fixed_length_uuid():
+    # A UUID is fixed-length with interior `-`, so `opened`'s end is the pattern end, not the
+    # class-run end: a second UUID that shares eight hex digits starts inside the first and ends
+    # past it. Whole-run masking would skip its cut and stream 28 of its 36 characters. The
+    # `single_run` flag keeps the UUID mask precise (#1379 review).
+    real = "2d783407-cd32-4951-bba5-47fd9b82b8dc"
+    out = redact.sanitize_line(f"\x1b[2maaaaaaaa-bbbb-cccc-dddd-abcd\x1b[0m{real}")
+    assert "cd32-4951-bba5-47fd9b82b8dc" not in out
+
+
+@pytest.mark.parametrize("seed", range(400))
+def test_reach_skip_never_masks_less_than_anchoring_at_every_cut(seed):
+    # The `reach` skip in `_cut_spans` must never mask less than anchoring at every cut. It may
+    # mask MORE (masking a whole greedy run over-masks a trailing `-`), so this asserts the
+    # coverage is a superset, not equality. This diff'd zero over millions of assembled lines
+    # while the fix was written; 400 with `-`/whitespace/uuid shapes guard the class in CI.
+    rng = random.Random(seed)  # noqa: S311 — assembling test fixtures, not crypto
+    esc = ["\x1b[m", "\x1b[32m", "\x1bPq\x1b\\", "\x1b_x\x07", "\x07", "\x01", "\x1f", "\r\n", ""]
+    tok = [
+        "session_AAA",
+        "cse",
+        "env",
+        "session",
+        "_AAAAAA",
+        "_BBBBBB",
+        "-",
+        "_",
+        "_x",
+        " ",
+        "env_AAAAAA",
+        "session_CCCCCC",
+        "cse_DDDDDD",
+        "sk-ABCDEFGHIJKLMNOP",
+        "xoxb-AAAAAAAAAA",
+        "glpat-CCCCCCCCCCCCCCCC",
+        "bearer DDDDDDDDDDDDDDDDDDDD",
+        "clauster_pat_EEEEEEEEEEEEEEEE",
+        "2d783407-cd32-4951-bba5-47fd9b82b8dc",
+        "AKIAIOSFODNN7EXAMPLE",
+        # UUID fragments, so assembly can weld two UUIDs that share hex digits.
+        "aaaaaaaa-bbbb-cccc-dddd-",
+        "2d783407",
+        "abcd",
+        "x",
+        "",
+    ]
+    line = "".join(rng.choice(esc) + rng.choice(tok) for _ in range(rng.randint(3, 9)))
+    _never_masks_less(line)

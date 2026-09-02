@@ -238,6 +238,46 @@ def test_extract_url_survives_an_osc_title_sequence() -> None:
     assert ls._extract_authorize_url(out) == "https://claude.ai/oauth/authorize?real=1"
 
 
+@pytest.mark.parametrize(
+    ("name", "sequence"),
+    [
+        ("DCS", "\x1bPq status\x1b\\"),
+        ("SOS", "\x1bXstart of string\x07"),
+        ("PM", "\x1b^privacy message\x07"),
+        ("APC", "\x1b_application command\x07"),
+    ],
+)
+def test_extract_url_survives_the_other_c1_string_sequences(name, sequence) -> None:
+    # #1344 widened `redact._ANSI_RE` so DCS/SOS/PM/APC are removed whole, exactly as OSC
+    # already was. This scanner reads `strip_ansi`'s output, so it inherits the change: the
+    # payload must not become a URL candidate and the visible link must still survive.
+    out = f"{sequence}Then authorize at https://claude.ai/oauth/authorize?real=1"
+    assert ls._extract_authorize_url(out) == "https://claude.ai/oauth/authorize?real=1", name
+
+
+@pytest.mark.parametrize(
+    ("name", "opener", "terminator"),
+    [
+        ("DCS", "\x1bPq ", "\x1b\\"),
+        ("SOS", "\x1bX", "\x07"),
+        ("PM", "\x1b^", "\x07"),
+        ("APC", "\x1b_", "\x07"),
+    ],
+)
+def test_extract_url_refuses_a_url_buried_in_a_c1_string_payload(name, opener, terminator) -> None:
+    # The behaviour change #1344 brings to this scanner, pinned rather than assumed. A URL
+    # inside a DCS/SOS/PM/APC payload is not shown to the operator by any terminal, so it is
+    # not an actionable candidate and now goes with the sequence. Same direction as the OSC 8
+    # hidden-target bar (#1356): refusing an invisible link fails closed — the operator gets
+    # login_shepherd's "Captured output:" message instead of a link they cannot see.
+    hidden = "https://claude.ai/oauth/authorize?hidden=1"
+    assert ls._extract_authorize_url(f"{opener}{hidden}{terminator} tail") is None, name
+    # A visible link on the same output still wins.
+    visible = "https://claude.ai/oauth/authorize?real=1"
+    out = f"{opener}{hidden}{terminator}Open {visible}"
+    assert ls._extract_authorize_url(out) == visible, name
+
+
 def test_extract_url_docs_subdomain_is_not_an_auth_host() -> None:
     # `docs.anthropic.com` is a subdomain of a known parent (anthropic.com) but is a docs
     # page, NOT an auth endpoint — a docs link printed BEFORE the real authorize URL must
