@@ -487,7 +487,7 @@ def test_hosted_ticks_do_not_authenticate_an_agent_from_a_different_boot(monkeyp
 
 
 def test_a_cross_boot_tick_collision_inside_the_epoch_window_is_admitted(monkeypatch):
-    """Pins the residue the ticks conjunct COSTS this gate, so it cannot widen unnoticed.
+    """TODO(1401): pins the residue the ticks conjunct COSTS this gate. Flip when boot_id lands.
 
     Honest failure documentation, not an endorsement. Before #1404 this gate compared the
     epoch at 0.05s, which no post-reboot process can pass — its create-time lies after the
@@ -500,8 +500,12 @@ def test_a_cross_boot_tick_collision_inside_the_epoch_window_is_admitted(monkeyp
     inside the 1h window. The gate says yes, and the operator's Kill would reach a stranger.
 
     #1399 accepted this residue for a card-liveness READ; #1404 is the first to route a
-    force-kill through it, and ``/proc/sys/kernel/random/boot_id`` (issue #1401) is the fix.
-    When that lands, this test flips to ``is False`` and stops being a wart.
+    force-kill through it. Both hosted call sites are operator-initiated (the dashboard's
+    Kill and Resume), so nothing reaps on a timer through this window — which is what makes
+    the residue tolerable in the meantime rather than merely tolerated.
+
+    TODO(1401): ``/proc/sys/kernel/random/boot_id`` settles it exactly. When that lands, the
+    first assertion below flips to ``is False`` and this test stops being a wart.
     """
     minute = 60.0
     recorded_epoch, recorded_ticks = 20 * minute, 20 * 60 * 100  # boot N + 20 min

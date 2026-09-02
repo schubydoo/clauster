@@ -1257,8 +1257,10 @@ class HostedManager:
             await old_session.detach()
             self._sessions.pop(hosted_id, None)
         elif old.is_orphan and old.agent_pid is not None:
-            # Orphan survivor still running on this conversation — kill it (gated on a
-            # pid+create_time match) so the resumed agent doesn't share its session.
+            # Orphan survivor still running on this conversation — kill it (gated on a pid +
+            # start-identity match, both halves) so the resumed agent doesn't share its
+            # session. Operator-initiated: this runs only inside a Resume the operator
+            # asked for, never from a background reaper.
             await asyncio.to_thread(
                 procutil.kill_if_match,
                 old.agent_pid,
@@ -1362,7 +1364,7 @@ class HostedManager:
             await self._persist()
 
     @staticmethod
-    def _is_orphan(instance: RemoteControlInstance) -> bool:
+    async def _is_orphan(instance: RemoteControlInstance) -> bool:
         """Whether a not-found instance is a recoverable (killable) survivor.
 
         Uses the same fail-closed predicate as the guarded kill, so a row is only
@@ -1377,9 +1379,20 @@ class HostedManager:
         re-derives it from a ``/proc/stat`` btime that NTP moves by seconds, so on a
         drifting host a survivor reads as lost — the row loses Kill and Resume, and a
         Resume off a *different* row spawns a second agent beside the one still running.
+
+        Async, and the predicate runs in a thread: it is two blocking ``/proc`` reads per row
+        (``/proc/<pid>/stat`` plus ``boot_time()``'s ``/proc/stat``), and ``reattach_all``
+        calls it once per persisted row while the event loop is also serving the dashboard
+        that is waiting for exactly these cards. The pid check stays inline and short-
+        circuits, so a row with no pid evidence costs no thread hop at all.
         """
-        return instance.agent_pid is not None and procutil.is_killable_hosted(
-            instance.agent_pid, instance.agent_proc_start, start_ticks=instance.agent_start_ticks
+        if instance.agent_pid is None:
+            return False
+        return await asyncio.to_thread(
+            procutil.is_killable_hosted,
+            instance.agent_pid,
+            instance.agent_proc_start,
+            start_ticks=instance.agent_start_ticks,
         )
 
     async def aclose(self) -> None:
@@ -1479,7 +1492,7 @@ class HostedManager:
                 # agent running (CL-8), its (pid, create_time) still matches a live
                 # process → it's an orphan we can recover; otherwise it's truly lost.
                 instance.status = InstanceStatus.CRASHED
-                if self._is_orphan(instance):
+                if await self._is_orphan(instance):
                     instance.is_orphan = True
                     # A salvaged row can be an orphan AND have lost its `project` — the
                     # per-field salvage keeps the pid evidence while a model-rejected project

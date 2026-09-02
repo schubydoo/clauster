@@ -1179,6 +1179,80 @@ async def _spawn(mgr, client, *, project="proj"):
     )
 
 
+async def test_spawn_stamps_and_persists_both_halves_of_the_start_identity(
+    fake_claustrum, tmp_path, monkeypatch
+):
+    """The spawn-side stamp is where every later comparison gets its evidence (#1404).
+
+    Without this the whole fix is unreachable in production while every other test stays
+    green: the gate would receive the ticks faithfully, and they would always be ``None``
+    because nothing ever recorded them. Asserted on the PERSISTED record rather than only
+    the in-memory row, because ``_is_orphan`` runs at ``reattach_all`` against what came
+    back off disk — a stamp that never reached the store fixes nothing.
+
+    The call count is part of the assertion. Both halves must come from ONE
+    ``proc_start_pair`` read: sampling separately puts a suspension point between two
+    ``/proc`` reads, and an agent dying in that window can have its pid recycled, leaving a
+    pair whose halves describe different processes — which the gate then authenticates,
+    matching the ticks exactly and the epoch only coarsely.
+    """
+    calls: list[int] = []
+
+    def _pair(pid):
+        calls.append(pid)
+        return 1717000000.0, 770579
+
+    monkeypatch.setattr(procutil, "proc_start_pair", _pair)
+    fake = await fake_claustrum(support_want_pid=True)
+    store = HostedStateStore(tmp_path)
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        try:
+            inst = await _spawn(mgr, client)
+            assert inst.agent_pid == 4242
+            assert inst.agent_proc_start == 1717000000.0
+            assert inst.agent_start_ticks == 770579, "the drift-immune half must be stamped"
+            assert calls == [4242], "both halves must come from exactly one paired read"
+            record = store.load()[inst.claustrum_process_id]
+            assert record["agent_proc_start"] == 1717000000.0
+            assert record["agent_start_ticks"] == 770579, "the stamp must reach the store"
+        finally:
+            await mgr.aclose()
+
+
+async def test_spawn_stamps_neither_half_when_the_daemon_reports_no_pid(
+    fake_claustrum, tmp_path, monkeypatch
+):
+    """A pre-CT-1 daemon reports no pid, so there is nothing to read and nothing to stamp.
+
+    The guard must skip the read entirely rather than call ``proc_start_pair(None)``. Both
+    halves stay absent together — a row with ticks but no pid would be evidence about no
+    process at all, and ``_is_orphan`` requires the pid before it looks at either.
+    """
+    calls: list[object] = []
+    monkeypatch.setattr(
+        procutil, "proc_start_pair", lambda pid: calls.append(pid) or (1717000000.0, 770579)
+    )
+    fake = await fake_claustrum()  # no want_pid support → agent_pid stays None
+    store = HostedStateStore(tmp_path)
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        try:
+            inst = await _spawn(mgr, client)
+            assert inst.agent_pid is None
+            assert inst.agent_proc_start is None
+            assert inst.agent_start_ticks is None
+            assert calls == [], "no pid means no /proc read at all"
+            record = store.load()[inst.claustrum_process_id]
+            # `None`, not absent: this JSON store filters by field NAME and writes the null
+            # through, where the DB store's `_present` drops it. Both read back as "no
+            # evidence", which is all the gate asks — asserted on the value so the test does
+            # not silently encode one store's representation as the contract.
+            assert record["agent_start_ticks"] is None
+        finally:
+            await mgr.aclose()
+
+
 async def test_manager_spawn_registers_running_instance(fake_claustrum):
     async with _manager(fake_claustrum) as (fake, client, mgr):
         inst = await _spawn(mgr, client)

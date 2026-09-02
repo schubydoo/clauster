@@ -48,19 +48,23 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "c4f1b6a2e590"
-# ☢️ TODO(1404): PROVISIONAL — retarget at 0010's revision id before this merges.
+# ☢️ TODO(1404): PROVISIONAL PARENT. Retarget before this merges:
 #
-# Issue 1402's migration takes 0010 and its PR is not open yet, so this points at 0009 for
-# now purely so the chain resolves and the suite's Alembic template builds. Alembic chains
-# on revision IDs, not filenames, so reserving the 0011 filename reserves nothing: 1402's
-# branch will be cut from a main without this file and will set ``down_revision`` to
+#     down_revision: str | None = "c1f4a70b9e63"  # 0010_instance_keeper_start_ticks (#1402)
+#
+# It points at 0009 only so the chain resolves locally: issue 1402's PR carries the 0010
+# file, and without it on disk this branch's suite cannot build a chain that names it.
+#
+# Alembic chains on revision IDs, not filenames, so reserving the 0011 filename reserves
+# nothing. 1402's branch was cut from a main without this file and sets `down_revision` to
 # 8e2d05b7a913 as well. Merged in that state the two are TWO HEADS off 0009, and
-# ``bootstrap._pending_revision`` calls ``get_current_head()``, which raises
-# ``MultipleHeads`` — failing every migration AND app boot, not just this feature.
+# `bootstrap._pending_revision` calls `get_current_head()`, which raises `MultipleHeads` --
+# failing every migration AND app boot, not just this feature.
 #
-# So: these two PRs must not both merge while this line reads 8e2d05b7a913. Whichever is
-# second rebases onto the new head first. That is ordinary rebase discipline; this comment
-# exists only because the ordering was fixed before either branch existed.
+# So: these two PRs must not both merge while this line reads 8e2d05b7a913. 1402 merges
+# first, then this line is set to c1f4a70b9e63 and this branch is rebased.
+# `test_the_migration_chain_has_exactly_one_head` reds CI if that is ever forgotten, so the
+# failure lands in a check rather than in a user's boot.
 down_revision: str | None = "8e2d05b7a913"  # 0009_instance_bridge_start_ticks (#1399)
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None

@@ -861,7 +861,11 @@ def test_hosted_agent_start_ticks_migration_adds_and_drops_nullable_column(tmp_p
             }
             assert "agent_start_ticks" in columns
 
-            command.downgrade(cfg, "-1")  # one step back, pre-0011
+            # Pinned by revision id, not "-1". A relative step silently re-aims at whatever
+            # ends up below this migration, so it would keep passing after the parent is
+            # retargeted even if the retarget were wrong. ☢️ TODO(1404): this becomes
+            # "c1f4a70b9e63" (0010, #1402) together with the migration's own down_revision.
+            command.downgrade(cfg, "8e2d05b7a913")  # 0009 — this migration's parent
             columns = {
                 row[1] for row in conn.execute(text("PRAGMA table_info(hosted_sessions)")).all()
             }
@@ -870,6 +874,32 @@ def test_hosted_agent_start_ticks_migration_adds_and_drops_nullable_column(tmp_p
             assert {"claustrum_process_id", "agent_pid", "agent_proc_start"} <= columns
     finally:
         engine.dispose()
+
+
+def test_the_migration_chain_has_exactly_one_head():
+    """A second Alembic head must red CI here, not fail every app boot (#1404).
+
+    Alembic chains on revision IDs, not filenames, so two PRs authored in parallel can each
+    set ``down_revision`` to the same parent and each look fine alone. Merged together they
+    are two heads, and ``bootstrap._pending_revision`` calls
+    ``ScriptDirectory.get_current_head()``, which raises ``MultipleHeads`` — so the damage is
+    not a broken migration but a refusal to BOOT, for every user, on upgrade.
+
+    This is a cheap structural assertion with no engine and no database: it walks the
+    versions directory only. It is written for the general case rather than for #1404's own
+    ordering, so it keeps earning its place after this branch's provisional parent is
+    retargeted at 0010.
+    """
+    from alembic.script import ScriptDirectory
+
+    cfg = Config(str(bootstrap._ALEMBIC_INI))
+    cfg.set_main_option("script_location", str(bootstrap._MIGRATIONS_DIR))
+    heads = ScriptDirectory.from_config(cfg).get_heads()
+    assert len(heads) == 1, (
+        "the migration chain forked into multiple heads "
+        f"({sorted(heads)}) — every `upgrade_to_head` and every app boot raises "
+        "MultipleHeads until one is rebased onto the other"
+    )
 
 
 def test_baseline_downgrade_drops_all_tables(tmp_path):
