@@ -138,8 +138,21 @@ jobs:
           # Submitted REVIEWS too (issue 1406): one run should add exactly one. The delta
           # is what tells a grouped review from one that split into a review per finding,
           # which the comment counts above cannot see — both shapes add comments.
-          R=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/reviews" --paginate \
-                --jq '[.[] | select(.user.login | test("claude"; "i"))] | length' | awk '{s+=$1} END{print s+0}')
+          # "Submitted review" means one that carries substance: a non-empty body, or at
+          # least one TOP-LEVEL comment. GitHub wraps every thread REPLY in an empty review
+          # of its own, so counting raw review objects would call a grouped review plus one
+          # clarifying reply a split. The guard step applies the same definition.
+          # Soft, unlike N and M: a failed fetch records "?" and the guard then reports the
+          # grouping check as unavailable instead of skipping every check in that step.
+          REVIEWS=$(
+            {
+              gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/reviews" --paginate \
+                --jq '.[] | select(((.user // {}).login // "") | test("claude"; "i")) | select((.body // "") != "") | .id' \
+              && gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/comments" --paginate \
+                --jq '.[] | select(((.user // {}).login // "") | test("claude"; "i")) | select(.in_reply_to_id == null) | .pull_request_review_id'
+            } | sort -un
+          ) || REVIEWS="?"
+          if [ "$REVIEWS" = "?" ]; then R="?"; else R=$(printf '%s\n' "$REVIEWS" | grep -c '[0-9]' || true); fi
           { echo "count=$((N + M))"; echo "reviews=$R"; } >> "$GITHUB_OUTPUT"
           echo "::notice::Claude comments before the review: $((N + M)); submitted reviews: $R"
 
@@ -215,9 +228,12 @@ jobs:
         #
         # What runs from it on the runner: the SessionStart hook (node), the Stop hook
         # (python3, advisory only), and its PostToolUse hook on Write|Edit — the reviewer
-        # DOES have `Write` (the action grants it regardless of `--allowedTools`; run
-        # 33569148143 used it for `review.json`), but the hook only lints Markdown paths,
-        # so it is inert for the JSON payload the review recipe writes.
+        # DOES have `Write`: the action's tag mode leaves Write/Edit out of its own tool
+        # list but appends `--permission-mode acceptEdits`, so writes inside
+        # $GITHUB_WORKSPACE go through (run 33569148143 wrote `review.json` that way).
+        # ⚠️ That is the whole basis of the review recipe: never set `--permission-mode`
+        # in `claude_args`, or the recipe silently loses its Write. The hook only lints
+        # Markdown paths, so it is inert for the JSON payload the recipe writes.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: AminBlg/SimpleEnglish
@@ -378,40 +394,61 @@ jobs:
           # comments) and to the denial count below (grouped runs log 2-7 denials too:
           # redirects, compound commands, tools outside --allowedTools). The delta in
           # submitted reviews is the only honest tell: one run must add exactly one.
-          R=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/reviews" --paginate \
-                --jq '[.[] | select(.user.login | test("claude"; "i"))] | length' | awk '{s+=$1} END{print s+0}')
-          ADDED=$((R - REVIEWS_BEFORE))
-          if [ "$ADDED" -lt 0 ]; then
-            echo "::warning::Claude's submitted-review count went DOWN during the run ($REVIEWS_BEFORE -> $R): a review was deleted mid-run, so the grouping check cannot be trusted this time"
-          elif [ "$ADDED" -eq 0 ]; then
-            echo "::warning::no review was SUBMITTED. Either the grouped POST was never attempted (findings, if any, went out as plain comments with no anchors or resolvable threads), it was REJECTED (a 422 on one anchor outside the diff loses the whole review), or the Write tool was unavailable for review.json. See issue 1406."
-          elif [ "$ADDED" -gt 1 ]; then
-            echo "::warning::the review SPLIT into $ADDED submitted reviews (PRs 1397 and 1405 did this). Cause is one of: standalone inline comments (each becomes its own review; the MCP inline-comment tool is no longer allowlisted for this reason), or falling back from the 'Write review.json + gh api --input' recipe. See issue 1406."
+          # Same definition as the baseline step: a review with a body or a top-level
+          # comment. Thread replies (each wrapped by GitHub in an empty review) do not count.
+          # Nothing from here to the denial block may fail the job after a good review:
+          # every fetch degrades to "?" or empty, and the message says so.
+          REVIEWS=$(
+            {
+              gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/reviews" --paginate \
+                --jq '.[] | select(((.user // {}).login // "") | test("claude"; "i")) | select((.body // "") != "") | .id' \
+              && gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/comments" --paginate \
+                --jq '.[] | select(((.user // {}).login // "") | test("claude"; "i")) | select(.in_reply_to_id == null) | .pull_request_review_id'
+            } | sort -un
+          ) || REVIEWS="?"
+          if [ "$REVIEWS" = "?" ] || [ "$REVIEWS_BEFORE" = "?" ]; then
+            echo "::warning::the grouping check is unavailable this run — the review list could not be fetched before or after the review. The comment counts above still hold."
           else
-            # One review is necessary, not sufficient: `gh pr review --comment` also yields
-            # exactly one, with no anchors at all. Count the anchors the added review carries
-            # and read the tally its body is required to open with. Findings with zero
-            # anchors is the degraded shape; a review with no findings legitimately has none.
-            # The added review is Claude's newest: the highest id, over every page. Nothing
-            # in this branch may fail the job after a good review: every fetch degrades to
-            # "?" or empty and the message says so.
-            RID=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/reviews" --paginate \
-                    --jq '.[] | select(.user.login | test("claude"; "i")) | .id' | sort -n | tail -1 || true)
-            ANCHORS=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/reviews/${RID}/comments" --paginate \
-                        --jq 'length' | awk '{s+=$1} END{print s+0}' || echo "?")
-            BODY=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/reviews/${RID}" --jq '.body // ""' || echo "")
-            # The tally line the instructions require: "N important, M nits", or the "No
-            # important findings" form with an optional nit count. `|| true` on both lines:
-            # under pipefail a no-match grep exits 1 and would abort the step after a
-            # correctly submitted clean review; awk prints 0 for empty input.
-            TALLY=$(printf '%s' "$BODY" | grep -o -E '([0-9]+|[Nn]o) important( findings)?(, [0-9]+ nits?)?|[0-9]+ nits?' | head -1 || true)
-            FINDINGS=$(printf '%s' "$TALLY" | grep -o -E '[0-9]+' | awk '{s+=$1} END{print s+0}' || true)
-            if [ "$ANCHORS" = "?" ]; then
-              echo "::warning::one review was submitted but its anchors could not be counted (API error); tally: ${TALLY:-none stated}"
-            elif [ "$ANCHORS" -eq 0 ] && [ "$FINDINGS" -gt 0 ]; then
-              echo "::warning::one review was submitted but it carries NO inline anchors while its body reports '$TALLY' — a body-only review (e.g. 'gh pr review --comment'); the findings have no resolvable threads. See issue 1406."
+            R=$(printf '%s\n' "$REVIEWS" | grep -c '[0-9]' || true)
+            ADDED=$((R - REVIEWS_BEFORE))
+            if [ "$ADDED" -lt 0 ]; then
+              echo "::warning::Claude's submitted-review count went DOWN during the run ($REVIEWS_BEFORE -> $R): a review was deleted mid-run, so the grouping check cannot be trusted this time"
+            elif [ "$ADDED" -eq 0 ]; then
+              echo "::warning::no review was SUBMITTED. Either the grouped POST was never attempted (findings, if any, went out as plain comments with no anchors or resolvable threads), it was REJECTED (a 422 on one anchor outside the diff loses the whole review), or the Write tool was unavailable for review.json. See issue 1406."
+            elif [ "$ADDED" -gt 1 ]; then
+              echo "::warning::the review SPLIT into $ADDED submitted reviews (PRs 1397 and 1405 did this; thread replies are not counted). Cause is one of: standalone inline comments (each becomes its own review; the MCP inline-comment tool is no longer allowlisted for this reason), or falling back from the 'Write review.json + gh api --input' recipe. See issue 1406."
             else
-              echo "::notice::one grouped review submitted with $ANCHORS inline anchor(s); tally: ${TALLY:-none stated}"
+              # One review is necessary, not sufficient: `gh pr review --comment` also
+              # yields exactly one, with no anchors at all. Count the anchors the added
+              # review carries and read the tally its body is required to open with.
+              # Findings with zero anchors is the degraded shape; a review with no findings
+              # legitimately has none. The added review is the newest: highest id.
+              RID=$(printf '%s\n' "$REVIEWS" | tail -1)
+              # Status and output kept apart: awk prints a line even when gh failed, so an
+              # `|| echo "?"` INSIDE the substitution would yield "0\n?" and never "?". The
+              # assignment's own exit status is the pipeline's, and an assignment in an
+              # AND-OR list is exempt from set -e, so the fallback lands cleanly.
+              ANCHORS=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/reviews/${RID}/comments" --paginate \
+                          --jq 'length' | awk '{s+=$1} END{print s+0}') || ANCHORS="?"
+              BODY=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/reviews/${RID}" --jq '.body // ""') || BODY=""
+              # The tally line the instructions require on the FIRST non-empty line of the
+              # body, matched case-insensitively: "N important, M nits", or "No important
+              # findings" with an optional nit count. First line only, on purpose: a
+              # re-review body goes on to a "Previous findings" section whose prose also
+              # says "important", and a whole-body match would read that instead. `|| true`
+              # on both lines: under pipefail a no-match grep exits 1 and would abort the
+              # step after a correctly submitted clean review; awk prints 0 for empty input.
+              TALLY=$(printf '%s\n' "$BODY" | grep -m1 -v '^[[:space:]]*$' | grep -i -o -E '([0-9]+|no) important( findings)?(, [0-9]+ nits?)?' | head -1 || true)
+              FINDINGS=$(printf '%s' "$TALLY" | grep -o -E '[0-9]+' | awk '{s+=$1} END{print s+0}' || true)
+              if [ "$ANCHORS" = "?" ]; then
+                echo "::warning::one review was submitted but its anchors could not be counted (API error); tally: ${TALLY:-none stated}"
+              elif [ "$ANCHORS" -eq 0 ] && [ -z "$TALLY" ]; then
+                echo "::warning::one review was submitted with NO inline anchors and NO tally line in its body — not the shape the instructions require, so a clean review cannot be told from a body-only one. See issue 1406."
+              elif [ "$ANCHORS" -eq 0 ] && [ "$FINDINGS" -gt 0 ]; then
+                echo "::warning::one review was submitted but it carries NO inline anchors while its body reports '$TALLY' — a body-only review (e.g. 'gh pr review --comment'); the findings have no resolvable threads. See issue 1406."
+              else
+                echo "::notice::one grouped review submitted with $ANCHORS inline anchor(s); tally: ${TALLY:-none stated}"
+              fi
             fi
           fi
           # Posted-something is necessary but not sufficient: a review that is blocked from
@@ -429,7 +466,10 @@ jobs:
           if [ ! -f "$LOG" ]; then
             echo "::warning::no execution log at $LOG — cannot tell whether tool calls were denied, so a degraded review would look identical to a clean one here"
           else
-            RESULT=$(jq -s -c 'flatten | map(select(type == "object" and .type == "result")) | last // empty' "$LOG" 2>/dev/null || true)
+            # Status outside the substitution on every fallback below (the shape the guard
+            # block above uses): `|| echo x` INSIDE `$( )` appends x to whatever the failing
+            # command already printed, so the variable never equals the fallback.
+            RESULT=$(jq -s -c 'flatten | map(select(type == "object" and .type == "result")) | last // empty' "$LOG" 2>/dev/null) || RESULT=""
             if [ -z "$RESULT" ]; then
               echo "::warning::execution log present but no result record parsed — denial count unknown. Re-run with '@claude review debug' to capture the log as an artifact."
             else
@@ -437,8 +477,8 @@ jobs:
               # posts the action's early tracking comment, so the AFTER>BEFORE check below
               # passes on a run that never actually reviewed. Detect it from the result
               # record's own error fields — independent of whatever number the turn cap holds.
-              IS_ERR=$(printf '%s' "$RESULT" | jq -r '.is_error // false' 2>/dev/null || echo "false")
-              SUBTYPE=$(printf '%s' "$RESULT" | jq -r '.subtype // ""' 2>/dev/null || echo "")
+              IS_ERR=$(printf '%s' "$RESULT" | jq -r '.is_error // false' 2>/dev/null) || IS_ERR="false"
+              SUBTYPE=$(printf '%s' "$RESULT" | jq -r '.subtype // ""' 2>/dev/null) || SUBTYPE=""
               if [ "$IS_ERR" = "true" ] || [ "${SUBTYPE#error}" != "$SUBTYPE" ]; then
                 echo "::error::the review did not complete (is_error=$IS_ERR subtype='${SUBTYPE:-none}') — it hit the turn cap, timed out, or errored. The tracking comment it left is NOT a review; re-run with '@claude review'."
                 exit 1
@@ -451,7 +491,7 @@ jobs:
               D=$(printf '%s' "$RESULT" | jq -r '
                 if has("permission_denials") then (.permission_denials | length)
                 elif has("permission_denials_count") then .permission_denials_count
-                else "?" end' 2>/dev/null || echo "?")
+                else "?" end' 2>/dev/null) || D="?"
               case "$D" in
                 0) : ;;  # the only silent path: parsed, and genuinely zero
                 "?") echo "::warning::result record parsed but carries neither permission_denials nor permission_denials_count — the log format may have changed upstream" ;;
