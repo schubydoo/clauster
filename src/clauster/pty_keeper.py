@@ -376,6 +376,22 @@ def _load_pty_process() -> Any:
     return PtyProcess
 
 
+def _report_keeper_fault(message: str) -> None:
+    """Print a keeper-level fault to stderr, which the launcher captures to ``<sidecar>.log``.
+
+    The sidecar's ``error`` field alone is NOT a report. The runner reads it only inside the
+    spawn-readiness window (``_await_ready_pty`` -> ``error_detail``); once a bridge is RUNNING
+    nothing reads it again, so a mid-session ConPTY fault recorded only there would be silent —
+    and this module's rule (see :meth:`_KeeperDrain._scan_session_id`) is that a fault is never
+    a silent skip. This is the same channel the escaping traceback used to land in, which is
+    what made the pre-#1389 crash at least diagnosable.
+
+    Carries only Clauster's own text plus the exception's message. Screen/stream content never
+    reaches here, so nothing unredacted rides out (invariant 4).
+    """
+    print(f"clauster.pty_keeper: {message}", file=sys.stderr, flush=True)
+
+
 def _conpty_alive(proc: Any) -> tuple[bool, str | None]:
     """Report whether the ConPTY bridge is still running, reading a raise as "assume dead".
 
@@ -525,6 +541,7 @@ def _run_keeper_conpty(
             # sidecar never is. Nothing consumes the exit status (see the docstring), so leaving
             # rc at 73 costs nothing and the sidecar's `error` carries the real answer.
             base["error"] = loop_error
+            _report_keeper_fault(loop_error)
             with contextlib.suppress(Exception):
                 proc.terminate()
         else:
@@ -535,19 +552,32 @@ def _run_keeper_conpty(
                 # this `wait()` should have returned its cached status without blocking. It
                 # raised instead: keep rc at 73 and name it, rather than lose the terminal
                 # sidecar in the gap between here and `finish`.
-                base["error"] = f"conpty wait failed: {exc}"
-    except Exception as exc:  # noqa: BLE001 — annotate and RE-RAISE; nothing is swallowed
-        # A fault none of the guards above anticipate (a pywinpty build returning bytes, a pyte
-        # fault escaping the drain). The keeper still dies and its traceback still reaches
-        # `<sidecar>.log`; this only stops the sidecar reading as a clean exit on the way out.
-        base["error"] = f"conpty keeper aborted: {exc!r}"
+                wait_error = f"conpty wait failed: {exc}"
+                base["error"] = wait_error
+                _report_keeper_fault(wait_error)
+    except BaseException as exc:
+        # BaseException, not Exception: an interrupt unwinding the keeper (SIGINT ->
+        # KeyboardInterrupt, SystemExit) would otherwise skip this and publish the one terminal
+        # shape that reads as a CLEAN exit with no reason — `exited` / 73 / `error: null`. So
+        # every abort is named, whether it is an unanticipated fault (a pywinpty build returning
+        # bytes, a pyte fault escaping the drain) or a signal.
+        #
+        # Kill the bridge before unwinding: the `finally` below closes the ConPTY handle and the
+        # keeper then dies, so a bridge left running here outlives the only process that could
+        # observe or drive it. Then re-raise — nothing is swallowed, and the traceback still
+        # reaches `<sidecar>.log` (B036 is satisfied by that `raise`).
+        abort_error = f"conpty keeper aborted: {exc!r}"
+        base["error"] = abort_error
+        _report_keeper_fault(abort_error)
+        with contextlib.suppress(Exception):
+            proc.terminate()
         raise
     finally:
         drain.finish(rc)
-    try:
-        proc.close()
-    except Exception:  # noqa: BLE001,S110 — teardown close must never crash the keeper
-        pass
+        try:
+            proc.close()
+        except Exception:  # noqa: BLE001,S110 — teardown close must never crash the keeper
+            pass
     return rc
 
 
@@ -562,6 +592,13 @@ def run_keeper(
     Returns the bridge's exit status. Any setup failure is recorded in the
     sidecar (``state: "error"``) and returned as a non-zero code rather than
     raised, so the launching process always gets a diagnosable result.
+
+    That covers the failures each backend anticipates; it is NOT a promise never to raise.
+    :func:`_run_keeper_conpty` publishes the terminal sidecar and then re-raises anything it
+    did not anticipate (#1389), because a keeper that swallowed an unknown fault would leave
+    no traceback in ``<sidecar>.log`` at all. The POSIX path below keeps its narrower
+    enumerated ``except`` shape unchanged — its transport is ``os.read`` on a plain fd, whose
+    failure modes are the documented ``OSError`` family, not a third-party handle's.
 
     When ``screen_sidecar`` is given (the opt-in live-screen tap, #534), the same drained
     chunks are also fed into a pyte emulator and a redacted, cells-only frame is republished

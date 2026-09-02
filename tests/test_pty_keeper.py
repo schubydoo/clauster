@@ -886,6 +886,7 @@ def _fake_conpty(
     winpty_error_at=(),
     isalive_raises_at=(),
     wait_error=None,
+    terminate_error=None,
 ):
     """Build a fake pywinpty ``PtyProcess`` class scripted to emit ``chunks`` then exit.
 
@@ -900,6 +901,9 @@ def _fake_conpty(
     separately) so an individual arm of the loop can be targeted. ``wait()`` here returns at
     once; the REAL one is an unbounded ``isalive()`` poll, which is why the fail-closed paths
     assert it was never called rather than asserting what it returned.
+
+    ``terminate_error`` covers the case the keeper's ``contextlib.suppress`` exists for: the
+    handle is already unusable, so the kill it attempts on the way out raises too.
     """
     calls: list[dict] = []
 
@@ -941,6 +945,8 @@ def _fake_conpty(
 
         def terminate(self, force: bool = False) -> None:
             calls.append({"terminated": True})
+            if terminate_error is not None:
+                raise terminate_error
 
         def wait(self):
             # Recorded, because the real one is an unbounded `isalive()` poll: "the keeper did
@@ -1153,14 +1159,14 @@ def test_run_keeper_conpty_read_error_fails_closed(tmp_path: Path, monkeypatch) 
 
 
 def test_run_keeper_conpty_non_oserror_read_failure_fails_closed(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, capsys
 ) -> None:
     from clauster import pty_keeper
 
     # pywinpty's own error type is not an OSError subclass, so the old `except OSError` arm
     # missed exactly the fault it was written for: a broken ConPTY channel. It must take the
     # same fail-closed path the OSError case does, not escape the loop.
-    fake = _fake_conpty(chunks=["boot\r\n"], winpty_error_at={2}, alive_reads=5)
+    fake = _fake_conpty(chunks=["boot\r\n"], winpty_error_at={2})
     monkeypatch.setattr(pty_keeper, "_load_pty_process", lambda: fake)
     sidecar = tmp_path / "b.keeper.json"
     rc = pty_keeper._run_keeper_conpty(["claude"], sidecar, None, None)
@@ -1170,10 +1176,13 @@ def test_run_keeper_conpty_non_oserror_read_failure_fails_closed(
     assert "conpty read failed" in (data["error"] or "")
     assert {"terminated": True} in fake.calls  # the undrivable bridge was terminated
     assert {"waited": True} not in fake.calls  # ... and NOT reaped through the unbounded wait
+    # Never a silent skip: the sidecar `error` is read only during the readiness window, so
+    # the reason must also reach stderr -> `<sidecar>.log`, where the traceback used to land.
+    assert "conpty read failed" in capsys.readouterr().err
 
 
 def test_run_keeper_conpty_isalive_failure_on_empty_read_fails_closed(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, capsys
 ) -> None:
     from clauster import pty_keeper
 
@@ -1192,6 +1201,7 @@ def test_run_keeper_conpty_isalive_failure_on_empty_read_fails_closed(
     assert "conpty liveness check failed" in (data["error"] or "")
     assert {"terminated": True} in fake.calls
     assert {"waited": True} not in fake.calls
+    assert "conpty liveness check failed" in capsys.readouterr().err
 
 
 def test_run_keeper_conpty_isalive_failure_on_eof_fails_closed(
@@ -1214,7 +1224,7 @@ def test_run_keeper_conpty_isalive_failure_on_eof_fails_closed(
 
 
 def test_run_keeper_conpty_wait_failure_still_publishes_exited(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, capsys
 ) -> None:
     from clauster import pty_keeper
 
@@ -1229,10 +1239,37 @@ def test_run_keeper_conpty_wait_failure_still_publishes_exited(
     assert data["state"] == "exited" and data["bridge_exit"] == 73
     assert "conpty wait failed" in (data["error"] or "")
     assert {"closed": True} in fake.calls  # teardown still ran
+    assert "conpty wait failed" in capsys.readouterr().err
+    # THE ANCHOR for the three `{"waited": True} not in fake.calls` assertions above. Without
+    # it, typo'ing the marker in the fake makes all of them vacuously true and the suite stays
+    # green while the no-reap decision goes untested. This is the one path that DOES reap.
+    assert {"waited": True} in fake.calls
+
+
+def test_run_keeper_conpty_terminate_failure_does_not_stop_the_teardown(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from clauster import pty_keeper
+
+    # What the `contextlib.suppress` around `terminate()` is for: the handle is already
+    # unusable, which is WHY we are on this path, so the kill can fail the same way. It must
+    # not stop the terminal sidecar or the close.
+    fake = _fake_conpty(
+        chunks=["boot\r\n"],
+        isalive_raises_at={1},
+        terminate_error=_FakeWinptyError("cannot signal a dead handle"),
+    )
+    monkeypatch.setattr(pty_keeper, "_load_pty_process", lambda: fake)
+    sidecar = tmp_path / "b.keeper.json"
+    assert pty_keeper._run_keeper_conpty(["claude"], sidecar, None, None) == 73
+    data = _read(sidecar)
+    assert data["state"] == "exited"
+    assert "conpty liveness check failed" in (data["error"] or "")
+    assert {"closed": True} in fake.calls
 
 
 def test_run_keeper_conpty_unanticipated_fault_publishes_exited_and_reraises(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, capsys
 ) -> None:
     from clauster import pty_keeper
 
@@ -1248,6 +1285,36 @@ def test_run_keeper_conpty_unanticipated_fault_publishes_exited_and_reraises(
     data = _read(sidecar)
     assert data["state"] == "exited" and data["bridge_exit"] == 73
     assert "conpty keeper aborted" in (data["error"] or "")
+    assert "conpty keeper aborted" in capsys.readouterr().err
+    # The keeper is about to die; a bridge left running would outlive the only process that
+    # can observe or drive it, and its ConPTY handle is closed out from under it below.
+    assert {"terminated": True} in fake.calls
+    assert {"closed": True} in fake.calls
+
+
+def test_run_keeper_conpty_interrupt_is_named_not_a_clean_exit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from clauster import pty_keeper
+
+    # A BaseException — SIGINT arriving as KeyboardInterrupt — skips `except Exception`. Left
+    # to the `finally` alone it would publish `exited` / 73 / `error: null`: the one terminal
+    # shape that reads as a clean exit with no reason at all. It must be named and torn down
+    # like any other abort, and must still propagate.
+    fake = _fake_conpty(chunks=["boot\r\n"])
+
+    def _interrupt(self, size: int = 1024) -> str:
+        raise KeyboardInterrupt
+
+    fake.read = _interrupt
+    monkeypatch.setattr(pty_keeper, "_load_pty_process", lambda: fake)
+    sidecar = tmp_path / "b.keeper.json"
+    with pytest.raises(KeyboardInterrupt):
+        pty_keeper._run_keeper_conpty(["claude"], sidecar, None, None)
+    data = _read(sidecar)
+    assert data["state"] == "exited" and data["bridge_exit"] == 73
+    assert "conpty keeper aborted" in (data["error"] or "")  # never a null-reason exit
+    assert {"terminated": True} in fake.calls and {"closed": True} in fake.calls
 
 
 def test_run_keeper_conpty_drains_exit_tail(tmp_path: Path, monkeypatch) -> None:
