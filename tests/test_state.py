@@ -190,6 +190,47 @@ def test_corrupt_copy_leaves_no_temp_when_the_replace_fails(tmp_path, caplog, mo
     assert sorted(p.name for p in tmp_path.iterdir()) == ["state.json"]
 
 
+def test_corrupt_copy_cleans_up_when_interrupted(tmp_path, monkeypatch):
+    # Best-effort covers OSError only: a KeyboardInterrupt mid-copy must still propagate
+    # rather than be swallowed into a degraded load, and must not leave a half-written
+    # temp sitting in the state dir.
+    (tmp_path / "state.json").write_text("[" * 100_000, encoding="utf-8")
+
+    def boom(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("clauster.state.shutil.copyfileobj", boom)
+    with pytest.raises(KeyboardInterrupt):
+        StateStore(tmp_path).load()
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == ["state.json"]
+
+
+@pytest.mark.parametrize("target", ["ensure_private_dir", "tempfile"])
+def test_corrupt_copy_failing_before_the_temp_exists_still_degrades(
+    tmp_path, caplog, monkeypatch, target
+):
+    # The two steps that run before there is a temp to clean up. ensure_private_dir is
+    # fail-closed on its own account (a read-only mount or a state dir owned by another
+    # user) and mkstemp opens an fd (EMFILE), so either one raising out of load() would
+    # break the degrade contract at exactly the call sites that cannot take it:
+    # `clauster migrate` has no handler, and db.bootstrap's would abandon the import of
+    # a perfectly good hosted_state.json alongside it.
+    (tmp_path / "state.json").write_text("[" * 100_000, encoding="utf-8")
+
+    def boom(*_args, **_kwargs):
+        raise PermissionError("simulated: read-only state dir")
+
+    if target == "ensure_private_dir":
+        monkeypatch.setattr("clauster.state.ensure_private_dir", boom)
+    else:
+        monkeypatch.setattr(state.tempfile, "mkstemp", boom)
+
+    with caplog.at_level("WARNING", logger="clauster.state"):
+        assert StateStore(tmp_path).load() == {}
+    assert any("could not copy corrupt" in r.getMessage() for r in caplog.records)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["state.json"]
+
+
 def test_corrupt_copy_closes_the_fd_when_fdopen_fails(tmp_path, caplog, monkeypatch):
     # If os.fdopen raises before the `with` adopts the fd (EMFILE under fd-table
     # pressure), the raw mkstemp fd must be closed, not leaked -- and the load must

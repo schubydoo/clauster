@@ -23,11 +23,19 @@ import tempfile
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from .atomicio import atomic_write_text, ensure_private_dir, replace_with_retry
+from .atomicio import atomic_write_text, ensure_private_dir, fsync_dir, replace_with_retry
 
 CURRENT_SCHEMA = 1
 
 _log = logging.getLogger("clauster.state")
+
+
+def _unlink_quietly(path: Path | None) -> None:
+    """Remove a temp file if one was created, swallowing the removal's own failure."""
+    if path is None:
+        return
+    with contextlib.suppress(OSError):
+        path.unlink(missing_ok=True)
 
 
 @runtime_checkable
@@ -163,10 +171,18 @@ class KeyedJsonStore:
         backup = self._path.with_suffix(self._path.suffix + ".corrupt.bak")
         if backup.exists():
             return
-        ensure_private_dir(self._path.parent)
-        fd, tmp_name = tempfile.mkstemp(dir=backup.parent, prefix=backup.name + ".", suffix=".tmp")
-        tmp = Path(tmp_name)
+        tmp: Path | None = None
         try:
+            # Inside the guard, both of them: ``ensure_private_dir`` is fail-closed on
+            # its own account (it re-raises so a secret is never stored under a
+            # directory it could not secure) and ``mkstemp`` opens an fd, so a read-only
+            # mount, a state dir owned by another user, or fd-table pressure would
+            # otherwise raise straight out of a load that promises to degrade.
+            ensure_private_dir(self._path.parent)
+            fd, tmp_name = tempfile.mkstemp(
+                dir=backup.parent, prefix=backup.name + ".", suffix=".tmp"
+            )
+            tmp = Path(tmp_name)
             # If fdopen raises at the open(2) level the fd was NOT adopted, so the raw
             # mkstemp fd would leak — close it. Guarded, because if it *was* adopted an
             # unguarded os.close would raise EBADF over the real error.
@@ -183,12 +199,17 @@ class KeyedJsonStore:
             replace_with_retry(tmp, backup)
         except OSError as exc:
             self._LOG.warning("could not copy corrupt %s aside: %s", self._path, exc)
-        finally:
-            # A successful replace already moved it; this is the failure path, and it also
-            # catches a KeyboardInterrupt mid-copy (which still propagates — best-effort
-            # covers OSError only, exactly as the pre-migration backup does).
-            with contextlib.suppress(OSError):
-                tmp.unlink(missing_ok=True)
+            _unlink_quietly(tmp)
+        except BaseException:
+            # A KeyboardInterrupt mid-copy still propagates — best-effort covers OSError
+            # only, exactly as the pre-migration backup does — but it must not leave a
+            # half-written temp sitting in the state dir.
+            _unlink_quietly(tmp)
+            raise
+        else:
+            # The file's data is fsynced above; this is its directory entry. A crash
+            # right after the rename must not lose the only copy of what we discarded.
+            fsync_dir(backup.parent)
 
     def _migrate(self, data: dict, raw: str) -> dict:
         """Back up once, then coerce to the current schema.
