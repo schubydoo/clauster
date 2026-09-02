@@ -175,6 +175,15 @@ def test_build_hosted_argv_keeps_a_session_shaped_resume_uuid(good):
     assert argv[argv.index("--resume") + 1] == good
 
 
+def test_build_hosted_argv_truncates_the_refused_value_it_names():
+    # The message becomes the resume route's 409 `detail` and is rendered in the dashboard,
+    # so it is bounded the same way `_refused_uuid_shape` bounds the log line -- an
+    # unbounded record field must not become an unbounded response body.
+    with pytest.raises(HostedSessionError) as excinfo:
+        build_hosted_argv(_BIN, permission_mode="default", resume_uuid="-" + "x" * 5000)
+    assert len(str(excinfo.value)) < 200
+
+
 # -- spawn -----------------------------------------------------------------
 
 

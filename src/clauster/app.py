@@ -4724,8 +4724,8 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         """Resume a lost/ended hosted session by id, respawning with ``--resume <uuid>``.
 
         ``instance`` is the row the route already fetched. Maps the engine's
-        :class:`HostedSessionError` (unknown / still-running / no-uuid / no-project) to 409
-        and a daemon spawn failure to 502.
+        :class:`HostedSessionError` (unknown / still-running / no-uuid / malformed-uuid /
+        no-project) to 409 and a daemon spawn failure to 502.
         """
         if not instance.project:
             # BEFORE `_hosted_prereqs`, which resolves the project path: a row whose saved

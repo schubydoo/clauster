@@ -116,7 +116,9 @@ _REHYDRATE_ROLES: frozenset[str] = frozenset({"user", "assistant", "system"})
 # claude's current filename format. This one guards an id claude *itself* minted and
 # handed us in an init frame; re-specifying the format here would silently cost a whole
 # session its resume the day claude changes it (a ULID, say). Keeping the token out of
-# the flag namespace is the whole job.
+# the flag namespace is the whole job. Not format-*independence*, though: the length cap
+# is a narrower bet in the same direction, so an id longer than the column could hold
+# would be dropped on reload too. Widen the cap with the column if that day comes.
 _SESSION_UUID_SHAPE_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 
 
@@ -150,7 +152,14 @@ def build_hosted_argv(
     mapper still cannot put a flag-shaped string next to ``--resume`` (#1392). A refusal
     **raises** :class:`HostedSessionError` rather than dropping the flag — dropping it
     would silently start a *fresh* conversation under a name the operator asked to
-    resume, and the resume route already maps this error to 409.
+    resume, and the resume route already maps this error to 409. The refused value is
+    truncated the same way :func:`_refused_uuid_shape` truncates it for the log, because
+    this message becomes that 409's ``detail`` and is rendered in the dashboard.
+
+    ⚠️ The check runs BEFORE :meth:`HostedSession.start` subscribes to the process
+    stream, which is why a refusal leaks nothing. Subscribing first would leak an
+    undrained subscriber, and ``start``'s ``except BaseException`` cleanup would not
+    cover it — the raise happens outside that ``try``.
 
     ``permission_mode`` of :data:`~clauster.config.INHERIT_PERMISSION_MODE` emits **no**
     ``--permission-mode`` flag (#1231), so the session starts in its own default mode
@@ -162,7 +171,9 @@ def build_hosted_argv(
         argv += ["--permission-mode", permission_mode]
     if resume_uuid is not None:
         if not _is_session_uuid(resume_uuid):
-            raise HostedSessionError(f"refusing a malformed resume session id: {resume_uuid!r}")
+            raise HostedSessionError(
+                f"refusing a malformed resume session id: {resume_uuid[:72]!r}"
+            )
         argv += ["--resume", resume_uuid]
     return argv
 
@@ -856,7 +867,17 @@ class HostedSession:
             logger.warning("hosted: permission-needed callback failed: %s", exc)
 
     def _capture_session_uuid(self, frame: dict[str, Any]) -> None:
-        """Latch the first ``session_id`` seen (drives ``--resume``); never overwrite it."""
+        """Latch the first ``session_id`` seen (drives ``--resume``); never overwrite it.
+
+        Deliberately NOT shape-checked (:func:`_is_session_uuid`), unlike the persisted
+        read and the argv seam (#1392). This is the value's *source* — claude's own init
+        frame — so refusing it here would mean capturing nothing at all the day claude
+        changes its id format, and a session that simply has no Resume is the silent
+        failure invariant 1 exists to prevent. Refusing at the argv seam instead makes
+        that same day produce a named 409 the operator can read. The latch cannot strand
+        a good id behind a bad one either: every frame of one session carries the same
+        ``session_id``, so "off-shape now, well-formed later" is not a state that occurs.
+        """
         if self.claude_session_uuid is not None:
             return
         sid = frame.get("session_id")
@@ -1116,7 +1137,8 @@ class HostedManager:
         this starts a *fresh* process with ``--resume <uuid>`` to reload the
         conversation — keyed by a new ``claustrum_process_id``; the dead row is retired
         once the resumed one is live. Raises :class:`HostedSessionError` if the session
-        is unknown, still running, has no captured uuid to resume from, or has no
+        is unknown, still running, has no captured uuid to resume from, has a captured
+        uuid that :func:`build_hosted_argv` refuses as malformed (#1392), or has no
         ``project`` to respawn into — the last of which is what a record that degraded on
         ``project`` leaves behind (#1381). A :class:`ClaustrumError` from the spawn
         propagates (the caller maps it).
