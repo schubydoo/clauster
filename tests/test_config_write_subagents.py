@@ -15,10 +15,13 @@ touched.
 
 from __future__ import annotations
 
+import json
 import os
+import time
 from pathlib import Path
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 
 from clauster import config_write as cw
@@ -1427,6 +1430,143 @@ def test_read_agent_degrades_a_self_referential_file_an_earlier_release_wrote(
 
     assert doc["frontmatter"] == {}  # the derived display field degrades...
     assert doc["content"] == raw.decode()  # ...and the raw text is still returned to fix
+
+
+def test_read_agent_degrades_an_alias_pyramid_file_instead_of_hanging_the_worker(
+    tmp_path: Path,
+) -> None:
+    # #1393: a 346-byte billion-laughs header is legal ACYCLIC YAML, so it was accepted by the
+    # write and then re-expanded on every GET -- `redact_secrets` walked O(distinct paths) and
+    # held an `asyncio.to_thread` worker for as long as it ran (0.72s here for this header, and
+    # a 472-byte one never finished). The parse seam now refuses it by expanded SIZE, so no NEW
+    # file can hold one; a file an earlier release wrote takes the SAME degradation path as a
+    # self-referential one above -- `frontmatter` becomes `{}`, `content` still comes back so
+    # the operator can repair it. Raw bytes on purpose: that is how it got there.
+    root = tmp_path / "agents"
+    root.mkdir()
+    levels = ["a0: &a0 x"]
+    for i in range(1, 9):
+        levels.append(f"a{i}: &a{i} [" + ",".join([f"*a{i - 1}"] * 8) + "]")
+    raw = ("---\nname: legacy\ndescription: d\n" + "\n".join(levels) + "\n---\nbody\n").encode()
+    (root / "legacy.md").write_bytes(raw)
+
+    started = time.perf_counter()
+    doc = sub._read_agent(root, "legacy", "project")
+    assert time.perf_counter() - started < 0.5  # orders of magnitude under the 0.72s blow-up
+
+    assert doc["frontmatter"] == {}
+    assert doc["content"] == raw.decode()
+
+
+def test_read_agent_masks_a_secret_inside_an_omap_reached_through_a_tuple(
+    tmp_path: Path,
+) -> None:
+    # #1393: `safe_load` builds a list of TUPLES for `!!omap`, and `redact_secrets` recursed
+    # `dict | list` only -- so the tuple was returned by identity and `jsonable_encoder`
+    # rendered the live secret into the response as a JSON array. This is the end-to-end pin
+    # on the real read path, not just the unit walk: the file is written with raw bytes,
+    # because a header carrying an `!!omap` is accepted by the write validator too.
+    root = tmp_path / "agents"
+    root.mkdir()
+    raw = (
+        b"---\nname: my-agent\ndescription: d\nauth: !!omap\n"
+        b"  - token: sk-live-DEADBEEF\n---\nbody\n"
+    )
+    (root / "my-agent.md").write_bytes(raw)
+
+    doc = sub._read_agent(root, "my-agent", "project")
+
+    assert "sk-live-DEADBEEF" not in json.dumps(doc["frontmatter"])
+    assert cw.REDACTION_SENTINEL in json.dumps(doc["frontmatter"])
+    assert doc["content"] == raw.decode()  # `content` is verbatim by contract, as always
+
+
+def test_read_agent_omap_inner_key_is_a_secret_hint_the_way_a_dict_key_is() -> None:
+    # Redaction must not depend on how the document SPELLS a mapping. The hint comes from a
+    # key, and an `!!omap`/`!!pairs` entry is a two-element tuple whose first element IS the
+    # key -- so `mcpServers: !!omap [{token: sk-live-…}]` masks exactly like the dict
+    # spelling, even though the only outer key (`mcpServers`) is benign. Before #1393 the
+    # whole tuple passed by IDENTITY, so this spelling leaked past the key-name rule and past
+    # the `${interp}` and credential-URL rules too.
+    parsed = yaml.safe_load("mcpServers: !!omap\n  - token: sk-live-DEADBEEF\n")
+    red = cw.redact_secrets(parsed)
+    assert red == {"mcpServers": [["token", cw.REDACTION_SENTINEL]]}
+    # The KEY survives, as a dict key does -- masking it too would be over-masking that makes
+    # the display useless, and the dict branch has never masked a key by itself.
+    dict_spelling = cw.redact_secrets(yaml.safe_load("mcpServers:\n  token: sk-live-DEADBEEF\n"))
+    assert dict_spelling == {"mcpServers": {"token": cw.REDACTION_SENTINEL}}
+    # Under a secret-shaped ANCESTOR both elements mask, because the ambient hint still
+    # reaches the key element. Over-masking, deliberately: that is the safe direction.
+    secret_outer = cw.redact_secrets(yaml.safe_load("auth: !!omap\n  - name: sk-live-DEADBEEF\n"))
+    assert secret_outer == {"auth": [[cw.REDACTION_SENTINEL, cw.REDACTION_SENTINEL]]}
+
+
+def test_read_agent_omap_mcp_servers_get_the_same_server_name_carve_out(
+    tmp_path: Path,
+) -> None:
+    # The `mcpServers` carve-out exists because the block is keyed by user-chosen SERVER
+    # NAMES, not config keys, so a name must not act as a secret hint. It was guarded by
+    # `isinstance(servers, dict)` and so missed the `!!omap`/`!!pairs` spelling -- where the
+    # redactor's own pair rule then DID treat the server name as a key, masking a server's
+    # `command`/`args` that the dict spelling shows in the clear. The two spellings of one
+    # block must agree; this is the direction the tuple walk made possible, so it is pinned
+    # against the dict spelling rather than in isolation.
+    root = tmp_path / "agents"
+    root.mkdir()
+    raw = (
+        b"---\nname: my-agent\ndescription: d\nmcpServers: !!omap\n"
+        b"  - auth-gw:\n"
+        b"      command: npx\n"
+        b"      args: [-y, srv]\n"
+        b"      env: {API_TOKEN: sk-live-DEADBEEF}\n"
+        b"---\nbody\n"
+    )
+    (root / "my-agent.md").write_bytes(raw)
+
+    doc = sub._read_agent(root, "my-agent", "project")
+    name_, entry = doc["frontmatter"]["mcpServers"][0]
+
+    assert name_ == "auth-gw"  # the server name survives, as a dict key does
+    assert entry["command"] == "npx"  # NOT masked by its own server name
+    assert entry["args"] == ["-y", "srv"]
+    assert entry["env"]["API_TOKEN"] == cw.REDACTION_SENTINEL  # a real secret still masks
+
+    # The dict spelling of the identical block, for the same assertions.
+    dict_raw = raw.replace(b"mcpServers: !!omap\n  - auth-gw:\n", b"mcpServers:\n  auth-gw:\n")
+    (root / "dict-agent.md").write_bytes(dict_raw.replace(b"name: my-agent", b"name: dict-agent"))
+    dict_doc = sub._read_agent(root, "dict-agent", "project")
+    dict_entry = dict_doc["frontmatter"]["mcpServers"]["auth-gw"]
+
+    assert dict_entry["command"] == "npx"
+    assert dict_entry["env"]["API_TOKEN"] == cw.REDACTION_SENTINEL
+    assert dict_entry == entry  # the two spellings display the same thing
+
+
+def test_read_agent_omap_server_name_that_is_a_container_is_still_redacted(
+    tmp_path: Path,
+) -> None:
+    # The `mcpServers` carve-out re-redacts an entry's NAME as well as its value, where the
+    # dict branch keeps its key verbatim. `construct_yaml_omap` puts no hashability
+    # constraint on a key, so an omap "name" can be a whole container carrying a secret,
+    # while a dict key is always a scalar. Skipping the name -- the obvious mirror of the
+    # dict branch -- put that secret back into the display field the carve-out exists to
+    # clean, and contradicted `redact_secrets`, which masks element 0 of a pair.
+    root = tmp_path / "agents"
+    root.mkdir()
+    raw = (
+        b"---\nname: my-agent\ndescription: d\nmcpServers: !!omap\n"
+        b"  - ? {token: sk-live-DEADBEEF}\n"
+        b"    : {command: npx}\n"
+        b"---\nbody\n"
+    )
+    (root / "my-agent.md").write_bytes(raw)
+
+    doc = sub._read_agent(root, "my-agent", "project")
+
+    assert "sk-live-DEADBEEF" not in json.dumps(doc["frontmatter"])
+    # ...and an ordinary string name is untouched by that, because with no hint it is not
+    # secret-shaped. Pinned here so the fix cannot be "mask the name unconditionally".
+    assert cw.redact_secrets("auth-gw") == "auth-gw"
 
 
 def test_read_agent_frontmatter_does_not_use_a_server_name_as_a_secret_hint(

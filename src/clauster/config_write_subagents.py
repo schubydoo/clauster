@@ -98,6 +98,10 @@ from .config_write_permissions import BYPASS_MODE, RECOGNIZED_MODES
 AGENTS_DIRNAME = "agents"
 
 #: Size cap for a single subagent file (frontmatter + body), matching the CLAUDE.md cap.
+#: ⚠️ COUPLED to :data:`clauster.config_write.MAX_EXPANDED_CHARS` — raising this without
+#: raising that would make the alias-expansion guard reject an alias-FREE header. Read the
+#: comment there before changing this number; ``test_byte_caps_stay_under_the_expansion_cap``
+#: is the gate.
 MAX_BYTES = 64 * 1024
 
 #: Claude Code's own subagent-name shape: lowercase letters, digits, and hyphens; must
@@ -565,6 +569,19 @@ def list_project_agents(project_dir: Path) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
+def _is_pair_list(value: Any) -> bool:
+    """Whether ``value`` is what ``safe_load`` builds for an ``!!omap``/``!!pairs`` block.
+
+    Both tags construct a list of two-element **tuples**, and nothing else a
+    ``SafeConstructor`` builds produces a tuple — so this identifies the ordered-mapping
+    spelling of a block that is otherwise written as a plain YAML map.
+
+    False for an EMPTY list, deliberately: ``all`` over nothing is true, and an empty block
+    has no entries to carve out, so answering yes would have every caller re-guard for it.
+    """
+    return bool(value) and all(isinstance(entry, tuple) and len(entry) == 2 for entry in value)
+
+
 def _read_agent(root: Path, name: str, source: str) -> dict[str, Any]:
     """Return the full detail doc for one subagent, or raise a typed read error.
 
@@ -620,6 +637,23 @@ def _read_agent(root: Path, name: str, source: str) -> dict[str, Any]:
             frontmatter["mcpServers"] = {
                 name_: cw.redact_secrets(entry) for name_, entry in servers.items()
             }
+        elif isinstance(servers, list) and _is_pair_list(servers):
+            # The SAME carve-out for the `!!omap`/`!!pairs` spelling of the same block, which
+            # `safe_load` builds as a list of 2-tuples rather than a dict. Without this the
+            # spellings disagreed in the opposite direction to the redactor's own tuple gap:
+            # `redact_secrets` treats an omap entry's first element as a key, so the SERVER
+            # NAME became the hint and `mcpServers: !!omap [{auth-gw: {command: npx}}]`
+            # masked its own `command`/`args` while the dict spelling showed them. Entry
+            # values are re-redacted with NO hint, exactly as the dict branch does.
+            #
+            # The NAME goes through the redactor too, where the dict branch keeps its key
+            # verbatim, and the asymmetry is deliberate: `construct_yaml_omap` puts no
+            # hashability constraint on a key, so an omap "name" can be a whole container
+            # holding a secret, where a dict key is always a scalar. An ordinary string name
+            # is unaffected — with no hint, `_is_secretish("", "auth-gw")` is False.
+            frontmatter["mcpServers"] = [
+                [cw.redact_secrets(name_), cw.redact_secrets(entry)] for name_, entry in servers
+            ]
     except cw.InvalidCandidateError:
         # An unparsable frontmatter block still surfaces via `content` (so the
         # operator can see and fix it); the derived display field just degrades.

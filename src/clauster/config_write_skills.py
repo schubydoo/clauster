@@ -104,6 +104,11 @@ SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 #: Size caps — generous but bounded (DoS/disk-fill guard, not a documented Claude Code
 #: limit). ``SKILL.md`` mirrors the CLAUDE.md cap for consistency; a supporting file
 #: gets a larger allowance since scripts run longer than the frontmatter+instructions.
+#: ⚠️ ``MAX_SKILL_MD_BYTES`` is COUPLED to
+#: :data:`clauster.config_write.MAX_EXPANDED_CHARS` — raising it without raising that would
+#: make the alias-expansion guard reject an alias-FREE header. Read the comment there before
+#: changing it; ``test_byte_caps_stay_under_the_expansion_cap`` is the gate. The other two
+#: caps are unaffected: a supporting file is never parsed as YAML.
 MAX_SKILL_MD_BYTES = 64 * 1024
 MAX_FILE_BYTES = 256 * 1024
 MAX_TOTAL_BYTES = 2 * 1024 * 1024
