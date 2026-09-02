@@ -1449,7 +1449,7 @@ def test_cleanup_keeper_refuses_a_pid_recycled_onto_a_different_keeper(
 
 
 def test_cleanup_keeper_refuses_a_snapshot_with_no_readable_start(
-    runner_config, monkeypatch
+    runner_config, monkeypatch, caplog
 ) -> None:
     """A snapshot that read NEITHER half never authenticates a force-kill (#1403).
 
@@ -1460,6 +1460,11 @@ def test_cleanup_keeper_refuses_a_snapshot_with_no_readable_start(
     snapshot, readable again while the grace loop probes it, unreadable once more at the
     final compare. A steadily failing read is foreclosed earlier: the loop returns on its
     first `None`. The guard is belt-and-braces for that narrow window, not a routine path.
+
+    The refusal WARNING is asserted, not just the absence of a kill: the epoch stub is sized
+    to the grace loop, so if that loop ever grows the stub runs out mid-loop, `_cleanup_keeper`
+    returns at its own `is None` check, and `forced == []` would hold for the wrong reason.
+    Only the warning proves the refusal came from the guard under test.
     """
     runner, _ = _pty_runner(runner_config)
     monkeypatch.setattr("clauster.runner.time.sleep", lambda _s: None)
@@ -1476,8 +1481,12 @@ def test_cleanup_keeper_refuses_a_snapshot_with_no_readable_start(
     forced: list[int] = []
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
 
-    runner._cleanup_keeper(777)
+    with caplog.at_level("WARNING", logger="clauster.runner"):
+        runner._cleanup_keeper(777)
     assert forced == [], "an unreadable start time must never authenticate a force-kill"
+    assert any("no longer that keeper" in r.getMessage() for r in caplog.records), (
+        "the grace loop returned early — the guard under test was never reached"
+    )
 
 
 def test_cleanup_keeper_forces_a_lingering_keeper_without_ticks(

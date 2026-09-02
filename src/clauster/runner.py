@@ -3205,7 +3205,6 @@ class SessionRunner:
         # `_KEEPER_START_TOLERANCE` (2.0s) is wide enough to admit a pid recycled during
         # this very grace loop. That sibling bound guards `pty_keeper.stop_keeper`'s own
         # force-kill after the same ~2s grace; naming it here is not a claim that it is fine.
-        # No issue tracks it — #1402 explicitly leaves it out of scope without filing one.
         #
         # Order is unchanged, and chosen for freshness and cost rather than for the result:
         # both operands are pure predicates, so `and` would answer the same either way. The
