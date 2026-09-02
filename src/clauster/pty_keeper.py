@@ -376,6 +376,48 @@ def _load_pty_process() -> Any:
     return PtyProcess
 
 
+def _report_keeper_fault(message: str) -> None:
+    """Print a keeper-level fault to stderr, which the launcher captures to ``<sidecar>.log``.
+
+    The sidecar's ``error`` field alone is NOT a report. The runner reads it only inside the
+    spawn-readiness window (``_await_ready_pty`` -> ``error_detail``); once a bridge is RUNNING
+    nothing reads it again, so a mid-session ConPTY fault recorded only there would be silent —
+    and this module's rule (see :meth:`_KeeperDrain._scan_session_id`) is that a fault is never
+    a silent skip. This is the same channel the escaping traceback used to land in, which is
+    what made the pre-#1389 crash at least diagnosable.
+
+    Carries only Clauster's own text plus the exception's message. Screen/stream content never
+    reaches here, so nothing unredacted rides out (invariant 4).
+    """
+    print(f"clauster.pty_keeper: {message}", file=sys.stderr, flush=True)
+
+
+def _conpty_alive(proc: Any) -> tuple[bool, str | None]:
+    """Report whether the ConPTY bridge is still running, reading a raise as "assume dead".
+
+    ``isalive()`` is the exit-vs-idle decision on every empty read in
+    :func:`_run_keeper_conpty`, and pywinpty raises out of it on a process handle it can
+    no longer query. Unguarded, that escaped the drain loop and skipped
+    :meth:`_KeeperDrain.finish`, so the discovery sidecar stayed at ``starting``/``ready``
+    while the bridge was orphaned — a lifecycle error collapsing into a misleading state
+    (invariant 1). Assuming dead is the fail-closed answer: the loop leaves by its ordinary
+    exit, which terminates the bridge and publishes the terminal sidecar with the reason on
+    it, rather than spinning on a handle that can no longer be read.
+
+    Deliberately no retry: a fault here is not distinguishable from a genuinely gone handle,
+    and treating "unsure" as alive is the open-failing half of the choice — it keeps the loop
+    polling a bridge nobody can drive while the sidecar still reads live. A session lost to a
+    transient fault is recoverable (``claude --continue``); a stranded card is not.
+
+    Returns ``(alive, error)``. A non-None ``error`` ALWAYS comes with ``alive=False`` — the
+    caller relies on that to break out of the loop, so never add a ``(True, warning)`` case.
+    """
+    try:
+        return bool(proc.isalive()), None
+    except Exception as exc:  # noqa: BLE001 — any pywinpty fault means "cannot observe"
+        return False, f"conpty liveness check failed: {exc}"
+
+
 def _run_keeper_conpty(
     bridge_argv: list[str],
     sidecar: Path,
@@ -388,7 +430,9 @@ def _run_keeper_conpty(
     shared :class:`_KeeperDrain`. ConPTY always fragments output with cursor escapes (like
     the POSIX TUI-winsize case), so a pyte screen is built unconditionally for URL
     reassembly when pyte is present — the raw-byte scrape rarely survives ConPTY alone.
-    Setup/spawn failures are recorded in the sidecar and returned as a code, never raised.
+    Setup, spawn and reap failures are recorded in the sidecar and returned as a keeper code
+    (71-73), never raised. The code is a hint only — a bridge may exit 73 itself, and nothing
+    consumes either it or the sidecar's ``bridge_exit``; ``error`` is what says which happened.
     """
     base: dict[str, object] = {
         "keeper_pid": os.getpid(),
@@ -444,42 +488,97 @@ def _run_keeper_conpty(
     # bridge can leave a final chunk (its connect URL or exit banner) buffered after the process
     # handle already reports dead, so read that tail first and consult isalive() only on an EMPTY
     # read to decide exit-vs-idle.
-    read_error: str | None = None
-    while True:
-        try:
-            data = proc.read(65536)  # str; "" when no data (PYWINPTY_BLOCK=0)
-        except EOFError:
-            # End-of-stream, or an idle non-blocking read some pywinpty builds surface as EOFError:
-            # a still-alive bridge is idle (keep polling); a dead one is closed and drained.
-            if not proc.isalive():
+    #
+    # `drain.finish` sits in a `finally`, not after the loop: an exception escaping the drain
+    # or the reap used to skip it, stranding the sidecar at `starting`/`ready` for an orphaned
+    # bridge (#1389, the same failure mode #1388 closed on the scrape). Structural rather than
+    # enumerated — the individual pywinpty guards below decide how well that terminal sidecar
+    # is DESCRIBED; the `finally` decides that it gets written at all, including for faults
+    # nothing here anticipates.
+    loop_error: str | None = None
+    rc = 73  # "no bridge exit status available"; replaced on every path that reaps one
+    try:
+        while True:
+            try:
+                data = proc.read(65536)  # str; "" when no data (PYWINPTY_BLOCK=0)
+            except EOFError:
+                # End-of-stream, or an idle non-blocking read some pywinpty builds surface as
+                # EOFError. Which one it is, is exactly the question the empty-read branch below
+                # already answers, so fold this into "no data" and let the single `_conpty_alive`
+                # there decide: a still-alive bridge is idle (keep polling), a dead one is closed
+                # and drained (break). Checking here as well would query the handle twice per
+                # idle poll for one answer.
+                data = ""
+            except Exception as exc:  # noqa: BLE001 — see below: ANY read fault is fail-closed
+                # A genuine read-channel error, NOT mere idle — the ConPTY is unusable, so the
+                # bridge can be neither observed nor driven. Fail closed: stop and record it,
+                # rather than spin converting the error to no-data and promoting a broken stream
+                # to "ready".
+                #
+                # Deliberately NOT `except OSError`: pywinpty raises its own `WinptyError`, which
+                # is not an OSError subclass, so the narrow form let the very failure this arm
+                # exists for escape the loop instead of take it.
+                # `login_shepherd._pump_conpty` already catches the read this widely, for this
+                # reason.
+                loop_error = f"conpty read failed: {exc}"
                 break
-            data = ""
-        except OSError as exc:
-            # A genuine read-channel error, NOT mere idle — the ConPTY is unusable, so the bridge
-            # can be neither observed nor driven. Fail closed: stop and record it, rather than spin
-            # converting the error to no-data and promoting a broken stream to "ready".
-            read_error = f"conpty read failed: {exc}"
-            break
-        if data:
-            drain.feed(data.encode("utf-8", "replace"))
-        elif not proc.isalive():
-            break  # no buffered output and the bridge has exited
-        else:
-            time.sleep(0.05)  # alive but idle; yield before re-polling
-        drain.tick()
+            if data:
+                drain.feed(data.encode("utf-8", "replace"))
+            else:
+                alive, loop_error = _conpty_alive(proc)
+                if not alive:
+                    break  # no buffered output, and the bridge exited or went unobservable
+                time.sleep(0.05)  # alive but idle; yield before re-polling
+            drain.tick()
 
-    if read_error is not None:
-        # The stream broke: terminate the (possibly still-running) bridge so we neither leak an
-        # undrivable process nor block wait() below on one we can no longer observe.
-        base["error"] = read_error
+        if loop_error is not None:
+            # The stream broke, or liveness stopped answering. Terminate the (possibly still
+            # running) bridge so we don't leak an undrivable process — and then do NOT reap it.
+            # pywinpty's `wait()` has no timeout and polls `isalive()`, the very call that may
+            # have just failed: a fault that then clears would block the keeper here for the
+            # bridge's whole remaining life while nothing drains the ConPTY. A HUNG keeper is
+            # worse than the crash this fixes, because the runner's stale-sidecar sweep is gated
+            # on `is_keeper_process` — a dead keeper is swept, a live one holding a `ready`
+            # sidecar never is. Nothing consumes the exit status (see the docstring), so leaving
+            # rc at 73 costs nothing and the sidecar's `error` carries the real answer.
+            base["error"] = loop_error
+            _report_keeper_fault(loop_error)
+            with contextlib.suppress(Exception):
+                proc.terminate()
+        else:
+            try:
+                rc = proc.wait() or 0
+            except Exception as exc:  # noqa: BLE001 — the sidecar outranks the exit status
+                # The loop exited cleanly, so `isalive()` had just reported the bridge dead and
+                # this `wait()` should have returned its cached status without blocking. It
+                # raised instead: keep rc at 73 and name it, rather than lose the terminal
+                # sidecar in the gap between here and `finish`.
+                wait_error = f"conpty wait failed: {exc}"
+                base["error"] = wait_error
+                _report_keeper_fault(wait_error)
+    except BaseException as exc:
+        # BaseException, not Exception: an interrupt unwinding the keeper (SIGINT ->
+        # KeyboardInterrupt, SystemExit) would otherwise skip this and publish the one terminal
+        # shape that reads as a CLEAN exit with no reason — `exited` / 73 / `error: null`. So
+        # every abort is named, whether it is an unanticipated fault (a pywinpty build returning
+        # bytes, a pyte fault escaping the drain) or a signal.
+        #
+        # Kill the bridge before unwinding: the `finally` below closes the ConPTY handle and the
+        # keeper then dies, so a bridge left running here outlives the only process that could
+        # observe or drive it. Then re-raise — nothing is swallowed, and the traceback still
+        # reaches `<sidecar>.log` (B036 is satisfied by that `raise`).
+        abort_error = f"conpty keeper aborted: {exc!r}"
+        base["error"] = abort_error
+        _report_keeper_fault(abort_error)
         with contextlib.suppress(Exception):
             proc.terminate()
-    rc = proc.wait() or 0
-    drain.finish(rc)
-    try:
-        proc.close()
-    except Exception:  # noqa: BLE001,S110 — teardown close must never crash the keeper
-        pass
+        raise
+    finally:
+        drain.finish(rc)
+        try:
+            proc.close()
+        except Exception:  # noqa: BLE001,S110 — teardown close must never crash the keeper
+            pass
     return rc
 
 
@@ -494,6 +593,13 @@ def run_keeper(
     Returns the bridge's exit status. Any setup failure is recorded in the
     sidecar (``state: "error"``) and returned as a non-zero code rather than
     raised, so the launching process always gets a diagnosable result.
+
+    That covers the failures each backend anticipates; it is NOT a promise never to raise.
+    :func:`_run_keeper_conpty` publishes the terminal sidecar and then re-raises anything it
+    did not anticipate (#1389), because a keeper that swallowed an unknown fault would leave
+    no traceback in ``<sidecar>.log`` at all. The POSIX path below keeps its narrower
+    enumerated ``except`` shape unchanged — its transport is ``os.read`` on a plain fd, whose
+    failure modes are the documented ``OSError`` family, not a third-party handle's.
 
     When ``screen_sidecar`` is given (the opt-in live-screen tap, #534), the same drained
     chunks are also fed into a pyte emulator and a redacted, cells-only frame is republished

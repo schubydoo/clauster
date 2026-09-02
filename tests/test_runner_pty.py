@@ -1983,3 +1983,77 @@ async def test_spawn_pty_error_surfaces_keeper_error_detail(
 
     assert out.status is InstanceStatus.ERROR
     assert out.error_detail == "openpty failed: boom"  # the keeper's reason, surfaced
+
+
+@_POSIX_ONLY
+async def test_spawn_pty_error_detail_is_redacted(runner_config, tmp_path, monkeypatch) -> None:
+    # Invariant 4: error_detail is rendered inline on the dashboard card, and the keeper now
+    # interpolates arbitrary exception text into the sidecar `error` (pty_keeper's conpty
+    # read/liveness/wait/abort reasons, #1389) — text that reaches here through no redactor.
+    # A session id in it is bearer-equivalent, so this writer redacts exactly as the stderr-tail
+    # writer beside it does.
+    from clauster.models import Project, RemoteControlInstance
+
+    runner, _ = _pty_runner(runner_config)
+
+    async def _noop_persist() -> None:
+        pass
+
+    class _DeadProc:
+        pid = 4242
+
+        def poll(self):  # noqa: ANN202 — mimic subprocess.Popen.poll
+            return 73
+
+    leaky = "conpty read failed: broke at https://claude.ai/code/session_01LEAKAAAAAAAAAAAAAA"
+    monkeypatch.setattr(runner, "_persist", _noop_persist)
+    monkeypatch.setattr(runner, "_popen_keeper", lambda *a, **k: _DeadProc())
+    monkeypatch.setattr(
+        runner, "_await_ready_pty", lambda sidecar, proc: {"state": "error", "error": leaky}
+    )
+    proj = Project(name="alpha", path=runner_config[0].projects_root / "alpha")
+    inst = RemoteControlInstance(project="alpha", label="alpha", resume_mode="pty")
+
+    out = await runner._spawn_pty(
+        inst, proj, "alpha", tmp_path / "alpha.log", "default", resume=False
+    )
+
+    detail = out.error_detail or ""
+    assert "session_01LEAKAAAAAAAAAAAAAA" not in detail  # the bearer-equivalent id is gone
+    assert "session_<redacted>" in detail  # ... masked, not dropped
+    assert "conpty read failed" in detail  # ... and the operator still gets the reason
+
+
+@_POSIX_ONLY
+async def test_spawn_pty_error_detail_absent_stays_none(
+    runner_config, tmp_path, monkeypatch
+) -> None:
+    # The keeper records `error: null` for a state it has no reason for. Redacting must not
+    # turn that absence into the string "None" on the card.
+    from clauster.models import Project, RemoteControlInstance
+
+    runner, _ = _pty_runner(runner_config)
+
+    async def _noop_persist() -> None:
+        pass
+
+    class _DeadProc:
+        pid = 4242
+
+        def poll(self):  # noqa: ANN202 — mimic subprocess.Popen.poll
+            return 70
+
+    monkeypatch.setattr(runner, "_persist", _noop_persist)
+    monkeypatch.setattr(runner, "_popen_keeper", lambda *a, **k: _DeadProc())
+    monkeypatch.setattr(
+        runner, "_await_ready_pty", lambda sidecar, proc: {"state": "error", "error": None}
+    )
+    proj = Project(name="alpha", path=runner_config[0].projects_root / "alpha")
+    inst = RemoteControlInstance(project="alpha", label="alpha", resume_mode="pty")
+
+    out = await runner._spawn_pty(
+        inst, proj, "alpha", tmp_path / "alpha.log", "default", resume=False
+    )
+
+    assert out.status is InstanceStatus.ERROR
+    assert out.error_detail is None

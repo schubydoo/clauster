@@ -3110,7 +3110,18 @@ class SessionRunner:
         if instance.status is InstanceStatus.ERROR:
             # Surface whatever the keeper recorded (openpty/spawn failure); the
             # bridge's own failure reason, if any, is in its --debug-file on disk.
-            instance.error_detail = info.get("error")
+            #
+            # Redact + bound it exactly as `_capture_error_detail` does for the other
+            # error_detail writer (invariant 4): this field is rendered inline on the
+            # dashboard card, and the keeper interpolates arbitrary exception text into
+            # it (`pty_keeper`'s conpty read/liveness/wait/abort reasons, #1389) — text
+            # that has passed through no redactor on its way here.
+            keeper_error = info.get("error")
+            instance.error_detail = (
+                redact.redact_for_disk(keeper_error)[-2000:]
+                if isinstance(keeper_error, str)
+                else None
+            )
         await self._persist()
         if instance.status is InstanceStatus.STARTING:
             self._start_startup_watch(instance.instance_id)
