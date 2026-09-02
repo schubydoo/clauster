@@ -208,7 +208,7 @@ def test_build_hosted_argv_never_reproduces_the_refused_value(bad):
     with pytest.raises(HostedSessionError) as excinfo:
         build_hosted_argv(_BIN, permission_mode="default", resume_uuid=bad)
     message = str(excinfo.value)
-    assert f"malformed ({len(bad)} chars)" in message
+    assert f"malformed, {len(bad)} chars" in message
     # No substring of the value, in any form: not verbatim, not a prefix, not a repr.
     assert bad not in message
     for width in (4, 8, 16):
@@ -2209,7 +2209,9 @@ def test_a_refused_claude_session_uuid_is_named_not_typed_in_the_log(caplog) -> 
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="clauster.hosted"):
         HostedManager._row_from_record(_PID, {**record, "claude_session_uuid": 7})
-    assert "(int)" in caplog.text and "empty string" not in caplog.text
+    # `: int;` not `(int)`: the shape follows a colon, because this helper's answer for a
+    # string carries its own comma and would otherwise nest a parenthesis inside one.
+    assert ": int;" in caplog.text and "empty string" not in caplog.text
 
     # A non-empty string that fails the shape check is described by SHAPE AND LENGTH, never
     # by its bytes (#1392, CodeQL "clear-text logging of sensitive information"). A session
@@ -2220,7 +2222,7 @@ def test_a_refused_claude_session_uuid_is_named_not_typed_in_the_log(caplog) -> 
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="clauster.hosted"):
         HostedManager._row_from_record(_PID, {**record, "claude_session_uuid": "--rm\n-rf"})
-    assert "malformed (8 chars)" in caplog.text
+    assert "malformed, 8 chars" in caplog.text
     assert "--rm" not in caplog.text  # not verbatim...
     assert "\\n-rf" not in caplog.text  # ...and not repr-escaped either
 
@@ -2231,7 +2233,7 @@ def test_a_refused_claude_session_uuid_is_named_not_typed_in_the_log(caplog) -> 
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="clauster.hosted"):
         HostedManager._row_from_record(_PID, {**record, "claude_session_uuid": secret})
-    assert f"malformed ({len(secret)} chars)" in caplog.text
+    assert f"malformed, {len(secret)} chars" in caplog.text
     assert secret not in caplog.text
     assert "ghp_" not in caplog.text
     assert "<redacted>" not in caplog.text  # nothing to redact -- nothing was copied

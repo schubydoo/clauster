@@ -407,15 +407,17 @@
                    of #1381 moved rather than fixed. Covers BOTH halves of the Resume gate
                    below, because a salvaged record can lose its `project` (#1381) or its
                    `claude_session_uuid` (#1392 widened that set well past the empty string).
-                   A healthy row matches neither, so it is unaffected. When BOTH are missing
-                   the label names the project half; the View panel's ended banner carries the
-                   full sentence for every combination, which is why the title here stays
-                   short rather than naming a follow-up action — Kill renders only for an
-                   orphan, Forget for everything else, so no single sentence fits both. #}
+                   A healthy row matches neither, so it is unaffected. BOTH can be missing at
+                   once — `_degraded_row` salvages per field, so one tampered record drops the
+                   uuid and the project independently — and that case names both rather than
+                   falling to the project half, which would leave the operator repairing one
+                   field and hitting the same wall. The title stays short rather than naming a
+                   follow-up action: Kill renders only for an orphan and Forget for everything
+                   else, so no single sentence fits both. #}
                 <span class="text-secondary small me-1" x-cloak data-test="hosted-resume-blocked"
                       x-show="['crashed', 'stopped', 'error'].includes(h.status) && !(h.claude_session_uuid && h.project)"
-                      :title="h.project ? 'No usable conversation id was saved for this session, so a respawn would have nothing to reload.' : 'This session has no project saved, so there is nowhere to respawn it.'"
-                      x-text="h.project ? 'resume unavailable — conversation id unknown' : 'resume unavailable — project unknown'">resume unavailable</span>
+                      :title="h.claude_session_uuid ? 'This session has no project saved, so there is nowhere to respawn it.' : h.project ? 'No usable conversation id was saved for this session, so a respawn would have nothing to reload.' : 'This session has neither a project nor a usable conversation id saved, so there is nothing to respawn and nowhere to put it.'"
+                      x-text="h.claude_session_uuid ? 'resume unavailable — project unknown' : h.project ? 'resume unavailable — conversation id unknown' : 'resume unavailable — project and conversation id unknown'">resume unavailable</span>
                 {# `:disabled` is coerced with `!!` on every busy-state binding below. These
                    buttons live in an x-for clone and the busy maps (hostedStopping/hostedResuming/
                    agentStopping) start without the row's key. Alpine 3.15.x renders a bare

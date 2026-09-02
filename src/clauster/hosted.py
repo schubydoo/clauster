@@ -153,7 +153,7 @@ def _refused_uuid_shape(value: Any) -> str:
     """
     if not isinstance(value, str):
         return type(value).__name__
-    return "empty string" if not value else f"malformed ({len(value)} chars)"
+    return "empty string" if not value else f"malformed, {len(value)} chars"
 
 
 def _is_session_uuid(value: Any) -> TypeGuard[str]:
@@ -206,7 +206,7 @@ def build_hosted_argv(
     if resume_uuid is not None:
         if not _is_session_uuid(resume_uuid):
             raise HostedSessionError(
-                f"refusing an unusable resume session id ({_refused_uuid_shape(resume_uuid)})"
+                f"refusing an unusable resume session id: {_refused_uuid_shape(resume_uuid)}"
             )
         argv += ["--resume", resume_uuid]
     return argv
@@ -1903,7 +1903,10 @@ def _as_session_uuid(value: Any) -> str | None:
         return value
     if value is not None:
         logger.warning(
-            "hosted: refusing a claude_session_uuid (%s) from a persisted record; the row "
+            # Colon, not the `(%s)` its three siblings use: they interpolate a bare type
+            # name, which reads fine parenthesised, while this helper's answer carries its
+            # own punctuation and would nest a parenthesis inside one.
+            "hosted: refusing a claude_session_uuid from a persisted record: %s; the row "
             "loses its resume evidence",
             _refused_uuid_shape(value),
         )

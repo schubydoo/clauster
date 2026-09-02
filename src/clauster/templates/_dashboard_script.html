@@ -5001,7 +5001,8 @@
         // its own now — `_as_session_uuid` drops a value that is not session-shaped, and a
         // session that ended before its init frame never captured one at all — so a row with
         // a project and no uuid used to fall through both branches and explain nothing,
-        // which is the "fails opaquely" failure the row chip exists to prevent.
+        // which is the "fails opaquely" failure the row chip exists to prevent. Four branches,
+        // not three: the halves are salvaged independently, so "neither" is a real state.
         let resume = "";
         if (h && h.claude_session_uuid && h.project) {
           resume = " Use Resume above to continue it.";
@@ -5010,9 +5011,15 @@
           // orphan row this sentence lands beside one telling the operator to Kill, and two
           // consecutive sentences naming different actions is worse than naming none.
           resume = " It cannot be resumed: no usable conversation id was saved for it.";
-        } else if (h) {
+        } else if (h && h.claude_session_uuid) {
           resume = " It cannot be resumed: its project is unknown, so there is nowhere to" +
             " respawn it. Start a new session in the right project instead.";
+        } else if (h) {
+          // Both halves at once. `_degraded_row` salvages per FIELD, so one tampered record
+          // drops the uuid and the project independently -- falling to the project-only
+          // wording here would have the operator repair one field and hit the same wall.
+          resume = " It cannot be resumed: it has neither a project nor a usable conversation" +
+            " id saved. Start a new session in the right project instead.";
         }
         return base + detail + resume;
       },
