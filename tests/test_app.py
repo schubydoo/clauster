@@ -888,7 +888,10 @@ def test_dashboard_explains_missing_connect_url(write_config):
     assert "connectUrlMissing(name) {" in page  # the transient-gap helper
     assert "connectUrlUnavailable(name) {" not in page  # the pty 'no URL ever' split is removed
     assert "No web link" not in page  # the false 'permanent no link' copy is gone for good
-    assert 'x-show="connectUrlMissing(i.rk)"' in page  # single placeholder gate, both modes
+    # Single placeholder gate, both modes — now also suppressed when the backend named a
+    # reason the link is not coming (#1390); a spinner promising a link that will never
+    # arrive is worse than no chip.
+    assert 'x-show="connectUrlMissing(i.rk) && !connectNoticeOf(i.rk)"' in page
     assert "Preparing connect link" in page  # the transient spinner copy (visual chip)
     # The visual chip is aria-hidden; the SR announcement is a PERSISTENT aria-live region
     # (always mounted, content-toggled) — a live region shown in via x-show is silently skipped
@@ -901,6 +904,26 @@ def test_dashboard_explains_missing_connect_url(write_config):
     # The announced string mirrors the visible chip label word-for-word, so the SR and sighted
     # experiences match (pin it — it's otherwise unasserted and could drift).
     assert '"Preparing connect link…"' in page  # transient SR text == spinner chip label
+
+
+def test_dashboard_shows_the_reason_a_connect_link_is_not_coming(write_config):
+    # #1390: when the pty keeper gave up on the connect URL because its screen would not
+    # render, the backend puts the reason on the row as `notice` and the card shows it
+    # where the Open in Claude button would be. Before this the operator saw a green
+    # Running row with the affordances gone and nothing saying why.
+    page = _client(write_config).get("/").text
+    assert "connectNoticeOf(name) {" in page  # the helper ships
+    # Read from `notice`, NOT `error_detail`: that field is bound to the error/ended zones,
+    # so an advisory routed through it would render nowhere on a RUNNING row (or paint a
+    # healthy session as failed). Pin the field name — the split is the whole design.
+    assert "(this.rowOf(name) || {}).notice || null" in page
+    assert 'data-test="connect-notice"' in page  # the chip exists and is selectable in E2E
+    assert 'x-text="connectNoticeOf(i.rk)"' in page  # renders the backend string verbatim
+    assert "text-warning small align-self-center" in page  # advisory, not text-danger
+    # One live region, not two: the chips are mutually exclusive, so the notice is
+    # announced through the SAME persistent region as the spinner text.
+    assert "return this.connectNoticeOf(name) || (this.connectUrlMissing(name) ?" in page
+    assert page.count('x-text="connectStatusText(i.rk)"') == 1
 
 
 def test_dashboard_restart_note_says_sessions_survive(write_config):

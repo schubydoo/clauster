@@ -430,6 +430,33 @@ Three probes, from cheapest to most direct:
 3. **Process there?** `pgrep -a -f 'claude.*remote-control'` — a live process
    with a dead card usually means an orphaned keeper (previous section).
 
+### "Connect link unavailable — the session's screen could not be rendered."
+
+**What you see:** a green **Running** Interactive Session card with no **Open in
+Claude** button and no QR button, carrying that sentence where the buttons
+would be.
+
+**The bridge is fine.** Only its deep link is missing. The session runs, the
+live log tail works, and Stop and the live terminal all behave normally.
+
+**Cause:** the keeper reads the connect link off a terminal screen it rebuilds
+from the bridge's output. A rare byte sequence — a double-width character left
+half-overwritten — makes that screen fail to render. The keeper skips the bad
+chunk and retries on the next one, which normally succeeds within the 30-second
+capture window. This message means it never did.
+
+**The fix:** open the session from
+[claude.ai/code](https://claude.ai/code) and pick it from your session list, or
+Stop the card and start a new session. Nothing needs repairing on the host.
+
+**Mechanism:** the keeper writes the reason into its sidecar next to the
+bridge's log, and Clauster lifts it onto the card. The exact fault is also
+logged, one line beginning `clauster.pty_keeper:`:
+
+```sh
+grep clauster.pty_keeper ~/.clauster/logs/<label>-*.keeper.log
+```
+
 ## Everything looks fine but the session never responds
 
 ### Hosted / Direct Session: "cannot connect to claustrum"

@@ -3647,9 +3647,25 @@
       // surface before it's true. Without this a green "Running" row shows no connect
       // affordance and no explanation. Applies to BOTH modes: a pty (flag-form) bridge
       // DOES print a connect URL (the keeper scrapes it from the reassembled pty screen,
-      // #665) — so it is a transient capture gap, not a permanent "no link" state.
+      // #665) — so it is USUALLY a transient capture gap, not a permanent "no link" state.
+      // `connectNoticeOf` below is the exception the backend can name.
       connectUrlMissing(name) {
         return this.statusOf(name) === "running" && !this.sessionUrlOf(name);
+      },
+      // The backend's reason the connect link is missing and is NOT coming (#1390) — today
+      // the pty keeper's "the screen could not be rendered", set on the sidecar after its
+      // 30s capture window expired with the render fault still live.
+      //
+      // Read from `notice`, deliberately NOT `error_detail`: this row is RUNNING and its
+      // session works, while `detailOf`/`error_detail` is bound to the error and ended
+      // zones — routing an advisory through it would either render nowhere here or paint a
+      // healthy session as failed.
+      //
+      // Gated on `connectUrlMissing` so it can only ever appear where it is the answer:
+      // a stale notice sitting beside a link that did arrive would contradict the link.
+      connectNoticeOf(name) {
+        if (!this.connectUrlMissing(name)) return null;
+        return (this.rowOf(name) || {}).notice || null;
       },
       // Screen-reader text for the connect-link state, surfaced via an aria-live region
       // that stays mounted across the connect gap (empty when idle). A live region only
@@ -3658,9 +3674,12 @@
       // NVDA/VoiceOver — so the wrapper persists and only this text changes. (The region
       // shares the row's filter x-show, so an off-filter desktop row stays silent — which
       // is intended: a row the user has filtered out shouldn't announce.) The string
-      // mirrors the visible chip label so the SR and sighted experiences match word-for-word.
+      // mirrors the visible chip label so the SR and sighted experiences match word-for-word
+      // — which is why the notice is announced HERE rather than from a second live region:
+      // the two chips are mutually exclusive, so one region carries whichever is showing,
+      // and swapping the text of an already-mounted region is what actually announces.
       connectStatusText(name) {
-        return this.connectUrlMissing(name) ? "Preparing connect link…" : "";
+        return this.connectNoticeOf(name) || (this.connectUrlMissing(name) ? "Preparing connect link…" : "");
       },
       errorOf(name) { return this.errors[name] || null; },
       // A stopped/crashed bridge can be revived — show "Resume" instead of "Start" and

@@ -120,6 +120,15 @@ class RemoteControlInstance(BaseModel):
     # Tail of the bridge's stdout/stderr, captured when a spawn fails (ERROR/CRASHED)
     # so the UI can show *why* instead of a bare "Failed to start". None on success.
     error_detail: str | None = None
+    # A non-fatal advisory about a bridge that is otherwise HEALTHY (#1390) — currently the
+    # pty keeper's "the screen could not be rendered, so no connect link was captured".
+    # Deliberately NOT `error_detail`: the dashboard ties that field to the error/ended
+    # states, so a note routed through it would either render nowhere on a running row or
+    # make a working session read as failed. Set from the keeper sidecar's `note`.
+    # Not persisted (`SessionRunner._persist_subset` builds its rows field-by-field), for the
+    # same reason as `error_detail` — it describes this run of this bridge, and a reattach
+    # re-reads the sidecar that is still on disk.
+    notice: str | None = None
     # The `claude` release the bridge PROCESS is running (#1275) — read off the live process
     # tree by `procutil.running_claude_version` on every liveness poll, and cleared the tick
     # a bridge stops. Deliberately NOT persisted (`SessionRunner._persist_subset` builds its

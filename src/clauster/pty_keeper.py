@@ -59,6 +59,21 @@ _RE_CONNECT_URL = re.compile(rb"https?://claude\.ai/code/(session_[A-Za-z0-9]+)"
 # discovery (the bridge stays running regardless; this only bounds URL capture).
 _URL_TIMEOUT = 30.0
 
+#: The sidecar's advisory `note` when the URL timeout fires while the pyte render fault
+#: guarded in `_KeeperDrain._scan_session_id` is still live (#1390). The keeper-path sibling
+#: of `login_shepherd._SCREEN_FAULT_NOTE`: a transient fault clears on the next chunk and is
+#: only worth a log line, but one that outlives the whole capture window is the reason the
+#: operator has no deep link, and a log file nobody has a reason to open is not a report.
+#:
+#: A `note` is deliberately NOT the sidecar's `error`: `error` means the keeper failed, and
+#: the runner reads it only for an ERROR row. This bridge is running fine — the note is an
+#: advisory carried alongside a healthy `ready` row.
+#:
+#: Fixed text, never interpolated: the exception's own message adds nothing an operator can
+#: act on, and keeping the string constant means nothing from the screen can ride out here
+#: (invariant 4). It is rendered verbatim on the card, so it is written to be read there.
+_SCREEN_FAULT_NOTE = "Connect link unavailable — the session's screen could not be rendered."
+
 
 def _worktree_from_argv(bridge_argv: list[str]) -> str | None:
     """Return the ``--worktree <name>`` the bridge was launched with, or ``None`` (#1241).
@@ -349,6 +364,18 @@ class _KeeperDrain:
             # `--continue` resume or a newer claude build may never re-print it).
             self._url_found = True
             self._buf = bytearray()
+            if self._screen_scan_failed:
+                # A render fault that was still live at the deadline is WHY there is no URL:
+                # `_scan_session_id` clears the flag on any clean render, so reaching here
+                # with it set means the last scrape of the capture window could not read the
+                # screen. Record it as an advisory the runner lifts onto the card (#1390) —
+                # otherwise the row promotes to `ready` with `connect_url: null` and the
+                # operator's only trace is `<sidecar>.log`.
+                #
+                # Set before the state check, not inside it: `base` is shared with the
+                # backend and `finish` republishes it, so the note survives even on the
+                # promotion path this `if` skips.
+                self._base["note"] = _SCREEN_FAULT_NOTE
             if self._base.get("state") == "starting":  # pragma: no branch
                 self._base["state"] = "ready"
                 _write_sidecar(self._sidecar, self._base)
@@ -444,6 +471,11 @@ def _run_keeper_conpty(
         "worktree_name": _worktree_from_argv(bridge_argv),
         "state": "starting",
         "error": None,
+        # Advisory, NOT a failure: set when the bridge is fine but something degraded for
+        # the operator (#1390). Distinct from `error` by design — the runner reads `error`
+        # only on an ERROR row, and this rides a healthy one. Always present so the sidecar
+        # keeps one shape whether or not a note was raised.
+        "note": None,
     }
     _write_sidecar(sidecar, base)
 
@@ -626,6 +658,7 @@ def run_keeper(
         "worktree_name": _worktree_from_argv(bridge_argv),
         "state": "starting",
         "error": None,
+        "note": None,  # advisory on a healthy row; see the ConPTY base dict above (#1390)
     }
     _write_sidecar(sidecar, base)
 

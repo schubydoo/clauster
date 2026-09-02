@@ -409,6 +409,38 @@ def _row_float(value: object) -> float | None:
     return float(value)
 
 
+#: Cap on a keeper `note` lifted onto a card. The keeper writes one fixed sentence, so this
+#: only bounds a hand-edited or corrupt sidecar; kept short because the value renders inline
+#: on the row rather than in a log pane.
+_NOTICE_MAX_CHARS = 200
+
+
+def _sidecar_notice(info: dict) -> str | None:
+    """Read a keeper sidecar's advisory ``note`` as a bounded, redacted string (#1390).
+
+    THE single reader for that field, shared by both paths that fold a sidecar onto an
+    instance — :meth:`SessionRunner._apply_pty_info` (spawn + startup watch) and
+    :meth:`SessionRunner._reattach_pty_from_sidecar` (a keeper adopted after a restart).
+    They are the same (path, field) pair: a reattached row shows the same card, so a note
+    read on only one of them would appear and then vanish across a Clauster restart.
+
+    Treated as untrusted text even though the keeper only ever writes a fixed constant: a
+    sidecar is an on-disk file a hand edit or a corrupt write can put anything into (the
+    same reasoning the pid fields' ``> 0`` gates carry), and this one is rendered on the
+    dashboard. Redacted for the same reason ``_capture_error_detail`` redacts — nothing
+    reaching the browser skips ``redact`` (invariant 4) — then bounded.
+
+    A non-string, empty or whitespace-only value degrades to ``None`` (no chip) rather than
+    an empty advisory the operator cannot read a reason out of.
+    """
+    note = info.get("note")
+    if not isinstance(note, str) or not note.strip():
+        return None
+    # Head, not tail (unlike `error_detail`'s stderr tail): a note is one sentence written
+    # front-first, so a truncation must keep its beginning.
+    return redact.redact_for_disk(note)[:_NOTICE_MAX_CHARS]
+
+
 class SessionRunner:
     """Owns the lifecycle of managed bridges: spawn, resume, stop, and status polling."""
 
@@ -3040,6 +3072,11 @@ class SessionRunner:
             instance.starter_session_id = sid
         if url := info.get("connect_url"):
             instance.url = url
+        # Assigned unconditionally, unlike the fields above: those only ever gain a value
+        # (a sidecar re-read during the startup watch must not un-learn a pid), but a note
+        # is a statement about the CURRENT sidecar. Clearing it when the sidecar no longer
+        # carries one is what lets an advisory go away instead of sticking to the card.
+        instance.notice = _sidecar_notice(info)
 
         keeper_dead = proc.poll() is not None
         # A pty bridge is RUNNING once the keeper reports readiness: either a captured
@@ -4242,6 +4279,12 @@ class SessionRunner:
                 bridge_raw_log_path=tail_source,
                 starter_session_id=info.get("session_id") or None,
                 url=info.get("connect_url") or None,
+                # Carried across the restart with the URL it explains (#1390). This leg
+                # reattaches a `ready` sidecar, which is exactly the state the keeper
+                # promotes a screen-fault session into with `connect_url: null` — so
+                # dropping the note here would rebuild the card with the missing link and
+                # none of the reason, the failure the note exists to close.
+                notice=_sidecar_notice(info),
                 # The bridge's real `--worktree` name (#1241). Without it a reattach that
                 # had to mint a fresh instance_id would derive a name for a worktree that
                 # does not exist — resuming into a NEW one and orphaning the original,
