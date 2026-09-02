@@ -468,10 +468,12 @@ def _row_str(value: object) -> str | None:
     """Coerce a persisted-row field to ``str``, or ``None`` if it isn't one (#1401).
 
     ``bridge_boot_id`` is a string in every row this process writes, but a hand-edited row
-    can hold junk. A non-string value degrades to ``None`` — ticks-only liveness, exactly as
-    an absent boot id does — rather than reaching the identity compare as the wrong type.
+    can hold junk. A non-string OR empty value degrades to ``None`` — ticks-only liveness,
+    exactly as an absent boot id does — rather than reaching the identity compare as the wrong
+    type or as an ``""`` that can never match a live boot id (which would read a live bridge as
+    dead, the #1399 failure shape). ``proc_boot_id`` maps an empty read to ``None`` too.
     """
-    return value if isinstance(value, str) else None
+    return value if isinstance(value, str) and value else None
 
 
 class SessionRunner:
@@ -4349,10 +4351,10 @@ class SessionRunner:
             if not procutil.is_keeper_process(keeper_pid):
                 continue
             bridge_start_ticks = _row_int(info.get("bridge_start_ticks"))
-            # No `boot_id`: the sidecar records none, and a live keeper (checked above) proves
-            # the current boot, so the exact tick match is complete (#1401). The reattached
-            # instance below therefore also carries no boot_id and stands on its ticks until a
-            # fresh spawn stamps one.
+            # No `boot_id` in the gate: the sidecar records none, and a live keeper (checked
+            # above) proves the current boot, so the exact tick match is complete here (#1401).
+            # The reattached instance below is then STAMPED with the current boot id, so the
+            # persisted row keeps the cross-boot defense across the next restart.
             if not procutil.is_live_bridge(
                 bridge_pid, bridge_proc_start, start_ticks=bridge_start_ticks
             ):
@@ -4396,6 +4398,14 @@ class SessionRunner:
                 # promotes back, so the card sticks STOPPED under a running keeper — the
                 # whole #1399 failure, reproduced on a fully-upgraded host.
                 bridge_start_ticks=bridge_start_ticks,
+                # Stamped with the CURRENT boot, not carried from the sidecar (which records
+                # none): the live keeper checked above proves this bridge is running in this
+                # boot, so its boot id is the live one (#1401). Without this the reattached row
+                # persists boot-id-less and loses the cross-boot defense after the next
+                # restart+reboot, on a row this method itself creates. Read here inside the
+                # `to_thread` this method already runs in (see `rediscover`), so no event-loop
+                # block.
+                bridge_boot_id=procutil.proc_boot_id(),
                 intentional_stop=False,
                 keeper_pid=keeper_pid,
                 keeper_proc_start=keeper_proc_start,
@@ -4765,6 +4775,16 @@ class SessionRunner:
             # have dropped the row, which we must not resurrect.
             if iid in self._instances or iid not in self._persisted:
                 continue
+            # A post-#1401 spawn's row carries its boot id; a pre-#1401 row (or one whose bridge
+            # was pointer/sidecar-reattached before) carries none. This build is reached only
+            # for a row judged live in THIS boot, so stamp the current boot for a boot-id-less
+            # one — otherwise the reattached row persists boot-id-less and loses the cross-boot
+            # defense on the next restart, a row this pass itself rewrites (#1401). The recorded
+            # value already went to `_judge_row` above; this only affects what we persist. Read
+            # off-thread.
+            live_boot_id = (
+                boot_id if boot_id is not None else await asyncio.to_thread(procutil.proc_boot_id)
+            )
             # Liveness is not usability (see `_reconcile_status`): a bridge whose process is
             # up but which has not registered an environment / reached a ready sidecar is
             # STARTING, not RUNNING. `connect` IS that evidence — it only resolves from a
@@ -4794,10 +4814,11 @@ class SessionRunner:
                 # row's own pair ACCEPTED the process and accepts the read only inside the
                 # exact 0.05s bound (`_ticks_on_exact_match`), so it cannot admit more.
                 bridge_start_ticks=start_ticks,
-                # The boot the ticks belong to, carried from the row so the reattached bridge
-                # keeps the cross-boot defense across this restart (#1401). A pre-#1401 row
-                # has none and stands on its ticks until a fresh spawn re-stamps it.
-                bridge_boot_id=boot_id,
+                # The boot the bridge is running in (#1401): the row's own recorded id when it
+                # has one, else the current boot (`live_boot_id` above) — this build is reached
+                # only for a row judged live THIS boot, so the reattached row keeps the
+                # cross-boot defense across the next restart instead of persisting boot-id-less.
+                bridge_boot_id=live_boot_id,
                 keeper_pid=keeper_pid,
                 keeper_proc_start=keeper_proc_start,
                 keeper_start_ticks=keeper_start_ticks,
@@ -5100,6 +5121,9 @@ class SessionRunner:
             # Re-bind the live tail to the log this survivor was already writing before the
             # restart, so `/ws/bridge-log` resolves a real path instead of 1008-ing (#584).
             log_path = await asyncio.to_thread(self._latest_debug_log_for, proj.name)
+            # The pointer's bridge is live NOW (this survivor loop only runs for a live
+            # pointer), so the current boot is its boot (#1401). Read off-thread.
+            boot_id = await asyncio.to_thread(procutil.proc_boot_id)
             instance = self._instance_from_pointer(
                 proj.name,
                 ptr,
@@ -5109,6 +5133,7 @@ class SessionRunner:
                 resume_mode=resume_mode,
                 bridge_proc_start=bridge_proc_start,
                 bridge_start_ticks=bridge_start_ticks,
+                bridge_boot_id=boot_id,
                 keeper_pid=keeper_pid,
                 keeper_proc_start=keeper_proc_start,
                 keeper_start_ticks=keeper_start_ticks,
@@ -5257,6 +5282,7 @@ class SessionRunner:
         # external bridge has no keeper and states so by passing None.
         keeper_start_ticks: int | None,
         bridge_start_ticks: int | None = None,
+        bridge_boot_id: str | None = None,
         bridge_debug_log_path: Path | None = None,
         bridge_raw_log_path: Path | None = None,
         instance_id: str | None = None,
@@ -5309,6 +5335,11 @@ class SessionRunner:
             # btime into the row and hands the result to a 0.05s bound. Carrying the original
             # keeps the immune value the pointer already gave us (#1399).
             bridge_start_ticks=bridge_start_ticks,
+            # The current boot id (#1401). A pointer records none, but the caller only builds
+            # this after `is_live_bridge`/cwd confirm the pointer's bridge is live NOW, so its
+            # boot is the live one. Passed in (read off-thread by the async caller) so the row
+            # persists with the cross-boot defense rather than boot-id-less.
+            bridge_boot_id=bridge_boot_id,
             bridge_debug_log_path=bridge_debug_log_path,
             bridge_raw_log_path=bridge_raw_log_path,
             environment_id=ptr.environment_id,
@@ -5406,6 +5437,9 @@ class SessionRunner:
         persisted_hit = self._persisted_for_project(proj.name)
         saved = persisted_hit[1] if persisted_hit is not None else {}
         spawn_mode, permission_mode, _resume_mode = self._saved_modes(saved)
+        # The external bridge is live at this project's cwd right now, so the current boot is
+        # its boot (#1401). Read off-thread, like the rediscover survivor path.
+        boot_id = await asyncio.to_thread(procutil.proc_boot_id)
         instance = self._instance_from_pointer(
             proj.name,
             ptr,
@@ -5415,6 +5449,7 @@ class SessionRunner:
             resume_mode="standard",
             bridge_proc_start=procutil._expected_epoch(ptr.proc_start),
             bridge_start_ticks=_pointer_start_ticks(ptr.proc_start),
+            bridge_boot_id=boot_id,
             # An adopted EXTERNAL session is a standard bridge with no keeper at all
             # (`is_standard_bridge_cmdline` gates adoption on exactly that), so the whole
             # keeper trio is stated as absent rather than left to a default.

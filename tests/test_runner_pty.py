@@ -2078,6 +2078,33 @@ def test_keeper_reattach_carries_the_sidecar_note_onto_the_card(
     assert inst.notice == note  # `None` arm is the positive control: no note, no chip
 
 
+async def test_pty_sidecar_reattach_stamps_the_current_boot_id(runner_config, monkeypatch) -> None:
+    # #1401: the sidecar records no boot id, but the live keeper proves the current boot, so
+    # the reattached instance must be STAMPED with it — otherwise the persisted row loses the
+    # cross-boot defense on the next restart, on a row this method itself creates.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    runner._log_dir.mkdir(parents=True, exist_ok=True)
+    (runner._log_dir / "alpha-1700000000000-0.keeper.json").write_text(
+        json.dumps(
+            {"keeper_pid": 7777, "bridge_pid": 8888, "bridge_proc_start": 333.0, "state": "ready"}
+        )
+    )
+    saved = {"project_name": "alpha", "label": "alpha", "resume_mode": "pty"}
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda pid: pid == 7777)
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge", lambda pid, start=None, **k: pid == 8888
+    )
+    monkeypatch.setattr("clauster.runner.procutil.proc_boot_id", lambda: "live-boot-uuid")
+
+    inst = runner._reattach_pty_from_sidecar("alpha", saved)
+
+    assert inst is not None
+    assert inst.bridge_boot_id == "live-boot-uuid", (
+        "the reattached row must carry the live boot id"
+    )
+
+
 @_POSIX_ONLY
 async def test_resume_keeps_an_explicit_worktree_name(runner_config, monkeypatch) -> None:
     # A resume mints a new instance object and copies only the identity across. The

@@ -120,10 +120,10 @@ def proc_boot_id() -> str | None:
     Those platforms record an absolute create-time and are exposed to neither fault.
     """
     try:
-        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+        raw = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    return boot_id or None
+    return raw.strip() or None
 
 
 def start_time_is_drift_prone() -> bool:
