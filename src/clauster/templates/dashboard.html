@@ -386,24 +386,32 @@
                 <span class="badge bg-secondary-lt me-1"
                       title="Hosted sessions stream live here only — unlike bridges, they are not attachable from claude.ai/code or the Claude mobile app">local live-view only</span>
                 <span class="badge me-1" :class="hostedStatusBadge(h.status)"><span class="status-dot" :class="hostedStatusDot(h.status)" aria-hidden="true"></span><span class="text-capitalize" x-text="h.status"></span></span>
-                {# The title names Resume only when the row can actually offer it: a salvaged
-                   row can be an orphan AND have lost its `project`, and the Resume button is
-                   not rendered for those (#1381). Mirrors the same branch in `reattach_all`'s
-                   orphan `error_detail`. #}
+                {# The title names Resume only when the row can actually offer it. Both halves
+                   of the Resume gate below, not just `project`: a salvaged row can be an
+                   orphan AND have lost its `project` (#1381), and it can just as well have
+                   lost its `claude_session_uuid` — `_as_session_uuid` drops one that is not
+                   session-shaped (#1392). Testing one half promised Resume where the button
+                   is not rendered. Mirrors the same branch in `reattach_all`'s orphan
+                   `error_detail`; the two must move together. #}
                 <span class="badge bg-orange-lt me-1" x-show="h.is_orphan" x-cloak
-                      :title="h.project ? 'Survived a daemon restart — Resume to recover or Kill to clean up' : 'Survived a daemon restart — Kill to clean up (it cannot be resumed: its project is unknown)'">orphan</span>
+                      :title="h.project && h.claude_session_uuid ? 'Survived a daemon restart — Resume to recover or Kill to clean up' : 'Survived a daemon restart — Kill to clean up (it cannot be resumed: part of its saved record was unreadable)'">orphan</span>
                 {# `|| h.label` because a row whose saved record degraded on `project` carries
                    `project: ""` (#1381) and would otherwise render nameless. Same fallback
                    idiom `forgetHosted` already uses for its confirm prompt. #}
                 <span class="fw-medium me-1" x-text="h.project || h.label"></span>
                 <span class="text-secondary small me-1" x-text="permLabel(h.permission_mode)"></span>
-                {# The reason the Resume button below is absent for this row. Without it the
+                {# The reason the Resume button below is absent for this row, as VISIBLE text:
+                   a tooltip never fires on touch and this is a phone-first product — the same
+                   reasoning the bridge rows' `resume-blocked` chip is built on. Without it the
                    row shows only Kill and no explanation, which is the "fails opaquely" half
-                   of #1381 moved rather than fixed. Shown only where Resume would otherwise
-                   have been offered, so a healthy row is unaffected. #}
+                   of #1381 moved rather than fixed. Covers BOTH halves of the Resume gate
+                   below, because a salvaged record can lose its `project` (#1381) or its
+                   `claude_session_uuid` (#1392 widened that set well past the empty string).
+                   A healthy row matches neither, so it is unaffected. #}
                 <span class="text-secondary small me-1" x-cloak
-                      x-show="['crashed', 'stopped', 'error'].includes(h.status) && h.claude_session_uuid && !h.project"
-                      title="This session's saved record was unreadable and its project is unknown, so it cannot be respawned. Kill it and start a new session in the right project.">resume unavailable — project unknown</span>
+                      x-show="['crashed', 'stopped', 'error'].includes(h.status) && !(h.claude_session_uuid && h.project)"
+                      :title="h.project ? 'No usable conversation id was saved for this session, so a respawn would have nothing to reload. Kill it and start a new session.' : 'Part of the saved record for this session was unreadable and its project is unknown, so it cannot be respawned. Kill it and start a new session in the right project.'"
+                      x-text="h.project ? 'resume unavailable — conversation id unknown' : 'resume unavailable — project unknown'">resume unavailable</span>
                 {# `:disabled` is coerced with `!!` on every busy-state binding below. These
                    buttons live in an x-for clone and the busy maps (hostedStopping/hostedResuming/
                    agentStopping) start without the row's key. Alpine 3.15.x renders a bare

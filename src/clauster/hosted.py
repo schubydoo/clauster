@@ -133,9 +133,11 @@ def _refused_uuid_shape(value: Any) -> str:
     type name would read as a type complaint about one of the shapes this refusal exists
     for. ``_restore_instance_id`` draws the same distinction for a falsy instance_id. A
     non-empty string that fails :data:`_SESSION_UUID_SHAPE_RE` is quoted and truncated
-    instead — it is the one refusal an operator can act on, so the message names the exact
-    token to fix in the record. ``repr`` escapes every control character, so a hand-edited
-    record cannot inject a line into either sink.
+    instead — it is the one refusal an operator can act on, so the message names the token
+    to fix in the record (near enough to find it: ``sanitize_line`` *strips* ANSI rather
+    than escaping it, so an escape sequence in the value is reported without it). ``repr``
+    escapes every control character, so a hand-edited record cannot inject a line into
+    either sink.
 
     Two sinks, both outside redaction's normal reach: a ``logger.warning`` and the message
     of the :class:`HostedSessionError` that :func:`build_hosted_argv` raises, which the
@@ -145,12 +147,14 @@ def _refused_uuid_shape(value: Any) -> str:
     is written around is claude changing its id format, and that day the *real, current*
     session id would otherwise land verbatim in a log file and a dashboard error while
     ``_redact_obj`` masks that same id out of every frame. Redact BEFORE truncating: a
-    72-character prefix of a secret is still a secret. The 256-char pre-slice only bounds
-    the regex work.
+    72-character prefix of a secret is still a secret. The 1024-char pre-slice bounds the
+    regex work; it is well clear of the ``String(64)`` column a real value comes from, and
+    generous enough that a secret cannot be cut below the length its mask matches on and
+    slip through as a fragment.
     """
     if not isinstance(value, str):
         return type(value).__name__
-    return "empty string" if not value else f"malformed {sanitize_line(value[:256])[:72]!r}"
+    return "empty string" if not value else f"malformed {sanitize_line(value[:1024])[:72]!r}"
 
 
 def _is_session_uuid(value: Any) -> TypeGuard[str]:
