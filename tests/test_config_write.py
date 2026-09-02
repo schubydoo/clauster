@@ -211,13 +211,13 @@ def test_load_settings_json_obj_rejects_non_object(raw: bytes) -> None:
 def test_load_settings_json_obj_rejects_deeply_nested_json() -> None:
     # The contract is InvalidCandidateError only (the caller maps it to 422: "we will
     # not overwrite a file we could not parse"). A deeply-nested settings file — which
-    # can arrive with a cloned repository — raises RecursionError out of CPython's
-    # recursive JSON scanner before json can raise JSONDecodeError, and RecursionError
-    # is not a ValueError, so it escaped the handler and left this code-executing write
-    # tier raising outside its contract. It must fail closed as a structural error.
-    # CPython 3.14.7+ bounds the scanner's depth itself and raises JSONDecodeError for the
-    # same input, so the message differs by interpreter; the contract (the exception
-    # type) is what the test pins, and both branches must map to it.
+    # can arrive with a cloned repository — raised RecursionError out of CPython's
+    # recursive JSON scanner (before 3.14.7) before json could raise JSONDecodeError,
+    # and RecursionError is not a ValueError, so it escaped the handler and left this
+    # code-executing write tier raising outside its contract. It must fail closed as a
+    # structural error. CPython 3.14.7+ bounds the scanner's depth itself and raises
+    # JSONDecodeError for the same input, so the message differs by interpreter; the
+    # contract (the exception type) is what the test pins, and both branches map to it.
     with pytest.raises(cw.InvalidCandidateError, match="too deeply|not valid JSON"):
         cw.load_settings_json_obj(b"[" * 100_000)
 
