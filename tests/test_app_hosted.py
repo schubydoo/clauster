@@ -418,7 +418,13 @@ def test_hosted_resume_gate_says_the_same_thing_in_all_three_places(
     with TestClient(app) as client:
         body = client.get("/").text
     # 1. the button, 2. the orphan badge's tooltip, 3. the "why not" chip -- all both-halves.
-    assert "h.claude_session_uuid && h.project" in body
+    # The button pin carries its status list: the bare gate is also a SUBSTRING of the chip's
+    # negation, of `hasResumable`, and of `_hostedEndedReason`, so on its own it would stay
+    # green with the Resume `x-if` deleted outright.
+    assert (
+        "['crashed', 'stopped', 'error'].includes(h.status) && h.claude_session_uuid"
+        " && h.project" in body
+    )
     assert "h.project && h.claude_session_uuid ?" in body
     assert "!(h.claude_session_uuid && h.project)" in body
     # The chip's reason is VISIBLE text, not a tooltip: a title never fires on touch, and

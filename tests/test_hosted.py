@@ -25,6 +25,7 @@ from clauster.hosted import (
     HostedSession,
     HostedSessionError,
     _redact_obj,
+    _refused_uuid_shape,
     build_hosted_argv,
 )
 from clauster.hosted_state import HostedStateStore
@@ -204,7 +205,12 @@ def test_build_hosted_argv_truncates_the_refused_value_it_names(bad):
     # after redaction, each worth at most ten in `repr`, plus the fixed prose.
     with pytest.raises(HostedSessionError) as excinfo:
         build_hosted_argv(_BIN, permission_mode="default", resume_uuid=bad)
-    assert len(str(excinfo.value)) < 800
+    named = _refused_uuid_shape(bad)
+    assert named in str(excinfo.value)
+    # The bound is asserted on the NAMED value, not on the whole message: measuring the
+    # message would couple this test to the surrounding prose, so a reword longer than the
+    # slack would fail it for a reason that has nothing to do with truncation.
+    assert len(named) <= len("malformed ") + 72 * 10 + 2
     assert "x" * 100 not in str(excinfo.value)
 
 
