@@ -560,6 +560,77 @@ def test_apply_pty_info_ready_without_url_is_running(runner_config) -> None:
     runner._apply_pty_info(inst, {"bridge_pid": 7, "state": "ready"}, _FakeProc(alive=True))
     assert inst.status is InstanceStatus.RUNNING
     assert inst.url is None  # no deep link captured on a URL-less resume (expected)
+    assert inst.notice is None  # ... and no advisory: nothing said WHY, so we claim nothing
+
+
+# -- #1390: the keeper's advisory `note` reaches the card as `notice` -------------------
+
+
+def test_apply_pty_info_lifts_the_keeper_note_onto_the_row(runner_config) -> None:
+    # A running pty bridge whose keeper gave up on the connect URL because its screen
+    # would not render. `error_detail` is the wrong channel (the frontend binds it to the
+    # error/ended zones), so the reason rides a separate `notice` field on a RUNNING row.
+    from clauster.models import RemoteControlInstance
+    from clauster.pty_keeper import _SCREEN_FAULT_NOTE
+
+    runner, _ = _pty_runner(runner_config)
+    inst = RemoteControlInstance(project="alpha", label="alpha")
+    runner._apply_pty_info(
+        inst,
+        {"bridge_pid": 7, "state": "ready", "note": _SCREEN_FAULT_NOTE},
+        _FakeProc(alive=True),
+    )
+    assert inst.status is InstanceStatus.RUNNING  # a note is not a failure
+    assert inst.url is None
+    assert inst.notice == _SCREEN_FAULT_NOTE
+    assert inst.error_detail is None  # never routed through the error channel
+
+
+def test_apply_pty_info_clears_a_notice_the_sidecar_no_longer_carries(runner_config) -> None:
+    # The startup watch re-folds the same sidecar every tick. Unlike the pid/URL fields
+    # (which only ever gain a value), a note describes the CURRENT sidecar — so one that
+    # went away must leave the card, or an advisory would stick to a row that recovered.
+    from clauster.models import RemoteControlInstance
+
+    runner, _ = _pty_runner(runner_config)
+    inst = RemoteControlInstance(project="alpha", label="alpha", notice="stale advisory")
+    runner._apply_pty_info(inst, {"bridge_pid": 7, "state": "ready"}, _FakeProc(alive=True))
+    assert inst.notice is None
+
+
+@pytest.mark.parametrize("note", [None, 123, True, "", "   ", ["a"], {"a": 1}])
+def test_sidecar_notice_rejects_a_non_string_note(note) -> None:
+    # A sidecar is an on-disk file a hand edit or a corrupt write can put anything into,
+    # and this value renders on the dashboard. Junk degrades to "no chip", never to an
+    # empty advisory or a stringified object.
+    from clauster.runner import _sidecar_notice
+
+    assert _sidecar_notice({"note": note}) is None
+    assert _sidecar_notice({}) is None  # absent entirely
+
+
+def test_sidecar_notice_is_redacted_and_bounded() -> None:
+    # Same treatment `_capture_error_detail` gives the other operator-visible text field:
+    # nothing reaching the browser skips `redact` (invariant 4). Bounded from the HEAD,
+    # not the tail — a note is one sentence written front-first.
+    from clauster.runner import _NOTICE_MAX_CHARS, _sidecar_notice
+
+    leaky = f"see https://claude.ai/code/session_01LEAKAAAAAAAAAAAAAAAA {'x' * 500}"
+    out = _sidecar_notice({"note": leaky})
+    assert out is not None
+    assert "session_01LEAKAAAAAAAAAAAAAAAA" not in out  # redacted, not passed through
+    assert len(out) == _NOTICE_MAX_CHARS
+    assert out.startswith("see ")  # head kept
+
+
+def test_the_notice_redaction_has_a_positive_control() -> None:
+    # PIN: the session-id shape above really is something `redact_for_disk` rewrites. If
+    # a redact change stopped matching it and nothing pinned that, the assertion above
+    # would keep passing while proving nothing.
+    from clauster import redact
+
+    raw = "see https://claude.ai/code/session_01LEAKAAAAAAAAAAAAAAAA"
+    assert redact.redact_for_disk(raw) != raw
 
 
 def test_apply_pty_info_rejects_bool_bridge_pid(runner_config) -> None:
@@ -1810,6 +1881,45 @@ async def test_keeper_only_reattach_keeps_the_original_worktree_identity(
     assert row["worktree_name"] == "clauster-0a1b2c3d"
     rebuilt = runner._stopped_from_row(inst.instance_id, row)
     assert SessionRunner._pty_worktree_name(rebuilt) == "clauster-0a1b2c3d"
+
+
+@pytest.mark.parametrize("note", [None, "the screen could not be rendered"])
+def test_keeper_reattach_carries_the_sidecar_note_onto_the_card(
+    runner_config, monkeypatch, note
+) -> None:
+    # #1390, the OTHER (path, field) pair. This leg builds a RUNNING card straight from a
+    # `ready` sidecar, which is exactly the state a screen-fault session promotes into with
+    # `connect_url: null` — so it is a path that really can produce running-with-no-link.
+    # Dropping the note here would make the advisory vanish on the next Clauster restart
+    # while the missing link stayed.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    runner._log_dir.mkdir(parents=True, exist_ok=True)
+    (runner._log_dir / "alpha-1700000000000-0.keeper.json").write_text(
+        json.dumps(
+            {
+                "keeper_pid": 7777,
+                "bridge_pid": 8888,
+                "bridge_proc_start": 333.0,
+                "state": "ready",
+                "connect_url": None,
+                "note": note,
+            }
+        )
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda pid: pid == 7777)
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge", lambda pid, start=None, **k: pid == 8888
+    )
+
+    inst = runner._reattach_pty_from_sidecar(
+        "alpha", {"project_name": "alpha", "label": "alpha", "resume_mode": "pty"}
+    )
+
+    assert inst is not None
+    assert inst.status is InstanceStatus.RUNNING  # the note never downgrades the row
+    assert inst.url is None
+    assert inst.notice == note  # `None` arm is the positive control: no note, no chip
 
 
 @_POSIX_ONLY

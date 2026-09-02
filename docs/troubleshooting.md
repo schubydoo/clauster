@@ -430,6 +430,41 @@ Three probes, from cheapest to most direct:
 3. **Process there?** `pgrep -a -f 'claude.*remote-control'` — a live process
    with a dead card usually means an orphaned keeper (previous section).
 
+### "Connect link unavailable — this session's screen could not be read."
+
+**What you see:** a green **Running** Interactive Session card with no **Open in
+Claude** button and no QR button, carrying that sentence where the buttons
+would be.
+
+**The bridge is fine.** Only its deep link is missing. The session runs, the
+live log tail works, and Stop and the live terminal all behave normally.
+
+**Cause:** the keeper reads the connect link off a terminal screen it rebuilds
+from the bridge's output. Two faults stop it. The first is a rare byte sequence, a
+double-width character left half-overwritten, that makes one frame fail to
+render. The keeper then skips the bad chunk and retries on the next one, which
+normally succeeds within the 30-second capture window. The second is a failure
+that disables the screen emulator for the rest of the session. This message
+means capture never succeeded.
+
+**Where it happens:** Windows always, and Linux or macOS only with
+`claude.pty_screen_enabled: true`. The keeper builds that screen unconditionally
+on Windows, because a Windows console fragments the link across the raw byte
+stream. Elsewhere it builds one only for the live-terminal view, and without a
+screen there is no screen fault to report.
+
+**The fix:** open the session from
+[claude.ai/code](https://claude.ai/code) and pick it from your session list, or
+Stop the card and start a new session. Nothing needs repairing on the host.
+
+**Mechanism:** the keeper writes the reason into its sidecar next to the
+bridge's log, and Clauster lifts it onto the card. The exact fault is also
+logged, one line beginning `clauster.pty_keeper:`:
+
+```sh
+grep clauster.pty_keeper ~/.clauster/logs/<label>-*.keeper.log
+```
+
 ## Everything looks fine but the session never responds
 
 ### Hosted / Direct Session: "cannot connect to claustrum"

@@ -3647,9 +3647,36 @@
       // surface before it's true. Without this a green "Running" row shows no connect
       // affordance and no explanation. Applies to BOTH modes: a pty (flag-form) bridge
       // DOES print a connect URL (the keeper scrapes it from the reassembled pty screen,
-      // #665) — so it is a transient capture gap, not a permanent "no link" state.
+      // #665) — so it is USUALLY a transient capture gap, not a permanent "no link" state.
+      // `connectNoticeOf` below is the exception the backend can name.
       connectUrlMissing(name) {
         return this.statusOf(name) === "running" && !this.sessionUrlOf(name);
+      },
+      // The backend's reason the connect link is missing and is NOT coming (#1390) — today
+      // the pty keeper's "the screen could not be rendered", set on the sidecar after its
+      // 30s capture window expired with the render fault still live.
+      //
+      // Read from `notice`, deliberately NOT `error_detail`: this row is RUNNING and its
+      // session works, while `detailOf`/`error_detail` is bound to the error and ended
+      // zones — routing an advisory through it would either render nowhere here or paint a
+      // healthy session as failed.
+      //
+      // Gated on `connectUrlMissing` so it can only ever appear where it is the answer:
+      // a stale notice sitting beside a link that did arrive would contradict the link.
+      //
+      // Its chip is rendered as ordinary visible text, NOT through the aria-live region
+      // below — the opposite choice from the spinner, for the opposite reason. The spinner
+      // is a TRANSIENT state a screen-reader user needs told about as it changes, and it
+      // has cleared by the time anyone browses back. This is a PERMANENT one: it is still
+      // true minutes later and after a reload (a reattached keeper republishes it), so it
+      // has to be readable at any time, which a `visually-hidden` live region is not. Same
+      // treatment as the two other persistent explanations on this page — the missing-`pty`
+      // -extra hint and `resume-blocked` — both plain text beside the control they explain.
+      // The cost is no announcement at the instant of the swap; the gain is that it is
+      // never announced twice and never unreachable.
+      connectNoticeOf(name) {
+        if (!this.connectUrlMissing(name)) return null;
+        return (this.rowOf(name) || {}).notice || null;
       },
       // Screen-reader text for the connect-link state, surfaced via an aria-live region
       // that stays mounted across the connect gap (empty when idle). A live region only
@@ -3659,8 +3686,12 @@
       // shares the row's filter x-show, so an off-filter desktop row stays silent — which
       // is intended: a row the user has filtered out shouldn't announce.) The string
       // mirrors the visible chip label so the SR and sighted experiences match word-for-word.
+      // It carries the SPINNER only, never `connectNoticeOf` — see there for why a permanent
+      // explanation belongs in the a11y tree as plain text instead of in this region.
       connectStatusText(name) {
-        return this.connectUrlMissing(name) ? "Preparing connect link…" : "";
+        return this.connectUrlMissing(name) && !this.connectNoticeOf(name)
+          ? "Preparing connect link…"
+          : "";
       },
       errorOf(name) { return this.errors[name] || null; },
       // A stopped/crashed bridge can be revived — show "Resume" instead of "Start" and

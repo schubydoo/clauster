@@ -1377,3 +1377,151 @@ def test_run_keeper_dispatches_to_conpty_on_win32(tmp_path: Path, monkeypatch) -
     rc = pty_keeper.run_keeper(["claude"], sidecar, cwd=str(tmp_path))
     assert rc == 0
     assert _read(sidecar)["session_id"] == "session_01DISPATCHAAAAAAAAAAA"
+
+
+# -- #1390: a PERSISTENT render fault becomes an operator-visible note ------------------
+# The guard above degrades a render fault to "no match on this chunk", which is right for a
+# transient one. A fault still live when the capture window closes is different: the row
+# promotes to `ready` with `connect_url: null`, and before this the operator's only trace
+# was a `<sidecar>.log` they had no reason to open.
+
+
+def test_keeper_drain_notes_a_persistent_render_fault_on_the_url_timeout(tmp_path: Path) -> None:
+    """A fault still live at the deadline is published as the sidecar's advisory `note`."""
+    from clauster import pty_keeper
+
+    sidecar = tmp_path / "k.json"
+    base: dict[str, object] = {"state": "starting", "note": None}
+    drain = pty_keeper._KeeperDrain(base, sidecar, _ScriptedFaultScreen(), None)
+    drain._deadline = time.monotonic() - 1  # the capture window has closed
+
+    drain.feed(_WIDE_CHAR_FAULT)
+    assert drain._screen_scan_failed is True  # precondition, not the claim
+    drain.tick()
+
+    assert base["note"] == pty_keeper._SCREEN_FAULT_NOTE
+    written = _read(sidecar)
+    assert written["note"] == pty_keeper._SCREEN_FAULT_NOTE  # published, not just in memory
+    assert written["state"] == "ready"  # the bridge is fine; only the deep link is gone
+    assert written.get("connect_url") is None
+    assert written.get("error") is None  # an advisory is NOT a keeper failure
+
+
+def test_keeper_drain_writes_no_note_when_the_url_simply_never_came(tmp_path: Path) -> None:
+    """The note names a RENDER fault, so a plain no-URL timeout must not claim one.
+
+    Positive control for the test above: same deadline, same promotion, same shape — only
+    the fault is absent. Without this, a `note` written unconditionally on the timeout would
+    pass that test while mislabelling every `--continue` resume that legitimately never
+    reprints its URL.
+    """
+    from clauster import pty_keeper
+
+    sidecar = tmp_path / "k.json"
+    base: dict[str, object] = {"state": "starting", "note": None}
+    drain = pty_keeper._KeeperDrain(base, sidecar, _fresh_screen(), None)
+    drain._deadline = time.monotonic() - 1
+
+    drain.feed(b"ordinary output with no url\r\n")
+    assert drain._screen_scan_failed is False  # precondition
+    drain.tick()
+
+    assert base["note"] is None
+    assert _read(sidecar)["state"] == "ready"  # promoted all the same
+    assert _read(sidecar)["note"] is None
+
+
+def test_keeper_drain_writes_no_note_when_the_fault_recovered(tmp_path: Path) -> None:
+    """A fault that cleared before the deadline is a log line, not a card advisory.
+
+    This is why the note keys on the latch rather than on "a fault ever happened": one bad
+    chunk early in a session that then rendered fine — and simply never saw a URL — must
+    leave the card unmarked.
+    """
+    from clauster import pty_keeper
+
+    sidecar = tmp_path / "k.json"
+    base: dict[str, object] = {"state": "starting", "note": None}
+    drain = pty_keeper._KeeperDrain(base, sidecar, _ScriptedFaultScreen(), None)
+
+    drain.feed(_WIDE_CHAR_FAULT)
+    assert drain._screen_scan_failed is True
+    drain.feed(b"ordinary output\r\n")  # a clean render clears the latch
+    assert drain._screen_scan_failed is False
+    drain._deadline = time.monotonic() - 1
+    drain.tick()
+
+    assert base["note"] is None
+    assert _read(sidecar)["note"] is None
+
+
+def test_keeper_drain_notes_nothing_once_the_url_was_found(tmp_path: Path) -> None:
+    """A captured URL retires the deadline, so a later fault cannot mark a working link."""
+    from clauster import pty_keeper
+
+    sidecar = tmp_path / "k.json"
+    base: dict[str, object] = {"state": "starting", "note": None}
+    drain = pty_keeper._KeeperDrain(base, sidecar, _ScriptedFaultScreen(), None)
+
+    drain.feed(b"Continue at https://claude.ai/code/session_01NOTEAAAAAAAAAAAAAAAA\r\n")
+    assert drain._url_found is True  # precondition: the deadline no longer applies
+    drain.feed(_WIDE_CHAR_FAULT)  # a fault AFTER the link landed
+    drain._deadline = time.monotonic() - 1
+    drain.tick()
+
+    assert base["note"] is None
+    assert _read(sidecar)["connect_url"].endswith("session_01NOTEAAAAAAAAAAAAAAAA")
+
+
+def test_keeper_drain_notes_a_screen_that_was_disabled_by_a_feed_failure(
+    tmp_path: Path, capsys
+) -> None:  # noqa: ANN001
+    """The other half of the fault space: the emulator died, not just one frame.
+
+    A `screen.feed` failure sets `_screen = None`, after which the scrape can no longer
+    raise — so the very next chunk CLEARS the render-fault latch while URL capture stays
+    just as dead. Keyed on that latch alone the note would never fire here, for the exact
+    same operator-visible state. With no live-screen tap the failure also had no reader at
+    all before this: no stderr line, no sidecar field.
+    """
+    from clauster import pty_keeper
+
+    class _BoomFeed:
+        def feed(self, data):  # noqa: ANN001, ANN202 — test stub
+            raise RuntimeError("feed boom")
+
+        def find_session_id(self):  # noqa: ANN202 — test stub; never reached once disabled
+            return None
+
+    sidecar = tmp_path / "k.json"
+    base: dict[str, object] = {"state": "starting", "note": None}
+    drain = pty_keeper._KeeperDrain(base, sidecar, _BoomFeed(), None)  # no tap: sidecar is None
+
+    drain.feed(b"anything\r\n")
+    assert drain._screen is None  # precondition: the emulator was disabled
+    drain.feed(b"more output\r\n")  # a later chunk that CANNOT re-raise the render fault
+    assert drain._screen_scan_failed is False  # ... so the render latch reads clean
+    drain._deadline = time.monotonic() - 1
+    drain.tick()
+
+    assert base["note"] == pty_keeper._SCREEN_FAULT_NOTE
+    assert _read(sidecar)["note"] == pty_keeper._SCREEN_FAULT_NOTE
+    err = capsys.readouterr().err
+    assert err.count("terminal emulator failed") == 1  # reported once, tap or no tap
+
+
+def test_keeper_sidecar_always_carries_a_note_key(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """The ConPTY backend's very first sidecar write already has the field, valued null.
+
+    One shape whether or not a note is ever raised, so a reader never has to tell "no note"
+    from "an older keeper that could not write one".
+    """
+    from clauster import pty_keeper
+
+    fake = _fake_conpty(chunks=["no url in this output\r\n"], exit_code=0)
+    monkeypatch.setattr(pty_keeper, "_load_pty_process", lambda: fake)
+    sidecar = tmp_path / "b.keeper.json"
+    pty_keeper._run_keeper_conpty(["claude"], sidecar, None, None)
+
+    assert "note" in _read(sidecar)
+    assert _read(sidecar)["note"] is None

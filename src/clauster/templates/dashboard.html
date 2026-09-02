@@ -795,15 +795,34 @@
                   {# Running but no connect URL yet: explain the transient capture gap instead
                      of silently dropping the headline "open on your phone" affordance (#427
                      UX-02). Both modes get a URL (pty's is scraped from the reassembled pty
-                     screen, #665), so this is always a spinner placeholder, never a permanent
-                     "no link" state. The chip is VISUAL only (aria-hidden); the screen-reader
-                     announcement comes from a persistent aria-live region below, because a
-                     live region toggled in via x-show (display:none→visible) is silently
-                     skipped by NVDA/VoiceOver. #}
+                     screen, #665), so this is USUALLY a spinner placeholder — unless the
+                     backend named a reason it is not coming, in which case the advisory chip
+                     below replaces it (`&& !connectNoticeOf`, #1390): a spinner promising a
+                     link that will never arrive is worse than no chip at all. The chip is
+                     VISUAL only (aria-hidden); the screen-reader announcement comes from a
+                     persistent aria-live region below, because a live region toggled in via
+                     x-show (display:none→visible) is silently skipped by NVDA/VoiceOver. #}
                   <span class="btn btn-sm btn-ghost-secondary disabled text-secondary" aria-hidden="true"
-                        x-show="connectUrlMissing(i.rk)" x-cloak
+                        x-show="connectUrlMissing(i.rk) && !connectNoticeOf(i.rk)" x-cloak
                         title="The connect link is being captured from the bridge…">
                     <span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>Preparing connect link…</span>
+                  {# The advisory: the link is missing and the backend knows why (#1390). Plain
+                     text, not a control — there is nothing to click, and a button-shaped chip
+                     would invite a press. Warning, not danger, is the point of a separate
+                     `notice` field: the session is RUNNING and usable, only its deep link is
+                     gone, so this must not read as the failure `error_detail` marks.
+                     `text-warning-emphasis`, NOT `text-warning`: the plain token is Tabler's
+                     #f59f00, which is 2.1:1 on the light theme's white surface — fine for an
+                     icon, failing 1.4.3 AA for the only sentence explaining the missing
+                     buttons. The emphasis token is theme-aware and clears 9:1 on both.
+
+                     NOT aria-hidden, unlike its spinner sibling: this state is permanent and
+                     survives a reload, so it must be readable in the a11y tree at any time
+                     rather than announced once. It is therefore kept OUT of the live region
+                     below, or a screen reader would meet the same sentence twice. #}
+                  <span class="text-warning-emphasis small align-self-center"
+                        data-test="connect-notice" x-show="connectNoticeOf(i.rk)" x-cloak
+                        x-text="connectNoticeOf(i.rk)"></span>
                   {# Persistent live region — always mounted, empty when idle — so the
                      announcement fires on a content change, not a display toggle (#427 UX-02). #}
                   <span class="visually-hidden" aria-live="polite" x-text="connectStatusText(i.rk)"></span>
