@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import itertools
+import logging
 import os
 from collections import namedtuple
 
@@ -93,3 +94,21 @@ def test_sample_tree_proc_vanishes_during_second_snapshot(monkeypatch):
     s = metrics.sample_tree(os.getpid(), interval=0.01)
     assert s is not None
     assert s["rss_bytes"] == 0
+
+
+def test_sample_tree_children_btime_runtimeerror_samples_root_only(monkeypatch, caplog):
+    # psutil's children() reads the epoch (create_time without monotonic), which raises a
+    # bare RuntimeError on a procfs with no `btime` line (gVisor, WSL1, some containers).
+    # The walk must degrade to the root alone rather than fault the whole sample. Without
+    # the RuntimeError arm this call raises RuntimeError instead of returning a sample.
+    def boom(self, recursive=False):
+        raise RuntimeError("line 'btime' not found in /proc/stat")
+
+    monkeypatch.setattr(psutil.Process, "children", boom)
+    with caplog.at_level(logging.DEBUG, logger="clauster.metrics"):
+        s = metrics.sample_tree(os.getpid(), interval=0.02)
+    assert s is not None
+    assert s["procs"] == 1
+    assert s["rss_bytes"] > 0
+    # The degrade leaves a trace, so a masked non-btime RuntimeError stays recoverable.
+    assert "degrades to root only" in caplog.text
