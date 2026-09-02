@@ -4993,12 +4993,20 @@
         // Resume button that is not rendered is worse than the 409 the button used to
         // produce, so a project-less row is told WHY instead — this panel is the one place
         // that already surfaces `error_detail`, which makes it the right home for the reason.
+        // Every combination, not just two of three (#1392). The uuid half can be missing on
+        // its own now — `_as_session_uuid` drops a value that is not session-shaped, and a
+        // session that ended before its init frame never captured one at all — so a row with
+        // a project and no uuid used to fall through both branches and explain nothing,
+        // which is the "fails opaquely" failure the row chip exists to prevent.
         let resume = "";
         if (h && h.claude_session_uuid && h.project) {
           resume = " Use Resume above to continue it.";
-        } else if (h && h.claude_session_uuid) {
-          resume = " It cannot be resumed: its saved record was unreadable and its project is" +
-            " unknown. Kill it and start a new session in the right project.";
+        } else if (h && h.project) {
+          resume = " It cannot be resumed: no usable conversation id was saved for it." +
+            " Start a new session in this project instead.";
+        } else if (h) {
+          resume = " It cannot be resumed: its project is unknown, so there is nowhere to" +
+            " respawn it. Start a new session in the right project instead.";
         }
         return base + detail + resume;
       },

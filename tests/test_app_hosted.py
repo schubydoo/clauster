@@ -399,6 +399,38 @@ def test_dashboard_shows_hosted_panel_when_enabled(write_config, projects_root, 
     assert ':class="hostedStatusDot(h.status)"' in body  # the hosted row wires the status-dot
 
 
+def test_hosted_resume_gate_says_the_same_thing_in_all_three_places(
+    write_config, projects_root, monkeypatch
+):
+    """The Resume button, the orphan tooltip and the ended banner mirror one backend branch.
+
+    `reattach_all` names Resume in a row's `error_detail` only when BOTH halves survive, and
+    the template gates the button on `h.claude_session_uuid && h.project`. #1381 aligned the
+    project half; #1392 widened the set of rows that lose the *uuid* half well past the empty
+    string, so all three mirrors have to test both. Substring pins in the style of
+    `resumeBlockedReason` above -- brittle by design, so a reflow forces a re-read instead of
+    passing silently.
+    """
+    monkeypatch.setattr(app_module, "ClaustrumDaemon", _NoopDaemon)
+    config = load_config(write_config("claustrum:\n  enabled: true\n"))
+    app = create_app(config)
+    app.state.hosted = _StubManager()
+    with TestClient(app) as client:
+        body = client.get("/").text
+    # 1. the button, 2. the orphan badge's tooltip, 3. the "why not" chip -- all both-halves.
+    assert "h.claude_session_uuid && h.project" in body
+    assert "h.project && h.claude_session_uuid ?" in body
+    assert "!(h.claude_session_uuid && h.project)" in body
+    # The chip's reason is VISIBLE text, not a tooltip: a title never fires on touch, and
+    # this is a phone-first product. Same contract as the bridge rows' `resume-blocked`.
+    assert 'data-test="hosted-resume-blocked"' in body
+    assert "resume unavailable — conversation id unknown" in body
+    assert "resume unavailable — project unknown" in body
+    # 4. the View panel's ended banner: a project-ful, uuid-less row used to fall through
+    # every branch and explain nothing -- the "fails opaquely" failure one layer down.
+    assert "no usable conversation id was saved for it" in body
+
+
 def test_hosted_status_badge_colors_match_bridge(write_config, projects_root, monkeypatch):
     # #430: the hosted badge map must speak the same colour-to-meaning language as
     # the bridge STATUS_BADGE in the shared Active list. The three divergent
