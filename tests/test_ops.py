@@ -139,6 +139,55 @@ def test_doctor_invalid_config_fails(tmp_path):
     assert ok is False and checks[0].name == "config" and checks[0].status == FAIL
 
 
+# ----- the config row never echoes the file's own contents (#1395) ------
+#
+# `/api/doctor` returns `Check.detail` verbatim with no redaction of its own, so a
+# broken clauster.yml must not be able to put its text in the browser. One canary
+# string, one test per arm of the config-load except chain.
+
+_CFG_CANARY = "FAKEFAKEFAKEFAKEfake42"
+
+
+def _config_detail(path: Path) -> str:
+    return run_doctor(str(path), check_port=False)[0][0].detail
+
+
+def test_doctor_yaml_error_detail_withholds_the_source_line(tmp_path):
+    # PyYAML's str() re-emits the offending source line, so a malformed `token:` line
+    # handed the token itself to the dashboard. Positions only now.
+    bad = tmp_path / "bad.yml"
+    bad.write_text(f'auth:\n  token: "{_CFG_CANARY}\n', encoding="utf-8")
+    detail = _config_detail(bad)
+    assert _CFG_CANARY not in detail
+    # Still locates the fault: PyYAML's own class name plus a 1-based line and column.
+    assert detail.startswith("config is not valid YAML (")
+    assert "line " in detail and "column " in detail
+
+
+def test_doctor_validation_error_detail_withholds_the_parsed_mapping(tmp_path):
+    # pydantic embeds `input_value=`, and for a MISSING-field error that value is the
+    # whole parsed config mapping — so an unrelated typo dumped every other key too.
+    bad = tmp_path / "bad.yml"
+    bad.write_text(f"port: '{_CFG_CANARY}'\n", encoding="utf-8")
+    detail = _config_detail(bad)
+    assert _CFG_CANARY not in detail
+    # Both errors still reported, by field path and reason.
+    assert detail.startswith("invalid config: ")
+    assert "projects_root: Field required" in detail
+    assert "port: Input should be a valid integer" in detail
+
+
+def test_doctor_non_mapping_root_detail_reports_type_and_path(tmp_path):
+    # The residual (non-pydantic) ValueError arm: clauster's own message, which names
+    # the root's TYPE and the file, never the document's values.
+    bad = tmp_path / "bad.yml"
+    bad.write_text(f"- {_CFG_CANARY}\n", encoding="utf-8")
+    detail = _config_detail(bad)
+    assert _CFG_CANARY not in detail
+    assert "config root must be a mapping, got list" in detail
+    assert bad.name in detail
+
+
 def test_doctor_claude_not_found(write_config, tmp_path):
     cfg = str(write_config(f"claude:\n  binary: no-such-claude-bin\nstate_dir: {tmp_path}/.s\n"))
     by = {c.name: c for c in run_doctor(cfg)[0]}

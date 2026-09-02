@@ -225,8 +225,8 @@ service](installation.md#run-as-a-systemd-service-linux).
 ### "no config found" / "invalid config"
 
 **What you see:** `doctor` fails the `config` row with one of three details —
-`no config found: ...`, `invalid config: ...`, or `config is not valid YAML: ...`
-— and most other verbs exit `2` with a one-line `clauster: config error:`
+`no config found: ...`, `invalid config: ...`, or `config is not valid YAML
+(...)` — and most other verbs exit `2` with a one-line `clauster: config error:`
 message. Three behave differently: `doctor` itself exits `1` with the table
 above, `clauster run` with no config at all opens the setup wizard rather than
 failing, and `install-service` still renders a unit using defaults.
@@ -238,12 +238,18 @@ where to look:
 | Detail | What is wrong | Where the message points |
 | --- | --- | --- |
 | `no config found` | No file at any searched path | The search order |
-| `config is not valid YAML` | The file does not parse — a stray tab, an unclosed quote | A line and column |
-| `invalid config` | The file parses but a value is rejected | The offending key — or, for a root that is not a mapping, only the file |
+| `config is not valid YAML` | The file does not parse — a stray tab, an unclosed quote | The parser's own error class, plus a line and column |
+| `invalid config` | The file parses but a value is rejected | One `key.path: reason` entry per rejected key — or, for a root that is not a mapping, the root's type and the file |
 
 ```sh
 clauster doctor -c /path/to/clauster.yml   # same file the service uses
 ```
+
+**The detail points at the fault. It never quotes the file.** The dashboard
+serves these same rows over `/api/doctor`, so each one is built from positions
+and key paths only. A `clauster.yml` whose `auth.token` line is the broken one
+would otherwise put that token in the browser. Open the file at the reported
+line to read the offending text.
 
 **Mechanism:** [Configuration — loading &
 overrides](guides/configuration.md#loading-overrides).
@@ -586,7 +592,7 @@ present in every run:
 
 | Row | OK means | A warn/fail usually means |
 | --- | --- | --- |
-| `config` | `clauster.yml` found and valid | `no config found: ...` / `config is not valid YAML: ...` / `invalid config: ...` |
+| `config` | `clauster.yml` found and valid | `no config found: ...` / `config is not valid YAML (...)` / `invalid config: ...` |
 | `claude` | binary found, version ≥ `min_version` | not on PATH, or too old — see above |
 | `claude-login` | usable `claude` credentials | not logged in — bridges will spawn then hang |
 | `projects_root` | the directory exists | wrong path in config |

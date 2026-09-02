@@ -365,6 +365,12 @@ def _friendly_validation_message(exc: ValidationError) -> str:
     … https://errors.pydantic.dev/…") — none of it actionable in the dashboard
     banner (#1034). Render one ``field.path: reason`` line per error instead; the
     full exception still reaches the log via the ``from exc`` chain.
+
+    ``include_input=False`` is the load-bearing argument, not a tidy-up: pydantic's own
+    ``input_value=`` carries the rejected value, and for a *missing-field* error that
+    value is the whole parsed mapping. ``ops.run_doctor`` renders a broken
+    ``clauster.yml`` through here for the same reason, and its result reaches
+    `/api/doctor` (#1395).
     """
     parts: list[str] = []
     for err in exc.errors(include_url=False, include_input=False):
@@ -372,13 +378,19 @@ def _friendly_validation_message(exc: ValidationError) -> str:
         msg = err.get("msg") or "invalid value"
         # pydantic prefixes custom-validator failures with "Value error, " — noise here.
         msg = msg.removeprefix("Value error, ")
-        parts.append(f"{loc}: {msg}" if loc else msg)
-    # ``msg`` can echo the offending INPUT value. Safe today because every
-    # secret-bearing field sits in EXCLUDED_FIELDS (never editable) and the
-    # secret-adjacent model validators raise static messages — but wrap in the
-    # secret-line redactor anyway so a future Tier-A/B addition or a validator
-    # that starts echoing its value cannot leak into the dashboard banner.
-    return redact_secret_lines("; ".join(parts)) or "validation failed"
+        # ``msg`` can echo the offending INPUT value. Safe today because every
+        # secret-bearing field sits in EXCLUDED_FIELDS (never editable) and the
+        # secret-adjacent model validators raise static messages — but wrap in the
+        # secret-line redactor anyway so a future Tier-A/B addition or a validator
+        # that starts echoing its value cannot leak into the dashboard banner.
+        #
+        # ⚠️ Redact PER PART, before joining. :func:`redact_secret_lines` masks the value
+        # of the FIRST ``key: value`` pair it finds on a line, so redacting the joined
+        # ``"a: …; auth.token: …"`` string anchored on ``a`` and left every later part
+        # unmasked — the guard silently covered only error one. Now every part is its own
+        # anchored line, so coverage does not depend on error order.
+        parts.append(redact_secret_lines(f"{loc}: {msg}" if loc else msg))
+    return "; ".join(parts) or "validation failed"
 
 
 def _resolve_field_info(path: str) -> Any:

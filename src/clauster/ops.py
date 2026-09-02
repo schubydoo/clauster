@@ -24,9 +24,12 @@ from typing import BinaryIO, Literal, TypedDict
 from xml.sax.saxutils import escape as _xml_escape
 
 import yaml
+from pydantic import ValidationError
 
 from . import atomicio, claude_cli, config_write_mcp, deps, environments, procutil, pty_screen
 from .config import ClausterConfig, _missing_enforced_auth, load_config
+from .config_editor import _friendly_validation_message
+from .config_write import _yaml_error_where, redact_secret_lines
 from .discovery import Project, discover_projects
 from .state import CURRENT_SCHEMA, CorruptStateFile, StateStore
 
@@ -88,16 +91,43 @@ def run_doctor(
         config: ClausterConfig | None = load_config(config_path)
         checks.append(Check("config", OK, f"loaded {config.source_path}"))
     except FileNotFoundError as exc:
+        # Clauster's own message, built from the search order — it names candidate paths
+        # and never opens a file, so nothing from the document can be in it.
         checks.append(Check("config", FAIL, f"no config found: {exc}"))
         config = None
+    except ValidationError as exc:
+        # Must precede the ``ValueError`` arm: pydantic's ``ValidationError`` IS a
+        # ``ValueError``, so the broad arm below would swallow it.
+        #
+        # ``str(exc)`` embeds ``input_value=`` — and for a missing-field error that value
+        # is the WHOLE parsed config mapping, not just the offending field. `/api/doctor`
+        # returns ``Check.detail`` verbatim, so the raw message put `auth.token` in the
+        # browser (#1395). The shared renderer asks pydantic for the errors with ``input``
+        # and ``url`` dropped, keeps field path + reason, and passes the result through
+        # :func:`redact_secret_lines` — which *can* reach an echoed value here, because
+        # every line it emits is anchored as ``field.path: reason`` and that scanner is
+        # key-anchored.
+        detail = _friendly_validation_message(exc)
+        checks.append(Check("config", FAIL, f"invalid config: {detail}"))
+        config = None
     except ValueError as exc:
-        checks.append(Check("config", FAIL, f"invalid config: {exc}"))
+        # What is left is clauster-authored (a root that is not a mapping, an unreadable
+        # ``*_FILE`` env override) and names types and paths, not values. Redacted anyway
+        # so this arm cannot become the next leak: over-masking a diagnostic costs a
+        # re-read, under-masking reaches the browser.
+        checks.append(Check("config", FAIL, f"invalid config: {redact_secret_lines(str(exc))}"))
         config = None
     except yaml.YAMLError as exc:
         # NOT a ValueError, so it needs its own arm. Without it `clauster doctor` — the
         # one command whose whole job is diagnosing a broken config — was the command
         # that tracebacked on the most common way to break one.
-        checks.append(Check("config", FAIL, f"config is not valid YAML: {exc}"))
+        #
+        # Positions only, never ``str(exc)``: PyYAML re-emits the offending source line in
+        # its message, so a malformed ``token:`` line handed the token straight to
+        # `/api/doctor` (#1395). Same helper and same reasoning as the skills-frontmatter
+        # seam (#1369); ``line_offset`` stays 0 because we parse the whole file, so
+        # PyYAML's line numbers are already the file's.
+        checks.append(Check("config", FAIL, f"config is not valid YAML{_yaml_error_where(exc)}"))
         config = None
 
     if config is None:

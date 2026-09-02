@@ -102,6 +102,22 @@ def test_doctor_endpoint_shape_and_ok(write_config, tmp_path):
         assert c["status"] in {"ok", "warn", "fail"}
 
 
+def test_doctor_endpoint_never_echoes_a_broken_configs_contents(write_config, tmp_path):
+    # #1395: the route returns `Check.detail` verbatim and applies no redaction of its
+    # own, so the withholding has to happen in run_doctor. The scenario is ordinary —
+    # /api/doctor re-reads config.source_path, so an operator who breaks clauster.yml
+    # after boot gets the parse error back over HTTP.
+    canary = "FAKEFAKEFAKEFAKEfake42"
+    cfg = write_config(f"claude:\n  binary: {FAKE_CLAUDE}\nstate_dir: {tmp_path}/.s\n")
+    client = TestClient(create_app(load_config(cfg)))
+    cfg.write_text(f'auth:\n  token: "{canary}\n', encoding="utf-8")
+    r = client.get("/api/doctor")
+    assert r.status_code == 200
+    assert canary not in r.text
+    detail = next(c["detail"] for c in r.json()["checks"] if c["name"] == "config")
+    assert detail.startswith("config is not valid YAML (")
+
+
 # ----- per-project preflight (spawn-readiness for one project) ----------
 
 

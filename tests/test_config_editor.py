@@ -660,6 +660,38 @@ def test_validation_error_message_is_operator_friendly(write_config) -> None:
         assert leaked not in msg
 
 
+def test_validation_message_redacts_every_part_not_only_the_first() -> None:
+    """Each rendered error is redacted on its own line, whatever its position (#1395).
+
+    ``redact_secret_lines`` masks the value of the FIRST ``key: value`` pair on a line, so
+    redacting the joined ``"alpha: …; api_token: …"`` string anchored on ``alpha`` and left
+    every later part unmasked. ``ops.run_doctor`` renders a whole broken ``clauster.yml``
+    through this helper, where a secret-keyed field is not reliably error one.
+    """
+    from pydantic import ValidationError, field_validator
+
+    from clauster.config_editor import _friendly_validation_message
+
+    canary = "FAKEFAKEFAKEFAKEfake42"
+
+    class M(BaseModel):
+        alpha: int
+        api_token: str
+
+        @field_validator("api_token")
+        @classmethod
+        def _echo_the_value(cls, v: str) -> str:
+            raise ValueError(f"rejected {v}")
+
+    with pytest.raises(ValidationError) as ei:
+        M(alpha="not-an-int", api_token=canary)
+    msg = _friendly_validation_message(ei.value)
+    # `alpha` fails first, so the secret-keyed part is second — exactly the position the
+    # joined-then-redacted form could not reach.
+    assert msg.index("alpha") < msg.index("api_token")
+    assert canary not in msg
+
+
 def test_exclusive_bounds_are_emitted_distinctly() -> None:
     # `<input type=number>`'s min/max are INCLUSIVE by definition, so a `gt=0` field
     # advertised min="0", the browser called 0 valid, and the save came back 422 — the
