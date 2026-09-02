@@ -198,7 +198,9 @@ class KeyedJsonStore:
                 os.fsync(fh.fileno())
             replace_with_retry(tmp, backup)
         except OSError as exc:
-            self._LOG.warning("could not copy corrupt %s aside: %s", self._path, exc)
+            self._LOG.warning(
+                "could not copy corrupt %s aside: %s: %s", self._path, type(exc).__name__, exc
+            )
             _unlink_quietly(tmp)
         except BaseException:
             # A KeyboardInterrupt mid-copy still propagates — best-effort covers OSError
@@ -209,7 +211,11 @@ class KeyedJsonStore:
         else:
             # The file's data is fsynced above; this is its directory entry. A crash
             # right after the rename must not lose the only copy of what we discarded.
-            fsync_dir(backup.parent)
+            # Suppressed rather than left bare: the copy is already on disk by now, so a
+            # durability best-effort must not become the one arm that escapes a load
+            # documented to degrade.
+            with contextlib.suppress(OSError):
+                fsync_dir(backup.parent)
 
     def _migrate(self, data: dict, raw: str) -> dict:
         """Back up once, then coerce to the current schema.
