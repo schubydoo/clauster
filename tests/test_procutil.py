@@ -173,6 +173,32 @@ def test_force_kill_tree_safe_on_dead_pid():
     procutil.force_kill_tree(2_000_000_000)  # absent PID -> no raise
 
 
+def test_force_kill_tree_kills_the_root_when_children_cannot_read_a_clock(monkeypatch):
+    """``children()`` needs the epoch; on a btime-less procfs it raises, and the root still dies.
+
+    psutil's ``Process.children`` reads ``create_time()`` without ``monotonic=True`` to tell
+    a reused pid from a real child, and that ends in ``boot_time()``, which raises a bare
+    ``RuntimeError`` on gVisor / WSL1 (#1402). The tree is unreadable there, not the root:
+    returning would be the silent no-kill, and raising aborted ``stop()`` past its STOPPED
+    transition. The root is killed anyway.
+    """
+    killed: list[int] = []
+
+    class _RootWithoutATree:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def children(self, recursive=False):
+            raise RuntimeError("no btime line in /proc/stat")
+
+        def kill(self):
+            killed.append(self.pid)
+
+    monkeypatch.setattr(procutil.psutil, "Process", _RootWithoutATree)
+    procutil.force_kill_tree(4321)  # must return, not raise
+    assert killed == [4321]
+
+
 def test_force_kill_tree_wait_timeout_confirms_death():
     """`wait_timeout` makes the process observably gone by the time the call returns.
 
@@ -1456,3 +1482,42 @@ def test_process_vanishing_between_cmdline_and_create_time_is_not_live(monkeypat
     monkeypatch.setattr(procutil.psutil, "Process", _VanishingProc)
     assert procutil.is_live_bridge(1234, 1000.0) is False
     assert procutil.is_live_bridge(1234, 1000.0, start_ticks=770579) is False
+
+
+class _ProcWithoutAClock:
+    """A psutil 7.1+ Process on a btime-less procfs: any epoch read raises (#1402)."""
+
+    def __init__(self, pid):
+        self.pid = pid
+
+    def status(self):
+        return psutil.STATUS_RUNNING
+
+    def cmdline(self):
+        return ["/usr/bin/node", "/opt/wrapper/claude", "--print"]
+
+    def children(self, recursive=False):
+        raise RuntimeError("no btime line in /proc/stat")
+
+    def parent(self):
+        raise RuntimeError("no btime line in /proc/stat")
+
+
+def test_bridge_ancestor_answers_none_when_parent_cannot_read_a_clock(monkeypatch):
+    # psutil's `parent()` compares epochs to reject a reparented pid, so it raises on a
+    # btime-less procfs. That is "no ancestor found", not a crash of the prune (#1402).
+    monkeypatch.setattr(procutil.psutil, "Process", _ProcWithoutAClock)
+    assert procutil.bridge_ancestor(4321) is None
+
+
+def test_running_claude_version_answers_none_when_children_cannot_read_a_clock(monkeypatch):
+    # Same host, inside poll_once's tick: "no version", never an aborted poll (#1402).
+    monkeypatch.setattr(procutil.psutil, "Process", _ProcWithoutAClock)
+    monkeypatch.setattr(procutil, "_proc_claude_version", lambda proc: None)
+    assert procutil.running_claude_version(4321) is None
+
+
+def test_owned_pids_root_without_a_readable_tree_contributes_only_itself(monkeypatch):
+    # Same host: the root is still owned, only its descendants are unknown (#1402).
+    monkeypatch.setattr(procutil.psutil, "Process", _ProcWithoutAClock)
+    assert procutil.owned_pids([99]) == {99}

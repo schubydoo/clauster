@@ -714,7 +714,9 @@ def bridge_ancestor(pid: int, *, max_depth: int = _MAX_BRIDGE_ANCESTRY) -> int |
             if proc.status() != psutil.STATUS_ZOMBIE and is_bridge_cmdline(cmdline):
                 return proc.pid
             parent = proc.parent()
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, RuntimeError):
+            # RuntimeError: `parent()` compares epochs to reject a reparented pid, and that
+            # read raises on a procfs with no `btime` (#1402). No ancestor, not a crash.
             return None
         if parent is None or parent.pid <= 1:
             return None
@@ -824,9 +826,17 @@ def running_claude_version(pid: int) -> str | None:
         return version
     try:
         children = proc.children()
-    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+    except (
+        psutil.NoSuchProcess,
+        psutil.AccessDenied,
+        psutil.ZombieProcess,
+        OSError,
+        RuntimeError,
+    ):
         # OSError too: this runs inside poll_once's tick, and a raw errno from child
         # enumeration must degrade to "no version", never abort the whole poll.
+        # RuntimeError: `children()` reads the epoch, which raises on a procfs with no
+        # `btime` (#1402); same degrade.
         return None
     for child in children:
         version = _proc_claude_version(child)
@@ -905,10 +915,18 @@ def force_kill_tree(pid: int, *, wait_timeout: float | None = None) -> None:
     """
     try:
         proc = psutil.Process(pid)
-        targets = proc.children(recursive=True)
-        targets.append(proc)
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
         return
+    try:
+        targets = proc.children(recursive=True)
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, RuntimeError):
+        # `children()` reads the epoch (`create_time()` without `monotonic`) to tell a
+        # reused pid from a real child, and that ends in `boot_time()`, which raises a
+        # bare RuntimeError on a procfs with no `btime` line (#1402). The tree is what is
+        # unreadable there, not the root: returning would be the silent no-kill, and a
+        # raise aborted `stop()` past its STOPPED transition. Kill the root anyway.
+        targets = []
+    targets.append(proc)
     for p in targets:
         try:
             p.kill()
@@ -963,7 +981,9 @@ def owned_pids(root_pids: Iterable[int]) -> set[int]:
     for pid in roots:
         try:
             owned.update(child.pid for child in psutil.Process(pid).children(recursive=True))
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, RuntimeError):
+            # RuntimeError: `children()` reads the epoch, which raises on a procfs with no
+            # `btime` (#1402). The root still counts as owned; its tree is unreadable.
             continue
     return owned
 

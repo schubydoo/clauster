@@ -8,6 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import psutil
 import pytest
 
 from clauster import procutil, pty_keeper
@@ -212,6 +213,38 @@ def test_stop_keeper_winds_down_a_keeper_on_a_btime_less_procfs(monkeypatch):
     monkeypatch.setattr(procutil, "force_kill_tree", _force)
     assert pty_keeper.stop_keeper(123, expect_create_time=None, expect_start_ticks=4200) is True
     assert forced["n"] == 1, "a keeper with no readable epoch was never wound down"
+
+
+def test_stop_keeper_kills_the_root_when_the_tree_cannot_read_a_clock(monkeypatch):
+    # Same host as above, through the REAL force_kill_tree: psutil's children() reads the
+    # epoch on its own, so it raises there even on 7.1+, and `clauster keepers --kill` ended
+    # in a traceback instead of a kill. The root still dies; only its tree is unreadable.
+    alive = {"v": True}
+    killed: list[int] = []
+    monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
+    monkeypatch.setattr(pty_keeper.time, "sleep", lambda s: None)
+    _pin_start(monkeypatch, epoch=lambda: None, ticks=lambda: 4200 if alive["v"] else None)
+
+    class _KeeperWithoutATree:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def status(self):
+            return psutil.STATUS_RUNNING
+
+        def cmdline(self):
+            return [sys.executable, "-m", "clauster.pty_keeper", "--sidecar", "/tmp/k.json"]
+
+        def children(self, recursive=False):
+            raise RuntimeError("no btime line in /proc/stat")
+
+        def kill(self):
+            killed.append(self.pid)
+            alive["v"] = False
+
+    monkeypatch.setattr(procutil.psutil, "Process", _KeeperWithoutATree)
+    assert pty_keeper.stop_keeper(123, expect_create_time=None, expect_start_ticks=4200) is True
+    assert killed == [123]
 
 
 def test_stop_keeper_returns_false_when_force_fails(monkeypatch):

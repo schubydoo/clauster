@@ -1487,6 +1487,45 @@ def test_cleanup_keeper_spares_rather_than_raises_when_the_constructor_wants_a_c
     assert "no longer that keeper" in caplog.text
 
 
+def test_cleanup_keeper_kills_the_root_when_the_tree_cannot_read_a_clock(
+    runner_config, monkeypatch
+) -> None:
+    """The REAL ``force_kill_tree`` on a btime-less procfs kills the keeper instead of raising.
+
+    The 7.1 floor keeps the constructor off the clock, but ``Process.children`` still reads
+    the epoch on its own, so on that host the wind-down reached ``force_kill_tree`` and
+    raised out of ``asyncio.to_thread`` past the STOPPED transition. This drives the real
+    kill path, not a stub: the gate passes a clockless keeper through, and the kill lands
+    on the root even though its tree cannot be read.
+    """
+    runner, _ = _pty_runner(runner_config)
+    monkeypatch.setattr("clauster.runner.time.sleep", lambda _s: None)
+    monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
+    _patch_keeper_start(monkeypatch, epoch=lambda: None, ticks=lambda: 4200)
+    killed: list[int] = []
+
+    class _KeeperWithoutATree:
+        def __init__(self, pid):
+            self.pid = pid  # psutil >= 7.1: no clock in the constructor
+
+        def status(self):
+            return psutil.STATUS_RUNNING
+
+        def cmdline(self):
+            return [sys.executable, "-m", "clauster.pty_keeper", "--sidecar", "/tmp/k.json"]
+
+        def children(self, recursive=False):
+            raise RuntimeError("no btime line in /proc/stat")
+
+        def kill(self):
+            killed.append(self.pid)
+
+    monkeypatch.setattr(procutil.psutil, "Process", _KeeperWithoutATree)
+
+    runner._cleanup_keeper(777)  # must return, not raise
+    assert killed == [777], "the root must die even when its tree cannot be read"
+
+
 def test_cleanup_keeper_force_kills_through_a_clock_step(runner_config, monkeypatch) -> None:
     """An NTP step during the grace no longer spares a keeper that never moved (#1403).
 
