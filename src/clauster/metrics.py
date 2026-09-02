@@ -9,9 +9,12 @@ parsing or eBPF — tracked for a v2.
 
 from __future__ import annotations
 
+import logging
 import time
 
 import psutil
+
+_log = logging.getLogger("clauster.metrics")
 
 # Errors meaning "this process is gone / not inspectable" — treated as skip.
 _GONE = (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess)
@@ -39,6 +42,11 @@ def sample_tree(pid: int, *, interval: float = 0.15, normalize_cpu: bool = False
     set. ``rss_bytes`` is summed (shared pages are slightly double-counted). The
     ``disk_*`` fields are ``None`` on platforms without ``io_counters`` (e.g. macOS).
 
+    On a host whose procfs has no ``btime`` line the descendant walk cannot run, so
+    the sample degrades to the root process alone and reports ``procs`` as 1. A debug
+    line records that, because ``procs: 1`` otherwise reads like a bridge that
+    genuinely has no children.
+
     Blocks for ``interval`` seconds — call it off the event loop
     (``asyncio.to_thread``), as the dashboard endpoint does.
     """
@@ -56,7 +64,12 @@ def sample_tree(pid: int, *, interval: float = 0.15, normalize_cpu: bool = False
         # (gVisor, WSL1, some container runtimes; #1429). The descendants are what is
         # unreadable there, not the root — sample the root's own CPU and memory rather than
         # failing the whole request. `procutil.proc_create_time` and its predicate family
-        # absorb the same `RuntimeError` on the same terms.
+        # absorb the same `RuntimeError` on the same terms. Logged because `RuntimeError` is
+        # broad: any other psutil RuntimeError also lands here, and the debug line is what
+        # tells a real root-only sample from a masked one afterwards.
+        _log.debug(
+            "host cannot express boot time; metrics sample for pid %s degrades to root only", pid
+        )
         procs = [root]
 
     # First snapshot: cumulative cpu time + io byte counters, keyed by pid.
