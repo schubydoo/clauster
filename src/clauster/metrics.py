@@ -44,9 +44,20 @@ def sample_tree(pid: int, *, interval: float = 0.15, normalize_cpu: bool = False
     """
     try:
         root = psutil.Process(pid)
+    except _GONE:
+        return None
+    try:
         procs = [root, *root.children(recursive=True)]
     except _GONE:
         return None
+    except RuntimeError:
+        # `children()` reads the epoch (`create_time()` without `monotonic`), which ends in
+        # `boot_time()` and raises a bare RuntimeError on a procfs with no `btime` line
+        # (gVisor, WSL1, some container runtimes; #1429). The descendants are what is
+        # unreadable there, not the root — sample the root's own CPU and memory rather than
+        # failing the whole request. `procutil.proc_create_time` and its predicate family
+        # absorb the same `RuntimeError` on the same terms.
+        procs = [root]
 
     # First snapshot: cumulative cpu time + io byte counters, keyed by pid.
     first: dict[int, tuple[float, tuple[int, int] | None]] = {}
