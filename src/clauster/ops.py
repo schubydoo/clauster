@@ -1076,10 +1076,13 @@ def restore_backup(
 
 
 class MigrateResult(TypedDict):
-    """The outcome of :func:`migrate_state`: the schema written and the instance count.
+    """The outcome of :func:`migrate_state`.
 
-    ``corrupt`` is ``None`` on a normal migrate and a short reason when the read failed,
-    in which case nothing was written and the counts describe what was skipped.
+    Read ``corrupt`` first. It is ``None`` on a normal migrate, and a short reason when
+    the read failed — and on that refusal path nothing was written, so the other two
+    fields are placeholders that carry no meaning. ``instances`` is ``0`` because there
+    is no count to report, NOT because the file held no records, and ``schema_version``
+    names the schema that would have been written rather than one that was.
     """
 
     schema_version: int

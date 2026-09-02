@@ -214,9 +214,7 @@ class KeyedJsonStore:
         try:
             atomic_copy_file(self._path, backup)
         except OSError as exc:
-            self._LOG.warning(
-                "could not copy corrupt %s aside: %s: %s", self._path, type(exc).__name__, exc
-            )
+            self._LOG.warning("could not copy corrupt %s aside: %s", self._path, _describe(exc))
 
     def _migrate(self, data: dict, raw: str) -> dict:
         """Back up once, then coerce to the current schema.

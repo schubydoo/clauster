@@ -215,7 +215,14 @@ def test_corrupt_copy_failure_is_logged_not_silent(tmp_path, caplog, monkeypatch
     monkeypatch.setattr("clauster.state.atomic_copy_file", boom)
     with caplog.at_level("WARNING", logger="clauster.state"):
         assert StateStore(tmp_path).load() == {}
-    assert any("could not copy corrupt" in r.getMessage() for r in caplog.records)
+    # The exception TYPE is the part worth naming -- a read-only mount and a sharing
+    # violation degrade identically, so the type is all that tells them apart in a log.
+    # Asserting only the prefix would let the line drop back to a bare `exc`.
+    assert any(
+        "could not copy corrupt" in r.getMessage()
+        and "PermissionError: simulated: read-only state dir" in r.getMessage()
+        for r in caplog.records
+    )
     assert sorted(entry.name for entry in tmp_path.iterdir()) == ["state.json"]
 
 
