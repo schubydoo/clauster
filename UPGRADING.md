@@ -172,9 +172,13 @@ affected:
   them to `*.imported`. Later starts are idempotent — no re-import.
 - **If one of those files is damaged**, the import no longer fails the start. It
   imports no records from that file, logs a warning naming the failure, and keeps
-  a one-time byte-exact copy beside it as `state.json.corrupt.bak`. See the
-  [legacy note in the corruption runbook](docs/operations.md#recovering-from-a-corrupted-state-database)
-  for how to feed that copy back in.
+  a one-time byte-exact copy beside it — `state.json.corrupt.bak`, or
+  `hosted_state.json.corrupt.bak` for the hosted store. To feed that copy back in,
+  follow **step 3** of
+  [Recovering from a corrupted state database](docs/operations.md#recovering-from-a-corrupted-state-database).
+  That works only if the import wrote **no rows at all**, meaning every legacy
+  file present was damaged. If a healthy file imported alongside the damaged one,
+  its rows close the window and the copy is yours to merge by hand.
 - **Do not run `clauster migrate` for this** — it only touches the legacy flat
   files, not the database. Just upgrade the package and restart.
 - **Back up first** (`clauster backup`): the database is now the live store, so a

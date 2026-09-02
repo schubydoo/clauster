@@ -445,7 +445,9 @@ database (see Routine backup, above). The workspace-trust writes to
 >
 > `clauster migrate` treats the same file differently. That command re-saves what
 > it reads, so it reads strictly. It writes nothing, prints the reason, and exits
-> 1 on a `state.json` it cannot read or cannot understand. It reads only
+> 1 on a `state.json` it cannot read or cannot understand. It takes no
+> `.corrupt.bak` either: the copy above exists because the import degrades, and
+> `migrate` refuses instead, which leaves the original where it is. It reads only
 > `state.json`, never `hosted_state.json`.
 >
 > A mismatched `schema_version`, older or newer, is not damage on its own. Those
@@ -477,27 +479,32 @@ to start):
    Clauster starts fresh and **rediscovers** still-running bridges on startup
    (it matches live processes), so a lost database is not a lost session —
    you primarily lose recorded metadata, not the bridges themselves.
-3. **Recover a legacy `state.json.corrupt.bak`, if one is there and you want its
-   records back.** This applies only if you took the **move-the-database-aside**
-   branch of step 2. A restore replaces the whole `state_dir` with the archive's
-   contents, and the restored database normally already holds rows, so the window
-   below is closed. Do the same for `hosted_state.json.corrupt.bak` if one is
-   there.
+3. **Put a legacy `state.json.corrupt.bak` back**, if one is there and you want
+   its records back. Do the same for `hosted_state.json.corrupt.bak`. Stop
+   Clauster first (step 1) if it is still running — a reader arriving here from
+   [the 0.12 upgrade notes](upgrading.md) may have a healthy install — and do all
+   of this **before** you start it again.
 
-   Repair the copy first — it holds bytes Clauster could not read. Then put it
-   back under the original name:
+   This works only while `clauster.db` has **no instance and no hosted-session
+   rows**. Two situations leave it that way: the move-the-database-aside branch
+   of step 2, and a first upgrade whose only legacy file was the damaged one —
+   that import wrote no rows. A restore does not: it puts the archive's
+   `state_dir` back, and the restored database normally already holds rows. Any
+   recorded bridge or hosted session writes a row and closes the window until the
+   database is empty again.
+
+   Repair the copy first — it holds bytes Clauster could not read. Then move the
+   retired original out of the way and put the copy back under the original name:
 
    ```sh
    mv ~/.clauster/state.json.imported ~/.clauster/state.json.imported.keep
    mv ~/.clauster/state.json.corrupt.bak ~/.clauster/state.json
    ```
 
-   Do this **before** you start Clauster again. The legacy import re-runs only
-   while `clauster.db` holds no bridge or hosted-session rows, and the
-   move-aside branch is what empties it. Any recorded bridge or hosted session
-   writes a row and closes that window until the database is empty again. The
-   first `mv` above is why the original is moved out of the way: a re-import
-   renames the new file to `state.json.imported` too, replacing what was there.
+   The first `mv` is not optional. A re-import renames the new file to
+   `state.json.imported` as well. On Linux and macOS that replaces whatever was
+   already there. On Windows the rename fails, Clauster logs a warning, and the
+   newly imported file is left un-retired.
 4. **For `~/.claude.json`** (workspace trust / remote-control acknowledgement):
    the trust writer keeps a one-time `~/.claude.json.bak` taken before its first
    modification. If that file is damaged, the `.bak` is the recovery source.
