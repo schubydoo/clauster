@@ -350,15 +350,15 @@ class _KeeperDrain:
                 # reader at all — no stderr line, no sidecar field — while producing exactly
                 # the render fault's symptom: a `ready` row with no connect link and nothing
                 # saying why. Reported here for the same reason the render fault is: a fault
-                # is never a silent skip.
-                if not self._screen_feed_failed:
-                    self._screen_feed_failed = True
-                    print(
-                        f"clauster.pty_keeper: the terminal emulator failed and was disabled; "
-                        f"the connect-URL scrape falls back to the raw byte stream: {exc}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
+                # is never a silent skip. Fires at most once: `_screen` is None from here on,
+                # so no later chunk can re-enter this arm.
+                self._screen_feed_failed = True
+                print(
+                    f"clauster.pty_keeper: the terminal emulator failed and was disabled; "
+                    f"the connect-URL scrape falls back to the raw byte stream: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
         if not self._url_found:
             self._buf.extend(chunk)
             session_id = self._scan_session_id()
