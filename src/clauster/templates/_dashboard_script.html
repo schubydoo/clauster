@@ -3663,6 +3663,17 @@
       //
       // Gated on `connectUrlMissing` so it can only ever appear where it is the answer:
       // a stale notice sitting beside a link that did arrive would contradict the link.
+      //
+      // Its chip is rendered as ordinary visible text, NOT through the aria-live region
+      // below — the opposite choice from the spinner, for the opposite reason. The spinner
+      // is a TRANSIENT state a screen-reader user needs told about as it changes, and it
+      // has cleared by the time anyone browses back. This is a PERMANENT one: it is still
+      // true minutes later and after a reload (a reattached keeper republishes it), so it
+      // has to be readable at any time, which a `visually-hidden` live region is not. Same
+      // treatment as the two other persistent explanations on this page — the missing-`pty`
+      // -extra hint and `resume-blocked` — both plain text beside the control they explain.
+      // The cost is no announcement at the instant of the swap; the gain is that it is
+      // never announced twice and never unreachable.
       connectNoticeOf(name) {
         if (!this.connectUrlMissing(name)) return null;
         return (this.rowOf(name) || {}).notice || null;
@@ -3674,12 +3685,13 @@
       // NVDA/VoiceOver — so the wrapper persists and only this text changes. (The region
       // shares the row's filter x-show, so an off-filter desktop row stays silent — which
       // is intended: a row the user has filtered out shouldn't announce.) The string
-      // mirrors the visible chip label so the SR and sighted experiences match word-for-word
-      // — which is why the notice is announced HERE rather than from a second live region:
-      // the two chips are mutually exclusive, so one region carries whichever is showing,
-      // and swapping the text of an already-mounted region is what actually announces.
+      // mirrors the visible chip label so the SR and sighted experiences match word-for-word.
+      // It carries the SPINNER only, never `connectNoticeOf` — see there for why a permanent
+      // explanation belongs in the a11y tree as plain text instead of in this region.
       connectStatusText(name) {
-        return this.connectNoticeOf(name) || (this.connectUrlMissing(name) ? "Preparing connect link…" : "");
+        return this.connectUrlMissing(name) && !this.connectNoticeOf(name)
+          ? "Preparing connect link…"
+          : "";
       },
       errorOf(name) { return this.errors[name] || null; },
       // A stopped/crashed bridge can be revived — show "Resume" instead of "Start" and

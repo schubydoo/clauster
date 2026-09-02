@@ -919,11 +919,19 @@ def test_dashboard_shows_the_reason_a_connect_link_is_not_coming(write_config):
     assert "(this.rowOf(name) || {}).notice || null" in page
     assert 'data-test="connect-notice"' in page  # the chip exists and is selectable in E2E
     assert 'x-text="connectNoticeOf(i.rk)"' in page  # renders the backend string verbatim
-    assert "text-warning small align-self-center" in page  # advisory, not text-danger
-    # One live region, not two: the chips are mutually exclusive, so the notice is
-    # announced through the SAME persistent region as the spinner text.
-    assert "return this.connectNoticeOf(name) || (this.connectUrlMissing(name) ?" in page
-    assert page.count('x-text="connectStatusText(i.rk)"') == 1
+    # Advisory, not danger — and the EMPHASIS token, not plain `text-warning`: Tabler's
+    # #f59f00 is ~2.1:1 on the light theme's white surface, failing WCAG 1.4.3 AA for what
+    # is now the only sentence explaining the missing buttons.
+    assert "text-warning-emphasis small align-self-center" in page
+    assert 'class="text-warning small" data-test="connect-notice"' not in page
+    # The chip is NOT aria-hidden, unlike its transient spinner sibling: this state is
+    # permanent and survives a reload, so it has to be readable in the a11y tree at any
+    # time rather than announced once. It is therefore kept OUT of the live region below,
+    # or a screen reader would meet the same sentence twice.
+    chip = page[page.index('data-test="connect-notice"') :].split("</span>")[0]
+    assert "aria-hidden" not in chip
+    assert "return this.connectUrlMissing(name) && !this.connectNoticeOf(name)" in page
+    assert page.count('x-text="connectStatusText(i.rk)"') == 1  # still exactly one region
 
 
 def test_dashboard_restart_note_says_sessions_survive(write_config):

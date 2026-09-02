@@ -409,20 +409,29 @@ def _row_float(value: object) -> float | None:
     return float(value)
 
 
-#: Cap on a keeper `note` lifted onto a card. The keeper writes one fixed sentence, so this
-#: only bounds a hand-edited or corrupt sidecar; kept short because the value renders inline
-#: on the row rather than in a log pane.
-_NOTICE_MAX_CHARS = 200
+#: Cap on a keeper `note` lifted onto a card. The keeper writes one fixed ~70-character
+#: sentence, so this only bounds a hand-edited or corrupt sidecar — kept tight because the
+#: value renders inline in the card's button cluster, which wraps: a long string does not
+#: overflow but does push the row's controls onto extra lines.
+_NOTICE_MAX_CHARS = 120
 
 
 def _sidecar_notice(info: dict) -> str | None:
     """Read a keeper sidecar's advisory ``note`` as a bounded, redacted string (#1390).
 
-    THE single reader for that field, shared by both paths that fold a sidecar onto an
-    instance — :meth:`SessionRunner._apply_pty_info` (spawn + startup watch) and
-    :meth:`SessionRunner._reattach_pty_from_sidecar` (a keeper adopted after a restart).
-    They are the same (path, field) pair: a reattached row shows the same card, so a note
-    read on only one of them would appear and then vanish across a Clauster restart.
+    THE single reader for that field, shared by the two paths that can build a RUNNING pty
+    row from a sidecar — :meth:`SessionRunner._apply_pty_info` (spawn + startup watch) and
+    :meth:`SessionRunner._reattach_pty_from_sidecar` (a live keeper adopted with no row to
+    correlate it to). They show the same card, so a note read on only one of them would
+    appear and then vanish.
+
+    :meth:`SessionRunner._connect_facts_for` deliberately does NOT read it. Its two callers
+    use the returned dict's emptiness as the readiness gate, so a note riding that dict
+    would promote a row on a non-evidence field. It also never needs to: the keeper writes
+    ``connect_url`` and ``session_id`` in one update, so that helper returns non-empty only
+    when a session id was captured — and then ``session_url`` exists and no advisory is due.
+    The consequence is named in #1390: a row rebuilt through that leg after a restart stays
+    STARTING rather than showing this notice.
 
     Treated as untrusted text even though the keeper only ever writes a fixed constant: a
     sidecar is an on-disk file a hand edit or a corrupt write can put anything into (the

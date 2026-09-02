@@ -808,13 +808,20 @@
                     <span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>Preparing connect link…</span>
                   {# The advisory: the link is missing and the backend knows why (#1390). Plain
                      text, not a control — there is nothing to click, and a button-shaped chip
-                     would invite a press. `text-warning` over `text-danger` is the point of a
-                     separate `notice` field: the session is RUNNING and usable, only its deep
-                     link is gone, so this must not read as the failure `error_detail` marks.
-                     aria-hidden like its sibling — same single live region below announces it,
-                     so a screen reader hears the sentence once, not twice. #}
-                  <span class="text-warning small align-self-center" data-test="connect-notice"
-                        aria-hidden="true" x-show="connectNoticeOf(i.rk)" x-cloak
+                     would invite a press. Warning, not danger, is the point of a separate
+                     `notice` field: the session is RUNNING and usable, only its deep link is
+                     gone, so this must not read as the failure `error_detail` marks.
+                     `text-warning-emphasis`, NOT `text-warning`: the plain token is Tabler's
+                     #f59f00, which is 2.1:1 on the light theme's white surface — fine for an
+                     icon, failing 1.4.3 AA for the only sentence explaining the missing
+                     buttons. The emphasis token is theme-aware and clears 9:1 on both.
+
+                     NOT aria-hidden, unlike its spinner sibling: this state is permanent and
+                     survives a reload, so it must be readable in the a11y tree at any time
+                     rather than announced once. It is therefore kept OUT of the live region
+                     below, or a screen reader would meet the same sentence twice. #}
+                  <span class="text-warning-emphasis small align-self-center"
+                        data-test="connect-notice" x-show="connectNoticeOf(i.rk)" x-cloak
                         x-text="connectNoticeOf(i.rk)"></span>
                   {# Persistent live region — always mounted, empty when idle — so the
                      announcement fires on a content change, not a display toggle (#427 UX-02). #}

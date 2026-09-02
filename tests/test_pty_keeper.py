@@ -1473,6 +1473,43 @@ def test_keeper_drain_notes_nothing_once_the_url_was_found(tmp_path: Path) -> No
     assert _read(sidecar)["connect_url"].endswith("session_01NOTEAAAAAAAAAAAAAAAA")
 
 
+def test_keeper_drain_notes_a_screen_that_was_disabled_by_a_feed_failure(
+    tmp_path: Path, capsys
+) -> None:  # noqa: ANN001
+    """The other half of the fault space: the emulator died, not just one frame.
+
+    A `screen.feed` failure sets `_screen = None`, after which the scrape can no longer
+    raise — so the very next chunk CLEARS the render-fault latch while URL capture stays
+    just as dead. Keyed on that latch alone the note would never fire here, for the exact
+    same operator-visible state. With no live-screen tap the failure also had no reader at
+    all before this: no stderr line, no sidecar field.
+    """
+    from clauster import pty_keeper
+
+    class _BoomFeed:
+        def feed(self, data):  # noqa: ANN001, ANN202 — test stub
+            raise RuntimeError("feed boom")
+
+        def find_session_id(self):  # noqa: ANN202 — test stub; never reached once disabled
+            return None
+
+    sidecar = tmp_path / "k.json"
+    base: dict[str, object] = {"state": "starting", "note": None}
+    drain = pty_keeper._KeeperDrain(base, sidecar, _BoomFeed(), None)  # no tap: sidecar is None
+
+    drain.feed(b"anything\r\n")
+    assert drain._screen is None  # precondition: the emulator was disabled
+    drain.feed(b"more output\r\n")  # a later chunk that CANNOT re-raise the render fault
+    assert drain._screen_scan_failed is False  # ... so the render latch reads clean
+    drain._deadline = time.monotonic() - 1
+    drain.tick()
+
+    assert base["note"] == pty_keeper._SCREEN_FAULT_NOTE
+    assert _read(sidecar)["note"] == pty_keeper._SCREEN_FAULT_NOTE
+    err = capsys.readouterr().err
+    assert err.count("terminal emulator failed") == 1  # reported once, tap or no tap
+
+
 def test_keeper_sidecar_always_carries_a_note_key(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     """The ConPTY backend's very first sidecar write already has the field, valued null.
 

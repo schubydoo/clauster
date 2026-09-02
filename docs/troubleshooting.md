@@ -430,7 +430,7 @@ Three probes, from cheapest to most direct:
 3. **Process there?** `pgrep -a -f 'claude.*remote-control'` — a live process
    with a dead card usually means an orphaned keeper (previous section).
 
-### "Connect link unavailable — the session's screen could not be rendered."
+### "Connect link unavailable — this session's screen could not be read."
 
 **What you see:** a green **Running** Interactive Session card with no **Open in
 Claude** button and no QR button, carrying that sentence where the buttons
@@ -440,10 +440,18 @@ would be.
 live log tail works, and Stop and the live terminal all behave normally.
 
 **Cause:** the keeper reads the connect link off a terminal screen it rebuilds
-from the bridge's output. A rare byte sequence — a double-width character left
-half-overwritten — makes that screen fail to render. The keeper skips the bad
-chunk and retries on the next one, which normally succeeds within the 30-second
-capture window. This message means it never did.
+from the bridge's output. Two faults stop it. The first is a rare byte sequence, a
+double-width character left half-overwritten, that makes one frame fail to
+render. The keeper then skips the bad chunk and retries on the next one, which
+normally succeeds within the 30-second capture window. The second is a failure
+that disables the screen emulator for the rest of the session. This message
+means capture never succeeded.
+
+**Where it happens:** Windows always, and Linux or macOS only with
+`claude.pty_screen_enabled: true`. The keeper builds that screen unconditionally
+on Windows, because a Windows console fragments the link across the raw byte
+stream. Elsewhere it builds one only for the live-terminal view, and without a
+screen there is no screen fault to report.
 
 **The fix:** open the session from
 [claude.ai/code](https://claude.ai/code) and pick it from your session list, or
