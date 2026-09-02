@@ -837,6 +837,59 @@ def test_validation_message_masks_value_shaped_credentials_regardless_of_the_fie
     assert "FAKEFAKEFAKEFAKEfake42" not in _friendly_validation_message(ei.value)
 
 
+def test_str_leaves_terminates_on_a_cycle_and_visits_each_container_once() -> None:
+    """The walk runs on raw ``safe_load`` output, which can be cyclic (#1395).
+
+    ``config_write._is_self_referential`` exists for the same reason on the frontmatter
+    seam; a recursive walk here never terminated, and without the id-set it was O(paths).
+    """
+    from clauster.config_editor import _str_leaves
+
+    cyclic: dict = {"token": "supersecrettoken12345"}
+    cyclic["self"] = cyclic
+    assert _str_leaves(cyclic) == ["supersecrettoken12345"]
+
+    # A diamond is collected once, not once per path — that is what kills the blow-up.
+    shared = ["shared-leaf-value"]
+    assert _str_leaves({"a": shared, "b": shared}) == ["shared-leaf-value"]
+
+    # Nested containers and non-str leaves.
+    assert sorted(_str_leaves({"a": ["x", 1, None, ("y",)], "b": {"c": "z"}})) == ["x", "y", "z"]
+    assert _str_leaves({"a": ""}) == []  # empty strings are not needles
+
+
+@pytest.mark.parametrize(
+    "message,expected",
+    [
+        # A word character abutting a non-word EDGE is still a boundary: emitting `(?<!\\w)`
+        # unconditionally refused these and printed the value verbatim.
+        ("x/var/run/secret-token-x now", "x******** now"),
+        ("got /var/run/secret-token-x now", "got ******** now"),
+        ("/var/run/secret-token-x", "********"),
+        # ...but a needle whose own edges are word characters keeps its anchoring, so it
+        # cannot match inside a longer word.
+        ("prefix_supersecrettoken12345", "prefix_supersecrettoken12345"),
+    ],
+)
+def test_mask_respects_the_needles_own_edges(message, expected) -> None:
+    """A lookaround is applied per edge, only where the needle's edge is a word char (#1395)."""
+    from clauster.config_editor import _mask_echoed_input
+
+    needle = "/var/run/secret-token-x" if "/var" in message else "supersecrettoken12345"
+    assert _mask_echoed_input("auth.token", message, needle) == expected
+
+
+def test_mask_applies_longer_needles_first() -> None:
+    """A shorter needle must not eat a longer one's tail and strand its prefix (#1395)."""
+    from clauster.config_editor import _mask_echoed_input
+
+    long_secret = "supersecrettoken12345"
+    short_secret = "secrettoken12345"  # a boundary-aligned suffix of the longer one
+    needles = [long_secret, short_secret]
+    masked = _mask_echoed_input("auth.token", f"rejected {long_secret}", needles)
+    assert masked == "rejected ********"
+
+
 def test_exclusive_bounds_are_emitted_distinctly() -> None:
     # `<input type=number>`'s min/max are INCLUSIVE by definition, so a `gt=0` field
     # advertised min="0", the browser called 0 valid, and the save came back 422 — the

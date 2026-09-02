@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tarfile
+import time
 from pathlib import Path
 
 import pytest
@@ -213,6 +214,31 @@ def test_doctor_deeply_nested_yaml_does_not_crash(tmp_path):
     # down with it. run_doctor's contract is to stay resilient to a broken config.
     detail = _config_detail(tmp_path / "bad.yml", "[" * 5000)
     assert detail == "config is not valid YAML: the config is nested too deeply to parse"
+
+
+def test_doctor_survives_a_self_referential_yaml_alias(tmp_path):
+    # `safe_load` builds a genuinely cyclic dict for a recursive alias without complaint, and
+    # pydantic hands that whole mapping to the renderer as a missing-field error's `input`.
+    # A recursive leaf-walk never terminated: doctor tracebacked and /api/doctor 500'd, which
+    # would have turned the leak this row exists to close into a crash on the same file.
+    detail = _config_detail(
+        tmp_path / "bad.yml",
+        "auth: &a\n  enabled: true\n  token: supersecrettoken12345\n  self: *a\n",
+    )
+    assert "projects_root: Field required" in detail
+    assert "supersecrettoken12345" not in detail
+
+
+def test_doctor_is_not_exponential_on_a_yaml_alias_pyramid(tmp_path):
+    # Without a `seen` set the leaf-walk is O(paths), not O(nodes): this 24-level pyramid is
+    # ~540 bytes and took 16.9s inside run_doctor, doubling per level. The wall-clock bound is
+    # deliberately loose (it ran in ~0.002s) — it is here to catch a return to exponential,
+    # not to measure this host.
+    body = ["a0: &a0 [x, y]"] + [f"a{i}: &a{i} [*a{i - 1}, *a{i - 1}]" for i in range(1, 25)]
+    started = time.monotonic()
+    detail = _config_detail(tmp_path / "bad.yml", "\n".join(body) + "\n")
+    assert time.monotonic() - started < 10
+    assert "projects_root: Field required" in detail
 
 
 def test_doctor_validation_error_detail_withholds_the_parsed_mapping(tmp_path):

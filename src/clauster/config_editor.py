@@ -373,21 +373,50 @@ def validate_edits(
 _MIN_MASKABLE_INPUT = 12
 
 
+def _is_word_char(char: str) -> bool:
+    r"""Whether ``char`` is what ``\\w`` matches, so a lookaround around it is meaningful."""
+    return char.isalnum() or char == "_"
+
+
 def _str_leaves(value: object) -> list[str]:
-    """Return every non-empty string leaf in ``value``, recursing lists/tuples/dicts.
+    r"""Return every non-empty string leaf in ``value``, walking lists/tuples/dicts.
 
     pydantic reports ``input`` as the WHOLE container for a list- or dict-valued field while
     the message quotes one element — ``trusted_ips: ['…']`` -> ``'…' does not appear to be an
     IPv4 or IPv6 network``. A bare ``isinstance(str)`` check therefore disarmed the mask on
     exactly the shape a future secret-bearing list would take.
+
+    **Iterative, with a ``seen`` id-set, for the two reasons
+    :func:`config_write._is_self_referential` already records** — this walks the raw output of
+    ``yaml.safe_load`` on an operator's file, so it inherits both of that seam's hazards:
+
+    * ``safe_load`` builds a genuinely self-referential structure for a recursive alias
+      (``auth: &a\\n  self: *a``) without complaint. A recursive walk never terminated:
+      ``clauster doctor`` tracebacked and `/api/doctor` answered 500 — turning the leak this
+      module exists to close into a crash on the same input (#1395).
+    * Without ``seen`` the walk is O(*paths*), not O(nodes), which an alias pyramid turns
+      exponential. Measured on the recursive version: a 542-byte config took 16.9 s inside
+      ``run_doctor``, and each added level doubled it.
+
+    Dict keys are not walked, for the same reason as that function: ``safe_load`` builds keys
+    only from hashable scalars, so a key cannot be a container.
     """
-    if isinstance(value, str):
-        return [value] if value else []
-    if isinstance(value, list | tuple):
-        return [leaf for item in value for leaf in _str_leaves(item)]
-    if isinstance(value, dict):
-        return [leaf for item in value.values() for leaf in _str_leaves(item)]
-    return []
+    out: list[str] = []
+    stack: list[Any] = [value]
+    seen: set[int] = set()
+    while stack:
+        node = stack.pop()
+        if isinstance(node, str):
+            if node:
+                out.append(node)
+            continue
+        if not isinstance(node, dict | list | tuple):
+            continue
+        if id(node) in seen:
+            continue  # a cycle, or a diamond already collected: re-walking is the blow-up
+        seen.add(id(node))
+        stack.extend(node.values() if isinstance(node, dict) else node)
+    return out
 
 
 def _mask_echoed_input(loc: str, msg: str, raw_input: object) -> str:
@@ -414,7 +443,7 @@ def _mask_echoed_input(loc: str, msg: str, raw_input: object) -> str:
       shredded that same message. The whole-token bound is the second half of that fix — it
       stops a value matching *inside* a longer word.
 
-    Two limits, stated rather than implied:
+    Four limits, stated rather than implied:
 
     * ``loc`` gates the mask because over-masking has a cost: nearly every Clauster validator
       that quotes its input quotes a **path** (``projects_root does not exist: /srv/x``), and
@@ -424,16 +453,33 @@ def _mask_echoed_input(loc: str, msg: str, raw_input: object) -> str:
       ``v.lower()``) defeats it. That is the price of not guessing; the standing rule for this
       seam is still "do not write a message that carries a value", and this is the net under
       it, not a licence.
+    * Only ``str`` leaves are needles, so a credential YAML resolved to another type
+      (``auth.token: 123456789012`` -> ``int``) is invisible here.
+    * :data:`_MIN_MASKABLE_INPUT` is a floor, so a credential shorter than it is not masked.
+      ``auth.reverse_proxy.shared_secret`` is the one secret field with no length-forcing
+      validator, so an 8-character shared secret would sit below it.
 
     :func:`_friendly_validation_message` additionally runs the value-shaped passes
     (``${…}`` interpolations, ``scheme://user@host`` credentials) on every part. Those are
     ``loc``-independent and cannot touch a static message, so they need no gate.
     """
-    needles = [n for n in _str_leaves(raw_input) if len(n) >= _MIN_MASKABLE_INPUT]
-    if not needles or not _SECRET_KEY_RE.search(loc):
+    # The cheap gate FIRST: it decides the same answer without walking a structure that came
+    # from an operator's file, so an ordinary field never pays for the walk at all.
+    if not _SECRET_KEY_RE.search(loc):
         return msg
+    # Longest first. A shorter needle that is a boundary-aligned suffix of a longer one would
+    # otherwise consume its tail and leave the longer one's prefix standing in the message.
+    needles = sorted(
+        (n for n in _str_leaves(raw_input) if len(n) >= _MIN_MASKABLE_INPUT), key=len, reverse=True
+    )
     for needle in needles:
-        msg = re.sub(rf"(?<!\w){re.escape(needle)}(?!\w)", REDACTION_SENTINEL, msg)
+        # `\b` semantics, applied per EDGE: a lookaround only makes sense where the needle's
+        # own edge character is a word character. Emitting `(?<!\w)` unconditionally refused
+        # to mask `/var/run/secret-token-x` whenever a word character preceded the slash —
+        # the value then printed verbatim, which is the failure direction that matters.
+        behind = r"(?<!\w)" if _is_word_char(needle[0]) else ""
+        ahead = r"(?!\w)" if _is_word_char(needle[-1]) else ""
+        msg = re.sub(rf"{behind}{re.escape(needle)}{ahead}", REDACTION_SENTINEL, msg)
     return msg
 
 
