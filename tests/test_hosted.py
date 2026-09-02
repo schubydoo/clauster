@@ -15,10 +15,12 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
+import psutil
 import pytest
 from pydantic import ValidationError
 
 import clauster.hosted as hosted
+from clauster import procutil
 from clauster.claustrum_client import ClaustrumClient, ClaustrumError, DaemonUnreachable
 from clauster.hosted import (
     HostedManager,
@@ -1177,6 +1179,80 @@ async def _spawn(mgr, client, *, project="proj"):
     )
 
 
+async def test_spawn_stamps_and_persists_both_halves_of_the_start_identity(
+    fake_claustrum, tmp_path, monkeypatch
+):
+    """The spawn-side stamp is where every later comparison gets its evidence (#1404).
+
+    Without this the whole fix is unreachable in production while every other test stays
+    green: the gate would receive the ticks faithfully, and they would always be ``None``
+    because nothing ever recorded them. Asserted on the PERSISTED record rather than only
+    the in-memory row, because ``_is_orphan`` runs at ``reattach_all`` against what came
+    back off disk — a stamp that never reached the store fixes nothing.
+
+    The call count is part of the assertion. Both halves must come from ONE
+    ``proc_start_pair`` read: sampling separately puts a suspension point between two
+    ``/proc`` reads, and an agent dying in that window can have its pid recycled, leaving a
+    pair whose halves describe different processes — which the gate then authenticates,
+    matching the ticks exactly and the epoch only coarsely.
+    """
+    calls: list[int] = []
+
+    def _pair(pid):
+        calls.append(pid)
+        return 1717000000.0, 770579
+
+    monkeypatch.setattr(procutil, "proc_start_pair", _pair)
+    fake = await fake_claustrum(support_want_pid=True)
+    store = HostedStateStore(tmp_path)
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        try:
+            inst = await _spawn(mgr, client)
+            assert inst.agent_pid == 4242
+            assert inst.agent_proc_start == 1717000000.0
+            assert inst.agent_start_ticks == 770579, "the drift-immune half must be stamped"
+            assert calls == [4242], "both halves must come from exactly one paired read"
+            record = store.load()[inst.claustrum_process_id]
+            assert record["agent_proc_start"] == 1717000000.0
+            assert record["agent_start_ticks"] == 770579, "the stamp must reach the store"
+        finally:
+            await mgr.aclose()
+
+
+async def test_spawn_stamps_neither_half_when_the_daemon_reports_no_pid(
+    fake_claustrum, tmp_path, monkeypatch
+):
+    """A pre-CT-1 daemon reports no pid, so there is nothing to read and nothing to stamp.
+
+    The guard must skip the read entirely rather than call ``proc_start_pair(None)``. Both
+    halves stay absent together — a row with ticks but no pid would be evidence about no
+    process at all, and ``_is_orphan`` requires the pid before it looks at either.
+    """
+    calls: list[object] = []
+    monkeypatch.setattr(
+        procutil, "proc_start_pair", lambda pid: calls.append(pid) or (1717000000.0, 770579)
+    )
+    fake = await fake_claustrum()  # no want_pid support → agent_pid stays None
+    store = HostedStateStore(tmp_path)
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        try:
+            inst = await _spawn(mgr, client)
+            assert inst.agent_pid is None
+            assert inst.agent_proc_start is None
+            assert inst.agent_start_ticks is None
+            assert calls == [], "no pid means no /proc read at all"
+            record = store.load()[inst.claustrum_process_id]
+            # `None`, not absent: this JSON store filters by field NAME and writes the null
+            # through, where the DB store's `_present` drops it. Both read back as "no
+            # evidence", which is all the gate asks — asserted on the value so the test does
+            # not silently encode one store's representation as the contract.
+            assert record["agent_start_ticks"] is None
+        finally:
+            await mgr.aclose()
+
+
 async def test_manager_spawn_registers_running_instance(fake_claustrum):
     async with _manager(fake_claustrum) as (fake, client, mgr):
         inst = await _spawn(mgr, client)
@@ -1440,13 +1516,14 @@ async def test_manager_resume_by_instance_id(fake_claustrum):
 async def test_manager_kill_orphan_by_instance_id(monkeypatch):
     killed: list[tuple] = []
     monkeypatch.setattr(
-        "clauster.procutil.kill_if_match", lambda pid, ps: killed.append((pid, ps))
+        "clauster.procutil.kill_if_match",
+        lambda pid, ps, *, start_ticks: killed.append((pid, ps, start_ticks)),
     )
     mgr = HostedManager()
     inst = _orphan_instance()
     mgr._instances[inst.claustrum_process_id] = inst
     result = await mgr.kill_orphan(inst.instance_id)  # kill by the dashed UUID
-    assert killed == [(4242, 1000.0)]  # match-gated kill still issued for the survivor
+    assert killed == [(4242, 1000.0, 770579)]  # match-gated kill still issued for the survivor
     assert result.status is InstanceStatus.STOPPED
 
 
@@ -2108,11 +2185,11 @@ _REJECTED_RECORDS = [
     pytest.param({"project": {}}, id="project-not-a-string"),
     pytest.param({"label": 7}, id="label-not-a-string"),
     pytest.param({"permission_mode": "nope"}, id="permission-mode-not-in-the-literal"),
-    # NB agent_pid, agent_proc_start and claude_session_uuid are deliberately NOT here: all
-    # three are coerced by the SAME helper on both mapping paths (a junk value → None), so
-    # none raises a ValidationError or triggers degradation. Their tolerance is pinned by the
-    # three `..._never_reaches_the_model_on_either_path` tests below. claude_session_uuid was
-    # the last one still listed here — it joined the family in #1380.
+    # NB agent_pid, agent_proc_start, agent_start_ticks and claude_session_uuid are
+    # deliberately NOT here: all four are coerced by the SAME helper on both mapping paths (a
+    # junk value → None), so none raises a ValidationError or triggers degradation. Their
+    # tolerance is pinned by the four `..._never_reaches_the_model_on_either_path` tests
+    # below. claude_session_uuid joined the family in #1380, agent_start_ticks in #1404.
 ]
 
 
@@ -2151,6 +2228,40 @@ def test_a_junk_agent_proc_start_never_reaches_the_model_on_either_path():
     kept = {"project": "proj", "label": "hosted:proj", "agent_proc_start": 1234.5}
     assert HostedManager._row_from_record(_PID, kept).agent_proc_start == 1234.5
     assert HostedManager._degraded_row(_PID, kept).agent_proc_start == 1234.5
+
+
+def test_a_junk_agent_start_ticks_never_reaches_the_model_on_either_path():
+    """The fourth of the family — the drift-immune half of the orphan-recovery pair (#1404).
+
+    Same asymmetry hazard as its three siblings: pydantic's lax coercion accepts ``true`` as
+    tick count 1 and ``"770579"`` as 770579, while the salvage takes plain non-negative ints
+    only. Left asymmetric, a record that degraded for an unrelated reason would drop ticks
+    the healthy path kept, ``_persist`` would write that loss, and the row would silently
+    fall back to the drifting epoch-only compare this field exists to end.
+
+    A negative count is refused too, which has no ``_as_pid`` equivalent: field 22 of
+    ``/proc/<pid>/stat`` counts ticks since boot and cannot be negative, so such a value can
+    only be hand-edited. Keeping it would make every future tick compare fail and refuse
+    every kill; dropping it lets the row fall back to the epoch it still has.
+    """
+    for junk in ("770579", True, 770579.0, {}, -1, 2**63, 10**400):
+        record = {"project": "proj", "label": "hosted:proj", "agent_start_ticks": junk}
+        assert HostedManager._row_from_record(_PID, record).agent_start_ticks is None
+        assert HostedManager._degraded_row(_PID, record).agent_start_ticks is None
+    kept = {"project": "proj", "label": "hosted:proj", "agent_start_ticks": 770579}
+    assert HostedManager._row_from_record(_PID, kept).agent_start_ticks == 770579
+    assert HostedManager._degraded_row(_PID, kept).agent_start_ticks == 770579
+    # Zero is a legitimate count (a process started in the boot's first tick), so the
+    # non-negative test must not be written as truthiness.
+    zero = {"project": "proj", "label": "hosted:proj", "agent_start_ticks": 0}
+    assert HostedManager._row_from_record(_PID, zero).agent_start_ticks == 0
+    assert HostedManager._degraded_row(_PID, zero).agent_start_ticks == 0
+    # The top of the range is the INTEGER column's limit, not a guess at a plausible uptime:
+    # a tighter cap would discard real counts on a long-uptime host, which is exactly where
+    # the drift this field defends against has accumulated most.
+    big = {"project": "proj", "label": "hosted:proj", "agent_start_ticks": 2**63 - 1}
+    assert HostedManager._row_from_record(_PID, big).agent_start_ticks == 2**63 - 1
+    assert HostedManager._degraded_row(_PID, big).agent_start_ticks == 2**63 - 1
 
 
 def test_a_junk_claude_session_uuid_never_reaches_the_model_on_either_path():
@@ -2384,6 +2495,7 @@ _ONE_BAD_FIELD = {
     "hosted_log_path": "/tmp/proj/hosted.log",
     "agent_pid": 4242,
     "agent_proc_start": 1234.5,
+    "agent_start_ticks": 770579,
     "started_at": "2026-08-30T10:00:00",
     "intentional_stop": True,
     "instance_id": "11111111-2222-4333-8444-555555555555",
@@ -2391,13 +2503,14 @@ _ONE_BAD_FIELD = {
 
 
 def test_degraded_row_salvages_every_field_the_model_did_not_reject():
-    """Only the rejected value is reset; the other ten survive.
+    """Only the rejected value is reset; the other eleven survive.
 
     Not cosmetic. ``reattach_all`` ends in a ``_persist`` that rewrites the record from
     this row, so a wholesale default would DESTROY the recoverable fields on the first
     boot after corruption — turning a repairable state file into an unrepairable one,
-    the opposite of fail-visible. ``agent_pid``/``agent_proc_start`` matter twice over:
-    they are the only evidence ``_is_orphan`` has (see the CL-8 test below).
+    the opposite of fail-visible. ``agent_pid``/``agent_proc_start``/``agent_start_ticks``
+    matter twice over: they are the only evidence ``_is_orphan`` has (see the CL-8 test
+    below), and without the ticks the other two drift (#1404).
     """
     inst = HostedManager._instance_from_record(_PID, _ONE_BAD_FIELD)
     assert inst.project == ""  # the rejected field, and only it, falls back
@@ -2408,6 +2521,7 @@ def test_degraded_row_salvages_every_field_the_model_did_not_reject():
     assert inst.hosted_log_path == Path("/tmp/proj/hosted.log")
     assert inst.agent_pid == 4242
     assert inst.agent_proc_start == 1234.5
+    assert inst.agent_start_ticks == 770579
     assert inst.started_at == datetime(2026, 8, 30, 10, 0)
     assert inst.intentional_stop is True
     assert inst.instance_id == "11111111-2222-4333-8444-555555555555"
@@ -2420,6 +2534,9 @@ def test_degraded_row_salvages_every_field_the_model_did_not_reject():
         ("agent_pid", 1.5, None),
         ("agent_proc_start", True, None),
         ("agent_proc_start", 10**400, None),  # int too large for a float
+        ("agent_start_ticks", True, None),  # bool subclasses int, as for agent_pid
+        ("agent_start_ticks", -1, None),  # ticks since boot are never negative
+        ("agent_start_ticks", 2**63, None),  # past the INTEGER column: OverflowError on write
         ("claude_session_uuid", ["not-a-uuid"], None),
         ("hosted_log_path", 7, None),
         ("permission_mode", "nope", "default"),
@@ -2571,7 +2688,9 @@ async def test_manager_reattach_degraded_row_can_still_be_an_orphan(
     """
     fake = await fake_claustrum()
     store = HostedStateStore(tmp_path)
-    monkeypatch.setattr(hosted.procutil, "is_killable_hosted", lambda pid, start: True)
+    monkeypatch.setattr(
+        hosted.procutil, "is_killable_hosted", lambda pid, start, *, start_ticks: True
+    )
     store.save(
         {
             "01GONEPROCESS00000000000": {
@@ -2607,7 +2726,9 @@ async def test_manager_reattach_orphan_without_a_usable_uuid_does_not_offer_resu
     """
     fake = await fake_claustrum()
     store = HostedStateStore(tmp_path)
-    monkeypatch.setattr(hosted.procutil, "is_killable_hosted", lambda pid, start: True)
+    monkeypatch.setattr(
+        hosted.procutil, "is_killable_hosted", lambda pid, start, *, start_ticks: True
+    )
     store.save(
         {
             "01GONEPROCESS00000000000": {
@@ -3076,7 +3197,13 @@ async def test_manager_aclose_detaches_without_killing(fake_claustrum, tmp_path)
 
 
 def _orphan_instance(pid=4242, uuid="11111111-2222-4333-8444-555555555555"):
-    """A crashed hosted row that survived a daemon restart (live pid, no session)."""
+    """A crashed hosted row that survived a daemon restart (live pid, no session).
+
+    Carries BOTH halves of the start identity. The tick count is what keeps the kill
+    reachable on a host whose clock has been corrected (#1404), so the tests that assert on
+    the recorded kill argv assert on it too — a call site that dropped it would still kill,
+    just against the drifting epoch alone, which is the regression.
+    """
     return RemoteControlInstance(
         project="proj",
         label="hosted:proj",
@@ -3084,6 +3211,7 @@ def _orphan_instance(pid=4242, uuid="11111111-2222-4333-8444-555555555555"):
         claustrum_process_id="01ORPHAN0000000000000000",
         agent_pid=pid,
         agent_proc_start=1000.0,
+        agent_start_ticks=770579,
         claude_session_uuid=uuid,
         status=InstanceStatus.CRASHED,
         is_orphan=True,
@@ -3115,6 +3243,110 @@ async def test_manager_reattach_marks_live_survivor_as_orphan(
         assert inst.status is InstanceStatus.CRASHED
         assert inst.is_orphan is True
         assert "survived a daemon restart" in (inst.error_detail or "")
+
+
+def _drifted_agent(monkeypatch, *, epoch_now, ticks_now=770579):
+    """Patch procutil so pid 4242 looks like a live hosted agent at ``epoch_now``.
+
+    ``epoch_now`` is what a fresh ``create_time()`` returns *now*; the persisted row was
+    stamped at 1000.0. Their difference IS the clock correction, driven directly rather
+    than waited for — which is the only way to test #1404 deterministically.
+    """
+
+    class _Proc:
+        def __init__(self, pid):
+            pass
+
+        def status(self):
+            return psutil.STATUS_RUNNING
+
+        def cmdline(self):
+            return ["claude", "--output-format", "stream-json"]
+
+        def create_time(self):
+            return epoch_now
+
+    monkeypatch.setattr(procutil.psutil, "Process", _Proc)
+    monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: ticks_now)
+
+
+async def _reattach_row(fake_claustrum, tmp_path, extra):
+    """Persist one hosted row the daemon will not know, reattach, and return it."""
+    fake = await fake_claustrum()
+    store = HostedStateStore(tmp_path)
+    pid = "01GONEPROCESS00000000000"
+    store.save(
+        {
+            pid: {
+                "project": "proj",
+                "label": "hosted:proj",
+                "agent_pid": 4242,
+                "agent_proc_start": 1000.0,
+                "claude_session_uuid": "11111111-2222-4333-8444-555555555555",
+                **extra,
+            }
+        }
+    )
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        await mgr.reattach_all(client)  # daemon doesn't know it → not-found
+        return mgr, mgr.get_instance(pid)
+
+
+async def test_clock_drift_no_longer_reads_a_survived_hosted_agent_as_lost(
+    fake_claustrum, tmp_path, monkeypatch
+):
+    """THE #1404 regression, end to end through the store and ``reattach_all``.
+
+    The agent survived our restart and never moved, but psutil re-derives its create_time
+    from a ``/proc/stat`` btime that NTP has since shifted by 4 seconds — measured on the
+    dogfood host, against the 0.05s bound ``is_killable_hosted`` compares with. With the
+    boot-relative half persisted, the row is still an orphan: Kill and Resume stay
+    reachable, and the operator does not end up with a second agent on the conversation.
+
+    The control below is the point of the pair — the SAME drift, the same row, minus the
+    ticks — so this test cannot pass by accident of the fake looking alive.
+    """
+    _drifted_agent(monkeypatch, epoch_now=1004.0)
+    mgr, inst = await _reattach_row(fake_claustrum, tmp_path, {"agent_start_ticks": 770579})
+    assert inst.status is InstanceStatus.CRASHED  # the daemon doesn't know it either way
+    assert inst.is_orphan is True
+    assert "survived a daemon restart" in (inst.error_detail or "")
+    assert "Resume to recover, or Kill" in (inst.error_detail or "")
+    # And the row it re-persisted carries the ticks forward, so the NEXT restart is covered
+    # too — a stamp that only lived in memory would fix one boot and lose the next.
+    assert mgr._record(inst)["agent_start_ticks"] == 770579
+
+
+async def test_clock_drift_still_loses_a_row_that_predates_the_ticks_column(
+    fake_claustrum, tmp_path, monkeypatch
+):
+    """The positive control for the test above, and the documented pre-#1404 behaviour.
+
+    A row written by an older build has no ``agent_start_ticks``, so the epoch is the only
+    evidence and the same 4-second drift still reads the survivor as lost. Stated as a test
+    rather than left implicit: it is what makes the assertion above meaningful, and it pins
+    the honest bound of the fix — such a row heals on its session's next spawn, not here.
+    """
+    _drifted_agent(monkeypatch, epoch_now=1004.0)
+    _mgr, inst = await _reattach_row(fake_claustrum, tmp_path, {})
+    assert inst.is_orphan is False
+    assert "session lost" in (inst.error_detail or "")
+
+
+async def test_a_recycled_pid_is_not_an_orphan_even_with_an_undrifted_epoch(
+    fake_claustrum, tmp_path, monkeypatch
+):
+    """The PID-reuse defence must get STRICTER, not laxer, for taking the ticks conjunct.
+
+    The replacement process started 10ms later — inside the 0.05s epoch bound that used to
+    be the whole gate, but a whole tick away from the recorded count. It must not be
+    classified as our survivor, because that offers a Kill aimed at a stranger.
+    """
+    _drifted_agent(monkeypatch, epoch_now=1000.01, ticks_now=770580)
+    _mgr, inst = await _reattach_row(fake_claustrum, tmp_path, {"agent_start_ticks": 770579})
+    assert inst.is_orphan is False
+    assert "session lost" in (inst.error_detail or "")
 
 
 async def test_manager_reattach_lost_when_no_survivor(fake_claustrum, tmp_path, monkeypatch):
@@ -3174,14 +3406,15 @@ async def test_manager_reattach_lost_when_survivor_not_killable(
 async def test_manager_kill_orphan_terminates_and_stops(monkeypatch):
     killed: list[tuple] = []
     monkeypatch.setattr(
-        "clauster.procutil.kill_if_match", lambda pid, ps: killed.append((pid, ps))
+        "clauster.procutil.kill_if_match",
+        lambda pid, ps, *, start_ticks: killed.append((pid, ps, start_ticks)),
     )
     mgr = HostedManager()
     inst = _orphan_instance()
     inst.error_detail = "Resume to recover, or Kill"  # stale orphan recovery prompt
     mgr._instances[inst.claustrum_process_id] = inst
     result = await mgr.kill_orphan(inst.claustrum_process_id)
-    assert killed == [(4242, 1000.0)]  # match-gated kill issued for the survivor
+    assert killed == [(4242, 1000.0, 770579)]  # match-gated kill issued for the survivor
     assert result.status is InstanceStatus.STOPPED
     assert result.intentional_stop is True
     assert result.is_orphan is False
@@ -3193,7 +3426,8 @@ async def test_manager_kill_orphan_without_pid_skips_kill(monkeypatch):
     # issues a kill — covers the pid-absent branch of kill_orphan.
     killed: list[tuple] = []
     monkeypatch.setattr(
-        "clauster.procutil.kill_if_match", lambda pid, ps: killed.append((pid, ps))
+        "clauster.procutil.kill_if_match",
+        lambda pid, ps, *, start_ticks: killed.append((pid, ps, start_ticks)),
     )
     mgr = HostedManager()
     inst = _orphan_instance(pid=None)
@@ -3213,7 +3447,8 @@ async def test_manager_kill_orphan_unknown_raises():
 async def test_manager_resume_kills_orphan_survivor(fake_claustrum, monkeypatch):
     killed: list[tuple] = []
     monkeypatch.setattr(
-        "clauster.procutil.kill_if_match", lambda pid, ps: killed.append((pid, ps))
+        "clauster.procutil.kill_if_match",
+        lambda pid, ps, *, start_ticks: killed.append((pid, ps, start_ticks)),
     )
     async with _manager(fake_claustrum) as (fake, client, mgr):
         inst = _orphan_instance()
@@ -3221,7 +3456,7 @@ async def test_manager_resume_kills_orphan_survivor(fake_claustrum, monkeypatch)
         resumed = await mgr.resume(
             client, inst.claustrum_process_id, cwd="/tmp/proj", claude_binary=_BIN
         )
-        assert killed == [(4242, 1000.0)]  # survivor killed as part of the resume
+        assert killed == [(4242, 1000.0, 770579)]  # survivor killed as part of the resume
         assert resumed.status is InstanceStatus.RUNNING
         assert resumed.claude_session_uuid == inst.claude_session_uuid
         assert mgr.get_instance("01ORPHAN0000000000000000") is None  # dead row retired

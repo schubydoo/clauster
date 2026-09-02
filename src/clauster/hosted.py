@@ -1108,10 +1108,22 @@ class HostedManager:
         await session.start(
             cwd=cwd, permission_mode=permission_mode, resume_uuid=resume_uuid, want_pid=True
         )
-        # Measure our OWN psutil create_time of the (CT-1-reported) pid — that's what
+        # Measure our OWN start identity for the (CT-1-reported) pid — that's what
         # CL-8 orphan validation compares against, NOT the daemon's startTime token
-        # (decision (b)). None when there's no pid (pre-CT-1 daemon) or it's unreadable.
-        proc_start = procutil.proc_create_time(session.agent_pid) if session.agent_pid else None
+        # (decision (b)). Both halves in ONE `proc_start_pair` read (#1404): sampling the
+        # epoch and the ticks separately puts a suspension point between two `/proc` reads,
+        # and an agent that dies in that window can have its pid recycled, leaving a pair
+        # whose halves describe DIFFERENT processes — which `is_live_process` would then
+        # authenticate, because it matches the ticks exactly and the epoch only coarsely.
+        # `(None, None)` when there's no pid (pre-CT-1 daemon) or it's unreadable.
+        # `to_thread`, matching the bridge twin at `runner._spawn`: the pair is two blocking
+        # `/proc` reads (`/proc/<pid>/stat` plus `boot_time()`'s `/proc/stat`), and the
+        # sibling kill paths `_resume_locked` and `kill_orphan` already offload `kill_if_match`.
+        proc_start, start_ticks = (
+            await asyncio.to_thread(procutil.proc_start_pair, session.agent_pid)
+            if session.agent_pid
+            else (None, None)
+        )
         instance = RemoteControlInstance(
             project=project,
             label=label,
@@ -1120,6 +1132,7 @@ class HostedManager:
             claustrum_process_id=process_id,
             agent_pid=session.agent_pid,
             agent_proc_start=proc_start,
+            agent_start_ticks=start_ticks,
             status=InstanceStatus.RUNNING,
             started_at=datetime.now(UTC),
         )
@@ -1244,9 +1257,16 @@ class HostedManager:
             await old_session.detach()
             self._sessions.pop(hosted_id, None)
         elif old.is_orphan and old.agent_pid is not None:
-            # Orphan survivor still running on this conversation — kill it (gated on a
-            # pid+create_time match) so the resumed agent doesn't share its session.
-            await asyncio.to_thread(procutil.kill_if_match, old.agent_pid, old.agent_proc_start)
+            # Orphan survivor still running on this conversation — kill it (gated on a pid +
+            # start-identity match, both halves) so the resumed agent doesn't share its
+            # session. Operator-initiated: this runs only inside a Resume the operator
+            # asked for, never from a background reaper.
+            await asyncio.to_thread(
+                procutil.kill_if_match,
+                old.agent_pid,
+                old.agent_proc_start,
+                start_ticks=old.agent_start_ticks,
+            )
         self._instances.pop(hosted_id, None)
         # Prune this id's lock too: resume retires the old hosted_id permanently (the
         # resumed agent runs under a fresh id), so the old lock would otherwise strand
@@ -1259,9 +1279,9 @@ class HostedManager:
         """Terminate a survived-but-orphaned hosted agent and mark its row stopped (CL-8).
 
         For an orphan (a live agent the restarted daemon no longer manages): hard-kill
-        the survivor pid+tree — gated on a pid + create_time + hosted-cmdline match so a
-        reused/unrelated PID is never touched — then mark the row stopped. Raises
-        :class:`HostedSessionError` for an unknown id.
+        the survivor pid+tree — gated on a pid + start-time pair (both halves) +
+        hosted-cmdline match so a reused/unrelated PID is never touched — then mark the
+        row stopped. Raises :class:`HostedSessionError` for an unknown id.
 
         Serialized per id (see :meth:`_lock_for`) so a concurrent resume can't spawn
         a fresh agent off this row while we're hard-killing the survivor.
@@ -1275,7 +1295,10 @@ class HostedManager:
                 raise HostedSessionError(f"no such hosted session: {hosted_id}")
             if inst.agent_pid is not None:
                 await asyncio.to_thread(
-                    procutil.kill_if_match, inst.agent_pid, inst.agent_proc_start
+                    procutil.kill_if_match,
+                    inst.agent_pid,
+                    inst.agent_proc_start,
+                    start_ticks=inst.agent_start_ticks,
                 )
             inst.is_orphan = False
             inst.intentional_stop = True
@@ -1341,18 +1364,35 @@ class HostedManager:
             await self._persist()
 
     @staticmethod
-    def _is_orphan(instance: RemoteControlInstance) -> bool:
+    async def _is_orphan(instance: RemoteControlInstance) -> bool:
         """Whether a not-found instance is a recoverable (killable) survivor.
 
         Uses the same fail-closed predicate as the guarded kill, so a row is only
-        classified as an orphan when we actually have killable ``(pid, create_time)``
+        classified as an orphan when we actually have killable ``(pid, start-time pair)``
         evidence. A survivor we can't safely kill (e.g. a pre-CL-8 row with no recorded
         ``agent_proc_start``) is treated as lost, not as a recoverable orphan — otherwise
         ``kill_orphan``/resume would transition the row to a clean stop while the process
         kept running.
+
+        Both halves of the start identity are handed over (#1404). Without
+        ``agent_start_ticks`` the epoch is compared against a 0.05s bound while psutil
+        re-derives it from a ``/proc/stat`` btime that NTP moves by seconds, so on a
+        drifting host a survivor reads as lost — the row loses Kill and Resume, and a
+        Resume off a *different* row spawns a second agent beside the one still running.
+
+        Async, and the predicate runs in a thread: it is two blocking ``/proc`` reads per row
+        (``/proc/<pid>/stat`` plus ``boot_time()``'s ``/proc/stat``), and ``reattach_all``
+        calls it once per persisted row while the event loop is also serving the dashboard
+        that is waiting for exactly these cards. The pid check stays inline and short-
+        circuits, so a row with no pid evidence costs no thread hop at all.
         """
-        return instance.agent_pid is not None and procutil.is_killable_hosted(
-            instance.agent_pid, instance.agent_proc_start
+        if instance.agent_pid is None:
+            return False
+        return await asyncio.to_thread(
+            procutil.is_killable_hosted,
+            instance.agent_pid,
+            instance.agent_proc_start,
+            start_ticks=instance.agent_start_ticks,
         )
 
     async def aclose(self) -> None:
@@ -1449,10 +1489,10 @@ class HostedManager:
                 continue
             if not result.get("found"):
                 # The new daemon doesn't know this process. If -keep-children left the
-                # agent running (CL-8), its (pid, create_time) still matches a live
+                # agent running (CL-8), its (pid, start-time pair) still matches a live
                 # process → it's an orphan we can recover; otherwise it's truly lost.
                 instance.status = InstanceStatus.CRASHED
-                if self._is_orphan(instance):
+                if await self._is_orphan(instance):
                     instance.is_orphan = True
                     # A salvaged row can be an orphan AND have lost its `project` — the
                     # per-field salvage keeps the pid evidence while a model-rejected project
@@ -1604,6 +1644,7 @@ class HostedManager:
             "hosted_log_path": str(instance.hosted_log_path) if instance.hosted_log_path else None,
             "agent_pid": instance.agent_pid,
             "agent_proc_start": instance.agent_proc_start,
+            "agent_start_ticks": instance.agent_start_ticks,
             "started_at": instance.started_at.isoformat() if instance.started_at else None,
             "intentional_stop": instance.intentional_stop,
             "instance_id": instance.instance_id,
@@ -1651,13 +1692,13 @@ class HostedManager:
 
         Per field rather than wholesale, because ``reattach_all`` ends in a
         :meth:`_persist` that rewrites the record from this row: defaulting the other
-        ten fields because one is junk would *destroy* them on the first boot after
-        corruption, leaving nothing to repair by hand. Three of them are load-bearing
-        beyond display — ``agent_pid``/``agent_proc_start`` are the only evidence
-        :meth:`_is_orphan` has, so losing them downgrades a recoverable CL-8 survivor
-        to "session lost" and lets ``forget`` drop clauster's last record of a live
-        process, and ``claude_session_uuid`` is what drives ``--resume``. Only the value
-        the model actually rejected falls back to its default.
+        eleven fields because one is junk would *destroy* them on the first boot after
+        corruption, leaving nothing to repair by hand. Four of them are load-bearing
+        beyond display — ``agent_pid``/``agent_proc_start``/``agent_start_ticks`` are the
+        only evidence :meth:`_is_orphan` has, so losing them downgrades a recoverable CL-8
+        survivor to "session lost" and lets ``forget`` drop clauster's last record of a
+        live process, and ``claude_session_uuid`` is what drives ``--resume``. Only the
+        value the model actually rejected falls back to its default.
 
         This function must not raise, or it reopens the very escape it exists to close
         (its caller catches ``ValidationError`` and nothing else). Every value is
@@ -1684,6 +1725,7 @@ class HostedManager:
             hosted_log_path=_as_log_path(fields.get("hosted_log_path")),
             agent_pid=_as_pid(agent_pid),
             agent_proc_start=_as_proc_start(proc_start),
+            agent_start_ticks=_as_start_ticks(fields.get("agent_start_ticks")),
             started_at=_as_started_at(fields.get("started_at")),
             intentional_stop=bool(fields.get("intentional_stop", False)),
             status=InstanceStatus.STARTING,
@@ -1708,6 +1750,7 @@ class HostedManager:
             hosted_log_path=_as_log_path(fields.get("hosted_log_path")),
             agent_pid=_as_pid(fields.get("agent_pid")),
             agent_proc_start=_as_proc_start(fields.get("agent_proc_start")),
+            agent_start_ticks=_as_start_ticks(fields.get("agent_start_ticks")),
             started_at=_as_started_at(fields.get("started_at")),
             intentional_stop=bool(fields.get("intentional_stop", False)),
             status=InstanceStatus.STARTING,
@@ -1942,6 +1985,60 @@ def _as_pid(value: Any) -> int | None:
         logger.warning(
             "hosted: refusing a non-integer agent_pid (%s) from a persisted record; the "
             "row loses its orphan-recovery pid evidence",
+            type(value).__name__,
+        )
+    return None
+
+
+def _as_start_ticks(value: Any) -> int | None:
+    """Coerce a persisted ``agent_start_ticks`` to an int, falling back to ``None``.
+
+    The fourth member of the :func:`_as_pid` / :func:`_as_proc_start` / :func:`_as_session_uuid`
+    family, and used by BOTH mapping paths for the same reason they are: a value the healthy
+    path kept and the salvage path dropped would leave a degraded row without the
+    drift-immune half of its orphan evidence, and ``_persist`` writes that loss back.
+
+    Stricter than pydantic's lax coercion on purpose, exactly as :func:`_as_pid` is: that
+    accepts ``true`` as tick count **1** and ``770579.0`` as 770579. ``_record`` only ever
+    writes an int (or ``None``), so nothing legitimate is refused.
+
+    Range-checked as well as type-checked, which :func:`_as_pid` has no equivalent of, and
+    bounded at BOTH ends exactly as its sibling :func:`clauster.runner._pointer_start_ticks`
+    is. Field 22 of ``/proc/<pid>/stat`` is an unsigned count of ticks since boot, so neither
+    a negative value nor one past the column's range can have come from
+    :func:`procutil.proc_start_ticks`; both mean a hand-edited row or a tampered ``ops
+    restore`` backup, which is the threat model that makes this an untrusted input at all.
+
+    * **Negative** cannot authenticate a wrong process — an equality test against a live
+      reading can only fail — but it fails in the #1404 direction, permanently. Dropping it
+      lets the row fall back to the epoch it still has instead of a tick compare guaranteed
+      to refuse every kill.
+    * **Past 2**63** reaches an INTEGER column, and ``int(value)`` on it raises
+      ``OverflowError`` out of ``_persist``, which catches only ``OSError`` — the same escape
+      :func:`_coerce_seq` documents, where an exception here fails the whole app boot rather
+      than degrading one row. The bound is the COLUMN's limit deliberately, not a guess at a
+      plausible uptime: a 2**31 cap would start discarding real counts after ~248 days up at
+      ``CLK_TCK=100``, dropping drift protection on exactly the long-lived hosts that have
+      accumulated the most correction.
+
+    A refusal is logged, and names WHICH rule it broke rather than only the type — a
+    hand-edited ``-1`` logging "(int)" would report the one thing about it that was fine.
+    ``_persist`` writes the ``None`` back, so the row silently reverts to the drifting
+    epoch-only comparison #1404 exists to end, with nothing else to explain it.
+    """
+    if _is_plain_int(value):
+        if 0 <= value < 2**63:
+            return value
+        logger.warning(
+            "hosted: refusing an out-of-range agent_start_ticks (%d) from a persisted "
+            "record; the row falls back to the drift-prone epoch-only liveness compare",
+            value,
+        )
+        return None
+    if value is not None:
+        logger.warning(
+            "hosted: refusing a non-integer agent_start_ticks (%s) from a persisted record; "
+            "the row falls back to the drift-prone epoch-only liveness compare",
             type(value).__name__,
         )
     return None

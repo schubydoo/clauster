@@ -386,11 +386,11 @@ def test_kill_if_match_kills_only_on_match(monkeypatch):
     killed: list[int] = []
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: killed.append(pid))
     monkeypatch.setattr(procutil, "is_live_process", lambda *a, **k: True)
-    assert procutil.kill_if_match(1234, 1000.0) is True
+    assert procutil.kill_if_match(1234, 1000.0, start_ticks=None) is True
     assert killed == [1234]
     killed.clear()
     monkeypatch.setattr(procutil, "is_live_process", lambda *a, **k: False)
-    assert procutil.kill_if_match(1234, 1000.0) is False
+    assert procutil.kill_if_match(1234, 1000.0, start_ticks=None) is False
     assert killed == []  # never killed when the match fails
 
 
@@ -400,19 +400,146 @@ def test_kill_if_match_fails_closed_without_comparable_start(monkeypatch):
     killed: list[int] = []
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: killed.append(pid))
     monkeypatch.setattr(procutil, "is_live_process", lambda *a, **k: True)
-    assert procutil.kill_if_match(1234, None) is False
-    assert procutil.kill_if_match(1234, "garbage") is False
+    assert procutil.kill_if_match(1234, None, start_ticks=None) is False
+    assert procutil.kill_if_match(1234, "garbage", start_ticks=None) is False
+    # Recorded ticks do NOT buy a kill past the missing epoch (#1404). Reachable only on a
+    # btime-less procfs, where `proc_start_pair` yields (None, ticks); sparing a live agent
+    # is the safe error for a gate that force-kills a tree.
+    assert procutil.kill_if_match(1234, None, start_ticks=770579) is False
     assert killed == []
+
+
+def test_kill_if_match_forwards_the_ticks_it_was_given(monkeypatch):
+    # The parameter is not decoration: `is_killable_hosted` must receive the drift-immune
+    # half, or the whole chain silently reverts to the epoch-only compare (#1404).
+    seen: list[int | None] = []
+    monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: None)
+    monkeypatch.setattr(
+        procutil,
+        "is_killable_hosted",
+        lambda pid, ps, *, start_ticks: seen.append(start_ticks) or True,
+    )
+    assert procutil.kill_if_match(1234, 1000.0, start_ticks=770579) is True
+    assert seen == [770579]
 
 
 def test_is_killable_hosted_requires_comparable_start(monkeypatch):
     # The shared orphan-classification/kill predicate: alive + comparable create-time.
     monkeypatch.setattr(procutil, "is_live_process", lambda *a, **k: True)
-    assert procutil.is_killable_hosted(1234, 1000.0) is True  # comparable + alive
-    assert procutil.is_killable_hosted(1234, None) is False  # no create-time evidence
-    assert procutil.is_killable_hosted(1234, "garbage") is False  # uncomparable
+    assert procutil.is_killable_hosted(1234, 1000.0, start_ticks=None) is True
+    assert procutil.is_killable_hosted(1234, None, start_ticks=None) is False
+    assert procutil.is_killable_hosted(1234, "garbage", start_ticks=None) is False
+    # Ticks alone do not satisfy the entry guard — see kill_if_match's twin above.
+    assert procutil.is_killable_hosted(1234, None, start_ticks=770579) is False
     monkeypatch.setattr(procutil, "is_live_process", lambda *a, **k: False)
-    assert procutil.is_killable_hosted(1234, 1000.0) is False  # comparable but dead
+    assert procutil.is_killable_hosted(1234, 1000.0, start_ticks=None) is False
+
+
+def test_clock_drift_no_longer_reads_a_survived_hosted_agent_as_lost(monkeypatch):
+    # THE #1404 regression, the hosted twin of #1399. psutil's create_time is
+    # `starttime/CLK_TCK + boot_time()`, and boot_time() re-reads /proc/stat btime every
+    # call — NTP slew moves it under an agent that never restarted. Measured on the dogfood
+    # host: a 4-second spread inside 3.5 minutes, against the 0.05s bound this gate uses.
+    #
+    # The consequence is not a wrong kill but a missing one: `_is_orphan` files the
+    # survivor as lost, so the dashboard offers neither Kill nor Resume for it and a Resume
+    # elsewhere spawns a second agent on the same conversation.
+    monkeypatch.setattr(
+        procutil.psutil,
+        "Process",
+        _fake_proc(cmdline=("claude", "--output-format", "stream-json"), ct=1000.0),
+    )
+    monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: 770579)
+
+    # Epoch-only (a pre-#1404 row, or a non-Linux host): the drift IS the bug.
+    assert procutil.is_killable_hosted(1234, 1004.0, start_ticks=None) is False
+    # With the boot-relative half recorded, the same drift is absorbed in both directions.
+    assert procutil.is_killable_hosted(1234, 1004.0, start_ticks=770579) is True
+    assert procutil.is_killable_hosted(1234, 996.0, start_ticks=770579) is True
+
+
+def test_hosted_ticks_still_reject_a_recycled_pid_the_epoch_bound_would_have_admitted(
+    monkeypatch,
+):
+    # The gate that force-kills a tree must not get laxer. It gets strictly tighter: a pid
+    # recycled 10ms later differs by a whole tick, where 0.05s of epoch slack admitted it.
+    monkeypatch.setattr(
+        procutil.psutil,
+        "Process",
+        _fake_proc(cmdline=("claude", "--output-format", "stream-json"), ct=1000.0),
+    )
+    monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: 770580)
+    assert procutil.is_killable_hosted(1234, 1000.0, start_ticks=770579) is False
+    # What the epoch alone allowed, and still allows for a row that has no ticks.
+    assert procutil.is_killable_hosted(1234, 1000.01, start_ticks=None) is True
+
+
+def test_hosted_ticks_do_not_authenticate_an_agent_from_a_different_boot(monkeypatch):
+    # Ticks restart at zero each boot, so an exact match across a reboot means nothing. The
+    # coarse epoch conjunct is what discriminates that, and it must still bite here.
+    monkeypatch.setattr(
+        procutil.psutil,
+        "Process",
+        _fake_proc(cmdline=("claude", "--output-format", "stream-json"), ct=9_000_000.0),
+    )
+    monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: 770579)
+    assert procutil.is_killable_hosted(1234, 1000.0, start_ticks=770579) is False
+
+
+def test_a_cross_boot_tick_collision_inside_the_epoch_window_is_admitted(monkeypatch):
+    """TODO(1401): pins the residue the ticks conjunct COSTS this gate. Flip when boot_id lands.
+
+    Honest failure documentation, not an endorsement. Before #1404 this gate compared the
+    epoch at 0.05s, which no post-reboot process can pass — its create-time lies after the
+    reboot and the recorded one before it. Cross-boot PID reuse was excluded structurally.
+    The ticks conjunct trades that for ``_DRIFT_EPOCH_TOLERANCE``, so a host rebooting inside
+    an hour can present a process holding the same pid AND the same offset from boot.
+
+    Recorded at 20 min into boot N; boot N+1 starts 31 min after boot N; a hosted agent
+    starts 20 min into it, so the tick counts collide and the epochs differ by 31 min — well
+    inside the 1h window. The gate says yes, and the operator's Kill would reach a stranger.
+
+    #1399 accepted this residue for a card-liveness READ; #1404 is the first to route a
+    force-kill through it. Both hosted call sites are operator-initiated (the dashboard's
+    Kill and Resume), so nothing reaps on a timer through this window — which is what makes
+    the residue tolerable in the meantime rather than merely tolerated.
+
+    TODO(1401): ``/proc/sys/kernel/random/boot_id`` settles it exactly. When that lands, the
+    first assertion below flips to ``is False`` and this test stops being a wart.
+    """
+    minute = 60.0
+    recorded_epoch, recorded_ticks = 20 * minute, 20 * 60 * 100  # boot N + 20 min
+    monkeypatch.setattr(
+        procutil.psutil,
+        "Process",
+        _fake_proc(
+            cmdline=("claude", "--output-format", "stream-json"),
+            ct=recorded_epoch + 31 * minute,  # boot N+1 (+31 min), then 20 min in
+        ),
+    )
+    monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: recorded_ticks)
+    assert procutil.is_killable_hosted(1234, recorded_epoch, start_ticks=recorded_ticks) is True
+    # The bound is real, not unbounded: push the reboot past the window and it is rejected
+    # again, which is what keeps a widened _DRIFT_EPOCH_TOLERANCE from passing silently.
+    monkeypatch.setattr(
+        procutil.psutil,
+        "Process",
+        _fake_proc(
+            cmdline=("claude", "--output-format", "stream-json"),
+            ct=recorded_epoch + 61 * minute,
+        ),
+    )
+    assert procutil.is_killable_hosted(1234, recorded_epoch, start_ticks=recorded_ticks) is False
+
+
+def test_a_non_hosted_cmdline_is_never_killable_however_well_the_ticks_match(monkeypatch):
+    # The cmdline gate is upstream of the whole start-time question. An exactly-matching
+    # tick count on a process that is not a hosted agent must not open the kill path.
+    monkeypatch.setattr(
+        procutil.psutil, "Process", _fake_proc(cmdline=("claude", "remote-control"), ct=1000.0)
+    )
+    monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: 770579)
+    assert procutil.is_killable_hosted(1234, 1000.0, start_ticks=770579) is False
 
 
 def test_child_env_strips_clauster_secrets(monkeypatch):

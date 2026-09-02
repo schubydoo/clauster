@@ -102,6 +102,9 @@ _HOSTED_FIELDS = (
     "hosted_log_path",
     "agent_pid",
     "agent_proc_start",
+    # The drift-immune half of the agent pair (#1404). ``_present`` drops the NULL for a row
+    # from an older build, which then compares on the epoch alone — the pre-#1404 behaviour.
+    "agent_start_ticks",
     "started_at",
     "intentional_stop",
     "instance_id",

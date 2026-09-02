@@ -42,6 +42,13 @@ _PERSISTED_FIELDS = (
     "hosted_log_path",
     "agent_pid",
     "agent_proc_start",
+    # The drift-immune half of the agent pair (#1404). Listed to keep this whitelist the
+    # exact mirror of ``db.stores._HOSTED_FIELDS`` — that mirror is the property stopping a
+    # field from being persisted by one store and silently dropped by the other. ⚠️ Not
+    # dead weight to prune: ``save`` filters on this tuple, and the hosted tests inject
+    # THIS class as the manager's store, so removing the entry makes them exercise a row
+    # that lost its ticks. Absent from a record simply stays absent, as every field does.
+    "agent_start_ticks",
     "started_at",
     "intentional_stop",
     "instance_id",
