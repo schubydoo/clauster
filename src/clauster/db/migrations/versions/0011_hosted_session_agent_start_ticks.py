@@ -42,10 +42,19 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "c4f1b6a2e590"
-# TODO(1404): down_revision = <0010 id> on rebase. Issue 1402's migration takes 0010 and is
-# not open yet, so this points at 0009 for now to keep the chain linear and the test suite's
-# Alembic template buildable. Retarget it at 0010's revision id once that PR exists, then
-# rebase onto the main that carries it.
+# ☢️ TODO(1404): PROVISIONAL — retarget at 0010's revision id before this merges.
+#
+# Issue 1402's migration takes 0010 and its PR is not open yet, so this points at 0009 for
+# now purely so the chain resolves and the suite's Alembic template builds. Alembic chains
+# on revision IDs, not filenames, so reserving the 0011 filename reserves nothing: 1402's
+# branch will be cut from a main without this file and will set ``down_revision`` to
+# 8e2d05b7a913 as well. Merged in that state the two are TWO HEADS off 0009, and
+# ``bootstrap._pending_revision`` calls ``get_current_head()``, which raises
+# ``MultipleHeads`` — failing every migration AND app boot, not just this feature.
+#
+# So: these two PRs must not both merge while this line reads 8e2d05b7a913. Whichever is
+# second rebases onto the new head first. That is ordinary rebase discipline; this comment
+# exists only because the ordering was fixed before either branch existed.
 down_revision: str | None = "8e2d05b7a913"  # 0009_instance_bridge_start_ticks (#1399)
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None

@@ -92,9 +92,11 @@ Reference: <https://code.claude.com/docs/en/remote-control> — Server mode is t
 > on reconnect Clauster reattaches the sessions it can, and marks survivors it
 > can no longer drive as recoverable **orphans** (Kill / Resume from the
 > dashboard). A survivor is hard-killed only when it is provably still the same
-> process — alive, recorded create-time match, hosted cmdline
+> process — alive, recorded start-time match, hosted cmdline
 > (`procutil.is_killable_hosted`); without that evidence it is reported lost,
-> never killed.
+> never killed. The start time is a pair. It holds the wall-clock create-time and
+> a boot-relative tick count. NTP can move the wall-clock half under a process
+> that never restarted. The tick count does not move.
 
 ### Server Mode (`claude remote-control`)
 

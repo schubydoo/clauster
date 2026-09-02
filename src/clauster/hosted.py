@@ -1255,12 +1255,10 @@ class HostedManager:
             # Orphan survivor still running on this conversation — kill it (gated on a
             # pid+create_time match) so the resumed agent doesn't share its session.
             await asyncio.to_thread(
-                partial(
-                    procutil.kill_if_match,
-                    old.agent_pid,
-                    old.agent_proc_start,
-                    start_ticks=old.agent_start_ticks,
-                )
+                procutil.kill_if_match,
+                old.agent_pid,
+                old.agent_proc_start,
+                start_ticks=old.agent_start_ticks,
             )
         self._instances.pop(hosted_id, None)
         # Prune this id's lock too: resume retires the old hosted_id permanently (the
@@ -1290,12 +1288,10 @@ class HostedManager:
                 raise HostedSessionError(f"no such hosted session: {hosted_id}")
             if inst.agent_pid is not None:
                 await asyncio.to_thread(
-                    partial(
-                        procutil.kill_if_match,
-                        inst.agent_pid,
-                        inst.agent_proc_start,
-                        start_ticks=inst.agent_start_ticks,
-                    )
+                    procutil.kill_if_match,
+                    inst.agent_pid,
+                    inst.agent_proc_start,
+                    start_ticks=inst.agent_start_ticks,
                 )
             inst.is_orphan = False
             inst.intentional_stop = True
