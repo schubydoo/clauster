@@ -1531,34 +1531,34 @@ def test_ticks_still_reject_a_recycled_pid_the_epoch_bound_would_have_admitted(m
     assert procutil.is_live_bridge(1234, 1000.01) is True  # what the epoch alone allowed
 
 
-def test_a_recorded_boot_id_rejects_a_process_from_a_different_boot(monkeypatch):
-    # Ticks restart at zero each boot, so an exact match across a reboot means nothing (#1401).
-    # A recorded boot id that differs from the live one proves the row is from an earlier boot
-    # and its pid names a different process — rejected on identity, WITHOUT the wall-clock
-    # epoch (here a 9_000_000 vs 1000 gap the old coarse bound leaned on, now unused).
+def test_a_recorded_boot_id_supersedes_the_epoch_across_a_clock_step(monkeypatch):
+    # A recorded boot id is boot-relative like the ticks, so it survives a clock STEP the coarse
+    # epoch fallback cannot (#1401). Here the epoch gap is ~9M seconds, far past the 1h bound:
+    # a MATCHING boot id still admits, and a MISMATCH rejects on identity — neither consults the
+    # epoch. The no-boot-id control below proves the boot id is what carries the match.
     monkeypatch.setattr(procutil.psutil, "Process", _fake_proc(ct=9_000_000.0))
     monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: 770579)
     monkeypatch.setattr(procutil, "proc_boot_id", lambda: "live-boot-uuid")
-    # Positive control: with NO recorded boot id (a pre-#1401 row) the exact tick match stands
-    # alone, so the same call is admitted — proving the rejection below is the boot id's doing,
-    # not the epoch's. This is the documented legacy degrade, re-stamped on the next spawn.
-    assert procutil.is_live_bridge(1234, 1000.0, start_ticks=770579) is True
-    # A boot id mismatch rejects the cross-boot row.
+    # A matching boot id keeps the live bridge despite the huge epoch gap — the clock-step win.
+    assert (
+        procutil.is_live_bridge(1234, 1000.0, start_ticks=770579, boot_id="live-boot-uuid") is True
+    )
+    # A boot id mismatch rejects the cross-boot row on identity.
     assert (
         procutil.is_live_bridge(1234, 1000.0, start_ticks=770579, boot_id="earlier-boot-uuid")
         is False
     )
-    # A matching boot id keeps the live bridge, even with the epoch far off.
-    assert (
-        procutil.is_live_bridge(1234, 1000.0, start_ticks=770579, boot_id="live-boot-uuid") is True
-    )
+    # Positive control: WITHOUT a recorded boot id the same huge gap falls to the coarse epoch
+    # bound (the #1402 / #1404 keeper/hosted callers keep it), which rejects it — so the boot id
+    # is exactly what lets the match above survive the step, not a silent no-op.
+    assert procutil.is_live_bridge(1234, 1000.0, start_ticks=770579) is False
 
 
-def test_a_recorded_boot_id_falls_back_to_ticks_when_the_live_id_is_unreadable(monkeypatch):
+def test_a_recorded_boot_id_falls_back_to_the_epoch_when_the_live_id_is_unreadable(monkeypatch):
     # A recorded boot id but no readable live one (a host that lost /proc/sys access, or a row
-    # copied to a non-Linux host): the exact tick match stands alone rather than rejecting a
-    # live bridge on an id it cannot compare (#1401). Ticks are still exact, so a recycled pid
-    # is still rejected on them.
+    # copied to a non-Linux host): fall back to the coarse epoch rather than reject a live bridge
+    # on an id it cannot compare (#1401). Ticks are still exact, so a recycled pid is rejected on
+    # them before the epoch is ever reached.
     monkeypatch.setattr(procutil.psutil, "Process", _fake_proc(ct=1000.0))
     monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: 770579)
     monkeypatch.setattr(procutil, "proc_boot_id", lambda: None)

@@ -289,20 +289,6 @@ _STARTUP_WATCH_INTERVAL = 2.0
 # (the two epochs are derived independently). Mirrors procutil.is_live_bridge's
 # default tolerance so the two PID-reuse checks can't disagree.
 _PROC_START_TOLERANCE = 2.0
-# Coarse "same boot?" bound for the two sites that correlate a keeper SIDECAR or an
-# Anthropic POINTER against this instance's recorded pair (`_recover_keeper_pid`,
-# `_connect_facts_for`). Those carriers record boot-relative ticks but NOT a boot id — the
-# sidecar is written by `pty_keeper` and the pointer by Anthropic — so, unlike
-# `is_live_process`, they cannot reject a previous-boot match on identity and still pair the
-# exact tick match with this bound. It is the bound #1401 lifted OUT of `procutil` (it used to
-# be `_DRIFT_EPOCH_TOLERANCE` there): the bridge-liveness path now uses `bridge_boot_id`
-# instead, but these two paths keep a coarse epoch guard because their carriers give them
-# nothing better. Wide enough to absorb any plausible clock correction, far narrower than the
-# gap a reboot puts between two epochs. Its residual limit (a clock step over an hour, or a
-# reboot inside one) is #1401's boot-id fix applied only where a boot id can be recorded, and
-# is out of scope for the keeper/connect paths, which fail non-destructively (a lost keeper
-# link, a stuck connect card) rather than deleting a card.
-_SAME_BOOT_EPOCH_TOLERANCE = 3600.0
 # How long shutdown() waits for in-flight fire-and-forget notify sends to finish
 # before cancelling them — bounds shutdown while letting a quick send complete.
 _NOTIFY_DRAIN_GRACE = 2.0
@@ -3042,7 +3028,7 @@ class SessionRunner:
                 # `_cleanup_keeper`'s `force_kill_tree`, where a different live keeper on that
                 # pid passes the cmdline gate and takes another session's bridge down with it.
                 if sidecar_ticks != bridge_start_ticks or (
-                    epoch_gap is not None and epoch_gap > _SAME_BOOT_EPOCH_TOLERANCE
+                    epoch_gap is not None and epoch_gap > procutil._DRIFT_EPOCH_TOLERANCE
                 ):
                     continue
             elif epoch_gap is not None and epoch_gap > _PROC_START_TOLERANCE:
@@ -4919,7 +4905,7 @@ class SessionRunner:
             # on identity; the helper keeps its own guard so a future caller without that gate
             # cannot inherit a weaker rule.
             if pointer_ticks != start_ticks or (
-                epoch_gap is not None and epoch_gap > _SAME_BOOT_EPOCH_TOLERANCE
+                epoch_gap is not None and epoch_gap > procutil._DRIFT_EPOCH_TOLERANCE
             ):
                 return {}
         elif epoch_gap is not None and epoch_gap > procutil._EXACT_PROC_START_TOLERANCE:

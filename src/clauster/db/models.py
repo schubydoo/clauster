@@ -148,9 +148,11 @@ class Instance(Base, TimestampMixin):
     bridge_start_ticks: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # ``bridge_boot_id`` completes the tick identity (#1401): ticks restart at zero each
     # boot, so a row from an earlier boot could name a recycled pid holding the same count.
-    # The per-boot ``/proc/sys/kernel/random/boot_id`` rejects such a row on identity, which
-    # lets ``is_live_process`` drop the wall-clock epoch that NTP moved (#1399). NULL keeps
-    # the pre-#1401 tick-only behaviour for an older build's row.
+    # The per-boot ``/proc/sys/kernel/random/boot_id`` rejects such a row on identity, and
+    # being boot-relative it survives a clock step the coarse epoch cannot, so
+    # ``is_live_process`` uses it INSTEAD of the wall-clock epoch NTP moved (#1399). NULL keeps
+    # the coarse-epoch fallback for an older build's row (and for the keeper/hosted callers,
+    # which record no boot id).
     bridge_boot_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     keeper_pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # A pty session's git-worktree name, stored ONLY when it is not derivable from this

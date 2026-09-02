@@ -16,14 +16,16 @@ rebooted inside an hour could admit a process holding both the same pid and the 
 The boot id settles both exactly. It is stable for one boot and regenerated on the next, so
 a recorded value that differs from the live one proves a row is from an earlier boot — its
 pid names a different process regardless of the wall clock. With it recorded,
-``is_live_process`` drops the epoch conjunct entirely: an exact tick match plus a matching
+``is_live_process`` uses it INSTEAD of the epoch conjunct: an exact tick match plus a matching
 boot id is a complete identity, and neither half moves when NTP corrects the clock.
 
 Additive and nullable, mirroring 8e2d05b7a913: a row written by an older build loads with the
-column absent, and the comparison degrades to the exact tick match ALONE — correct within a
-boot, and re-stamped with a boot id on that bridge's next spawn. Linux-only, exactly as
-``bridge_start_ticks`` is: macOS and Windows record an absolute create-time and are exposed to
-neither the drift fault nor the cross-boot one, so both columns stay NULL there.
+column absent, and the comparison falls back to the exact tick match plus the coarse epoch
+conjunct — the pre-#1401 behaviour, which the keeper and hosted callers (#1402 / #1404) keep
+because they record no boot id. A bridge row re-stamps a boot id on its next spawn or
+reattach. Linux-only, exactly as ``bridge_start_ticks`` is: macOS and Windows record an
+absolute create-time and are exposed to neither the drift fault nor the cross-boot one, so
+both columns stay NULL there.
 
 Revision ID: d0a7c3f21b84
 Revises: c4f1b6a2e590

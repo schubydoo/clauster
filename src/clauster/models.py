@@ -81,9 +81,10 @@ class RemoteControlInstance(BaseModel):
     bridge_start_ticks: int | None = None
     # The boot this bridge started in (/proc/sys/kernel/random/boot_id), Linux-only (#1401).
     # Ticks restart at zero each boot, so a row from an earlier boot could name a recycled
-    # pid holding the same count; a boot_id mismatch rejects that on identity, which lets
-    # is_live_process drop the wall-clock epoch entirely. None on a pre-#1401 row (ticks
-    # then stand alone) and off Linux.
+    # pid holding the same count; a boot_id mismatch rejects that on identity, and being
+    # boot-relative it survives a clock step the coarse epoch cannot, so is_live_process uses
+    # it INSTEAD of the epoch. None on a pre-#1401 row (which then keeps the coarse epoch
+    # fallback) and off Linux.
     bridge_boot_id: str | None = None
     bridge_id: str | None = None  # UUID from bridge:init log
     environment_id: str | None = None  # env_<ULID>; the URL parameter

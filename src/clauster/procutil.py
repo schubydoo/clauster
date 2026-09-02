@@ -61,9 +61,20 @@ KEEPER_SUBCOMMAND = "__pty-keeper__"
 # so NTP slew moves it under a process that never restarted (#1399: five distinct btime
 # values, a 4-second spread, inside 3.5 minutes on a drifting host). Against 0.05s that
 # reads as "not our process". Where a boot-relative tick count is also recorded,
-# :func:`is_live_process` compares THAT instead and never consults the epoch at all — see
-# it and :func:`proc_boot_id` for how ticks plus a per-boot id replace the drifting epoch.
+# :func:`is_live_process` compares THAT and falls back to `_DRIFT_EPOCH_TOLERANCE` below,
+# or to a recorded per-boot id (:func:`proc_boot_id`) that supersedes the epoch entirely.
 _EXACT_PROC_START_TOLERANCE = 0.05
+
+# The coarse epoch bound used alongside an exact boot-relative tick match, when no per-boot id
+# is recorded to settle the one thing ticks cannot: they restart at zero each boot, so after a
+# reboot an unrelated process can hold both the same pid and the same count. The epoch is
+# demoted to a "same boot?" discriminator — wide enough to absorb any plausible clock
+# correction, far narrower than the gap a reboot puts between two epochs. It has two known
+# limits (a clock STEP over an hour still fails it; a reboot inside an hour can admit a pid +
+# tick collision). A recorded ``bridge_boot_id`` settles both and, when present,
+# :func:`is_live_process` uses it INSTEAD of this bound (#1401). The keeper and hosted callers
+# (#1402 / #1404) record no boot id, so this bound remains their cross-boot guard.
+_DRIFT_EPOCH_TOLERANCE = 3600.0
 
 
 def _clk_tck() -> int:
@@ -310,10 +321,11 @@ def proc_start_pair(pid: int) -> tuple[float | None, int | None]:
     between two ``/proc`` reads, and a process that dies in that window can have its pid
     recycled — leaving a pair whose halves describe DIFFERENT processes. That pair then
     authenticates the recycled occupant, because :func:`is_live_process` matches the ticks
-    exactly (they are the new process's) and, with the epoch conjunct gone (#1401), consults
-    nothing else. On a destructive path (``stop`` signals and force-kills the tree behind
-    this pair) that is strictly worse than the pre-#1399 tight epoch bound, which rejected
-    the mismatch — so both halves must come from the one read this function performs.
+    exactly (they are the new process's) and pairs them only with a coarse epoch (or, for a
+    bridge, a boot id that a same-boot recycle shares). On a destructive path (``stop`` signals
+    and force-kills the tree behind this pair) that is strictly worse than the pre-#1399 tight
+    epoch bound, which rejected the mismatch — so both halves must come from the one read this
+    function performs.
 
     Deriving the epoch FROM the ticks makes the halves agree by construction — it is the
     same arithmetic psutil does on Linux, so the epoch is bit-identical to what
@@ -412,20 +424,23 @@ def is_live_process(
     PID-reuse window); a jiffies string keeps the looser ``tolerance``.
 
     ``start_ticks`` is the boot-relative half of the same pair (:func:`proc_start_ticks`),
-    and when it is recorded AND readable for this pid it decides the PID-reuse question
-    instead: the ticks must match **exactly**, and the wall-clock epoch is not consulted at
-    all. Ticks are measured against the boot instant, so NTP cannot move them under a
-    process that never restarted (#1399); the 0.05s epoch bound would read a live bridge as
-    dead after a correction, and a clock STEP larger than an hour defeated even the coarse
-    bound this used to pair with. Within one boot the tick match is COMPLETE: a pid recycled
-    a second later differs by a whole ``CLK_TCK`` of ticks and fails exactly.
+    and when it is recorded AND readable for this pid it carries the PID-reuse defense: the
+    ticks must match **exactly**. Ticks are measured against the boot instant, so NTP cannot
+    move them under a process that never restarted (#1399); the 0.05s epoch bound would read a
+    live bridge as dead after a correction. Within one boot the tick match is COMPLETE: a pid
+    recycled a second later differs by a whole ``CLK_TCK`` of ticks and fails exactly.
 
     ``boot_id`` is the persisted ``/proc/sys/kernel/random/boot_id`` (:func:`proc_boot_id`),
     the one case ticks alone cannot settle: they restart at zero each boot, so a row from an
     earlier boot could name a recycled pid holding the same count. When ``boot_id`` is
-    recorded AND readable now, a mismatch rejects such a row outright — on identity, not on a
-    wall-clock gap. When it is absent (a pre-#1401 row) or unreadable, the exact tick match
-    stands alone; that row re-stamps its boot_id on the bridge's next spawn.
+    recorded AND readable now, it decides that question on identity — a mismatch rejects the
+    row — and, being boot-relative like the ticks, it is immune to the clock STEP that a coarse
+    epoch bound could not survive (#1401), so it is used INSTEAD of the epoch. When ``boot_id``
+    is absent (the keeper and hosted callers, or a pre-#1401 bridge row) or unreadable, the
+    exact tick match pairs with the coarse ``_DRIFT_EPOCH_TOLERANCE`` as a "same boot?"
+    discriminator — the behaviour #1402 and #1404 rely on. A btime-less host cannot compare
+    the epoch, so ticks stand alone there. A bridge row re-stamps its boot_id on the next
+    spawn or reattach.
 
     With ticks recorded but unreadable for this pid, or none recorded at all, the answer
     falls through to the epoch comparison below: ``proc_start`` None or an underivable
@@ -466,18 +481,24 @@ def is_live_process(
         if observed_ticks is not None:
             if observed_ticks != start_ticks:
                 return False  # a pid recycled within this boot differs by whole ticks
-            # Ticks match exactly — a COMPLETE identity within one boot (a pid recycled a
+            # Ticks match exactly — the PID-reuse defense within one boot (a pid recycled a
             # second later differs by a whole CLK_TCK). ``boot_id``, when both recorded and
-            # readable, rules out the one case ticks cannot: a row from an earlier boot whose
+            # readable, settles the one thing ticks cannot: a row from an EARLIER boot whose
             # pid was recycled onto a process holding the same count. A mismatch rejects that
-            # on identity, not on the wall-clock gap NTP moves (#1401). With no recorded
-            # boot_id (a pre-#1401 row) or none readable now, ticks stand alone; the row
-            # re-stamps its boot_id on the bridge's next spawn.
+            # on identity, and — being boot-relative like the ticks — it is immune to the clock
+            # step that defeats the epoch (#1401), so when it is present the epoch is not
+            # consulted at all.
             if boot_id is not None:
                 live_boot_id = proc_boot_id()
                 if live_boot_id is not None:
                     return boot_id == live_boot_id
-            return True
+            # No recorded boot id (the keeper/hosted callers, or a pre-#1401 bridge row): fall
+            # back to the coarse epoch as a "same boot?" discriminator, the behaviour #1402 and
+            # #1404 rely on. A btime-less host (create_time / expected underivable) cannot
+            # compare it, so ticks stand alone there — the only defense such a host has.
+            if create_time is None or expected is None:
+                return True
+            return abs(create_time - expected) <= _DRIFT_EPOCH_TOLERANCE
     if create_time is None:
         return False  # btime-less host and no ticks to fall back on: not provably ours
     if expected is None:
