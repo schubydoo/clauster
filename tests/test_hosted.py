@@ -150,7 +150,7 @@ def test_build_hosted_argv_refuses_a_resume_uuid_that_is_not_session_shaped(bad)
     went through `_as_session_uuid`. It RAISES rather than dropping the flag: dropping it
     would silently start a fresh conversation under a name the operator asked to resume.
     """
-    with pytest.raises(HostedSessionError, match="malformed resume session id"):
+    with pytest.raises(HostedSessionError, match="unusable resume session id"):
         build_hosted_argv(_BIN, permission_mode="default", resume_uuid=bad)
 
 
@@ -173,6 +173,17 @@ def test_build_hosted_argv_keeps_a_session_shaped_resume_uuid(good):
     """
     argv = build_hosted_argv(_BIN, permission_mode="default", resume_uuid=good)
     assert argv[argv.index("--resume") + 1] == good
+
+
+@pytest.mark.parametrize("bad", [7, True, {"a": 1}, ["x"], 1.5])
+def test_build_hosted_argv_refuses_a_non_string_resume_uuid_without_a_type_error(bad):
+    # The seam exists for a caller that bypassed `_as_session_uuid`, so it must not assume
+    # a str. Slicing one of these to name it in the message would raise TypeError -- not a
+    # `ClaustrumError`, so it would escape the resume route's handlers as a 500 instead of
+    # the 409 every other refusal gets. The #1343 escape shape, in miniature.
+    with pytest.raises(HostedSessionError) as excinfo:
+        build_hosted_argv(_BIN, permission_mode="default", resume_uuid=bad)
+    assert type(bad).__name__ in str(excinfo.value)
 
 
 def test_build_hosted_argv_truncates_the_refused_value_it_names():

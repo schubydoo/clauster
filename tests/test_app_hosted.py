@@ -675,6 +675,25 @@ def test_spawn_hosted_daemon_error_is_502(write_config, projects_root, monkeypat
     assert r.status_code == 502
 
 
+def test_spawn_hosted_session_error_is_409_not_a_daemon_502(
+    write_config, projects_root, monkeypatch
+):
+    # `HostedSessionError` subclasses `ClaustrumError`, so without its own arm above the
+    # 502 one it would render as "hosted spawn failed" — which reads as the daemon being
+    # down and sends the operator to the wrong place. `build_hosted_argv` raising on a
+    # refused resume session id (#1392) is a second way `start()` can produce this class.
+    monkeypatch.setattr(app_module, "is_trusted", lambda *a, **k: True)
+    monkeypatch.setattr(app_module.claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
+    manager = _StubManager()
+    manager.spawn_error = HostedSessionError("refusing an unusable resume session id (int)")
+    app = _app(write_config, manager=manager, daemon=_StubDaemon())
+    with TestClient(app) as client:
+        r = client.post("/api/instances", json={"project": "alpha", "channel": "hosted"})
+    assert r.status_code == 409
+    assert "unusable resume session id" in r.json()["detail"]
+    assert "hosted spawn failed" not in r.json()["detail"]
+
+
 def test_message_wrong_state_is_409(write_config, projects_root):
     manager = _StubManager()
     manager.seed()

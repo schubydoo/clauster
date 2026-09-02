@@ -126,6 +126,22 @@ class HostedSessionError(ClaustrumError):
     """Raised when a hosted-session operation is invalid for the current state."""
 
 
+def _refused_uuid_shape(value: Any) -> str:
+    """Name the shape of a refused ``claude_session_uuid`` for the operator's log line.
+
+    Named, not typed, for the two string cases: the empty string IS a ``str``, so a bare
+    type name would read as a type complaint about one of the shapes this refusal exists
+    for. ``_restore_instance_id`` draws the same distinction for a falsy instance_id. A
+    non-empty string that fails :data:`_SESSION_UUID_SHAPE_RE` is quoted and truncated instead —
+    it is the one refusal an operator can act on, so the message names the exact token to
+    fix in the record. ``repr`` escapes every control character, so a hand-edited record
+    cannot inject a line into the log (#1392).
+    """
+    if not isinstance(value, str):
+        return type(value).__name__
+    return "empty string" if not value else f"malformed {value[:72]!r}"
+
+
 def _is_session_uuid(value: Any) -> TypeGuard[str]:
     """Report whether ``value`` is a str shaped like a session id.
 
@@ -152,9 +168,13 @@ def build_hosted_argv(
     mapper still cannot put a flag-shaped string next to ``--resume`` (#1392). A refusal
     **raises** :class:`HostedSessionError` rather than dropping the flag — dropping it
     would silently start a *fresh* conversation under a name the operator asked to
-    resume, and the resume route already maps this error to 409. The refused value is
-    truncated the same way :func:`_refused_uuid_shape` truncates it for the log, because
-    this message becomes that 409's ``detail`` and is rendered in the dashboard.
+    resume, and the resume route already maps this error to 409. The refusal is named by
+    :func:`_refused_uuid_shape`, the same helper the persisted-read refusal logs with, so
+    the two say the same thing about the same value — and because this message becomes
+    that 409's ``detail`` and is rendered in the dashboard, it must be *bounded*. It also
+    must not assume a ``str``: a caller bypassing the mapper is exactly what this seam
+    exists for, and slicing an ``int`` here would raise ``TypeError`` — not a
+    :class:`ClaustrumError`, so it would escape the route's handlers as a 500.
 
     ⚠️ The check runs BEFORE :meth:`HostedSession.start` subscribes to the process
     stream, which is why a refusal leaks nothing. Subscribing first would leak an
@@ -172,7 +192,7 @@ def build_hosted_argv(
     if resume_uuid is not None:
         if not _is_session_uuid(resume_uuid):
             raise HostedSessionError(
-                f"refusing a malformed resume session id: {resume_uuid[:72]!r}"
+                f"refusing an unusable resume session id ({_refused_uuid_shape(resume_uuid)})"
             )
         argv += ["--resume", resume_uuid]
     return argv
@@ -1832,22 +1852,6 @@ def _as_proc_start(value: Any) -> float | None:
         return float(value)
     except (OverflowError, ValueError):
         return None
-
-
-def _refused_uuid_shape(value: Any) -> str:
-    """Name the shape of a refused ``claude_session_uuid`` for the operator's log line.
-
-    Named, not typed, for the two string cases: the empty string IS a ``str``, so a bare
-    type name would read as a type complaint about one of the shapes this refusal exists
-    for. ``_restore_instance_id`` draws the same distinction for a falsy instance_id. A
-    non-empty string that fails :data:`_SESSION_UUID_SHAPE_RE` is quoted and truncated instead —
-    it is the one refusal an operator can act on, so the message names the exact token to
-    fix in the record. ``repr`` escapes every control character, so a hand-edited record
-    cannot inject a line into the log (#1392).
-    """
-    if not isinstance(value, str):
-        return type(value).__name__
-    return "empty string" if not value else f"malformed {value[:72]!r}"
 
 
 def _as_session_uuid(value: Any) -> str | None:
