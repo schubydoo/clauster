@@ -432,11 +432,21 @@ database (see Routine backup, above). The workspace-trust writes to
 > `state.json.imported` — it is never read or written again, so moving it aside
 > does nothing.
 >
-> If that legacy file was damaged, the import degrades to "no legacy records"
-> rather than failing the boot, logs a warning naming the failure, and keeps a
-> one-time copy of the file beside it — `state.json.corrupt.bak` when the file
-> could not be parsed at all, `state.json.bak` when it was parsed but carried an
-> older schema. Those copies are the recovery source, and nothing prunes them.
+> A legacy file that **cannot be parsed as JSON** no longer fails that boot. The
+> import treats it as holding no records, logs a warning naming the failure, and
+> keeps a one-time byte-exact copy beside it as `state.json.corrupt.bak` — the
+> original is still renamed `state.json.imported` as usual. `clauster migrate`
+> takes the same copy, and there it is load-bearing: that command re-saves the
+> file from what it read, so on a damaged file the copy is the only thing holding
+> the original bytes. A file that cannot be *read* at all (permissions, IO) is
+> logged without a copy — there is nothing to copy.
+>
+> A legacy file that parses but carries a **mismatched `schema_version`**, older
+> or newer, is a different case: it is not damaged, its records are still
+> imported, and Clauster coerces it to the current schema after keeping a one-time
+> `state.json.bak` of the pre-coercion file. That one is taken silently.
+>
+> Nothing prunes either copy — delete them once you no longer need them.
 
 If `clauster.db` is ever unreadable (disk fault, a failed migration that refuses
 to start):

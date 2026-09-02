@@ -17,11 +17,13 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from .atomicio import atomic_write_text, replace_with_retry
+from .atomicio import atomic_write_text, ensure_private_dir, replace_with_retry
 
 CURRENT_SCHEMA = 1
 
@@ -148,18 +150,43 @@ class KeyedJsonStore:
 
         The copy exists because a caller may write over the file straight after a
         degraded load: ``ops.migrate_state`` is ``load()`` then ``save()``.
+
+        Streamed into a ``mkstemp`` temp (created 0600) and then replaced onto the
+        target, the shape :func:`clauster.ops._write_restored_config` records: a
+        ``shutil.copy2`` would propagate the *source* mode, and a legacy file predating
+        the atomic writer (or restored through ``ops._safe_extract_tar``, which writes
+        members with a bare ``open``) sits at the umask default — which would publish a
+        hosted store's ``claude`` session uuid to every local user. The unique temp name
+        is the same rule :mod:`clauster.atomicio` states: two concurrent readers must not
+        share one fixed ``.tmp``.
         """
         backup = self._path.with_suffix(self._path.suffix + ".corrupt.bak")
         if backup.exists():
             return
-        tmp = backup.with_suffix(backup.suffix + ".tmp")
+        ensure_private_dir(self._path.parent)
+        fd, tmp_name = tempfile.mkstemp(dir=backup.parent, prefix=backup.name + ".", suffix=".tmp")
+        tmp = Path(tmp_name)
         try:
-            # copy2 (not copyfile) carries the source's owner-only mode onto the copy;
-            # the tmp + replace keeps a torn copy from ever occupying the one slot.
-            shutil.copy2(self._path, tmp)
+            # If fdopen raises at the open(2) level the fd was NOT adopted, so the raw
+            # mkstemp fd would leak — close it. Guarded, because if it *was* adopted an
+            # unguarded os.close would raise EBADF over the real error.
+            try:
+                fh = os.fdopen(fd, "wb")
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+                raise
+            with fh, self._path.open("rb") as src:
+                shutil.copyfileobj(src, fh)
+                fh.flush()
+                os.fsync(fh.fileno())
             replace_with_retry(tmp, backup)
         except OSError as exc:
             self._LOG.warning("could not copy corrupt %s aside: %s", self._path, exc)
+        finally:
+            # A successful replace already moved it; this is the failure path, and it also
+            # catches a KeyboardInterrupt mid-copy (which still propagates — best-effort
+            # covers OSError only, exactly as the pre-migration backup does).
             with contextlib.suppress(OSError):
                 tmp.unlink(missing_ok=True)
 

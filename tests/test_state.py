@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import stat
+import sys
 from pathlib import Path
 
 import pytest
 
+from clauster import state
 from clauster.hosted_state import HostedStateStore
 from clauster.state import StateStore
 
@@ -164,11 +167,74 @@ def test_corrupt_copy_failure_is_logged_not_silent(tmp_path, caplog, monkeypatch
     def boom(*_args, **_kwargs):
         raise OSError("simulated: copy failed")
 
-    monkeypatch.setattr("clauster.state.shutil.copy2", boom)
+    monkeypatch.setattr("clauster.state.shutil.copyfileobj", boom)
     with caplog.at_level("WARNING", logger="clauster.state"):
         assert StateStore(tmp_path).load() == {}
     assert any("could not copy corrupt" in r.getMessage() for r in caplog.records)
     assert not (tmp_path / "state.json.corrupt.bak").exists()
+    assert not list(tmp_path.glob("*.tmp"))  # the half-written temp is cleaned up
+
+
+def test_corrupt_copy_leaves_no_temp_when_the_replace_fails(tmp_path, caplog, monkeypatch):
+    # The other half of the cleanup: the copy succeeded, so a real temp exists on disk
+    # when the replace raises. Patching the copy alone would leave that line a no-op.
+    (tmp_path / "state.json").write_text("[" * 100_000, encoding="utf-8")
+
+    def boom(*_args, **_kwargs):
+        raise OSError("simulated: replace failed")
+
+    monkeypatch.setattr("clauster.state.replace_with_retry", boom)
+    with caplog.at_level("WARNING", logger="clauster.state"):
+        assert StateStore(tmp_path).load() == {}
+    assert any("could not copy corrupt" in r.getMessage() for r in caplog.records)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["state.json"]
+
+
+def test_corrupt_copy_closes_the_fd_when_fdopen_fails(tmp_path, caplog, monkeypatch):
+    # If os.fdopen raises before the `with` adopts the fd (EMFILE under fd-table
+    # pressure), the raw mkstemp fd must be closed, not leaked -- and the load must
+    # still degrade rather than propagate. Same guard as atomicio.atomic_write_text.
+    (tmp_path / "state.json").write_text("[" * 100_000, encoding="utf-8")
+    real_mkstemp = state.tempfile.mkstemp
+    real_close = state.os.close
+    captured: dict[str, int] = {}
+    closed: list[int] = []
+
+    def _spy_mkstemp(*a, **k):
+        fd, name = real_mkstemp(*a, **k)
+        captured["fd"] = fd
+        return fd, name
+
+    def _boom_fdopen(*_a, **_k):
+        raise OSError("too many open files")
+
+    def _spy_close(fd):
+        closed.append(fd)
+        real_close(fd)
+
+    monkeypatch.setattr(state.tempfile, "mkstemp", _spy_mkstemp)
+    monkeypatch.setattr(state.os, "fdopen", _boom_fdopen)
+    monkeypatch.setattr(state.os, "close", _spy_close)
+
+    with caplog.at_level("WARNING", logger="clauster.state"):
+        assert StateStore(tmp_path).load() == {}
+    assert captured["fd"] in closed  # the raw fd was closed, not leaked
+    assert any("could not copy corrupt" in r.getMessage() for r in caplog.records)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["state.json"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
+def test_corrupt_copy_is_owner_only_even_from_a_permissive_source(tmp_path):
+    # A legacy file predating the atomic writer (or restored through _safe_extract_tar,
+    # which writes members with a bare open) sits at the umask default. Copying its mode
+    # onto the copy would publish a hosted store's claude session uuid to every local
+    # user, so the copy is written through a mkstemp temp instead.
+    src = tmp_path / "hosted_state.json"
+    src.write_text("[" * 100_000, encoding="utf-8")
+    src.chmod(0o644)
+    assert HostedStateStore(tmp_path).load() == {}
+    mode = (tmp_path / "hosted_state.json.corrupt.bak").stat().st_mode
+    assert not mode & (stat.S_IRWXG | stat.S_IRWXO)
 
 
 def test_unknown_fields_dropped(tmp_path):
