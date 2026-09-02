@@ -454,10 +454,14 @@ def _mask_echoed_input(loc: str, msg: str, raw_input: object) -> str:
       seam is still "do not write a message that carries a value", and this is the net under
       it, not a licence.
     * Only ``str`` leaves are needles, so a credential YAML resolved to another type
-      (``auth.token: 123456789012`` -> ``int``) is invisible here.
+      (``auth.token: 123456789012`` -> ``int``, or a ``!!set`` member) is invisible here.
     * :data:`_MIN_MASKABLE_INPUT` is a floor, so a credential shorter than it is not masked.
       ``auth.reverse_proxy.shared_secret`` is the one secret field with no length-forcing
       validator, so an 8-character shared secret would sit below it.
+    * Only ``msg`` is masked. :func:`_friendly_validation_message` emits ``loc`` verbatim,
+      and for the three dict-valued fields (``claude.env``, ``projects``,
+      ``webhooks.events``) its last segment is an operator-supplied KEY, not a Clauster
+      field name. Keys, never values — pydantic's message for those quotes nothing.
 
     :func:`_friendly_validation_message` additionally runs the value-shaped passes
     (``${…}`` interpolations, ``scheme://user@host`` credentials) on every part. Those are
