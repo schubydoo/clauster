@@ -1116,8 +1116,13 @@ class HostedManager:
         # whose halves describe DIFFERENT processes — which `is_live_process` would then
         # authenticate, because it matches the ticks exactly and the epoch only coarsely.
         # `(None, None)` when there's no pid (pre-CT-1 daemon) or it's unreadable.
+        # `to_thread`, matching the bridge twin at `runner._spawn`: the pair is two blocking
+        # `/proc` reads (`/proc/<pid>/stat` plus `boot_time()`'s `/proc/stat`), and this
+        # coroutine already offloads its `kill_if_match` calls.
         proc_start, start_ticks = (
-            procutil.proc_start_pair(session.agent_pid) if session.agent_pid else (None, None)
+            await asyncio.to_thread(procutil.proc_start_pair, session.agent_pid)
+            if session.agent_pid
+            else (None, None)
         )
         instance = RemoteControlInstance(
             project=project,
@@ -1984,23 +1989,42 @@ def _as_start_ticks(value: Any) -> int | None:
     accepts ``true`` as tick count **1** and ``770579.0`` as 770579. ``_record`` only ever
     writes an int (or ``None``), so nothing legitimate is refused.
 
-    Negative is refused too, which :func:`_as_pid` has no equivalent of. Field 22 of
-    ``/proc/<pid>/stat`` is an unsigned count of ticks since boot, so a negative value cannot
-    have come from :func:`procutil.proc_start_ticks`; it can only come from a hand-edited row
-    or a tampered ``ops restore`` backup. Keeping it would not be dangerous — the comparison
-    is an equality test against a value read live, which no real process can match — but
-    dropping it is what makes the row fall back to the epoch it still has rather than to a
-    tick compare that is guaranteed to fail and would refuse every kill.
+    Range-checked as well as type-checked, which :func:`_as_pid` has no equivalent of, and
+    bounded at BOTH ends exactly as its sibling :func:`clauster.runner._pointer_start_ticks`
+    is. Field 22 of ``/proc/<pid>/stat`` is an unsigned count of ticks since boot, so neither
+    a negative value nor one past the column's range can have come from
+    :func:`procutil.proc_start_ticks`; both mean a hand-edited row or a tampered ``ops
+    restore`` backup, which is the threat model that makes this an untrusted input at all.
 
-    A refusal is logged: ``_persist`` writes the ``None`` back, so the row silently reverts
-    to the drifting epoch-only comparison #1404 exists to end, with nothing else to explain
-    it.
+    * **Negative** cannot authenticate a wrong process — an equality test against a live
+      reading can only fail — but it fails in the #1404 direction, permanently. Dropping it
+      lets the row fall back to the epoch it still has instead of a tick compare guaranteed
+      to refuse every kill.
+    * **Past 2**63** reaches an INTEGER column, and ``int(value)`` on it raises
+      ``OverflowError`` out of ``_persist``, which catches only ``OSError`` — the same escape
+      :func:`_coerce_seq` documents, where an exception here fails the whole app boot rather
+      than degrading one row. The bound is the COLUMN's limit deliberately, not a guess at a
+      plausible uptime: a 2**31 cap would start discarding real counts after ~248 days up at
+      ``CLK_TCK=100``, dropping drift protection on exactly the long-lived hosts that have
+      accumulated the most correction.
+
+    A refusal is logged, and names WHICH rule it broke rather than only the type — a
+    hand-edited ``-1`` logging "(int)" would report the one thing about it that was fine.
+    ``_persist`` writes the ``None`` back, so the row silently reverts to the drifting
+    epoch-only comparison #1404 exists to end, with nothing else to explain it.
     """
-    if _is_plain_int(value) and value >= 0:
-        return value
+    if _is_plain_int(value):
+        if 0 <= value < 2**63:
+            return value
+        logger.warning(
+            "hosted: refusing an out-of-range agent_start_ticks (%d) from a persisted "
+            "record; the row falls back to the drift-prone epoch-only liveness compare",
+            value,
+        )
+        return None
     if value is not None:
         logger.warning(
-            "hosted: refusing an unusable agent_start_ticks (%s) from a persisted record; "
+            "hosted: refusing a non-integer agent_start_ticks (%s) from a persisted record; "
             "the row falls back to the drift-prone epoch-only liveness compare",
             type(value).__name__,
         )

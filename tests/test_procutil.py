@@ -486,6 +486,48 @@ def test_hosted_ticks_do_not_authenticate_an_agent_from_a_different_boot(monkeyp
     assert procutil.is_killable_hosted(1234, 1000.0, start_ticks=770579) is False
 
 
+def test_a_cross_boot_tick_collision_inside_the_epoch_window_is_admitted(monkeypatch):
+    """Pins the residue the ticks conjunct COSTS this gate, so it cannot widen unnoticed.
+
+    Honest failure documentation, not an endorsement. Before #1404 this gate compared the
+    epoch at 0.05s, which no post-reboot process can pass — its create-time lies after the
+    reboot and the recorded one before it. Cross-boot PID reuse was excluded structurally.
+    The ticks conjunct trades that for ``_DRIFT_EPOCH_TOLERANCE``, so a host rebooting inside
+    an hour can present a process holding the same pid AND the same offset from boot.
+
+    Recorded at 20 min into boot N; boot N+1 starts 31 min after boot N; a hosted agent
+    starts 20 min into it, so the tick counts collide and the epochs differ by 31 min — well
+    inside the 1h window. The gate says yes, and the operator's Kill would reach a stranger.
+
+    #1399 accepted this residue for a card-liveness READ; #1404 is the first to route a
+    force-kill through it, and ``/proc/sys/kernel/random/boot_id`` (issue #1401) is the fix.
+    When that lands, this test flips to ``is False`` and stops being a wart.
+    """
+    minute = 60.0
+    recorded_epoch, recorded_ticks = 20 * minute, 20 * 60 * 100  # boot N + 20 min
+    monkeypatch.setattr(
+        procutil.psutil,
+        "Process",
+        _fake_proc(
+            cmdline=("claude", "--output-format", "stream-json"),
+            ct=recorded_epoch + 31 * minute,  # boot N+1 (+31 min), then 20 min in
+        ),
+    )
+    monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: recorded_ticks)
+    assert procutil.is_killable_hosted(1234, recorded_epoch, start_ticks=recorded_ticks) is True
+    # The bound is real, not unbounded: push the reboot past the window and it is rejected
+    # again, which is what keeps a widened _DRIFT_EPOCH_TOLERANCE from passing silently.
+    monkeypatch.setattr(
+        procutil.psutil,
+        "Process",
+        _fake_proc(
+            cmdline=("claude", "--output-format", "stream-json"),
+            ct=recorded_epoch + 61 * minute,
+        ),
+    )
+    assert procutil.is_killable_hosted(1234, recorded_epoch, start_ticks=recorded_ticks) is False
+
+
 def test_a_non_hosted_cmdline_is_never_killable_however_well_the_ticks_match(monkeypatch):
     # The cmdline gate is upstream of the whole start-time question. An exactly-matching
     # tick count on a process that is not a hosted agent must not open the kill path.

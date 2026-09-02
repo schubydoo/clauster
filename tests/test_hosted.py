@@ -2170,7 +2170,7 @@ def test_a_junk_agent_start_ticks_never_reaches_the_model_on_either_path():
     only be hand-edited. Keeping it would make every future tick compare fail and refuse
     every kill; dropping it lets the row fall back to the epoch it still has.
     """
-    for junk in ("770579", True, 770579.0, {}, -1):
+    for junk in ("770579", True, 770579.0, {}, -1, 2**63, 10**400):
         record = {"project": "proj", "label": "hosted:proj", "agent_start_ticks": junk}
         assert HostedManager._row_from_record(_PID, record).agent_start_ticks is None
         assert HostedManager._degraded_row(_PID, record).agent_start_ticks is None
@@ -2182,6 +2182,12 @@ def test_a_junk_agent_start_ticks_never_reaches_the_model_on_either_path():
     zero = {"project": "proj", "label": "hosted:proj", "agent_start_ticks": 0}
     assert HostedManager._row_from_record(_PID, zero).agent_start_ticks == 0
     assert HostedManager._degraded_row(_PID, zero).agent_start_ticks == 0
+    # The top of the range is the INTEGER column's limit, not a guess at a plausible uptime:
+    # a tighter cap would discard real counts on a long-uptime host, which is exactly where
+    # the drift this field defends against has accumulated most.
+    big = {"project": "proj", "label": "hosted:proj", "agent_start_ticks": 2**63 - 1}
+    assert HostedManager._row_from_record(_PID, big).agent_start_ticks == 2**63 - 1
+    assert HostedManager._degraded_row(_PID, big).agent_start_ticks == 2**63 - 1
 
 
 def test_a_junk_claude_session_uuid_never_reaches_the_model_on_either_path():
@@ -2456,6 +2462,7 @@ def test_degraded_row_salvages_every_field_the_model_did_not_reject():
         ("agent_proc_start", 10**400, None),  # int too large for a float
         ("agent_start_ticks", True, None),  # bool subclasses int, as for agent_pid
         ("agent_start_ticks", -1, None),  # ticks since boot are never negative
+        ("agent_start_ticks", 2**63, None),  # past the INTEGER column: OverflowError on write
         ("claude_session_uuid", ["not-a-uuid"], None),
         ("hosted_log_path", 7, None),
         ("permission_mode", "nope", "default"),

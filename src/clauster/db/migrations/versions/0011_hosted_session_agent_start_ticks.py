@@ -23,9 +23,15 @@ PID-reuse defense, now genuinely exact rather than nearly-tight), coarse on the 
 
 Additive and nullable, mirroring 8e2d05b7a913: a row written by an older build loads with
 the column absent and the comparison degrades to exactly today's epoch-only behaviour, which
-still drifts. Unlike the bridge half there is no self-heal to add here — the hosted row's
-one liveness reader runs once, in ``reattach_all``, so there is no poll tick to land a
-stamp on. Such a row is re-stamped the next time that conversation is spawned or resumed.
+still drifts. The bridge half's self-heal is deliberately NOT mirrored, and the cost is
+worth stating rather than implying. It could be: ``runner._ticks_on_exact_match`` needs no
+poll tick, only a moment at which the old 0.05s epoch bound holds, and ``reattach_all``
+produces exactly one — a True answer from ``is_killable_hosted`` on a tick-less row MEANS
+that bound held — and it already ends in a ``_persist``, so a stamp would cost no extra
+write. It is left out to keep #1404 to the one change it needs. The gap is wider here than
+for bridges, not narrower: a bridge samples several times a minute and heals on the first
+undrifted one, while a hosted row gets one sample per clauster restart, and the row that
+most needs the fix is a long-lived Direct Session that is never respawned.
 
 Revision ID: c4f1b6a2e590
 Revises: 8e2d05b7a913

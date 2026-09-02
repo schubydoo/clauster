@@ -545,12 +545,30 @@ def is_killable_hosted(
     epoch-only behaviour — the failure mode PR #1400 hit three review rounds running.
 
     The entry guard above deliberately still requires the *epoch*, and is not loosened to
-    "ticks alone are enough". That is not a claim ticks are weaker — :func:`is_live_process`
-    compares them EXACTLY, which is stricter than the 0.05s epoch bound — but a row can only
-    reach here with ticks and no epoch on a procfs with no ``btime`` line (gVisor, some
-    container runtimes, WSL1), where :func:`proc_start_pair` yields ``(None, ticks)``. Such
-    a row stays un-killable and its agent leaks. That is the safe error for a kill gate: a
-    leaked agent is recoverable by hand, a kill aimed at the wrong process is not.
+    "ticks alone are enough". Within one boot that is not a claim ticks are weaker —
+    :func:`is_live_process` compares them EXACTLY, which is stricter than the 0.05s epoch
+    bound — but a row can only reach here with ticks and no epoch on a procfs with no
+    ``btime`` line (gVisor, some container runtimes, WSL1), where :func:`proc_start_pair`
+    yields ``(None, ticks)``. Such a row stays un-killable and its agent leaks. That is the
+    safe error for a kill gate: a leaked agent is recoverable by hand, a kill aimed at the
+    wrong process is not.
+
+    ⚠️ ACROSS a reboot the pair is LAXER than what this gate used to apply, and this is the
+    first call site to route a ``SIGKILL`` through that residue — state it plainly rather
+    than let the paragraph above read as "strictly stricter". Before ticks were recorded
+    this gate reached :func:`is_live_process` with none, so it compared the epoch at
+    ``_EXACT_PROC_START_TOLERANCE`` (0.05s), which no post-reboot process can pass: its
+    create-time lies after the reboot and the recorded one before it, so the gap is at
+    least the downtime. Cross-boot PID reuse was excluded *structurally*. With ticks the
+    conjunct becomes exact-ticks AND ``_DRIFT_EPOCH_TOLERANCE`` (1h), so a host that reboots
+    within an hour of its previous boot can admit a process holding the same pid AND the
+    same tick offset from boot — see that constant's own note, which named this residue when
+    #1399 accepted it for a card-liveness READ. A force-kill is a worse place to spend it.
+    Not fixed here because the fix is a second column (``/proc/sys/kernel/random/boot_id``,
+    issue #1401) that settles it exactly for all three halves at once; #1404 would otherwise
+    grow a schema change it does not need. ``test_a_cross_boot_tick_collision_inside_the_
+    epoch_window_is_admitted`` pins the residue so it cannot widen unnoticed, and is the
+    test #1401 flips.
     """
     if _expected_epoch(proc_start) is None:
         return False
