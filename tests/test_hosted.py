@@ -124,6 +124,57 @@ def test_build_hosted_argv_with_resume():
     assert argv[argv.index("--resume") + 1] == "abc-123"
 
 
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "--dangerously-skip-permissions",  # the shape that matters: a whole extra FLAG
+        "-p",
+        "--",  # commander's end-of-options marker, not a session id
+        "",
+        " abc-123",
+        "abc 123",  # a space is one argv token here, but never a session id
+        "abc-123\n",  # `$` matches before a trailing newline; `\Z` is why this is refused
+        "../../etc/passwd",
+        "a/b",
+        "a\\b",
+        "abc\x00123",
+        "a" * 65,  # past the String(64) column the value round-trips through
+    ],
+)
+def test_build_hosted_argv_refuses_a_resume_uuid_that_is_not_session_shaped(bad):
+    """#1392: `--resume [sessionId]` takes an OPTIONAL value.
+
+    A flag-shaped token in that slot is parsed as a fresh flag rather than consumed as
+    data, so a persisted string could contribute an argument to the spawn argv (invariant
+    2). This seam is the last one before the daemon, so it holds for a caller that never
+    went through `_as_session_uuid`. It RAISES rather than dropping the flag: dropping it
+    would silently start a fresh conversation under a name the operator asked to resume.
+    """
+    with pytest.raises(HostedSessionError, match="malformed resume session id"):
+        build_hosted_argv(_BIN, permission_mode="default", resume_uuid=bad)
+
+
+@pytest.mark.parametrize(
+    "good",
+    [
+        "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",  # RFC-4122, what claude mints today
+        "01ARZ3NDEKTSV4RRFFQ69G5FAV",  # a ULID, if it ever mints one
+        "s-1",
+        "abc.123_x",
+        "a",
+        "a" * 64,  # exactly the column width, inclusive
+    ],
+)
+def test_build_hosted_argv_keeps_a_session_shaped_resume_uuid(good):
+    """The guard is a SHAPE, not claude's current id format — see `_SESSION_UUID_SHAPE_RE`.
+
+    Positive control for the test above: without these, a guard that refused *everything*
+    would pass the refusal cases and silently take `--resume` away from every session.
+    """
+    argv = build_hosted_argv(_BIN, permission_mode="default", resume_uuid=good)
+    assert argv[argv.index("--resume") + 1] == good
+
+
 # -- spawn -----------------------------------------------------------------
 
 
@@ -2079,6 +2130,25 @@ def test_a_junk_claude_session_uuid_never_reaches_the_model_on_either_path():
     assert HostedManager._degraded_row(_PID, kept).claude_session_uuid == uuid
 
 
+def test_a_flag_shaped_persisted_session_uuid_never_reaches_the_model_on_either_path():
+    """#1392: non-empty was not enough — the value's only consumer is a `--resume` token.
+
+    `claude`'s `--resume [sessionId]` takes an *optional* value, so a flag-shaped string
+    there is parsed as a fresh FLAG. The record is reachable without code execution (an
+    `ops restore` from a tampered backup), which is what makes it an untrusted input.
+    Both mapping paths must agree, exactly as they do for the empty string.
+    """
+    for junk in ("--dangerously-skip-permissions", "-p", "--", "a b", "a/b", "x" * 65):
+        record = {"project": "proj", "label": "hosted:proj", "claude_session_uuid": junk}
+        assert HostedManager._row_from_record(_PID, record).claude_session_uuid is None
+        assert HostedManager._degraded_row(_PID, record).claude_session_uuid is None
+    # ...and the shape a live session actually carries still round-trips untouched.
+    uuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    kept = {"project": "proj", "label": "hosted:proj", "claude_session_uuid": uuid}
+    assert HostedManager._row_from_record(_PID, kept).claude_session_uuid == uuid
+    assert HostedManager._degraded_row(_PID, kept).claude_session_uuid == uuid
+
+
 def test_a_refused_claude_session_uuid_is_named_not_typed_in_the_log(caplog) -> None:
     """`_as_session_uuid` is the one member of the family whose message branches.
 
@@ -2097,6 +2167,15 @@ def test_a_refused_claude_session_uuid_is_named_not_typed_in_the_log(caplog) -> 
     with caplog.at_level(logging.WARNING, logger="clauster.hosted"):
         HostedManager._row_from_record(_PID, {**record, "claude_session_uuid": 7})
     assert "(int)" in caplog.text and "empty string" not in caplog.text
+
+    # A non-empty string that fails the shape check is the one refusal an operator can act
+    # on, so it names the exact token to fix — quoted via repr, which escapes the control
+    # characters a hand-edited record could otherwise inject into the log (#1392).
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="clauster.hosted"):
+        HostedManager._row_from_record(_PID, {**record, "claude_session_uuid": "--rm\n-rf"})
+    assert "malformed '--rm\\n-rf'" in caplog.text
+    assert "\n-rf" not in caplog.text  # the newline never reaches the log verbatim
 
     # ...and a legitimate uuid says nothing at all.
     caplog.clear()
@@ -2453,7 +2532,11 @@ async def test_manager_reattach_degraded_row_can_still_be_an_orphan(
         assert "Resume" not in (inst.error_detail or "")  # never offered where it cannot work
 
 
-@pytest.mark.parametrize("bad_uuid", ["", ["not-a-uuid"]], ids=["empty-string", "not-a-string"])
+@pytest.mark.parametrize(
+    "bad_uuid",
+    ["", ["not-a-uuid"], "--dangerously-skip-permissions"],
+    ids=["empty-string", "not-a-string", "flag-shaped"],
+)
 async def test_manager_reattach_never_takes_the_session_uuid_from_the_raw_record(
     fake_claustrum, tmp_path, bad_uuid
 ):
@@ -2470,6 +2553,10 @@ async def test_manager_reattach_never_takes_the_session_uuid_from_the_raw_record
     code, but ``""`` is the shape that ACTUALLY latched the healthy path shut (pydantic
     accepts it for a ``str | None`` field, so it never degraded the row), and this is the
     only end-to-end pin of the whole pipeline — record, reattach, latch, init frame, persist.
+
+    ``--dangerously-skip-permissions`` is the #1392 shape: a *string*, so #1380's type check
+    let it through, and flag-shaped, so ``claude``'s optional-valued ``--resume`` would read
+    it as a fresh flag instead of as the session id.
     """
     fake = await fake_claustrum()
     store = HostedStateStore(tmp_path)
@@ -2795,6 +2882,34 @@ async def test_manager_resume_after_reattach_loss(fake_claustrum, tmp_path):
         assert resumed.claude_session_uuid == uuid
         assert mgr.get_instance(old_id) is None  # dead row retired
         await mgr.aclose()
+
+
+async def test_manager_resume_never_puts_a_flag_shaped_persisted_uuid_on_the_argv(
+    fake_claustrum, tmp_path
+):
+    """#1392, end to end: the token reaches neither `--resume` nor the daemon at all.
+
+    Same setup as `test_manager_resume_after_reattach_loss` — a record the daemon has lost,
+    resumable purely from its persisted uuid — with the one field an `ops restore` from a
+    tampered backup could carry. `_as_session_uuid` drops it on the way in, so the resume
+    fails closed with "no captured session uuid" rather than spawning; the argv assertion
+    is what would catch a future path that skipped the mapper.
+    """
+    fake = await fake_claustrum()
+    store = HostedStateStore(tmp_path)
+    bad = "--dangerously-skip-permissions"
+    old_id = "01GONEPROCESS00000000000"
+    store.save({old_id: {"project": "proj", "label": "hosted:proj", "claude_session_uuid": bad}})
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        await mgr.reattach_all(client)
+        assert mgr.get_instance(old_id).claude_session_uuid is None  # dropped, not smuggled
+        with pytest.raises(HostedSessionError, match="no captured session uuid"):
+            await mgr.resume(client, old_id, cwd=str(tmp_path), claude_binary=_BIN)
+        await mgr.aclose()
+    # Nothing was spawned at all, so the token reached no argv. Asserted as the empty list
+    # rather than as "not in any argv", which would pass vacuously either way.
+    assert fake.spawned == []
 
 
 async def test_manager_resume_unknown_raises(fake_claustrum):
