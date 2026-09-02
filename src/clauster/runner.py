@@ -4769,22 +4769,24 @@ class SessionRunner:
                 proc_start,
                 start_ticks=start_ticks,
             )
-            # Re-check across the awaits above. This runs lock-free on the poll loop, so a
-            # lock-holding adopt()/spawn() can have registered this id — overwriting it would
-            # discard the object the HTTP caller was handed — and a concurrent forget() can
-            # have dropped the row, which we must not resurrect.
-            if iid in self._instances or iid not in self._persisted:
-                continue
             # A post-#1401 spawn's row carries its boot id; a pre-#1401 row (or one whose bridge
             # was pointer/sidecar-reattached before) carries none. This build is reached only
             # for a row judged live in THIS boot, so stamp the current boot for a boot-id-less
             # one — otherwise the reattached row persists boot-id-less and loses the cross-boot
             # defense on the next restart, a row this pass itself rewrites (#1401). The recorded
             # value already went to `_judge_row` above; this only affects what we persist. Read
-            # off-thread.
+            # off-thread BEFORE the recheck below, so the recheck stays the last await-free
+            # statement before the build — its whole job is to close the lock-free race this
+            # extra await would otherwise reopen.
             live_boot_id = (
                 boot_id if boot_id is not None else await asyncio.to_thread(procutil.proc_boot_id)
             )
+            # Re-check across the awaits above. This runs lock-free on the poll loop, so a
+            # lock-holding adopt()/spawn() can have registered this id — overwriting it would
+            # discard the object the HTTP caller was handed — and a concurrent forget() can
+            # have dropped the row, which we must not resurrect.
+            if iid in self._instances or iid not in self._persisted:
+                continue
             # Liveness is not usability (see `_reconcile_status`): a bridge whose process is
             # up but which has not registered an environment / reached a ready sidecar is
             # STARTING, not RUNNING. `connect` IS that evidence — it only resolves from a
