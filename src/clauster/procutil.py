@@ -345,17 +345,30 @@ def proc_is_gone(pid: int) -> bool:
     down and nothing was logged. Boot-relative ticks read fine on exactly that host, which is
     what makes the bug invisible rather than total.
 
-    Asking the status directly answers the same question identically everywhere and needs no
-    clock at all. A **zombie counts as gone**: it has already exited, only its exit status
-    remains, and its tree went with it — force-killing it is pointless and the identity
-    compare downstream would report it as "no longer that keeper", which is untrue and
-    misleading. Gone / denied / a pid that cannot name a process are all gone, matching what
-    ``proc_create_time is None`` answered for them.
+    Asking the status directly answers the same question identically everywhere. A **zombie
+    counts as gone**: it has already exited, only its exit status remains, and its tree went
+    with it — force-killing it is pointless and the identity compare downstream would report
+    it as "no longer that keeper", which is untrue and misleading. Gone / denied / a pid that
+    cannot name a process are all gone, matching what ``proc_create_time is None`` answered
+    for them.
+
+    ⚠️ ``status()`` needs no clock, but ``psutil.Process(pid)`` itself can still want one:
+    up to and including psutil 7.0.0 its ``_init`` calls ``create_time()``, so on the very
+    btime-less host this function exists for it raises the bare ``RuntimeError``
+    :func:`jiffies_to_epoch` documents for the family. That must answer **not gone** — a live
+    process we cannot do clock arithmetic for has not exited — and it cannot swallow a real
+    exit, because a dead pid raises ``NoSuchProcess`` from the stat read first. Left
+    uncaught it propagated out of ``asyncio.to_thread`` in :meth:`stop`, past the
+    ``STOPPED`` transition and the worktree unlock, which is worse than the silent no-kill
+    it replaced. (The lockfile pins psutil 7.2.2, where the constructor no longer does this;
+    ``pyproject.toml`` floors at 5.9, so a source install can still resolve one that does.)
     """
     try:
         return psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, ValueError):
         return True
+    except RuntimeError:
+        return False
 
 
 def proc_cwd(pid: int) -> Path | None:
@@ -573,10 +586,12 @@ def is_live_keeper(
     proc_start: str | float | None,
     *,
     tolerance: float = 2.0,
-    # Keyword-REQUIRED, no default (#1402), for the reason `is_live_bridge`'s twin states:
-    # threading a start-ticks argument through some call sites and defaulting it on the rest
-    # is the failure #1399's review found three rounds running, and it is silent. Without a
-    # default a missed site is a type error pyright names on the spot.
+    # Keyword-REQUIRED, no default (#1402). Threading a start-ticks argument through some
+    # call sites and defaulting it on the rest is the failure #1399's review found three
+    # rounds running, and it is silent; without a default a missed site is a type error
+    # pyright names on the spot. `is_live_bridge` below still carries the defaulted form it
+    # shipped with — the two are deliberately NOT symmetric yet, and converting it means
+    # touching every bridge call site, which belongs in its own change.
     start_ticks: int | None,
 ) -> bool:
     """Whether ``pid`` is a trustworthy, currently-running ``clauster.pty_keeper`` (#1178).

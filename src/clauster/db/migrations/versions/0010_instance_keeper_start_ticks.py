@@ -26,10 +26,19 @@ keeps both and swaps their roles: exact on the ticks, coarse on the epoch.
 
 Additive and nullable, mirroring 8e2d05b7a913 and 3a5e9c81d47b: a row written by an older
 build loads with the column absent and the keeper comparison degrades to exactly today's
-epoch-only behaviour. Unlike the bridge half there is no self-heal pass, and none is needed —
-a card's keeper trio is never carried over from a row, it is re-measured off the live pid
-every time the keeper is spawned, reattached or adopted, so the stamp lands on the first such
-event and the row is re-persisted with it.
+epoch-only behaviour.
+
+Unlike the bridge half there is no self-heal pass, and one residue is accepted rather than
+covered. A CARDED instance re-measures its keeper trio off the live pid every time the keeper
+is spawned, reattached or adopted — the trio is never carried over from a row — so the stamp
+lands on the first such event and the row is re-persisted with it. An UNCARDED row does not:
+``rediscover`` deliberately leaves a pid-less row uncarded while its project already has an
+unresolved live pty bridge, and none of those three events ever fires for it, so its
+``keeper_start_ticks`` stays absent indefinitely. ``forget``'s persisted-only arm then still
+compares that row on the drifting epoch alone, which is the pre-#1402 exposure, for that row
+shape only. Closing it means stamping ticks from inside a delete gate or carding a row
+``rediscover`` refuses to card on purpose; both are worse than the residue, and #1402 states
+the epoch-only degrade for an older build as intended behaviour.
 
 Revision ID: c1f4a70b9e63
 Revises: 8e2d05b7a913

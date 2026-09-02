@@ -3752,6 +3752,13 @@ class SessionRunner:
         working instead of reporting its live keeper as dead. Such a row still reads as live
         if a *different* process of the right shape holds that exact pid; it re-acquires the
         full defense the next time the instance is spawned or reattached.
+
+        ⚠️ One row shape never reaches that re-acquisition: a pid-less row :meth:`rediscover`
+        leaves UNCARDED because its project already has an unresolved live pty bridge. It is
+        never spawned, reattached or adopted, so nothing re-measures its keeper trio and a
+        pre-#1402 one keeps comparing on the drifting epoch here indefinitely. Accepted, not
+        overlooked — see migration ``c1f4a70b9e63`` for why the two ways to close it are both
+        worse than the residue.
         """
         # Determine project name before taking the lock (needed for per-project lock and
         # the pointer clear below). Fall back to the persisted record — a forgotten bridge
@@ -4312,12 +4319,13 @@ class SessionRunner:
             # path symmetric with the standard path's `_latest_debug_log_for` (#584).
             tail_source = raw_path if raw_path.exists() else None
             log_path = log_path if tail_source is not None else None
-            # Snapshotted here, right after `is_keeper_process` classified this pid as a
-            # keeper, so the pid is carried as a full identity from the moment we adopt it
-            # (#1178 / #1402). The sidecar itself records neither half. ONE `proc_start_pair`
-            # call, not two reads: separate samples can straddle a pid recycle and describe
-            # two different processes, and the coarse epoch conjunct would then authenticate
-            # the newcomer on its own exact ticks.
+            # Snapshotted once `is_keeper_process` above has classified this pid as a keeper,
+            # so the pid is carried as a full identity from the moment we adopt it (#1178 /
+            # #1402). The sidecar itself records neither half. ONE `proc_start_pair` call, not
+            # two reads: separate samples can straddle a pid recycle and describe two
+            # different processes, and the coarse epoch conjunct would then authenticate the
+            # newcomer on its own exact ticks. Only filesystem reads separate the two, and
+            # the pair is an identity rather than a liveness claim, so the gap is benign.
             keeper_proc_start, keeper_start_ticks = procutil.proc_start_pair(keeper_pid)
             # No `instance_id=`: the model mints a fresh one. See the identity paragraph
             # above — nothing here can say which row owns this keeper (#1108).

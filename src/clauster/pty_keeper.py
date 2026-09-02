@@ -927,9 +927,15 @@ def iter_keepers(log_dir: Path) -> list[KeeperInfo]:
                 # so a PID the keeper left behind and the OS recycled onto an unrelated
                 # process is never listed as a live orphan (#301 / RUNOPS-1). The leading
                 # `keeper_pid is not None` also narrows the type for is_keeper_process.
-                alive=keeper_pid is not None
-                and create_time is not None
-                and procutil.is_keeper_process(keeper_pid),
+                #
+                # `is_keeper_process` is the WHOLE test now (#1402). It already proves alive,
+                # non-zombie and keeper-cmdline, so the `create_time is not None` conjunct it
+                # used to carry added no rejection — it only asked the clock a liveness
+                # question, and on a procfs with no `btime` the answer is None for a keeper
+                # that is plainly running. That made `find_orphan_keepers` list nothing there,
+                # so `clauster keepers --kill` refused every pid and `stop_keeper` — the one
+                # place the btime-less wind-down could happen from the CLI — was unreachable.
+                alive=keeper_pid is not None and procutil.is_keeper_process(keeper_pid),
                 keeper_create_time=create_time,
                 keeper_start_ticks=start_ticks,
             )
@@ -973,15 +979,43 @@ def _start_still_matches(
     is wide enough to admit a pid recycled during :func:`stop_keeper`'s own ~2s grace, which
     is the hole this closes. Ticks are measured from the boot instant, so they do not move at
     all while a recycled pid differs by a whole ``CLK_TCK`` of them: drift-proof *and*
-    stricter than the bound it replaces. With neither half comparable the answer is True and
-    the cmdline gate decides, exactly as a ``None`` ``expect_create_time`` behaved before.
+    stricter than the bound it replaces.
+
+    With **nothing** comparable this answers False — "not proven to be ours", not "ours".
+    An expectation was recorded and could not be checked, and this predicate fronts a
+    ``force_kill_tree`` on a whole process tree, so the unproven case must not authorize it.
+    Note that is a real narrowing over the pre-#1402 code, which read the epoch alone: given
+    a recorded ``expect_create_time`` and a host where the epoch is unreadable but ticks are
+    (a btime-less procfs), that code fell through to killing on the cmdline gate alone.
+    :func:`_start_is_comparable` is how the post-kill poll asks the other question — whether
+    the answer was reached from evidence — because there an unproven read must keep waiting
+    rather than report a kill it cannot confirm.
     """
     epoch, ticks = observed
     if expect_start_ticks is not None and ticks is not None:
         return ticks == expect_start_ticks
-    if expect_create_time is None or epoch is None:
-        return True
-    return abs(epoch - expect_create_time) <= _KEEPER_START_TOLERANCE
+    if expect_create_time is not None and epoch is not None:
+        return abs(epoch - expect_create_time) <= _KEEPER_START_TOLERANCE
+    return False
+
+
+def _start_is_comparable(
+    observed: tuple[float | None, int | None],
+    expect_create_time: float | None,
+    expect_start_ticks: int | None,
+) -> bool:
+    """Whether :func:`_start_still_matches` had any evidence to reach its answer on (#1402).
+
+    Splits "definitely a different process" from "could not tell", which the two callers need
+    to separate because they act on opposite ones. The pre-kill gate refuses on either. The
+    post-kill poll may only treat a **definite** mismatch as proof the keeper it killed is
+    gone: reporting success from an unreadable pair would turn an unconfirmed kill into a
+    silent success, where waiting out the poll reports the honest failure instead.
+    """
+    epoch, ticks = observed
+    return (expect_start_ticks is not None and ticks is not None) or (
+        expect_create_time is not None and epoch is not None
+    )
 
 
 def stop_keeper(
@@ -1036,7 +1070,9 @@ def stop_keeper(
         if procutil.proc_is_gone(keeper_pid):
             return True
         observed = procutil.proc_start_pair(keeper_pid)
-        if not _start_still_matches(observed, expect_create_time, expect_start_ticks):
+        if _start_is_comparable(
+            observed, expect_create_time, expect_start_ticks
+        ) and not _start_still_matches(observed, expect_create_time, expect_start_ticks):
             return True  # PID recycled onto a new process → the keeper we killed is gone
         time.sleep(0.1)
     return False

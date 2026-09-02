@@ -1246,6 +1246,22 @@ def test_proc_is_gone_reports_a_live_process_on_a_host_that_cannot_express_boot_
     assert procutil.proc_is_gone(1234) is False
 
 
+def test_proc_is_gone_answers_not_gone_when_the_constructor_itself_wants_a_clock(monkeypatch):
+    # `status()` needs no clock, but `psutil.Process(pid)` does up to psutil 7.0.0: its
+    # `_init` calls `create_time()`, which ends in `+ boot_time()` and raises the bare
+    # RuntimeError on a btime-less procfs. pyproject floors at psutil 5.9, so a source
+    # install can still resolve one that does. Uncaught, this propagated out of
+    # `_cleanup_keeper`'s `asyncio.to_thread` and past `stop()`'s STOPPED transition and
+    # worktree unlock — a card left RUNNING over a bridge that had already been SIGINT-ed.
+    # A live process we cannot do clock arithmetic for is NOT gone.
+    class _ClockHungryConstructor:
+        def __init__(self, pid):
+            raise RuntimeError("no btime line in /proc/stat")
+
+    monkeypatch.setattr(procutil.psutil, "Process", _ClockHungryConstructor)
+    assert procutil.proc_is_gone(1234) is False
+
+
 def test_proc_is_gone_counts_a_zombie_as_gone(monkeypatch):
     # A zombie has exited; only its exit status remains and its tree went with it. Counting it
     # as gone is what keeps `_cleanup_keeper` and `stop_keeper` from running their identity
