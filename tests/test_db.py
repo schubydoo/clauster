@@ -661,6 +661,31 @@ def test_import_retires_empty_present_json_without_importing(tmp_path):
     assert not (tmp_path / "hosted_state.json").exists()
 
 
+def test_import_of_a_corrupt_legacy_file_commits_and_keeps_a_copy(tmp_path, caplog):
+    # The headline of #1384, at the seam it actually matters: two of these shapes used
+    # to raise out of KeyedJsonStore.load, and import_legacy_json catches only
+    # SQLAlchemyError/OSError, so the exception killed the boot. Now each degrades to no
+    # records -- the transaction still commits, BOTH files are retired, and the copy
+    # written from inside the open transaction does not abort it. A good hosted file
+    # alongside a corrupt state file must still import.
+    (tmp_path / "state.json").write_text("[" * 100_000, encoding="utf-8")
+    (tmp_path / "hosted_state.json").write_bytes(b"\xff\xfe\x00not utf-8")
+    engine = create_db_engine(tmp_path)
+    upgrade_to_head(engine, tmp_path)
+    factory = make_session_factory(engine)
+    try:
+        with caplog.at_level("WARNING", logger="clauster"):
+            assert import_legacy_json(tmp_path, factory) is False
+    finally:
+        engine.dispose()
+
+    assert (tmp_path / "state.json.imported").exists()
+    assert (tmp_path / "hosted_state.json.imported").exists()
+    assert (tmp_path / "state.json.corrupt.bak").read_text(encoding="utf-8") == "[" * 100_000
+    assert (tmp_path / "hosted_state.json.corrupt.bak").read_bytes() == b"\xff\xfe\x00not utf-8"
+    assert sum("ignoring corrupt" in r.getMessage() for r in caplog.records) == 2
+
+
 # ----- packaged migration env: standalone + offline paths ----------------
 
 

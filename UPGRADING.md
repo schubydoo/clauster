@@ -170,6 +170,11 @@ affected:
   migration **fail-closed** (it won't serve if the migration fails), then
   **imports your existing `state.json` and `hosted_state.json` once** and renames
   them to `*.imported`. Later starts are idempotent — no re-import.
+- **If one of those files is damaged**, the import no longer fails the start. It
+  imports no records from that file, logs a warning naming the failure, and keeps
+  a one-time byte-exact copy beside it as `state.json.corrupt.bak`. See the
+  [legacy note in the corruption runbook](docs/operations.md#recovering-from-a-corrupted-state-database)
+  for how to feed that copy back in.
 - **Do not run `clauster migrate` for this** — it only touches the legacy flat
   files, not the database. Just upgrade the package and restart.
 - **Back up first** (`clauster backup`): the database is now the live store, so a
@@ -180,7 +185,9 @@ fail-closed, so a failure leaves the service *down*, not half-migrated. The
 simplest recovery is to restore the pre-upgrade `clauster backup` tarball and
 reinstall the prior version. To revert by hand instead: stop clauster, delete
 `clauster.db`, rename `state.json.imported` / `hosted_state.json.imported` back
-(drop the `.imported` suffix), and reinstall the prior clauster version.
+(drop the `.imported` suffix), and reinstall the prior clauster version. A
+`*.corrupt.bak` beside them is a copy of a file the import could not use — repair
+it before you rename it over the original.
 
 ## Upgrade, by install method
 

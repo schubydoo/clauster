@@ -180,110 +180,56 @@ def test_unreadable_file_is_logged_with_no_copy(tmp_path, caplog, monkeypatch):
     assert not (tmp_path / "state.json.corrupt.bak").exists()
 
 
+def test_unreadable_file_raises_out_of_the_strict_read(tmp_path, monkeypatch):
+    # An unreadable file is not an empty one. `save` needs only the DIRECTORY to be
+    # writable, so a caller that writes back what it read would replace a file it never
+    # managed to read -- the same wipe as a corrupt one, by a different route. The
+    # DB-backed store raises OSError here for the same reason (#949).
+    (tmp_path / "state.json").write_text("{}", encoding="utf-8")
+
+    def boom(*_args, **_kwargs):
+        raise OSError("simulated: EIO")
+
+    monkeypatch.setattr(Path, "read_text", boom)
+    with pytest.raises(OSError, match="simulated: EIO"):
+        StateStore(tmp_path).load_strict()
+
+
+def test_missing_file_is_empty_not_unreadable(tmp_path):
+    # FileNotFoundError is an OSError, so it has to be caught above the arm that lets
+    # one through: an absent store is an empty store on BOTH reads.
+    assert StateStore(tmp_path).load_strict() == {}
+
+
 def test_corrupt_copy_failure_is_logged_not_silent(tmp_path, caplog, monkeypatch):
     # The copy is best-effort -- it must never block the load or abort a caller's
     # transaction -- but a failure to keep the only copy is exactly the kind of loss
-    # that must not pass silently.
-    (tmp_path / "state.json").write_text("[" * 100_000, encoding="utf-8")
-
-    def boom(*_args, **_kwargs):
-        raise OSError("simulated: copy failed")
-
-    monkeypatch.setattr("clauster.state.shutil.copyfileobj", boom)
-    with caplog.at_level("WARNING", logger="clauster.state"):
-        assert StateStore(tmp_path).load() == {}
-    assert any("could not copy corrupt" in r.getMessage() for r in caplog.records)
-    assert not (tmp_path / "state.json.corrupt.bak").exists()
-    assert not list(tmp_path.glob("*.tmp"))  # the half-written temp is cleaned up
-
-
-def test_corrupt_copy_leaves_no_temp_when_the_replace_fails(tmp_path, caplog, monkeypatch):
-    # The other half of the cleanup: the copy succeeded, so a real temp exists on disk
-    # when the replace raises. Patching the copy alone would leave that line a no-op.
-    (tmp_path / "state.json").write_text("[" * 100_000, encoding="utf-8")
-
-    def boom(*_args, **_kwargs):
-        raise OSError("simulated: replace failed")
-
-    monkeypatch.setattr("clauster.state.replace_with_retry", boom)
-    with caplog.at_level("WARNING", logger="clauster.state"):
-        assert StateStore(tmp_path).load() == {}
-    assert any("could not copy corrupt" in r.getMessage() for r in caplog.records)
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["state.json"]
-
-
-def test_corrupt_copy_cleans_up_when_interrupted(tmp_path, monkeypatch):
-    # Best-effort covers OSError only: a KeyboardInterrupt mid-copy must still propagate
-    # rather than be swallowed into a degraded load, and must not leave a half-written
-    # temp sitting in the state dir.
-    (tmp_path / "state.json").write_text("[" * 100_000, encoding="utf-8")
-
-    def boom(*_args, **_kwargs):
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr("clauster.state.shutil.copyfileobj", boom)
-    with pytest.raises(KeyboardInterrupt):
-        StateStore(tmp_path).load()
-    assert sorted(entry.name for entry in tmp_path.iterdir()) == ["state.json"]
-
-
-@pytest.mark.parametrize("target", ["ensure_private_dir", "tempfile"])
-def test_corrupt_copy_failing_before_the_temp_exists_still_degrades(
-    tmp_path, caplog, monkeypatch, target
-):
-    # The two steps that run before there is a temp to clean up. ensure_private_dir is
-    # fail-closed on its own account (a read-only mount or a state dir owned by another
-    # user) and mkstemp opens an fd (EMFILE), so either one raising out of load() would
-    # break the degrade contract at exactly the call sites that cannot take it:
-    # `clauster migrate` has no handler, and db.bootstrap's would abandon the import of
-    # a perfectly good hosted_state.json alongside it.
+    # that must not pass silently. atomicio raises only OSError subclasses out of its
+    # write path (a read-only mount, EMFILE at mkstemp, a Windows sharing violation),
+    # so one arm catches every way the copy can fail.
     (tmp_path / "state.json").write_text("[" * 100_000, encoding="utf-8")
 
     def boom(*_args, **_kwargs):
         raise PermissionError("simulated: read-only state dir")
 
-    if target == "ensure_private_dir":
-        monkeypatch.setattr("clauster.state.ensure_private_dir", boom)
-    else:
-        monkeypatch.setattr(state.tempfile, "mkstemp", boom)
-
+    monkeypatch.setattr("clauster.state.atomic_copy_file", boom)
     with caplog.at_level("WARNING", logger="clauster.state"):
         assert StateStore(tmp_path).load() == {}
     assert any("could not copy corrupt" in r.getMessage() for r in caplog.records)
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["state.json"]
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == ["state.json"]
 
 
-def test_corrupt_copy_closes_the_fd_when_fdopen_fails(tmp_path, caplog, monkeypatch):
-    # If os.fdopen raises before the `with` adopts the fd (EMFILE under fd-table
-    # pressure), the raw mkstemp fd must be closed, not leaked -- and the load must
-    # still degrade rather than propagate. Same guard as atomicio.atomic_write_text.
+def test_corrupt_copy_does_not_swallow_an_interrupt(tmp_path, monkeypatch):
+    # Best-effort covers OSError only. A KeyboardInterrupt mid-copy must still
+    # propagate rather than be swallowed into a degraded load.
     (tmp_path / "state.json").write_text("[" * 100_000, encoding="utf-8")
-    real_mkstemp = state.tempfile.mkstemp
-    real_close = state.os.close
-    captured: dict[str, int] = {}
-    closed: list[int] = []
 
-    def _spy_mkstemp(*a, **k):
-        fd, name = real_mkstemp(*a, **k)
-        captured["fd"] = fd
-        return fd, name
+    def boom(*_args, **_kwargs):
+        raise KeyboardInterrupt
 
-    def _boom_fdopen(*_a, **_k):
-        raise OSError("too many open files")
-
-    def _spy_close(fd):
-        closed.append(fd)
-        real_close(fd)
-
-    monkeypatch.setattr(state.tempfile, "mkstemp", _spy_mkstemp)
-    monkeypatch.setattr(state.os, "fdopen", _boom_fdopen)
-    monkeypatch.setattr(state.os, "close", _spy_close)
-
-    with caplog.at_level("WARNING", logger="clauster.state"):
-        assert StateStore(tmp_path).load() == {}
-    assert captured["fd"] in closed  # the raw fd was closed, not leaked
-    assert any("could not copy corrupt" in r.getMessage() for r in caplog.records)
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["state.json"]
+    monkeypatch.setattr("clauster.state.atomic_copy_file", boom)
+    with pytest.raises(KeyboardInterrupt):
+        StateStore(tmp_path).load()
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
@@ -336,9 +282,94 @@ def test_migrate_backup_failure_is_logged_not_silent(tmp_path, caplog, monkeypat
     assert any("backup" in r.message for r in caplog.records)  # surfaced, not silent
 
 
-def test_non_dict_root_returns_empty(tmp_path):
-    (tmp_path / "state.json").write_text(json.dumps(["not", "a", "dict"]))
-    assert StateStore(tmp_path).load() == {}
+# Valid JSON that parses to something this store cannot use. It is the third corrupt
+# shape, and it reaches the same destructive re-save as the other two, so it degrades
+# identically: warn, copy aside once, return {}.
+_WRONG_SHAPE = [
+    pytest.param(json.dumps(["not", "a", "dict"]), id="root-is-a-list"),
+    pytest.param(json.dumps("just a string"), id="root-is-a-string"),
+    pytest.param(json.dumps({"schema_version": 1, "instances": ["a"]}), id="map-is-a-list"),
+    pytest.param(json.dumps({"schema_version": 1, "instances": None}), id="map-is-null"),
+    # The same damage under a MISMATCHED schema_version. _migrate coerces a non-object
+    # map to {} on its way past, so checking the shape after it would launder real
+    # damage into a clean-looking empty store -- and `clauster migrate` would write that
+    # back over the file. Byte-identical damage must get the same verdict either way.
+    pytest.param(
+        json.dumps({"schema_version": 0, "instances": ["a"]}), id="legacy-schema-map-is-a-list"
+    ),
+    pytest.param(
+        json.dumps({"schema_version": 0, "instances": None}), id="legacy-schema-map-is-null"
+    ),
+]
+
+
+@pytest.mark.parametrize("payload", _WRONG_SHAPE)
+def test_wrong_shape_is_copied_aside_and_logged(tmp_path, caplog, payload):
+    path = tmp_path / "state.json"
+    path.write_text(payload, encoding="utf-8")
+    with caplog.at_level("WARNING", logger="clauster.state"):
+        assert StateStore(tmp_path).load() == {}
+    assert path.read_text(encoding="utf-8") == payload  # load itself never rewrites
+    assert (tmp_path / "state.json.corrupt.bak").read_text(encoding="utf-8") == payload
+    assert any("ignoring corrupt" in r.getMessage() for r in caplog.records)
+    # Rejected before the schema branch, so no migration ran and no snapshot was taken.
+    assert not (tmp_path / "state.json.bak").exists()
+
+
+@pytest.mark.parametrize("payload", _WRONG_SHAPE)
+def test_wrong_shape_reason_names_the_shape_not_the_content(caplog, tmp_path, payload):
+    # Positive control on the message: the reason must describe the shape, so a reader
+    # can tell these apart from a parse failure, and it must never quote the file --
+    # `hosted_state.json` carries a claude session uuid.
+    (tmp_path / "state.json").write_text(payload, encoding="utf-8")
+    with caplog.at_level("WARNING", logger="clauster.state"):
+        StateStore(tmp_path).load()
+    reasons = [r.getMessage() for r in caplog.records if "ignoring corrupt" in r.getMessage()]
+    assert len(reasons) == 1
+    assert "not an object" in reasons[0]
+    assert payload not in reasons[0]
+
+
+@pytest.mark.parametrize(("store_cls", "filename"), _STORES)
+def test_wrong_shape_reason_names_each_store_own_map_key(tmp_path, caplog, store_cls, filename):
+    # The record-map check is shared code reading a per-store class attribute, so both
+    # subclasses must reject their own key and say which one it was.
+    map_key = store_cls._MAP_KEY
+    (tmp_path / filename).write_text(
+        json.dumps({"schema_version": 1, map_key: ["not", "an", "object"]}), encoding="utf-8"
+    )
+    with caplog.at_level("WARNING", logger="clauster"):
+        assert store_cls(tmp_path).load() == {}
+    assert any(f"{map_key!r} is a list" in r.getMessage() for r in caplog.records)
+    assert (tmp_path / f"{filename}.corrupt.bak").exists()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(json.dumps({"schema_version": 1}), id="map-absent"),
+        pytest.param(json.dumps({"schema_version": 1, "instances": {}}), id="map-empty"),
+    ],
+)
+def test_empty_or_absent_record_map_is_not_corruption(tmp_path, caplog, payload):
+    # The boundary the shape check must not cross. A schema-correct file that has never
+    # held a record looks exactly like this, and `save({})` writes the empty form on
+    # every stop, so treating it as damage would warn and copy on ordinary operation.
+    (tmp_path / "state.json").write_text(payload, encoding="utf-8")
+    with caplog.at_level("WARNING", logger="clauster.state"):
+        assert StateStore(tmp_path).load() == {}
+    assert not (tmp_path / "state.json.corrupt.bak").exists()
+    assert not [r for r in caplog.records if "ignoring corrupt" in r.getMessage()]
+
+
+def test_wrong_shape_survives_the_round_trip_of_a_real_save(tmp_path):
+    # The same control from the other side: what `save` writes must load back clean,
+    # with no warning and no copy. If the shape check ever rejects our own output,
+    # every ordinary load starts copying the store aside.
+    store = StateStore(tmp_path)
+    store.save({})
+    assert store.load() == {}
+    assert not (tmp_path / "state.json.corrupt.bak").exists()
 
 
 def test_non_dict_instance_values_are_skipped(tmp_path):

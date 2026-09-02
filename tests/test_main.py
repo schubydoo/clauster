@@ -573,6 +573,22 @@ def test_migrate_exit_0(write_config, tmp_path):
     assert json.loads((sd / "state.json").read_text())["schema_version"] == 1
 
 
+def test_migrate_corrupt_exit_1_without_writing(write_config, tmp_path, capsys):
+    # Exit 0 with "0 instance record(s)" is indistinguishable from a genuinely empty
+    # migrate, and this command rewrites what it reads. A corrupt file must exit
+    # non-zero, say why, and leave the file alone.
+    cfg = _cfg(write_config, tmp_path)
+    sd = Path(f"{tmp_path}/.cstate")
+    sd.mkdir(parents=True, exist_ok=True)
+    payload = "[" * 100_000
+    (sd / "state.json").write_text(payload, encoding="utf-8")
+
+    assert cli.main(["migrate", "-c", cfg]) == 1
+
+    assert "refusing to rewrite state.json" in capsys.readouterr().err
+    assert (sd / "state.json").read_text(encoding="utf-8") == payload
+
+
 def test_backup_failure_exit_1(write_config, tmp_path, monkeypatch):
     monkeypatch.setattr(
         "clauster.ops.make_backup",

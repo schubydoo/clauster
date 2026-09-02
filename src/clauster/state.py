@@ -9,33 +9,41 @@ non-authoritative: corruption degrades to "forget the labels", never a crash.
 Atomic-write pattern mirrors ``trust.trust_directory``: write ``.tmp`` then
 ``os.replace``. Two one-time copies guard the two ways a load can act on data it
 does not trust: ``.bak`` before a schema migration, and ``.corrupt.bak`` when the
-file exists but cannot be read as JSON at all.
+file exists but cannot be used as a store at all.
 """
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
-import os
-import shutil
-import tempfile
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from .atomicio import atomic_write_text, ensure_private_dir, fsync_dir, replace_with_retry
+from .atomicio import atomic_copy_file, atomic_write_text
 
 CURRENT_SCHEMA = 1
 
 _log = logging.getLogger("clauster.state")
 
 
-def _unlink_quietly(path: Path | None) -> None:
-    """Remove a temp file if one was created, swallowing the removal's own failure."""
-    if path is None:
-        return
-    with contextlib.suppress(OSError):
-        path.unlink(missing_ok=True)
+def _describe(exc: BaseException) -> str:
+    """Render an exception for a log line: its type and its ``str``, never its ``repr``.
+
+    ``UnicodeDecodeError.args[1]`` is the raw undecoded bytes of the whole file, so
+    ``%r`` would put the entire file on one log line (measured on a sibling seam: 420 KB
+    for a 200 KB input). ``str`` gives the bounded "codec can't decode byte 0xff in
+    position N" form. The other three — ``JSONDecodeError``, the int-limit
+    ``ValueError``, ``RecursionError`` — carry no file content either way.
+    """
+    return f"{type(exc).__name__}: {exc}"
+
+
+class CorruptStateFile(Exception):
+    """A state file exists but cannot be used as one.
+
+    Raised only by :meth:`KeyedJsonStore.load_strict`; :meth:`KeyedJsonStore.load`
+    catches it and degrades. Carries a short human reason, never file content.
+    """
 
 
 @runtime_checkable
@@ -66,8 +74,10 @@ class KeyedJsonStore:
     degrades to ``{}`` silently; a corrupt one degrades to ``{}`` with a warning and a
     one-time ``.corrupt.bak`` copy), the in-place coercion of any mismatched
     ``schema_version``, older or newer (taking a separate one-time ``.bak`` first), the
-    unknown-field drop, and the atomic write. Subclasses customize *only* the
-    class attributes below, so the on-disk shape stays exactly per-store.
+    unknown-field drop, and the atomic write. "Corrupt" is every shape that leaves a
+    file we cannot use as a store: undecodable bytes, unparseable JSON, and JSON that
+    parses to the wrong shape. Subclasses customize *only* the class attributes below,
+    so the on-disk shape stays exactly per-store.
     """
 
     FILENAME: str  # public: clauster.db.bootstrap reads it to find the legacy file
@@ -81,29 +91,49 @@ class KeyedJsonStore:
         self._path = state_dir.expanduser() / self.FILENAME
 
     def load(self) -> dict[str, dict]:
-        """Return ``{key: {persisted fields}}``.
+        """Return ``{key: {persisted fields}}``, tolerating a missing or corrupt file.
 
-        Tolerates a missing or corrupt file (returns ``{}``) and coerces ANY
-        mismatched ``schema_version`` — older or newer — to the current one, taking a
-        one-time ``.bak`` first. Unknown fields are dropped. Only a missing file
-        degrades silently: every other failure is warned about, and one that leaves a
-        file we could not interpret on disk is copied aside once (``.corrupt.bak``).
+        The read every caller wants except one: a store that cannot be used degrades to
+        ``{}`` so the app keeps running. Only a missing file degrades silently. Every
+        other failure is warned about, and a file that is still on disk and still
+        unusable is copied aside once as ``.corrupt.bak``.
+
+        ANY mismatched ``schema_version`` — older or newer — is coerced to the current
+        one, taking a separate one-time ``.bak`` first. Unknown fields are dropped.
+        """
+        try:
+            return self.load_strict()
+        except CorruptStateFile as exc:
+            self._discard(str(exc))
+            return {}
+        except OSError as exc:
+            # Unreadable (permissions, IO), not unusable: there is no copy to take, and
+            # it is the arm actually worth diagnosing, so it must not pass silently.
+            self._LOG.warning("could not read %s: %s", self._path, _describe(exc))
+            return {}
+
+    def load_strict(self) -> dict[str, dict]:
+        """Like :meth:`load`, but raise :class:`CorruptStateFile` instead of degrading.
+
+        For a caller that must not act on a degraded read. ``ops.migrate_state`` is
+        ``load()`` then ``save()``, so a silent ``{}`` there overwrites the file the
+        read could not understand — a wipe reported as success. The DB-backed
+        ``db.stores.StateStore.load_strict`` exists for the same reason (#949).
+
+        A missing file still returns ``{}``: there is nothing to misinterpret. An
+        unreadable one (permissions, IO) raises its ``OSError`` unchanged, which is what
+        the DB-backed store raises too — an unreadable file is not an empty one, and a
+        caller that writes back what it read must not write back ``{}``.
         """
         try:
             raw = self._path.read_text(encoding="utf-8")
         except FileNotFoundError:
             return {}
         except UnicodeDecodeError as exc:
-            # UnicodeDecodeError (a ValueError) for a non-UTF-8 file is the "corrupt
-            # file" case the docstring promises to tolerate — degrade to {}.
-            self._log_corrupt(exc)
-            self._backup_corrupt()
-            return {}
-        except OSError as exc:
-            # Unreadable (permissions, IO), not malformed — no copy to take, and it is
-            # the arm actually worth diagnosing, so it must not pass silently.
-            self._LOG.warning("could not read %s: %s: %s", self._path, type(exc).__name__, exc)
-            return {}
+            # A non-UTF-8 file: the bytes are not text, so there is no parse to attempt.
+            raise CorruptStateFile(_describe(exc)) from exc
+        # Any other OSError propagates: see the docstring. FileNotFoundError is caught
+        # above it, so an absent file still reads as an empty store.
         try:
             data = json.loads(raw)
         except (ValueError, RecursionError) as exc:
@@ -111,23 +141,39 @@ class KeyedJsonStore:
             # base-10 integer-string-conversion limit (CVE-2020-10735), on by default
             # for a >4300-digit int literal on every supported interpreter (>=3.11), and
             # RecursionError, which is not a ValueError at all — CPython's recursive
-            # scanner overflows on deeply-nested JSON before json can raise. Both used
-            # to escape and propagate; this store is read at startup, so that took the
-            # app down instead of degrading. `pointers.load_pointer` and `usage` catch
-            # the same pair. No `OSError` here: the read is its own try above.
-            self._log_corrupt(exc)
-            self._backup_corrupt()
-            return {}
+            # scanner overflows on deeply-nested JSON before json can raise (3.14.7+
+            # bounds the depth itself and raises JSONDecodeError instead). Both used to
+            # escape and propagate; this store is read at startup, so that took the app
+            # down instead of degrading. `pointers.load_pointer` and `usage` catch the
+            # same pair. No `OSError` here: the read is its own try above.
+            raise CorruptStateFile(_describe(exc)) from exc
         if not isinstance(data, dict):
-            return {}
+            # Valid JSON of the wrong shape is still a file we cannot use as a store,
+            # and it reaches the same destructive re-save, so it degrades the same way.
+            raise CorruptStateFile(f"top-level JSON is a {type(data).__name__}, not an object")
+        # Before the schema branch, not after: :meth:`_migrate` coerces a non-object
+        # record map to ``{}`` on its way past, which would launder real damage into a
+        # clean-looking empty store — and ``ops.migrate_state`` would then write that
+        # back over the file. An ABSENT map is not damage: a file that has never held a
+        # record looks exactly like that, and only a PRESENT non-object is corruption.
+        if self._MAP_KEY in data and not isinstance(data[self._MAP_KEY], dict):
+            raise CorruptStateFile(
+                f"{self._MAP_KEY!r} is a {type(data[self._MAP_KEY]).__name__}, not an object"
+            )
         if data.get("schema_version") != self._SCHEMA:
             data = self._migrate(data, raw)
 
-        records = data.get(self._MAP_KEY)
-        if not isinstance(records, dict):
-            return {}
+        # Total by construction: the map is either absent (an empty store) or the dict
+        # the check above already accepted, and ``_migrate`` substitutes ``{}`` for an
+        # absent one rather than dropping the key.
+        records = data.get(self._MAP_KEY, {})
         out: dict[str, dict] = {}
         for key, fields in records.items():
+            # Deliberately NOT the corrupt verdict the map-shape check above gives, even
+            # though the damage looks similar: this store is non-authoritative, so one
+            # unreadable record costs a label and the rest still load. Rejecting the
+            # whole file would throw away the records we CAN read to punish one we
+            # can't. A map that is not a map has no records to save that way.
             if isinstance(fields, dict):
                 out[key] = {k: fields[k] for k in self._PERSISTED_FIELDS if k in fields}
         return out
@@ -137,93 +183,49 @@ class KeyedJsonStore:
         payload = {"schema_version": self._SCHEMA, self._MAP_KEY: records}
         atomic_write_text(self._path, json.dumps(payload, indent=2))
 
-    def _log_corrupt(self, exc: BaseException) -> None:
-        """Warn that a file was discarded, naming which shape of corruption it was.
+    def _discard(self, reason: str) -> None:
+        """Warn that a file is being thrown away, and keep one copy of it.
 
-        Formatted with ``str``, never ``repr``: ``UnicodeDecodeError.args[1]`` is the
-        whole decoded buffer, so ``%r`` would put the entire file on one log line.
+        The two halves always travel together, so they live in one method: a warning
+        without a copy loses the file, and a copy without a warning is a silent
+        degrade. ``reason`` is a short description — never file content.
         """
-        self._LOG.warning("ignoring corrupt %s: %s: %s", self._path, type(exc).__name__, exc)
+        self._LOG.warning("ignoring corrupt %s: %s", self._path, reason)
+        self._backup_corrupt()
 
     def _backup_corrupt(self) -> None:
-        """Copy a file we could not interpret aside, once, as ``.corrupt.bak``.
+        """Copy a file we could not use aside, once, as ``.corrupt.bak``.
 
         Its own slot, not the pre-migration ``.bak``: that one is a snapshot of data we
         *did* parse, and a corrupt file must not be able to claim it and leave the next
-        real migration with no snapshot. A byte-level copy rather than a re-write,
-        because a file we could not decode has no text form and because the exact bytes
-        are the whole point of keeping it. Never re-taken — an existing copy is the
-        older, more original one. Best-effort: a failure is warned about, never raised,
-        so it can't block a load or abort a caller's transaction.
+        real migration with no snapshot. Never re-taken — an existing copy is the older,
+        more original one. Best-effort: a failure is warned about, never raised, so it
+        can't block a load or abort a caller's transaction.
 
         The copy exists because a caller may write over the file straight after a
-        degraded load: ``ops.migrate_state`` is ``load()`` then ``save()``.
-
-        Streamed into a ``mkstemp`` temp (created 0600) and then replaced onto the
-        target, the shape :func:`clauster.ops._write_restored_config` records: a
-        ``shutil.copy2`` would propagate the *source* mode, and a legacy file predating
-        the atomic writer (or restored through ``ops._safe_extract_tar``, which writes
-        members with a bare ``open``) sits at the umask default — which would publish a
-        hosted store's ``claude`` session uuid to every local user. The unique temp name
-        is the same rule :mod:`clauster.atomicio` states: two concurrent readers must not
-        share one fixed ``.tmp``.
+        degraded load: ``db.bootstrap.import_legacy_json`` degrades by design.
+        :func:`clauster.atomicio.atomic_copy_file` re-opens and streams the file rather
+        than writing back the ``raw`` that failed — that is what keeps a non-UTF-8 file
+        copyable at all, and what keeps the copy byte-exact instead of newline-folded.
         """
         backup = self._path.with_suffix(self._path.suffix + ".corrupt.bak")
         if backup.exists():
             return
-        tmp: Path | None = None
         try:
-            # Inside the guard, both of them: ``ensure_private_dir`` is fail-closed on
-            # its own account (it re-raises so a secret is never stored under a
-            # directory it could not secure) and ``mkstemp`` opens an fd, so a read-only
-            # mount, a state dir owned by another user, or fd-table pressure would
-            # otherwise raise straight out of a load that promises to degrade.
-            ensure_private_dir(self._path.parent)
-            fd, tmp_name = tempfile.mkstemp(
-                dir=backup.parent, prefix=backup.name + ".", suffix=".tmp"
-            )
-            tmp = Path(tmp_name)
-            # If fdopen raises at the open(2) level the fd was NOT adopted, so the raw
-            # mkstemp fd would leak — close it. Guarded, because if it *was* adopted an
-            # unguarded os.close would raise EBADF over the real error.
-            try:
-                fh = os.fdopen(fd, "wb")
-            except BaseException:
-                with contextlib.suppress(OSError):
-                    os.close(fd)
-                raise
-            with fh, self._path.open("rb") as src:
-                shutil.copyfileobj(src, fh)
-                fh.flush()
-                os.fsync(fh.fileno())
-            replace_with_retry(tmp, backup)
+            atomic_copy_file(self._path, backup)
         except OSError as exc:
             self._LOG.warning(
                 "could not copy corrupt %s aside: %s: %s", self._path, type(exc).__name__, exc
             )
-            _unlink_quietly(tmp)
-        except BaseException:
-            # A KeyboardInterrupt mid-copy still propagates — best-effort covers OSError
-            # only, exactly as the pre-migration backup does — but it must not leave a
-            # half-written temp sitting in the state dir.
-            _unlink_quietly(tmp)
-            raise
-        else:
-            # The file's data is fsynced above; this is its directory entry. A crash
-            # right after the rename must not lose the only copy of what we discarded.
-            # Suppressed rather than left bare: the copy is already on disk by now, so a
-            # durability best-effort must not become the one arm that escapes a load
-            # documented to degrade.
-            with contextlib.suppress(OSError):
-                fsync_dir(backup.parent)
 
     def _migrate(self, data: dict, raw: str) -> dict:
         """Back up once, then coerce to the current schema.
 
         Only v1 exists today: a well-formed record map is preserved as-is, and a
-        missing or non-dict map degrades to an empty v1 — we never trust an
-        ambiguous shape. The pre-coerce ``.bak`` guards against losing data we
-        couldn't interpret.
+        missing map becomes an empty v1. The ``else {}`` covers only that missing case
+        now — :meth:`load_strict` rejects a present non-object map before it reaches
+        here, because coercing one would hide the damage. The pre-coerce ``.bak`` guards
+        against losing data we couldn't interpret.
         """
         backup = self._path.with_suffix(self._path.suffix + ".bak")
         if not backup.exists():

@@ -64,6 +64,8 @@ state dir are usable, and reports per-extra (`extra:<name>`) and per-binary
 
 `backup` tars `state_dir` + the active config; `restore <archive> --state-dir …`
 puts it back; `migrate` is a legacy helper for pre-database `state.json` files.
+`migrate` re-saves what it reads, so it **exits 1 without writing** if it cannot
+read or cannot understand the legacy `state.json`.
 Full runbook (including corruption recovery):
 [Operations → Backup, restore, and corruption recovery](../operations.md#backup-restore-and-corruption-recovery).
 

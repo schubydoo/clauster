@@ -46,7 +46,9 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
+from typing import IO, Any
 
 try:
     import fcntl  # POSIX only; Windows has no flock equivalent we rely on here.
@@ -336,17 +338,15 @@ def ensure_private_dir(path: Path) -> None:
         raise
 
 
-def atomic_write_text(target: Path, text: str) -> None:
-    r"""Atomically and durably write ``text`` to ``target`` at mode ``0600``.
+@contextlib.contextmanager
+def _atomic_temp(target: Path, mode: str, **open_kwargs: Any) -> Iterator[IO[Any]]:
+    """Yield an open temp file that replaces ``target`` when the block exits cleanly.
 
-    Writes a unique temp file in ``target``'s directory, ``fsync``s it, then
-    ``os.replace``s it onto ``target`` — a reader never observes a partial file and
-    a crash can't leave an empty target. The temp is removed if anything fails
-    before the rename. The directory is ensured present + owner-only first.
-
-    ``newline="\n"`` keeps the on-disk bytes identical across OSes (the default would
-    translate ``\n`` to ``\r\n`` on Windows, #914). The replace retries over a transient
-    Windows sharing violation (:func:`replace_with_retry`).
+    The shared body of :func:`atomic_write_text` and :func:`atomic_copy_file`: ensure
+    the directory, open a unique ``mkstemp`` temp (mode ``0600``), hand it to the
+    caller, then ``fsync`` + ``os.replace`` it onto ``target`` and ``fsync`` the
+    directory entry. Anything that raises removes the temp and leaves ``target``
+    untouched. One copy so the fd-leak guard below is written — and tested — once.
     """
     directory = target.parent
     ensure_private_dir(directory)
@@ -361,7 +361,7 @@ def atomic_write_text(target: Path, text: str) -> None:
         # later wrapper stage raised, the fd is already closed, and an unguarded
         # os.close would raise EBADF and mask the original error.
         try:
-            fh = os.fdopen(fd, "w", encoding="utf-8", newline="\n")
+            fh = os.fdopen(fd, mode, **open_kwargs)
         except BaseException:
             try:
                 os.close(fd)
@@ -369,7 +369,7 @@ def atomic_write_text(target: Path, text: str) -> None:
                 pass
             raise
         with fh:
-            fh.write(text)
+            yield fh
             fh.flush()
             os.fsync(fh.fileno())
         replace_with_retry(tmp, target)
@@ -379,6 +379,40 @@ def atomic_write_text(target: Path, text: str) -> None:
         tmp.unlink(missing_ok=True)
         raise
     fsync_dir(directory)
+
+
+def atomic_write_text(target: Path, text: str) -> None:
+    r"""Atomically and durably write ``text`` to ``target`` at mode ``0600``.
+
+    Writes a unique temp file in ``target``'s directory, ``fsync``s it, then
+    ``os.replace``s it onto ``target`` — a reader never observes a partial file and
+    a crash can't leave an empty target. The temp is removed if anything fails
+    before the rename. The directory is ensured present + owner-only first.
+
+    ``newline="\n"`` keeps the on-disk bytes identical across OSes (the default would
+    translate ``\n`` to ``\r\n`` on Windows, #914). The replace retries over a transient
+    Windows sharing violation (:func:`replace_with_retry`).
+    """
+    with _atomic_temp(target, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)
+
+
+def atomic_copy_file(src: Path, target: Path) -> None:
+    """Atomically and durably copy ``src`` to ``target`` at mode ``0600``.
+
+    The byte-for-byte counterpart of :func:`atomic_write_text`, for a file that has no
+    text form we can trust: the source is streamed as bytes, so nothing is decoded and
+    no newline is translated. ``target`` therefore holds the source's exact bytes, and
+    its mode comes from the ``0600`` temp rather than from ``src`` — unlike
+    ``shutil.copy2``, which would propagate a permissive source mode onto a copy that
+    may hold session-identifying state.
+
+    ``src`` is read at copy time, not snapshotted beforehand, so a concurrent writer can
+    make the copy differ from what the caller last read. Every caller here copies a file
+    it has already decided is unusable, which nothing rewrites in place.
+    """
+    with _atomic_temp(target, "wb") as fh, src.open("rb") as fsrc:
+        shutil.copyfileobj(fsrc, fh)
 
 
 def fsync_dir(directory: Path) -> None:
