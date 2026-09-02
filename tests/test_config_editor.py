@@ -690,6 +690,32 @@ def test_validation_message_redacts_every_part_not_only_the_first() -> None:
     # joined-then-redacted form could not reach.
     assert msg.index("alpha") < msg.index("api_token")
     assert canary not in msg
+    # `alpha`'s reason is pydantic's own (type `int_parsing`), so it is NOT redacted — the
+    # redactor masks everything after a `key:`, and blanket-applying it would erase the
+    # reason on every secret-shaped key rather than a value.
+    assert "alpha: Input should be a valid integer" in msg
+
+
+def test_validation_message_keeps_the_reason_on_a_secret_shaped_key() -> None:
+    """A built-in pydantic reason survives on a secret-shaped field (#1395).
+
+    ``include_input=False`` already strips the input from every error pydantic writes
+    itself, so there is nothing to mask; masking anyway turned the whole ``auth.*`` block
+    into sentinels and cost `doctor` its diagnosis.
+    """
+    from pydantic import ValidationError
+
+    from clauster.config_editor import _friendly_validation_message
+
+    class M(BaseModel):
+        api_token_ttl: int
+
+    with pytest.raises(ValidationError) as ei:
+        M(api_token_ttl="nope")
+    msg = _friendly_validation_message(ei.value)
+    assert msg == (
+        "api_token_ttl: Input should be a valid integer, unable to parse string as an integer"
+    )
 
 
 def test_exclusive_bounds_are_emitted_distinctly() -> None:

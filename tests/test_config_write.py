@@ -768,14 +768,17 @@ def test_load_frontmatter_yaml_names_the_reader_error_coordinate_space() -> None
 
 def test_yaml_error_where_degrades_to_the_category_alone_with_no_position() -> None:
     # The last arm of `_yaml_error_where`, exercised DIRECTLY because it is unreachable
-    # through the seam: every error `safe_load` raises sets `problem_mark`, and the one that
-    # does not (`ReaderError`) carries `.position`. So a YAMLError with neither cannot be
-    # produced by `load_frontmatter_yaml` -- which is exactly why the arm exists. It is the
-    # defence that keeps a future PyYAML shape degrading to the category instead of raising
-    # an AttributeError out of the handler whose whole job is preventing 500s.
-    assert cw._yaml_error_where(yaml.YAMLError("no marks here")) == " (YAMLError)"
+    # through the FRONTMATTER seam: every error `safe_load` raises sets `problem_mark`, and
+    # the one that does not (`ReaderError`) carries `.position`. So a YAMLError with neither
+    # cannot be produced by `load_frontmatter_yaml` -- which is exactly why the arm exists. It
+    # is the defence that keeps a future PyYAML shape degrading to the category instead of
+    # raising an AttributeError out of the handler whose whole job is preventing 500s.
+    # (#1395 gave the arm a live producer on the OTHER seam: `config.UnfittingYamlTagError`
+    # and `TooDeeplyNestedYamlError` are raised by hand and carry neither.)
+    kw = {"block_name": "frontmatter block"}
+    assert cw._yaml_error_where(yaml.YAMLError("no marks here"), **kw) == " (YAMLError)"
     # ...and, like every other arm, it carries nothing derived from the document.
-    assert "no marks here" not in cw._yaml_error_where(yaml.YAMLError("no marks here"))
+    assert "no marks here" not in cw._yaml_error_where(yaml.YAMLError("no marks here"), **kw)
 
 
 def test_load_frontmatter_yaml_reports_the_second_position_when_it_differs() -> None:

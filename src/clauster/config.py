@@ -1792,10 +1792,41 @@ def _apply_env_overrides(data: dict) -> dict:
     return data
 
 
+class UnfittingYamlTagError(yaml.YAMLError):
+    """A YAML tag whose value ``SafeConstructor`` could not build (``!!int "abc"``).
+
+    PyYAML raises these **outside** :class:`yaml.YAMLError` — ``ValueError``,
+    ``AttributeError``, ``KeyError``, ``IndexError`` — and the payload carries the offending
+    document scalar (``invalid literal for int() with base 10: '<the value>'``). That is a
+    parse failure wearing another exception's clothes, so every caller's YAML arm should see
+    it: without this, ``clauster doctor`` echoed the scalar into `/api/doctor` on the
+    ``ValueError`` path and tracebacked on the ``AttributeError`` one (#1395).
+
+    Deliberately message-free at the raise site — the class name is the whole diagnosis, the
+    same shape :func:`config_write.load_frontmatter_yaml` settled on for the identical family
+    (#1369). Reproduced per tag: ``!!int``/``!!float`` -> ``ValueError`` (the second
+    lowercases the scalar but still carries it), ``!!bool`` -> ``KeyError``, ``!!timestamp``
+    -> ``AttributeError``. Every other tag already fails as a ``ConstructorError``, which is
+    a ``YAMLError``. That list records where each class was SEEN, not a proof of
+    exhaustiveness.
+    """
+
+
+class TooDeeplyNestedYamlError(yaml.YAMLError):
+    """A config whose flow collections overflow PyYAML's composer before it can finish.
+
+    ``RecursionError`` is not a ``YAMLError`` either, so ``clauster doctor`` — the command
+    whose job is diagnosing a broken config — tracebacked on one, and `/api/doctor` answered
+    500. Same structural verdict as any other parse failure: we could not read the file.
+    """
+
+
 def load_config(path: str | os.PathLike | None = None) -> ClausterConfig:
     """Load, env-override, and validate the Clauster config.
 
-    Raises FileNotFoundError if no config file is found in the search order.
+    Raises FileNotFoundError if no config file is found in the search order, and a
+    :class:`yaml.YAMLError` if it does not parse — including the two subclasses above, which
+    exist so that "does not parse" is one contract rather than four exception families.
     """
     explicit = Path(path).expanduser() if path is not None else None
     candidates = _candidate_paths(explicit)
@@ -1804,7 +1835,19 @@ def load_config(path: str | os.PathLike | None = None) -> ClausterConfig:
         searched = ", ".join(str(p) for p in candidates)
         raise FileNotFoundError(f"no clauster.yml found (searched: {searched})")
 
-    raw = yaml.safe_load(found.read_text(encoding="utf-8")) or {}
+    text = found.read_text(encoding="utf-8")
+    try:
+        raw = yaml.safe_load(text) or {}
+    except RecursionError as exc:
+        raise TooDeeplyNestedYamlError from exc
+    except (ValueError, AttributeError, KeyError, IndexError) as exc:
+        # Scoped to the `safe_load` call alone, so nothing past the parse is reclassified.
+        # `read_text` is deliberately OUTSIDE it: a non-UTF-8 file raises UnicodeDecodeError,
+        # which is a ValueError, and is an encoding fault rather than a YAML one.
+        #
+        # Fails closed in one direction only: this converts a crash (or a leak) into a
+        # rejection, never a rejection into an accept.
+        raise UnfittingYamlTagError from exc
     if not isinstance(raw, dict):
         raise ValueError(f"config root must be a mapping, got {type(raw).__name__}: {found}")
 

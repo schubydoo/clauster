@@ -111,10 +111,15 @@ def run_doctor(
         checks.append(Check("config", FAIL, f"invalid config: {detail}"))
         config = None
     except ValueError as exc:
-        # What is left is clauster-authored (a root that is not a mapping, an unreadable
-        # ``*_FILE`` env override) and names types and paths, not values. Redacted anyway
-        # so this arm cannot become the next leak: over-masking a diagnostic costs a
-        # re-read, under-masking reaches the browser.
+        # What is left is clauster-authored: a root that is not a mapping, an unreadable
+        # ``*_FILE`` env override, a non-UTF-8 file. Each names types and paths, not values.
+        #
+        # It is *only* clauster-authored because ``load_config`` now re-raises PyYAML's
+        # constructor escapes as :class:`UnfittingYamlTagError` — a `!!int "<token>"` tag
+        # made ``safe_load`` itself raise a plain ``ValueError`` carrying the scalar, which
+        # landed here and which the line-anchored redactor could not reach (the value sits
+        # mid-prose after ``base 10:``, with no key to anchor on). Redacted anyway, so this
+        # arm cannot become the next leak: over-masking a diagnostic costs a re-read.
         checks.append(Check("config", FAIL, f"invalid config: {redact_secret_lines(str(exc))}"))
         config = None
     except yaml.YAMLError as exc:
@@ -126,8 +131,10 @@ def run_doctor(
         # its message, so a malformed ``token:`` line handed the token straight to
         # `/api/doctor` (#1395). Same helper and same reasoning as the skills-frontmatter
         # seam (#1369); ``line_offset`` stays 0 because we parse the whole file, so
-        # PyYAML's line numbers are already the file's.
-        checks.append(Check("config", FAIL, f"config is not valid YAML{_yaml_error_where(exc)}"))
+        # PyYAML's line numbers are already the file's, and ``block_name`` says "file" for
+        # the same reason.
+        where = _yaml_error_where(exc, block_name="file")
+        checks.append(Check("config", FAIL, f"config is not valid YAML{where}"))
         config = None
 
     if config is None:

@@ -226,10 +226,11 @@ service](installation.md#run-as-a-systemd-service-linux).
 
 **What you see:** `doctor` fails the `config` row with one of three details —
 `no config found: ...`, `invalid config: ...`, or `config is not valid YAML
-(...)` — and most other verbs exit `2` with a one-line `clauster: config error:`
-message. Three behave differently: `doctor` itself exits `1` with the table
-above, `clauster run` with no config at all opens the setup wizard rather than
-failing, and `install-service` still renders a unit using defaults.
+(...)` — and most other verbs exit `2` with a `clauster: config error:` message
+carrying the raw parser or validation error. Three behave differently: `doctor`
+itself exits `1` with the table above, `clauster run` with no config at all
+opens the setup wizard rather than failing, and `install-service` still renders
+a unit using defaults.
 
 **Most likely cause:** no `clauster.yml` where Clauster looks for one, or a
 mistake inside it. The three details separate the cases, which is what tells you
@@ -238,18 +239,19 @@ where to look:
 | Detail | What is wrong | Where the message points |
 | --- | --- | --- |
 | `no config found` | No file at any searched path | The search order |
-| `config is not valid YAML` | The file does not parse — a stray tab, an unclosed quote | The parser's own error class, plus a line and column |
+| `config is not valid YAML` | The file does not parse — a stray tab, an unclosed quote | The parser's error class, plus a line and column. When the parser also knows where the construct opened, a second position follows. An unfitting tag (`!!int "abc"`) gives the class alone |
 | `invalid config` | The file parses but a value is rejected | One `key.path: reason` entry per rejected key — or, for a root that is not a mapping, the root's type and the file |
 
 ```sh
 clauster doctor -c /path/to/clauster.yml   # same file the service uses
 ```
 
-**The detail points at the fault. It never quotes the file.** The dashboard
-serves these same rows over `/api/doctor`, so each one is built from positions
-and key paths only. A `clauster.yml` whose `auth.token` line is the broken one
-would otherwise put that token in the browser. Open the file at the reported
-line to read the offending text.
+**The detail points at the fault. It never echoes the offending source line, and
+never the whole parsed mapping.** The dashboard serves these same rows over
+`/api/doctor`. Each detail is built from positions and key paths. A
+`clauster.yml` whose `auth.token` line is the broken one would otherwise put
+that token in the browser. A validator that rejects a path still names that
+path. Open the file at the reported line to read the offending text.
 
 **Mechanism:** [Configuration — loading &
 overrides](guides/configuration.md#loading-overrides).

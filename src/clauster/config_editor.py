@@ -357,6 +357,20 @@ def validate_edits(
     return candidate
 
 
+#: The pydantic error types whose ``msg`` is written by a *validator* rather than by pydantic,
+#: and can therefore quote the rejected input. Everything else builds ``msg`` from the
+#: CONSTRAINT ("Input should be a valid integer", "Input should be 'a' or 'b'") and the input
+#: itself only ever appeared under ``input_value=``, which ``include_input=False`` drops.
+#:
+#: This is the gate on :func:`redact_secret_lines` in :func:`_friendly_validation_message`, and
+#: it is narrow on purpose. The redactor masks the whole value after a secret-shaped key, so
+#: applying it to every line replaced the *reason* on every ``auth.*`` / ``*token*`` / ``*secret*``
+#: field with the sentinel — turning "auth.session_max_age_seconds: Input should be a valid
+#: integer" into "auth.session_max_age_seconds: ********" and costing doctor its whole job on
+#: the auth block (#1395). A new member belongs here, not in a wider blanket.
+_ECHOING_ERROR_TYPES = frozenset({"value_error", "assertion_error"})
+
+
 def _friendly_validation_message(exc: ValidationError) -> str:
     """Compress a pydantic ``ValidationError`` into operator-facing per-field lines.
 
@@ -371,6 +385,12 @@ def _friendly_validation_message(exc: ValidationError) -> str:
     value is the whole parsed mapping. ``ops.run_doctor`` renders a broken
     ``clauster.yml`` through here for the same reason, and its result reaches
     `/api/doctor` (#1395).
+
+    What that argument cannot reach is a *validator's own* message, which is free to quote
+    the value it rejected — so those lines, and only those, additionally go through
+    :func:`redact_secret_lines` (see :data:`_ECHOING_ERROR_TYPES`). Each is redacted
+    **before** the join, not after: the redactor masks the value of the FIRST ``key: value``
+    pair on a line, so redacting the joined string covered error one and nothing after it.
     """
     parts: list[str] = []
     for err in exc.errors(include_url=False, include_input=False):
@@ -378,18 +398,8 @@ def _friendly_validation_message(exc: ValidationError) -> str:
         msg = err.get("msg") or "invalid value"
         # pydantic prefixes custom-validator failures with "Value error, " — noise here.
         msg = msg.removeprefix("Value error, ")
-        # ``msg`` can echo the offending INPUT value. Safe today because every
-        # secret-bearing field sits in EXCLUDED_FIELDS (never editable) and the
-        # secret-adjacent model validators raise static messages — but wrap in the
-        # secret-line redactor anyway so a future Tier-A/B addition or a validator
-        # that starts echoing its value cannot leak into the dashboard banner.
-        #
-        # ⚠️ Redact PER PART, before joining. :func:`redact_secret_lines` masks the value
-        # of the FIRST ``key: value`` pair it finds on a line, so redacting the joined
-        # ``"a: …; auth.token: …"`` string anchored on ``a`` and left every later part
-        # unmasked — the guard silently covered only error one. Now every part is its own
-        # anchored line, so coverage does not depend on error order.
-        parts.append(redact_secret_lines(f"{loc}: {msg}" if loc else msg))
+        line = f"{loc}: {msg}" if loc else msg
+        parts.append(redact_secret_lines(line) if err["type"] in _ECHOING_ERROR_TYPES else line)
     return "; ".join(parts) or "validation failed"
 
 

@@ -110,7 +110,7 @@ def test_doctor_endpoint_never_echoes_a_broken_configs_contents(write_config, tm
     canary = "FAKEFAKEFAKEFAKEfake42"
     cfg = write_config(f"claude:\n  binary: {FAKE_CLAUDE}\nstate_dir: {tmp_path}/.s\n")
     client = TestClient(create_app(load_config(cfg)))
-    cfg.write_text(f'auth:\n  token: "{canary}\n', encoding="utf-8")
+    cfg.write_text(f'auth:\n  token: "{canary}\n', encoding="utf-8", newline="")
     r = client.get("/api/doctor")
     assert r.status_code == 200
     assert canary not in r.text
