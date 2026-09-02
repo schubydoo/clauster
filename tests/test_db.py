@@ -862,10 +862,9 @@ def test_hosted_agent_start_ticks_migration_adds_and_drops_nullable_column(tmp_p
             assert "agent_start_ticks" in columns
 
             # Pinned by revision id, not "-1". A relative step silently re-aims at whatever
-            # ends up below this migration, so it would keep passing after the parent is
-            # retargeted even if the retarget were wrong. ☢️ TODO(1404): this becomes
-            # "c1f4a70b9e63" (0010, #1402) together with the migration's own down_revision.
-            command.downgrade(cfg, "8e2d05b7a913")  # 0009 — this migration's parent
+            # ends up below this migration, so it would keep passing after a parent change
+            # even if that change were wrong.
+            command.downgrade(cfg, "c1f4a70b9e63")  # 0010 — this migration's parent
             columns = {
                 row[1] for row in conn.execute(text("PRAGMA table_info(hosted_sessions)")).all()
             }

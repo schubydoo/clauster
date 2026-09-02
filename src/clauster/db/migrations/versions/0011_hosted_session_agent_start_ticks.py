@@ -34,7 +34,7 @@ undrifted one, while a hosted row gets one sample per clauster restart, and the 
 most needs the fix is a long-lived Direct Session that is never respawned.
 
 Revision ID: c4f1b6a2e590
-Revises: 8e2d05b7a913
+Revises: c1f4a70b9e63
 Create Date: 2026-09-01
 
 """
@@ -48,24 +48,10 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "c4f1b6a2e590"
-# ☢️ TODO(1404): PROVISIONAL PARENT. Retarget before this merges:
-#
-#     down_revision: str | None = "c1f4a70b9e63"  # 0010_instance_keeper_start_ticks (#1402)
-#
-# It points at 0009 only so the chain resolves locally: issue 1402's PR carries the 0010
-# file, and without it on disk this branch's suite cannot build a chain that names it.
-#
-# Alembic chains on revision IDs, not filenames, so reserving the 0011 filename reserves
-# nothing. 1402's branch was cut from a main without this file and sets `down_revision` to
-# 8e2d05b7a913 as well. Merged in that state the two are TWO HEADS off 0009, and
-# `bootstrap._pending_revision` calls `get_current_head()`, which raises `MultipleHeads` --
-# failing every migration AND app boot, not just this feature.
-#
-# So: these two PRs must not both merge while this line reads 8e2d05b7a913. 1402 merges
-# first, then this line is set to c1f4a70b9e63 and this branch is rebased.
-# `test_the_migration_chain_has_exactly_one_head` reds CI if that is ever forgotten, so the
-# failure lands in a check rather than in a user's boot.
-down_revision: str | None = "8e2d05b7a913"  # 0009_instance_bridge_start_ticks (#1399)
+# Alembic chains on revision IDs, not filenames. This parent is 0010 from issue 1402, which
+# merged first; `test_the_migration_chain_has_exactly_one_head` reds CI if a later branch
+# ever forks the chain off an older parent.
+down_revision: str | None = "c1f4a70b9e63"  # 0010_instance_keeper_start_ticks (#1402)
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
