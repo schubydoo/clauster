@@ -332,6 +332,32 @@ def proc_start_pair(pid: int) -> tuple[float | None, int | None]:
     return jiffies_to_epoch(ticks), ticks
 
 
+def proc_is_gone(pid: int) -> bool:
+    """Whether ``pid`` names no live, non-zombie process — the grace-loop probe (#1402).
+
+    ``proc_create_time(pid) is None`` was the idiom at both keeper grace loops
+    (:meth:`clauster.runner.SessionRunner._cleanup_keeper` and
+    :func:`clauster.pty_keeper.stop_keeper`), and it is wrong on an emulated procfs with no
+    ``btime`` (gVisor, some container runtimes, WSL1 — see :func:`jiffies_to_epoch`): psutil's
+    ``create_time`` ends in ``+ boot_time()``, which raises there, so a keeper that is plainly
+    running reads as gone. Both loops then returned before their identity compare and
+    force-killed nothing, silently — a lingering keeper and its pty bridge were never wound
+    down and nothing was logged. Boot-relative ticks read fine on exactly that host, which is
+    what makes the bug invisible rather than total.
+
+    Asking the status directly answers the same question identically everywhere and needs no
+    clock at all. A **zombie counts as gone**: it has already exited, only its exit status
+    remains, and its tree went with it — force-killing it is pointless and the identity
+    compare downstream would report it as "no longer that keeper", which is untrue and
+    misleading. Gone / denied / a pid that cannot name a process are all gone, matching what
+    ``proc_create_time is None`` answered for them.
+    """
+    try:
+        return psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, ValueError):
+        return True
+
+
 def proc_cwd(pid: int) -> Path | None:
     """Return ``pid``'s current working directory, or ``None`` when it can't be read.
 
@@ -542,7 +568,17 @@ def is_keeper_process(pid: int) -> bool:
         return False
 
 
-def is_live_keeper(pid: int, proc_start: str | float | None, *, tolerance: float = 2.0) -> bool:
+def is_live_keeper(
+    pid: int,
+    proc_start: str | float | None,
+    *,
+    tolerance: float = 2.0,
+    # Keyword-REQUIRED, no default (#1402), for the reason `is_live_bridge`'s twin states:
+    # threading a start-ticks argument through some call sites and defaulting it on the rest
+    # is the failure #1399's review found three rounds running, and it is silent. Without a
+    # default a missed site is a type error pyright names on the spot.
+    start_ticks: int | None,
+) -> bool:
     """Whether ``pid`` is a trustworthy, currently-running ``clauster.pty_keeper`` (#1178).
 
     The keeper counterpart of :func:`is_live_bridge`, and the same wrapper over
@@ -552,13 +588,27 @@ def is_live_keeper(pid: int, proc_start: str | float | None, *, tolerance: float
     that happens to hold that pid; on a host running many interactive sessions those
     are exactly the pids most likely to be reused by another keeper.
 
-    ``proc_start is None`` degrades to :func:`is_keeper_process`'s cmdline+alive
-    answer, deliberately: a row written before ``keeper_proc_start`` was persisted has
-    no start-time to compare, and treating unknown as a mismatch would report a live
-    keeper as dead — which for ``forget`` means pruning the record of a running
-    process, the very failure the check exists to prevent.
+    ``start_ticks`` is the persisted ``keeper_start_ticks`` and makes the start-time half
+    immune to clock drift; see :func:`is_live_process` for which of the two then carries
+    which job. It matters here for the mirror image of the reason it matters on the bridge
+    (#1402): a false "not live" from this predicate lets ``forget`` delete the record of a
+    keeper that is still holding a pty bridge's terminal, and ``forget`` never kills — so
+    the keeper and its bridge run on with neither card nor row, and nothing automated
+    recovers them.
+
+    ``proc_start is None`` **with no ticks either** degrades to :func:`is_keeper_process`'s
+    cmdline+alive answer, deliberately: a row written before ``keeper_proc_start`` was
+    persisted has no start-time to compare, and treating unknown as a mismatch would report
+    a live keeper as dead — the very failure the check exists to prevent. Recorded ticks
+    with no epoch decide alone and exactly, which is stricter; see :func:`is_live_process`.
     """
-    return is_live_process(pid, proc_start, tolerance=tolerance, require_cmdline=is_keeper_cmdline)
+    return is_live_process(
+        pid,
+        proc_start,
+        tolerance=tolerance,
+        require_cmdline=is_keeper_cmdline,
+        start_ticks=start_ticks,
+    )
 
 
 def is_bridge_process(pid: int) -> bool:

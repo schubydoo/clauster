@@ -1112,8 +1112,8 @@ class SessionRunner:
         (:meth:`_recover_keeper_pid`), and :meth:`stop` force-kills that tree — so a stale
         keeper pid is the one value here that could reap a stranger's processes. It stays
         on ``_persist_subset``'s own ``inst.keeper_pid`` passthrough (with its paired
-        ``keeper_proc_start``, #1178), which means a stop()-ed card's row keeps both while
-        a REBUILT card's row drops both.
+        ``keeper_proc_start`` and ``keeper_start_ticks``, #1178 / #1402), which means a
+        stop()-ed card's row keeps all three while a REBUILT card's row drops all three.
         """
         if inst.bridge_pid is not None:
             return {
@@ -1170,9 +1170,12 @@ class SessionRunner:
                 **self._persisted_liveness(inst),
                 # Always as a PAIR (#1178), never the pid alone: a keeper pid with a stale
                 # or absent start time is what lets a DIFFERENT live keeper on that pid
-                # answer for this one. Both are set and cleared together on the instance.
+                # answer for this one. All three are set and cleared together on the
+                # instance — the epoch identifies the keeper and the boot-relative ticks
+                # keep that identification from moving with the host clock (#1402).
                 "keeper_pid": inst.keeper_pid,
                 "keeper_proc_start": inst.keeper_proc_start,
+                "keeper_start_ticks": inst.keeper_start_ticks,
             }
             for inst in self._instances.values()
             # #951 rounds 2+3: a dead card (STOPPED/CRASHED/ERROR) whose row this
@@ -3014,39 +3017,50 @@ class SessionRunner:
         bridge_proc_start: float | None,
         *,
         bridge_start_ticks: int | None,  # keyword-required — see _recover_keeper_pid
-    ) -> tuple[int | None, float | None]:
-        """Return the ``(keeper_pid, keeper_proc_start)`` PAIR for this bridge (#1178).
+    ) -> tuple[int | None, float | None, int | None]:
+        """Return the ``(keeper_pid, keeper_proc_start, keeper_start_ticks)`` TRIO (#1178).
 
-        Thin wrapper over :meth:`_recover_keeper_pid` that snapshots the pid's create-time
-        at the moment of classification — the same "captured when the keeper was
+        Thin wrapper over :meth:`_recover_keeper_pid` that snapshots the pid's start
+        identity at the moment of classification — the same "captured when the keeper was
         classified" value :func:`clauster.pty_keeper.stop_keeper` documents for its
         ``expect_create_time`` guard.
 
-        Callers must publish **both or neither**. A keeper pid carrying the *previous*
-        generation's start time is worse than carrying none: the comparison then fails for
+        Both halves come from ONE :func:`procutil.proc_start_pair` read (#1402), never two
+        samples: two reads can straddle a death plus a pid recycle and yield halves that
+        describe DIFFERENT processes, and :func:`procutil.is_live_process` would then
+        authenticate the recycled occupant — it matches the ticks exactly (they are the new
+        process's) and the epoch only within ``_DRIFT_EPOCH_TOLERANCE``.
+
+        Callers must publish **all three or none**. A keeper pid carrying the *previous*
+        generation's start values is worse than carrying none: the comparison then fails for
         a keeper that is genuinely alive, and :meth:`forget` would drop the record of a
-        running process — the exact failure the pair exists to prevent. ``None`` for the
-        start time (psutil error, or a keeper that exited between the two reads) is the
-        honest unknown and degrades to the cmdline-only gate.
+        running process — the exact failure the trio exists to prevent. ``None`` for either
+        start value (psutil error, no ``/proc``, or a keeper that exited between the reads)
+        is the honest unknown; with neither the gate degrades to cmdline-only.
 
         The snapshot is **fenced by validation time** (review catch): if the keeper exits
-        and the OS recycles its pid between :meth:`_recover_keeper_pid` and the
-        ``proc_create_time`` read, the pair would otherwise authenticate the NEW occupant —
-        and a keeper-shaped occupant would strand ``forget`` with ``InstanceStillLive``,
-        the very bug this defends against. A process created *after* validation began
-        cannot be the keeper that validation saw, so its time is rejected and the whole
-        recovery reports "no keeper" — honest, since the validated keeper is gone.
+        and the OS recycles its pid between :meth:`_recover_keeper_pid` and the start read,
+        the values would otherwise authenticate the NEW occupant — and a keeper-shaped
+        occupant would strand ``forget`` with ``InstanceStillLive``, the very bug this
+        defends against. A process created *after* validation began cannot be the keeper
+        that validation saw, so it is rejected and the whole recovery reports "no keeper" —
+        honest, since the validated keeper is gone. The fence reads the EPOCH because that
+        is the only half comparable with a wall-clock instant; ticks are boot-relative. It
+        therefore cannot fire on a host with no comparable epoch, exactly as before.
         """
         validated_at = time.time()
         keeper_pid = self._recover_keeper_pid(
             name, bridge_pid, bridge_proc_start, bridge_start_ticks=bridge_start_ticks
         )
         if keeper_pid is None:
-            return None, None
-        created = procutil.proc_create_time(keeper_pid)
+            return None, None, None
+        created, ticks = procutil.proc_start_pair(keeper_pid)
         if created is not None and created > validated_at:
-            return None, None  # pid recycled mid-recovery: the keeper we validated is gone
-        return keeper_pid, created
+            # pid recycled mid-recovery: the keeper we validated is gone. Drop the ticks
+            # too — they are the same rejected process's, and publishing them beside a
+            # None pid is exactly the split identity the trio rule forbids.
+            return None, None, None
+        return keeper_pid, created, ticks
 
     def _await_ready_pty(self, sidecar: Path, proc: subprocess.Popen) -> dict:
         """Block until the keeper publishes a connect URL, the keeper exits, or timeout."""
@@ -3144,12 +3158,19 @@ class SessionRunner:
             return instance
         self._procs[instance.instance_id] = proc
         instance.keeper_pid = proc.pid
-        # Snapshot the keeper's create-time with its pid (#1178) so a later `forget` can
+        # Snapshot the keeper's start identity with its pid (#1178) so a later `forget` can
         # tell THIS keeper from another one that inherited the pid. Read immediately after
         # the spawn, while the process is certainly still ours; None (an already-exited
         # keeper, or a psutil error) degrades to the cmdline-only gate rather than pairing
         # the pid with a start time that isn't its own.
-        instance.keeper_proc_start = await asyncio.to_thread(procutil.proc_create_time, proc.pid)
+        #
+        # ONE `proc_start_pair` read for both halves (#1402), not a create-time read plus a
+        # ticks read: the boot-relative half is what keeps this identification from moving
+        # when NTP corrects the host clock, and sampling the two separately can straddle a
+        # pid recycle and produce a pair describing two different processes.
+        instance.keeper_proc_start, instance.keeper_start_ticks = await asyncio.to_thread(
+            procutil.proc_start_pair, proc.pid
+        )
         info = await asyncio.to_thread(self._await_ready_pty, sidecar, proc)
         self._apply_pty_info(instance, info, proc)
         await asyncio.to_thread(self._flush_redacted_mirror, instance)
@@ -3193,7 +3214,15 @@ class SessionRunner:
         expected_start, expected_ticks = procutil.proc_start_pair(pid)
         for _ in range(8):  # ~2s grace for the keeper to follow its bridge out
             procutil.reap_if_exited(pid)
-            if procutil.proc_create_time(pid) is None:
+            # `proc_is_gone`, not `proc_create_time(pid) is None` (#1402). The latter asks the
+            # clock a liveness question: psutil's `create_time` ends in `+ boot_time()`, which
+            # raises on a procfs with no `btime` (gVisor, WSL1 — see
+            # `procutil.jiffies_to_epoch`), so on that host a keeper that is plainly running
+            # read as gone. This loop returned before the compare below and force-killed
+            # nothing, silently, while the boot-relative ticks the compare wants read fine.
+            # `proc_is_gone` still counts a zombie as gone, which is what keeps this from
+            # reporting an exited keeper as "no longer that keeper" further down.
+            if procutil.proc_is_gone(pid):
                 return  # pragma: skip-on-win
             time.sleep(0.25)
         # Re-verify before force-killing a TREE. This pid used to be reachable only as this
@@ -3209,9 +3238,11 @@ class SessionRunner:
         # pid moments earlier, so it detects a recycle INSIDE the grace loop and nothing
         # before it — a `keeper_pid` that a row another process wrote had already lost to a
         # stranger keeper matches itself here and passes. Closing that needs the RECORDED
-        # keeper pair (`instance.keeper_proc_start`, plus a keeper ticks column it does not
-        # have yet — a migration) threaded in as a conjunct. Issue #1303 tracks exactly that
-        # and names the tolerance decision it forces.
+        # keeper trio threaded in as a conjunct. `instance.keeper_start_ticks` now exists
+        # (#1402), so the missing column is no longer the blocker; what remains is the
+        # tolerance decision a `force_kill_tree` gate forces and the plumbing of the trio
+        # down to this method, which today receives only a pid. Issue #1303 tracks exactly
+        # that and names the tolerance decision.
         # Until then the cmdline gate is the only thing separating those two, exactly as
         # before this change; what the boot-relative compare removes is the intermittent
         # drift that used to spare such a stranger BY ACCIDENT — the accident issue #1403
@@ -3238,9 +3269,11 @@ class SessionRunner:
         # not sound, only fail-safe: psutil derives `create_time` from that very file, so in
         # practice both halves fail together and the grace loop has already returned;
         # were it reached, drift there can only over-spare. An emulated procfs with no
-        # `btime` (gVisor, WSL1 — see `procutil.jiffies_to_epoch`) inverts that: ticks read
-        # fine while `proc_create_time` is None, so the grace loop's own `is None: return`
-        # fires and the compare is never reached at all. Pre-existing, and untouched here.
+        # `btime` (gVisor, WSL1 — see `procutil.jiffies_to_epoch`) used to invert that: ticks
+        # read fine while `proc_create_time` was None, so the grace loop's own probe fired and
+        # this compare was never reached at all — a lingering keeper was never wound down and
+        # nothing was logged. That loop now probes with `procutil.proc_is_gone` (#1402), which
+        # needs no clock, so the tick branch below is what decides on that host.
         #
         # Every remaining gap resolves toward sparing: a tick count readable at the snapshot
         # and unreadable now compares unequal, and a snapshot with NO readable start at all
@@ -3261,7 +3294,9 @@ class SessionRunner:
         # (0.05s) is far too tight to absorb an NTP step anyway, and
         # `_KEEPER_START_TOLERANCE` (2.0s) is wide enough to admit a pid recycled during
         # this very grace loop. That sibling bound guards `pty_keeper.stop_keeper`'s own
-        # force-kill after the same ~2s grace; naming it here is not a claim that it is fine.
+        # force-kill after the same ~2s grace, where it is now the FALLBACK rather than the
+        # decider: that guard takes the same exact tick compare wherever both sides have it
+        # (#1402), so the epoch is consulted only on a host whose epoch does not drift.
         #
         # Order is unchanged, and chosen for freshness and cost rather than for the result:
         # both operands are pure predicates, so `and` would answer the same either way. The
@@ -3691,18 +3726,28 @@ class SessionRunner:
         is live-but-untracked, which is the likeliest way to reach a persisted-only live
         row. Raises :class:`UnknownProject` when there's no such record at all.
 
-        Both liveness checks are gated on the ``(pid, create-time)`` PAIR against PID reuse —
-        ``is_live_bridge`` for the bridge, ``is_live_keeper`` for the keeper (#1178) — so a
-        pid the OS recycled onto an unrelated process, *or onto a different live process of
-        the same shape*, does not refuse the forget. That matters most here: a persisted row
-        can predate a reboot, and since forget never kills, a false "still live" would strand
-        the record with no operator path out short of hand-editing the state database.
+        Both liveness checks are gated on the ``(pid, start-time)`` identity against PID
+        reuse — ``is_live_bridge`` for the bridge, ``is_live_keeper`` for the keeper (#1178)
+        — so a pid the OS recycled onto an unrelated process, *or onto a different live
+        process of the same shape*, does not refuse the forget. That matters most here: a
+        persisted row can predate a reboot, and since forget never kills, a false "still
+        live" would strand the record with no operator path out short of hand-editing the
+        state database.
 
-        ⚠️ The pair check is only as strong as the stored start-time. Where one is absent —
+        Each start-time is a PAIR — the wall-clock epoch and the boot-relative tick count
+        (``bridge_start_ticks``, #1399; ``keeper_start_ticks``, #1402) — and both halves are
+        passed here. The failure that forces it runs the other way from stranding: psutil's
+        create-time is re-derived from a ``/proc/stat`` btime that NTP moves, so on a
+        drifting host the epoch compare answers "dead" for a keeper that never restarted,
+        this gate opens, and the row of a live keeper and its pty bridge is deleted. Nothing
+        automated recovers that — ``forget`` did not kill them, and ``clauster keepers``
+        cannot reap a keeper whose record just went away. The ticks do not move.
+
+        ⚠️ The check is only as strong as the stored start values. Where both are absent —
         a row persisted with a null ``bridge_proc_start`` (``adopt`` writes one whenever the
         pointer has no comparable start time), or a ``keeper_pid`` written by a pre-#1178
-        build with no ``keeper_proc_start`` — ``_expected_epoch`` returns None and
-        ``is_live_process`` degrades to cmdline+alive, exactly as it behaved before. That
+        build with no ``keeper_proc_start`` and no ticks — ``_expected_epoch`` returns None
+        and ``is_live_process`` degrades to cmdline+alive, exactly as it behaved before. That
         degrade is deliberate and is the safe direction for an upgrade: an old row keeps
         working instead of reporting its live keeper as dead. Such a row still reads as live
         if a *different* process of the right shape holds that exact pid; it re-acquires the
@@ -3766,7 +3811,10 @@ class SessionRunner:
                         f"{instance_id!r} still has a live bridge — Stop it first"
                     )
                 if instance.keeper_pid is not None and await asyncio.to_thread(
-                    procutil.is_live_keeper, instance.keeper_pid, instance.keeper_proc_start
+                    procutil.is_live_keeper,
+                    instance.keeper_pid,
+                    instance.keeper_proc_start,
+                    start_ticks=instance.keeper_start_ticks,
                 ):
                     raise InstanceStillLive(
                         f"{instance_id!r} still has a live keeper — Stop it first"
@@ -3795,6 +3843,7 @@ class SessionRunner:
                     procutil.is_live_keeper,
                     row_keeper_pid,
                     _row_float(row.get("keeper_proc_start")),
+                    start_ticks=_row_int(row.get("keeper_start_ticks")),
                 ):
                     raise InstanceStillLive(
                         f"{instance_id!r} still has a live keeper — Stop it first"
@@ -4044,11 +4093,13 @@ class SessionRunner:
             bridge_pid=None,
             bridge_proc_start=None,
             # Named rather than left to the model default: this is a deliberate ZEROING of
-            # the identity, so all three fields of the pair belong here together. Relying on
+            # the identity, so every field of both trios belongs here together. Relying on
             # the default would let a future default change silently carry a stale tick count
             # onto a dead card, where a pid reuse could read as the bridge coming back.
             bridge_start_ticks=None,
             keeper_pid=None,
+            keeper_proc_start=None,
+            keeper_start_ticks=None,
         )
 
     def _modes_with_an_unclaimed_live_bridge(
@@ -4261,6 +4312,13 @@ class SessionRunner:
             # path symmetric with the standard path's `_latest_debug_log_for` (#584).
             tail_source = raw_path if raw_path.exists() else None
             log_path = log_path if tail_source is not None else None
+            # Snapshotted here, right after `is_keeper_process` classified this pid as a
+            # keeper, so the pid is carried as a full identity from the moment we adopt it
+            # (#1178 / #1402). The sidecar itself records neither half. ONE `proc_start_pair`
+            # call, not two reads: separate samples can straddle a pid recycle and describe
+            # two different processes, and the coarse epoch conjunct would then authenticate
+            # the newcomer on its own exact ticks.
+            keeper_proc_start, keeper_start_ticks = procutil.proc_start_pair(keeper_pid)
             # No `instance_id=`: the model mints a fresh one. See the identity paragraph
             # above — nothing here can say which row owns this keeper (#1108).
             return RemoteControlInstance(
@@ -4278,10 +4336,8 @@ class SessionRunner:
                 bridge_start_ticks=bridge_start_ticks,
                 intentional_stop=False,
                 keeper_pid=keeper_pid,
-                # Snapshotted here, right after `is_keeper_process` classified this pid as
-                # a keeper, so the pid is carried as a PAIR from the moment we adopt it
-                # (#1178). The sidecar itself records no create-time.
-                keeper_proc_start=procutil.proc_create_time(keeper_pid),
+                keeper_proc_start=keeper_proc_start,
+                keeper_start_ticks=keeper_start_ticks,
                 bridge_pid=bridge_pid,
                 bridge_proc_start=bridge_proc_start,
                 bridge_debug_log_path=log_path,
@@ -4442,7 +4498,7 @@ class SessionRunner:
         # for that project behind up to three globs of the bridge-log dir, per resynced
         # row, per tick, for no correctness gain. What must be inside the lock is the
         # re-check plus the mutation, and that block contains no ``await`` at all.
-        keeper_pid, keeper_proc_start = (
+        keeper_pid, keeper_proc_start, keeper_start_ticks = (
             await asyncio.to_thread(
                 self._recover_keeper_identity,
                 inst.project,
@@ -4451,7 +4507,7 @@ class SessionRunner:
                 bridge_start_ticks=start_ticks,
             )
             if inst.resume_mode == "pty"
-            else (None, None)
+            else (None, None, None)
         )
         connect = await asyncio.to_thread(
             self._connect_facts_for,
@@ -4490,10 +4546,12 @@ class SessionRunner:
             # compared against the NEW pid's ticks and never match, reporting the bridge we
             # just adopted as dead on the very next poll (#1399).
             current.bridge_pid, current.bridge_proc_start, current.bridge_start_ticks = pair
-            # Both halves of the keeper pair, together (#1178): leaving the old
-            # `keeper_proc_start` beside a NEW `keeper_pid` would make the live keeper of
-            # the generation we just adopted read as gone.
-            current.keeper_pid, current.keeper_proc_start = keeper_pid, keeper_proc_start
+            # Every field of the keeper trio, together (#1178 / #1402): leaving the old
+            # `keeper_proc_start` or `keeper_start_ticks` beside a NEW `keeper_pid` would
+            # make the live keeper of the generation we just adopted read as gone.
+            current.keeper_pid = keeper_pid
+            current.keeper_proc_start = keeper_proc_start
+            current.keeper_start_ticks = keeper_start_ticks
             current.intentional_stop = bool(saved.get("intentional_stop"))
             current.url = connect.get("url")
             current.environment_id = connect.get("environment_id")
@@ -4598,7 +4656,7 @@ class SessionRunner:
             # alone only proves "some keeper", not "OUR keeper" — and `stop()` hands
             # `keeper_pid` to `_cleanup_keeper`, which force-kills the whole tree. A recycled
             # pid landing on another instance's keeper would reap a stranger's processes.
-            keeper_pid, keeper_proc_start = (
+            keeper_pid, keeper_proc_start, keeper_start_ticks = (
                 await asyncio.to_thread(
                     self._recover_keeper_identity,
                     proj.name,
@@ -4607,7 +4665,7 @@ class SessionRunner:
                     bridge_start_ticks=start_ticks,
                 )
                 if resume_mode == "pty"
-                else (None, None)
+                else (None, None, None)
             )
             log_path = await asyncio.to_thread(self._latest_debug_log_for, proj.name)
             # The row carries identity and liveness but NOT the connect facts — those live in
@@ -4659,6 +4717,7 @@ class SessionRunner:
                 bridge_start_ticks=start_ticks,
                 keeper_pid=keeper_pid,
                 keeper_proc_start=keeper_proc_start,
+                keeper_start_ticks=keeper_start_ticks,
                 bridge_debug_log_path=log_path,
                 bridge_raw_log_path=(
                     self._raw_log_path_for(log_path) if log_path is not None else None
@@ -4788,11 +4847,13 @@ class SessionRunner:
             bridge_pid=None,
             bridge_proc_start=None,
             # Named rather than left to the model default: this is a deliberate ZEROING of
-            # the identity, so all three fields of the pair belong here together. Relying on
+            # the identity, so every field of both trios belongs here together. Relying on
             # the default would let a future default change silently carry a stale tick count
             # onto a dead card, where a pid reuse could read as the bridge coming back.
             bridge_start_ticks=None,
             keeper_pid=None,
+            keeper_proc_start=None,
+            keeper_start_ticks=None,
         )
 
     async def rediscover(self, *, persist: bool = True) -> None:
@@ -4933,10 +4994,12 @@ class SessionRunner:
             # restart; recover its pid from the sidecar so stop()/poll_once can reap
             # it — otherwise a rediscovered pty bridge would leak its keeper. The log
             # path is timestamped (not derivable), so match the sidecar by bridge pid
-            # + proc-start (PID-reuse defense — see _recover_keeper_pid). The pid and
-            # its create-time travel as a PAIR (#1178): recovering only the pid here
-            # would persist a row whose forget gate degrades to cmdline-only.
-            keeper_pid, keeper_proc_start = (
+            # + proc-start (PID-reuse defense — see _recover_keeper_pid). The pid, its
+            # create-time and its boot-relative ticks travel as one identity (#1178 /
+            # #1402): recovering only the pid here would persist a row whose forget gate
+            # degrades to cmdline-only, and recovering it without the ticks would leave that
+            # gate on the epoch a clock correction moves.
+            keeper_pid, keeper_proc_start, keeper_start_ticks = (
                 await asyncio.to_thread(
                     self._recover_keeper_identity,
                     proj.name,
@@ -4945,7 +5008,7 @@ class SessionRunner:
                     bridge_start_ticks=bridge_start_ticks,
                 )
                 if resume_mode == "pty"
-                else (None, None)
+                else (None, None, None)
             )
             # Re-bind the live tail to the log this survivor was already writing before the
             # restart, so `/ws/bridge-log` resolves a real path instead of 1008-ing (#584).
@@ -4961,6 +5024,7 @@ class SessionRunner:
                 bridge_start_ticks=bridge_start_ticks,
                 keeper_pid=keeper_pid,
                 keeper_proc_start=keeper_proc_start,
+                keeper_start_ticks=keeper_start_ticks,
                 bridge_debug_log_path=log_path,
                 bridge_raw_log_path=(
                     self._raw_log_path_for(log_path) if log_path is not None else None
@@ -5100,6 +5164,11 @@ class SessionRunner:
         bridge_proc_start: float | None,
         keeper_pid: int | None,
         keeper_proc_start: float | None = None,
+        # Keyword-required, no default, unlike its epoch sibling above (#1402): a caller that
+        # forgot it would silently publish a keeper the drifting epoch alone has to defend,
+        # and that is exactly the shape #1399's review caught three times. `adopt`'s standard
+        # external bridge has no keeper and states so by passing None.
+        keeper_start_ticks: int | None,
         bridge_start_ticks: int | None = None,
         bridge_debug_log_path: Path | None = None,
         bridge_raw_log_path: Path | None = None,
@@ -5138,10 +5207,12 @@ class SessionRunner:
             resume_mode=resume_mode,
             worktree_name=worktree_name,
             keeper_pid=keeper_pid,
-            # The keeper pid's create-time travels with it (#1178) — a pointer-walk
-            # survivor must regain the full PID-reuse defense, not the cmdline-only
-            # degrade a pre-upgrade row gets.
+            # The keeper pid's start identity travels with it (#1178 / #1402) — a
+            # pointer-walk survivor must regain the full PID-reuse defense, not the
+            # cmdline-only degrade a pre-upgrade row gets, and not an epoch-only one that a
+            # host clock correction turns into "keeper dead, row deleted".
             keeper_proc_start=keeper_proc_start,
+            keeper_start_ticks=keeper_start_ticks,
             intentional_stop=False,
             status=InstanceStatus.RUNNING,
             bridge_pid=ptr.pid,
@@ -5257,7 +5328,12 @@ class SessionRunner:
             resume_mode="standard",
             bridge_proc_start=procutil._expected_epoch(ptr.proc_start),
             bridge_start_ticks=_pointer_start_ticks(ptr.proc_start),
+            # An adopted EXTERNAL session is a standard bridge with no keeper at all
+            # (`is_standard_bridge_cmdline` gates adoption on exactly that), so the whole
+            # keeper trio is stated as absent rather than left to a default.
             keeper_pid=None,
+            keeper_proc_start=None,
+            keeper_start_ticks=None,
         )
         self._instances[instance.instance_id] = instance
         await self._persist()

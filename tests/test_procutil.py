@@ -1218,6 +1218,51 @@ def test_proc_start_ticks_fails_closed_on_a_pid_that_cannot_name_a_process():
     assert procutil.proc_start_ticks(2_000_000_000) is None
 
 
+def test_proc_is_gone_answers_the_liveness_question_without_a_clock():
+    # The grace-loop probe (#1402). `proc_create_time(pid) is None` used to stand in for it,
+    # and on a procfs with no btime that answers "gone" for a process that is plainly there —
+    # psutil's create_time ends in `+ boot_time()`, which raises. This asks the status.
+    assert procutil.proc_is_gone(os.getpid()) is False
+    assert procutil.proc_is_gone(2_000_000_000) is True
+    assert procutil.proc_is_gone(-1) is True  # psutil's ValueError, same as the family
+
+
+def test_proc_is_gone_reports_a_live_process_on_a_host_that_cannot_express_boot_time(monkeypatch):
+    # gVisor / WSL1: `create_time()` ends in `+ boot_time()`, which raises a bare RuntimeError
+    # on a procfs with no btime line. `proc_create_time` absorbs that as None — and a caller
+    # reading None as "gone" then never winds the process down. `proc_is_gone` never calls it.
+    class _NoBtime:
+        def __init__(self, pid):
+            pass
+
+        def status(self):
+            return psutil.STATUS_RUNNING
+
+        def create_time(self):
+            raise RuntimeError("no btime line in /proc/stat")
+
+    monkeypatch.setattr(procutil.psutil, "Process", _NoBtime)
+    assert procutil.proc_create_time(1234) is None  # the trap the old idiom fell into
+    assert procutil.proc_is_gone(1234) is False
+
+
+def test_proc_is_gone_counts_a_zombie_as_gone(monkeypatch):
+    # A zombie has exited; only its exit status remains and its tree went with it. Counting it
+    # as gone is what keeps `_cleanup_keeper` and `stop_keeper` from running their identity
+    # compare on it and reporting "no longer that keeper", which would be untrue. Faked rather
+    # than reaped for real: a genuine zombie needs POSIX and an unwaited child, and the state
+    # this pins is the one psutil reports, not the one the kernel spells.
+    class _Zombie:
+        def __init__(self, pid):
+            pass
+
+        def status(self):
+            return psutil.STATUS_ZOMBIE
+
+    monkeypatch.setattr(procutil.psutil, "Process", _Zombie)
+    assert procutil.proc_is_gone(1234) is True
+
+
 def test_proc_start_ticks_survives_a_comm_containing_spaces_and_parens(tmp_path, monkeypatch):
     # Field 2 is the executable name, unquoted and free to hold ')' and spaces. A
     # left-to-right split would miscount every later field and return the wrong number —

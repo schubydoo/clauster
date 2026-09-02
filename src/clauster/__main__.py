@@ -1214,7 +1214,11 @@ def _keepers(config_path: str | None, kill_pid: int | None) -> int:
                 file=sys.stderr,
             )
             return 2
-        if not pty_keeper.stop_keeper(kill_pid, expect_create_time=target.keeper_create_time):
+        if not pty_keeper.stop_keeper(
+            kill_pid,
+            expect_create_time=target.keeper_create_time,
+            expect_start_ticks=target.keeper_start_ticks,
+        ):
             print(
                 f"clauster: failed to stop keeper {kill_pid} "
                 "(it may have exited or its PID was reused)",

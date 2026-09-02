@@ -137,6 +137,12 @@ class Instance(Base, TimestampMixin):
     # process that never restarted wanders by seconds. The tick count is measured against
     # the boot instant and does not. Neither is sufficient alone (ticks restart at zero each
     # boot), so ``procutil.is_live_process`` uses both; see it for which carries which job.
+    #
+    # ``keeper_start_ticks`` is that same drift-immune half for the keeper (#1402), and its
+    # absence had the mirror-image cost: ``forget``'s keeper gate read a live keeper as dead
+    # and deleted the row of a running process, which nothing automated then recovers. NULL
+    # keeps the epoch-only compare a pre-#1402 row shipped with; the next spawn, reattach or
+    # adoption of that keeper stamps it.
     bridge_pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
     bridge_proc_start: Mapped[float | None] = mapped_column(Float, nullable=True)
     bridge_start_ticks: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -148,6 +154,7 @@ class Instance(Base, TimestampMixin):
     # after the session ends.
     worktree_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     keeper_proc_start: Mapped[float | None] = mapped_column(Float, nullable=True)
+    keeper_start_ticks: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     project: Mapped[Project] = relationship(back_populates="instances")
 
