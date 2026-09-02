@@ -109,9 +109,9 @@ So when a PR asserts a test result or a performance number:
 - Do **not** frame the absence of a local run as a limitation of the review. It is the
   design.
 
-Attempting it anyway is worse than useless: the calls are denied, and the workflow reads a
-non-zero denial count as a signal that the review was blocked from *publishing* — so
-routine denials train that warning to be ignored.
+Attempting it anyway is worse than useless: the calls are denied, and every denial is
+counted and reported by the workflow's guard step — routine denials bury the ones that
+matter.
 
 ## Volume
 
@@ -142,10 +142,18 @@ fix cannot reach round seven on style.
 - **How to submit it, exactly.** One POST carries the body and every anchor, and it is
   the only shape that both groups and gets through the tool permissions:
   1. Use the `Write` tool to create `review.json` in the workspace root with the
-     payload: `commit_id` (the PR head SHA), `event: "COMMENT"`, `body` (the summary),
-     and a `comments` array of `{path, line, side: "RIGHT", body}` entries, one per
-     finding.
+     payload: `commit_id` (the PR head SHA, from `gh pr view <n> --json headRefOid`),
+     `event: "COMMENT"`, `body` (the summary), and a `comments` array of
+     `{path, line, side: "RIGHT", body}` entries, one per finding (`side: "LEFT"` only
+     for a line the diff removes).
   2. Run `gh api repos/<owner>/<repo>/pulls/<n>/reviews --input review.json`.
+
+  Every `line` must be a line the diff touches, on that side. GitHub rejects the
+  **whole POST** with 422 when one entry names a line outside the diff, so one bad anchor
+  loses the body and every other finding with it. To flag an unchanged line, anchor the
+  comment to the nearest changed line and name the real line in the comment body. If the
+  POST returns 422, correct that entry and repeat the same POST. Never fall back to a
+  shape that posts findings one at a time.
 
   Leave `review.json` where it is: no allowed tool can delete it, and the workspace is
   discarded when the job ends.
