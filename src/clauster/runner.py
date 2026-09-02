@@ -3122,13 +3122,18 @@ class SessionRunner:
         The keeper self-exits once its bridge is gone, so for a keeper this process
         spawned this is usually just a reap. A REATTACHED keeper (pid recovered from a
         sidecar/row another process wrote, #1088) is not our child — ``reap_if_exited``
-        is a no-op on it, and the real path is the grace loop plus the create-time
+        is a no-op on it, and the real path is the grace loop plus the start-time
         re-verify before ``force_kill_tree``.
         """
         # Identity, snapshotted BEFORE the grace: `is_keeper_process` alone answers "is this
         # pid *a* keeper", never "is it *THIS* keeper", and on a host that spawns keepers
         # continuously those differ.
-        expected_start = procutil.proc_create_time(pid)
+        #
+        # Both halves in ONE `proc_start_pair` read (#1399) — the pair API exists for this
+        # and derives the epoch from the ticks rather than sampling twice. Only one half is
+        # ever consulted below, so a straddled pair could not authenticate anything *here*;
+        # see `proc_start_pair`'s own docstring for the sites where it could.
+        expected_start, expected_ticks = procutil.proc_start_pair(pid)
         for _ in range(8):  # ~2s grace for the keeper to follow its bridge out
             procutil.reap_if_exited(pid)
             if procutil.proc_create_time(pid) is None:
@@ -3141,26 +3146,65 @@ class SessionRunner:
         # tree of whatever now holds it would take down an unrelated process — including,
         # if the recycled holder is itself a keeper, that keeper's live bridge.
         #
-        # The create-time pair is what gives this the same discipline as
-        # `procutil.kill_if_match` (live + cmdline + create-time): cmdline alone passes for
-        # ANY keeper.
+        # ⚠️ Scope, stated honestly rather than borrowed: `procutil.kill_if_match` compares
+        # against a PERSISTED `proc_start` and refuses outright without one, so it can reject
+        # a pid that was already stale before the call. This snapshot is taken off the live
+        # pid moments earlier, so it detects a recycle INSIDE the grace loop and nothing
+        # before it — a `keeper_pid` that a row another process wrote had already lost to a
+        # stranger keeper matches itself here and passes. Closing that needs the RECORDED
+        # keeper pair (`instance.keeper_proc_start` plus the ticks column) threaded in as a
+        # conjunct, which is issue #1402's work and names this function in its pointers.
+        # Until then the cmdline gate is the only thing separating those two, exactly as
+        # before this change; what the boot-relative compare removes is the intermittent
+        # drift that used to spare such a stranger BY ACCIDENT — the accident issue #1403
+        # asked us to stop relying on.
         #
-        # Exact `!=`, and deliberately NOT the tolerance its siblings use. Both values come
-        # from `proc_create_time`, but that is psutil's `starttime/CLK_TCK + boot_time()`,
-        # and `boot_time()` re-reads `/proc/stat` btime on every call (verified uncached in
+        # Compared EXACTLY, and deliberately not with the tolerance its siblings use — on
+        # the boot-relative tick count (`proc_start_ticks`, field 22 of `/proc/<pid>/stat`)
+        # wherever it is readable. `proc_create_time` would not survive an exact compare
+        # across this gap: it is psutil's `starttime/CLK_TCK + boot_time()`, and
+        # `boot_time()` re-reads `/proc/stat` btime on every call (verified uncached in
         # psutil 7.2.2). btime tracks the live realtime-vs-uptime offset, so an NTP step
-        # between the two samples — ~2s apart, across the grace loop — shifts it by about a
-        # second and this reads as a mismatch. That is the direction we want: the outcome
-        # is a keeper that is spared and leaks (the orphan-keeper sweep still reaps it),
-        # not a `force_kill_tree` aimed at an unrelated process. Widening to absorb the
-        # step is what would be unsafe here — `_EXACT_PROC_START_TOLERANCE` (0.05s) is far
-        # too tight to absorb it anyway, and `_KEEPER_START_TOLERANCE` (2.0s) is wide
-        # enough to admit a pid recycled during this very grace loop.
+        # between the two samples — ~2s apart, across the grace loop — shifts the epoch by
+        # about a second under a keeper that never moved. Ticks are measured from the boot
+        # instant and do not move at all, while a pid recycled during the grace differs by a
+        # whole `CLK_TCK` of them, so exact is both drift-proof and precise here. Ticks
+        # cannot survive a REBOOT (they restart at zero), which is why `is_live_process`
+        # pairs them with a coarse epoch bound; a reboot between two samples 2s apart in one
+        # call is not reachable, so this site needs no such conjunct.
         #
-        # psutil exposes a clock-step-immune `create_time(monotonic=True)` only on the
-        # private Linux implementation, not on `psutil.Process`, so there is no supported
-        # way to compare boot-relative values here today.
-        if not procutil.is_keeper_process(pid) or procutil.proc_create_time(pid) != expected_start:
+        # Ticks unavailable at the snapshot falls back to the exact epoch compare this
+        # always used. On macOS and Windows that fallback is SOUND, not merely tolerated —
+        # they record an absolute timestamp at exec and never re-derive it, so their epochs
+        # do not drift. An unreadable `/proc` is the Linux member of the same branch and is
+        # not sound, only fail-safe: psutil derives `create_time` from that very file, so in
+        # practice both halves fail together and the grace loop has already returned;
+        # were it reached, drift there can only over-spare.
+        #
+        # Every remaining gap resolves toward sparing: a tick count readable at the snapshot
+        # and unreadable now compares unequal, and a snapshot with NO readable start at all
+        # is rejected outright rather than matching a later unreadable one. Sparing is the
+        # direction we want — a spared keeper leaks and the orphan-keeper sweep still reaps
+        # it, where a wrong kill is a `force_kill_tree` aimed at an unrelated process.
+        # Widening either compare is what would be unsafe: `_EXACT_PROC_START_TOLERANCE`
+        # (0.05s) is far too tight to absorb an NTP step anyway, and
+        # `_KEEPER_START_TOLERANCE` (2.0s) is wide enough to admit a pid recycled during
+        # this very grace loop. That sibling bound guards `pty_keeper.stop_keeper`'s own
+        # force-kill after the same ~2s grace; naming it here is not a claim that it is
+        # fine, and issue #1402 tracks it.
+        #
+        # Order matters and is unchanged: the cheap cmdline gate reads first, so the start
+        # time stays the last observation before the kill and nothing sits between "provably
+        # ours" and the SIGKILL. It also keeps the ZOMBIE filter ahead of the tick compare —
+        # `is_keeper_process` fails closed on a zombie, where `proc_start_ticks` would happily
+        # match one (a zombie keeps a readable `/proc/<pid>/stat`; `proc_create_time`, the
+        # value this used to compare, returned None for it instead).
+        still_this_keeper = procutil.is_keeper_process(pid) and (
+            procutil.proc_start_ticks(pid) == expected_ticks
+            if expected_ticks is not None
+            else expected_start is not None and procutil.proc_create_time(pid) == expected_start
+        )
+        if not still_this_keeper:
             _log.warning("keeper pid %s is no longer that keeper — not force-killing", pid)
             return
         procutil.force_kill_tree(pid)

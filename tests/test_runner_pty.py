@@ -1273,12 +1273,25 @@ async def test_rediscover_pty_reattach_without_proc_start_uses_cmdline_liveness(
     assert inst.bridge_proc_start is None  # matched by cmdline+alive, no proc-start recorded
 
 
+def _patch_keeper_start(monkeypatch, *, epoch, ticks) -> None:
+    """Pin both halves of pid 777's start identity for the `_cleanup_keeper` tests.
+
+    `epoch` and `ticks` are zero-arg callables so a test can move either half mid-run.
+    Pinned rather than left to the real readers because pid 777 may genuinely exist on
+    the host running the suite, which would make `proc_start_ticks` answer a real value
+    and the assertions depend on the machine.
+    """
+    monkeypatch.setattr(procutil, "proc_create_time", lambda pid: epoch())
+    monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: ticks())
+    monkeypatch.setattr(procutil, "proc_start_pair", lambda pid: (epoch(), ticks()))
+
+
 def test_cleanup_keeper_forces_a_lingering_keeper(runner_config, monkeypatch) -> None:
     """If the keeper outlives its bridge, _cleanup_keeper force-kills then reaps it."""
     runner, _ = _pty_runner(runner_config)
     monkeypatch.setattr("clauster.runner.time.sleep", lambda _s: None)
     monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
-    monkeypatch.setattr(procutil, "proc_create_time", lambda pid: 1.0)  # always "alive"
+    _patch_keeper_start(monkeypatch, epoch=lambda: 1.0, ticks=lambda: 4200)  # always "alive"
     # ...and is still genuinely a keeper. Since #1088 a keeper pid can come from a row
     # another process wrote, so the force-kill re-verifies by cmdline first.
     monkeypatch.setattr(procutil, "is_keeper_process", lambda pid: True)
@@ -1287,6 +1300,93 @@ def test_cleanup_keeper_forces_a_lingering_keeper(runner_config, monkeypatch) ->
 
     runner._cleanup_keeper(777)
     assert forced == [777]
+
+
+def test_cleanup_keeper_force_kills_through_a_clock_step(runner_config, monkeypatch) -> None:
+    """An NTP step during the grace no longer spares a keeper that never moved (#1403).
+
+    `proc_create_time` is `starttime/CLK_TCK + boot_time()`, and btime tracks the live
+    realtime-vs-uptime offset, so a clock correction between the two samples shifts the
+    epoch under a process that never restarted. The boot-relative tick count does not move,
+    so the identity gate holds and the lingering keeper is still wound down.
+
+    The mid-run epoch step is deliberately inert against the shipped code — it is there to
+    prove the epoch is IGNORED once ticks are available. It reddens if the tick branch ever
+    regains an epoch conjunct, and it inverts against the pre-#1403 epoch-only compare.
+    """
+    runner, _ = _pty_runner(runner_config)
+    state = {"epoch": 1.0, "sleeps": 0}
+
+    def _sleep(_s) -> None:
+        state["sleeps"] += 1
+        if state["sleeps"] == 8:  # NTP steps the clock just as the grace expires
+            state["epoch"] = 2.0
+
+    monkeypatch.setattr("clauster.runner.time.sleep", _sleep)
+    monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
+    _patch_keeper_start(monkeypatch, epoch=lambda: state["epoch"], ticks=lambda: 4200)
+    monkeypatch.setattr(procutil, "is_keeper_process", lambda pid: True)
+    forced: list[int] = []
+    monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
+
+    runner._cleanup_keeper(777)
+    assert forced == [777], "clock drift, not a pid recycle, spared a keeper that never moved"
+
+
+def test_cleanup_keeper_refuses_a_keeper_whose_ticks_moved(runner_config, monkeypatch) -> None:
+    """A changed tick count is a recycled pid, and force-killing its tree is refused (#1403).
+
+    The mirror of the drift test: the wall clock stands still, so the epoch compare would
+    pass, but the boot-relative start is a different one — a different process holds the pid.
+    """
+    runner, _ = _pty_runner(runner_config)
+    state = {"ticks": 4200, "sleeps": 0}
+
+    def _sleep(_s) -> None:
+        state["sleeps"] += 1
+        if state["sleeps"] == 8:  # grace expires; the pid now belongs to another keeper
+            state["ticks"] = 9900
+
+    monkeypatch.setattr("clauster.runner.time.sleep", _sleep)
+    monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
+    _patch_keeper_start(monkeypatch, epoch=lambda: 1.0, ticks=lambda: state["ticks"])
+    monkeypatch.setattr(procutil, "is_keeper_process", lambda pid: True)  # a keeper — not ours
+    forced: list[int] = []
+    monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
+
+    runner._cleanup_keeper(777)
+    assert forced == [], "force-killed a DIFFERENT keeper's tree, taking its live bridge down"
+
+
+def test_cleanup_keeper_spares_a_keeper_whose_ticks_go_unreadable(
+    runner_config, monkeypatch
+) -> None:
+    """An unreadable tick count spares the keeper rather than widening toward a kill (#1403).
+
+    Readable at the snapshot and `None` at the re-verify (a `/proc` read that failed) is an
+    *inconclusive* answer, and the only safe reading of inconclusive on a `force_kill_tree`
+    path is "not provably ours". The spared keeper leaks; the orphan-keeper sweep reaps it.
+    """
+    runner, _ = _pty_runner(runner_config)
+    state = {"ticks": 4200, "sleeps": 0}
+
+    def _sleep(_s) -> None:
+        state["sleeps"] += 1
+        if state["sleeps"] == 8:
+            state["ticks"] = None
+
+    monkeypatch.setattr("clauster.runner.time.sleep", _sleep)
+    monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
+    # The epoch stays readable and unchanged, so only the missing ticks can decide this.
+    monkeypatch.setattr(procutil, "proc_create_time", lambda pid: 1.0)
+    monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: state["ticks"])
+    monkeypatch.setattr(procutil, "proc_start_pair", lambda pid: (1.0, state["ticks"]))
+    monkeypatch.setattr(procutil, "is_keeper_process", lambda pid: True)
+    forced: list[int] = []
+    monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
+
+    runner._cleanup_keeper(777)
+    assert forced == [], "an unreadable tick count must spare the keeper, never widen the kill"
 
 
 def test_cleanup_keeper_refuses_to_force_kill_a_recycled_pid(runner_config, monkeypatch) -> None:
@@ -1300,7 +1400,7 @@ def test_cleanup_keeper_refuses_to_force_kill_a_recycled_pid(runner_config, monk
     runner, _ = _pty_runner(runner_config)
     monkeypatch.setattr("clauster.runner.time.sleep", lambda _s: None)
     monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
-    monkeypatch.setattr(procutil, "proc_create_time", lambda pid: 1.0)  # still "alive"
+    _patch_keeper_start(monkeypatch, epoch=lambda: 1.0, ticks=lambda: 4200)  # still "alive"
     monkeypatch.setattr(procutil, "is_keeper_process", lambda pid: False)  # ...but not ours
     forced: list[int] = []
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
@@ -1312,13 +1412,17 @@ def test_cleanup_keeper_refuses_to_force_kill_a_recycled_pid(runner_config, monk
 def test_cleanup_keeper_refuses_a_pid_recycled_onto_a_different_keeper(
     runner_config, monkeypatch
 ) -> None:
-    """The gap a cmdline-only gate leaves open (#1088).
+    """The gap a cmdline-only gate leaves open (#1088), on a host with no tick count.
 
     `is_keeper_process` answers "is this pid *a* keeper", not "is it *THIS* keeper". On a
     host that spawns keepers continuously the recycled holder can itself be a keeper, so the
     gate passes and `force_kill_tree` takes down that keeper **and its live bridge**. Only
-    an identity check — the create-time pair, as `procutil.kill_if_match` uses — separates
+    an identity check — the start-time pair, as `procutil.kill_if_match` uses — separates
     them. The sibling test above covers the easy half (recycled onto a NON-keeper).
+
+    Ticks are `None` here, the macOS/Windows shape: `_cleanup_keeper` falls back to the
+    exact epoch compare, which is sound there because those platforms record an absolute
+    timestamp at exec instead of re-deriving it from a moving boot-time baseline (#1403).
     """
     runner, _ = _pty_runner(runner_config)
     state = {"start": 1.0, "sleeps": 0}
@@ -1330,13 +1434,62 @@ def test_cleanup_keeper_refuses_a_pid_recycled_onto_a_different_keeper(
 
     monkeypatch.setattr("clauster.runner.time.sleep", _sleep)
     monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
-    monkeypatch.setattr(procutil, "proc_create_time", lambda pid: state["start"])
+    _patch_keeper_start(monkeypatch, epoch=lambda: state["start"], ticks=lambda: None)
     monkeypatch.setattr(procutil, "is_keeper_process", lambda pid: True)  # a keeper — not ours
     forced: list[int] = []
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
 
     runner._cleanup_keeper(777)
     assert forced == [], "force-killed a DIFFERENT keeper's tree, taking its live bridge down"
+
+
+def test_cleanup_keeper_refuses_a_snapshot_with_no_readable_start(
+    runner_config, monkeypatch
+) -> None:
+    """A snapshot that read NEITHER half never authenticates a force-kill (#1403).
+
+    Both halves `None` is the ABSENCE of an identity, not a match, and `None == None` must
+    not let an unreadable start time authorize `force_kill_tree` on a whole process tree.
+
+    Reachable only through a TRANSIENT failure — a raced or denied `/proc` read at the
+    snapshot instant, with the process readable again by the time the grace loop probes it.
+    A permanent failure is foreclosed earlier: the loop returns on its first `None`. The
+    guard is belt-and-braces for that narrow window, not a routine path.
+    """
+    runner, _ = _pty_runner(runner_config)
+    monkeypatch.setattr("clauster.runner.time.sleep", lambda _s: None)
+    monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
+    monkeypatch.setattr(procutil, "proc_start_pair", lambda pid: (None, None))
+    monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: None)
+    # Readable from the loop's first probe onward, so the grace runs to the end and the
+    # compare is reached with only the snapshot missing.
+    monkeypatch.setattr(procutil, "proc_create_time", lambda pid: 1.0)
+    monkeypatch.setattr(procutil, "is_keeper_process", lambda pid: True)
+    forced: list[int] = []
+    monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
+
+    runner._cleanup_keeper(777)
+    assert forced == [], "an unreadable start time must never authenticate a force-kill"
+
+
+def test_cleanup_keeper_forces_a_lingering_keeper_without_ticks(
+    runner_config, monkeypatch
+) -> None:
+    """The epoch fallback still WINDS A KEEPER DOWN where no tick count exists (#1403).
+
+    The counterexample to the test above: a platform with no `/proc` must not lose keeper
+    cleanup altogether just because the boot-relative half is unavailable there.
+    """
+    runner, _ = _pty_runner(runner_config)
+    monkeypatch.setattr("clauster.runner.time.sleep", lambda _s: None)
+    monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
+    _patch_keeper_start(monkeypatch, epoch=lambda: 1.0, ticks=lambda: None)
+    monkeypatch.setattr(procutil, "is_keeper_process", lambda pid: True)
+    forced: list[int] = []
+    monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
+
+    runner._cleanup_keeper(777)
+    assert forced == [777]
 
 
 def test_backfill_starter_session_from_debug_file_on_resume(runner_config, tmp_path) -> None:
