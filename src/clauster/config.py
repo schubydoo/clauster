@@ -1802,13 +1802,17 @@ class UnfittingYamlTagError(yaml.YAMLError):
     it: without this, ``clauster doctor`` echoed the scalar into `/api/doctor` on the
     ``ValueError`` path and tracebacked on the ``AttributeError`` one (#1395).
 
-    Deliberately message-free at the raise site — the class name is the whole diagnosis, the
-    same shape :func:`config_write.load_frontmatter_yaml` settled on for the identical family
-    (#1369). Reproduced per tag: ``!!int``/``!!float`` -> ``ValueError`` (the second
-    lowercases the scalar but still carries it), ``!!bool`` -> ``KeyError``, ``!!timestamp``
-    -> ``AttributeError``. Every other tag already fails as a ``ConstructorError``, which is
-    a ``YAMLError``. That list records where each class was SEEN, not a proof of
-    exhaustiveness.
+    The message is a **literal**, never the original's payload — same shape
+    :func:`config_write.load_frontmatter_yaml` settled on for the identical family (#1369).
+    It is not omitted entirely because the CLI arms print ``str(exc)``, and an empty one
+    turns ``clauster: config error:`` into a line with no diagnosis in it. ``run_doctor``
+    renders the class name instead and never sees this text.
+
+    Reproduced per tag: ``!!int``/``!!float`` -> ``ValueError`` (the second lowercases the
+    scalar but still carries it), ``!!bool`` -> ``KeyError``, ``!!timestamp`` ->
+    ``AttributeError``. Every other tag already fails as a ``ConstructorError``, which is a
+    ``YAMLError``. That list records where each class was SEEN, not a proof of exhaustiveness
+    — which is why the ``except`` below names classes rather than trusting the list.
     """
 
 
@@ -1839,15 +1843,18 @@ def load_config(path: str | os.PathLike | None = None) -> ClausterConfig:
     try:
         raw = yaml.safe_load(text) or {}
     except RecursionError as exc:
-        raise TooDeeplyNestedYamlError from exc
+        raise TooDeeplyNestedYamlError("config is nested too deeply to parse") from exc
     except (ValueError, AttributeError, KeyError, IndexError) as exc:
         # Scoped to the `safe_load` call alone, so nothing past the parse is reclassified.
         # `read_text` is deliberately OUTSIDE it: a non-UTF-8 file raises UnicodeDecodeError,
         # which is a ValueError, and is an encoding fault rather than a YAML one.
         #
         # Fails closed in one direction only: this converts a crash (or a leak) into a
-        # rejection, never a rejection into an accept.
-        raise UnfittingYamlTagError from exc
+        # rejection, never a rejection into an accept. The text is a literal — interpolating
+        # `exc` is the whole bug, since its payload IS the document scalar.
+        raise UnfittingYamlTagError(
+            "config carries a YAML tag its value does not satisfy (the value is withheld)"
+        ) from exc
     if not isinstance(raw, dict):
         raise ValueError(f"config root must be a mapping, got {type(raw).__name__}: {found}")
 

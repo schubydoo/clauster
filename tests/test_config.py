@@ -4,7 +4,7 @@ import logging
 
 import pytest
 
-from clauster.config import load_config
+from clauster.config import TooDeeplyNestedYamlError, UnfittingYamlTagError, load_config
 
 
 def test_loads_minimal_config(write_config, projects_root):
@@ -263,6 +263,44 @@ def test_non_utf8_env_file_fails_closed(write_config, monkeypatch, tmp_path):
     with pytest.raises(ValueError, match="not valid UTF-8") as exc:
         load_config(write_config())
     assert "secret" not in str(exc.value)
+
+
+def test_yaml_constructor_escapes_become_yaml_errors_without_the_scalar(write_config, tmp_path):
+    # #1395: `yaml.safe_load` raises OUTSIDE `yaml.YAMLError` for a tag whose value does not
+    # fit, and the payload IS the offending scalar. Every caller's YAML arm has to see these,
+    # and none of them may see the value. The CLI arms print `str(exc)`, so the message must
+    # also be non-empty — an empty one renders `clauster: config error:` with no diagnosis.
+    canary = "FAKEFAKEFAKEFAKEfake42"
+    for body in (
+        f'auth:\n  token: !!int "{canary}"\n',  # ValueError
+        f'auth:\n  token: !!float "{canary}"\n',  # ValueError, lowercased
+        f'auth:\n  token: !!bool "{canary}"\n',  # KeyError
+        f'a: !!timestamp "{canary}"\n',  # AttributeError
+    ):
+        cfg = tmp_path / "bad.yml"
+        cfg.write_text(body, encoding="utf-8", newline="")
+        with pytest.raises(UnfittingYamlTagError) as exc:
+            load_config(cfg)
+        assert canary not in str(exc.value) and canary.lower() not in str(exc.value)
+        assert str(exc.value)
+
+
+def test_deeply_nested_yaml_becomes_a_yaml_error(write_config, tmp_path):
+    # RecursionError is not a `yaml.YAMLError` either, so it escaped every caller's arm.
+    cfg = tmp_path / "bad.yml"
+    cfg.write_text("[" * 5000, encoding="utf-8", newline="")
+    with pytest.raises(TooDeeplyNestedYamlError, match="nested too deeply"):
+        load_config(cfg)
+
+
+def test_non_utf8_config_file_is_not_reclassified_as_a_yaml_error(tmp_path):
+    # `read_text` sits OUTSIDE the reclassifying try on purpose: a non-UTF-8 file is an
+    # encoding fault, and UnicodeDecodeError is a ValueError that would otherwise be
+    # relabelled as an unfitting YAML tag.
+    cfg = tmp_path / "bad.yml"
+    cfg.write_bytes(b"projects_root: \xff\xfe\x80\n")
+    with pytest.raises(UnicodeDecodeError):
+        load_config(cfg)
 
 
 def test_non_loopback_host_rejected_without_auth(write_config):
