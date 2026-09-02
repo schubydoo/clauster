@@ -15,6 +15,7 @@ atomic replace + ruamel round-trip) lives in :mod:`clauster.config_writer`.
 from __future__ import annotations
 
 import copy
+import re
 import types
 from pathlib import Path
 from typing import Any, Literal, Union, get_args, get_origin
@@ -30,7 +31,13 @@ from .config import (
     ClausterConfig,
     load_config,
 )
-from .config_write import hash_bytes, redact_secret_lines
+from .config_write import (
+    _SECRET_KEY_RE,
+    REDACTION_SENTINEL,
+    _mask_interps,
+    _mask_url_creds,
+    hash_bytes,
+)
 
 # Tier-A allowlist: dotted paths editable from the web UI. Operational only — no
 # auth/secret/bind/structural/clone/supply-chain field appears here (those stay
@@ -357,6 +364,129 @@ def validate_edits(
     return candidate
 
 
+#: Shortest input :func:`_mask_echoed_input` will treat as a credential. Below it, the value
+#: is not worth protecting and the cost is severe: the needle is a substring, so a rejected
+#: ``a`` rewrote every ``a`` in ``api_token_hash must be a 64-character lowercase hex string``
+#: — re-creating, for short values, the destroyed-diagnostic bug the identity mask replaced.
+#: Chosen to clear the longest word in Clauster's own static validator messages
+#: (``characters``), and to sit far below any credential the config accepts.
+_MIN_MASKABLE_INPUT = 12
+
+
+def _is_word_char(char: str) -> bool:
+    r"""Whether ``char`` is what ``\\w`` matches, so a lookaround around it is meaningful."""
+    return char.isalnum() or char == "_"
+
+
+def _str_leaves(value: object) -> list[str]:
+    r"""Return every non-empty string leaf in ``value``, walking lists/tuples/dicts.
+
+    pydantic reports ``input`` as the WHOLE container for a list- or dict-valued field while
+    the message quotes one element — ``trusted_ips: ['…']`` -> ``'…' does not appear to be an
+    IPv4 or IPv6 network``. A bare ``isinstance(str)`` check therefore disarmed the mask on
+    exactly the shape a future secret-bearing list would take.
+
+    **Iterative, with a ``seen`` id-set, for the two reasons
+    :func:`config_write._is_self_referential` already records** — this walks the raw output of
+    ``yaml.safe_load`` on an operator's file, so it inherits both of that seam's hazards:
+
+    * ``safe_load`` builds a genuinely self-referential structure for a recursive alias
+      (``auth: &a\\n  self: *a``) without complaint. A recursive walk never terminated:
+      ``clauster doctor`` tracebacked and `/api/doctor` answered 500 — turning the leak this
+      module exists to close into a crash on the same input (#1395).
+    * Without ``seen`` the walk is O(*paths*), not O(nodes), which an alias pyramid turns
+      exponential. Measured on the recursive version: a 542-byte config took 16.9 s inside
+      ``run_doctor``, and each added level doubled it.
+
+    Dict keys are not walked, for the same reason as that function: ``safe_load`` builds keys
+    only from hashable scalars, so a key cannot be a container.
+    """
+    out: list[str] = []
+    stack: list[Any] = [value]
+    seen: set[int] = set()
+    while stack:
+        node = stack.pop()
+        if isinstance(node, str):
+            if node:
+                out.append(node)
+            continue
+        if not isinstance(node, dict | list | tuple):
+            continue
+        if id(node) in seen:
+            continue  # a cycle, or a diamond already collected: re-walking is the blow-up
+        seen.add(id(node))
+        stack.extend(node.values() if isinstance(node, dict) else node)
+    return out
+
+
+def _mask_echoed_input(loc: str, msg: str, raw_input: object) -> str:
+    """Mask the rejected value inside ``msg``, but only under a secret-shaped field path.
+
+    A validator's own message is free to quote what it rejected, and dropping pydantic's
+    ``input_value=`` cannot reach that. So the value is masked here **by identity**: pydantic
+    hands us the exact input, and each string leaf of it is replaced where it occurs in
+    ``msg`` as a whole token. Nothing is guessed, and a message that does not quote its input
+    comes back untouched.
+
+    Three earlier shapes were tried and are recorded so they are not tried again:
+
+    * :func:`redact_secret_lines` over the whole ``f"{loc}: {msg}"`` line. It is *key*
+      anchored — it masks everything after a secret-shaped key — so a static message on a
+      secret-shaped field was destroyed rather than trimmed. ``_SECRET_KEY_RE`` matches the
+      bare word ``auth``, so ``auth.reverse_proxy: … Pin the proxy's IP/CIDR in trusted_ips``
+      became eight asterisks, and ``doctor`` lost the whole auth block (#1395).
+    * Gating that by pydantic error *type*. It restored pydantic-authored reasons but not
+      Clauster's own, whose validators raise ``value_error`` with deliberately static text
+      (``api_token_hash must be a 64-character lowercase hex string``) — the exact message an
+      operator who pasted a truncated token needs.
+    * An unbounded ``str.replace``. See :data:`_MIN_MASKABLE_INPUT`: a one-character input
+      shredded that same message. The whole-token bound is the second half of that fix — it
+      stops a value matching *inside* a longer word.
+
+    Four limits, stated rather than implied:
+
+    * ``loc`` gates the mask because over-masking has a cost: nearly every Clauster validator
+      that quotes its input quotes a **path** (``projects_root does not exist: /srv/x``), and
+      the path is the diagnosis. So a credential under a field whose path is not
+      secret-shaped is not covered here.
+    * The match is **verbatim**. A validator that normalizes before quoting (``v.strip()``,
+      ``v.lower()``) defeats it. That is the price of not guessing; the standing rule for this
+      seam is still "do not write a message that carries a value", and this is the net under
+      it, not a licence.
+    * Only ``str`` leaves are needles, so a credential YAML resolved to another type
+      (``auth.token: 123456789012`` -> ``int``, or a ``!!set`` member) is invisible here.
+    * :data:`_MIN_MASKABLE_INPUT` is a floor, so a credential shorter than it is not masked.
+      ``auth.reverse_proxy.shared_secret`` is the one secret field with no length-forcing
+      validator, so an 8-character shared secret would sit below it.
+    * Only ``msg`` is masked. :func:`_friendly_validation_message` emits ``loc`` verbatim,
+      and for the three dict-valued fields (``claude.env``, ``projects``,
+      ``webhooks.events``) its last segment is an operator-supplied KEY, not a Clauster
+      field name. Keys, never values — pydantic's message for those quotes nothing.
+
+    :func:`_friendly_validation_message` additionally runs the value-shaped passes
+    (``${…}`` interpolations, ``scheme://user@host`` credentials) on every part. Those are
+    ``loc``-independent and cannot touch a static message, so they need no gate.
+    """
+    # The cheap gate FIRST: it decides the same answer without walking a structure that came
+    # from an operator's file, so an ordinary field never pays for the walk at all.
+    if not _SECRET_KEY_RE.search(loc):
+        return msg
+    # Longest first. A shorter needle that is a boundary-aligned suffix of a longer one would
+    # otherwise consume its tail and leave the longer one's prefix standing in the message.
+    needles = sorted(
+        (n for n in _str_leaves(raw_input) if len(n) >= _MIN_MASKABLE_INPUT), key=len, reverse=True
+    )
+    for needle in needles:
+        # `\b` semantics, applied per EDGE: a lookaround only makes sense where the needle's
+        # own edge character is a word character. Emitting `(?<!\w)` unconditionally refused
+        # to mask `/var/run/secret-token-x` whenever a word character preceded the slash —
+        # the value then printed verbatim, which is the failure direction that matters.
+        behind = r"(?<!\w)" if _is_word_char(needle[0]) else ""
+        ahead = r"(?!\w)" if _is_word_char(needle[-1]) else ""
+        msg = re.sub(rf"{behind}{re.escape(needle)}{ahead}", REDACTION_SENTINEL, msg)
+    return msg
+
+
 def _friendly_validation_message(exc: ValidationError) -> str:
     """Compress a pydantic ``ValidationError`` into operator-facing per-field lines.
 
@@ -365,20 +495,29 @@ def _friendly_validation_message(exc: ValidationError) -> str:
     … https://errors.pydantic.dev/…") — none of it actionable in the dashboard
     banner (#1034). Render one ``field.path: reason`` line per error instead; the
     full exception still reaches the log via the ``from exc`` chain.
+
+    Dropping ``input_value=`` is the load-bearing part, not a tidy-up: it carries the
+    rejected value, and for a *missing-field* error that value is the whole parsed mapping.
+    ``ops.run_doctor`` renders a broken ``clauster.yml`` through here, and its result reaches
+    `/api/doctor` (#1395). ``include_input`` stays **on** only so :func:`_mask_echoed_input`
+    can use the value as a needle; it is never emitted.
     """
     parts: list[str] = []
-    for err in exc.errors(include_url=False, include_input=False):
+    for err in exc.errors(include_url=False):
         loc = ".".join(str(piece) for piece in err.get("loc", ()))
         msg = err.get("msg") or "invalid value"
         # pydantic prefixes custom-validator failures with "Value error, " — noise here.
         msg = msg.removeprefix("Value error, ")
-        parts.append(f"{loc}: {msg}" if loc else msg)
-    # ``msg`` can echo the offending INPUT value. Safe today because every
-    # secret-bearing field sits in EXCLUDED_FIELDS (never editable) and the
-    # secret-adjacent model validators raise static messages — but wrap in the
-    # secret-line redactor anyway so a future Tier-A/B addition or a validator
-    # that starts echoing its value cannot leak into the dashboard banner.
-    return redact_secret_lines("; ".join(parts)) or "validation failed"
+        msg = _mask_echoed_input(loc, msg, err.get("input"))
+        part = f"{loc}: {msg}" if loc else msg
+        # The two VALUE-shaped passes `redact_secret_lines` also ran. They were dropped
+        # together with its key-anchored pass, which is what had to go; these two did not.
+        # Both are loc-independent (a credentialed URL under `notifications.urls` has a loc
+        # `_SECRET_KEY_RE` never matches) and neither can touch a static message, so they run
+        # unconditionally rather than behind the `_mask_echoed_input` gate.
+        part = _mask_interps(part, REDACTION_SENTINEL)
+        parts.append(_mask_url_creds(part, f"{REDACTION_SENTINEL}@"))
+    return "; ".join(parts) or "validation failed"
 
 
 def _resolve_field_info(path: str) -> Any:

@@ -24,9 +24,12 @@ from typing import BinaryIO, Literal, TypedDict
 from xml.sax.saxutils import escape as _xml_escape
 
 import yaml
+from pydantic import ValidationError
 
 from . import atomicio, claude_cli, config_write_mcp, deps, environments, procutil, pty_screen
-from .config import ClausterConfig, _missing_enforced_auth, load_config
+from .config import ClausterConfig, FixedDetailYamlError, _missing_enforced_auth, load_config
+from .config_editor import _friendly_validation_message
+from .config_write import _yaml_error_where, redact_secret_lines
 from .discovery import Project, discover_projects
 from .state import CURRENT_SCHEMA, CorruptStateFile, StateStore
 
@@ -88,16 +91,71 @@ def run_doctor(
         config: ClausterConfig | None = load_config(config_path)
         checks.append(Check("config", OK, f"loaded {config.source_path}"))
     except FileNotFoundError as exc:
+        # Clauster's own message, built from the search order — it names candidate paths
+        # and never opens a file, so nothing from the document can be in it.
         checks.append(Check("config", FAIL, f"no config found: {exc}"))
         config = None
-    except ValueError as exc:
-        checks.append(Check("config", FAIL, f"invalid config: {exc}"))
+    except ValidationError as exc:
+        # Must precede the ``ValueError`` arm: pydantic's ``ValidationError`` IS a
+        # ``ValueError``, so the broad arm below would swallow it.
+        #
+        # ``str(exc)`` embeds ``input_value=`` — and for a missing-field error that value
+        # is the WHOLE parsed config mapping, not just the offending field. `/api/doctor`
+        # returns ``Check.detail`` verbatim, so the raw message put `auth.token` in the
+        # browser (#1395). The shared renderer keeps field path + reason and drops
+        # ``input_value=`` entirely, then masks a value a *validator* quoted back — but only
+        # under a secret-shaped field path. A validator that quotes a PATH under an ordinary
+        # key (``projects_root does not exist: /srv/x``) is left readable on purpose: that
+        # path is the diagnosis, and it is the documented behaviour of this row.
+        detail = _friendly_validation_message(exc)
+        checks.append(Check("config", FAIL, f"invalid config: {detail}"))
+        config = None
+    except FixedDetailYamlError as exc:
+        # Clauster's own parse verdicts, which carry no position to report. Printing the
+        # message is safe *by construction*, not by inspection: `FixedDetailYamlError`
+        # takes no constructor arguments, so its text can only ever be the class's own
+        # `DETAIL` literal. That is worth more to an operator than the bare class name
+        # `_yaml_error_where` would otherwise fall back to.
+        checks.append(Check("config", FAIL, f"config is not valid YAML: {exc}"))
         config = None
     except yaml.YAMLError as exc:
-        # NOT a ValueError, so it needs its own arm. Without it `clauster doctor` — the
-        # one command whose whole job is diagnosing a broken config — was the command
-        # that tracebacked on the most common way to break one.
-        checks.append(Check("config", FAIL, f"config is not valid YAML: {exc}"))
+        # Both YAML arms sit ABOVE the `ValueError` one. Not needed today — `yaml.YAMLError`
+        # is not a `ValueError` — but `FixedDetailYamlError` invites new members, and one
+        # declared `class X(FixedDetailYamlError, ValueError)` (a plausible move for CLI
+        # back-compat) would otherwise be routed silently to the wrong arm and rendered
+        # "invalid config:". Ordering costs nothing and removes the trap.
+        #
+        # Without a YAML arm at all, `clauster doctor` — the one command whose whole job is
+        # diagnosing a broken config — tracebacked on the most common way to break one.
+        #
+        # Positions only, never ``str(exc)``: PyYAML re-emits the offending source line in
+        # its message, so a malformed ``token:`` line handed the token straight to
+        # `/api/doctor` (#1395). Same helper and same reasoning as the skills-frontmatter
+        # seam (#1369); ``line_offset`` stays 0 because we parse the whole file, so
+        # PyYAML's line numbers are already the file's, and ``block_name`` says "file"
+        # because `load_config` reads with ``newline=""`` — the character offset a
+        # `ReaderError` reports really is an offset into the file, CRLF included.
+        where = _yaml_error_where(exc, block_name="file")
+        checks.append(Check("config", FAIL, f"config is not valid YAML{where}"))
+        config = None
+    except ValueError as exc:
+        # What is left is a root that is not a mapping, an unreadable ``*_FILE`` env
+        # override, or a non-UTF-8 file. The first two are Clauster's own text; the third is
+        # Python's ``UnicodeDecodeError``, whose ``str`` names a codec, a byte and an offset.
+        # None of them carries file content.
+        #
+        # That is true *only* because ``load_config`` re-raises PyYAML's constructor escapes
+        # as :class:`UnconstructableYamlValueError` — a `!!int "<token>"` tag made
+        # ``safe_load`` itself raise a plain ``ValueError`` carrying the scalar, which landed
+        # here and which the line-anchored redactor could not reach (the value sits mid-prose
+        # after ``base 10:``, with no key to anchor on).
+        #
+        # ⚠️ `redact_secret_lines` is KEY-anchored and fires only on a ``<secret-ish key>:
+        # <value>`` line. NO message reachable here has that shape — all three open with
+        # prose — so today it is dead defence, not a partial net. Kept for a future message,
+        # but a new one on this path must be written not to carry a value, not written to
+        # rely on this.
+        checks.append(Check("config", FAIL, f"invalid config: {redact_secret_lines(str(exc))}"))
         config = None
 
     if config is None:

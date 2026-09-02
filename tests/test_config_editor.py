@@ -660,6 +660,239 @@ def test_validation_error_message_is_operator_friendly(write_config) -> None:
         assert leaked not in msg
 
 
+def test_validation_message_masks_an_echoed_value_at_any_error_position() -> None:
+    """A validator that quotes its input is trimmed under a secret-shaped path (#1395).
+
+    Position-independent on purpose: the earlier shape redacted the JOINED string, and
+    ``redact_secret_lines`` anchors on the FIRST ``key: value`` pair on a line, so a
+    secret-keyed error that was not error one went unmasked. ``ops.run_doctor`` renders a
+    whole broken ``clauster.yml`` through here, where ordering is not ours to choose.
+    """
+    from pydantic import ValidationError, field_validator
+
+    from clauster.config_editor import _friendly_validation_message
+
+    canary = "FAKEFAKEFAKEFAKEfake42"
+
+    class M(BaseModel):
+        alpha: int
+        api_token: str
+
+        @field_validator("api_token")
+        @classmethod
+        def _echo_the_value(cls, v: str) -> str:
+            raise ValueError(f"rejected {v}")
+
+    with pytest.raises(ValidationError) as ei:
+        M(alpha="not-an-int", api_token=canary)
+    msg = _friendly_validation_message(ei.value)
+    # `alpha` fails first, so the secret-keyed part is second.
+    assert msg.index("alpha") < msg.index("api_token")
+    assert canary not in msg
+    # Only the echoed VALUE is masked; the surrounding reason survives on both parts.
+    assert "api_token: rejected ********" in msg
+    assert "alpha: Input should be a valid integer" in msg
+
+
+def test_validation_message_keeps_a_static_reason_on_a_secret_shaped_key() -> None:
+    """A reason that never quoted the input is untouched, secret-shaped path or not (#1395).
+
+    Masking the whole line after a secret-shaped key blanked these, and ``_SECRET_KEY_RE``
+    matches the bare word ``auth`` — so the entire ``auth.*`` block became sentinels and
+    ``doctor`` lost its diagnosis on the fields most likely to be mistyped.
+    """
+    from pydantic import ValidationError, field_validator
+
+    from clauster.config_editor import _friendly_validation_message
+
+    class M(BaseModel):
+        api_token_ttl: int
+        auth_secret: str = ""
+
+        @field_validator("auth_secret")
+        @classmethod
+        def _static_reason(cls, v: str) -> str:
+            raise ValueError("must be 64 lowercase hex characters")
+
+    with pytest.raises(ValidationError) as ei:
+        M(api_token_ttl="nope", auth_secret="FAKEFAKEFAKEFAKEfake42")
+    msg = _friendly_validation_message(ei.value)
+    # pydantic-authored reason: built from the constraint, so nothing to mask.
+    assert "api_token_ttl: Input should be a valid integer" in msg
+    # Validator-authored but static: the value is not in it, so it is not touched.
+    assert "auth_secret: must be 64 lowercase hex characters" in msg
+    assert "********" not in msg
+
+
+def test_validation_message_keeps_an_echoed_path_under_an_ordinary_key() -> None:
+    """A rejected PATH stays readable — masking it would remove the diagnosis (#1395).
+
+    Nearly every Clauster validator that quotes its input quotes a path, and
+    `docs/troubleshooting.md` promises the row names it. The mask is armed by the field
+    path's own shape, so an ordinary key never trips it.
+    """
+    from pydantic import ValidationError, field_validator
+
+    from clauster.config_editor import _friendly_validation_message
+
+    class M(BaseModel):
+        projects_root: str
+
+        @field_validator("projects_root")
+        @classmethod
+        def _reject(cls, v: str) -> str:
+            raise ValueError(f"does not exist: {v}")
+
+    with pytest.raises(ValidationError) as ei:
+        M(projects_root="/srv/not-here")
+    assert _friendly_validation_message(ei.value) == "projects_root: does not exist: /srv/not-here"
+
+
+@pytest.mark.parametrize("value", ["a", "hash", "64", "characters", "lowercase", "must be"])
+def test_validation_message_does_not_shred_a_reason_with_a_short_input(value) -> None:
+    """A short rejected value must not rewrite the static reason it appears inside (#1395).
+
+    The mask is a substring replace, so ``api_token_hash: a`` once produced
+    ``********pi_token_h********sh must be ******** 64-ch********r********cter …`` — the same
+    destroyed diagnostic the identity mask was introduced to fix, scoped to short values.
+    Each parameter is a real substring of the message, so this fails loudly without the
+    length floor and the whole-token bound.
+    """
+    from pydantic import ValidationError, field_validator
+
+    from clauster.config_editor import _friendly_validation_message
+
+    reason = "api_token_hash must be a 64-character lowercase hex string"
+
+    class M(BaseModel):
+        api_token_hash: str
+
+        @field_validator("api_token_hash")
+        @classmethod
+        def _static_reason(cls, v: str) -> str:
+            raise ValueError(reason)
+
+    with pytest.raises(ValidationError) as ei:
+        M(api_token_hash=value)
+    assert _friendly_validation_message(ei.value) == f"api_token_hash: {reason}"
+
+
+def test_validation_message_masks_an_echoed_element_of_a_list_field() -> None:
+    """pydantic reports a list field's input as the CONTAINER, not the quoted element (#1395).
+
+    ``trusted_ips: ['…']`` fails with ``'…' does not appear to be an IPv4 or IPv6 network``
+    while ``err["input"]`` is the whole list — so an ``isinstance(str)`` gate disarmed the
+    mask on exactly the shape a future secret-bearing list would take.
+    """
+    from pydantic import ValidationError, field_validator
+
+    from clauster.config_editor import _friendly_validation_message
+
+    canary = "FAKEFAKEFAKEFAKEfake42"
+
+    class M(BaseModel):
+        auth_tokens: list[str]
+
+        @field_validator("auth_tokens")
+        @classmethod
+        def _reject(cls, v: list[str]) -> list[str]:
+            raise ValueError(f"{v[0]!r} is not usable")
+
+    with pytest.raises(ValidationError) as ei:
+        M(auth_tokens=[canary])
+    msg = _friendly_validation_message(ei.value)
+    assert canary not in msg
+    assert msg == "auth_tokens: '********' is not usable"
+
+
+def test_validation_message_masks_value_shaped_credentials_regardless_of_the_field(
+    write_config,
+) -> None:
+    """``${…}`` and ``scheme://user@host`` are masked with no field-path gate (#1395).
+
+    They rode in on ``redact_secret_lines``, whose key-anchored pass had to go. These two do
+    not depend on the field name, and neither can touch a static message — a credentialed URL
+    under ``notifications.urls`` has a path ``_SECRET_KEY_RE`` never matches.
+    """
+    from pydantic import ValidationError, field_validator
+
+    from clauster.config_editor import _friendly_validation_message
+
+    class M(BaseModel):
+        notify_url: str
+
+        @field_validator("notify_url")
+        @classmethod
+        def _reject(cls, v: str) -> str:
+            raise ValueError(f"unsupported target {v}")
+
+    with pytest.raises(ValidationError) as ei:
+        M(notify_url="slack://FAKEFAKEFAKEFAKEfake42@hooks.example.com")
+    msg = _friendly_validation_message(ei.value)
+    assert "FAKEFAKEFAKEFAKEfake42" not in msg
+    assert "hooks.example.com" in msg  # the host survives; only the credential goes
+
+    with pytest.raises(ValidationError) as ei:
+        M(notify_url="${FAKEFAKEFAKEFAKEfake42}")
+    assert "FAKEFAKEFAKEFAKEfake42" not in _friendly_validation_message(ei.value)
+
+
+def test_str_leaves_terminates_on_a_cycle_and_visits_each_container_once() -> None:
+    """The walk runs on raw ``safe_load`` output, which can be cyclic (#1395).
+
+    ``config_write._is_self_referential`` exists for the same reason on the frontmatter
+    seam; a recursive walk here never terminated, and without the id-set it was O(paths).
+    """
+    from clauster.config_editor import _str_leaves
+
+    cyclic: dict = {"token": "supersecrettoken12345"}
+    cyclic["self"] = cyclic
+    assert _str_leaves(cyclic) == ["supersecrettoken12345"]
+
+    # A diamond is collected once, not once per path — that is what kills the blow-up.
+    shared = ["shared-leaf-value"]
+    assert _str_leaves({"a": shared, "b": shared}) == ["shared-leaf-value"]
+
+    # Nested containers and non-str leaves.
+    assert sorted(_str_leaves({"a": ["x", 1, None, ("y",)], "b": {"c": "z"}})) == ["x", "y", "z"]
+    assert _str_leaves({"a": ""}) == []  # empty strings are not needles
+
+
+@pytest.mark.parametrize(
+    "message,expected",
+    [
+        # A word character abutting a non-word EDGE is still a boundary: emitting `(?<!\\w)`
+        # unconditionally refused these and printed the value verbatim.
+        ("x/var/run/secret-token-x now", "x******** now"),
+        ("got /var/run/secret-token-x now", "got ******** now"),
+        ("/var/run/secret-token-x", "********"),
+        # ...but a needle whose own edges are word characters keeps its anchoring, so it
+        # cannot match inside a longer word.
+        ("prefix_supersecrettoken12345", "prefix_supersecrettoken12345"),
+    ],
+)
+def test_mask_respects_the_needles_own_edges(message, expected) -> None:
+    """A lookaround is applied per edge, only where the needle's edge is a word char (#1395)."""
+    from clauster.config_editor import _mask_echoed_input
+
+    needle = "/var/run/secret-token-x" if "/var" in message else "supersecrettoken12345"
+    assert _mask_echoed_input("auth.token", message, needle) == expected
+
+
+def test_mask_applies_longer_needles_first() -> None:
+    """A shorter needle must not eat a longer one's tail and strand its prefix (#1395)."""
+    from clauster.config_editor import _mask_echoed_input
+
+    # `short_secret` sits inside `long_secret` preceded by `/`, a non-word character, so the
+    # `(?<!\w)` edge does NOT refuse it. Shortest-first therefore masks the short needle and
+    # strands the longer one's `/var/` prefix, so deleting the sort makes this assertion fail.
+    long_secret = "/var/secrettoken12345"
+    short_secret = "secrettoken12345"  # a non-boundary-aligned suffix of the longer one
+    needles = [long_secret, short_secret]
+    masked = _mask_echoed_input("auth.token", f"rejected {long_secret}", needles)
+    assert masked == "rejected ********"
+
+
 def test_exclusive_bounds_are_emitted_distinctly() -> None:
     # `<input type=number>`'s min/max are INCLUSIVE by definition, so a `gt=0` field
     # advertised min="0", the browser called 0 valid, and the save came back 422 — the

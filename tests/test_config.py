@@ -3,8 +3,14 @@ from __future__ import annotations
 import logging
 
 import pytest
+import yaml
 
-from clauster.config import load_config
+from clauster.config import (
+    FixedDetailYamlError,
+    TooDeeplyNestedYamlError,
+    UnconstructableYamlValueError,
+    load_config,
+)
 
 
 def test_loads_minimal_config(write_config, projects_root):
@@ -263,6 +269,81 @@ def test_non_utf8_env_file_fails_closed(write_config, monkeypatch, tmp_path):
     with pytest.raises(ValueError, match="not valid UTF-8") as exc:
         load_config(write_config())
     assert "secret" not in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'auth:\n  token: !!int "{c}"\n',  # ValueError, scalar in the payload
+        'auth:\n  token: !!float "{c}"\n',  # ValueError, scalar lowercased
+        'auth:\n  token: !!bool "{c}"\n',  # KeyError
+        'a: !!timestamp "{c}"\n',  # AttributeError
+        "a: 2020-13-45\n",  # implicit resolver: no `!!` anywhere
+        "port: " + "9" * 5000 + "\n",  # implicit int, over CPython's digit limit
+    ],
+)
+def test_yaml_constructor_escapes_become_yaml_errors_without_the_scalar(tmp_path, body):
+    # #1395: `yaml.safe_load` raises OUTSIDE `yaml.YAMLError` for a value it cannot build,
+    # and the payload IS the offending scalar. Every caller's YAML arm has to see these, and
+    # none of them may see the value. The CLI arms print `str(exc)`, so the message must also
+    # be non-empty — an empty one renders `clauster: config error:` with no diagnosis in it.
+    canary = "FAKEFAKEFAKEFAKEfake42"
+    cfg = tmp_path / "bad.yml"
+    cfg.write_text(body.format(c=canary), encoding="utf-8", newline="")
+    with pytest.raises(UnconstructableYamlValueError) as exc:
+        load_config(cfg)
+    assert canary not in str(exc.value) and canary.lower() not in str(exc.value)
+    assert str(exc.value) == UnconstructableYamlValueError.DETAIL
+
+
+def test_fixed_detail_yaml_errors_cannot_be_handed_a_document_scalar():
+    # The guard is structural: `__init__` takes no arguments, so the message can only ever be
+    # the class's own literal. `run_doctor` prints it BECAUSE of that, not after inspecting it.
+    for cls in (UnconstructableYamlValueError, TooDeeplyNestedYamlError):
+        assert issubclass(cls, FixedDetailYamlError)
+        with pytest.raises(TypeError):
+            cls("a token pasted in by a future caller")  # type: ignore[call-arg]
+
+
+def test_deeply_nested_yaml_becomes_a_yaml_error(tmp_path):
+    # RecursionError is not a `yaml.YAMLError` either, so it escaped every caller's arm.
+    cfg = tmp_path / "bad.yml"
+    cfg.write_text("[" * 5000, encoding="utf-8", newline="")
+    with pytest.raises(TooDeeplyNestedYamlError, match="nested too deeply"):
+        load_config(cfg)
+
+
+def test_non_utf8_config_file_is_not_reclassified_as_a_yaml_error(tmp_path):
+    # `read_text` sits OUTSIDE the reclassifying try on purpose: a non-UTF-8 file is an
+    # encoding fault, and UnicodeDecodeError is a ValueError that would otherwise be
+    # relabelled as an unconstructable YAML value.
+    cfg = tmp_path / "bad.yml"
+    cfg.write_bytes(b"projects_root: \xff\xfe\x80\n")
+    with pytest.raises(UnicodeDecodeError):
+        load_config(cfg)
+
+
+def test_crlf_config_parses_identically_and_keeps_true_character_offsets(tmp_path):
+    # `load_config` reads with newline="" so no line-ending translation happens. Two things
+    # ride on that: a CRLF config must parse the same (PyYAML normalizes breaks itself,
+    # block scalars included), and `ReaderError.position` must stay a real FILE offset —
+    # under universal newlines it was short by one per preceding line, while `run_doctor`
+    # calls that number an offset "of the file".
+    body = "projects_root: {root}\nb: |\n  line1\n  line2\n"
+    lf, crlf = tmp_path / "lf.yml", tmp_path / "crlf.yml"
+    text = body.format(root=tmp_path.as_posix())
+    lf.write_bytes(text.encode())
+    crlf.write_bytes(text.replace("\n", "\r\n").encode())
+    assert load_config(crlf).model_dump() == load_config(lf).model_dump()
+
+    fault = "aaaa: b\ncc: d\x01e\n"  # the control character sits at byte 13 of the LF form
+    for raw, offset in ((fault, 13), (fault.replace("\n", "\r\n"), 14)):
+        bad = tmp_path / "bad.yml"
+        bad.write_bytes(raw.encode())
+        with pytest.raises(yaml.YAMLError) as exc:
+            load_config(bad)
+        assert raw.encode().index(b"\x01") == offset  # the fixture says what it means
+        assert exc.value.position == offset
 
 
 def test_non_loopback_host_rejected_without_auth(write_config):

@@ -1792,10 +1792,72 @@ def _apply_env_overrides(data: dict) -> dict:
     return data
 
 
+class FixedDetailYamlError(yaml.YAMLError):
+    """A parse failure whose entire message is a Clauster literal, never document text.
+
+    PyYAML raises some parse failures **outside** :class:`yaml.YAMLError`, and their payload
+    is the offending document scalar. ``clauster doctor`` echoed that scalar into
+    `/api/doctor` on the ``ValueError`` shapes and tracebacked outright on the others
+    (#1395), so :func:`load_config` re-raises the whole family as subclasses of this — one
+    "the file does not parse" contract instead of four exception families to enumerate at
+    every call site.
+
+    ``__init__`` **takes no arguments**, which is the guard: a caller physically cannot pass
+    a document scalar in, so the message can only ever be :data:`DETAIL`. That is what makes
+    it safe for ``run_doctor`` to print, rather than falling back to the class name — and it
+    is why a new member subclasses this rather than :class:`yaml.YAMLError` directly.
+    """
+
+    #: The whole message. A subclass overrides it with a literal; never an f-string.
+    DETAIL = "the config does not parse"
+
+    def __init__(self) -> None:
+        """Carry :data:`DETAIL` and nothing else."""
+        super().__init__(self.DETAIL)
+
+
+class UnconstructableYamlValueError(FixedDetailYamlError):
+    """A scalar PyYAML could not build into the type it resolved for it.
+
+    Covers the **explicit** tag (``!!int "abc"``) and the **implicit** resolver alike: an
+    ordinary ``a: 2020-13-45`` is resolved to a timestamp and fails the same way, with no
+    ``!!`` anywhere in the file. Naming only the tag case would send an operator hunting for
+    a tag they never wrote.
+
+    Reproduced per shape: ``!!int``/``!!float`` -> ``ValueError`` (the second lowercases the
+    scalar but still carries it), ``!!bool`` -> ``KeyError``, ``!!timestamp`` and a
+    bad implicit date -> ``AttributeError``/``ValueError``. Every other tag already fails as
+    a ``ConstructorError``, which is a ``YAMLError``. That list records where each class was
+    SEEN, not a proof of exhaustiveness — which is why :func:`load_config` names exception
+    classes rather than trusting the list.
+
+    The cost is real and deliberate: PyYAML's own ``month must be in 1..12`` was more useful
+    than this sentence. It is withheld because the same code path also produces
+    ``invalid literal for int() with base 10: '<your token>'``, and nothing at this seam can
+    tell the two apart.
+    """
+
+    DETAIL = "a value could not be built into the type YAML resolved for it"
+
+
+class TooDeeplyNestedYamlError(FixedDetailYamlError):
+    """A config whose flow collections overflow PyYAML's composer before it can finish.
+
+    ``RecursionError`` is not a ``YAMLError`` either, so ``clauster doctor`` — the command
+    whose job is diagnosing a broken config — tracebacked on one, and `/api/doctor` answered
+    500. Same structural verdict as any other parse failure: we could not read the file.
+    """
+
+    DETAIL = "the config is nested too deeply to parse"
+
+
 def load_config(path: str | os.PathLike | None = None) -> ClausterConfig:
     """Load, env-override, and validate the Clauster config.
 
-    Raises FileNotFoundError if no config file is found in the search order.
+    Raises FileNotFoundError if no config file is found in the search order, and a
+    :class:`yaml.YAMLError` if it does not parse — including the :class:`FixedDetailYamlError`
+    subclasses above, which exist so that "does not parse" is one contract rather than four
+    exception families.
     """
     explicit = Path(path).expanduser() if path is not None else None
     candidates = _candidate_paths(explicit)
@@ -1804,7 +1866,30 @@ def load_config(path: str | os.PathLike | None = None) -> ClausterConfig:
         searched = ", ".join(str(p) for p in candidates)
         raise FileNotFoundError(f"no clauster.yml found (searched: {searched})")
 
-    raw = yaml.safe_load(found.read_text(encoding="utf-8")) or {}
+    # newline="" so no line-ending translation happens: `ReaderError.position` is a plain
+    # character offset into the string handed to `safe_load`, so under universal newlines a
+    # CRLF config reported an offset short by one per preceding line — and `run_doctor` now
+    # names that offset as being "of the file". PyYAML normalizes line breaks itself, so a
+    # CRLF document still parses identically (verified, including block scalars).
+    #
+    # `Path.open`, not `Path.read_text(newline=…)`: that keyword only exists on 3.13+, and
+    # this project supports 3.11. It would have been a TypeError on two of the three
+    # supported interpreters, invisible to a suite that runs on 3.13.
+    with found.open(encoding="utf-8", newline="") as fh:
+        text = fh.read()
+    try:
+        raw = yaml.safe_load(text) or {}
+    except RecursionError as exc:
+        raise TooDeeplyNestedYamlError from exc
+    except (ValueError, AttributeError, KeyError, IndexError) as exc:
+        # Scoped to the `safe_load` call alone, so nothing past the parse is reclassified,
+        # and nothing of ours runs inside it (no custom constructor is registered anywhere).
+        # The `fh.read()` above is deliberately OUTSIDE: a non-UTF-8 file raises
+        # UnicodeDecodeError, which is a ValueError, and is an encoding fault, not a YAML one.
+        #
+        # Fails closed in one direction only: this converts a crash (or a leak) into a
+        # rejection, never a rejection into an accept.
+        raise UnconstructableYamlValueError from exc
     if not isinstance(raw, dict):
         raise ValueError(f"config root must be a mapping, got {type(raw).__name__}: {found}")
 

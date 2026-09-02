@@ -1020,7 +1020,7 @@ def _expands_beyond(value: Any, limit: int) -> bool:
     return False
 
 
-def _yaml_error_where(exc: yaml.YAMLError, line_offset: int = 0) -> str:
+def _yaml_error_where(exc: yaml.YAMLError, line_offset: int = 0, *, block_name: str) -> str:
     """Describe *where* a ``YAMLError`` happened, using nothing derived from the document.
 
     The rejection message reaches the browser — ``list_skills`` surfaces it as a skill's
@@ -1051,9 +1051,14 @@ def _yaml_error_where(exc: yaml.YAMLError, line_offset: int = 0) -> str:
     (``f"{mark}"``) would re-leak everything this function exists to withhold.
 
     ``line_offset`` shifts the reported line so it names the line in the FILE, not in the
-    header slice: both callers hand us ``FRONTMATTER_RE.group(1)``, which begins after the
-    opening ``---`` fence. Without it every message pointed one line above the fault, and with
-    the prose gone that number is all the operator has.
+    header slice: :func:`load_frontmatter_yaml`'s callers hand it ``FRONTMATTER_RE.group(1)``,
+    which begins after the opening ``---`` fence. Without it every message pointed one line
+    above the fault, and with the prose gone that number is all the operator has.
+
+    ``block_name`` names the coordinate space the ``ReaderError`` branch counts characters in,
+    and is **keyword-required with no default** so a new caller cannot inherit a wrong one:
+    ``ops.run_doctor`` parses a whole ``clauster.yml`` (#1395), where "of the frontmatter
+    block" would name a thing the file does not have.
 
     The cost is the ``problem`` phrase. The operator still gets the category, the position,
     and ``content`` in the editor beside it. Positions are reported 1-based to match PyYAML's
@@ -1086,13 +1091,14 @@ def _yaml_error_where(exc: yaml.YAMLError, line_offset: int = 0) -> str:
         # pasted into frontmatter (terminal output, an escape sequence) raises it. It carries
         # a plain character offset instead of a mark — positions-only by definition.
         #
-        # Named as an offset into the FRONTMATTER BLOCK, not the file, because that is what it
-        # is: `.position` indexes the string handed to `safe_load`, i.e. the header slice, and
-        # `line_offset` cannot convert it — the shift is the length of the opening fence, which
-        # varies (`---\n` vs `---\r\n`, plus the trailing whitespace `FRONTMATTER_RE` tolerates)
-        # and this seam does not see it. Saying which coordinate space it is beats sending an
-        # operator counting from the top of the file a few characters wrong.
-        return f" ({kind} at character {position} of the frontmatter block)"
+        # Named as an offset into whatever `block_name` says was handed to `safe_load`, which
+        # for the frontmatter callers is the header SLICE and not the file: `.position` indexes
+        # that string, and `line_offset` cannot convert it — the shift is the length of the
+        # opening fence, which varies (`---\n` vs `---\r\n`, plus the trailing whitespace
+        # `FRONTMATTER_RE` tolerates) and this seam does not see it. Saying which coordinate
+        # space it is beats sending an operator counting from the top of the file a few
+        # characters wrong. `run_doctor` hands over a whole file, so it says so.
+        return f" ({kind} at character {position} of the {block_name})"
     return f" ({kind})"
 
 
@@ -1143,7 +1149,8 @@ def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> An
         value = yaml.safe_load(header)
     except yaml.YAMLError as exc:
         raise InvalidCandidateError(
-            f"{what} is not valid YAML{_yaml_error_where(exc, line_offset)}"
+            f"{what} is not valid YAML"
+            f"{_yaml_error_where(exc, line_offset, block_name='frontmatter block')}"
         ) from exc
     except RecursionError as exc:
         raise InvalidCandidateError(f"{what} is nested too deeply to parse") from exc
