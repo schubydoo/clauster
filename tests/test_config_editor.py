@@ -748,6 +748,95 @@ def test_validation_message_keeps_an_echoed_path_under_an_ordinary_key() -> None
     assert _friendly_validation_message(ei.value) == "projects_root: does not exist: /srv/not-here"
 
 
+@pytest.mark.parametrize("value", ["a", "hash", "64", "characters", "lowercase", "must be"])
+def test_validation_message_does_not_shred_a_reason_with_a_short_input(value) -> None:
+    """A short rejected value must not rewrite the static reason it appears inside (#1395).
+
+    The mask is a substring replace, so ``api_token_hash: a`` once produced
+    ``********pi_token_h********sh must be ******** 64-ch********r********cter …`` — the same
+    destroyed diagnostic the identity mask was introduced to fix, scoped to short values.
+    Each parameter is a real substring of the message, so this fails loudly without the
+    length floor and the whole-token bound.
+    """
+    from pydantic import ValidationError, field_validator
+
+    from clauster.config_editor import _friendly_validation_message
+
+    reason = "api_token_hash must be a 64-character lowercase hex string"
+
+    class M(BaseModel):
+        api_token_hash: str
+
+        @field_validator("api_token_hash")
+        @classmethod
+        def _static_reason(cls, v: str) -> str:
+            raise ValueError(reason)
+
+    with pytest.raises(ValidationError) as ei:
+        M(api_token_hash=value)
+    assert _friendly_validation_message(ei.value) == f"api_token_hash: {reason}"
+
+
+def test_validation_message_masks_an_echoed_element_of_a_list_field() -> None:
+    """pydantic reports a list field's input as the CONTAINER, not the quoted element (#1395).
+
+    ``trusted_ips: ['…']`` fails with ``'…' does not appear to be an IPv4 or IPv6 network``
+    while ``err["input"]`` is the whole list — so an ``isinstance(str)`` gate disarmed the
+    mask on exactly the shape a future secret-bearing list would take.
+    """
+    from pydantic import ValidationError, field_validator
+
+    from clauster.config_editor import _friendly_validation_message
+
+    canary = "FAKEFAKEFAKEFAKEfake42"
+
+    class M(BaseModel):
+        auth_tokens: list[str]
+
+        @field_validator("auth_tokens")
+        @classmethod
+        def _reject(cls, v: list[str]) -> list[str]:
+            raise ValueError(f"{v[0]!r} is not usable")
+
+    with pytest.raises(ValidationError) as ei:
+        M(auth_tokens=[canary])
+    msg = _friendly_validation_message(ei.value)
+    assert canary not in msg
+    assert msg == "auth_tokens: '********' is not usable"
+
+
+def test_validation_message_masks_value_shaped_credentials_regardless_of_the_field(
+    write_config,
+) -> None:
+    """``${…}`` and ``scheme://user@host`` are masked with no field-path gate (#1395).
+
+    They rode in on ``redact_secret_lines``, whose key-anchored pass had to go. These two do
+    not depend on the field name, and neither can touch a static message — a credentialed URL
+    under ``notifications.urls`` has a path ``_SECRET_KEY_RE`` never matches.
+    """
+    from pydantic import ValidationError, field_validator
+
+    from clauster.config_editor import _friendly_validation_message
+
+    class M(BaseModel):
+        notify_url: str
+
+        @field_validator("notify_url")
+        @classmethod
+        def _reject(cls, v: str) -> str:
+            raise ValueError(f"unsupported target {v}")
+
+    with pytest.raises(ValidationError) as ei:
+        M(notify_url="slack://FAKEFAKEFAKEFAKEfake42@hooks.example.com")
+    msg = _friendly_validation_message(ei.value)
+    assert "FAKEFAKEFAKEFAKEfake42" not in msg
+    assert "hooks.example.com" in msg  # the host survives; only the credential goes
+
+    with pytest.raises(ValidationError) as ei:
+        M(notify_url="${FAKEFAKEFAKEFAKEfake42}")
+    assert "FAKEFAKEFAKEFAKEfake42" not in _friendly_validation_message(ei.value)
+
+
 def test_exclusive_bounds_are_emitted_distinctly() -> None:
     # `<input type=number>`'s min/max are INCLUSIVE by definition, so a `gt=0` field
     # advertised min="0", the browser called 0 valid, and the save came back 422 — the

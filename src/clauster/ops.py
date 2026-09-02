@@ -110,21 +110,6 @@ def run_doctor(
         detail = _friendly_validation_message(exc)
         checks.append(Check("config", FAIL, f"invalid config: {detail}"))
         config = None
-    except ValueError as exc:
-        # What is left is clauster-authored: a root that is not a mapping, an unreadable
-        # ``*_FILE`` env override, a non-UTF-8 file. Each names types and paths, not values.
-        #
-        # It is *only* clauster-authored because ``load_config`` now re-raises PyYAML's
-        # constructor escapes as :class:`UnconstructableYamlValueError` — a `!!int "<token>"`
-        # tag made ``safe_load`` itself raise a plain ``ValueError`` carrying the scalar,
-        # which landed here and which the line-anchored redactor could not reach (the value
-        # sits mid-prose after ``base 10:``, with no key to anchor on). Redacted anyway, so
-        # this arm cannot become the next leak: over-masking a diagnostic costs a re-read.
-        # ⚠️ That redactor is KEY-anchored, so it only fires when the message happens to be
-        # shaped ``<secret-ish key>: <value>``. It is a net, not a guarantee — a new message
-        # on this path must be written not to carry a value, not written to rely on this.
-        checks.append(Check("config", FAIL, f"invalid config: {redact_secret_lines(str(exc))}"))
-        config = None
     except FixedDetailYamlError as exc:
         # Clauster's own parse verdicts, which carry no position to report. Printing the
         # message is safe *by construction*, not by inspection: `FixedDetailYamlError`
@@ -134,9 +119,14 @@ def run_doctor(
         checks.append(Check("config", FAIL, f"config is not valid YAML: {exc}"))
         config = None
     except yaml.YAMLError as exc:
-        # NOT a ValueError, so it needs its own arm. Without it `clauster doctor` — the
-        # one command whose whole job is diagnosing a broken config — was the command
-        # that tracebacked on the most common way to break one.
+        # Both YAML arms sit ABOVE the `ValueError` one. Not needed today — `yaml.YAMLError`
+        # is not a `ValueError` — but `FixedDetailYamlError` invites new members, and one
+        # declared `class X(FixedDetailYamlError, ValueError)` (a plausible move for CLI
+        # back-compat) would otherwise be routed silently to the wrong arm and rendered
+        # "invalid config:". Ordering costs nothing and removes the trap.
+        #
+        # Without a YAML arm at all, `clauster doctor` — the one command whose whole job is
+        # diagnosing a broken config — tracebacked on the most common way to break one.
         #
         # Positions only, never ``str(exc)``: PyYAML re-emits the offending source line in
         # its message, so a malformed ``token:`` line handed the token straight to
@@ -147,6 +137,25 @@ def run_doctor(
         # `ReaderError` reports really is an offset into the file, CRLF included.
         where = _yaml_error_where(exc, block_name="file")
         checks.append(Check("config", FAIL, f"config is not valid YAML{where}"))
+        config = None
+    except ValueError as exc:
+        # What is left is a root that is not a mapping, an unreadable ``*_FILE`` env
+        # override, or a non-UTF-8 file. The first two are Clauster's own text; the third is
+        # Python's ``UnicodeDecodeError``, whose ``str`` names a codec, a byte and an offset.
+        # None of them carries file content.
+        #
+        # That is true *only* because ``load_config`` re-raises PyYAML's constructor escapes
+        # as :class:`UnconstructableYamlValueError` — a `!!int "<token>"` tag made
+        # ``safe_load`` itself raise a plain ``ValueError`` carrying the scalar, which landed
+        # here and which the line-anchored redactor could not reach (the value sits mid-prose
+        # after ``base 10:``, with no key to anchor on).
+        #
+        # ⚠️ `redact_secret_lines` is KEY-anchored and fires only on a ``<secret-ish key>:
+        # <value>`` line. NO message reachable here has that shape — all three open with
+        # prose — so today it is dead defence, not a partial net. Kept for a future message,
+        # but a new one on this path must be written not to carry a value, not written to
+        # rely on this.
+        checks.append(Check("config", FAIL, f"invalid config: {redact_secret_lines(str(exc))}"))
         config = None
 
     if config is None:

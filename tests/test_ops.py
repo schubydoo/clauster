@@ -258,6 +258,16 @@ def test_doctor_validation_error_states_the_reason_under_a_secret_shaped_key(
     assert expected in detail
 
 
+@pytest.mark.parametrize("value", ["a", "hash", "characters"])
+def test_doctor_validation_reason_survives_a_short_rejected_value(tmp_path, value):
+    # The mask is a substring replace, so a rejected `a` once rewrote every `a` in the
+    # reason: "********pi_token_h********sh must be ******** 64-ch********r********cter …".
+    # Each value here really is a substring of the message, so this is not vacuous.
+    detail = _config_detail(tmp_path / "bad.yml", f"auth:\n  api_token_hash: {value}\n")
+    assert "auth.api_token_hash: api_token_hash must be a 64-character lowercase hex" in detail
+    assert "********" not in detail
+
+
 def test_doctor_validation_error_keeps_a_rejected_path_readable(tmp_path):
     # A validator that quotes a PATH under an ordinary key is left alone on purpose: the
     # path IS the diagnosis, and docs/troubleshooting.md promises it. Only a secret-shaped

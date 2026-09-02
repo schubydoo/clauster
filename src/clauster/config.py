@@ -1884,8 +1884,8 @@ def load_config(path: str | os.PathLike | None = None) -> ClausterConfig:
     except (ValueError, AttributeError, KeyError, IndexError) as exc:
         # Scoped to the `safe_load` call alone, so nothing past the parse is reclassified,
         # and nothing of ours runs inside it (no custom constructor is registered anywhere).
-        # `read_text` is deliberately OUTSIDE: a non-UTF-8 file raises UnicodeDecodeError,
-        # which is a ValueError, and is an encoding fault rather than a YAML one.
+        # The `fh.read()` above is deliberately OUTSIDE: a non-UTF-8 file raises
+        # UnicodeDecodeError, which is a ValueError, and is an encoding fault, not a YAML one.
         #
         # Fails closed in one direction only: this converts a crash (or a leak) into a
         # rejection, never a rejection into an accept.
