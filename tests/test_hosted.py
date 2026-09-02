@@ -211,6 +211,10 @@ def test_build_hosted_argv_truncates_the_refused_value_it_names(bad):
     # message would couple this test to the surrounding prose, so a reword longer than the
     # slack would fail it for a reason that has nothing to do with truncation.
     assert len(named) <= len("malformed ") + 72 * 10 + 2
+    # ...and a generous bound on the WHOLE message too, so a future edit interpolating
+    # something else unbounded into the 409 detail is still caught. Slack, deliberately:
+    # this one must not fail merely because the prose was reworded.
+    assert len(str(excinfo.value)) < 1200
     assert "x" * 100 not in str(excinfo.value)
 
 

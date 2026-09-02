@@ -149,10 +149,11 @@ def _refused_uuid_shape(value: Any) -> str:
     ``_redact_obj`` masks that same id out of every frame. Redact BEFORE truncating: a
     72-character prefix of a secret is still a secret. The 1024-char pre-slice only bounds
     the regex work on a *tampered* value; a real one comes from a ``String(64)`` column and
-    is never sliced at all. It is not a claim that nothing can straddle the cut — a mask is
-    shorter than what it replaces, so a long enough authored value could pull material from
-    past 1024 into the output window. That leaks a fragment of the attacker's own string,
-    which is not a boundary worth widening the slice for.
+    is never sliced at all. It is not a claim that nothing can straddle the cut: a secret
+    spanning index 1024 is truncated below the length its mask matches on, so the surviving
+    prefix goes unmasked — and because a mask is shorter than what it replaces, that
+    still-in-range material can be pulled into the 72-char window. What leaks is a fragment
+    of the attacker's own authored string, which is not a boundary worth widening for.
     """
     if not isinstance(value, str):
         return type(value).__name__
