@@ -226,8 +226,9 @@ service](installation.md#run-as-a-systemd-service-linux).
 
 **What you see:** `doctor` fails the `config` row with one of three details —
 `no config found: ...`, `invalid config: ...`, or `config is not valid YAML
-(...)` — and most other verbs exit `2` with a `clauster: config error:` message
-carrying the raw parser or validation error. Three behave differently: `doctor`
+...` — and most other verbs exit `2` with a `clauster: config error:` message.
+That message carries the raw parser or validation error, except for the two
+fixed verdicts in the table below. Three verbs behave differently: `doctor`
 itself exits `1` with the table above, `clauster run` with no config at all
 opens the setup wizard rather than failing, and `install-service` still renders
 a unit using defaults.
@@ -239,7 +240,8 @@ where to look:
 | Detail | What is wrong | Where the message points |
 | --- | --- | --- |
 | `no config found` | No file at any searched path | The search order |
-| `config is not valid YAML` | The file does not parse — a stray tab, an unclosed quote | The parser's error class, plus a line and column. When the parser also knows where the construct opened, a second position follows. An unfitting tag (`!!int "abc"`) gives the class alone |
+| `config is not valid YAML (...)` | The file does not parse — a stray tab, an unclosed quote | The error's class, plus a line and column. When the parser knows where the construct opened, a second position follows. A control character gives a character offset instead |
+| `config is not valid YAML: ...` | A value no type can be built from (`a: 2020-13-45`), or a file nested too deep | A fixed sentence, with no position. The rejected value is withheld (see below) |
 | `invalid config` | The file parses but a value is rejected | One `key.path: reason` entry per rejected key — or, for a root that is not a mapping, the root's type and the file |
 
 ```sh
@@ -248,10 +250,17 @@ clauster doctor -c /path/to/clauster.yml   # same file the service uses
 
 **The detail points at the fault. It never echoes the offending source line, and
 never the whole parsed mapping.** The dashboard serves these same rows over
-`/api/doctor`. Each detail is built from positions and key paths. A
-`clauster.yml` whose `auth.token` line is the broken one would otherwise put
-that token in the browser. A validator that rejects a path still names that
+`/api/doctor`. A `clauster.yml` whose `auth.token` line is the broken one would
+otherwise put that token in the browser. That is also why `a: 2020-13-45`
+reports a fixed sentence, not "month must be in 1..12". The same code path
+produces `invalid literal for int() with base 10: '<your token>'`, and nothing
+there can tell the two apart. A validator that rejects a path still names that
 path. Open the file at the reported line to read the offending text.
+
+⚠️ **The guarantee covers the `doctor` detail, which the browser can reach. It
+does not cover the CLI.** `clauster: config error:` goes to the terminal and the
+service log of the host that holds the file, and it still quotes the offending
+line and the parsed mapping.
 
 **Mechanism:** [Configuration — loading &
 overrides](guides/configuration.md#loading-overrides).
@@ -594,7 +603,7 @@ present in every run:
 
 | Row | OK means | A warn/fail usually means |
 | --- | --- | --- |
-| `config` | `clauster.yml` found and valid | `no config found: ...` / `config is not valid YAML (...)` / `invalid config: ...` |
+| `config` | `clauster.yml` found and valid | `no config found: ...` / `config is not valid YAML ...` / `invalid config: ...` (the "no config found" section above breaks these down) |
 | `claude` | binary found, version ≥ `min_version` | not on PATH, or too old — see above |
 | `claude-login` | usable `claude` credentials | not logged in — bridges will spawn then hang |
 | `projects_root` | the directory exists | wrong path in config |

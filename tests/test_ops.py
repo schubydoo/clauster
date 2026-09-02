@@ -176,13 +176,13 @@ def test_doctor_yaml_reader_error_names_the_file_not_a_frontmatter_block(tmp_pat
     assert "frontmatter" not in detail
 
 
-def test_doctor_unfitting_yaml_tag_detail_withholds_the_scalar(tmp_path):
-    # PyYAML's SafeConstructor raises OUTSIDE yaml.YAMLError for a tag whose value does not
-    # fit — `!!int` a bare ValueError carrying the scalar, `!!timestamp` an AttributeError.
-    # The first landed in the ValueError arm and leaked (the value sits mid-prose after
+def test_doctor_unconstructable_value_detail_withholds_the_scalar(tmp_path):
+    # PyYAML's SafeConstructor raises OUTSIDE yaml.YAMLError for a value it cannot build —
+    # `!!int` a bare ValueError carrying the scalar, `!!timestamp` an AttributeError. The
+    # first landed in the ValueError arm and leaked (the value sits mid-prose after
     # "base 10:", where the key-anchored redactor cannot reach it); the second tracebacked,
     # so `clauster doctor` crashed and /api/doctor answered 500 on a config it exists to
-    # diagnose. `load_config` re-raises both as a YAMLError subclass.
+    # diagnose. `load_config` re-raises the family as a YAMLError subclass.
     for body in (
         f'auth:\n  token: !!int "{_CFG_CANARY}"\n',
         f'auth:\n  token: !!float "{_CFG_CANARY}"\n',
@@ -192,14 +192,27 @@ def test_doctor_unfitting_yaml_tag_detail_withholds_the_scalar(tmp_path):
         detail = _config_detail(tmp_path / "bad.yml", body)
         # `!!float` lowercases the scalar before rejecting it — check that shape too.
         assert _CFG_CANARY not in detail and _CFG_CANARY.lower() not in detail
-        assert detail == "config is not valid YAML (UnfittingYamlTagError)"
+        assert detail == (
+            "config is not valid YAML: a value could not be built into the type YAML "
+            "resolved for it"
+        )
+
+
+def test_doctor_unconstructable_value_covers_the_implicit_resolver_too(tmp_path):
+    # The same constructor family fires with no `!!` anywhere: PyYAML resolves `2020-13-45`
+    # to a timestamp and an over-long integer to an int, and both raise a bare ValueError.
+    # The row must not name a tag the operator never wrote.
+    for body in ("a: 2020-13-45\n", "port: " + "9" * 5000 + "\n"):
+        detail = _config_detail(tmp_path / "bad.yml", body)
+        assert detail.startswith("config is not valid YAML: a value could not be built")
+        assert "tag" not in detail
 
 
 def test_doctor_deeply_nested_yaml_does_not_crash(tmp_path):
     # RecursionError is not a YAMLError either, so the composer overflowing took doctor
     # down with it. run_doctor's contract is to stay resilient to a broken config.
     detail = _config_detail(tmp_path / "bad.yml", "[" * 5000)
-    assert detail == "config is not valid YAML (TooDeeplyNestedYamlError)"
+    assert detail == "config is not valid YAML: the config is nested too deeply to parse"
 
 
 def test_doctor_validation_error_detail_withholds_the_parsed_mapping(tmp_path):
@@ -213,15 +226,45 @@ def test_doctor_validation_error_detail_withholds_the_parsed_mapping(tmp_path):
     assert "port: Input should be a valid integer" in detail
 
 
-def test_doctor_validation_error_still_states_the_reason_on_a_secret_shaped_key(tmp_path):
-    # The redactor masks the whole value after a secret-shaped key, so gating it on the
-    # error type is what keeps the auth block diagnosable: pydantic writes this `msg` from
-    # the CONSTRAINT, never from the input, so there is nothing to mask.
-    detail = _config_detail(
-        tmp_path / "bad.yml", f"auth:\n  session_max_age_seconds: '{_CFG_CANARY}'\n"
-    )
+@pytest.mark.parametrize(
+    "body,expected",
+    [
+        # pydantic writes this reason from the CONSTRAINT, never from the input.
+        (
+            "auth:\n  session_max_age_seconds: '{c}'\n",
+            "auth.session_max_age_seconds: Input should be a valid integer",
+        ),
+        # Clauster's own secret-field validators raise `value_error` with STATIC text — the
+        # exact message an operator who pasted a truncated token needs.
+        (
+            "auth:\n  api_token_hash: '{c}'\n",
+            "auth.api_token_hash: api_token_hash must be a 64-character lowercase hex string",
+        ),
+        (
+            "auth:\n  reverse_proxy:\n    enabled: true\n    trusted_ips: []\n",
+            "auth.reverse_proxy: reverse_proxy.enabled is true but trusted_ips is empty",
+        ),
+    ],
+)
+def test_doctor_validation_error_states_the_reason_under_a_secret_shaped_key(
+    tmp_path, body, expected
+):
+    # Masking the whole line after a secret-shaped key blanked all three of these —
+    # `_SECRET_KEY_RE` matches the bare word `auth`, so it swallowed the entire auth block
+    # and cost the one command whose job is diagnosis its diagnosis. Only the value a
+    # validator quoted back is masked now, and none of these quote one.
+    detail = _config_detail(tmp_path / "bad.yml", body.format(c=_CFG_CANARY))
     assert _CFG_CANARY not in detail
-    assert "auth.session_max_age_seconds: Input should be a valid integer" in detail
+    assert expected in detail
+
+
+def test_doctor_validation_error_keeps_a_rejected_path_readable(tmp_path):
+    # A validator that quotes a PATH under an ordinary key is left alone on purpose: the
+    # path IS the diagnosis, and docs/troubleshooting.md promises it. Only a secret-shaped
+    # field path arms the mask.
+    detail = _config_detail(tmp_path / "bad.yml", f"projects_root: {tmp_path}/{_CFG_CANARY}\n")
+    assert f"projects_root does not exist or is not a directory: {tmp_path}" in detail
+    assert _CFG_CANARY in detail
 
 
 def test_doctor_non_mapping_root_detail_reports_type_and_path(tmp_path):

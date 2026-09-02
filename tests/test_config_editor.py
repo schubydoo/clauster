@@ -660,13 +660,13 @@ def test_validation_error_message_is_operator_friendly(write_config) -> None:
         assert leaked not in msg
 
 
-def test_validation_message_redacts_every_part_not_only_the_first() -> None:
-    """Each rendered error is redacted on its own line, whatever its position (#1395).
+def test_validation_message_masks_an_echoed_value_at_any_error_position() -> None:
+    """A validator that quotes its input is trimmed under a secret-shaped path (#1395).
 
-    ``redact_secret_lines`` masks the value of the FIRST ``key: value`` pair on a line, so
-    redacting the joined ``"alpha: …; api_token: …"`` string anchored on ``alpha`` and left
-    every later part unmasked. ``ops.run_doctor`` renders a whole broken ``clauster.yml``
-    through this helper, where a secret-keyed field is not reliably error one.
+    Position-independent on purpose: the earlier shape redacted the JOINED string, and
+    ``redact_secret_lines`` anchors on the FIRST ``key: value`` pair on a line, so a
+    secret-keyed error that was not error one went unmasked. ``ops.run_doctor`` renders a
+    whole broken ``clauster.yml`` through here, where ordering is not ours to choose.
     """
     from pydantic import ValidationError, field_validator
 
@@ -686,36 +686,66 @@ def test_validation_message_redacts_every_part_not_only_the_first() -> None:
     with pytest.raises(ValidationError) as ei:
         M(alpha="not-an-int", api_token=canary)
     msg = _friendly_validation_message(ei.value)
-    # `alpha` fails first, so the secret-keyed part is second — exactly the position the
-    # joined-then-redacted form could not reach.
+    # `alpha` fails first, so the secret-keyed part is second.
     assert msg.index("alpha") < msg.index("api_token")
     assert canary not in msg
-    # `alpha`'s reason is pydantic's own (type `int_parsing`), so it is NOT redacted — the
-    # redactor masks everything after a `key:`, and blanket-applying it would erase the
-    # reason on every secret-shaped key rather than a value.
+    # Only the echoed VALUE is masked; the surrounding reason survives on both parts.
+    assert "api_token: rejected ********" in msg
     assert "alpha: Input should be a valid integer" in msg
 
 
-def test_validation_message_keeps_the_reason_on_a_secret_shaped_key() -> None:
-    """A built-in pydantic reason survives on a secret-shaped field (#1395).
+def test_validation_message_keeps_a_static_reason_on_a_secret_shaped_key() -> None:
+    """A reason that never quoted the input is untouched, secret-shaped path or not (#1395).
 
-    ``include_input=False`` already strips the input from every error pydantic writes
-    itself, so there is nothing to mask; masking anyway turned the whole ``auth.*`` block
-    into sentinels and cost `doctor` its diagnosis.
+    Masking the whole line after a secret-shaped key blanked these, and ``_SECRET_KEY_RE``
+    matches the bare word ``auth`` — so the entire ``auth.*`` block became sentinels and
+    ``doctor`` lost its diagnosis on the fields most likely to be mistyped.
     """
-    from pydantic import ValidationError
+    from pydantic import ValidationError, field_validator
 
     from clauster.config_editor import _friendly_validation_message
 
     class M(BaseModel):
         api_token_ttl: int
+        auth_secret: str = ""
+
+        @field_validator("auth_secret")
+        @classmethod
+        def _static_reason(cls, v: str) -> str:
+            raise ValueError("must be 64 lowercase hex characters")
 
     with pytest.raises(ValidationError) as ei:
-        M(api_token_ttl="nope")
+        M(api_token_ttl="nope", auth_secret="FAKEFAKEFAKEFAKEfake42")
     msg = _friendly_validation_message(ei.value)
-    assert msg == (
-        "api_token_ttl: Input should be a valid integer, unable to parse string as an integer"
-    )
+    # pydantic-authored reason: built from the constraint, so nothing to mask.
+    assert "api_token_ttl: Input should be a valid integer" in msg
+    # Validator-authored but static: the value is not in it, so it is not touched.
+    assert "auth_secret: must be 64 lowercase hex characters" in msg
+    assert "********" not in msg
+
+
+def test_validation_message_keeps_an_echoed_path_under_an_ordinary_key() -> None:
+    """A rejected PATH stays readable — masking it would remove the diagnosis (#1395).
+
+    Nearly every Clauster validator that quotes its input quotes a path, and
+    `docs/troubleshooting.md` promises the row names it. The mask is armed by the field
+    path's own shape, so an ordinary key never trips it.
+    """
+    from pydantic import ValidationError, field_validator
+
+    from clauster.config_editor import _friendly_validation_message
+
+    class M(BaseModel):
+        projects_root: str
+
+        @field_validator("projects_root")
+        @classmethod
+        def _reject(cls, v: str) -> str:
+            raise ValueError(f"does not exist: {v}")
+
+    with pytest.raises(ValidationError) as ei:
+        M(projects_root="/srv/not-here")
+    assert _friendly_validation_message(ei.value) == "projects_root: does not exist: /srv/not-here"
 
 
 def test_exclusive_bounds_are_emitted_distinctly() -> None:

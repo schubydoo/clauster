@@ -30,7 +30,7 @@ from .config import (
     ClausterConfig,
     load_config,
 )
-from .config_write import hash_bytes, redact_secret_lines
+from .config_write import _SECRET_KEY_RE, REDACTION_SENTINEL, hash_bytes
 
 # Tier-A allowlist: dotted paths editable from the web UI. Operational only — no
 # auth/secret/bind/structural/clone/supply-chain field appears here (those stay
@@ -357,18 +357,37 @@ def validate_edits(
     return candidate
 
 
-#: The pydantic error types whose ``msg`` is written by a *validator* rather than by pydantic,
-#: and can therefore quote the rejected input. Everything else builds ``msg`` from the
-#: CONSTRAINT ("Input should be a valid integer", "Input should be 'a' or 'b'") and the input
-#: itself only ever appeared under ``input_value=``, which ``include_input=False`` drops.
-#:
-#: This is the gate on :func:`redact_secret_lines` in :func:`_friendly_validation_message`, and
-#: it is narrow on purpose. The redactor masks the whole value after a secret-shaped key, so
-#: applying it to every line replaced the *reason* on every ``auth.*`` / ``*token*`` / ``*secret*``
-#: field with the sentinel — turning "auth.session_max_age_seconds: Input should be a valid
-#: integer" into "auth.session_max_age_seconds: ********" and costing doctor its whole job on
-#: the auth block (#1395). A new member belongs here, not in a wider blanket.
-_ECHOING_ERROR_TYPES = frozenset({"value_error", "assertion_error"})
+def _mask_echoed_input(loc: str, msg: str, raw_input: object) -> str:
+    """Mask the rejected value inside ``msg``, but only under a secret-shaped field path.
+
+    A validator's own message is free to quote what it rejected, and ``include_input=False``
+    cannot reach that — it only drops pydantic's separate ``input_value=``. So the value is
+    masked here **by identity**: pydantic hands us the exact input, and it is replaced where
+    it occurs in ``msg``. Nothing is guessed, and a message that does not quote its input is
+    returned untouched.
+
+    Two earlier shapes were tried and are recorded so they are not tried again:
+
+    * :func:`redact_secret_lines` over the whole ``f"{loc}: {msg}"`` line. It is *key*
+      anchored — it masks everything after a secret-shaped key — so a static message on a
+      secret-shaped field was destroyed rather than trimmed. ``_SECRET_KEY_RE`` matches the
+      bare word ``auth``, so ``auth.reverse_proxy: … Pin the proxy's IP/CIDR in trusted_ips``
+      became eight asterisks, and ``doctor`` lost the whole auth block (#1395).
+    * Gating that by pydantic error *type*. It restored pydantic-authored reasons but not
+      Clauster's own, whose validators raise ``value_error`` with deliberately static text
+      (``api_token_hash must be a 64-character lowercase hex string``) — the exact message an
+      operator who pasted a truncated token needs.
+
+    The ``loc`` gate stays because over-masking still has a cost: nearly every Clauster
+    validator that quotes its input quotes a **path** (``projects_root does not exist:
+    /srv/x``), and a path is the diagnosis. Restricting the mask to secret-shaped fields
+    keeps those readable while covering the one place a credential could appear.
+    """
+    if not isinstance(raw_input, str) or not raw_input or raw_input not in msg:
+        return msg
+    if not _SECRET_KEY_RE.search(loc):
+        return msg
+    return msg.replace(raw_input, REDACTION_SENTINEL)
 
 
 def _friendly_validation_message(exc: ValidationError) -> str:
@@ -380,26 +399,20 @@ def _friendly_validation_message(exc: ValidationError) -> str:
     banner (#1034). Render one ``field.path: reason`` line per error instead; the
     full exception still reaches the log via the ``from exc`` chain.
 
-    ``include_input=False`` is the load-bearing argument, not a tidy-up: pydantic's own
-    ``input_value=`` carries the rejected value, and for a *missing-field* error that
-    value is the whole parsed mapping. ``ops.run_doctor`` renders a broken
-    ``clauster.yml`` through here for the same reason, and its result reaches
-    `/api/doctor` (#1395).
-
-    What that argument cannot reach is a *validator's own* message, which is free to quote
-    the value it rejected — so those lines, and only those, additionally go through
-    :func:`redact_secret_lines` (see :data:`_ECHOING_ERROR_TYPES`). Each is redacted
-    **before** the join, not after: the redactor masks the value of the FIRST ``key: value``
-    pair on a line, so redacting the joined string covered error one and nothing after it.
+    Dropping ``input_value=`` is the load-bearing part, not a tidy-up: it carries the
+    rejected value, and for a *missing-field* error that value is the whole parsed mapping.
+    ``ops.run_doctor`` renders a broken ``clauster.yml`` through here, and its result reaches
+    `/api/doctor` (#1395). ``include_input`` stays **on** only so :func:`_mask_echoed_input`
+    can use the value as a needle; it is never emitted.
     """
     parts: list[str] = []
-    for err in exc.errors(include_url=False, include_input=False):
+    for err in exc.errors(include_url=False):
         loc = ".".join(str(piece) for piece in err.get("loc", ()))
         msg = err.get("msg") or "invalid value"
         # pydantic prefixes custom-validator failures with "Value error, " — noise here.
         msg = msg.removeprefix("Value error, ")
-        line = f"{loc}: {msg}" if loc else msg
-        parts.append(redact_secret_lines(line) if err["type"] in _ECHOING_ERROR_TYPES else line)
+        msg = _mask_echoed_input(loc, msg, err.get("input"))
+        parts.append(f"{loc}: {msg}" if loc else msg)
     return "; ".join(parts) or "validation failed"
 
 
