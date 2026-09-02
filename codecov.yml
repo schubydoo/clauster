@@ -188,6 +188,7 @@ component_management:
         - src/clauster/db/migrations/versions/0009_instance_bridge_start_ticks.py # #1399 — boot-relative start
         - src/clauster/db/migrations/versions/0010_instance_keeper_start_ticks.py # #1402 — keeper boot-relative start
         - src/clauster/db/migrations/versions/0011_hosted_session_agent_start_ticks.py # #1404 — hosted boot-relative start
+        - src/clauster/db/migrations/versions/0012_instance_bridge_boot_id.py # #1401 — per-boot bridge id
     - component_id: config_write
       name: config-write (settings.json / .mcp.json)
       # The config_write feature cluster (#687 / #690 / #732 / #738) — capability-gated

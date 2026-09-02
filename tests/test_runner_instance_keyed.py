@@ -2402,8 +2402,8 @@ async def test_resync_refuses_an_instance_that_is_no_longer_the_registered_one(r
         "iid-a",
         stale,
         {"project_name": "alpha"},
-        (4402, 200.0, 4402000),
-        (4401, 100.0, InstanceStatus.STOPPED, False, None),
+        (4402, 200.0, 4402000, "boot-x"),  # pair now carries bridge_boot_id (#1401)
+        (4401, 100.0, InstanceStatus.STOPPED, False, None, None),  # ours_generation gains it too
         runner._discovered(),
     )
 

@@ -76,6 +76,10 @@ _INSTANCE_FIELDS = (
     # row from an older build, which then compares on the epoch alone — the pre-#1399
     # behaviour, re-stamped on that bridge's next spawn.
     "bridge_start_ticks",
+    # The boot the ticks belong to (#1401): a boot_id mismatch rejects a previous-boot row
+    # on identity. ``_present`` drops the NULL for a pre-#1401 row, which then stands on its
+    # ticks alone until its next spawn re-stamps this.
+    "bridge_boot_id",
     "keeper_pid",
     # Set only when the pty worktree name is NOT derivable from this row's instance_id
     # (#1241); ``_present`` drops the NULL for every ordinary row, which derives it.

@@ -76,9 +76,15 @@ class RemoteControlInstance(BaseModel):
     bridge_proc_start: float | None = None  # psutil create-time (epoch); PID-reuse defense
     # Boot-relative start ticks (/proc/<pid>/stat field 22), Linux-only (#1399). The epoch
     # above is re-derived from a btime that NTP moves, so on its own it declares a live
-    # bridge dead after a clock correction; this one does not move. Both are compared —
-    # see procutil.is_live_process.
+    # bridge dead after a clock correction; this one does not move. See
+    # procutil.is_live_process.
     bridge_start_ticks: int | None = None
+    # The boot this bridge started in (/proc/sys/kernel/random/boot_id), Linux-only (#1401).
+    # Ticks restart at zero each boot, so a row from an earlier boot could name a recycled
+    # pid holding the same count; a boot_id mismatch rejects that on identity, which lets
+    # is_live_process drop the wall-clock epoch entirely. None on a pre-#1401 row (ticks
+    # then stand alone) and off Linux.
+    bridge_boot_id: str | None = None
     bridge_id: str | None = None  # UUID from bridge:init log
     environment_id: str | None = None  # env_<ULID>; the URL parameter
     starter_session_id: str | None = None  # session_<ULID> from "Created initial session"

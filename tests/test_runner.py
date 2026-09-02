@@ -4035,3 +4035,62 @@ async def test_bridge_start_ticks_round_trips_through_the_store(runner_config, m
     assert await reloaded._refresh_persisted()
     row = reloaded._persisted[inst.instance_id]
     assert row["bridge_start_ticks"] == 770579
+
+
+async def test_spawn_stamps_the_bridge_boot_id(runner_config, monkeypatch):
+    # #1401: the boot id must land on the instance, not merely be read. A NULL here degrades
+    # every later comparison to ticks alone, dropping the cross-boot defense this adds.
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr("clauster.runner.procutil.proc_start_pair", lambda pid: (1000.0, 770579))
+    monkeypatch.setattr("clauster.runner.procutil.proc_boot_id", lambda: "boot-uuid-1")
+    inst = await runner.spawn("alpha")
+    assert inst.bridge_boot_id == "boot-uuid-1", "the boot id must be stamped at spawn"
+
+
+async def test_bridge_boot_id_round_trips_through_the_store(runner_config, monkeypatch):
+    # The model field, the ORM column, the store field list and `_persisted_liveness` all have
+    # to agree, or the boot id is stamped at spawn and lost on the first restart — leaving the
+    # reattached row on ticks alone, the exact pre-#1401 behaviour it replaces (#1401).
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr("clauster.runner.procutil.proc_start_pair", lambda pid: (1000.0, 770579))
+    monkeypatch.setattr("clauster.runner.procutil.proc_boot_id", lambda: "boot-uuid-1")
+    inst = await runner.spawn("alpha")
+    await runner._persist()
+
+    reloaded = _make_runner(runner_config)
+    assert await reloaded._refresh_persisted()
+    row = reloaded._persisted[inst.instance_id]
+    assert row["bridge_boot_id"] == "boot-uuid-1"
+
+
+async def test_a_row_from_an_earlier_boot_is_judged_dead_at_reattach(runner_config, monkeypatch):
+    # The cold-start case #1401 exists for: a persisted pid that survived into a NEW boot and
+    # was recycled onto a `claude remote-control` process holding the same tick count. Ticks
+    # match exactly, so the pre-#1401 code would resurrect it; the recorded boot id no longer
+    # matches the live one, so identity rejects it.
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr("clauster.runner.procutil.start_time_is_drift_prone", lambda: True)
+    monkeypatch.setattr("clauster.runner.procutil.proc_start_ticks", lambda pid: 770579)
+    monkeypatch.setattr("clauster.runner.procutil.proc_boot_id", lambda: "new-boot")
+
+    class _LiveBridge:
+        def __init__(self, pid):
+            pass
+
+        def status(self):
+            return procutil.psutil.STATUS_RUNNING
+
+        def cmdline(self):
+            return ["claude", "remote-control", "alpha"]
+
+        def create_time(self):
+            return 1000.0
+
+    monkeypatch.setattr("clauster.runner.procutil.psutil.Process", _LiveBridge)
+
+    # Same pid, same ticks, same epoch — the row differs from the live process ONLY on the
+    # boot id. Positive control below proves that difference is what decides it.
+    ticks, alive = runner._judge_row(555000, 1000.0, 770579, "old-boot")
+    assert alive is False, "a row from an earlier boot must be judged dead on identity"
+    ticks_same_boot, alive_same_boot = runner._judge_row(555000, 1000.0, 770579, "new-boot")
+    assert alive_same_boot is True, "the same row in the live boot stays alive"

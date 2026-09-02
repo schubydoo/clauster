@@ -1488,6 +1488,24 @@ def test_proc_start_ticks_returns_none_for_a_truncated_stat_line(monkeypatch):
     assert procutil.proc_start_ticks(77) is None
 
 
+def test_proc_boot_id_reads_the_kernel_boot_id_and_strips_it(monkeypatch):
+    monkeypatch.setattr(procutil.Path, "read_text", lambda self, **kw: "abcd-1234\n")
+    assert procutil.proc_boot_id() == "abcd-1234"
+
+
+def test_proc_boot_id_degrades_to_none_off_linux_or_on_a_read_error(monkeypatch):
+    # macOS/Windows have no such file, and a read can fail; either way the caller falls back
+    # to ticks alone, exactly as an absent tick count degrades (#1401).
+    def _raise(self, **kw):
+        raise OSError(2, "No such file or directory")
+
+    monkeypatch.setattr(procutil.Path, "read_text", _raise)
+    assert procutil.proc_boot_id() is None
+    # A file that exists but is empty must read as None, not "".
+    monkeypatch.setattr(procutil.Path, "read_text", lambda self, **kw: "\n")
+    assert procutil.proc_boot_id() is None
+
+
 def test_clock_drift_no_longer_reads_a_live_bridge_as_dead(monkeypatch):
     # THE #1399 regression. psutil's create_time is `starttime/CLK_TCK + boot_time()`, and
     # boot_time() re-reads /proc/stat btime every call — NTP slew moves it under a process
@@ -1513,13 +1531,40 @@ def test_ticks_still_reject_a_recycled_pid_the_epoch_bound_would_have_admitted(m
     assert procutil.is_live_bridge(1234, 1000.01) is True  # what the epoch alone allowed
 
 
-def test_ticks_do_not_authenticate_a_process_from_a_different_boot(monkeypatch):
-    # Ticks restart at zero each boot, so an exact match across a reboot means nothing. The
-    # epoch is kept precisely to discriminate that — coarsely, but a reboot moves it far
-    # further than any clock correction does.
+def test_a_recorded_boot_id_rejects_a_process_from_a_different_boot(monkeypatch):
+    # Ticks restart at zero each boot, so an exact match across a reboot means nothing (#1401).
+    # A recorded boot id that differs from the live one proves the row is from an earlier boot
+    # and its pid names a different process — rejected on identity, WITHOUT the wall-clock
+    # epoch (here a 9_000_000 vs 1000 gap the old coarse bound leaned on, now unused).
     monkeypatch.setattr(procutil.psutil, "Process", _fake_proc(ct=9_000_000.0))
     monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: 770579)
-    assert procutil.is_live_bridge(1234, 1000.0, start_ticks=770579) is False
+    monkeypatch.setattr(procutil, "proc_boot_id", lambda: "live-boot-uuid")
+    # Positive control: with NO recorded boot id (a pre-#1401 row) the exact tick match stands
+    # alone, so the same call is admitted — proving the rejection below is the boot id's doing,
+    # not the epoch's. This is the documented legacy degrade, re-stamped on the next spawn.
+    assert procutil.is_live_bridge(1234, 1000.0, start_ticks=770579) is True
+    # A boot id mismatch rejects the cross-boot row.
+    assert (
+        procutil.is_live_bridge(1234, 1000.0, start_ticks=770579, boot_id="earlier-boot-uuid")
+        is False
+    )
+    # A matching boot id keeps the live bridge, even with the epoch far off.
+    assert (
+        procutil.is_live_bridge(1234, 1000.0, start_ticks=770579, boot_id="live-boot-uuid") is True
+    )
+
+
+def test_a_recorded_boot_id_falls_back_to_ticks_when_the_live_id_is_unreadable(monkeypatch):
+    # A recorded boot id but no readable live one (a host that lost /proc/sys access, or a row
+    # copied to a non-Linux host): the exact tick match stands alone rather than rejecting a
+    # live bridge on an id it cannot compare (#1401). Ticks are still exact, so a recycled pid
+    # is still rejected on them.
+    monkeypatch.setattr(procutil.psutil, "Process", _fake_proc(ct=1000.0))
+    monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: 770579)
+    monkeypatch.setattr(procutil, "proc_boot_id", lambda: None)
+    assert procutil.is_live_bridge(1234, 1000.0, start_ticks=770579, boot_id="recorded") is True
+    monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: 770580)  # recycled: off by one
+    assert procutil.is_live_bridge(1234, 1000.0, start_ticks=770579, boot_id="recorded") is False
 
 
 def test_unreadable_ticks_fall_back_to_the_epoch_comparison(monkeypatch):
