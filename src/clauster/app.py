@@ -4717,11 +4717,13 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             )
         except HostedSessionError as exc:
             # BEFORE `ClaustrumError`, which it subclasses. A `HostedSessionError` from the
-            # engine is a precondition the caller got wrong (a refused resume session id,
-            # #1392), not a daemon fault — and "hosted spawn failed" at 502 reads as the
-            # daemon being down, sending the operator to the wrong place. Unreachable while
-            # this route passes no `resume_uuid`; the mapping is here so it stays right if
-            # it ever does. `_resume_hosted` already orders the two this way.
+            # engine is a precondition the caller got wrong, not a daemon fault — and
+            # "hosted spawn failed" at 502 reads as the daemon being down, sending the
+            # operator to the wrong place. `_resume_hosted` already orders the two this way.
+            # Not dead code: it is also the mapping for `start`'s "already started". Both
+            # of its causes are unreachable from here today — this route passes no
+            # `resume_uuid` (#1392) and `_spawn_session` mints a fresh session each call —
+            # so the arm is what keeps the mapping right the day either changes.
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ClaustrumError as exc:
             raise HTTPException(status_code=502, detail=f"hosted spawn failed: {exc}") from exc

@@ -186,13 +186,26 @@ def test_build_hosted_argv_refuses_a_non_string_resume_uuid_without_a_type_error
     assert type(bad).__name__ in str(excinfo.value)
 
 
-def test_build_hosted_argv_truncates_the_refused_value_it_names():
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "-" + "x" * 5000,
+        # repr expands a non-printable to up to ten characters, so this is the worst case
+        # for the bound -- asserting only against printable input would prove less than the
+        # comment claims.
+        "-" + "\U000e0001" * 5000,
+    ],
+    ids=["printable", "escape-expanding"],
+)
+def test_build_hosted_argv_truncates_the_refused_value_it_names(bad):
     # The message becomes the resume route's 409 `detail` and is rendered in the dashboard,
     # so it is bounded the same way `_refused_uuid_shape` bounds the log line -- an
-    # unbounded record field must not become an unbounded response body.
+    # unbounded record field must not become an unbounded response body. 72 characters
+    # after redaction, each worth at most ten in `repr`, plus the fixed prose.
     with pytest.raises(HostedSessionError) as excinfo:
-        build_hosted_argv(_BIN, permission_mode="default", resume_uuid="-" + "x" * 5000)
-    assert len(str(excinfo.value)) < 200
+        build_hosted_argv(_BIN, permission_mode="default", resume_uuid=bad)
+    assert len(str(excinfo.value)) < 800
+    assert "x" * 100 not in str(excinfo.value)
 
 
 # -- spawn -----------------------------------------------------------------
@@ -2197,6 +2210,18 @@ def test_a_refused_claude_session_uuid_is_named_not_typed_in_the_log(caplog) -> 
     assert "malformed '--rm\\n-rf'" in caplog.text
     assert "\n-rf" not in caplog.text  # the newline never reaches the log verbatim
 
+    # ...and it is named through `sanitize_line`, like every hosted frame (invariant 4).
+    # Unreachable with claude's current ids -- a uuid passes the shape check and is never
+    # named -- but the case this guard is written around is claude CHANGING its id format,
+    # and that day the real current id would otherwise land verbatim in the log and in the
+    # dashboard's 409, while `_redact_obj` masks the same id out of every frame.
+    secret = "-ghp_" + "a" * 36  # leading dash: fails the shape, so it IS named
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="clauster.hosted"):
+        HostedManager._row_from_record(_PID, {**record, "claude_session_uuid": secret})
+    assert "<redacted>" in caplog.text
+    assert secret not in caplog.text
+
     # ...and a legitimate uuid says nothing at all.
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="clauster.hosted"):
@@ -2550,6 +2575,43 @@ async def test_manager_reattach_degraded_row_can_still_be_an_orphan(
         assert inst.project == ""  # the shape: orphan AND project-less at once
         assert "Kill to clean up" in (inst.error_detail or "")
         assert "Resume" not in (inst.error_detail or "")  # never offered where it cannot work
+
+
+async def test_manager_reattach_orphan_without_a_usable_uuid_does_not_offer_resume(
+    fake_claustrum, tmp_path, monkeypatch
+):
+    """The twin of the test above, for the OTHER half of the dashboard's Resume gate.
+
+    The dashboard renders Resume on ``claude_session_uuid && project`` (dashboard.html),
+    but the orphan detail tested only ``project`` -- so a row that kept its project and
+    lost its uuid was told "Resume to recover" beside a button that is not rendered and an
+    endpoint that answers 409. #1381 fixed exactly that mismatch for the project half;
+    #1392 widened the set of dropped uuids from "empty or non-string" to "not
+    session-shaped", which is what makes the remaining half worth closing.
+    """
+    fake = await fake_claustrum()
+    store = HostedStateStore(tmp_path)
+    monkeypatch.setattr(hosted.procutil, "is_killable_hosted", lambda pid, start: True)
+    store.save(
+        {
+            "01GONEPROCESS00000000000": {
+                "project": "proj",  # kept -- this row degrades on the uuid instead
+                "label": "hosted:proj",
+                "claude_session_uuid": "--dangerously-skip-permissions",
+                "agent_pid": 4242,
+                "agent_proc_start": 1234.5,
+            }
+        }
+    )
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        await mgr.reattach_all(client)
+        inst = mgr.get_instance("01GONEPROCESS00000000000")
+        assert inst.is_orphan is True
+        assert inst.project == "proj"  # the half that survived
+        assert inst.claude_session_uuid is None  # ...and the half that did not
+        assert "Kill to clean up" in (inst.error_detail or "")
+        assert "Resume" not in (inst.error_detail or "")
 
 
 @pytest.mark.parametrize(

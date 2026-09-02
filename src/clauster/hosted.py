@@ -127,19 +127,30 @@ class HostedSessionError(ClaustrumError):
 
 
 def _refused_uuid_shape(value: Any) -> str:
-    """Name the shape of a refused ``claude_session_uuid`` for the operator's log line.
+    """Name the shape of a refused ``claude_session_uuid`` for the operator (#1392).
 
     Named, not typed, for the two string cases: the empty string IS a ``str``, so a bare
     type name would read as a type complaint about one of the shapes this refusal exists
     for. ``_restore_instance_id`` draws the same distinction for a falsy instance_id. A
-    non-empty string that fails :data:`_SESSION_UUID_SHAPE_RE` is quoted and truncated instead —
-    it is the one refusal an operator can act on, so the message names the exact token to
-    fix in the record. ``repr`` escapes every control character, so a hand-edited record
-    cannot inject a line into the log (#1392).
+    non-empty string that fails :data:`_SESSION_UUID_SHAPE_RE` is quoted and truncated
+    instead — it is the one refusal an operator can act on, so the message names the exact
+    token to fix in the record. ``repr`` escapes every control character, so a hand-edited
+    record cannot inject a line into either sink.
+
+    Two sinks, both outside redaction's normal reach: a ``logger.warning`` and the message
+    of the :class:`HostedSessionError` that :func:`build_hosted_argv` raises, which the
+    resume route renders as a 409 ``detail`` in the browser. So the value goes through
+    :func:`~clauster.redact.sanitize_line` first (invariant 4), the same call every hosted
+    frame takes — a bare uuid is unreachable here by construction, but the case this guard
+    is written around is claude changing its id format, and that day the *real, current*
+    session id would otherwise land verbatim in a log file and a dashboard error while
+    ``_redact_obj`` masks that same id out of every frame. Redact BEFORE truncating: a
+    72-character prefix of a secret is still a secret. The 256-char pre-slice only bounds
+    the regex work.
     """
     if not isinstance(value, str):
         return type(value).__name__
-    return "empty string" if not value else f"malformed {value[:72]!r}"
+    return "empty string" if not value else f"malformed {sanitize_line(value[:256])[:72]!r}"
 
 
 def _is_session_uuid(value: Any) -> TypeGuard[str]:
@@ -1445,9 +1456,15 @@ class HostedManager:
                     # falls back to empty. Naming Resume for such a row points at a button the
                     # dashboard does not render and an endpoint that answers 409 (#1381), so
                     # the offer is dropped and only the action that works is named.
+                    #
+                    # Both halves of the dashboard's gate, not just `project`: it renders
+                    # Resume on `claude_session_uuid && project`, and a row can lose the uuid
+                    # the same per-field way — `_as_session_uuid` drops one that is not
+                    # session-shaped (#1392), which widened that set well past the empty
+                    # string. Testing one half named an action the other half hid.
                     instance.error_detail = (
                         "survived a daemon restart — Resume to recover, or Kill"
-                        if instance.project
+                        if instance.project and instance.claude_session_uuid
                         else "survived a daemon restart — Kill to clean up"
                     )
                 else:
@@ -1871,10 +1888,11 @@ def _as_session_uuid(value: Any) -> str | None:
     because ``_persist`` writes the ``None`` back and a resume the row could once have
     offered disappears with nothing else to explain it.
 
-    Non-empty is not enough on its own (#1392): the value's only consumers are
-    :func:`build_hosted_argv`'s ``--resume`` slot and the transcript lookup, so it must
-    also be *shaped* like a session id — see :data:`_SESSION_UUID_SHAPE_RE` for why a
-    flag-shaped token there is an argv-injection seam rather than a cosmetic complaint.
+    Non-empty is not enough on its own (#1392): the value's *executing* consumer is
+    :func:`build_hosted_argv`'s ``--resume`` slot (the rest — the transcript lookup, the
+    MCP summary, the dashboard's Resume gate — only read it), so it must also be *shaped*
+    like a session id. See :data:`_SESSION_UUID_SHAPE_RE` for why a flag-shaped token
+    there is an argv-injection seam rather than a cosmetic complaint.
     ``ops restore`` from a tampered backup reaches this function with no code execution,
     which is what makes the record an untrusted input in the first place.
     """
