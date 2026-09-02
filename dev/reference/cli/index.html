@@ -1816,6 +1816,8 @@ state dir are usable, and reports per-extra (<code>extra:&lt;name&gt;</code>) an
 <h2 id="clauster-backup-restore-migrate"><code>clauster backup</code> / <code>restore</code> / <code>migrate</code><a class="headerlink" href="#clauster-backup-restore-migrate" title="Permanent link">&para;</a></h2>
 <p><code>backup</code> tars <code>state_dir</code> + the active config; <code>restore &lt;archive&gt; --state-dir …</code>
 puts it back; <code>migrate</code> is a legacy helper for pre-database <code>state.json</code> files.
+<code>migrate</code> re-saves what it reads, so it <strong>exits 1 without writing</strong> if it cannot
+read or cannot understand the legacy <code>state.json</code>.
 Full runbook (including corruption recovery):
 <a href="../../operations/#backup-restore-and-corruption-recovery">Operations → Backup, restore, and corruption recovery</a>.</p>
 <h2 id="clauster-config-reconcile-clean-up-deprecated-config-keys"><code>clauster config reconcile</code> — clean up deprecated config keys<a class="headerlink" href="#clauster-config-reconcile-clean-up-deprecated-config-keys" title="Permanent link">&para;</a></h2>

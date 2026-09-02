@@ -1771,6 +1771,15 @@ affected:</p>
   migration <strong>fail-closed</strong> (it won't serve if the migration fails), then
   <strong>imports your existing <code>state.json</code> and <code>hosted_state.json</code> once</strong> and renames
   them to <code>*.imported</code>. Later starts are idempotent — no re-import.</li>
+<li><strong>If one of those files is damaged</strong>, the import no longer fails the start. It
+  imports no records from that file, logs a warning naming the failure, and keeps
+  a one-time byte-exact copy beside it — <code>state.json.corrupt.bak</code>, or
+  <code>hosted_state.json.corrupt.bak</code> for the hosted store. To feed that copy back in,
+  follow <strong>step 3</strong> of
+  <a href="../operations/#recovering-from-a-corrupted-state-database">Recovering from a corrupted state database</a>.
+  That works only if the import wrote <strong>no rows at all</strong>, meaning every legacy
+  file present was damaged. If a healthy file imported alongside the damaged one,
+  its rows close the window and the copy is yours to merge by hand.</li>
 <li><strong>Do not run <code>clauster migrate</code> for this</strong> — it only touches the legacy flat
   files, not the database. Just upgrade the package and restart.</li>
 <li><strong>Back up first</strong> (<code>clauster backup</code>): the database is now the live store, so a
@@ -1781,7 +1790,9 @@ fail-closed, so a failure leaves the service <em>down</em>, not half-migrated. T
 simplest recovery is to restore the pre-upgrade <code>clauster backup</code> tarball and
 reinstall the prior version. To revert by hand instead: stop clauster, delete
 <code>clauster.db</code>, rename <code>state.json.imported</code> / <code>hosted_state.json.imported</code> back
-(drop the <code>.imported</code> suffix), and reinstall the prior clauster version.</p>
+(drop the <code>.imported</code> suffix), and reinstall the prior clauster version. A
+<code>*.corrupt.bak</code> beside them is a copy of a file the import could not use — repair
+it before you rename it over the original.</p>
 <h2 id="upgrade-by-install-method">Upgrade, by install method<a class="headerlink" href="#upgrade-by-install-method" title="Permanent link">&para;</a></h2>
 <p>Match how you installed (the same rows as the
 <a href="https://schubydoo.github.io/clauster/latest/installation/#which-install-method">installation decision table</a>),

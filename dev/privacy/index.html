@@ -1463,6 +1463,12 @@ configured value if you changed it.</p>
 <td>Present only on installs that predate the database; renamed <code>*.imported</code> once imported.</td>
 </tr>
 <tr>
+<td>Legacy state copies</td>
+<td><code>~/.clauster/state.json.bak</code>, <code>state.json.corrupt.bak</code> (and the <code>hosted_state.json</code> equivalents)</td>
+<td>One-time copies of a legacy file Clauster could not act on as-is: <code>.bak</code> before it coerced a mismatched <code>schema_version</code> (older or newer), <code>.corrupt.bak</code> — a byte-exact copy — when the file could not be used as a store at all: undecodable bytes, unparseable JSON, or JSON that parses to the wrong shape. <code>.bak</code> holds the pre-coercion file's text; <code>.corrupt.bak</code> holds that file's bytes exactly as found, whatever they turned out to be. Either can carry the hosted store's <code>claude</code> session uuid, so both are written <code>0600</code> regardless of the mode the legacy file itself carried.</td>
+<td>Taken at most once each and never rewritten. <strong>Not</strong> renamed <code>*.imported</code> with the original. Clauster never deletes them, so delete them yourself once you no longer need the recovery source — but note <code>clauster restore --force</code> puts the archive's <code>state_dir</code> back, so a copy the archive does not contain is gone (see <a href="../operations/#recovering-from-a-corrupted-state-database">Recovering from a corrupted state database</a>).</td>
+</tr>
+<tr>
 <td>Session secret</td>
 <td><code>~/.clauster/session.secret</code></td>
 <td>The HMAC key that signs login-session cookies (<code>0600</code>). Not personal data, but a credential.</td>
