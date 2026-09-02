@@ -1364,8 +1364,13 @@ def test_cleanup_keeper_spares_a_keeper_whose_ticks_go_unreadable(
     """An unreadable tick count spares the keeper rather than widening toward a kill (#1403).
 
     Readable at the snapshot and `None` at the re-verify (a `/proc` read that failed) is an
-    *inconclusive* answer, and the only safe reading of inconclusive on a `force_kill_tree`
-    path is "not provably ours". The spared keeper leaks; the orphan-keeper sweep reaps it.
+    *inconclusive* answer, and the rule this pins is that an inconclusive answer never
+    authorizes a kill. The spared keeper then leaks with no automated path to recover it —
+    `stop()` leaves the row carded, so `clauster keepers --kill` refuses it as carded and
+    `forget` refuses it as live — which we accept over force-killing a stranger's tree.
+
+    The two reads are split synthetically: both come from `/proc/<pid>/stat` in reality, so
+    a real host rarely fails only the second. The split is how the branch gets exercised.
     """
     runner, _ = _pty_runner(runner_config)
     state = {"ticks": 4200, "sleeps": 0}
@@ -1451,19 +1456,22 @@ def test_cleanup_keeper_refuses_a_snapshot_with_no_readable_start(
     Both halves `None` is the ABSENCE of an identity, not a match, and `None == None` must
     not let an unreadable start time authorize `force_kill_tree` on a whole process tree.
 
-    Reachable only through a TRANSIENT failure — a raced or denied `/proc` read at the
-    snapshot instant, with the process readable again by the time the grace loop probes it.
-    A permanent failure is foreclosed earlier: the loop returns on its first `None`. The
-    guard is belt-and-braces for that narrow window, not a routine path.
+    Reachable only through INTERMITTENT failure — a raced or denied `/proc` read at the
+    snapshot, readable again while the grace loop probes it, unreadable once more at the
+    final compare. A steadily failing read is foreclosed earlier: the loop returns on its
+    first `None`. The guard is belt-and-braces for that narrow window, not a routine path.
     """
     runner, _ = _pty_runner(runner_config)
     monkeypatch.setattr("clauster.runner.time.sleep", lambda _s: None)
     monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
     monkeypatch.setattr(procutil, "proc_start_pair", lambda pid: (None, None))
     monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: None)
-    # Readable from the loop's first probe onward, so the grace runs to the end and the
-    # compare is reached with only the snapshot missing.
-    monkeypatch.setattr(procutil, "proc_create_time", lambda pid: 1.0)
+    # Readable for the 8 grace probes so the loop runs to the end, then `None` at the final
+    # compare. That is what makes this test bite: with the epoch unreadable at BOTH ends,
+    # dropping the `expected_start is not None` conjunct leaves `None == None` — a match that
+    # would authorize the kill. Pinning 1.0 throughout would never evaluate that comparison.
+    epochs = iter([1.0] * 8)
+    monkeypatch.setattr(procutil, "proc_create_time", lambda pid: next(epochs, None))
     monkeypatch.setattr(procutil, "is_keeper_process", lambda pid: True)
     forced: list[int] = []
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))

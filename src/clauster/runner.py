@@ -3152,8 +3152,9 @@ class SessionRunner:
         # pid moments earlier, so it detects a recycle INSIDE the grace loop and nothing
         # before it — a `keeper_pid` that a row another process wrote had already lost to a
         # stranger keeper matches itself here and passes. Closing that needs the RECORDED
-        # keeper pair (`instance.keeper_proc_start` plus the ticks column) threaded in as a
-        # conjunct, which is issue #1402's work and names this function in its pointers.
+        # keeper pair (`instance.keeper_proc_start`, plus a keeper ticks column it does not
+        # have yet — a migration) threaded in as a conjunct. Issue #1303 tracks exactly that
+        # and names the tolerance decision it forces.
         # Until then the cmdline gate is the only thing separating those two, exactly as
         # before this change; what the boot-relative compare removes is the intermittent
         # drift that used to spare such a stranger BY ACCIDENT — the accident issue #1403
@@ -3179,26 +3180,40 @@ class SessionRunner:
         # do not drift. An unreadable `/proc` is the Linux member of the same branch and is
         # not sound, only fail-safe: psutil derives `create_time` from that very file, so in
         # practice both halves fail together and the grace loop has already returned;
-        # were it reached, drift there can only over-spare.
+        # were it reached, drift there can only over-spare. An emulated procfs with no
+        # `btime` (gVisor, WSL1 — see `procutil.jiffies_to_epoch`) inverts that: ticks read
+        # fine while `proc_create_time` is None, so the grace loop's own `is None: return`
+        # fires and the compare is never reached at all. Pre-existing, and untouched here.
         #
         # Every remaining gap resolves toward sparing: a tick count readable at the snapshot
         # and unreadable now compares unequal, and a snapshot with NO readable start at all
-        # is rejected outright rather than matching a later unreadable one. Sparing is the
-        # direction we want — a spared keeper leaks and the orphan-keeper sweep still reaps
-        # it, where a wrong kill is a `force_kill_tree` aimed at an unrelated process.
+        # is rejected outright rather than matching a later unreadable one.
+        #
+        # Sparing is the direction we want, but it is NOT free, and the cost is worth stating
+        # exactly. A keeper spared here is a keeper NO automated path recovers: `stop()` has
+        # already left the instance carded (STOPPED, still persisted), and
+        # `pty_keeper.find_orphan_keepers` — whose only caller is the `clauster keepers` CLI —
+        # filters out every keeper whose project is carded, so `keepers --kill` refuses it and
+        # `forget` refuses it too, as still-live. It leaks until someone kills it by hand. We
+        # take that over the alternative anyway: the alternative is a `force_kill_tree` aimed
+        # at a stranger, which takes down a process we do not own and, if the stranger is
+        # itself a keeper, its live bridge with it. A leak is recoverable by hand; a wrong
+        # kill is not recoverable at all.
+        #
         # Widening either compare is what would be unsafe: `_EXACT_PROC_START_TOLERANCE`
         # (0.05s) is far too tight to absorb an NTP step anyway, and
         # `_KEEPER_START_TOLERANCE` (2.0s) is wide enough to admit a pid recycled during
         # this very grace loop. That sibling bound guards `pty_keeper.stop_keeper`'s own
-        # force-kill after the same ~2s grace; naming it here is not a claim that it is
-        # fine, and issue #1402 tracks it.
+        # force-kill after the same ~2s grace; naming it here is not a claim that it is fine.
+        # No issue tracks it — #1402 explicitly leaves it out of scope without filing one.
         #
-        # Order matters and is unchanged: the cheap cmdline gate reads first, so the start
-        # time stays the last observation before the kill and nothing sits between "provably
-        # ours" and the SIGKILL. It also keeps the ZOMBIE filter ahead of the tick compare —
-        # `is_keeper_process` fails closed on a zombie, where `proc_start_ticks` would happily
-        # match one (a zombie keeps a readable `/proc/<pid>/stat`; `proc_create_time`, the
-        # value this used to compare, returned None for it instead).
+        # Order is unchanged, and chosen for freshness and cost rather than for the result:
+        # both operands are pure predicates, so `and` would answer the same either way. The
+        # cheap cmdline gate reads first, which leaves the start time as the last observation
+        # before the kill and skips the `/proc` read entirely when the pid is not a keeper.
+        # Note the zombie case rests on that gate alone now: `is_keeper_process` fails closed
+        # on a zombie, whereas `proc_start_ticks` matches one happily (a zombie keeps a
+        # readable `/proc/<pid>/stat`, where `proc_create_time` answered None instead).
         still_this_keeper = procutil.is_keeper_process(pid) and (
             procutil.proc_start_ticks(pid) == expected_ticks
             if expected_ticks is not None
