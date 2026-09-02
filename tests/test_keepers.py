@@ -8,6 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import psutil
 import pytest
 
 from clauster import procutil, pty_keeper
@@ -20,8 +21,15 @@ _DEAD_PID = 2_147_483_646  # far above any real pid → proc_create_time is None
 def _bypass_keeper_cmdline_gate(monkeypatch):
     """Treat any live PID as a keeper so these tests can stand in os.getpid() / a plain
     sleeper for a real ``clauster.pty_keeper``. They exercise liveness / orphan / kill
-    logic; the cmdline gate itself is covered in test_keeper_cmdline_gate.py (RUNOPS-1)."""
-    monkeypatch.setattr(procutil, "is_keeper_process", lambda pid: True)
+    logic; the cmdline gate itself is covered in test_keeper_cmdline_gate.py (RUNOPS-1).
+
+    Only the CMDLINE half is bypassed — the liveness half is answered honestly, which is what
+    "any LIVE pid" says. A blanket ``True`` also asserted a dead pid is a keeper, and that was
+    invisible only while ``iter_keepers`` carried a separate ``create_time is not None``
+    conjunct doing the liveness work. Since #1402 ``is_keeper_process`` IS that whole test, so
+    a blanket stub would report every dead pid as a live orphan and hide the real behaviour.
+    """
+    monkeypatch.setattr(procutil, "is_keeper_process", lambda pid: not procutil.proc_is_gone(pid))
 
 
 def _sidecar(log_dir: Path, name: str, *, keeper_pid: int, seq: int = 0, **fields) -> Path:
@@ -51,6 +59,34 @@ def test_iter_keepers_reads_fields_and_liveness(tmp_path):
     assert by_project["alpha"].bridge_pid == 4242
     assert by_project["alpha"].session_id == "session_X"
     assert by_project["beta"].alive is False  # dead pid
+
+
+def test_iter_keepers_lists_a_live_keeper_on_a_btime_less_procfs(tmp_path, monkeypatch):
+    # gVisor / WSL1 (#1402): `proc_start_pair` answers `(None, ticks)` there, because the
+    # epoch needs `boot_time()` and the ticks do not. `alive` used to conjoin
+    # `create_time is not None`, so it read False for a keeper that is plainly running — and
+    # `find_orphan_keepers` filters on `alive`, so `clauster keepers` listed nothing and
+    # `--kill` refused every pid. `is_keeper_process` alone already proves live + non-zombie
+    # + keeper cmdline, which is what `alive` means.
+    _sidecar(tmp_path, "alpha", keeper_pid=os.getpid(), bridge_pid=4242)
+    monkeypatch.setattr(procutil, "proc_start_pair", lambda pid: (None, 770579))
+
+    [info] = pty_keeper.iter_keepers(tmp_path)
+
+    assert info.alive is True, "a keeper with no readable epoch was hidden from the CLI"
+    assert (info.keeper_create_time, info.keeper_start_ticks) == (None, 770579)
+    assert pty_keeper.find_orphan_keepers(tmp_path, carded_projects=set()) == [info]
+
+
+def test_iter_keepers_still_rejects_a_pid_that_is_not_a_keeper(tmp_path, monkeypatch):
+    # The control for the test above: dropping the create-time conjunct must not widen what
+    # counts as live. The cmdline gate is the whole defense now, so it has to still bite.
+    _sidecar(tmp_path, "alpha", keeper_pid=os.getpid())
+    monkeypatch.setattr(procutil, "is_keeper_process", lambda pid: False)  # beats the autouse
+
+    [info] = pty_keeper.iter_keepers(tmp_path)
+
+    assert info.alive is False
 
 
 def test_find_orphan_keepers_excludes_carded_and_dead(tmp_path):
@@ -120,10 +156,26 @@ def test_find_orphan_keepers_unparsable_name_is_orphan(tmp_path):
 # ----- stop ----------------------------------------------------------------
 
 
+def _pin_start(monkeypatch, *, epoch, ticks=lambda: None) -> None:
+    """Pin every start-identity reader `stop_keeper` consults, from one fiction.
+
+    `epoch`/`ticks` are zero-arg callables so a test can move either half mid-run. Pinned
+    together because the grace probe (`proc_is_gone`), the identity read (`proc_start_pair`)
+    and the legacy epoch reader all describe the SAME process — letting real psutil answer
+    any one of them for pid 123 would let the host decide the test. `proc_create_time` is in
+    the set even though `stop_keeper` no longer calls it: the fiction has to stay consistent
+    for a reader (and for any future caller) rather than leave one reader live.
+    """
+    monkeypatch.setattr(procutil, "proc_create_time", lambda pid: epoch())
+    monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: ticks())
+    monkeypatch.setattr(procutil, "proc_start_pair", lambda pid: (epoch(), ticks()))
+    monkeypatch.setattr(procutil, "proc_is_gone", lambda pid: epoch() is None and ticks() is None)
+
+
 def test_stop_keeper_returns_true_when_already_gone(monkeypatch):
-    monkeypatch.setattr(procutil, "proc_create_time", lambda pid: None)
+    _pin_start(monkeypatch, epoch=lambda: None)
     monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
-    assert pty_keeper.stop_keeper(123) is True
+    assert pty_keeper.stop_keeper(123, expect_start_ticks=None) is True
 
 
 def test_stop_keeper_force_kills_a_lingering_keeper(monkeypatch):
@@ -131,24 +183,77 @@ def test_stop_keeper_force_kills_a_lingering_keeper(monkeypatch):
     forced = {"n": 0}
     monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
     monkeypatch.setattr(pty_keeper.time, "sleep", lambda s: None)  # don't wait the real grace
-    monkeypatch.setattr(procutil, "proc_create_time", lambda pid: 1.0 if alive["v"] else None)
+    _pin_start(monkeypatch, epoch=lambda: 1.0 if alive["v"] else None)
 
     def _force(pid):
         forced["n"] += 1
         alive["v"] = False  # the hard kill succeeds
 
     monkeypatch.setattr(procutil, "force_kill_tree", _force)
-    assert pty_keeper.stop_keeper(123) is True
+    assert pty_keeper.stop_keeper(123, expect_start_ticks=None) is True
     assert forced["n"] == 1  # grace expired → force path taken
+
+
+def test_stop_keeper_winds_down_a_keeper_on_a_btime_less_procfs(monkeypatch):
+    # gVisor / WSL1 (#1402): psutil's create_time ends in `+ boot_time()`, which raises on a
+    # procfs with no btime, so the epoch is unavailable for a keeper that is plainly running
+    # while `/proc/<pid>/stat` field 22 reads fine. The grace loop used to call that "gone"
+    # and return True without killing anything — a lingering keeper and its pty bridge left
+    # running, silently, and nothing logged. The boot-relative half proves it is still there.
+    alive = {"v": True}
+    forced = {"n": 0}
+    monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
+    monkeypatch.setattr(pty_keeper.time, "sleep", lambda s: None)
+    _pin_start(monkeypatch, epoch=lambda: None, ticks=lambda: 4200 if alive["v"] else None)
+
+    def _force(pid):
+        forced["n"] += 1
+        alive["v"] = False
+
+    monkeypatch.setattr(procutil, "force_kill_tree", _force)
+    assert pty_keeper.stop_keeper(123, expect_create_time=None, expect_start_ticks=4200) is True
+    assert forced["n"] == 1, "a keeper with no readable epoch was never wound down"
+
+
+def test_stop_keeper_kills_the_root_when_the_tree_cannot_read_a_clock(monkeypatch):
+    # Same host as above, through the REAL force_kill_tree: psutil's children() reads the
+    # epoch on its own, so it raises there even on 7.1+, and `clauster keepers --kill` ended
+    # in a traceback instead of a kill. The root still dies; only its tree is unreadable.
+    alive = {"v": True}
+    killed: list[int] = []
+    monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
+    monkeypatch.setattr(pty_keeper.time, "sleep", lambda s: None)
+    _pin_start(monkeypatch, epoch=lambda: None, ticks=lambda: 4200 if alive["v"] else None)
+
+    class _KeeperWithoutATree:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def status(self):
+            return psutil.STATUS_RUNNING
+
+        def cmdline(self):
+            return [sys.executable, "-m", "clauster.pty_keeper", "--sidecar", "/tmp/k.json"]
+
+        def children(self, recursive=False):
+            raise RuntimeError("no btime line in /proc/stat")
+
+        def kill(self):
+            killed.append(self.pid)
+            alive["v"] = False
+
+    monkeypatch.setattr(procutil.psutil, "Process", _KeeperWithoutATree)
+    assert pty_keeper.stop_keeper(123, expect_create_time=None, expect_start_ticks=4200) is True
+    assert killed == [123]
 
 
 def test_stop_keeper_returns_false_when_force_fails(monkeypatch):
     # A keeper that stays alive even through the force path → report failure honestly.
     monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
     monkeypatch.setattr(pty_keeper.time, "sleep", lambda s: None)
-    monkeypatch.setattr(procutil, "proc_create_time", lambda pid: 1.0)  # never dies
+    _pin_start(monkeypatch, epoch=lambda: 1.0)  # never dies
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: None)
-    assert pty_keeper.stop_keeper(123) is False
+    assert pty_keeper.stop_keeper(123, expect_start_ticks=None) is False
 
 
 def test_stop_keeper_refuses_on_pid_reuse(monkeypatch):
@@ -157,10 +262,105 @@ def test_stop_keeper_refuses_on_pid_reuse(monkeypatch):
     forced = {"n": 0}
     monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
     monkeypatch.setattr(pty_keeper.time, "sleep", lambda s: None)
-    monkeypatch.setattr(procutil, "proc_create_time", lambda pid: 999.0)  # a stranger
+    _pin_start(monkeypatch, epoch=lambda: 999.0)  # a stranger
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.__setitem__("n", 1))
-    assert pty_keeper.stop_keeper(123, expect_create_time=100.0) is False
+    assert pty_keeper.stop_keeper(123, expect_create_time=100.0, expect_start_ticks=None) is False
     assert forced["n"] == 0  # never SIGKILLed the reused PID
+
+
+def test_stop_keeper_refuses_a_pid_recycled_inside_its_own_grace(monkeypatch):
+    # THE reason this guard needed the boot-relative half (#1402). `_KEEPER_START_TOLERANCE`
+    # is 2.0s and cannot be tightened while the epoch stands alone, because psutil re-derives
+    # that epoch from a btime NTP moves — so it is wide enough to admit a pid recycled during
+    # stop_keeper's own ~2s grace, and what follows is a SIGKILL on a whole process tree. The
+    # replacement keeper here starts 0.5s later, well inside that bound; its tick count
+    # differs by a whole CLK_TCK and the exact compare rejects it.
+    forced = {"n": 0}
+    state = {"epoch": 100.0, "ticks": 4200, "sleeps": 0}
+
+    def _sleep(_s):
+        state["sleeps"] += 1
+        if state["sleeps"] == 8:  # the original keeper exits and the pid is recycled
+            state["epoch"], state["ticks"] = 100.5, 4250
+
+    monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
+    monkeypatch.setattr(pty_keeper.time, "sleep", _sleep)
+    _pin_start(monkeypatch, epoch=lambda: state["epoch"], ticks=lambda: state["ticks"])
+    # The module's autouse `_bypass_keeper_cmdline_gate` already answers "a keeper" for any
+    # pid, which is the shape under test: a keeper by cmdline, just not OURS.
+    monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.__setitem__("n", 1))
+
+    assert pty_keeper.stop_keeper(123, expect_create_time=100.0, expect_start_ticks=4200) is False
+    assert forced["n"] == 0, "force-killed the tree of a stranger the 2.0s epoch bound admitted"
+
+
+def test_stop_keeper_kills_through_a_clock_step_when_the_ticks_hold(monkeypatch):
+    # The other direction, and the control for the test above. The clock is corrected by four
+    # seconds during the grace — past the 2.0s bound — but the keeper never moved, so its
+    # boot-relative start is unchanged and the wind-down must still happen. Epoch-only, this
+    # refused and the orphan leaked.
+    alive = {"v": True}
+    forced = {"n": 0}
+    state = {"epoch": 100.0, "sleeps": 0}
+
+    def _sleep(_s):
+        state["sleeps"] += 1
+        if state["sleeps"] == 8:
+            state["epoch"] = 104.0  # NTP steps the clock; btime moved under a live process
+
+    monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
+    monkeypatch.setattr(pty_keeper.time, "sleep", _sleep)
+    _pin_start(
+        monkeypatch,
+        epoch=lambda: state["epoch"] if alive["v"] else None,
+        ticks=lambda: 4200 if alive["v"] else None,
+    )
+
+    def _force(pid):
+        forced["n"] += 1
+        alive["v"] = False
+
+    monkeypatch.setattr(procutil, "force_kill_tree", _force)
+    assert pty_keeper.stop_keeper(123, expect_create_time=100.0, expect_start_ticks=4200) is True
+    assert forced["n"] == 1, "clock drift, not a pid recycle, spared a keeper that never moved"
+
+
+def test_stop_keeper_refuses_when_an_expectation_cannot_be_checked(monkeypatch):
+    # Fail closed on "could not tell", not just on "definitely different". A recorded
+    # `expect_create_time` with an unreadable epoch and no recorded ticks used to read
+    # `proc_create_time is None` as "exited during the grace" and return True — a false
+    # success with no kill. False is the honest answer for an unproven identity in front of
+    # a SIGKILL on a whole process tree. The ticks read here belong to whatever holds the
+    # pid; nothing was recorded to compare them against.
+    forced = {"n": 0}
+    monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
+    monkeypatch.setattr(pty_keeper.time, "sleep", lambda s: None)
+    _pin_start(monkeypatch, epoch=lambda: None, ticks=lambda: 4200)
+    monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.__setitem__("n", 1))
+
+    assert pty_keeper.stop_keeper(123, expect_create_time=100.0, expect_start_ticks=None) is False
+    assert forced["n"] == 0, "an unproven identity must never front a force_kill_tree"
+
+
+def test_stop_keeper_does_not_report_success_from_an_unreadable_post_kill_poll(monkeypatch):
+    # The other side of the same split. After the SIGKILL the poll may only treat a DEFINITE
+    # mismatch as proof the keeper is gone: an unreadable pair means "could not tell", and
+    # reporting the kill as succeeded there would turn an unconfirmed kill into a silent
+    # success. Waiting the poll out and reporting False is the honest answer.
+    reads = {"n": 0}
+
+    def _epoch():
+        reads["n"] += 1
+        return 100.0 if reads["n"] <= 9 else None  # grace(8) + pre-force guard, then blind
+
+    monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
+    monkeypatch.setattr(pty_keeper.time, "sleep", lambda s: None)
+    # Ticks stay readable throughout, so `proc_is_gone` never fires — only the recorded-vs-
+    # observed comparability changes, which is exactly the branch under test.
+    _pin_start(monkeypatch, epoch=_epoch, ticks=lambda: 4200)
+    monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: None)
+
+    assert pty_keeper.stop_keeper(123, expect_create_time=100.0, expect_start_ticks=None) is False
 
 
 def test_stop_keeper_true_when_exits_at_reuse_guard(monkeypatch):
@@ -172,27 +372,27 @@ def test_stop_keeper_true_when_exits_at_reuse_guard(monkeypatch):
 
     monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
     monkeypatch.setattr(pty_keeper.time, "sleep", lambda s: None)
-    monkeypatch.setattr(procutil, "proc_create_time", lambda pid: next(seq))
+    _pin_start(monkeypatch, epoch=lambda: next(seq, None))
     monkeypatch.setattr(procutil, "force_kill_tree", _no_force)
-    assert pty_keeper.stop_keeper(123, expect_create_time=1.0) is True
+    assert pty_keeper.stop_keeper(123, expect_create_time=1.0, expect_start_ticks=None) is True
 
 
 def test_stop_keeper_true_when_pid_reused_after_force(monkeypatch):
     # Matching through grace + the pre-force guard; force fires; then the PID is recycled
     # (create-time changes) in the post-force poll → report the kill as succeeded.
-    times = iter([100.0] * 8 + [100.0, 999.0])  # grace(8) + pre-force guard + post-force
+    times = iter([100.0] * 8 + [100.0])  # grace(8) + pre-force guard; then the stranger
     monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
     monkeypatch.setattr(pty_keeper.time, "sleep", lambda s: None)
-    monkeypatch.setattr(procutil, "proc_create_time", lambda pid: next(times))
+    _pin_start(monkeypatch, epoch=lambda: next(times, 999.0))
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: None)
-    assert pty_keeper.stop_keeper(123, expect_create_time=100.0) is True
+    assert pty_keeper.stop_keeper(123, expect_create_time=100.0, expect_start_ticks=None) is True
 
 
 def test_stop_keeper_kills_a_real_process():
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     try:
         assert procutil.proc_create_time(proc.pid) is not None
-        assert pty_keeper.stop_keeper(proc.pid) is True
+        assert pty_keeper.stop_keeper(proc.pid, expect_start_ticks=None) is True
         assert procutil.proc_create_time(proc.pid) is None
     finally:
         try:

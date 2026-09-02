@@ -173,6 +173,32 @@ def test_force_kill_tree_safe_on_dead_pid():
     procutil.force_kill_tree(2_000_000_000)  # absent PID -> no raise
 
 
+def test_force_kill_tree_kills_the_root_when_children_cannot_read_a_clock(monkeypatch):
+    """``children()`` needs the epoch; on a btime-less procfs it raises, and the root still dies.
+
+    psutil's ``Process.children`` reads ``create_time()`` without ``monotonic=True`` to tell
+    a reused pid from a real child, and that ends in ``boot_time()``, which raises a bare
+    ``RuntimeError`` on gVisor / WSL1 (#1402). The tree is unreadable there, not the root:
+    returning would be the silent no-kill, and raising aborted ``stop()`` past its STOPPED
+    transition. The root is killed anyway.
+    """
+    killed: list[int] = []
+
+    class _RootWithoutATree:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def children(self, recursive=False):
+            raise RuntimeError("no btime line in /proc/stat")
+
+        def kill(self):
+            killed.append(self.pid)
+
+    monkeypatch.setattr(procutil.psutil, "Process", _RootWithoutATree)
+    procutil.force_kill_tree(4321)  # must return, not raise
+    assert killed == [4321]
+
+
 def test_force_kill_tree_wait_timeout_confirms_death():
     """`wait_timeout` makes the process observably gone by the time the call returns.
 
@@ -1218,6 +1244,104 @@ def test_proc_start_ticks_fails_closed_on_a_pid_that_cannot_name_a_process():
     assert procutil.proc_start_ticks(2_000_000_000) is None
 
 
+def test_proc_is_gone_answers_the_liveness_question_without_a_clock():
+    # The grace-loop probe (#1402). `proc_create_time(pid) is None` used to stand in for it,
+    # and on a procfs with no btime that answers "gone" for a process that is plainly there —
+    # psutil's create_time ends in `+ boot_time()`, which raises. This asks the status.
+    assert procutil.proc_is_gone(os.getpid()) is False
+    assert procutil.proc_is_gone(2_000_000_000) is True
+    assert procutil.proc_is_gone(-1) is True  # psutil's ValueError, same as the family
+
+
+def test_proc_is_gone_reports_a_live_process_on_a_host_that_cannot_express_boot_time(monkeypatch):
+    # gVisor / WSL1: `create_time()` ends in `+ boot_time()`, which raises a bare RuntimeError
+    # on a procfs with no btime line. `proc_create_time` absorbs that as None — and a caller
+    # reading None as "gone" then never winds the process down. `proc_is_gone` never calls it.
+    class _NoBtime:
+        def __init__(self, pid):
+            pass
+
+        def status(self):
+            return psutil.STATUS_RUNNING
+
+        def create_time(self):
+            raise RuntimeError("no btime line in /proc/stat")
+
+    monkeypatch.setattr(procutil.psutil, "Process", _NoBtime)
+    assert procutil.proc_create_time(1234) is None  # the trap the old idiom fell into
+    assert procutil.proc_is_gone(1234) is False
+
+
+def test_proc_is_gone_answers_not_gone_when_the_constructor_itself_wants_a_clock(monkeypatch):
+    # `status()` needs no clock, but `psutil.Process(pid)` does up to psutil 7.0.0: its
+    # `_init` calls `create_time()`, which ends in `+ boot_time()` and raises the bare
+    # RuntimeError on a btime-less procfs. pyproject now floors at psutil 7.1 (#1402), so this
+    # arm is defence in depth for that floor. Uncaught, this propagated out of
+    # `_cleanup_keeper`'s `asyncio.to_thread` and past `stop()`'s STOPPED transition and
+    # worktree unlock — a card left RUNNING over a bridge that had already been SIGINT-ed.
+    # A live process we cannot do clock arithmetic for is NOT gone.
+    class _ClockHungryConstructor:
+        def __init__(self, pid):
+            raise RuntimeError("no btime line in /proc/stat")
+
+    monkeypatch.setattr(procutil.psutil, "Process", _ClockHungryConstructor)
+    assert procutil.proc_is_gone(1234) is False
+
+
+def test_is_keeper_process_spares_a_pid_whose_constructor_wants_a_clock(monkeypatch):
+    # Defence in depth for the same floor, on the gate `proc_is_gone` made reachable: the
+    # keeper grace loops now run out on a btime-less procfs and land here, and this function
+    # constructs outside the arm above. A raise would abort `stop()` past its STOPPED
+    # transition; "not a keeper" spares the pid instead, which is the recoverable direction.
+    class _ClockHungryConstructor:
+        def __init__(self, pid):
+            raise RuntimeError("no btime line in /proc/stat")
+
+    monkeypatch.setattr(procutil.psutil, "Process", _ClockHungryConstructor)
+    assert procutil.is_keeper_process(1234) is False
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="btime is a Linux /proc/stat concept")
+def test_process_constructor_needs_no_clock_on_the_pinned_psutil(monkeypatch):
+    # The premise behind pyproject's `psutil>=7.1` floor (#1402): from 7.1 the constructor
+    # derives its identity from the boot-relative start on Linux, so on a btime-less procfs
+    # it constructs fine while `create_time()` still raises. `is_keeper_process` and
+    # `is_live_process` are reached on that host now that the grace loops run out there, so
+    # the floor is what keeps them from raising. Simulated on the REAL psutil by making its
+    # `boot_time` raise the way it does with no `btime` line; a psutil that regressed to a
+    # clock-hungry constructor fails this at the `Process(...)` line.
+    from psutil import _pslinux  # the Linux backend; `create_time` reads its `boot_time`
+
+    def _no_btime() -> float:
+        raise RuntimeError("no btime line in /proc/stat")
+
+    monkeypatch.setattr(_pslinux, "boot_time", _no_btime)
+    me = os.getpid()
+    proc = psutil.Process(me)  # the floor's promise: no clock in the constructor
+    with pytest.raises(RuntimeError):
+        proc.create_time()  # the family rule still holds for the clock read itself
+    assert procutil.proc_create_time(me) is None
+    assert procutil.is_keeper_process(me) is False  # answers, rather than raising
+    assert procutil.proc_is_gone(me) is False
+
+
+def test_proc_is_gone_counts_a_zombie_as_gone(monkeypatch):
+    # A zombie has exited; only its exit status remains and its tree went with it. Counting it
+    # as gone is what keeps `_cleanup_keeper` and `stop_keeper` from running their identity
+    # compare on it and reporting "no longer that keeper", which would be untrue. Faked rather
+    # than reaped for real: a genuine zombie needs POSIX and an unwaited child, and the state
+    # this pins is the one psutil reports, not the one the kernel spells.
+    class _Zombie:
+        def __init__(self, pid):
+            pass
+
+        def status(self):
+            return psutil.STATUS_ZOMBIE
+
+    monkeypatch.setattr(procutil.psutil, "Process", _Zombie)
+    assert procutil.proc_is_gone(1234) is True
+
+
 def test_proc_start_ticks_survives_a_comm_containing_spaces_and_parens(tmp_path, monkeypatch):
     # Field 2 is the executable name, unquoted and free to hold ')' and spaces. A
     # left-to-right split would miscount every later field and return the wrong number —
@@ -1358,3 +1482,42 @@ def test_process_vanishing_between_cmdline_and_create_time_is_not_live(monkeypat
     monkeypatch.setattr(procutil.psutil, "Process", _VanishingProc)
     assert procutil.is_live_bridge(1234, 1000.0) is False
     assert procutil.is_live_bridge(1234, 1000.0, start_ticks=770579) is False
+
+
+class _ProcWithoutAClock:
+    """A psutil 7.1+ Process on a btime-less procfs: any epoch read raises (#1402)."""
+
+    def __init__(self, pid):
+        self.pid = pid
+
+    def status(self):
+        return psutil.STATUS_RUNNING
+
+    def cmdline(self):
+        return ["/usr/bin/node", "/opt/wrapper/claude", "--print"]
+
+    def children(self, recursive=False):
+        raise RuntimeError("no btime line in /proc/stat")
+
+    def parent(self):
+        raise RuntimeError("no btime line in /proc/stat")
+
+
+def test_bridge_ancestor_answers_none_when_parent_cannot_read_a_clock(monkeypatch):
+    # psutil's `parent()` compares epochs to reject a reparented pid, so it raises on a
+    # btime-less procfs. That is "no ancestor found", not a crash of the prune (#1402).
+    monkeypatch.setattr(procutil.psutil, "Process", _ProcWithoutAClock)
+    assert procutil.bridge_ancestor(4321) is None
+
+
+def test_running_claude_version_answers_none_when_children_cannot_read_a_clock(monkeypatch):
+    # Same host, inside poll_once's tick: "no version", never an aborted poll (#1402).
+    monkeypatch.setattr(procutil.psutil, "Process", _ProcWithoutAClock)
+    monkeypatch.setattr(procutil, "_proc_claude_version", lambda proc: None)
+    assert procutil.running_claude_version(4321) is None
+
+
+def test_owned_pids_root_without_a_readable_tree_contributes_only_itself(monkeypatch):
+    # Same host: the root is still owned, only its descendants are unknown (#1402).
+    monkeypatch.setattr(procutil.psutil, "Process", _ProcWithoutAClock)
+    assert procutil.owned_pids([99]) == {99}

@@ -891,7 +891,7 @@ async def test_forget_refuses_a_persisted_only_row_with_a_live_keeper(runner_con
         {"iid-ghost": _row("alpha", pid=None, keeper_pid=7777, keeper_proc_start=900.0)}
     )
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
-    monkeypatch.setattr("clauster.runner.procutil.is_live_keeper", lambda pid, start: True)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_keeper", lambda pid, start, **_kw: True)
 
     with pytest.raises(InstanceStillLive):
         await runner.forget("iid-ghost")
@@ -910,7 +910,7 @@ async def test_forget_is_not_stranded_by_a_recycled_keeper_pid(runner_config, mo
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
     # Alive, but not our keeper — exactly the recycled-pid shape.
     monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: 12345.0)
-    monkeypatch.setattr("clauster.runner.procutil.is_live_keeper", lambda pid, start: False)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_keeper", lambda pid, start, **_kw: False)
 
     await runner.forget("iid-ghost")  # must not be refused
 
@@ -1001,6 +1001,124 @@ async def test_forget_gate_degrades_to_cmdline_for_a_pre_1178_row(runner_config,
     assert "iid-legacy" in runner.persistence.state_store().load()
 
 
+# ---------------------------------------------------------------------------
+# Bug 1402 — the keeper half of the liveness pair was still epoch-only
+# ---------------------------------------------------------------------------
+
+
+async def test_forget_refuses_a_live_keeper_through_a_clock_step(runner_config, monkeypatch):
+    # THE #1402 regression test. The clock offset is driven directly rather than waited for
+    # on a drifting host: psutil derives create_time on Linux as `starttime/CLK_TCK +
+    # boot_time()`, and boot_time() re-reads /proc/stat btime every call, so an NTP
+    # correction moves the epoch of a keeper that never restarted. Four seconds of it here,
+    # against a 0.05s bound. Epoch-only, this gate opened and forget deleted the row of a
+    # keeper still holding a live pty bridge — with no card, no row, and no automated way
+    # back, because forget does not kill and `clauster keepers` needs the record that just
+    # went away.
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save(
+        {
+            "iid-ghost": _row(
+                "alpha",
+                pid=None,
+                keeper_pid=7777,
+                keeper_proc_start=900.0,
+                keeper_start_ticks=770579,
+            )
+        }
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    _pretend_a_live_keeper_holds_the_pid(monkeypatch, create_time=904.0)
+    # The boot-relative half did not move, because nothing about the process did.
+    monkeypatch.setattr("clauster.procutil.proc_start_ticks", lambda pid: 770579)
+
+    with pytest.raises(InstanceStillLive):
+        await runner.forget("iid-ghost")
+
+    assert "iid-ghost" in runner.persistence.state_store().load()
+
+
+async def test_forget_still_allows_a_row_whose_keeper_ticks_moved(runner_config, monkeypatch):
+    # The control, and the reason the tick compare is EXACT. A genuinely recycled pid — a
+    # second keeper born later — differs by a whole CLK_TCK of ticks even where the drifting
+    # epoch happens to land inside the coarse same-boot bound. The drift fix must not cost
+    # the PID-reuse defense it sits beside, because forget never kills and a false "still
+    # live" strands the record.
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save(
+        {
+            "iid-ghost": _row(
+                "alpha",
+                pid=None,
+                keeper_pid=7777,
+                keeper_proc_start=900.0,
+                keeper_start_ticks=770579,
+            )
+        }
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    _pretend_a_live_keeper_holds_the_pid(monkeypatch, create_time=904.0)
+    monkeypatch.setattr("clauster.procutil.proc_start_ticks", lambda pid: 770580)
+
+    await runner.forget("iid-ghost")  # must not be refused
+
+    assert "iid-ghost" not in runner.persistence.state_store().load()
+
+
+async def test_forget_keeper_gate_degrades_to_the_epoch_for_a_pre_1402_row(
+    runner_config, monkeypatch
+):
+    # Old-row compatibility, stated honestly. A row written before `keeper_start_ticks`
+    # existed carries the epoch alone, and the gate must go on comparing exactly that —
+    # not read the live pid's ticks and invent a half the row never stored, and not treat
+    # the missing half as a mismatch. Identical to the regression test above except that
+    # the row has no ticks, so the drifted epoch decides and the forget goes through.
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save(
+        {"iid-legacy": _row("alpha", pid=None, keeper_pid=7777, keeper_proc_start=900.0)}
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    _pretend_a_live_keeper_holds_the_pid(monkeypatch, create_time=904.0)
+    monkeypatch.setattr("clauster.procutil.proc_start_ticks", lambda pid: 770579)
+
+    await runner.forget("iid-legacy")
+
+    assert "iid-legacy" not in runner.persistence.state_store().load()
+    # The control that proves the epoch is still being compared at all, rather than the row
+    # having been dropped for some unrelated reason: an epoch that MATCHES still refuses.
+    runner.persistence.state_store().save(
+        {"iid-legacy": _row("alpha", pid=None, keeper_pid=7777, keeper_proc_start=904.0)}
+    )
+    with pytest.raises(InstanceStillLive):
+        await runner.forget("iid-legacy")
+
+
+async def test_forget_keeper_gate_reads_the_ticks_off_the_row_not_the_card(
+    runner_config, monkeypatch
+):
+    # The carded arm of the same gate — a different branch from the persisted-only one
+    # above, reading `instance.keeper_start_ticks` rather than the row's. Both must carry
+    # the drift-immune half or half the gate stays on the moving value.
+    runner = _make_runner(runner_config)
+    runner._instances["iid-pty"] = RemoteControlInstance(
+        instance_id="iid-pty",
+        project="alpha",
+        label="alpha",
+        resume_mode="pty",
+        status=InstanceStatus.STOPPED,
+        keeper_pid=7777,
+        keeper_proc_start=900.0,
+        keeper_start_ticks=770579,
+    )
+    _pretend_a_live_keeper_holds_the_pid(monkeypatch, create_time=904.0)
+    monkeypatch.setattr("clauster.procutil.proc_start_ticks", lambda pid: 770579)
+
+    with pytest.raises(InstanceStillLive):
+        await runner.forget("iid-pty")
+
+    assert runner.get_instance("iid-pty") is not None
+
+
 async def test_keeper_pid_and_start_time_are_persisted_and_reloaded_together(
     runner_config, monkeypatch
 ):
@@ -1019,12 +1137,19 @@ async def test_keeper_pid_and_start_time_are_persisted_and_reloaded_together(
         bridge_proc_start=222.0,
         keeper_pid=5555,
         keeper_proc_start=333.0,
+        keeper_start_ticks=770579,
     )
 
     await runner._persist()
 
     row = runner.persistence.state_store().load()["iid-pty"]
-    assert (row["keeper_pid"], row["keeper_proc_start"]) == (5555, 333.0)
+    # The boot-relative half rides with them (#1402): without it in the row, the keeper gate
+    # a fresh process applies to this record is back on the epoch a clock correction moves.
+    assert (row["keeper_pid"], row["keeper_proc_start"], row["keeper_start_ticks"]) == (
+        5555,
+        333.0,
+        770579,
+    )
 
 
 async def test_reattach_records_the_keeper_start_time_with_its_pid(runner_config, monkeypatch):
@@ -1037,13 +1162,22 @@ async def test_reattach_records_the_keeper_start_time_with_its_pid(runner_config
     runner.persistence.state_store().save({"iid-pty": _row("alpha", pid=5002)})
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
     monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s, **_kw: 5555)
-    monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: 777.0)
+    # Both halves from one read, and both pinned: pid 5555 may genuinely exist on the host
+    # running the suite, and the real `proc_start_ticks` would then answer for a stranger.
+    monkeypatch.setattr("clauster.procutil.proc_start_ticks", lambda pid: 770579)
+    monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", lambda ticks: 777.0)
 
     await runner.rediscover(persist=False)
 
     inst = runner.get_instance("iid-pty")
     assert inst is not None
-    assert (inst.keeper_pid, inst.keeper_proc_start) == (5555, 777.0)
+    # The boot-relative half rides with the epoch (#1402), or this row's forget gate is left
+    # on the value a host clock correction moves.
+    assert (inst.keeper_pid, inst.keeper_proc_start, inst.keeper_start_ticks) == (
+        5555,
+        777.0,
+        770579,
+    )
 
 
 def test_recovery_rejects_a_pid_recycled_mid_snapshot(runner_config, monkeypatch):
@@ -1053,10 +1187,14 @@ def test_recovery_rejects_a_pid_recycled_mid_snapshot(runner_config, monkeypatch
     # created AFTER validation began cannot be the keeper validation saw.
     runner = _make_runner(runner_config)
     monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s, **_kw: 5555)
+    # Pinned rather than left to the host: pid 5555 may genuinely exist here, and then the
+    # real `proc_start_ticks` would answer for a stranger and decide this test (#1409).
+    monkeypatch.setattr("clauster.procutil.proc_start_ticks", lambda pid: None)
     monkeypatch.setattr(
         "clauster.runner.procutil.proc_create_time", lambda pid: time.time() + 100.0
     )
     assert runner._recover_keeper_identity("alpha", 4242, 222.0, bridge_start_ticks=None) == (
+        None,
         None,
         None,
     )
@@ -1066,7 +1204,25 @@ def test_recovery_rejects_a_pid_recycled_mid_snapshot(runner_config, monkeypatch
     assert runner._recover_keeper_identity("alpha", 4242, 222.0, bridge_start_ticks=None) == (
         5555,
         777.0,
+        None,
     )
+
+    # And the boot-relative half rides along, from the SAME `proc_start_pair` read (#1402):
+    # the epoch is derived from these ticks on Linux, so the two cannot describe different
+    # processes. A recycled pid drops all three together, never a pid with no ticks.
+    monkeypatch.setattr("clauster.procutil.proc_start_ticks", lambda pid: 770579)
+    monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", lambda ticks: 777.0)
+    assert runner._recover_keeper_identity("alpha", 4242, 222.0, bridge_start_ticks=None) == (
+        5555,
+        777.0,
+        770579,
+    )
+    monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", lambda ticks: time.time() + 100.0)
+    assert runner._recover_keeper_identity("alpha", 4242, 222.0, bridge_start_ticks=None) == (
+        None,
+        None,
+        None,
+    ), "a pid recycled mid-recovery must drop the ticks too, not publish them beside a None pid"
 
 
 async def test_pointer_walk_reattach_records_the_keeper_start_time_too(runner_config, monkeypatch):
@@ -1089,13 +1245,18 @@ async def test_pointer_walk_reattach_records_the_keeper_start_time_too(runner_co
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
     monkeypatch.setattr("clauster.runner.pointers.pointer_for_project", lambda *a, **k: ptr)
     monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s, **_kw: 6666)
-    monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: 888.0)
+    monkeypatch.setattr("clauster.procutil.proc_start_ticks", lambda pid: 880880)
+    monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", lambda ticks: 888.0)
 
     await runner.rediscover(persist=False)
 
     inst = runner.get_instance("iid-pty")
     assert inst is not None
-    assert (inst.keeper_pid, inst.keeper_proc_start) == (6666, 888.0)
+    assert (inst.keeper_pid, inst.keeper_proc_start, inst.keeper_start_ticks) == (
+        6666,
+        888.0,
+        880880,
+    )
 
 
 async def test_resync_replaces_the_keeper_pair_together(runner_config, monkeypatch):
@@ -1123,21 +1284,27 @@ async def test_resync_replaces_the_keeper_pair_together(runner_config, monkeypat
     )
     _stub_connect(monkeypatch)
     monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s, **_kw: 2222)
-    monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: 222.0)
+    monkeypatch.setattr("clauster.procutil.proc_start_ticks", lambda pid: 222222)
+    monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", lambda ticks: 222.0)
 
     await runner.poll_once()
 
     inst = runner.get_instance("iid-pty")
     assert inst is not None
-    assert (inst.keeper_pid, inst.keeper_proc_start) == (2222, 222.0), (
-        "the keeper pid and its start time must be replaced as a pair"
-    )
+    # All three, not two: a `keeper_start_ticks` left over from the generation we just
+    # replaced would be compared against the NEW pid's ticks and never match, so the keeper
+    # we just adopted reads dead and forget deletes its row (#1402).
+    assert (inst.keeper_pid, inst.keeper_proc_start, inst.keeper_start_ticks) == (
+        2222,
+        222.0,
+        222222,
+    ), "the keeper pid and both halves of its start identity must be replaced together"
 
 
 async def test_a_standard_resync_clears_the_keeper_pair(runner_config, monkeypatch):
-    # A standard bridge has no keeper. Both halves must go, not just the pid: a leftover
-    # start time paired with a None pid is dead weight the gate would never consult, and the
-    # asymmetry is how a stale value survives into the next pty generation.
+    # A standard bridge has no keeper. Every field must go, not just the pid: a leftover
+    # start time or tick count paired with a None pid is dead weight the gate would never
+    # consult, and the asymmetry is how a stale value survives into the next pty generation.
     runner = _make_runner(runner_config)
     monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
     runner._instances["iid-std"] = RemoteControlInstance(
@@ -1150,6 +1317,7 @@ async def test_a_standard_resync_clears_the_keeper_pair(runner_config, monkeypat
         bridge_proc_start=100.0,
         keeper_pid=1111,
         keeper_proc_start=111.0,
+        keeper_start_ticks=111111,
     )
     runner.persistence.state_store().save(
         {"iid-std": _row("alpha", pid=4402, proc_start=200.0, resume_mode="standard")}
@@ -1163,7 +1331,11 @@ async def test_a_standard_resync_clears_the_keeper_pair(runner_config, monkeypat
 
     inst = runner.get_instance("iid-std")
     assert inst is not None
-    assert (inst.keeper_pid, inst.keeper_proc_start) == (None, None)
+    assert (inst.keeper_pid, inst.keeper_proc_start, inst.keeper_start_ticks) == (
+        None,
+        None,
+        None,
+    )
 
 
 async def test_forget_still_prunes_a_dead_persisted_only_row(runner_config, monkeypatch):

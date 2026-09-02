@@ -332,6 +332,48 @@ def proc_start_pair(pid: int) -> tuple[float | None, int | None]:
     return jiffies_to_epoch(ticks), ticks
 
 
+def proc_is_gone(pid: int) -> bool:
+    """Whether ``pid`` names no live, non-zombie process — the grace-loop probe (#1402).
+
+    ``proc_create_time(pid) is None`` was the idiom at both keeper grace loops
+    (:meth:`clauster.runner.SessionRunner._cleanup_keeper` and
+    :func:`clauster.pty_keeper.stop_keeper`), and it is wrong on an emulated procfs with no
+    ``btime`` (gVisor, some container runtimes, WSL1 — see :func:`jiffies_to_epoch`): psutil's
+    ``create_time`` ends in ``+ boot_time()``, which raises there, so a keeper that is plainly
+    running reads as gone. Both loops then returned before their identity compare and
+    force-killed nothing, silently — a lingering keeper and its pty bridge were never wound
+    down and nothing was logged. Boot-relative ticks read fine on exactly that host, which is
+    what makes the bug invisible rather than total.
+
+    Asking the status directly answers the same question identically everywhere. A **zombie
+    counts as gone**: it has already exited, only its exit status remains, and its tree went
+    with it — force-killing it is pointless and the identity compare downstream would report
+    it as "no longer that keeper", which is untrue and misleading. Gone / denied / a pid that
+    cannot name a process are all gone, matching what ``proc_create_time is None`` answered
+    for them.
+
+    ⚠️ ``status()`` needs no clock, but ``psutil.Process(pid)`` itself can still want one:
+    up to and including psutil 7.0.0 its ``_init`` calls ``create_time()``, so on the very
+    btime-less host this function exists for it raises the bare ``RuntimeError``
+    :func:`jiffies_to_epoch` documents for the family. That must answer **not gone** — a live
+    process we cannot do clock arithmetic for has not exited — and it cannot swallow a real
+    exit, because a dead pid raises ``NoSuchProcess`` from the stat read first. Left
+    uncaught it propagated out of ``asyncio.to_thread`` in :meth:`stop`, past the
+    ``STOPPED`` transition and the worktree unlock, which is worse than the silent no-kill
+    it replaced. ``pyproject.toml`` therefore floors psutil at 7.1, the first release whose
+    constructor takes the boot-relative start on Linux and never asks for a clock — that
+    floor is what keeps :func:`is_keeper_process` and :func:`is_live_process`, which
+    construct outside any ``RuntimeError`` arm, from raising on the same host. The arm
+    below stays as defence in depth for the floor.
+    """
+    try:
+        return psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, ValueError):
+        return True
+    except RuntimeError:
+        return False
+
+
 def proc_cwd(pid: int) -> Path | None:
     """Return ``pid``'s current working directory, or ``None`` when it can't be read.
 
@@ -532,6 +574,14 @@ def is_keeper_process(pid: int) -> bool:
     ⚠️ Pid ``0`` is deliberately NOT characterised here: it is absent on Linux but a real
     kernel process on macOS and Windows, so which arm of the catch it takes is platform
     specific. The cmdline gate answers it either way; nothing should depend on the route.
+
+    The ``RuntimeError`` arm is defence in depth for the psutil floor (#1402): before 7.1
+    the constructor itself called ``create_time()``, which raises bare on a procfs with no
+    ``btime``, and since :func:`proc_is_gone` lets the keeper grace loops run out on that
+    host this gate is reachable there. ``pyproject.toml`` floors psutil at 7.1 so the
+    constructor never asks for a clock; should one still raise, "not a keeper" spares the
+    pid — a leak an operator can end by hand, where a raise aborted :meth:`stop` past its
+    ``STOPPED`` transition and a wrong answer the other way would front a SIGKILL.
     """
     try:
         proc = psutil.Process(pid)
@@ -540,9 +590,23 @@ def is_keeper_process(pid: int) -> bool:
         return is_keeper_cmdline(proc.cmdline())
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, ValueError):
         return False
+    except RuntimeError:
+        return False
 
 
-def is_live_keeper(pid: int, proc_start: str | float | None, *, tolerance: float = 2.0) -> bool:
+def is_live_keeper(
+    pid: int,
+    proc_start: str | float | None,
+    *,
+    tolerance: float = 2.0,
+    # Keyword-REQUIRED, no default (#1402). Threading a start-ticks argument through some
+    # call sites and defaulting it on the rest is the failure #1399's review found three
+    # rounds running, and it is silent; without a default a missed site is a type error
+    # pyright names on the spot. `is_live_bridge` below still carries the defaulted form it
+    # shipped with — the two are deliberately NOT symmetric yet, and converting it means
+    # touching every bridge call site, which belongs in its own change.
+    start_ticks: int | None,
+) -> bool:
     """Whether ``pid`` is a trustworthy, currently-running ``clauster.pty_keeper`` (#1178).
 
     The keeper counterpart of :func:`is_live_bridge`, and the same wrapper over
@@ -552,13 +616,27 @@ def is_live_keeper(pid: int, proc_start: str | float | None, *, tolerance: float
     that happens to hold that pid; on a host running many interactive sessions those
     are exactly the pids most likely to be reused by another keeper.
 
-    ``proc_start is None`` degrades to :func:`is_keeper_process`'s cmdline+alive
-    answer, deliberately: a row written before ``keeper_proc_start`` was persisted has
-    no start-time to compare, and treating unknown as a mismatch would report a live
-    keeper as dead — which for ``forget`` means pruning the record of a running
-    process, the very failure the check exists to prevent.
+    ``start_ticks`` is the persisted ``keeper_start_ticks`` and makes the start-time half
+    immune to clock drift; see :func:`is_live_process` for which of the two then carries
+    which job. It matters here for the mirror image of the reason it matters on the bridge
+    (#1402): a false "not live" from this predicate lets ``forget`` delete the record of a
+    keeper that is still holding a pty bridge's terminal, and ``forget`` never kills — so
+    the keeper and its bridge run on with neither card nor row, and nothing automated
+    recovers them.
+
+    ``proc_start is None`` **with no ticks either** degrades to :func:`is_keeper_process`'s
+    cmdline+alive answer, deliberately: a row written before ``keeper_proc_start`` was
+    persisted has no start-time to compare, and treating unknown as a mismatch would report
+    a live keeper as dead — the very failure the check exists to prevent. Recorded ticks
+    with no epoch decide alone and exactly, which is stricter; see :func:`is_live_process`.
     """
-    return is_live_process(pid, proc_start, tolerance=tolerance, require_cmdline=is_keeper_cmdline)
+    return is_live_process(
+        pid,
+        proc_start,
+        tolerance=tolerance,
+        require_cmdline=is_keeper_cmdline,
+        start_ticks=start_ticks,
+    )
 
 
 def is_bridge_process(pid: int) -> bool:
@@ -636,7 +714,9 @@ def bridge_ancestor(pid: int, *, max_depth: int = _MAX_BRIDGE_ANCESTRY) -> int |
             if proc.status() != psutil.STATUS_ZOMBIE and is_bridge_cmdline(cmdline):
                 return proc.pid
             parent = proc.parent()
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, RuntimeError):
+            # RuntimeError: `parent()` compares epochs to reject a reparented pid, and that
+            # read raises on a procfs with no `btime` (#1402). No ancestor, not a crash.
             return None
         if parent is None or parent.pid <= 1:
             return None
@@ -746,9 +826,17 @@ def running_claude_version(pid: int) -> str | None:
         return version
     try:
         children = proc.children()
-    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+    except (
+        psutil.NoSuchProcess,
+        psutil.AccessDenied,
+        psutil.ZombieProcess,
+        OSError,
+        RuntimeError,
+    ):
         # OSError too: this runs inside poll_once's tick, and a raw errno from child
         # enumeration must degrade to "no version", never abort the whole poll.
+        # RuntimeError: `children()` reads the epoch, which raises on a procfs with no
+        # `btime` (#1402); same degrade.
         return None
     for child in children:
         version = _proc_claude_version(child)
@@ -827,10 +915,18 @@ def force_kill_tree(pid: int, *, wait_timeout: float | None = None) -> None:
     """
     try:
         proc = psutil.Process(pid)
-        targets = proc.children(recursive=True)
-        targets.append(proc)
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
         return
+    try:
+        targets = proc.children(recursive=True)
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, RuntimeError):
+        # `children()` reads the epoch (`create_time()` without `monotonic`) to tell a
+        # reused pid from a real child, and that ends in `boot_time()`, which raises a
+        # bare RuntimeError on a procfs with no `btime` line (#1402). The tree is what is
+        # unreadable there, not the root: returning would be the silent no-kill, and a
+        # raise aborted `stop()` past its STOPPED transition. Kill the root anyway.
+        targets = []
+    targets.append(proc)
     for p in targets:
         try:
             p.kill()
@@ -885,7 +981,9 @@ def owned_pids(root_pids: Iterable[int]) -> set[int]:
     for pid in roots:
         try:
             owned.update(child.pid for child in psutil.Process(pid).children(recursive=True))
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, RuntimeError):
+            # RuntimeError: `children()` reads the epoch, which raises on a procfs with no
+            # `btime` (#1402). The root still counts as owned; its tree is unreadable.
             continue
     return owned
 

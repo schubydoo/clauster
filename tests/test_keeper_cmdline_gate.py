@@ -88,8 +88,10 @@ def test_is_live_keeper_rejects_a_different_keeper_on_the_same_pid(monkeypatch):
     # The persisted create-time is what tells the two apart.
     monkeypatch.setattr(procutil.psutil, "Process", _FakeKeeperProc)
     assert procutil.is_keeper_process(1234) is True  # ...a keeper, by cmdline
-    assert procutil.is_live_keeper(1234, 1000.0) is True  # ...and ours: start times agree
-    assert procutil.is_live_keeper(1234, 500.0) is False  # a keeper, but NOT the one we stored
+    # ...and ours: start times agree
+    assert procutil.is_live_keeper(1234, 1000.0, start_ticks=None) is True
+    # a keeper, but NOT the one we stored
+    assert procutil.is_live_keeper(1234, 500.0, start_ticks=None) is False
 
 
 def test_is_live_keeper_degrades_to_cmdline_when_the_start_time_is_unknown(monkeypatch):
@@ -98,7 +100,50 @@ def test_is_live_keeper_degrades_to_cmdline_when_the_start_time_is_unknown(monke
     # unknown as a mismatch would report a live keeper as dead and let `forget` drop the
     # record of a running process.
     monkeypatch.setattr(procutil.psutil, "Process", _FakeKeeperProc)
-    assert procutil.is_live_keeper(1234, None) is True
+    assert procutil.is_live_keeper(1234, None, start_ticks=None) is True
+
+
+def test_is_live_keeper_survives_a_clock_step_when_the_ticks_match(monkeypatch):
+    # THE #1402 regression test, driven by the clock offset directly rather than by waiting
+    # on a drifting host. psutil derives create_time on Linux as `starttime/CLK_TCK +
+    # boot_time()`, and boot_time() re-reads /proc/stat btime every call — so an NTP
+    # correction moves the epoch of a keeper that never restarted. Here the stored epoch is
+    # 1000.0 and the live one now reads 1004.0, four seconds out, against a 0.05s bound.
+    monkeypatch.setattr(procutil.psutil, "Process", _FakeKeeperProc)
+    monkeypatch.setattr(_FakeKeeperProc, "create_time_value", 1004.0)
+    # The boot-relative half did not move, because nothing about the process did.
+    monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: 770579)
+
+    assert procutil.is_live_keeper(1234, 1000.0, start_ticks=770579) is True
+    # The control that names the fault: with no recorded ticks the same keeper reads DEAD,
+    # which is what let `forget` delete the row of a running keeper and its pty bridge.
+    assert procutil.is_live_keeper(1234, 1000.0, start_ticks=None) is False
+
+
+def test_is_live_keeper_rejects_a_keeper_whose_ticks_moved(monkeypatch):
+    # The other direction, and why the tick compare is EXACT: a pid recycled onto a second
+    # keeper differs by a whole CLK_TCK of ticks even when the epochs agree to the bit. The
+    # drift fix must not cost the PID-reuse defense it exists beside.
+    monkeypatch.setattr(procutil.psutil, "Process", _FakeKeeperProc)
+    monkeypatch.setattr(_FakeKeeperProc, "create_time_value", 1000.0)
+    monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: 770580)
+
+    assert procutil.is_live_keeper(1234, 1000.0, start_ticks=770579) is False
+    # ...and the epoch alone, which matches exactly here, would have admitted it.
+    assert procutil.is_live_keeper(1234, 1000.0, start_ticks=None) is True
+
+
+def test_is_live_keeper_falls_back_to_the_epoch_where_ticks_are_unreadable(monkeypatch):
+    # macOS, Windows, and any unreadable /proc: `proc_start_ticks` answers None and the
+    # recorded ticks have nothing to compare against. The answer must be the pre-#1402
+    # epoch compare, not "dead" — those platforms record an absolute timestamp at exec and
+    # never re-derive it, so their epochs do not drift in the first place.
+    monkeypatch.setattr(procutil.psutil, "Process", _FakeKeeperProc)
+    monkeypatch.setattr(_FakeKeeperProc, "create_time_value", 1000.0)
+    monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: None)
+
+    assert procutil.is_live_keeper(1234, 1000.0, start_ticks=770579) is True
+    assert procutil.is_live_keeper(1234, 500.0, start_ticks=770579) is False
 
 
 def test_is_live_keeper_rejects_a_live_non_keeper_pid():
@@ -108,8 +153,8 @@ def test_is_live_keeper_rejects_a_live_non_keeper_pid():
     try:
         ct = procutil.proc_create_time(proc.pid)
         assert ct is not None  # the stranger is genuinely alive
-        assert procutil.is_live_keeper(proc.pid, ct) is False
-        assert procutil.is_live_keeper(proc.pid, None) is False
+        assert procutil.is_live_keeper(proc.pid, ct, start_ticks=None) is False
+        assert procutil.is_live_keeper(proc.pid, None, start_ticks=None) is False
     finally:
         try:
             proc.kill()
@@ -121,8 +166,8 @@ def test_is_live_keeper_rejects_a_live_non_keeper_pid():
 def test_is_live_keeper_fails_closed_on_a_dead_or_negative_pid():
     # Same untrusted on-disk ints the rest of the family absorbs: a sidecar or a hand-edited
     # state row can hold either, and neither may raise into `forget`.
-    assert procutil.is_live_keeper(2_147_483_646, 1000.0) is False
-    assert procutil.is_live_keeper(-1, None) is False
+    assert procutil.is_live_keeper(2_147_483_646, 1000.0, start_ticks=None) is False
+    assert procutil.is_live_keeper(-1, None, start_ticks=None) is False
 
 
 def test_stop_keeper_refuses_to_kill_a_non_keeper_pid():
@@ -132,7 +177,10 @@ def test_stop_keeper_refuses_to_kill_a_non_keeper_pid():
     try:
         ct = procutil.proc_create_time(proc.pid)
         assert ct is not None  # the stranger is alive...
-        assert pty_keeper.stop_keeper(proc.pid, expect_create_time=ct) is True
+        assert (
+            pty_keeper.stop_keeper(proc.pid, expect_create_time=ct, expect_start_ticks=None)
+            is True
+        )
         assert procutil.proc_create_time(proc.pid) is not None  # ...and was NOT killed
     finally:
         try:

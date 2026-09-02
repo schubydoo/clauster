@@ -8,6 +8,7 @@ import json
 import sys
 from pathlib import Path
 
+import psutil
 import pytest
 
 from clauster import procutil
@@ -856,10 +857,22 @@ async def test_spawn_pty_reaches_running_then_stops(runner_config) -> None:
         assert inst.bridge_pid != inst.keeper_pid  # bridge is the keeper's child
         # the keeper-tracked bridge passes the same liveness check as a subcommand bridge
         assert procutil.is_live_bridge(inst.bridge_pid, inst.bridge_proc_start) is True
-        # …and the keeper is carried as a PAIR (#1178), the same PID-reuse defense: the
-        # snapshot must be the real create-time, or the stored value proves nothing.
-        assert inst.keeper_proc_start == procutil.proc_create_time(inst.keeper_pid)
-        assert procutil.is_live_keeper(inst.keeper_pid, inst.keeper_proc_start) is True
+        # …and the keeper is carried as a full start identity (#1178 / #1402), the same
+        # PID-reuse defense: the snapshot must be the real values, or they prove nothing.
+        # Compared against `proc_start_pair`, the one call the spawn itself makes — Linux
+        # stamps the boot-relative half, and elsewhere there is no /proc to read it from and
+        # the epoch stands alone, which on those platforms does not drift anyway.
+        assert (inst.keeper_proc_start, inst.keeper_start_ticks) == procutil.proc_start_pair(
+            inst.keeper_pid
+        )
+        assert (
+            procutil.is_live_keeper(
+                inst.keeper_pid,
+                inst.keeper_proc_start,
+                start_ticks=inst.keeper_start_ticks,
+            )
+            is True
+        )
     finally:
         stopped = await runner.stop(inst.instance_id)
     assert stopped.status is InstanceStatus.STOPPED
@@ -1121,6 +1134,10 @@ async def test_rediscover_reattaches_live_pty_keeper_without_pointer(
     monkeypatch.setattr("clauster.procutil.is_keeper_process", lambda pid: pid == 9999)
     monkeypatch.setattr("clauster.procutil.is_live_bridge", lambda pid, start, **k: pid == 4242)
     monkeypatch.setattr("clauster.procutil.proc_create_time", lambda pid: 8888.0)
+    # Pinned, not left to the host: pid 9999 may genuinely exist on the machine running the
+    # suite, and the real `proc_start_ticks` would then stamp a stranger's tick count here.
+    monkeypatch.setattr("clauster.procutil.proc_start_ticks", lambda pid: 999999)
+    monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", lambda ticks: 8888.0)
 
     await runner.rediscover()
 
@@ -1128,10 +1145,11 @@ async def test_rediscover_reattaches_live_pty_keeper_without_pointer(
     assert inst.status is InstanceStatus.RUNNING  # re-managed, not orphaned
     assert inst.resume_mode == "pty"
     assert inst.keeper_pid == 9999  # so stop()/poll_once own the survivor
-    # The sidecar records no create-time, so it is snapshotted at classification (#1178) —
-    # a keeper adopted here must carry the PAIR, or the reuse defense is inert on the very
-    # path where a pid is most likely to be stale.
-    assert inst.keeper_proc_start == 8888.0
+    # The sidecar records neither half, so both are snapshotted at classification, from one
+    # `proc_start_pair` read (#1178 / #1402) — a keeper adopted here must carry the whole
+    # identity, or the reuse defense is inert on the very path where a pid is most likely to
+    # be stale, and the drift defense is missing where a restart just made it matter.
+    assert (inst.keeper_proc_start, inst.keeper_start_ticks) == (8888.0, 999999)
     assert inst.bridge_pid == 4242
     assert inst.intentional_stop is False
     assert inst.url == "https://claude.ai/code/session_x"
@@ -1355,6 +1373,9 @@ def _patch_keeper_start(monkeypatch, *, epoch, ticks) -> None:
     monkeypatch.setattr(procutil, "proc_create_time", lambda pid: epoch())
     monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: ticks())
     monkeypatch.setattr(procutil, "proc_start_pair", lambda pid: (epoch(), ticks()))
+    # The grace loop's own probe, pinned to the same fiction: gone exactly when neither half
+    # of the identity is readable, so a host on which pid 777 really exists cannot decide it.
+    monkeypatch.setattr(procutil, "proc_is_gone", lambda pid: epoch() is None and ticks() is None)
 
 
 def test_cleanup_keeper_forces_a_lingering_keeper(runner_config, monkeypatch) -> None:
@@ -1371,6 +1392,138 @@ def test_cleanup_keeper_forces_a_lingering_keeper(runner_config, monkeypatch) ->
 
     runner._cleanup_keeper(777)
     assert forced == [777]
+
+
+def test_cleanup_keeper_winds_down_a_keeper_on_a_btime_less_procfs(
+    runner_config, monkeypatch
+) -> None:
+    """A procfs with no ``btime`` no longer makes the grace loop skip the wind-down (#1402).
+
+    gVisor, some container runtimes and WSL1 have no ``btime`` line, and psutil's
+    ``create_time`` ends in ``+ boot_time()`` — so it is unavailable for a keeper that is
+    plainly running, while ``/proc/<pid>/stat`` field 22 reads fine. The loop's old probe was
+    ``proc_create_time(pid) is None``, so on that host it declared every lingering keeper
+    already gone, returned before the identity compare, and force-killed nothing while
+    logging nothing. `procutil.proc_is_gone` asks the status instead and needs no clock.
+    """
+    runner, _ = _pty_runner(runner_config)
+    monkeypatch.setattr("clauster.runner.time.sleep", lambda _s: None)
+    monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
+    # No readable epoch anywhere — only the boot-relative half exists on this host.
+    _patch_keeper_start(monkeypatch, epoch=lambda: None, ticks=lambda: 4200)
+    monkeypatch.setattr(procutil, "is_keeper_process", lambda pid: True)
+    forced: list[int] = []
+    monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
+
+    runner._cleanup_keeper(777)
+    assert forced == [777], "a keeper with no readable epoch was never wound down"
+
+
+def test_cleanup_keeper_reaches_the_cmdline_gate_without_a_clock(
+    runner_config, monkeypatch
+) -> None:
+    """The grace loop runs out on a btime-less procfs, so the cmdline gate runs there too.
+
+    Before #1402 the loop's ``proc_create_time is None`` probe returned early on that host,
+    so ``is_keeper_process`` — which constructs ``psutil.Process`` outside any
+    ``RuntimeError`` arm — was never reached. It is now, and it must not need a clock:
+    ``pyproject.toml`` floors psutil at 7.1 for exactly that. This drives the REAL gate
+    (not a stub) with a Process shaped like psutil 7.1+ on that host: constructor, status
+    and cmdline need no clock, ``create_time`` raises the way psutil does.
+    """
+    runner, _ = _pty_runner(runner_config)
+    monkeypatch.setattr("clauster.runner.time.sleep", lambda _s: None)
+    monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
+    _patch_keeper_start(monkeypatch, epoch=lambda: None, ticks=lambda: 4200)
+
+    class _KeeperWithoutAClock:
+        def __init__(self, pid):
+            pass  # psutil >= 7.1: identity from the boot-relative start, no clock
+
+        def status(self):
+            return psutil.STATUS_RUNNING
+
+        def cmdline(self):
+            return [sys.executable, "-m", "clauster.pty_keeper", "--sidecar", "/tmp/k.json"]
+
+        def create_time(self):
+            raise RuntimeError("no btime line in /proc/stat")
+
+    monkeypatch.setattr(procutil.psutil, "Process", _KeeperWithoutAClock)
+    forced: list[int] = []
+    monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
+
+    runner._cleanup_keeper(777)
+    assert forced == [777], "the real cmdline gate must pass a clockless keeper through"
+
+
+def test_cleanup_keeper_spares_rather_than_raises_when_the_constructor_wants_a_clock(
+    runner_config, monkeypatch, caplog
+) -> None:
+    """A clock-hungry ``psutil.Process`` (pre-7.1) at the cmdline gate spares, never raises.
+
+    The floor makes this unreachable on a compliant install; the arm in
+    ``is_keeper_process`` is defence in depth for it. A raise here propagated out of
+    ``asyncio.to_thread`` in ``stop()`` past the STOPPED transition and the worktree unlock,
+    leaving a card RUNNING over a bridge that was already SIGINT-ed. Sparing leaks a keeper
+    an operator can end by hand, which is the recoverable direction.
+    """
+    runner, _ = _pty_runner(runner_config)
+    monkeypatch.setattr("clauster.runner.time.sleep", lambda _s: None)
+    monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
+    _patch_keeper_start(monkeypatch, epoch=lambda: None, ticks=lambda: 4200)
+
+    class _ClockHungryConstructor:
+        def __init__(self, pid):
+            raise RuntimeError("no btime line in /proc/stat")
+
+    monkeypatch.setattr(procutil.psutil, "Process", _ClockHungryConstructor)
+    forced: list[int] = []
+    monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
+
+    with caplog.at_level("WARNING", logger="clauster.runner"):
+        runner._cleanup_keeper(777)  # must return, not raise
+    assert forced == []
+    assert "no longer that keeper" in caplog.text
+
+
+def test_cleanup_keeper_kills_the_root_when_the_tree_cannot_read_a_clock(
+    runner_config, monkeypatch
+) -> None:
+    """The REAL ``force_kill_tree`` on a btime-less procfs kills the keeper instead of raising.
+
+    The 7.1 floor keeps the constructor off the clock, but ``Process.children`` still reads
+    the epoch on its own, so on that host the wind-down reached ``force_kill_tree`` and
+    raised out of ``asyncio.to_thread`` past the STOPPED transition. This drives the real
+    kill path, not a stub: the gate passes a clockless keeper through, and the kill lands
+    on the root even though its tree cannot be read.
+    """
+    runner, _ = _pty_runner(runner_config)
+    monkeypatch.setattr("clauster.runner.time.sleep", lambda _s: None)
+    monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
+    _patch_keeper_start(monkeypatch, epoch=lambda: None, ticks=lambda: 4200)
+    killed: list[int] = []
+
+    class _KeeperWithoutATree:
+        def __init__(self, pid):
+            self.pid = pid  # psutil >= 7.1: no clock in the constructor
+
+        def status(self):
+            return psutil.STATUS_RUNNING
+
+        def cmdline(self):
+            return [sys.executable, "-m", "clauster.pty_keeper", "--sidecar", "/tmp/k.json"]
+
+        def children(self, recursive=False):
+            raise RuntimeError("no btime line in /proc/stat")
+
+        def kill(self):
+            killed.append(self.pid)
+
+    monkeypatch.setattr(procutil.psutil, "Process", _KeeperWithoutATree)
+
+    runner._cleanup_keeper(777)  # must return, not raise
+    assert killed == [777], "the root must die even when its tree cannot be read"
 
 
 def test_cleanup_keeper_force_kills_through_a_clock_step(runner_config, monkeypatch) -> None:
@@ -1548,6 +1701,9 @@ def test_cleanup_keeper_refuses_a_snapshot_with_no_readable_start(
     # would authorize the kill. Pinning 1.0 throughout would never evaluate that comparison.
     epochs = iter([1.0] * 8)
     monkeypatch.setattr(procutil, "proc_create_time", lambda pid: next(epochs, None))
+    # The grace probe is `proc_is_gone` now (#1402), so it must be pinned too or the real
+    # psutil answers for pid 777 and the loop exits before the guard under test.
+    monkeypatch.setattr(procutil, "proc_is_gone", lambda pid: False)
     monkeypatch.setattr(procutil, "is_keeper_process", lambda pid: True)
     forced: list[int] = []
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))

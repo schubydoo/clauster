@@ -108,6 +108,13 @@ class RemoteControlInstance(BaseModel):
     # left over from a previous generation is worse than none, because it would report a
     # live keeper as gone. None means "unknown", which degrades to the cmdline-only gate.
     keeper_proc_start: float | None = None
+    # Boot-relative start ticks for the keeper pid (/proc/<pid>/stat field 22), Linux-only
+    # (#1402) — the keeper's half of what `bridge_start_ticks` gives the bridge. The epoch
+    # above is re-derived from a btime NTP moves, so on a drifting host `forget`'s keeper
+    # gate reads a live keeper as dead and drops the record of a running process. This one
+    # does not move. Read WITH the epoch, in one `procutil.proc_start_pair` call, and set
+    # and cleared with the rest of the keeper trio.
+    keeper_start_ticks: int | None = None
     status: InstanceStatus = InstanceStatus.STARTING
     intentional_stop: bool = False
     started_at: datetime | None = None
