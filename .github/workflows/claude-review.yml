@@ -394,7 +394,9 @@ jobs:
               ANCHORS=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/reviews/${RID}/comments" --paginate \
                           --jq 'length' | awk '{s+=$1} END{print s+0}')
               TALLY=$(printf '%s' "$LATEST" | jq -r '.body' | grep -o -E '[0-9]+ important, [0-9]+ nits?' | head -1 || true)
-              FINDINGS=$(printf '%s' "$TALLY" | grep -o -E '[0-9]+' | awk '{s+=$1} END{print s+0}')
+              # `|| true`: under pipefail an empty tally makes grep exit 1, which would abort
+              # the step after a correctly submitted clean review. awk prints 0 for no input.
+              FINDINGS=$(printf '%s' "$TALLY" | grep -o -E '[0-9]+' | awk '{s+=$1} END{print s+0}' || true)
               if [ "$ANCHORS" -eq 0 ] && [ "$FINDINGS" -gt 0 ]; then
                 echo "::warning::one review was submitted but it carries NO inline anchors while its body reports '$TALLY' — a body-only review (e.g. 'gh pr review --comment'); the findings have no resolvable threads. See issue 1406."
               else
