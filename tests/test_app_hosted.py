@@ -399,17 +399,21 @@ def test_dashboard_shows_hosted_panel_when_enabled(write_config, projects_root, 
     assert ':class="hostedStatusDot(h.status)"' in body  # the hosted row wires the status-dot
 
 
-def test_hosted_resume_gate_says_the_same_thing_in_all_three_places(
+def test_hosted_resume_gate_says_the_same_thing_in_all_five_places(
     write_config, projects_root, monkeypatch
 ):
-    """The Resume button, the orphan tooltip and the ended banner mirror one backend branch.
+    """Five front-end mirrors of one backend branch, each pinned, each written the same way.
 
-    `reattach_all` names Resume in a row's `error_detail` only when BOTH halves survive, and
-    the template gates the button on `h.claude_session_uuid && h.project`. #1381 aligned the
-    project half; #1392 widened the set of rows that lose the *uuid* half well past the empty
-    string, so all three mirrors have to test both. Substring pins in the style of
-    `resumeBlockedReason` above -- brittle by design, so a reflow forces a re-read instead of
-    passing silently.
+    `reattach_all` names Resume in a row's `error_detail` only when BOTH halves survive.
+    The mirrors are the Resume button, the orphan badge's tooltip, the "resume unavailable"
+    chip, `hasResumable` (the Recent group label), and `_hostedEndedReason` (the View
+    panel's ended banner). #1381 aligned the project half; #1392 widened the set of rows
+    that lose the *uuid* half well past the empty string, so every one of them has to test
+    both -- and all five spell the gate `h.claude_session_uuid && h.project`, in that order,
+    so a reader comparing them is comparing identical text.
+
+    Substring pins in the style of `resumeBlockedReason` above: brittle by design, so a
+    reflow forces a re-read instead of passing silently.
     """
     monkeypatch.setattr(app_module, "ClaustrumDaemon", _NoopDaemon)
     config = load_config(write_config("claustrum:\n  enabled: true\n"))
@@ -417,22 +421,25 @@ def test_hosted_resume_gate_says_the_same_thing_in_all_three_places(
     app.state.hosted = _StubManager()
     with TestClient(app) as client:
         body = client.get("/").text
-    # 1. the button, 2. the orphan badge's tooltip, 3. the "why not" chip -- all both-halves.
-    # The button pin carries its status list: the bare gate is also a SUBSTRING of the chip's
-    # negation, of `hasResumable`, and of `_hostedEndedReason`, so on its own it would stay
-    # green with the Resume `x-if` deleted outright.
+    # 1. the Resume button. The pin carries its status list because the bare gate is also a
+    # SUBSTRING of the chip's negation, of `hasResumable` and of `_hostedEndedReason` -- on
+    # its own it would stay green with the Resume `x-if` deleted outright.
     assert (
         "['crashed', 'stopped', 'error'].includes(h.status) && h.claude_session_uuid"
         " && h.project" in body
     )
-    assert "h.project && h.claude_session_uuid ?" in body
+    # 2. the orphan badge's tooltip, 3. the "resume unavailable" chip.
+    assert "h.claude_session_uuid && h.project ?" in body
     assert "!(h.claude_session_uuid && h.project)" in body
+    # 4. `hasResumable`, the Recent group label. Mutation-verified as the one mirror with no
+    # pin: dropping its `&& h.project` left the whole suite green.
+    assert "endedHosted().some((h) => h.claude_session_uuid && h.project)" in body
     # The chip's reason is VISIBLE text, not a tooltip: a title never fires on touch, and
     # this is a phone-first product. Same contract as the bridge rows' `resume-blocked`.
     assert 'data-test="hosted-resume-blocked"' in body
     assert "resume unavailable — conversation id unknown" in body
     assert "resume unavailable — project unknown" in body
-    # 4. the View panel's ended banner: a project-ful, uuid-less row used to fall through
+    # 5. the View panel's ended banner: a project-ful, uuid-less row used to fall through
     # every branch and explain nothing -- the "fails opaquely" failure one layer down.
     assert "no usable conversation id was saved for it" in body
 

@@ -4969,7 +4969,8 @@
       },
       // Surface a terminal hosted session in the live view: explain why it ended (with the
       // server's error_detail when present) and stop the reconnect loop. Resume (when the
-      // session kept its uuid) stays the recovery path, shown on the row above.
+      // session kept BOTH the uuid and the project) stays the recovery path, shown on the
+      // row above.
       _markHostedEnded(id, h, fallback) {
         const v = this.hostedView[id];
         if (!v) return;
@@ -5005,8 +5006,10 @@
         if (h && h.claude_session_uuid && h.project) {
           resume = " Use Resume above to continue it.";
         } else if (h && h.project) {
-          resume = " It cannot be resumed: no usable conversation id was saved for it." +
-            " Start a new session in this project instead.";
+          // No follow-up action named, for the reason the chip gives (dashboard.html): on an
+          // orphan row this sentence lands beside one telling the operator to Kill, and two
+          // consecutive sentences naming different actions is worse than naming none.
+          resume = " It cannot be resumed: no usable conversation id was saved for it.";
         } else if (h) {
           resume = " It cannot be resumed: its project is unknown, so there is nowhere to" +
             " respawn it. Start a new session in the right project instead.";

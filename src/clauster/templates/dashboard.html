@@ -394,7 +394,7 @@
                    is not rendered. Mirrors the same branch in `reattach_all`'s orphan
                    `error_detail`; the two must move together. #}
                 <span class="badge bg-orange-lt me-1" x-show="h.is_orphan" x-cloak
-                      :title="h.project && h.claude_session_uuid ? 'Survived a daemon restart — Resume to recover or Kill to clean up' : 'Survived a daemon restart — Kill to clean up (it cannot be resumed: its project or conversation id is unknown)'">orphan</span>
+                      :title="h.claude_session_uuid && h.project ? 'Survived a daemon restart — Resume to recover or Kill to clean up' : 'Survived a daemon restart — Kill to clean up (it cannot be resumed: its project or conversation id is unknown)'">orphan</span>
                 {# `|| h.label` because a row whose saved record degraded on `project` carries
                    `project: ""` (#1381) and would otherwise render nameless. Same fallback
                    idiom `forgetHosted` already uses for its confirm prompt. #}

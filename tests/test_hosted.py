@@ -25,7 +25,6 @@ from clauster.hosted import (
     HostedSession,
     HostedSessionError,
     _redact_obj,
-    _refused_uuid_shape,
     build_hosted_argv,
 )
 from clauster.hosted_state import HostedStateStore
@@ -190,32 +189,33 @@ def test_build_hosted_argv_refuses_a_non_string_resume_uuid_without_a_type_error
 @pytest.mark.parametrize(
     "bad",
     [
+        "--dangerously-skip-permissions",
+        "-ghp_" + "a" * 36,  # a secret-shaped value: not even a masked form may appear
+        "-sensitive-conversation-id-nobody-should-read",  # leading dash: fails the shape
         "-" + "x" * 5000,
-        # repr expands a non-printable to up to ten characters, so this is the worst case
-        # for the bound -- asserting only against printable input would prove less than the
-        # comment claims.
-        "-" + "\U000e0001" * 5000,
+        "-" + "\U000e0001" * 5000,  # non-printables, which a repr would expand not hide
     ],
-    ids=["printable", "escape-expanding"],
+    ids=["flag", "secret-shaped", "readable", "long", "non-printable"],
 )
-def test_build_hosted_argv_truncates_the_refused_value_it_names(bad):
-    # The message becomes the resume route's 409 `detail` and is rendered in the dashboard,
-    # so it is bounded the same way `_refused_uuid_shape` bounds the log line -- an
-    # unbounded record field must not become an unbounded response body. 72 characters
-    # after redaction, each worth at most ten in `repr`, plus the fixed prose.
+def test_build_hosted_argv_never_reproduces_the_refused_value(bad):
+    """The 409 `detail` this message becomes is rendered in the browser (invariant 4).
+
+    A session id is exactly the class `redact.py` masks, and the day this refusal fires on
+    a REAL id is the day claude changed its format -- so a sanitized or truncated copy is
+    not a redaction, it is a leak with fewer characters. `_refused_uuid_shape` describes
+    the shape and the length; nothing else about the value survives into either sink.
+    """
     with pytest.raises(HostedSessionError) as excinfo:
         build_hosted_argv(_BIN, permission_mode="default", resume_uuid=bad)
-    named = _refused_uuid_shape(bad)
-    assert named in str(excinfo.value)
-    # The bound is asserted on the NAMED value, not on the whole message: measuring the
-    # message would couple this test to the surrounding prose, so a reword longer than the
-    # slack would fail it for a reason that has nothing to do with truncation.
-    assert len(named) <= len("malformed ") + 72 * 10 + 2
-    # ...and a generous bound on the WHOLE message too, so a future edit interpolating
-    # something else unbounded into the 409 detail is still caught. Slack, deliberately:
-    # this one must not fail merely because the prose was reworded.
-    assert len(str(excinfo.value)) < 1200
-    assert "x" * 100 not in str(excinfo.value)
+    message = str(excinfo.value)
+    assert f"malformed ({len(bad)} chars)" in message
+    # No substring of the value, in any form: not verbatim, not a prefix, not a repr.
+    assert bad not in message
+    for width in (4, 8, 16):
+        assert bad[:width] not in message
+        assert repr(bad)[1 : 1 + width] not in message  # nor the repr-escaped form
+    # ...and the message is bounded by construction, since only a length is interpolated.
+    assert len(message) < 120
 
 
 # -- spawn -----------------------------------------------------------------
@@ -2211,26 +2211,30 @@ def test_a_refused_claude_session_uuid_is_named_not_typed_in_the_log(caplog) -> 
         HostedManager._row_from_record(_PID, {**record, "claude_session_uuid": 7})
     assert "(int)" in caplog.text and "empty string" not in caplog.text
 
-    # A non-empty string that fails the shape check is the one refusal an operator can act
-    # on, so it names the exact token to fix — quoted via repr, which escapes the control
-    # characters a hand-edited record could otherwise inject into the log (#1392).
+    # A non-empty string that fails the shape check is described by SHAPE AND LENGTH, never
+    # by its bytes (#1392, CodeQL "clear-text logging of sensitive information"). A session
+    # id is exactly the class `redact.py` masks, and the day this refusal fires on a real id
+    # is the day claude changed its format -- so a sanitized or truncated copy would not be
+    # a redaction, only a shorter leak. The length is safe and is what tells the operator
+    # whether the record holds a truncated id or something else entirely.
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="clauster.hosted"):
         HostedManager._row_from_record(_PID, {**record, "claude_session_uuid": "--rm\n-rf"})
-    assert "malformed '--rm\\n-rf'" in caplog.text
-    assert "\n-rf" not in caplog.text  # the newline never reaches the log verbatim
+    assert "malformed (8 chars)" in caplog.text
+    assert "--rm" not in caplog.text  # not verbatim...
+    assert "\\n-rf" not in caplog.text  # ...and not repr-escaped either
 
-    # ...and it is named through `sanitize_line`, like every hosted frame (invariant 4).
-    # Unreachable with claude's current ids -- a uuid passes the shape check and is never
-    # named -- but the case this guard is written around is claude CHANGING its id format,
-    # and that day the real current id would otherwise land verbatim in the log and in the
-    # dashboard's 409, while `_redact_obj` masks the same id out of every frame.
-    secret = "-ghp_" + "a" * 36  # leading dash: fails the shape, so it IS named
+    # Same for a secret-shaped value, which must not appear even in its MASKED form: the
+    # mask is applied by `sanitize_line`, which strips ANSI and masks ids it recognises --
+    # it is not a promise about a token whose format has just changed.
+    secret = "-ghp_" + "a" * 36  # leading dash: fails the shape, so it IS described
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="clauster.hosted"):
         HostedManager._row_from_record(_PID, {**record, "claude_session_uuid": secret})
-    assert "<redacted>" in caplog.text
+    assert f"malformed ({len(secret)} chars)" in caplog.text
     assert secret not in caplog.text
+    assert "ghp_" not in caplog.text
+    assert "<redacted>" not in caplog.text  # nothing to redact -- nothing was copied
 
     # ...and a legitimate uuid says nothing at all.
     caplog.clear()
