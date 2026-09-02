@@ -1117,8 +1117,8 @@ class HostedManager:
         # authenticate, because it matches the ticks exactly and the epoch only coarsely.
         # `(None, None)` when there's no pid (pre-CT-1 daemon) or it's unreadable.
         # `to_thread`, matching the bridge twin at `runner._spawn`: the pair is two blocking
-        # `/proc` reads (`/proc/<pid>/stat` plus `boot_time()`'s `/proc/stat`), and this
-        # coroutine already offloads its `kill_if_match` calls.
+        # `/proc` reads (`/proc/<pid>/stat` plus `boot_time()`'s `/proc/stat`), and the
+        # sibling kill paths `_resume_locked` and `kill_orphan` already offload `kill_if_match`.
         proc_start, start_ticks = (
             await asyncio.to_thread(procutil.proc_start_pair, session.agent_pid)
             if session.agent_pid
@@ -1279,9 +1279,9 @@ class HostedManager:
         """Terminate a survived-but-orphaned hosted agent and mark its row stopped (CL-8).
 
         For an orphan (a live agent the restarted daemon no longer manages): hard-kill
-        the survivor pid+tree — gated on a pid + create_time + hosted-cmdline match so a
-        reused/unrelated PID is never touched — then mark the row stopped. Raises
-        :class:`HostedSessionError` for an unknown id.
+        the survivor pid+tree — gated on a pid + start-time pair (both halves) +
+        hosted-cmdline match so a reused/unrelated PID is never touched — then mark the
+        row stopped. Raises :class:`HostedSessionError` for an unknown id.
 
         Serialized per id (see :meth:`_lock_for`) so a concurrent resume can't spawn
         a fresh agent off this row while we're hard-killing the survivor.
@@ -1368,7 +1368,7 @@ class HostedManager:
         """Whether a not-found instance is a recoverable (killable) survivor.
 
         Uses the same fail-closed predicate as the guarded kill, so a row is only
-        classified as an orphan when we actually have killable ``(pid, create_time)``
+        classified as an orphan when we actually have killable ``(pid, start-time pair)``
         evidence. A survivor we can't safely kill (e.g. a pre-CL-8 row with no recorded
         ``agent_proc_start``) is treated as lost, not as a recoverable orphan — otherwise
         ``kill_orphan``/resume would transition the row to a clean stop while the process
@@ -1489,7 +1489,7 @@ class HostedManager:
                 continue
             if not result.get("found"):
                 # The new daemon doesn't know this process. If -keep-children left the
-                # agent running (CL-8), its (pid, create_time) still matches a live
+                # agent running (CL-8), its (pid, start-time pair) still matches a live
                 # process → it's an orphan we can recover; otherwise it's truly lost.
                 instance.status = InstanceStatus.CRASHED
                 if await self._is_orphan(instance):
