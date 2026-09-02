@@ -1633,7 +1633,7 @@ Tabler UI from <code>templates/</code> (with <code>jinja2-fragments</code>) and 
 </tr>
 <tr>
 <td><code>procutil.py</code></td>
-<td><code>psutil</code>-based process introspection: liveness with PID-reuse defense (create-time + cmdline match) and the match-gated kill behind bridge rediscovery and hosted orphan recovery.</td>
+<td><code>psutil</code>-based process introspection: liveness with PID-reuse defense (start-time pair + cmdline match) and the match-gated kill behind bridge rediscovery and hosted orphan recovery.</td>
 </tr>
 <tr>
 <td><code>auth.py</code></td>
@@ -1758,9 +1758,11 @@ trying to open it on your phone is a dead end by design.</p>
 on reconnect Clauster reattaches the sessions it can, and marks survivors it
 can no longer drive as recoverable <strong>orphans</strong> (Kill / Resume from the
 dashboard). A survivor is hard-killed only when it is provably still the same
-process — alive, recorded create-time match, hosted cmdline
+process — alive, recorded start-time match, hosted cmdline
 (<code>procutil.is_killable_hosted</code>); without that evidence it is reported lost,
-never killed.</p>
+never killed. The start time is a pair. It holds the wall-clock create-time and
+a boot-relative tick count. NTP can move the wall-clock half under a process
+that never restarted. The tick count does not move.</p>
 </blockquote>
 <h3 id="server-mode-claude-remote-control">Server Mode (<code>claude remote-control</code>)<a class="headerlink" href="#server-mode-claude-remote-control" title="Permanent link">&para;</a></h3>
 <p>The default (Server Mode). <code>runner.py</code>'s <code>SessionRunner</code> spawns the headless
