@@ -974,6 +974,29 @@ def test_migrate_upgrades_old_schema(write_config, tmp_path):
     assert (config.state_dir / "state.json.bak").is_file()  # migration backed up
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param("[" * 100_000, id="deeply-nested"),
+        pytest.param("1" * 5000, id="oversized-int"),
+    ],
+)
+def test_migrate_keeps_a_corrupt_state_file_recoverable(write_config, tmp_path, payload):
+    # migrate_state is load() -> save(), so a degraded load makes it rewrite state.json
+    # empty. Neither of these payloads is a JSONDecodeError, so before #1384 they raised
+    # out of migrate instead; the fix must not turn that loud failure into a silent wipe.
+    # The one-time .bak taken by the degraded load is what keeps the bytes.
+    config = load_config(_cfg_file(write_config, tmp_path))
+    config.state_dir.mkdir(parents=True, exist_ok=True)
+    sj = config.state_dir / "state.json"
+    sj.write_text(payload, encoding="utf-8")
+
+    result = migrate_state(config)
+
+    assert result["instances"] == 0
+    assert (config.state_dir / "state.json.bak").read_text(encoding="utf-8") == payload
+
+
 # ----- install-service --------------------------------------------------
 
 

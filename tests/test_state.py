@@ -72,14 +72,26 @@ def test_hostile_payload_degrades_to_empty(tmp_path, store_cls, filename, payloa
 
 @pytest.mark.parametrize(("store_cls", "filename"), _STORES)
 @pytest.mark.parametrize("payload", _HOSTILE)
-def test_hostile_payload_leaves_the_file_recoverable(tmp_path, store_cls, filename, payload):
-    # Degrading must not consume the operator's only copy: the load bails before
-    # _migrate, so no .bak is taken and the file on disk is byte-identical.
+def test_hostile_payload_is_backed_up_and_logged(tmp_path, store_cls, filename, payload, caplog):
+    # Degrading must not consume the operator's only copy, and must not be silent.
+    # A caller can overwrite the file straight after a degraded load (ops.migrate_state
+    # does), so the one-time .bak is what keeps the bytes recoverable.
     path = tmp_path / filename
     path.write_text(payload, encoding="utf-8")
-    store_cls(tmp_path).load()
-    assert path.read_text(encoding="utf-8") == payload
-    assert not (tmp_path / f"{filename}.bak").exists()
+    with caplog.at_level("WARNING"):
+        assert store_cls(tmp_path).load() == {}
+    assert (tmp_path / f"{filename}.bak").read_text(encoding="utf-8") == payload
+    assert any("ignoring corrupt" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("payload", _HOSTILE)
+def test_hostile_payload_does_not_clobber_an_existing_backup(tmp_path, payload):
+    # Same rule the schema migration follows: an existing .bak is the older, more
+    # original copy. Discarding a corrupt file must never overwrite it.
+    (tmp_path / "state.json").write_text(payload, encoding="utf-8")
+    (tmp_path / "state.json.bak").write_text("ORIGINAL BACKUP", encoding="utf-8")
+    assert StateStore(tmp_path).load() == {}
+    assert (tmp_path / "state.json.bak").read_text(encoding="utf-8") == "ORIGINAL BACKUP"
 
 
 def test_unknown_fields_dropped(tmp_path):

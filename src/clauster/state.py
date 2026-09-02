@@ -69,26 +69,36 @@ class KeyedJsonStore:
         """Return ``{key: {persisted fields}}``.
 
         Tolerates a missing or corrupt file (returns ``{}``) and coerces ANY
-        mismatched ``schema_version`` — older or newer — to the current one,
-        taking a one-time ``.bak`` first. Unknown fields are dropped.
+        mismatched ``schema_version`` — older or newer — to the current one.
+        Both discarding an unparseable file and coercing a mismatched schema take a
+        one-time ``.bak`` first. Unknown fields are dropped.
         """
         try:
             raw = self._path.read_text(encoding="utf-8")
         except (FileNotFoundError, OSError, UnicodeDecodeError):
             # UnicodeDecodeError (a ValueError) for a non-UTF-8 file is the "corrupt
-            # file" case the docstring promises to tolerate — degrade to {}.
+            # file" case the docstring promises to tolerate — degrade to {}. No ``.bak``
+            # on this arm, unlike the parse arm below: the decode is what failed, so we
+            # hold no text to write one from.
             return {}
         try:
             data = json.loads(raw)
-        except (ValueError, RecursionError):
+        except (ValueError, RecursionError) as exc:
             # Two parse failures are NOT JSONDecodeError: a *bare* ValueError from the
             # base-10 integer-string-conversion limit (CVE-2020-10735), on by default
             # for a >4300-digit int literal on every supported interpreter (>=3.11), and
-            # RecursionError, which is not a ValueError at all — CPython’s recursive
+            # RecursionError, which is not a ValueError at all — CPython's recursive
             # scanner overflows on deeply-nested JSON before json can raise. Both used
             # to escape and propagate; this store is read at startup, so that took the
             # app down instead of degrading. `pointers.load_pointer` and `usage` catch
             # the same pair. No `OSError` here: the read is its own try above.
+            #
+            # Degrading is not silent and does not consume the file: the exception says
+            # which shape of corruption it was, and the one-time ``.bak`` keeps the
+            # bytes, because a caller may write over the file straight after a degraded
+            # load (``ops.migrate_state`` does exactly that).
+            self._LOG.warning("ignoring corrupt %s: %s: %s", self._path, type(exc).__name__, exc)
+            self._backup_once(raw)
             return {}
         if not isinstance(data, dict):
             return {}
@@ -109,6 +119,23 @@ class KeyedJsonStore:
         payload = {"schema_version": self._SCHEMA, self._MAP_KEY: records}
         atomic_write_text(self._path, json.dumps(payload, indent=2))
 
+    def _backup_once(self, raw: str) -> None:
+        """Keep a one-time ``.bak`` of *raw* before the load acts on data it can't trust.
+
+        Shared by both such paths — discarding an unparseable file and coercing a
+        mismatched schema. Best-effort and never re-taken: an existing ``.bak`` is the
+        older, more original copy, so it is never clobbered.
+        """
+        backup = self._path.with_suffix(self._path.suffix + ".bak")
+        if backup.exists():
+            return
+        try:
+            atomic_write_text(backup, raw)
+        except OSError as exc:
+            # Best-effort; never block the load, but surface it so a missing backup
+            # isn't a silent loss before we coerce away or discard the on-disk data.
+            self._LOG.warning("could not write %s backup: %s", backup, exc)
+
     def _migrate(self, data: dict, raw: str) -> dict:
         """Back up once, then coerce to the current schema.
 
@@ -117,15 +144,7 @@ class KeyedJsonStore:
         ambiguous shape. The pre-coerce ``.bak`` guards against losing data we
         couldn't interpret.
         """
-        backup = self._path.with_suffix(self._path.suffix + ".bak")
-        if not backup.exists():
-            try:
-                atomic_write_text(backup, raw)
-            except OSError as exc:
-                # Best-effort; never block the load, but surface it so a missing
-                # pre-migration backup isn't a silent loss before we coerce away
-                # the legacy data.
-                self._LOG.warning("could not write %s backup: %s", backup, exc)
+        self._backup_once(raw)
         records = data.get(self._MAP_KEY)
         return {
             "schema_version": self._SCHEMA,
