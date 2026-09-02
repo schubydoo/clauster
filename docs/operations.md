@@ -431,6 +431,12 @@ database (see Routine backup, above). The workspace-trust writes to
 > file is imported into `clauster.db` once on first boot and renamed
 > `state.json.imported` — it is never read or written again, so moving it aside
 > does nothing.
+>
+> If that legacy file was damaged, the import degrades to "no legacy records"
+> rather than failing the boot, logs a warning naming the failure, and keeps a
+> one-time copy of the file beside it — `state.json.corrupt.bak` when the file
+> could not be parsed at all, `state.json.bak` when it was parsed but carried an
+> older schema. Those copies are the recovery source, and nothing prunes them.
 
 If `clauster.db` is ever unreadable (disk fault, a failed migration that refuses
 to start):

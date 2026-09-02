@@ -981,20 +981,24 @@ def test_migrate_upgrades_old_schema(write_config, tmp_path):
         pytest.param("1" * 5000, id="oversized-int"),
     ],
 )
-def test_migrate_keeps_a_corrupt_state_file_recoverable(write_config, tmp_path, payload):
+def test_migrate_keeps_a_corrupt_state_file_recoverable(write_config, tmp_path, payload, caplog):
     # migrate_state is load() -> save(), so a degraded load makes it rewrite state.json
     # empty. Neither of these payloads is a JSONDecodeError, so before #1384 they raised
     # out of migrate instead; the fix must not turn that loud failure into a silent wipe.
-    # The one-time .bak taken by the degraded load is what keeps the bytes.
+    # The one-time .corrupt.bak taken by the degraded load is what keeps the bytes, and
+    # the warning is the "not silent" half -- `clauster migrate` never calls
+    # setup_logging, so that line reaches stderr through logging.lastResort alone.
     config = load_config(_cfg_file(write_config, tmp_path))
     config.state_dir.mkdir(parents=True, exist_ok=True)
     sj = config.state_dir / "state.json"
     sj.write_text(payload, encoding="utf-8")
 
-    result = migrate_state(config)
+    with caplog.at_level("WARNING", logger="clauster.state"):
+        result = migrate_state(config)
 
     assert result["instances"] == 0
-    assert (config.state_dir / "state.json.bak").read_text(encoding="utf-8") == payload
+    assert (config.state_dir / "state.json.corrupt.bak").read_text(encoding="utf-8") == payload
+    assert any("ignoring corrupt" in r.getMessage() for r in caplog.records)
 
 
 # ----- install-service --------------------------------------------------

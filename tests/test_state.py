@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -72,26 +73,102 @@ def test_hostile_payload_degrades_to_empty(tmp_path, store_cls, filename, payloa
 
 @pytest.mark.parametrize(("store_cls", "filename"), _STORES)
 @pytest.mark.parametrize("payload", _HOSTILE)
-def test_hostile_payload_is_backed_up_and_logged(tmp_path, store_cls, filename, payload, caplog):
+def test_hostile_payload_is_copied_aside_and_logged(
+    tmp_path, store_cls, filename, payload, caplog
+):
     # Degrading must not consume the operator's only copy, and must not be silent.
     # A caller can overwrite the file straight after a degraded load (ops.migrate_state
-    # does), so the one-time .bak is what keeps the bytes recoverable.
+    # does), so the one-time .corrupt.bak is what keeps the bytes recoverable.
     path = tmp_path / filename
     path.write_text(payload, encoding="utf-8")
     with caplog.at_level("WARNING"):
         assert store_cls(tmp_path).load() == {}
-    assert (tmp_path / f"{filename}.bak").read_text(encoding="utf-8") == payload
+    assert path.read_text(encoding="utf-8") == payload  # load itself never rewrites
+    assert (tmp_path / f"{filename}.corrupt.bak").read_text(encoding="utf-8") == payload
     assert any("ignoring corrupt" in r.getMessage() for r in caplog.records)
 
 
-@pytest.mark.parametrize("payload", _HOSTILE)
-def test_hostile_payload_does_not_clobber_an_existing_backup(tmp_path, payload):
-    # Same rule the schema migration follows: an existing .bak is the older, more
-    # original copy. Discarding a corrupt file must never overwrite it.
-    (tmp_path / "state.json").write_text(payload, encoding="utf-8")
-    (tmp_path / "state.json.bak").write_text("ORIGINAL BACKUP", encoding="utf-8")
+@pytest.mark.parametrize(("store_cls", "filename"), _STORES)
+def test_non_utf8_file_is_copied_aside_and_logged(tmp_path, store_cls, filename, caplog):
+    # A non-UTF-8 file is the third corrupt shape and degrades through the same
+    # contract. It is why the copy is a byte-level copy and not a re-write: the decode
+    # is what failed, so there is no text form of these bytes to write back out.
+    blob = b"\xff\xfe\x00not utf-8"
+    (tmp_path / filename).write_bytes(blob)
+    with caplog.at_level("WARNING"):
+        assert store_cls(tmp_path).load() == {}
+    assert (tmp_path / f"{filename}.corrupt.bak").read_bytes() == blob
+    assert any("ignoring corrupt" in r.getMessage() for r in caplog.records)
+
+
+def test_corrupt_copy_is_byte_exact_not_newline_normalized(tmp_path):
+    # A copy, not a read_text -> write round-trip: read_text applies universal newlines
+    # on every OS, so a re-write would silently rewrite CRLF (and a lone CR) to LF. In a
+    # file we have just declared uninterpretable, a stray control byte can be anywhere,
+    # and byte fidelity is the whole point of keeping it.
+    blob = b'{"schema_version": 1,\r\n "instances": \r{ oops'
+    (tmp_path / "state.json").write_bytes(blob)
     assert StateStore(tmp_path).load() == {}
-    assert (tmp_path / "state.json.bak").read_text(encoding="utf-8") == "ORIGINAL BACKUP"
+    assert (tmp_path / "state.json.corrupt.bak").read_bytes() == blob
+
+
+@pytest.mark.parametrize("payload", _HOSTILE)
+def test_hostile_payload_does_not_clobber_an_existing_copy(tmp_path, payload):
+    # Same rule the schema migration follows: an existing copy is the older, more
+    # original one. Discarding a corrupt file must never overwrite it.
+    (tmp_path / "state.json").write_text(payload, encoding="utf-8")
+    (tmp_path / "state.json.corrupt.bak").write_text("ORIGINAL", encoding="utf-8")
+    assert StateStore(tmp_path).load() == {}
+    assert (tmp_path / "state.json.corrupt.bak").read_text(encoding="utf-8") == "ORIGINAL"
+
+
+def test_corrupt_copy_does_not_consume_the_pre_migration_backup_slot(tmp_path):
+    # The two copies guard different things, so they get different names. If they shared
+    # one slot, a corrupt file seen once would claim it, and the operator's later repair
+    # to a legacy schema would then be coerced with NO pre-migration snapshot.
+    sj = tmp_path / "state.json"
+    sj.write_text("[" * 100_000, encoding="utf-8")
+    assert StateStore(tmp_path).load() == {}
+    assert (tmp_path / "state.json.corrupt.bak").exists()
+    assert not (tmp_path / "state.json.bak").exists()
+
+    legacy = json.dumps({"schema_version": 0, "instances": {"a": {"label": "a"}}})
+    sj.write_text(legacy, encoding="utf-8")
+    assert StateStore(tmp_path).load() == {"a": {"label": "a"}}
+    assert (tmp_path / "state.json.bak").read_text(encoding="utf-8") == legacy
+
+
+def test_unreadable_file_is_logged_with_no_copy(tmp_path, caplog, monkeypatch):
+    # An OSError is an unreadable file (permissions, IO), not malformed content: there
+    # is nothing to copy, and it is the arm actually worth diagnosing. Monkeypatch
+    # rather than chmod -- Windows ignores a file's read bit, and that cell is
+    # merge-blocking.
+    (tmp_path / "state.json").write_text("{}", encoding="utf-8")
+
+    def boom(*_args, **_kwargs):
+        raise OSError("simulated: EIO")
+
+    monkeypatch.setattr(Path, "read_text", boom)
+    with caplog.at_level("WARNING", logger="clauster.state"):
+        assert StateStore(tmp_path).load() == {}
+    assert any("could not read" in r.getMessage() for r in caplog.records)
+    assert not (tmp_path / "state.json.corrupt.bak").exists()
+
+
+def test_corrupt_copy_failure_is_logged_not_silent(tmp_path, caplog, monkeypatch):
+    # The copy is best-effort -- it must never block the load or abort a caller's
+    # transaction -- but a failure to keep the only copy is exactly the kind of loss
+    # that must not pass silently.
+    (tmp_path / "state.json").write_text("[" * 100_000, encoding="utf-8")
+
+    def boom(*_args, **_kwargs):
+        raise OSError("simulated: copy failed")
+
+    monkeypatch.setattr("clauster.state.shutil.copy2", boom)
+    with caplog.at_level("WARNING", logger="clauster.state"):
+        assert StateStore(tmp_path).load() == {}
+    assert any("could not copy corrupt" in r.getMessage() for r in caplog.records)
+    assert not (tmp_path / "state.json.corrupt.bak").exists()
 
 
 def test_unknown_fields_dropped(tmp_path):
