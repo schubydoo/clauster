@@ -37,6 +37,8 @@ def test_non_utf8_file_tolerated(tmp_path):
 
 # A parse failure that is not a JSONDecodeError. Both used to escape KeyedJsonStore.load
 # and propagate out of a startup read, taking the app down instead of degrading to {}.
+# (CPython 3.14.7+ bounds the JSON scanner's depth itself and raises JSONDecodeError for
+# the nested one -- see the control below. Either way it reaches the same handler.)
 _HOSTILE = [
     pytest.param("[" * 100_000, id="deeply-nested"),
     pytest.param("1" * 5000, id="oversized-int-literal"),
@@ -60,11 +62,31 @@ def test_oversized_int_literal_is_a_bare_value_error():
     assert not isinstance(raised.value, json.JSONDecodeError)
 
 
-def test_deeply_nested_json_is_a_recursion_error():
-    # The other positive control: CPython's recursive scanner overflows before json
-    # can raise JSONDecodeError, and RecursionError is not a ValueError.
-    with pytest.raises(RecursionError):
+def test_deeply_nested_json_raises_before_it_can_be_parsed():
+    # The other positive control, and which exception it is depends on the interpreter:
+    # before CPython 3.14.7 the recursive scanner overflowed with RecursionError -- not a
+    # ValueError, which is exactly how it escaped the old handler -- while 3.14.7+ bounds
+    # the depth itself and raises JSONDecodeError (PR 1408 hit the same split). The
+    # handler catches both, so the parametrized cases reach it on every supported
+    # interpreter; the test below pins the RecursionError arm independently of this one.
+    with pytest.raises((RecursionError, json.JSONDecodeError)):
         json.loads("[" * 100_000)
+
+
+def test_recursion_error_degrades_on_any_interpreter(tmp_path, caplog, monkeypatch):
+    # Pins the RecursionError half of the handler directly: on 3.14.7+ no real input
+    # reaches it any more, and it stays load-bearing for an interpreter without the
+    # bounded C scanner. Coverage cannot catch its loss -- the tuple is one line.
+    (tmp_path / "state.json").write_text("{}", encoding="utf-8")
+
+    def _overflow(_text):
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(state.json, "loads", _overflow)
+    with caplog.at_level("WARNING", logger="clauster.state"):
+        assert StateStore(tmp_path).load() == {}
+    assert any("RecursionError" in r.getMessage() for r in caplog.records)
+    assert (tmp_path / "state.json.corrupt.bak").read_text(encoding="utf-8") == "{}"
 
 
 @pytest.mark.parametrize(("store_cls", "filename"), _STORES)
