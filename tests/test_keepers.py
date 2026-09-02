@@ -294,10 +294,11 @@ def test_stop_keeper_kills_through_a_clock_step_when_the_ticks_hold(monkeypatch)
 
 def test_stop_keeper_refuses_when_an_expectation_cannot_be_checked(monkeypatch):
     # Fail closed on "could not tell", not just on "definitely different". A recorded
-    # `expect_create_time` with an unreadable epoch and no recorded ticks used to fall
-    # through to a `force_kill_tree` gated on the cmdline alone — an unproven identity in
-    # front of a SIGKILL on a whole process tree. The ticks read here belong to whatever
-    # holds the pid; nothing was recorded to compare them against.
+    # `expect_create_time` with an unreadable epoch and no recorded ticks used to read
+    # `proc_create_time is None` as "exited during the grace" and return True — a false
+    # success with no kill. False is the honest answer for an unproven identity in front of
+    # a SIGKILL on a whole process tree. The ticks read here belong to whatever holds the
+    # pid; nothing was recorded to compare them against.
     forced = {"n": 0}
     monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
     monkeypatch.setattr(pty_keeper.time, "sleep", lambda s: None)

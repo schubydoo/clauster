@@ -1249,8 +1249,8 @@ def test_proc_is_gone_reports_a_live_process_on_a_host_that_cannot_express_boot_
 def test_proc_is_gone_answers_not_gone_when_the_constructor_itself_wants_a_clock(monkeypatch):
     # `status()` needs no clock, but `psutil.Process(pid)` does up to psutil 7.0.0: its
     # `_init` calls `create_time()`, which ends in `+ boot_time()` and raises the bare
-    # RuntimeError on a btime-less procfs. pyproject floors at psutil 5.9, so a source
-    # install can still resolve one that does. Uncaught, this propagated out of
+    # RuntimeError on a btime-less procfs. pyproject now floors at psutil 7.1 (#1402), so this
+    # arm is defence in depth for that floor. Uncaught, this propagated out of
     # `_cleanup_keeper`'s `asyncio.to_thread` and past `stop()`'s STOPPED transition and
     # worktree unlock — a card left RUNNING over a bridge that had already been SIGINT-ed.
     # A live process we cannot do clock arithmetic for is NOT gone.
@@ -1260,6 +1260,43 @@ def test_proc_is_gone_answers_not_gone_when_the_constructor_itself_wants_a_clock
 
     monkeypatch.setattr(procutil.psutil, "Process", _ClockHungryConstructor)
     assert procutil.proc_is_gone(1234) is False
+
+
+def test_is_keeper_process_spares_a_pid_whose_constructor_wants_a_clock(monkeypatch):
+    # Defence in depth for the same floor, on the gate `proc_is_gone` made reachable: the
+    # keeper grace loops now run out on a btime-less procfs and land here, and this function
+    # constructs outside the arm above. A raise would abort `stop()` past its STOPPED
+    # transition; "not a keeper" spares the pid instead, which is the recoverable direction.
+    class _ClockHungryConstructor:
+        def __init__(self, pid):
+            raise RuntimeError("no btime line in /proc/stat")
+
+    monkeypatch.setattr(procutil.psutil, "Process", _ClockHungryConstructor)
+    assert procutil.is_keeper_process(1234) is False
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="btime is a Linux /proc/stat concept")
+def test_process_constructor_needs_no_clock_on_the_pinned_psutil(monkeypatch):
+    # The premise behind pyproject's `psutil>=7.1` floor (#1402): from 7.1 the constructor
+    # derives its identity from the boot-relative start on Linux, so on a btime-less procfs
+    # it constructs fine while `create_time()` still raises. `is_keeper_process` and
+    # `is_live_process` are reached on that host now that the grace loops run out there, so
+    # the floor is what keeps them from raising. Simulated on the REAL psutil by making its
+    # `boot_time` raise the way it does with no `btime` line; a psutil that regressed to a
+    # clock-hungry constructor fails this at the `Process(...)` line.
+    from psutil import _pslinux  # the Linux backend; `create_time` reads its `boot_time`
+
+    def _no_btime() -> float:
+        raise RuntimeError("no btime line in /proc/stat")
+
+    monkeypatch.setattr(_pslinux, "boot_time", _no_btime)
+    me = os.getpid()
+    proc = psutil.Process(me)  # the floor's promise: no clock in the constructor
+    with pytest.raises(RuntimeError):
+        proc.create_time()  # the family rule still holds for the clock read itself
+    assert procutil.proc_create_time(me) is None
+    assert procutil.is_keeper_process(me) is False  # answers, rather than raising
+    assert procutil.proc_is_gone(me) is False
 
 
 def test_proc_is_gone_counts_a_zombie_as_gone(monkeypatch):

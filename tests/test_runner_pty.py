@@ -8,6 +8,7 @@ import json
 import sys
 from pathlib import Path
 
+import psutil
 import pytest
 
 from clauster import procutil
@@ -1416,6 +1417,74 @@ def test_cleanup_keeper_winds_down_a_keeper_on_a_btime_less_procfs(
 
     runner._cleanup_keeper(777)
     assert forced == [777], "a keeper with no readable epoch was never wound down"
+
+
+def test_cleanup_keeper_reaches_the_cmdline_gate_without_a_clock(
+    runner_config, monkeypatch
+) -> None:
+    """The grace loop runs out on a btime-less procfs, so the cmdline gate runs there too.
+
+    Before #1402 the loop's ``proc_create_time is None`` probe returned early on that host,
+    so ``is_keeper_process`` — which constructs ``psutil.Process`` outside any
+    ``RuntimeError`` arm — was never reached. It is now, and it must not need a clock:
+    ``pyproject.toml`` floors psutil at 7.1 for exactly that. This drives the REAL gate
+    (not a stub) with a Process shaped like psutil 7.1+ on that host: constructor, status
+    and cmdline need no clock, ``create_time`` raises the way psutil does.
+    """
+    runner, _ = _pty_runner(runner_config)
+    monkeypatch.setattr("clauster.runner.time.sleep", lambda _s: None)
+    monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
+    _patch_keeper_start(monkeypatch, epoch=lambda: None, ticks=lambda: 4200)
+
+    class _KeeperWithoutAClock:
+        def __init__(self, pid):
+            pass  # psutil >= 7.1: identity from the boot-relative start, no clock
+
+        def status(self):
+            return psutil.STATUS_RUNNING
+
+        def cmdline(self):
+            return [sys.executable, "-m", "clauster.pty_keeper", "--sidecar", "/tmp/k.json"]
+
+        def create_time(self):
+            raise RuntimeError("no btime line in /proc/stat")
+
+    monkeypatch.setattr(procutil.psutil, "Process", _KeeperWithoutAClock)
+    forced: list[int] = []
+    monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
+
+    runner._cleanup_keeper(777)
+    assert forced == [777], "the real cmdline gate must pass a clockless keeper through"
+
+
+def test_cleanup_keeper_spares_rather_than_raises_when_the_constructor_wants_a_clock(
+    runner_config, monkeypatch, caplog
+) -> None:
+    """A clock-hungry ``psutil.Process`` (pre-7.1) at the cmdline gate spares, never raises.
+
+    The floor makes this unreachable on a compliant install; the arm in
+    ``is_keeper_process`` is defence in depth for it. A raise here propagated out of
+    ``asyncio.to_thread`` in ``stop()`` past the STOPPED transition and the worktree unlock,
+    leaving a card RUNNING over a bridge that was already SIGINT-ed. Sparing leaks a keeper
+    an operator can end by hand, which is the recoverable direction.
+    """
+    runner, _ = _pty_runner(runner_config)
+    monkeypatch.setattr("clauster.runner.time.sleep", lambda _s: None)
+    monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
+    _patch_keeper_start(monkeypatch, epoch=lambda: None, ticks=lambda: 4200)
+
+    class _ClockHungryConstructor:
+        def __init__(self, pid):
+            raise RuntimeError("no btime line in /proc/stat")
+
+    monkeypatch.setattr(procutil.psutil, "Process", _ClockHungryConstructor)
+    forced: list[int] = []
+    monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
+
+    with caplog.at_level("WARNING", logger="clauster.runner"):
+        runner._cleanup_keeper(777)  # must return, not raise
+    assert forced == []
+    assert "no longer that keeper" in caplog.text
 
 
 def test_cleanup_keeper_force_kills_through_a_clock_step(runner_config, monkeypatch) -> None:

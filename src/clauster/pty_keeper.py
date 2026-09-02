@@ -984,9 +984,11 @@ def _start_still_matches(
     With **nothing** comparable this answers False — "not proven to be ours", not "ours".
     An expectation was recorded and could not be checked, and this predicate fronts a
     ``force_kill_tree`` on a whole process tree, so the unproven case must not authorize it.
-    Note that is a real narrowing over the pre-#1402 code, which read the epoch alone: given
-    a recorded ``expect_create_time`` and a host where the epoch is unreadable but ticks are
-    (a btime-less procfs), that code fell through to killing on the cmdline gate alone.
+    Note that is a real change over the pre-#1402 code, which read the epoch alone: given
+    a recorded ``expect_create_time`` and a host where the epoch is unreadable (a btime-less
+    procfs), that code took ``proc_create_time is None`` as "exited during the grace" and
+    returned True — a false report of success with no kill. False is the honest answer
+    where True was a silent success; neither kills.
     :func:`_start_is_comparable` is how the post-kill poll asks the other question — whether
     the answer was reached from evidence — because there an unproven read must keep waiting
     rather than report a kill it cannot confirm.
@@ -1065,15 +1067,19 @@ def stop_keeper(
     # SIGKILL is asynchronous: the process may still be running/zombie for a beat
     # after force_kill_tree returns, so poll briefly (reaping our own child if it is
     # one) before reporting the outcome rather than racing the kill.
+    # Same guard as the pre-kill gate above: with neither expectation recorded the pair
+    # could not be comparable, so the `/proc` read would be discarded on every iteration.
+    expecting = expect_create_time is not None or expect_start_ticks is not None
     for _ in range(10):
         procutil.reap_if_exited(keeper_pid)
         if procutil.proc_is_gone(keeper_pid):
             return True
-        observed = procutil.proc_start_pair(keeper_pid)
-        if _start_is_comparable(
-            observed, expect_create_time, expect_start_ticks
-        ) and not _start_still_matches(observed, expect_create_time, expect_start_ticks):
-            return True  # PID recycled onto a new process → the keeper we killed is gone
+        if expecting:
+            observed = procutil.proc_start_pair(keeper_pid)
+            if _start_is_comparable(
+                observed, expect_create_time, expect_start_ticks
+            ) and not _start_still_matches(observed, expect_create_time, expect_start_ticks):
+                return True  # PID recycled onto a new process → the keeper we killed is gone
         time.sleep(0.1)
     return False
 

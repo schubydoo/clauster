@@ -360,8 +360,11 @@ def proc_is_gone(pid: int) -> bool:
     exit, because a dead pid raises ``NoSuchProcess`` from the stat read first. Left
     uncaught it propagated out of ``asyncio.to_thread`` in :meth:`stop`, past the
     ``STOPPED`` transition and the worktree unlock, which is worse than the silent no-kill
-    it replaced. (The lockfile pins psutil 7.2.2, where the constructor no longer does this;
-    ``pyproject.toml`` floors at 5.9, so a source install can still resolve one that does.)
+    it replaced. ``pyproject.toml`` therefore floors psutil at 7.1, the first release whose
+    constructor takes the boot-relative start on Linux and never asks for a clock — that
+    floor is what keeps :func:`is_keeper_process` and :func:`is_live_process`, which
+    construct outside any ``RuntimeError`` arm, from raising on the same host. The arm
+    below stays as defence in depth for the floor.
     """
     try:
         return psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
@@ -571,6 +574,14 @@ def is_keeper_process(pid: int) -> bool:
     ⚠️ Pid ``0`` is deliberately NOT characterised here: it is absent on Linux but a real
     kernel process on macOS and Windows, so which arm of the catch it takes is platform
     specific. The cmdline gate answers it either way; nothing should depend on the route.
+
+    The ``RuntimeError`` arm is defence in depth for the psutil floor (#1402): before 7.1
+    the constructor itself called ``create_time()``, which raises bare on a procfs with no
+    ``btime``, and since :func:`proc_is_gone` lets the keeper grace loops run out on that
+    host this gate is reachable there. ``pyproject.toml`` floors psutil at 7.1 so the
+    constructor never asks for a clock; should one still raise, "not a keeper" spares the
+    pid — a leak an operator can end by hand, where a raise aborted :meth:`stop` past its
+    ``STOPPED`` transition and a wrong answer the other way would front a SIGKILL.
     """
     try:
         proc = psutil.Process(pid)
@@ -578,6 +589,8 @@ def is_keeper_process(pid: int) -> bool:
             return False
         return is_keeper_cmdline(proc.cmdline())
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, ValueError):
+        return False
+    except RuntimeError:
         return False
 
 
