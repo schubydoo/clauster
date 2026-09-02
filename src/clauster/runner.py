@@ -3017,7 +3017,7 @@ class SessionRunner:
             )
             sidecar_ticks = _row_int(info.get("bridge_start_ticks"))
             if bridge_start_ticks is not None and sidecar_ticks is not None:
-                # Exact on the ticks, coarse on the epoch (`_SAME_BOOT_EPOCH_TOLERANCE`).
+                # Exact on the ticks, coarse on the epoch (`procutil._DRIFT_EPOCH_TOLERANCE`).
                 # Ticks restart at zero each boot, so on their own they cannot rule out a
                 # STALE sidecar that survived a reboot and happens to collide on both the
                 # bridge pid and the tick count. `is_live_process` rejects that on a recorded
@@ -3121,10 +3121,14 @@ class SessionRunner:
             # pair rejects. The keeper writes both halves in one breath for this reason.
             instance.bridge_start_ticks = _row_int(info.get("bridge_start_ticks"))
             # The keeper spawned this pty bridge in THIS process, so it is running in the
-            # current boot (#1401). The sidecar records no boot id, so stamp the live one
-            # beside the ticks — otherwise a pty spawn (which returns before `_spawn_locked`'s
-            # own stamp) persists boot-id-less and keeps the coarse-epoch fallback until a
-            # later reattach re-stamps it.
+            # current boot (#1401). The sidecar records no boot id, so stamp the live one beside
+            # the ticks — otherwise a pty spawn (which returns before `_spawn_locked`'s own
+            # stamp) persists boot-id-less and keeps the coarse-epoch fallback until a later
+            # reattach re-stamps it. Read inline rather than off-thread like the other stamp
+            # sites: `/proc/sys/kernel/random/boot_id` is a fixed 37-byte kernel-memory
+            # pseudo-file, not disk I/O, so it cannot stall the loop — and this method is a sync
+            # helper called from two on-loop sites, so a thread hop would have to be plumbed
+            # through both.
             instance.bridge_boot_id = procutil.proc_boot_id()
         if sid := info.get("session_id"):
             instance.starter_session_id = sid
@@ -4562,7 +4566,7 @@ class SessionRunner:
             return  # project vanished from discovery; nothing to attribute it to
         # boot_id is written back through `pair` below, not read here: the keeper/connect
         # helpers correlate a sidecar/pointer that carries no boot id (see
-        # `_SAME_BOOT_EPOCH_TOLERANCE`), so only the identity re-check consumes it.
+        # `procutil._DRIFT_EPOCH_TOLERANCE`), so only the identity re-check consumes it.
         pid, proc_start, start_ticks, _boot_id = pair
         # Resolved BEFORE the lock. All three are pure filesystem reads keyed entirely on
         # snapshot values (project, pid, proc_start) — none reads live mutable state — so
@@ -4903,7 +4907,7 @@ class SessionRunner:
             abs(expected - proc_start) if expected is not None and proc_start is not None else None
         )
         if start_ticks is not None and pointer_ticks is not None:
-            # Exact on the ticks, coarse on the epoch (`_SAME_BOOT_EPOCH_TOLERANCE`), the same
+            # Exact on the ticks, coarse on the epoch (`procutil._DRIFT_EPOCH_TOLERANCE`), the same
             # guard `_recover_keeper_pid` keeps. Ticks restart at zero each boot, so a pointer
             # that survived a reboot can collide on pid AND ticks, and the epoch rejects that
             # for free. `is_live_process` rejects it on a recorded boot id now (#1401), but an
