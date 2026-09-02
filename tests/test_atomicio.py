@@ -9,11 +9,12 @@ import sys
 import threading
 import time
 import types
+from pathlib import Path
 
 import pytest
 
 import clauster.atomicio as atomicio
-from clauster.atomicio import atomic_write_text, ensure_private_dir
+from clauster.atomicio import atomic_copy_file, atomic_write_text, ensure_private_dir
 
 # Perm assertions are POSIX-only; Windows has no 0700/0600 mode bits.
 _posix = pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
@@ -161,6 +162,74 @@ def test_atomic_write_text_fdopen_failure_survives_double_close(tmp_path, monkey
     with pytest.raises(OSError, match="primary fdopen failure"):
         atomic_write_text(tmp_path / "f.txt", "data")
     assert list(tmp_path.iterdir()) == []  # temp still removed
+
+
+def test_atomic_copy_file_is_byte_exact(tmp_path):
+    # Bytes, not text: read_text applies universal newlines on every OS, so a
+    # text round-trip would fold CRLF (and a lone CR) to LF. The callers copy a file
+    # they have declared unusable, where a stray control byte can be anywhere.
+    blob = b'{"schema_version": 1,\r\n "instances": \r{ oops\x00'
+    src = tmp_path / "src.json"
+    src.write_bytes(blob)
+    atomic_copy_file(src, tmp_path / "copy.json")
+    assert (tmp_path / "copy.json").read_bytes() == blob
+    assert sorted(f.name for f in tmp_path.iterdir()) == ["copy.json", "src.json"]
+
+
+def test_atomic_copy_file_copies_a_file_that_is_not_valid_utf8(tmp_path):
+    # The reason it is a byte copy at all: there is no text form of these bytes.
+    blob = b"\xff\xfe\x00not utf-8"
+    src = tmp_path / "src.json"
+    src.write_bytes(blob)
+    atomic_copy_file(src, tmp_path / "copy.json")
+    assert (tmp_path / "copy.json").read_bytes() == blob
+
+
+@_posix
+def test_atomic_copy_file_is_0600_even_from_a_permissive_source(tmp_path):
+    # shutil.copy2 would propagate the SOURCE mode. A legacy state file predating the
+    # atomic writer, or one restored through ops._safe_extract_tar (a bare open), sits
+    # at the umask default, and a copy of the hosted store carries a claude session
+    # uuid. The mode must come from the 0600 temp instead.
+    src = tmp_path / "src.json"
+    src.write_text("{}", encoding="utf-8")
+    src.chmod(0o644)
+    atomic_copy_file(src, tmp_path / "copy.json")
+    mode = (tmp_path / "copy.json").stat().st_mode
+    assert not mode & (stat.S_IRWXG | stat.S_IRWXO)
+
+
+def test_atomic_copy_file_cleans_up_temp_on_replace_failure(tmp_path, monkeypatch):
+    # A real temp exists on disk when the replace raises, so this exercises the
+    # cleanup rather than skipping over it.
+    src = tmp_path / "src.json"
+    src.write_text("data", encoding="utf-8")
+
+    def _boom(*_a, **_k):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(atomicio, "replace_with_retry", _boom)
+    with pytest.raises(OSError, match="replace failed"):
+        atomic_copy_file(src, tmp_path / "copy.json")
+    assert sorted(f.name for f in tmp_path.iterdir()) == ["src.json"]
+
+
+def test_atomic_copy_file_leaves_no_temp_when_the_source_vanishes(tmp_path, monkeypatch):
+    # The temp is opened before the source is, so a source that disappears between the
+    # caller's check and the copy must not strand it.
+    src = tmp_path / "src.json"
+    src.write_text("data", encoding="utf-8")
+    real_open = Path.open
+
+    def _vanish(self, *a, **k):
+        if self == src:
+            raise FileNotFoundError(str(src))
+        return real_open(self, *a, **k)
+
+    monkeypatch.setattr(Path, "open", _vanish)
+    with pytest.raises(FileNotFoundError):
+        atomic_copy_file(src, tmp_path / "copy.json")
+    assert sorted(f.name for f in tmp_path.iterdir()) == ["src.json"]
 
 
 def test_fsync_dir_ignores_open_error(tmp_path, monkeypatch):

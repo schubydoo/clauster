@@ -28,7 +28,7 @@ import yaml
 from . import atomicio, claude_cli, config_write_mcp, deps, environments, procutil, pty_screen
 from .config import ClausterConfig, _missing_enforced_auth, load_config
 from .discovery import Project, discover_projects
-from .state import CURRENT_SCHEMA, StateStore
+from .state import CURRENT_SCHEMA, CorruptStateFile, StateStore
 
 # ----- doctor -----------------------------------------------------------
 
@@ -1076,23 +1076,50 @@ def restore_backup(
 
 
 class MigrateResult(TypedDict):
-    """The outcome of :func:`migrate_state`: the schema written and the instance count."""
+    """The outcome of :func:`migrate_state`.
+
+    Read ``corrupt`` first. It is ``None`` on a normal migrate, and a short reason when
+    the read failed — and on that refusal path nothing was written, so the other two
+    fields are placeholders that carry no meaning. ``instances`` is ``0`` because there
+    is no count to report, NOT because the file held no records, and ``schema_version``
+    names the schema that would have been written rather than one that was.
+    """
 
     schema_version: int
     instances: int
+    corrupt: str | None
 
 
 def migrate_state(config: ClausterConfig) -> MigrateResult:
     """Force state.json to the current schema, then re-save canonical.
 
-    ``StateStore.load`` migrates (and ``.bak``s) older schemas on read; this forces that
-    read, then rewrites state.json canonically at ``CURRENT_SCHEMA``. clauster.yml is
-    additive-only and is not touched here — the caller already loaded and validated it.
+    ``StateStore.load_strict`` migrates (and ``.bak``s) older schemas on read; this
+    forces that read, then rewrites state.json canonically at ``CURRENT_SCHEMA``.
+    clauster.yml is additive-only and is not touched here — the caller already loaded
+    and validated it.
+
+    Reads STRICTLY, unlike every other caller. This function is ``load()`` then
+    ``save()``, so a tolerant read of a file it could not read would overwrite that file
+    with an empty one and report success. Both ways that can happen are refused here: a
+    file it cannot understand, and a file it cannot read at all (an unreadable file is
+    not an empty one, and ``save`` only needs the *directory* to be writable). Neither
+    writes anything, both leave the file exactly where it is, and both report the reason
+    so the CLI can exit non-zero. The boot-time importer keeps degrading — it has
+    nothing to lose, since it does not write back.
     """
     store = StateStore(config.state_dir)
-    data = store.load()
+    try:
+        data = store.load_strict()
+    except CorruptStateFile as exc:
+        return {"schema_version": CURRENT_SCHEMA, "instances": 0, "corrupt": str(exc)}
+    except OSError as exc:
+        return {
+            "schema_version": CURRENT_SCHEMA,
+            "instances": 0,
+            "corrupt": f"{type(exc).__name__}: {exc}",
+        }
     store.save(data)  # rewrite canonical at CURRENT_SCHEMA
-    return {"schema_version": CURRENT_SCHEMA, "instances": len(data)}
+    return {"schema_version": CURRENT_SCHEMA, "instances": len(data), "corrupt": None}
 
 
 # ----- install-service --------------------------------------------------

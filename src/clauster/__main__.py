@@ -800,9 +800,21 @@ def _restore(backup: str, state_dir: str, config_out: str | None, force: bool) -
 
 
 def _migrate(config_path: str | None) -> int:
-    """Re-save ``state.json`` at the current JSON schema; print the schema + instance count."""
+    """Re-save ``state.json`` at the current JSON schema; print the schema + instance count.
+
+    Exits 1 without writing when the file cannot be read or cannot be understood.
+    Silence there would be indistinguishable from a genuinely empty migrate, and this
+    command rewrites what it reads, so the operator must know it read nothing.
+    """
     config = _load_or_exit(config_path)
     result = ops.migrate_state(config)
+    if result["corrupt"] is not None:
+        print(
+            f"clauster: refusing to rewrite state.json — could not read it "
+            f"({result['corrupt']}); the file is unchanged",
+            file=sys.stderr,
+        )
+        return 1
     print(
         f"clauster: state at schema {result['schema_version']} "
         f"({result['instances']} instance record(s))",

@@ -974,6 +974,71 @@ def test_migrate_upgrades_old_schema(write_config, tmp_path):
     assert (config.state_dir / "state.json.bak").is_file()  # migration backed up
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param("[" * 100_000, id="deeply-nested"),
+        pytest.param("1" * 5000, id="oversized-int"),
+        pytest.param('["not", "a", "dict"]', id="wrong-shape"),
+        pytest.param('{"schema_version": 0, "instances": ["a"]}', id="legacy-schema-wrong-shape"),
+    ],
+)
+def test_migrate_refuses_to_rewrite_a_corrupt_state_file(write_config, tmp_path, payload):
+    # migrate_state is load() -> save(). A tolerant read of a file it cannot understand
+    # therefore overwrites that file with an empty one and reports success -- a wipe.
+    # It reads strictly instead: nothing is written, the file is byte-identical, and the
+    # reason comes back so the CLI can exit non-zero.
+    config = load_config(_cfg_file(write_config, tmp_path))
+    config.state_dir.mkdir(parents=True, exist_ok=True)
+    sj = config.state_dir / "state.json"
+    sj.write_text(payload, encoding="utf-8")
+
+    result = migrate_state(config)
+
+    assert result["corrupt"] is not None
+    assert result["instances"] == 0
+    assert sj.read_text(encoding="utf-8") == payload  # untouched, not rewritten empty
+    # A strict read degrades nothing, so it also takes no copy: there is nothing to
+    # recover FROM. The original is still the original.
+    assert not (config.state_dir / "state.json.corrupt.bak").exists()
+
+
+def test_migrate_refuses_to_rewrite_a_state_file_it_cannot_read(
+    write_config, tmp_path, monkeypatch
+):
+    # The other route to the same wipe: `save` needs only the directory to be writable,
+    # so an unreadable state.json would be replaced by an empty one and reported as a
+    # success. Monkeypatch rather than chmod -- Windows ignores a file's read bit.
+    config = load_config(_cfg_file(write_config, tmp_path))
+    config.state_dir.mkdir(parents=True, exist_ok=True)
+    sj = config.state_dir / "state.json"
+    payload = json.dumps({"schema_version": 1, "instances": {"a": {"label": "a"}}})
+    sj.write_text(payload, encoding="utf-8")
+
+    def boom(*_args, **_kwargs):
+        raise OSError("simulated: EIO")
+
+    monkeypatch.setattr(Path, "read_text", boom)
+    result = migrate_state(config)
+
+    assert result["corrupt"] is not None
+    assert result["instances"] == 0
+    monkeypatch.undo()
+    assert sj.read_text(encoding="utf-8") == payload  # untouched, not rewritten empty
+
+
+def test_migrate_reports_no_corruption_on_a_healthy_file(write_config, tmp_path):
+    # The other half of the CLI's exit code: a normal migrate must not look corrupt.
+    config = load_config(_cfg_file(write_config, tmp_path))
+    config.state_dir.mkdir(parents=True, exist_ok=True)
+    (config.state_dir / "state.json").write_text(
+        json.dumps({"schema_version": 0, "instances": {"a": {"label": "a"}}}), encoding="utf-8"
+    )
+    result = migrate_state(config)
+    assert result["corrupt"] is None
+    assert result["instances"] == 1
+
+
 # ----- install-service --------------------------------------------------
 
 
