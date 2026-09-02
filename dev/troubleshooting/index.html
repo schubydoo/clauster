@@ -1463,6 +1463,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#connect-link-unavailable-this-sessions-screen-could-not-be-read" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        "Connect link unavailable — this session's screen could not be read."
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -2220,6 +2231,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#connect-link-unavailable-this-sessions-screen-could-not-be-read" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        "Connect link unavailable — this session's screen could not be read."
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -2715,6 +2737,32 @@ instead is cleaned up with:</p>
 <li><strong>Process there?</strong> <code>pgrep -a -f 'claude.*remote-control'</code> — a live process
    with a dead card usually means an orphaned keeper (previous section).</li>
 </ol>
+<h3 id="connect-link-unavailable-this-sessions-screen-could-not-be-read">"Connect link unavailable — this session's screen could not be read."<a class="headerlink" href="#connect-link-unavailable-this-sessions-screen-could-not-be-read" title="Permanent link">&para;</a></h3>
+<p><strong>What you see:</strong> a green <strong>Running</strong> Interactive Session card with no <strong>Open in
+Claude</strong> button and no QR button, carrying that sentence where the buttons
+would be.</p>
+<p><strong>The bridge is fine.</strong> Only its deep link is missing. The session runs, the
+live log tail works, and Stop and the live terminal all behave normally.</p>
+<p><strong>Cause:</strong> the keeper reads the connect link off a terminal screen it rebuilds
+from the bridge's output. Two faults stop it. The first is a rare byte sequence, a
+double-width character left half-overwritten, that makes one frame fail to
+render. The keeper then skips the bad chunk and retries on the next one, which
+normally succeeds within the 30-second capture window. The second is a failure
+that disables the screen emulator for the rest of the session. This message
+means capture never succeeded.</p>
+<p><strong>Where it happens:</strong> Windows always, and Linux or macOS only with
+<code>claude.pty_screen_enabled: true</code>. The keeper builds that screen unconditionally
+on Windows, because a Windows console fragments the link across the raw byte
+stream. Elsewhere it builds one only for the live-terminal view, and without a
+screen there is no screen fault to report.</p>
+<p><strong>The fix:</strong> open the session from
+<a href="https://claude.ai/code">claude.ai/code</a> and pick it from your session list, or
+Stop the card and start a new session. Nothing needs repairing on the host.</p>
+<p><strong>Mechanism:</strong> the keeper writes the reason into its sidecar next to the
+bridge's log, and Clauster lifts it onto the card. The exact fault is also
+logged, one line beginning <code>clauster.pty_keeper:</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>grep<span class="w"> </span>clauster.pty_keeper<span class="w"> </span>~/.clauster/logs/&lt;label&gt;-*.keeper.log
+</code></pre></div>
 <h2 id="everything-looks-fine-but-the-session-never-responds">Everything looks fine but the session never responds<a class="headerlink" href="#everything-looks-fine-but-the-session-never-responds" title="Permanent link">&para;</a></h2>
 <h3 id="hosted-direct-session-cannot-connect-to-claustrum">Hosted / Direct Session: "cannot connect to claustrum"<a class="headerlink" href="#hosted-direct-session-cannot-connect-to-claustrum" title="Permanent link">&para;</a></h3>
 <p><strong>What you see:</strong> a Direct Session fails with
@@ -2722,9 +2770,9 @@ instead is cleaned up with:</p>
 API returns <code>hosted channel unavailable: claustrum daemon not connected</code>.</p>
 <p><strong>Most likely cause:</strong> the claustrum daemon is not running (or not installed —
 it is an optional dependency), or its socket path is wrong.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:7621/healthz<span class="w">      </span><span class="c1"># the claustrum block names the reason</span>
-<a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a>clauster<span class="w"> </span>deps<span class="w"> </span>list<span class="w">                         </span><span class="c1"># is claustrum installed?</span>
-<a id="__codelineno-15-3" name="__codelineno-15-3" href="#__codelineno-15-3"></a>tail<span class="w"> </span>~/.clauster/claustrum/daemon.log<span class="w">      </span><span class="c1"># what did the daemon last say?</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:7621/healthz<span class="w">      </span><span class="c1"># the claustrum block names the reason</span>
+<a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a>clauster<span class="w"> </span>deps<span class="w"> </span>list<span class="w">                         </span><span class="c1"># is claustrum installed?</span>
+<a id="__codelineno-16-3" name="__codelineno-16-3" href="#__codelineno-16-3"></a>tail<span class="w"> </span>~/.clauster/claustrum/daemon.log<span class="w">      </span><span class="c1"># what did the daemon last say?</span>
 </code></pre></div>
 <p>Start with <code>/healthz</code>: its <code>claustrum</code> block carries an <code>error</code> describing why
 the last start attempt failed — including the commonest case, the binary not
@@ -2770,11 +2818,11 @@ Before that the server logged at <code>info</code> in every deployment.</p>
 </blockquote>
 <p>Set <code>log_level</code> (default <code>info</code>) to raise the server's own verbosity — it
 covers Clauster's loggers and uvicorn's alike:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a><span class="nt">log_level</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">debug</span><span class="w">   </span><span class="c1"># debug | info | warning | error</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a><span class="nt">log_level</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">debug</span><span class="w">   </span><span class="c1"># debug | info | warning | error</span>
 </code></pre></div>
 <p>For a one-shot run, or in a container or unit file, use the env override
 instead of editing the config:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a><span class="nv">CLAUSTER_LOG_LEVEL</span><span class="o">=</span>debug<span class="w"> </span>clauster<span class="w"> </span>run<span class="w"> </span>-c<span class="w"> </span>clauster.yml
+<div class="highlight"><pre><span></span><code><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a><span class="nv">CLAUSTER_LOG_LEVEL</span><span class="o">=</span>debug<span class="w"> </span>clauster<span class="w"> </span>run<span class="w"> </span>-c<span class="w"> </span>clauster.yml
 </code></pre></div>
 <p>Either way the level is read <strong>once at startup</strong>, so restart Clauster after
 changing it. What <code>debug</code> mostly adds is <strong>uvicorn's own</strong> debug records —
