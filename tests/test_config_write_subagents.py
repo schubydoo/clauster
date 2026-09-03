@@ -1481,6 +1481,30 @@ def test_read_agent_masks_a_secret_inside_an_omap_reached_through_a_tuple(
     assert doc["content"] == raw.decode()  # `content` is verbatim by contract, as always
 
 
+def test_read_agent_masks_a_binary_spelled_secret_reached_as_bytes(
+    tmp_path: Path,
+) -> None:
+    # #1450: a UTF-8 `!!binary` value parses to `bytes`, and `_is_secretish` rejected any
+    # non-`str` value -- so a secret spelled as base64 fell through `redact_secrets`' scalar
+    # return by IDENTITY and `jsonable_encoder` decoded it back into `frontmatter`. Same shape
+    # as the #1393 omap identity leak. End-to-end pin on the real read path: the write validator
+    # accepts a UTF-8 `!!binary` header, so a cloned repo can carry one.
+    # `c2stbGl2ZS1ERUFEQkVFRg==` is base64 of `sk-live-DEADBEEF`.
+    root = tmp_path / "agents"
+    root.mkdir()
+    raw = (
+        b"---\nname: my-agent\ndescription: d\n"
+        b"api_token: !!binary c2stbGl2ZS1ERUFEQkVFRg==\n---\nbody\n"
+    )
+    (root / "my-agent.md").write_bytes(raw)
+
+    doc = sub._read_agent(root, "my-agent", "project")
+
+    assert "sk-live-DEADBEEF" not in json.dumps(doc["frontmatter"])
+    assert doc["frontmatter"]["api_token"] == cw.REDACTION_SENTINEL
+    assert doc["content"] == raw.decode()  # `content` is verbatim by contract, as always
+
+
 def test_read_agent_omap_inner_key_is_a_secret_hint_the_way_a_dict_key_is() -> None:
     # Redaction must not depend on how the document SPELLS a mapping. The hint comes from a
     # key, and an `!!omap`/`!!pairs` entry is a two-element tuple whose first element IS the

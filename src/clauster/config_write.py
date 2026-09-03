@@ -433,10 +433,20 @@ _YAML_CONTAINERS = dict | list | tuple | set | frozenset
 
 def _is_secretish(key: str, value: Any) -> bool:
     """Whether ``(key, value)`` should be masked (structural secret detection)."""
-    if not isinstance(value, str) or not value:
+    if not isinstance(value, str | bytes) or not value:
         return False
     if _SECRET_KEY_RE.search(key):
         return True
+    if isinstance(value, bytes):
+        # A `!!binary` value parses to `bytes`, and the rules below are regexes over text.
+        # `jsonable_encoder` decodes the bytes back to text for the display, so scan the decoded
+        # text too -- otherwise a credential URL or `${interp}` spelled as base64 leaks past a
+        # benign key exactly as a plain-string secret used to leak past the whole predicate
+        # (#1450, same spelling-independence the #1393 omap fix restored). `redact_secrets`
+        # still returns the original `bytes` when this is False, so a benign value decodes
+        # unchanged. `load_frontmatter_yaml` rejects non-UTF-8 binary, so `replace` only guards
+        # a caller that hands raw bytes; a value masked either way needs no round-trip fidelity.
+        value = value.decode("utf-8", "replace")
     if _has_interp(value):
         return True
     if _SECRETISH_URL_RE.match(value):

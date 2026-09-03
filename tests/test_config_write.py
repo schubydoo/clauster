@@ -362,6 +362,50 @@ def test_redact_masks_a_secret_inside_an_omap_pairs_or_set(header: str) -> None:
     assert cw.REDACTION_SENTINEL in json.dumps(red)
 
 
+# --- #1450: a `!!binary` secret is `bytes`, which `_is_secretish` used to reject outright -----
+#
+# `_is_secretish` returned False for any non-`str` value, so a secret spelled as a UTF-8
+# `!!binary` (base64 of the plain secret) fell through `redact_secrets`' scalar return and was
+# handed back by IDENTITY, then decoded into the display by `jsonable_encoder`. Same shape as the
+# #1393 omap leak: a spelling `safe_load` accepts that the redactor walked straight past. Bytes
+# now run all three detection rules -- a secret-shaped KEY masks, and so does secret-shaped
+# CONTENT (a credential URL or `${interp}`) once the display path's UTF-8 decode is applied. A
+# `bytes` value that is neither still decodes unchanged, matching the plain-string spelling.
+def test_redact_masks_a_binary_spelled_secret_under_a_secret_key() -> None:
+    # `!!binary "c2stbGl2ZS1BQUE="` is base64 of `sk-live-AAA`; `safe_load` parses it to bytes.
+    data = cw.load_frontmatter_yaml('api_token: !!binary "c2stbGl2ZS1BQUE="\n', what="frontmatter")
+    assert data["api_token"] == b"sk-live-AAA"  # positive control: the secret really is bytes
+    red = cw.redact_secrets(data)
+    assert red == {"api_token": cw.REDACTION_SENTINEL}
+    assert "sk-live-AAA" not in json.dumps(red)
+
+
+def test_redact_decodes_a_binary_value_that_is_not_secret_shaped() -> None:
+    # `!!binary "aGk="` is base64 of `hi`: an ordinary key AND benign content, so the bytes
+    # pass through unchanged -- `jsonable_encoder` decodes them for the response as before.
+    data = cw.load_frontmatter_yaml('description: !!binary "aGk="\n', what="frontmatter")
+    assert data["description"] == b"hi"
+    assert cw.redact_secrets(data) == {"description": b"hi"}
+
+
+def test_redact_masks_a_binary_whose_decoded_content_is_secret_shaped() -> None:
+    # A `!!binary` value under an ORDINARY key still masks when the decoded text is itself
+    # secret-shaped -- a credential URL or `${interp}` -- because the display path decodes the
+    # bytes, so redaction must not depend on the base64 spelling any more than on `!!omap`.
+    # `cG9zdGdyZXM6Ly91OnB3QGgvZGI=` is base64 of `postgres://u:pw@h/db`.
+    url = cw.load_frontmatter_yaml(
+        'endpoint: !!binary "cG9zdGdyZXM6Ly91OnB3QGgvZGI="\n', what="frontmatter"
+    )
+    assert url["endpoint"] == b"postgres://u:pw@h/db"  # positive control: the credential is bytes
+    assert cw.redact_secrets(url) == {"endpoint": cw.REDACTION_SENTINEL}
+    assert cw.redact_secrets(b"${SECRET}", "note") == cw.REDACTION_SENTINEL
+
+
+def test_redact_binary_top_level_scalar_masked_by_key_hint_not_by_benign_content() -> None:
+    assert cw.redact_secrets(b"sk-live-AAA", "api_token") == cw.REDACTION_SENTINEL
+    assert cw.redact_secrets(b"sk-live-AAA", "name") == b"sk-live-AAA"
+
+
 def test_redact_deep_copies_a_mutable_value_reached_through_a_tuple() -> None:
     # The docstring's first line promises a deep copy. A tuple returned by identity broke that
     # promise for anything mutable underneath it: mutating the caller's input then changed the
