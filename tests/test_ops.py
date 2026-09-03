@@ -346,6 +346,36 @@ def test_doctor_non_mapping_root_detail_reports_type_and_path(tmp_path):
     assert bad.name in detail
 
 
+def test_doctor_secret_file_error_stays_readable(write_config, tmp_path, monkeypatch):
+    # The ValueError arm no longer runs `str(exc)` through the key-anchored `redact_secret_lines`
+    # (#1472): that helper masks only a `<secret-ish key>: value` line whose key is a single
+    # spaceless token, and every message on this arm opens with prose. A `_read_secret_file`
+    # failure is prose that MENTIONS a secret-shaped env-var name (`..._PASSWORD_HASH_FILE` ->
+    # `password`) but carries no value, so the operator's diagnosis must stay intact.
+    empty = tmp_path / "pw_hash"
+    empty.write_text("   \n", encoding="utf-8")
+    monkeypatch.setenv("CLAUSTER_AUTH_PASSWORD_HASH_FILE", str(empty))
+    detail = run_doctor(_cfg_file(write_config, tmp_path), check_port=False)[0][0].detail
+    # `_read_secret_file` formats the path with `!r`, so match repr, not hand-written quotes:
+    # on Windows repr doubles the backslashes and a hand-quoted path would differ (PR 1478 nit).
+    assert detail == (
+        f"invalid config: CLAUSTER_AUTH_PASSWORD_HASH_FILE points to an empty file {str(empty)!r}"
+    )
+
+
+def test_doctor_secret_file_error_never_leaks_secret_bytes(write_config, tmp_path, monkeypatch):
+    # Invariant 4: a value-bearing failure must not put a config value on the surface. A
+    # non-UTF-8 secret file is the reachable value-bearing shape — `_read_secret_file` raises
+    # `from None` with a message that names the path, never the bytes, so nothing that reaches
+    # the ValueError arm can carry the secret to `/api/doctor` even without a redactor.
+    secret = tmp_path / "pw_hash"
+    secret.write_bytes(b"\xff\xfe\x80" + _CFG_CANARY.encode())
+    monkeypatch.setenv("CLAUSTER_AUTH_PASSWORD_HASH_FILE", str(secret))
+    detail = run_doctor(_cfg_file(write_config, tmp_path), check_port=False)[0][0].detail
+    assert _CFG_CANARY not in detail
+    assert "is not valid UTF-8 text" in detail
+
+
 def test_doctor_claude_not_found(write_config, tmp_path):
     cfg = str(write_config(f"claude:\n  binary: no-such-claude-bin\nstate_dir: {tmp_path}/.s\n"))
     by = {c.name: c for c in run_doctor(cfg)[0]}

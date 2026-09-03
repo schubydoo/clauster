@@ -29,7 +29,7 @@ from pydantic import ValidationError
 from . import atomicio, claude_cli, config_write_mcp, deps, environments, procutil, pty_screen
 from .config import ClausterConfig, FixedDetailYamlError, _missing_enforced_auth, load_config
 from .config_editor import _friendly_validation_message
-from .config_write import _yaml_error_where, redact_secret_lines
+from .config_write import _yaml_error_where
 from .discovery import Project, discover_projects
 from .state import CURRENT_SCHEMA, CorruptStateFile, StateStore
 
@@ -167,12 +167,23 @@ def run_doctor(
         # here and which the line-anchored redactor could not reach (the value sits mid-prose
         # after ``base 10:``, with no key to anchor on).
         #
-        # ⚠️ `redact_secret_lines` is KEY-anchored and fires only on a ``<secret-ish key>:
-        # <value>`` line. NO message reachable here has that shape — all three open with
-        # prose — so today it is dead defence, not a partial net. Kept for a future message,
-        # but a new one on this path must be written not to carry a value, not written to
-        # rely on this.
-        checks.append(Check("config", FAIL, f"invalid config: {redact_secret_lines(str(exc))}"))
+        # Print ``str(exc)`` directly — there is no config value on this arm to redact. Every
+        # shape reachable here opens with prose and carries at most a file path or an env-var
+        # name, never a value: the two ``load_config`` messages above and ``_read_secret_file``'s
+        # own (which raises ``from None`` so the secret file's bytes never enter the message).
+        # The one shape that once did carry a value — a ``!!int "<token>"`` scalar landing
+        # mid-prose after ``base 10:`` — is now re-raised as `UnconstructableYamlValueError` and
+        # caught by the YAML arm above, so it never reaches here.
+        #
+        # This used to wrap ``str(exc)`` in `redact_secret_lines` as a net (#1472). That helper
+        # runs three masks per line: a KEY-anchored ``<secret-ish key>: value`` rule, plus a
+        # ``${...}`` mask and a ``scheme://user@host`` mask anywhere in the line. No message on
+        # this arm carries a ``key: value`` token, and its only free text is a filesystem path or
+        # an env-var name — operator configuration, never a runtime secret, and a local path holds
+        # no ``scheme://user@host`` — so none of the three masks protected a secret here. A new
+        # message on this path must likewise carry no config value; do not add one and lean on a
+        # redactor that cannot reach a value sitting mid-prose.
+        checks.append(Check("config", FAIL, f"invalid config: {exc}"))
         config = None
 
     if config is None:
