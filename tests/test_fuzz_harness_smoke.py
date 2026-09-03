@@ -660,6 +660,31 @@ def test_pty_screen_feed_leak_oracle_fires_on_a_broken_redactor(
         harness.check(row, [], 80, 24, False)
 
 
+def test_pty_screen_feed_glued_leak_oracle_fires_where_the_bare_oracle_cannot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The glued-id oracle catches a welded id the leading-``\\b`` ``_LEAK`` is blind to (#1433).
+
+    ``fuzz/README.md``: an oracle that has never fired is indistinguishable from no oracle.
+    """
+    pytest.importorskip("pyte")
+    from clauster import redact
+
+    harness = _load("pty_screen_feed_fuzzer.py")
+    # pyte renders this as the welded row `bridgecse_01JABCDEFGHJKMNPQ` (no leading boundary).
+    row = b"bridge\x1b[32mcse_01JABCDEFGHJKMNPQ\r\n"
+    harness.check(row, [], 80, 24, False)  # unbroken: the screen masks the glued id, passes
+
+    # The two oracles differ exactly on the welded id: `_LEAK` cannot see it, `_GLUED_LEAK` can.
+    welded = "bridgecse_01JABCDEFGHJKMNPQ"
+    assert not harness._LEAK.search(welded)
+    assert harness._GLUED_LEAK.search(welded)
+
+    monkeypatch.setattr(redact, "redact_screen_text", lambda rows: list(rows))
+    with pytest.raises(AssertionError, match="^glued-id redaction leak in a rendered row"):
+        harness.check(row, [], 80, 24, False)
+
+
 def test_pty_screen_feed_raises_on_ordinary_escape_sequences() -> None:
     """PIN: ``PtyScreen.feed`` raises on sequences a real terminal emits.
 
@@ -706,32 +731,30 @@ def test_pty_screen_frame_width_refit_cannot_expose_an_identifier() -> None:
     test hand-built the row and sliced it, which meant a fix inside ``frame`` would have left
     it green either way — it proved nothing about the delivered frame.
 
-    Mechanism: masking ``session_ABCDEF`` *lengthens* the row by 4 characters, so trimming
-    back to ``cols`` shears the ``_zzz`` off ``cse_ABCDEFGH_zzz`` and manufactures the word
-    boundary ``redact._ID_RE`` needs. The id was correctly not masked while it ran on; the
-    trim is what exposed it (safety invariant 4). ``frame`` now redacts the fitted row again,
-    so the delivered row carries the mask instead — and ``pty_screen_feed_fuzzer`` asserts the
-    leak property on every delivered row rather than exempting the shortened ones.
+    `_apply_spans` clips the ``Bearer `` piece to the full neutral token, so
+    ``Bearer env_01ABCDEF`` GROWS from 19 to 20 characters. frame() trims it back to ``cols``
+    and re-redacts the shortened row (the ``if fitted != row`` belt in ``_fit_redacted_row``),
+    so the trim cannot manufacture the word boundary a ``\\b``-anchored mask needs (safety
+    invariant 4). ``pty_screen_feed_fuzzer`` asserts the leak property on every delivered row.
     """
     import re
 
     pty_screen = pytest.importorskip("clauster.pty_screen")
     pytest.importorskip("pyte")
 
-    cols = 40
-    row = "session_ABCDEF yyyyyyyy cse_ABCDEFGH_zzz"
-    assert len(row) == cols, "the row must fill the screen exactly for the shear to happen"
+    cols = 19
+    row = "Bearer env_01ABCDEF"
+    assert len(row) == cols
     screen = pty_screen.PtyScreen(cols=cols, rows=3)
     screen.feed(row.encode())
 
     delivered = screen.frame()["rows"][0]
     leak = re.compile(r"\b(env|session|cse)_[A-Za-z0-9]{6,}\b")
     assert not leak.search(delivered), f"frame() exposed a bare identifier: {delivered!r}"
-    assert "session_<redacted>" in delivered, "the lengthening mask is what shears the row"
     assert len(delivered) == cols, "the row must still be exactly one screen wide"
-    # The second pass masked the sheared tail, and the final trim cut inside that mask —
-    # `<` where `_ID_RE` needs an alphanumeric, which is why no third pass is needed.
-    assert delivered.endswith("cse_<redacte"), delivered
+    # The masked row is 20 chars (the `Bearer ` piece clips to the 10-char token), so the
+    # re-fit trims it and the belt runs; the final cut lands inside a `<redacted>` token.
+    assert delivered == "<redacted><redacted"
 
 
 def test_usage_line_to_turn_sanitizes_every_returned_string_field() -> None:

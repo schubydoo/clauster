@@ -613,24 +613,19 @@ class PtyScreen:
     def _fit_redacted_row(self, row: str) -> str:
         r"""Fit one redacted ``row`` to exactly ``cols``, re-redacting whatever the trim exposed.
 
-        Trimming redacted text is not safe on its own (#1359, safety invariant 4).
-        :data:`redact._ID_RE` ends in ``\b``, so ``cse_01JABCDEFGHJKMN_more`` is correctly not an
-        identifier and is correctly left unmasked — but redaction can LENGTHEN a row
-        (``session_ABCDEF`` masks to the four-character-longer ``session_<redacted>``), and
-        cutting that row back to ``cols`` drops the ``_more`` and manufactures the word boundary
-        the pattern needs. A bare, matchable identifier would then reach the browser purely
-        because of the trim; a cursor-addressed TUI puts text against the column boundary
-        constantly, and any word character triggers it.
+        Trimming redacted text is not safe on its own (#1359, safety invariant 4). Redaction on
+        this surface can LENGTHEN a row: :func:`redact.redact_screen_text` masks to the neutral
+        ``<redacted>`` token, and :func:`redact._apply_spans` replaces a clipped span-piece
+        shorter than the token with the full token, so ``Bearer env_01ABCDEF`` grows to
+        ``<redacted><redacted>`` (one longer). Trimming that back to ``cols`` can drop a suffix
+        and manufacture the word boundary a ``\b``-anchored mask needs, letting a bare
+        identifier reach the browser purely because of the trim; a cursor-addressed TUI puts
+        text against the column boundary constantly.
 
-        So a row the trim actually shortened is redacted again. One extra pass is enough, for
-        two reasons that compose. First, the trim can only create a boundary at the END —
-        everything before the cut is untouched and was already redacted — so the second pass
-        can only mask a suffix. Second, only :data:`redact._ID_RE` can lengthen a row at all:
-        every other mask is the bare 10-character ``<redacted>`` replacing a match of at least
-        15 characters, so it always shrinks. And ``_ID_RE``'s shortest match is ``prefix`` + 6
-        while its mask is ``prefix`` + 10, so when the final trim cuts inside that mask it
-        provably keeps at least ``cse_<redac`` — a ``<`` in the position the pattern needs an
-        alphanumeric. There is nothing left for a third pass to find.
+        So a row the trim actually shortened is redacted again. One extra pass is enough: the
+        trim can only create a boundary at the END, everything before the cut was already
+        redacted, and cutting inside a ``<redacted>`` token keeps a ``<`` where the pattern
+        needs an alphanumeric, so there is nothing for a third pass to find.
         """
         fitted = row[: self.cols]
         if fitted != row:  # only a row the trim shortened can have gained a boundary

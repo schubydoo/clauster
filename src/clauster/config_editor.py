@@ -763,8 +763,10 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
         "without it the feature stays dormant. Not available on the standalone binary — pyte is "
         "LGPL and not bundled, and can't be side-loaded into it; run clauster from a pip/uv "
         "install with the [pty] extra to use the live view. The render is best-effort "
-        "secret-redacted, so treat the live view as auth-gated, not secret-proof. Takes effect "
-        "on the next start."
+        "secret-redacted, so treat the live view as auth-gated, not secret-proof. It also "
+        "masks a real identifier welded onto the word before it. An ordinary name stays "
+        "readable, and a welded secret stays visible on this view. Takes effect on the next "
+        "start."
     ),
 }
 

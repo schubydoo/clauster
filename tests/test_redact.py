@@ -199,7 +199,7 @@ def test_redact_for_disk_masks_session_url_and_secrets_over_a_chunk():
 
 def test_redact_screen_text_masks_ids_and_secrets_per_row():
     # The pty-screen view (#534) feeds already-rendered plaintext rows; redaction runs
-    # per row and the id/secret masks fire just like the streamed-line path.
+    # per row. This surface masks to the NEUTRAL <redacted> token (no readable prefix).
     rows = [
         "user@host:~$ echo env_01ABCDEFGHIJKLMNOP",
         "token sk-abcdef0123456789 ok",
@@ -207,13 +207,106 @@ def test_redact_screen_text_masks_ids_and_secrets_per_row():
     ]
     out = redact.redact_screen_text(rows)
     assert len(out) == len(rows)  # row count preserved (fixed terminal geometry)
-    assert "env_01ABCDEFGHIJKLMNOP" not in out[0] and "env_<redacted>" in out[0]
+    assert "env_01ABCDEFGHIJKLMNOP" not in out[0] and "<redacted>" in out[0]
     assert "sk-abcdef0123456789" not in out[1] and "<redacted>" in out[1]
     assert out[2] == rows[2]  # a benign row passes through verbatim
 
 
 def test_redact_screen_text_empty_screen_is_empty():
     assert redact.redact_screen_text([]) == []
+
+
+def test_redact_screen_text_masks_a_glued_prefix_weld():
+    # pyte consumes the escape that welded a word onto an identifier, so `agent<ESC>env_<ULID>`
+    # arrives here as the row `agentenv_<ULID>` with no cut to anchor on. The old anchored
+    # screen pass left it bare — the leading `\b` fails after `t` — so the identifier reached
+    # the live screen. This surface now fails closed and masks the glued identifier (#1433).
+    row = f"agentenv_{_ULID}"
+    out = redact.redact_screen_text([row])[0]
+    assert _ULID not in out
+    assert out == "agent<redacted>"  # neutral token; the `agent` prefix is not id-shaped
+    # The old anchored pipeline (still the log path's behaviour) leaves the id bare: this is
+    # the gap #1433 closes, and the assertion above fails on the pre-fix screen pass.
+    assert _ULID in redact.redact_secrets(redact.redact_ids(row))
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        # Finding 1: the glued SECRET cores (`sk-`/`glpat-`/`xoxb-`) would match inside an
+        # ordinary hyphenated word if unanchored, so they stay ANCHORED on this surface. These
+        # ordinary branch names and paths must pass through verbatim.
+        "feat/task-queue-retry-backoff",
+        "risk-assessment-checklist",
+        "disk-usage-summary-2026",
+        # An ordinary compound name that embeds an id prefix without the real id shape.
+        "resolve_session_transcript",
+        "venv_project1",
+        "venv_01abc",  # too short after `01`
+        "nothing to hide on this row",
+    ],
+)
+def test_redact_screen_text_does_not_over_mask_ordinary_text(row):
+    # The screen masks a welded REAL id, not any word. An ordinary branch name, path, or
+    # snake_case identifier stays readable (#1433, the maintainer's tight core).
+    assert redact.redact_screen_text([row]) == [row]
+
+
+@pytest.mark.parametrize(
+    ("row", "must_not_leak"),
+    [
+        # A glued id lands INSIDE a longer secret. Masking it first with a sequential `sub`
+        # inserts a `<` that shortens the secret below its `{n,}` minimum, so the secret mask
+        # then fails and its prefix leaks — masking LESS than the old pass (#1433 review). The
+        # union pass covers every byte instead.
+        ("Bearer abcenv_01ABCDEFGH", "Bearer abc"),
+        ("sk-AAAAenv_01ABCDEFGH", "sk-AAAA"),
+    ],
+)
+def test_redact_screen_text_never_masks_less_than_the_anchored_pass(row, must_not_leak):
+    # Parity floor for the screen surface: a prefix the old sequential redact_ids/redact_secrets
+    # pass masked must stay masked. The `<` a mask inserts must never expose a neighbour.
+    old = redact.redact_secrets(redact.redact_ids(row))
+    assert must_not_leak not in old, "control: the anchored pass already masked this prefix"
+    assert must_not_leak not in redact.redact_screen_text([row])[0], row
+
+
+def test_redact_screen_text_masks_both_ids_in_an_id_to_id_weld():
+    # Two real ids welded with no boundary between them. The NEUTRAL <redacted> token is what
+    # closes this: masking the second id inserts a `<` that gives the first id the trailing
+    # boundary it lacked, and the fixed point then masks it too. Keeping a `session_` prefix
+    # (word chars) would leave the first id bare (#1433 review).
+    out = redact.redact_screen_text(["env_01ABCDEFGHsession_01ABCDEFGH"])[0]
+    assert out == "<redacted><redacted>"
+    assert "01ABCDEFGH" not in out
+
+
+def test_redact_screen_text_leaves_a_welded_secret_as_residue():
+    # Documented residue on this cut-less surface (#1433): a secret welded onto a word (no
+    # boundary) is NOT masked, because the secret cores stay anchored to avoid destroying
+    # ordinary text (see test_redact_screen_text_does_not_over_mask_ordinary_text). The old
+    # log-path pass leaves it too, so the screen masks no less than before.
+    row = "agentghp_abcdefghijklmnopqrstuv"
+    assert redact.redact_screen_text([row]) == [row]
+    assert redact.redact_secrets(redact.redact_ids(row)) == row
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        # A glued id is masked ONLY when it has the real id shape (prefix + `01` + eight or
+        # more), so a live weld cannot leave a bearer-equivalent id readable. The ordinary
+        # names that must STAY readable are covered by
+        # test_redact_screen_text_does_not_over_mask_ordinary_text.
+        "agentenv_01BX5ZZKBKACTAV9WEVGEMMVRZ",
+        "prefixsession_01ABCDEFGH",  # a different glued prefix, real id shape
+    ],
+)
+def test_redact_screen_text_masks_a_glued_real_id(row):
+    # The maintainer's tight core for #1433: the glued (no-leading-boundary) id match requires
+    # `(env|session|cse)_01` + eight or more, so the screen masks a welded REAL id.
+    out = redact.redact_screen_text([row])[0]
+    assert "<redacted>" in out and row not in out, out
 
 
 def test_sanitize_redacts_secret_split_by_ansi_even_when_strip_disabled():
