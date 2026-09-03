@@ -234,9 +234,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      security-events: write
+      # `contents: read` is all any step's job token needs: `actions/checkout` and
+      # zizmor's fork fallback both read only. The SARIF upload uses a minted App
+      # token, so the job token no longer needs `security-events: write` or `actions`.
       contents: read
-      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -244,20 +245,11 @@ jobs:
       # Mint a clauster-ci App token (≥5,000 REST req/hr) so zizmor's GitHub
       # API calls (e.g. the /advisories audit) don't exhaust the 1,000/hr
       # github-actions[bot] pool under bursts (observed: zizmor /advisories 403).
-      # The SARIF upload below now uses this App token against the public
-      # `POST /repos/{owner}/{repo}/code-scanning/sarifs` endpoint (#1437), which the
-      # REST docs limit "per user or app installation", so the App gets its own bucket.
-      # Verified 2026-09-03 on PR 1435 (run 33700073187) that `upload-sarif` cannot take
-      # the App token: with it carrying contents read, actions read and security-events
-      # write, the action answered "Not Found ... check that your token ... has
-      # contents: read, security-events: write". Inside Actions the action uploads
-      # through `PUT /repos/{owner}/{repo}/code-scanning/analysis` (its `analyses.ts`),
-      # an Actions-only route, so its `token` input is GITHUB_TOKEN-only;
-      # codeql-action#2719 is the same failure. GITHUB_TOKEN's shared pool hit "API rate
-      # limit exceeded for installation" on the upload (2026-09-02, PR 1431), which the
-      # per-installation endpoint above avoids.
-      # Same-repo runs only; fork PRs lack the App secrets, so the step is skipped
-      # and the token falls back to GITHUB_TOKEN below.
+      # This token carries `contents: read` only and goes to `Run zizmor` below. The
+      # SARIF upload uses a SECOND token with `security-events: write`, minted just
+      # before that step, so the `zizmor` binary never holds a scope that could rewrite
+      # the Security tab (#1437). Same-repo runs only; fork PRs lack the App secrets,
+      # so this step is skipped and zizmor falls back to GITHUB_TOKEN below.
       - name: Mint GitHub App token
         id: app-token
         if: >-
@@ -268,43 +260,66 @@ jobs:
           client-id: ${{ secrets.CLAUSTER_CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
           permission-contents: read
-          # security-events write lets this token post to `code-scanning/sarifs` below.
-          permission-security-events: write
       - name: Set up uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.12.9" # pinned uv (Renovate-tracked); skip the flaky "latest" fetch
       - name: Install zizmor
-        run: uv tool install zizmor
+        env:
+          # renovate: datasource=pypi depName=zizmor
+          ZIZMOR_VERSION: "1.30.0"
+        # Pinned so a bad PyPI release cannot change what runs under the App token.
+        run: uv tool install "zizmor==$ZIZMOR_VERSION"
       - name: Run zizmor
         run: zizmor --format sarif . > results.sarif
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+      # A SECOND App token, `security-events: write` only, for the code-scanning/sarifs
+      # POST below. Separate from the audit token above so the `zizmor` binary never
+      # holds the write scope (#1437). Same `if:` as the first mint.
+      - name: Mint SARIF upload token
+        id: sarif-token
+        if: >-
+          ${{ github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.CLAUSTER_CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
+          permission-security-events: write
       - name: Upload SARIF
         # `always()` like the trivy upload above: zizmor exits nonzero when it has
         # findings, which is exactly when the SARIF is worth sending to the Security
-        # tab. The job still goes red on findings; only the upload no longer skips.
-        # `upload-sarif` cannot take the App token (see the mint comment above), so this
-        # posts to the public `code-scanning/sarifs` endpoint directly. Every dynamic
-        # value arrives through `env:`, so nothing is interpolated into the script body
-        # (zizmor's template-injection audit). `gh` reads `GH_TOKEN` from the env.
-        # Same-repo only, like the mint above: a fork PR has a read-only GITHUB_TOKEN
-        # that `code-scanning/sarifs` rejects, so skip rather than red the required gate
-        # (`always()` counts the skip as passing). Forks cannot upload code scanning
-        # results at all, so nothing is lost.
+        # tab. `upload-sarif` cannot take an App token: inside Actions it uploads through
+        # `PUT /repos/{owner}/{repo}/code-scanning/analysis` (its `analyses.ts`), an
+        # Actions-only route that answered "Not Found" to this App token on PR 1435 (run
+        # 33700073187); codeql-action#2719 is the same failure. So this posts to the
+        # public `POST /repos/{owner}/{repo}/code-scanning/sarifs` endpoint, which the
+        # REST docs limit "per user or app installation", giving the App its own bucket
+        # instead of the shared GITHUB_TOKEN pool that hit "API rate limit exceeded for
+        # installation" on PR 1431. Every dynamic value arrives through `env:`, so
+        # nothing is interpolated into the script body (zizmor's template-injection
+        # audit). The upload token is required here, not GITHUB_TOKEN: this step's `if:`
+        # already limits it to same-repo, where the mint runs, and a fork PR cannot write
+        # code scanning results, so skip rather than red the required gate (`always()`
+        # counts the skip as passing).
         if: >-
           ${{ always()
           && (github.event_name != 'pull_request'
           || github.event.pull_request.head.repo.full_name == github.repository) }}
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.sarif-token.outputs.token }}
           REPO: ${{ github.repository }}
           COMMIT_SHA: ${{ github.sha }}
           REF: ${{ github.ref }}
           CHECKOUT_URI: file://${{ github.workspace }}
         run: |
           set -euo pipefail
-          sarif_b64="$(gzip -c results.sarif | base64 -w0)"
+          # `automationDetails.id` is what `upload-sarif` wrote from `category:`; the
+          # sarifs endpoint takes no category field, so set it here so these uploads
+          # supersede the existing `zizmor` analysis series instead of leaving stale
+          # duplicates next to it.
+          sarif_b64="$(jq '.runs[].automationDetails.id = "zizmor"' results.sarif | gzip -c | base64 -w0)"
           sarif_id="$(gh api "repos/$REPO/code-scanning/sarifs" \
             -f "commit_sha=$COMMIT_SHA" \
             -f "ref=$REF" \
@@ -313,10 +328,14 @@ jobs:
             -f "sarif=$sarif_b64" \
             --jq .id)"
           echo "Uploaded zizmor SARIF (id=$sarif_id); waiting for processing."
+          last_err=""
           for _ in $(seq 1 30); do
             # A transient GET error must not red an upload that already succeeded, so
-            # treat it as "keep polling" and let only a real `failed` or the timeout fail.
-            status="$(gh api "repos/$REPO/code-scanning/sarifs/$sarif_id" --jq .processing_status || echo pending)"
+            # keep polling and remember the last error for the timeout message below.
+            if ! status="$(gh api "repos/$REPO/code-scanning/sarifs/$sarif_id" --jq .processing_status 2>/tmp/gh_poll_err)"; then
+              last_err="$(cat /tmp/gh_poll_err)"
+              status="pending"
+            fi
             echo "processing_status=$status"
             case "$status" in
               complete) exit 0 ;;
@@ -327,8 +346,12 @@ jobs:
             esac
             sleep 5
           done
-          echo "zizmor SARIF did not finish processing within the bounded wait" >&2
-          exit 1
+          # A slow-but-not-failed upload must not red this required check: the audit
+          # verdict is the Run zizmor step, and the analysis lands a moment later. Warn
+          # and pass, but surface the last GET error so a persistent id or permission
+          # problem is not misread as a slow upload.
+          echo "::warning title=zizmor SARIF::still '$status' after the bounded wait; not failing the gate. last GET error: ${last_err:-none}"
+          exit 0
 
   dependency-review:
     name: dependency review
