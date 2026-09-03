@@ -244,11 +244,12 @@ jobs:
       # Mint a clauster-ci App token (≥5,000 REST req/hr) so zizmor's GitHub
       # API calls (e.g. the /advisories audit) don't exhaust the 1,000/hr
       # github-actions[bot] pool under bursts (observed: zizmor /advisories 403).
-      # The SARIF upload below uses the same token: the code-scanning SARIF
-      # endpoint is limited to 1,000/hr per user OR app installation, so the App
-      # gets its own bucket instead of sharing GITHUB_TOKEN's with every other job
-      # on the PR (observed 2026-09-02: "API rate limit exceeded for installation"
-      # on the upload, with the audit itself clean). The action's `token` input
+      # The SARIF upload below uses the same token. The REST docs for "Upload an
+      # analysis as SARIF data" say the endpoint "is limited to 1,000 requests per
+      # hour for each user or app installation calling it", and the installation
+      # primary limit is per token too, so the App gets its own buckets instead of
+      # sharing GITHUB_TOKEN's with every other job on the PR (observed 2026-09-02:
+      # "API rate limit exceeded for installation" on the upload, audit clean). The action's `token` input
       # documents GITHUB_TOKEN only; the action passes the token through unchanged
       # and its internal status report is warning-only, so a scoped App token with
       # code-scanning write works (codeql-action#2719 was a scoping failure).
@@ -277,11 +278,15 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
       - name: Upload SARIF
+        # `always()` like the trivy upload above: zizmor exits nonzero when it has
+        # findings, which is exactly when the SARIF is worth sending to the Security
+        # tab. The job still goes red on findings; only the upload no longer skips.
+        if: always()
         uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           sarif_file: results.sarif
           category: zizmor
-          token: ${{ steps.app-token.outputs.token || github.token }}
+          token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
 
   dependency-review:
     name: dependency review
