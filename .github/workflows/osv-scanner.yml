@@ -3,27 +3,44 @@ name: OSV-Scanner
 # Scan our committed lockfiles (uv.lock, package-lock.json, tests/e2e/package-lock.json,
 # flake.lock) against the OSV database (osv.dev) and upload SARIF to Security > Code scanning.
 # Complements Dependabot: a broader advisory corpus, and it scans the *resolved* lockfiles
-# rather than manifest version ranges. Non-required signal jobs (like fuzzing / e2e), and
-# report-only for now (`fail-on-vuln: false`) so findings surface without blocking merges —
-# flip to blocking once the signal is tuned. Tracked as #320 on Project #3.
+# rather than manifest version ranges. Non-required signal job (like fuzzing / e2e), and
+# report-only for now so findings surface without blocking merges — flip to blocking (fail
+# the job on findings) once the signal is tuned. Tracked as #320 on Project #3.
 #
-# The OSV reusable workflows are SHA-PINNED, not tag-pinned. GitHub allows a reusable-workflow
-# ref to be a SHA, tag, or branch (SHA is the safest — GitHub's own recommendation). Pinning by
-# SHA — instead of the tag the OSV docs show — keeps the required `zizmor` workflow-audit check
-# green and avoids re-introducing the Scorecard Pinned-Dependencies alerts cleared in #319.
-# Renovate tracks the pin via the trailing `# vX.Y.Z` comment (helpers:pinGitHubActionDigests).
+# WHY THE PINNED BINARY, NOT THE REUSABLE WORKFLOW
+# The Google `osv-scanner-action` reusable workflows both scan AND upload, and that upload
+# runs `github/codeql-action/upload-sarif` on the shared GITHUB_TOKEN pool — the same
+# rate-limit / pool-exhaustion exposure the CodeQL, Trivy and zizmor jobs moved off (#1445,
+# #1446, #1440). `upload-sarif` cannot take a minted App token (it is an Actions-only PUT
+# route; codeql-action#2719), so the reusable upload can't simply be re-tokened — the whole
+# scan+upload must be replaced. So this runs the pinned OSV-Scanner BINARY (checksum-verified)
+# to write a SARIF to disk, then posts it to the public `code-scanning/sarifs` endpoint with a
+# clauster-ci App token, off the shared pool (#1469 — the last GITHUB_TOKEN SARIF consumer).
+#
+# DIFF-AWARE PR SCAN DROPPED (deliberate). The old `scan-pr` job used the reusable
+# *pr* workflow, which reports only the vulnerabilities a PR introduces by scanning
+# base + head and diffing. That diff logic lives inside the reusable workflow this
+# change removes, and reproducing it with the binary is a large, bug-prone script for
+# a report-only signal that overlaps dependency-review. So PRs now get the same full
+# recursive scan as push/schedule (only when a lockfile/manifest changes — see the
+# `paths:` filter), uploaded to the PR merge ref. Pre-existing lockfile vulns can now
+# surface as report-only alerts on such a PR; flag for the maintainer if that is noisy.
+#
+# The binary is pinned by version + verified by sha256 (fail-loud on mismatch), so it stays
+# require-SHA-pin- and Scorecard-clean without a reusable-workflow SHA pin. Renovate bumps the
+# version via the trailing `# renovate:` comment; the checksum must be bumped with it.
 
 on:
   pull_request:
     # Trimmed off the `synchronize` storm (pr-auto-update fans a main push across
-    # every open PR). This PR scan is report-only (fail-on-vuln:false) and overlaps
-    # dependency-review on manifest CVEs, so a per-push rerun adds little; push:main
-    # + the weekly cron remain the real gate.
+    # every open PR). This PR scan is report-only and overlaps dependency-review on
+    # manifest CVEs, so a per-push rerun adds little; push:main + the weekly cron
+    # remain the real gate.
     types: [opened, reopened, ready_for_review]
     # Scoped to what this scan actually reads: the committed lockfiles listed in
     # the header, the manifests they resolve from, and this workflow itself (so a
     # change here is still validated on its own PR). A `paths:` filter is SAFE
-    # here — and only here — because NEITHER job below is a required status check:
+    # here — and only here — because this job is NOT a required status check:
     # a PR that skips the whole workflow leaves no context stuck at "Expected —
     # waiting for status", which is the #196 breakage that a paths-filtered
     # REQUIRED check causes. (ci.yml / security.yml back required contexts and so
@@ -49,8 +66,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# No secrets, and fork PRs run safely (plain `pull_request`, never `pull_request_target`).
-# Default-deny at the workflow level; each job grants only what it needs (least privilege).
+# No secrets in the scan itself, and fork PRs run safely (plain `pull_request`, never
+# `pull_request_target`). Default-deny at the workflow level; the job grants only what it
+# needs (least privilege) and the SARIF upload rides a separately minted App token.
 permissions: {}
 
 concurrency:
@@ -58,39 +76,120 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Diff-aware scan on PRs: reports only the vulnerabilities the PR introduces.
-  scan-pr:
-    # Draft PRs skip; `ready_for_review` (already in the trigger types above)
-    # re-fires this on the flip. Neither job here is a required status check, so
-    # a skip leaves nothing stuck at "Expected — waiting" (see the header).
-    if: github.event_name == 'pull_request' && github.event.pull_request.draft != true
-    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@6e4298ebc4db23e847df9b2e2de2939d6f066c67 # v2.5.1
-    with:
-      fail-on-vuln: false # report-only signal for now; flip to blocking once tuned
+  scan:
+    name: osv scan
+    # Draft PRs skip; `ready_for_review` (in the trigger types above) re-fires this on the
+    # flip. `!= true` (not `== false`) so push:main / the weekly cron / dispatch — where
+    # `draft` is null — fail-safe to running. This job is not a required status check, so a
+    # skip leaves nothing stuck at "Expected — waiting" (see the header).
+    if: github.event.pull_request.draft != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
-      security-events: write # upload the SARIF to Security > Code scanning
-      contents: read # checkout + read the lockfiles
-      actions: read # read run metadata for the SARIF upload
-
-  # Full scan on a schedule, on pushes to main, and on manual dispatch, via the OSV-Scanner
-  # reusable full-scan workflow (SHA-pinned, like scan-pr above). This previously ran the
-  # pinned OSV-Scanner binary directly because the reusable workflow referenced a conditional
-  # actions/download-artifact@<tag> internally, which the repo's require-SHA-pin policy rejects
-  # transitively at action-resolution time (it never runs, but still must resolve). Upstream
-  # SHA-pinned that action in v2.5.0 (download-artifact@3e5f45b2 # v8.0.1), so every `uses:` in
-  # the reusable workflow now resolves to a full-length SHA and the workaround is no longer
-  # needed (#326). This holds per-release, not forever: if a Renovate bump ever fails at
-  # action-resolution time, upstream re-tagged an internal action — re-check that every `uses:`
-  # in `osv-scanner-reusable.yml` is SHA-pinned before pinning the binary back. The reusable
-  # full-scan defaults to `-r ./` — the same recursive lockfile scan the binary ran — and
-  # report-only via `fail-on-vuln: false`.
-  scan-scheduled:
-    name: full scan
-    if: github.event_name != 'pull_request'
-    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@6e4298ebc4db23e847df9b2e2de2939d6f066c67 # v2.5.1
-    with:
-      fail-on-vuln: false # report-only signal for now; flip to blocking once tuned
-    permissions:
-      security-events: write # upload the SARIF to Security > Code scanning
-      contents: read # checkout + read the lockfiles
-      actions: read # read run metadata for the SARIF upload
+      # Checkout + read the lockfiles is all the job token needs; the minted App token
+      # below carries the `security-events: write` the SARIF upload requires.
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Mint an upload-only App token (`security-events: write`) BEFORE the scan, so a
+      # findings run (the scanner exits 1 on a vuln) cannot skip a mint gated on the implicit
+      # `success()` and leave the `always()` upload with no token. Same-repo only: a fork PR
+      # lacks the App secrets, so the step is skipped and the upload below skips too.
+      - name: Mint SARIF upload token
+        id: sarif-token
+        if: >-
+          ${{ github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.CLAUSTER_CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
+          permission-security-events: write
+      - name: Install OSV-Scanner (pinned release, checksum-verified)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # renovate: datasource=github-releases depName=google/osv-scanner
+          OSV_VERSION: "v2.5.1"
+          # Bump together with OSV_VERSION: sha256 of osv-scanner_linux_amd64 from the release's
+          # osv-scanner_SHA256SUMS. Renovate bumps the version; the sha256sum -c below then fails
+          # the job until this is updated to match — a deliberate fail-loud, never a silent skip.
+          OSV_SHA256: "f9f25499a2c8cc367b3af45df2ea7eeca7fbccceab9c35079968f4b3652194be"
+        run: |
+          set -euo pipefail
+          gh release download "$OSV_VERSION" --repo google/osv-scanner \
+            --pattern osv-scanner_linux_amd64 --output osv-scanner
+          echo "${OSV_SHA256}  osv-scanner" | sha256sum -c -
+          chmod +x osv-scanner
+      - name: Scan committed lockfiles (report-only)
+        run: |
+          set -euo pipefail
+          set +e
+          ./osv-scanner scan source -r --format sarif --output-file results.sarif .
+          echo "OSV_EXIT=$?" >> "$GITHUB_ENV"
+          exit 0 # never fail here — upload the SARIF first, then surface a real error below
+      - name: Upload SARIF
+        # Post to the public `code-scanning/sarifs` endpoint with the minted App token, the
+        # same path the trivy/codeql/zizmor jobs use, so this upload draws on the App's own
+        # per-installation rate bucket instead of the shared GITHUB_TOKEN pool. `upload-sarif`
+        # cannot take an App token (codeql-action#2719). Every dynamic value comes through
+        # `env:`, so nothing is interpolated into the script body. Same-repo only (a fork PR
+        # cannot write code scanning results); `always()` so a findings run still uploads.
+        if: >-
+          ${{ always()
+          && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository) }}
+        env:
+          GH_TOKEN: ${{ steps.sarif-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+          REF: ${{ github.ref }}
+          CHECKOUT_URI: file://${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          if [ ! -f results.sarif ]; then
+            echo "::warning title=osv SARIF::results.sarif is missing; the scan failed before writing it, nothing uploaded."
+            exit 0
+          fi
+          # `automationDetails.id` is the analysis category; the sarifs endpoint takes no
+          # category field, so set it here so these uploads supersede the existing
+          # `osv-scanner` series instead of duplicating it. The trailing slash is load-bearing:
+          # GitHub parses the id as `category/run-id`, so `osv-scanner` without one records an
+          # EMPTY category and starts a new alert series.
+          sarif_b64="$(jq '.runs[].automationDetails.id = "osv-scanner/"' results.sarif | gzip -c | base64 -w0)"
+          sarif_id="$(gh api "repos/$REPO/code-scanning/sarifs" \
+            -f "commit_sha=$COMMIT_SHA" \
+            -f "ref=$REF" \
+            -f "checkout_uri=$CHECKOUT_URI" \
+            -f "tool_name=osv-scanner" \
+            -f "sarif=$sarif_b64" \
+            --jq .id)"
+          echo "Uploaded osv SARIF (id=$sarif_id); waiting for processing."
+          last_err=""
+          for _ in $(seq 1 30); do
+            if ! status="$(gh api "repos/$REPO/code-scanning/sarifs/$sarif_id" --jq .processing_status 2>/tmp/gh_poll_err)"; then
+              last_err="$(cat /tmp/gh_poll_err)"
+              status="pending"
+            fi
+            echo "processing_status=$status"
+            case "$status" in
+              complete) exit 0 ;;
+              failed)
+                echo "osv SARIF processing failed:" >&2
+                gh api "repos/$REPO/code-scanning/sarifs/$sarif_id" --jq '.errors[]?' >&2
+                exit 1 ;;
+            esac
+            sleep 5
+          done
+          echo "::warning title=osv SARIF::still '$status' after the bounded wait; not failing the gate. last GET error: ${last_err:-none}"
+          exit 0
+      - name: Surface a real scanner error
+        if: ${{ always() }}
+        run: |
+          # 0 = no vulns, 1 = vulns found (report-only — surfaces in the SARIF, not a failure).
+          # Anything else is a real osv-scanner error: fail the job AFTER the SARIF upload above.
+          if [ "${OSV_EXIT:-0}" -gt 1 ]; then
+            echo "::error::osv-scanner failed (exit ${OSV_EXIT})"
+            exit "${OSV_EXIT}"
+          fi
