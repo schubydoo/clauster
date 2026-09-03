@@ -533,23 +533,88 @@ def redact_for_disk(text: str) -> str:
     return _sanitize(text)
 
 
+#: The screen's one UNANCHORED match: a real id a consumed escape welded onto the word before
+#: it. The pty screen has no cut to confirm a weld, so a glued id is indistinguishable from a
+#: literal compound word. Requiring the real id shape -- the ``01`` an Anthropic ULID carries
+#: after the prefix, then eight or more characters -- keeps ordinary names like
+#: ``resolve_session_transcript`` and ``venv_project1`` readable. The anchored ``_ID_RE`` still
+#: masks a standalone id of any shape; RESIDUE: a welded id that lacks the ``01`` shape is not
+#: caught, and (see :func:`_redact_screen_row`) neither is a welded secret.
+_SCREEN_GLUED_ID_RE = re.compile(r"(env|session|cse)_01[A-Za-z0-9]{8,}\b")
+
+
+def _redact_screen_row(row: str) -> str:
+    r"""Mask id/secret shapes in one pyte-rendered row, plus a real id welded onto a word.
+
+    This surface has no cut signal. pyte renders the grid before redaction runs and erases
+    the escape that welded a word onto an identifier: ``agent\x1b[32menv_<ULID>`` arrives as
+    the row ``agentenv_<ULID>``, byte-identical to a literal ``userenv_<ULID>``. So the
+    log-path cut-anchored pass (:func:`_cut_spans`) cannot help here -- there is nothing left
+    to anchor on.
+
+    Every mask runs ANCHORED, exactly as the old ``redact_secrets(redact_ids(row))`` pass, so
+    a standalone id or secret masks as before and no ordinary word is over-masked. The one
+    UNANCHORED match is :data:`_SCREEN_GLUED_ID_RE`, the real id shape, which covers an id a
+    consumed escape welded onto the word before it (``agentenv_01<...>``). The secrets stay
+    anchored on purpose: a glued secret core (``sk-``, ``glpat-``, ``xoxb-``) matches inside an
+    ordinary hyphenated word (``risk-assessment-checklist`` -> ``ri<redacted>``), so with no
+    cut to confirm a real weld, unanchoring them destroys readable text.
+
+    Masks replace with the NEUTRAL ``<redacted>`` token here, dropping the readable
+    ``env_``/``session_``/``cse_`` prefix the log path keeps. That is what closes an id welded
+    to another id: ``env_01<a>session_01<b>`` masks the second id first, and the ``<`` of its
+    neutral token gives the first id the trailing boundary it lacked, so the fixed point below
+    masks it too. Keeping the prefix would leave ``session_`` (word characters) there and the
+    first id would stay bare. The screen is a display surface, so the missing marker is only
+    cosmetic; the log path keeps it.
+
+    The spans are UNIONED through :func:`_apply_spans`, not applied by sequential ``sub`` (a
+    sequential sub can mask LESS -- a mask inserts a ``<`` that shortens a later match below
+    its minimum), and the union runs to a FIXED POINT (a ``<redacted>`` token masking inserts
+    is a boundary that can expose a neighbour). It terminates because each pass masks strictly
+    more and a ``<redacted>`` token never matches a core.
+
+    RESIDUE on this surface, stated because there is no cut to distinguish it: a welded SECRET
+    (secrets stay anchored) and a welded id that lacks the ``01`` shape are not masked. Both
+    need an attacker-influenced escape from Clauster's own bridge, and the endpoint is
+    AUTH-gated. The split case (a control char INSIDE an id) is not a gap: pyte joins the
+    halves into one matchable run the anchored pass catches.
+    """
+    while True:
+        spans = [
+            (m.start(), m.end(), _REDACTED)
+            for anchored, *_ in _MASKS
+            for m in anchored.finditer(row)
+        ]
+        spans += [(m.start(), m.end(), _REDACTED) for m in _SCREEN_GLUED_ID_RE.finditer(row)]
+        masked = _apply_spans(row, spans)
+        if masked == row:
+            return row
+        row = masked
+
+
 def redact_screen_text(rows: list[str]) -> list[str]:
     r"""Redact a rendered terminal screen (already-plaintext cells) row by row.
 
-    The live pty-screen view (#534) feeds pyte-RENDERED rows here, never raw bytes —
-    pyte has already consumed every escape sequence, so this applies only the id +
-    secret masks. It deliberately does NOT :func:`strip_ansi`: there are no escapes
-    left to strip.
+    The live pty-screen view (#534) feeds pyte-RENDERED rows here, never raw bytes — pyte has
+    already consumed every escape sequence, so this does NOT :func:`strip_ansi`. Each row is
+    masked by :func:`_redact_screen_row`. Beyond the standalone id/secret masks the old pass
+    ran, it also masks a real id a consumed escape welded onto the word before it (the tight
+    :data:`_SCREEN_GLUED_ID_RE` shape), so ``agentenv_01<...>`` masks while an ordinary name
+    such as ``resolve_session_transcript`` stays readable (#1433). See that helper for what is
+    covered and what is residue on this cut-less surface.
 
-    Row COUNT is preserved (the mask runs per row), but a row's LENGTH can change — a
-    mask is the fixed ``<redacted>`` token, so a long secret shrinks the row while a
-    short ``env_``/``session_`` id can lengthen it. Re-fitting rows to the exact
-    terminal width is the caller's job (:meth:`clauster.pty_screen.PtyScreen.frame`
-    re-fits each row to the screen width), not this text-only helper's.
+    Row COUNT is preserved (the mask runs per row), but a row's LENGTH can change in EITHER
+    direction. A mask usually shrinks a match to the ten-character ``<redacted>`` token, but
+    :func:`_apply_spans` also replaces a CLIPPED span-piece shorter than the token with the
+    full token, so a row can GROW (``Bearer env_01ABCDEF`` -> ``<redacted><redacted>``, one
+    longer). Re-fitting each row to the exact terminal width, and re-redacting whatever a trim
+    shears, is the caller's job (:meth:`clauster.pty_screen.PtyScreen.frame` and
+    :meth:`~clauster.pty_screen.PtyScreen._fit_redacted_row`), not this text-only helper's.
 
     Best-effort defense-in-depth, like the rest of this module: a secret that wraps
     across the fixed column width, or a novel high-entropy value, can still slip through
     (see the ``_SECRET_RES`` note). AUTH-gating the pty-screen endpoint is the *primary*
-    control; this only narrows the obvious-secret surface a live screen exposes.
+    control; this only narrows the obvious-identifier surface a live screen exposes.
     """
-    return [redact_secrets(redact_ids(row)) for row in rows]
+    return [_redact_screen_row(row) for row in rows]

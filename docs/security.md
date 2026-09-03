@@ -340,7 +340,12 @@ Three layers:
     an attacker who can print arbitrary text beside an identifier does not need
     to smuggle it past the mask. The case that matters is the escape weld, where
     Clauster's own bridge prints the real identifier and an injected escape only
-    deletes the boundary.
+    deletes the boundary. This bounded scope is for the streamed log and the
+    on-disk mirror. A terminal has already discarded the escape on the live
+    pty-screen view. So that view also masks a real identifier (the `01` shape)
+    welded onto the word before it, and an id welded to another id. An ordinary
+    compound name such as `resolve_session_transcript` stays readable. A welded
+    secret, and a welded id without the `01` shape, stay visible there.
 
 ### Hybrid by default
 

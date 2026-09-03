@@ -660,6 +660,31 @@ def test_pty_screen_feed_leak_oracle_fires_on_a_broken_redactor(
         harness.check(row, [], 80, 24, False)
 
 
+def test_pty_screen_feed_glued_leak_oracle_fires_where_the_bare_oracle_cannot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The glued-id oracle catches a welded id the leading-``\\b`` ``_LEAK`` is blind to (#1433).
+
+    ``fuzz/README.md``: an oracle that has never fired is indistinguishable from no oracle.
+    """
+    pytest.importorskip("pyte")
+    from clauster import redact
+
+    harness = _load("pty_screen_feed_fuzzer.py")
+    # pyte renders this as the welded row `bridgecse_01JABCDEFGHJKMNPQ` (no leading boundary).
+    row = b"bridge\x1b[32mcse_01JABCDEFGHJKMNPQ\r\n"
+    harness.check(row, [], 80, 24, False)  # unbroken: the screen masks the glued id, passes
+
+    # The two oracles differ exactly on the welded id: `_LEAK` cannot see it, `_GLUED_LEAK` can.
+    welded = "bridgecse_01JABCDEFGHJKMNPQ"
+    assert not harness._LEAK.search(welded)
+    assert harness._GLUED_LEAK.search(welded)
+
+    monkeypatch.setattr(redact, "redact_screen_text", lambda rows: list(rows))
+    with pytest.raises(AssertionError, match="^glued-id redaction leak in a rendered row"):
+        harness.check(row, [], 80, 24, False)
+
+
 def test_pty_screen_feed_raises_on_ordinary_escape_sequences() -> None:
     """PIN: ``PtyScreen.feed`` raises on sequences a real terminal emits.
 
@@ -706,12 +731,12 @@ def test_pty_screen_frame_width_refit_cannot_expose_an_identifier() -> None:
     test hand-built the row and sliced it, which meant a fix inside ``frame`` would have left
     it green either way — it proved nothing about the delivered frame.
 
-    Mechanism: masking ``session_ABCDEF`` *lengthens* the row by 4 characters, so trimming
-    back to ``cols`` shears the ``_zzz`` off ``cse_ABCDEFGH_zzz`` and manufactures the word
-    boundary ``redact._ID_RE`` needs. The id was correctly not masked while it ran on; the
-    trim is what exposed it (safety invariant 4). ``frame`` now redacts the fitted row again,
-    so the delivered row carries the mask instead — and ``pty_screen_feed_fuzzer`` asserts the
-    leak property on every delivered row rather than exempting the shortened ones.
+    The screen masks to the neutral ``<redacted>`` token, and masking ``session_ABCDEF``
+    SHRINKS this row, so the width re-fit does not trim it and cannot manufacture the word
+    boundary a ``\\b``-anchored mask needs (safety invariant 4). A row that GROWS past ``cols``
+    (a clipped ``Bearer`` piece) is sheared and re-redacted by ``_fit_redacted_row`` -- see
+    ``test_pty_screen.py::test_frame_re_redacts_a_row_the_width_refit_sheared``.
+    ``pty_screen_feed_fuzzer`` asserts the leak property on every delivered row.
     """
     import re
 
@@ -720,18 +745,17 @@ def test_pty_screen_frame_width_refit_cannot_expose_an_identifier() -> None:
 
     cols = 40
     row = "session_ABCDEF yyyyyyyy cse_ABCDEFGH_zzz"
-    assert len(row) == cols, "the row must fill the screen exactly for the shear to happen"
+    assert len(row) == cols
     screen = pty_screen.PtyScreen(cols=cols, rows=3)
     screen.feed(row.encode())
 
     delivered = screen.frame()["rows"][0]
     leak = re.compile(r"\b(env|session|cse)_[A-Za-z0-9]{6,}\b")
     assert not leak.search(delivered), f"frame() exposed a bare identifier: {delivered!r}"
-    assert "session_<redacted>" in delivered, "the lengthening mask is what shears the row"
     assert len(delivered) == cols, "the row must still be exactly one screen wide"
-    # The second pass masked the sheared tail, and the final trim cut inside that mask —
-    # `<` where `_ID_RE` needs an alphanumeric, which is why no third pass is needed.
-    assert delivered.endswith("cse_<redacte"), delivered
+    # session_ABCDEF masks to the neutral token and shrinks the row, so nothing is sheared;
+    # cse_ABCDEFGH_zzz is correctly not an id (trailing `_zzz`) and stays readable.
+    assert delivered == "<redacted> yyyyyyyy cse_ABCDEFGH_zzz".ljust(cols)
 
 
 def test_usage_line_to_turn_sanitizes_every_returned_string_field() -> None:

@@ -212,7 +212,10 @@ class ClaudeConfig(BaseModel):
         "setting `CLAUSTER_PYTE_PATH` to a directory holding an installed "
         "`pyte` (#702) — the binary appends it to `sys.path` only when set. The "
         "render is best-effort secret-redacted, so treat the live view as auth-gated, not "
-        "secret-proof.",
+        "secret-proof. It also masks a real identifier welded onto the word before it by a "
+        "discarded escape, so `agentenv_01<id>` masks while an ordinary name such as "
+        "`resolve_session_transcript` stays readable. A welded secret, and a welded identifier "
+        "without the leading `01` shape, stay visible on this view.",
     )
     path_append: list[str] = Field(
         default_factory=list,

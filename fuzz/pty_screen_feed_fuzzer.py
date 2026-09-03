@@ -131,6 +131,14 @@ with atheris.instrument_imports():
 #: redactor whether it redacted cannot fail. Same trade as ``redact_fuzzer``.
 _LEAK = re.compile(r"\b(env|session|cse)_[A-Za-z0-9]{6,}\b")
 
+#: The GLUED-id oracle, mirroring ``redact._SCREEN_GLUED_ID_RE``. ``_LEAK`` keeps a leading
+#: ``\b`` and so is structurally blind to the leak #1433 fixes: a real id a consumed escape
+#: welded onto the word before it (``agentenv_01<...>``) has no leading boundary. The screen
+#: masks exactly this shape, so any survivor in the output is a leak. It matches the real id
+#: shape only, so it never fires on the documented residue (a welded id without ``01``, whose
+#: run also lacks a trailing boundary, or a welded secret).
+_GLUED_LEAK = re.compile(r"(env|session|cse)_01[A-Za-z0-9]{8,}\b")
+
 #: Total bytes fed per input. Below ``pty_screen._OSC8_MAX_CARRY`` so chunk-boundary
 #: invariance is sound (see the module docstring), and small enough that a pure-Python
 #: terminal emulator still runs at a useful rate.
@@ -305,6 +313,13 @@ def check(data: bytes, cuts: list[int], cols: int, rows: int, capture_osc8: bool
             f"redaction leak in a rendered row: {redacted_row!r}"
         )
         assert not _LEAK.search(frame_row), f"redaction leak in a delivered row: {frame_row!r}"
+        # The glued-id oracle `_LEAK` cannot see (no leading `\b`): a welded real id (#1433).
+        assert not _GLUED_LEAK.search(redacted_row), (
+            f"glued-id redaction leak in a rendered row: {redacted_row!r}"
+        )
+        assert not _GLUED_LEAK.search(frame_row), (
+            f"glued-id redaction leak in a delivered row: {frame_row!r}"
+        )
     # The cursor is reported but deliberately NOT bounds-asserted. `frame`'s contract is
     # about the row geometry ("the client draws a fixed cols x rows_count grid") and says
     # nothing about the cursor, and pyte will hand back an x past the column count — this

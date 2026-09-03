@@ -570,39 +570,49 @@ def test_default_geometry_is_120x40():
 
 
 def test_every_frame_row_is_exactly_cols_wide_after_redaction():
-    # Redaction can SHORTEN a row (long secret -> 10-char `<redacted>`) or LENGTHEN it
-    # (short id -> `env_<redacted>`); frame() re-fits each row to exactly `cols` so the
-    # client's fixed grid never wraps. Both directions are exercised here; what the trim
+    # Redaction can SHORTEN a row (long secret -> 10-char `<redacted>`) or LENGTHEN it: a
+    # clipped span-piece shorter than the token becomes the full token, so `Bearer env_01ABCDEF`
+    # grows to `<redacted><redacted>` (one longer). frame() re-fits each row to exactly `cols`
+    # so the client's fixed grid never wraps. Both directions are exercised; what the trim
     # itself can expose is covered by the test below.
     scr = PtyScreen(cols=24, rows=3)
     scr.feed(b"sk-abcdef0123456789 tail")  # long secret -> row shrinks
-    scr.feed(b"\r\nenv_ABCDEF")  # short id -> `env_<redacted>` lengthens past width
+    scr.feed(b"\r\nBearer env_01ABCDEF")  # clipped `Bearer ` piece -> row grows
     frame = scr.frame()
     assert all(len(row) == 24 for row in frame["rows"])  # exact width, every row
     joined = "".join(frame["rows"])
-    assert "sk-abcdef0123456789" not in joined and "env_ABCDEF" not in joined
+    assert "sk-abcdef0123456789" not in joined and "env_01ABCDEF" not in joined
     assert "<redacted>" in joined
 
 
-def test_frame_re_redacts_a_row_the_width_refit_sheared():
-    # #1359, safety invariant 4. `redact._ID_RE` ends in `\b`, so `cse_ABCDEFGH_zzz` is
-    # correctly NOT an identifier and is correctly left unmasked — but masking `env_ABCDEF`
-    # lengthens the row by 4, so trimming back to `cols` drops the `_zzz` and manufactures
-    # the word boundary the pattern needs, delivering a bare, matchable id to the browser.
-    # frame() now redacts the fitted row again, so the trim can no longer shear one into view.
+def test_frame_width_refit_cannot_shear_an_identifier():
+    # #1359, safety invariant 4. This row does NOT grow (no clipping overlap), so the width
+    # re-fit does not trim it and cannot manufacture the boundary a `\b`-anchored mask needs.
+    # `env_ABCDEF` masks to the neutral token (same length); `cse_ABCDEFGH_zzz` is correctly not
+    # an id (trailing `_zzz`) and stays readable. The growing-row shear is the test below.
     cols = 32
     row = "env_ABCDEF FAKE cse_ABCDEFGH_zzz"
-    assert len(row) == cols, "the row must fill the screen exactly for the shear to happen"
+    assert len(row) == cols
     scr = PtyScreen(cols=cols, rows=2)
     scr.feed(row.encode())
 
     delivered = scr.frame()["rows"][0]
     assert len(delivered) == cols
     assert not _BARE_ID_RE.search(delivered), f"the re-fit exposed an identifier: {delivered!r}"
-    assert delivered.startswith("env_<redacted>")  # the lengthening mask that causes the shear
-    # The second pass masked the sheared tail and the final trim cut INSIDE that mask, where
-    # a `<` sits in the position the id pattern needs an alphanumeric — so it terminates.
-    assert delivered.endswith("cse_<redacte"), delivered
+    assert delivered == "<redacted> FAKE cse_ABCDEFGH_zzz"
+
+
+def test_frame_re_redacts_a_row_the_width_refit_sheared():
+    # #1359, safety invariant 4. `_apply_spans` clips the `Bearer ` piece to the full token, so
+    # this 19-char row GROWS to `<redacted><redacted>` (20) and the re-fit trims it back to 19.
+    # The re-redact belt (`_fit_redacted_row`) runs on the shortened row so the trim cannot
+    # shear a bare identifier into the frame. Here the trim cuts inside a `<redacted>` token.
+    scr = PtyScreen(cols=19, rows=1)
+    scr.feed(b"Bearer env_01ABCDEF")
+    delivered = scr.frame()["rows"][0]
+    assert len(delivered) == 19
+    assert not _BARE_ID_RE.search(delivered), f"the re-fit exposed an identifier: {delivered!r}"
+    assert delivered == "<redacted><redacted"
 
 
 def test_frame_leaves_an_unshorn_row_to_the_single_redaction_pass():
