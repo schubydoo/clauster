@@ -268,7 +268,7 @@ jobs:
           # the same versions.
           version: v0.37.0
           # renovate: datasource=docker depName=moby/buildkit versioning=docker
-          driver-opts: image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
+          driver-opts: image=moby/buildkit:v0.33.0@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3
           # No binary cache in a publish pipeline: nothing for a poisoned cache to swap in,
           # and the pinned tools are fetched deterministically each run (zizmor).
           cache-binary: false
@@ -442,7 +442,7 @@ jobs:
           # the same versions.
           version: v0.37.0
           # renovate: datasource=docker depName=moby/buildkit versioning=docker
-          driver-opts: image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
+          driver-opts: image=moby/buildkit:v0.33.0@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3
           # No binary cache in a publish pipeline: nothing for a poisoned cache to swap in,
           # and the pinned tools are fetched deterministically each run (zizmor).
           cache-binary: false
