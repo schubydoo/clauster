@@ -2102,6 +2102,30 @@ async def test_manager_reattach_all_survives_a_junk_persisted_cursor(fake_claust
         await mgr.aclose()
 
 
+async def test_reattach_persist_round_trip_keeps_an_off_shape_session_uuid_on_disk(
+    fake_claustrum, tmp_path
+):
+    """#1419: the reattach→persist boot cycle must not erase an off-shape uuid from disk.
+
+    #1392's read-seam nulling combined with `reattach_all`'s closing `_persist` meant a
+    daemon-lost row whose uuid was off-shape lost it after ONE boot — the None was written
+    back over the only value an operator could have repaired. The bytes must now survive the
+    round trip verbatim, so the record still holds something to fix by hand.
+    """
+    fake = await fake_claustrum()
+    store = HostedStateStore(tmp_path)
+    bad = "--dangerously-skip-permissions"
+    old_id = "01GONEPROCESS00000000000"
+    store.save({old_id: {"project": "proj", "label": "hosted:proj", "claude_session_uuid": bad}})
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        await mgr.reattach_all(client)  # daemon-lost → CRASHED, then _persist writes back
+        assert mgr.get_instance(old_id).status is InstanceStatus.CRASHED
+        await mgr.aclose()
+    # The regression: this used to read None. The off-shape bytes are still on disk.
+    assert store.load()[old_id]["claude_session_uuid"] == bad
+
+
 def test_record_projects_instance_id():
     """``_record`` includes ``instance_id`` so a save doesn't drop it (#841)."""
     inst = RemoteControlInstance(
@@ -2264,43 +2288,64 @@ def test_a_junk_agent_start_ticks_never_reaches_the_model_on_either_path():
     assert HostedManager._degraded_row(_PID, big).agent_start_ticks == 2**63 - 1
 
 
-def test_a_junk_claude_session_uuid_never_reaches_the_model_on_either_path():
-    """The third of the family — the resume evidence, and the last field left asymmetric.
+def test_an_empty_or_non_string_claude_session_uuid_coerces_to_none_on_either_path():
+    """The empty/non-string half of the #1380 symmetry, kept unchanged by #1419.
 
     The salvage always normalized `""` away while the healthy path handed the raw value to
     pydantic, which accepts `""` for a `str | None` field. An empty uuid is `not None`, so it
     latched `HostedSession._capture_session_uuid` shut and the real id from the replayed init
     frame was discarded for the process lifetime — taking `--resume` with it. Left
     asymmetric, a record degrading on an unrelated field would ALSO drop a uuid the healthy
-    path kept, and `_persist` writes that loss to disk (#1380).
+    path kept, and `_persist` writes that loss to disk (#1380). #1419 KEEPS an off-shape
+    *non-empty* string (see the test below), but the empty-string and non-`str` cases must
+    still coerce to None on BOTH paths — and a None uuid is not usable.
     """
     for junk in ("", ["not-a-uuid"], 7, True, {}):
         record = {"project": "proj", "label": "hosted:proj", "claude_session_uuid": junk}
-        assert HostedManager._row_from_record(_PID, record).claude_session_uuid is None
-        assert HostedManager._degraded_row(_PID, record).claude_session_uuid is None
+        healthy = HostedManager._row_from_record(_PID, record)
+        degraded = HostedManager._degraded_row(_PID, record)
+        assert healthy.claude_session_uuid is None
+        assert degraded.claude_session_uuid is None
+        assert healthy.claude_session_uuid_usable is False
+        assert degraded.claude_session_uuid_usable is False
     uuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
     kept = {"project": "proj", "label": "hosted:proj", "claude_session_uuid": uuid}
     assert HostedManager._row_from_record(_PID, kept).claude_session_uuid == uuid
     assert HostedManager._degraded_row(_PID, kept).claude_session_uuid == uuid
+    assert HostedManager._row_from_record(_PID, kept).claude_session_uuid_usable is True
 
 
-def test_a_flag_shaped_persisted_session_uuid_never_reaches_the_model_on_either_path():
-    """#1392: non-empty was not enough — the value's only consumer is a `--resume` token.
+def test_an_off_shape_persisted_session_uuid_is_kept_but_not_usable_and_never_reaches_argv():
+    """#1419: keep the off-shape bytes on the record; refuse them at the executing seam.
 
-    `claude`'s `--resume [sessionId]` takes an *optional* value, so a flag-shaped string
-    there is parsed as a fresh FLAG. The record is reachable without code execution (an
+    #1392 dropped every string that failed the shape check at the persisted read, and
+    `reattach_all` ends in `_persist`, which wrote the None back — a daemon-lost row lost
+    the one thing an operator could repair by hand. #1419 reverses the read-seam nulling:
+    the bytes survive in the model (both mapping paths agree, exactly as they do for the
+    empty string), `claude_session_uuid_usable` reports them as NOT usable, and
+    `build_hosted_argv` still raises rather than putting a flag-shaped token next to
+    `--resume` (invariant 2). The record is reachable without code execution (an
     `ops restore` from a tampered backup), which is what makes it an untrusted input.
-    Both mapping paths must agree, exactly as they do for the empty string.
     """
     for junk in ("--dangerously-skip-permissions", "-p", "--", "a b", "a/b", "x" * 65):
         record = {"project": "proj", "label": "hosted:proj", "claude_session_uuid": junk}
-        assert HostedManager._row_from_record(_PID, record).claude_session_uuid is None
-        assert HostedManager._degraded_row(_PID, record).claude_session_uuid is None
-    # ...and the shape a live session actually carries still round-trips untouched.
+        healthy = HostedManager._row_from_record(_PID, record)
+        degraded = HostedManager._degraded_row(_PID, record)
+        # Kept verbatim on BOTH paths — the operator has something to repair.
+        assert healthy.claude_session_uuid == junk
+        assert degraded.claude_session_uuid == junk
+        # ...but reported as unusable, so the dashboard hides Resume for it.
+        assert healthy.claude_session_uuid_usable is False
+        assert degraded.claude_session_uuid_usable is False
+        # ...and it can never become an argv token: the executing seam raises.
+        with pytest.raises(HostedSessionError, match="unusable resume session id"):
+            build_hosted_argv(_BIN, permission_mode="default", resume_uuid=junk)
+    # ...and the shape a live session actually carries still round-trips untouched and usable.
     uuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
     kept = {"project": "proj", "label": "hosted:proj", "claude_session_uuid": uuid}
     assert HostedManager._row_from_record(_PID, kept).claude_session_uuid == uuid
     assert HostedManager._degraded_row(_PID, kept).claude_session_uuid == uuid
+    assert HostedManager._row_from_record(_PID, kept).claude_session_uuid_usable is True
 
 
 def test_a_refused_claude_session_uuid_is_named_not_typed_in_the_log(caplog) -> None:
@@ -2324,30 +2369,35 @@ def test_a_refused_claude_session_uuid_is_named_not_typed_in_the_log(caplog) -> 
     # string carries its own comma and would otherwise nest a parenthesis inside one.
     assert ": int;" in caplog.text and "empty string" not in caplog.text
 
-    # A non-empty string that fails the shape check is described by SHAPE AND LENGTH, never
-    # by its bytes (#1392, CodeQL "clear-text logging of sensitive information"). A session
-    # id is exactly the class `redact.py` masks, and the day this refusal fires on a real id
-    # is the day claude changed its format -- so a sanitized or truncated copy would not be
-    # a redaction, only a shorter leak. The length is safe and is what tells the operator
-    # whether the record holds a truncated id or something else entirely.
+    # An off-shape NON-EMPTY string is now KEPT at the read seam (#1419), so the read logs
+    # nothing about it — there is no lost resume evidence to warn about. It is refused
+    # instead at the argv seam, where `build_hosted_argv` describes it by SHAPE AND LENGTH,
+    # never by its bytes (#1392, CodeQL "clear-text logging of sensitive information"). A
+    # session id is exactly the class `redact.py` masks, and the day this refusal fires on a
+    # real id is the day claude changed its format -- so a sanitized or truncated copy would
+    # not be a redaction, only a shorter leak. The length is safe and is what tells the
+    # operator whether the record holds a truncated id or something else entirely.
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="clauster.hosted"):
-        HostedManager._row_from_record(_PID, {**record, "claude_session_uuid": "--rm\n-rf"})
-    assert "malformed, 8 chars" in caplog.text
-    assert "--rm" not in caplog.text  # not verbatim...
-    assert "\\n-rf" not in caplog.text  # ...and not repr-escaped either
+        kept = HostedManager._row_from_record(_PID, {**record, "claude_session_uuid": "--rm\n-rf"})
+    assert kept.claude_session_uuid == "--rm\n-rf"  # kept, not dropped
+    assert "claude_session_uuid" not in caplog.text  # ...and silently, no warning
+    with pytest.raises(HostedSessionError, match="unusable resume session id") as exc:
+        build_hosted_argv(_BIN, permission_mode="default", resume_uuid="--rm\n-rf")
+    assert "malformed, 8 chars" in str(exc.value)
+    assert "--rm" not in str(exc.value)  # not verbatim...
+    assert "\\n-rf" not in str(exc.value)  # ...and not repr-escaped either
 
     # Same for a secret-shaped value, which must not appear even in its MASKED form: the
     # mask is applied by `sanitize_line`, which strips ANSI and masks ids it recognises --
     # it is not a promise about a token whose format has just changed.
     secret = "-ghp_" + "a" * 36  # leading dash: fails the shape, so it IS described
-    caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="clauster.hosted"):
-        HostedManager._row_from_record(_PID, {**record, "claude_session_uuid": secret})
-    assert f"malformed, {len(secret)} chars" in caplog.text
-    assert secret not in caplog.text
-    assert "ghp_" not in caplog.text
-    assert "<redacted>" not in caplog.text  # nothing to redact -- nothing was copied
+    with pytest.raises(HostedSessionError, match="unusable resume session id") as exc:
+        build_hosted_argv(_BIN, permission_mode="default", resume_uuid=secret)
+    assert f"malformed, {len(secret)} chars" in str(exc.value)
+    assert secret not in str(exc.value)
+    assert "ghp_" not in str(exc.value)
+    assert "<redacted>" not in str(exc.value)  # nothing to redact -- nothing was copied
 
     # ...and a legitimate uuid says nothing at all.
     caplog.clear()
@@ -2717,12 +2767,13 @@ async def test_manager_reattach_orphan_without_a_usable_uuid_does_not_offer_resu
 ):
     """The twin of the test above, for the OTHER half of the dashboard's Resume gate.
 
-    The dashboard renders Resume on ``claude_session_uuid && project`` (dashboard.html),
+    The dashboard renders Resume on ``claude_session_uuid_usable && project`` (dashboard.html),
     but the orphan detail tested only ``project`` -- so a row that kept its project and
-    lost its uuid was told "Resume to recover" beside a button that is not rendered and an
-    endpoint that answers 409. #1381 fixed exactly that mismatch for the project half;
-    #1392 widened the set of dropped uuids from "empty or non-string" to "not
-    session-shaped", which is what makes the remaining half worth closing.
+    carries an unusable uuid was told "Resume to recover" beside a button that is not rendered
+    and an endpoint that answers 409. #1381 fixed exactly that mismatch for the project half;
+    #1419 keeps an off-shape uuid on the record (rather than #1392's drop) and gates the
+    detail on SHAPE via ``is_session_uuid``, which is what makes the remaining half worth
+    closing: the bytes survive for repair, but the orphan detail names only Kill.
     """
     fake = await fake_claustrum()
     store = HostedStateStore(tmp_path)
@@ -2746,7 +2797,10 @@ async def test_manager_reattach_orphan_without_a_usable_uuid_does_not_offer_resu
         inst = mgr.get_instance("01GONEPROCESS00000000000")
         assert inst.is_orphan is True
         assert inst.project == "proj"  # the half that survived
-        assert inst.claude_session_uuid is None  # ...and the half that did not
+        # The uuid is KEPT for repair (#1419), not dropped...
+        assert inst.claude_session_uuid == "--dangerously-skip-permissions"
+        assert inst.claude_session_uuid_usable is False  # ...but it is not usable...
+        # ...so the orphan detail names only Kill, never Resume.
         assert "Kill to clean up" in (inst.error_detail or "")
         assert "Resume" not in (inst.error_detail or "")
 
@@ -2759,23 +2813,29 @@ async def test_manager_reattach_orphan_without_a_usable_uuid_does_not_offer_resu
 async def test_manager_reattach_never_takes_the_session_uuid_from_the_raw_record(
     fake_claustrum, tmp_path, bad_uuid
 ):
-    """A junk persisted uuid must not reach the live session (invariant 2).
+    """A junk or off-shape persisted uuid must not latch the live session shut.
 
     ``reattach_all`` used to read ``claude_session_uuid`` straight out of the record,
     bypassing the mapper's type check and the model alike (assignments are
     unvalidated). A truthy non-string then latched ``_capture_session_uuid`` shut — the
     real id from the replayed init frame was discarded for the process lifetime — and
     reached ``build_hosted_argv``'s ``--resume``, i.e. a rejected persisted value in
-    spawn argv.
+    spawn argv. The seam now pre-sets the session uuid only when the persisted value is a
+    usable session id (``is_session_uuid``), so for every shape below the latch stays OPEN
+    and a found-daemon row re-latches the real id from its replayed init frame.
 
-    Parametrized over the empty string too (#1380): mechanically both now traverse identical
-    code, but ``""`` is the shape that ACTUALLY latched the healthy path shut (pydantic
-    accepts it for a ``str | None`` field, so it never degraded the row), and this is the
-    only end-to-end pin of the whole pipeline — record, reattach, latch, init frame, persist.
+    Parametrized over the empty string too (#1380): mechanically all three now traverse
+    identical code, but ``""`` is the shape that ACTUALLY latched the healthy path shut
+    (pydantic accepts it for a ``str | None`` field, so it never degraded the row), and this
+    is the only end-to-end pin of the whole pipeline — record, reattach, latch, init frame,
+    persist.
 
     ``--dangerously-skip-permissions`` is the #1392 shape: a *string*, so #1380's type check
     let it through, and flag-shaped, so ``claude``'s optional-valued ``--resume`` would read
-    it as a fresh flag instead of as the session id.
+    it as a fresh flag instead of as the session id. #1419 KEEPS that value on the record for
+    an operator to repair, but leaves it off the live session, so this found-daemon row still
+    recovers the real id — the bytes-kept behaviour is pinned in the coercion + round-trip
+    tests above.
     """
     fake = await fake_claustrum()
     store = HostedStateStore(tmp_path)
@@ -3106,13 +3166,15 @@ async def test_manager_resume_after_reattach_loss(fake_claustrum, tmp_path):
 async def test_manager_resume_never_puts_a_flag_shaped_persisted_uuid_on_the_argv(
     fake_claustrum, tmp_path
 ):
-    """#1392, end to end: the token reaches neither `--resume` nor the daemon at all.
+    """#1392/#1419, end to end: the token reaches neither `--resume` nor the daemon at all.
 
     Same setup as `test_manager_resume_after_reattach_loss` — a record the daemon has lost,
     resumable purely from its persisted uuid — with the one field an `ops restore` from a
-    tampered backup could carry. `_as_session_uuid` drops it on the way in, so the resume
-    fails closed with "no captured session uuid" rather than spawning; the argv assertion
-    is what would catch a future path that skipped the mapper.
+    tampered backup could carry. #1419 KEEPS the off-shape bytes on the row (so an operator
+    can repair them), but the executing seam is unchanged: `build_hosted_argv` refuses the
+    off-shape `--resume` slot, so the resume fails closed with "unusable resume session id"
+    and nothing is spawned. The empty-argv assertion is what would catch a future path that
+    skipped that seam.
     """
     fake = await fake_claustrum()
     store = HostedStateStore(tmp_path)
@@ -3122,8 +3184,10 @@ async def test_manager_resume_never_puts_a_flag_shaped_persisted_uuid_on_the_arg
     async with ClaustrumClient(fake.socket_path, fake.token) as client:
         mgr = HostedManager(store)
         await mgr.reattach_all(client)
-        assert mgr.get_instance(old_id).claude_session_uuid is None  # dropped, not smuggled
-        with pytest.raises(HostedSessionError, match="no captured session uuid"):
+        row = mgr.get_instance(old_id)
+        assert row.claude_session_uuid == bad  # kept for repair, not dropped
+        assert row.claude_session_uuid_usable is False  # ...but not usable
+        with pytest.raises(HostedSessionError, match="unusable resume session id"):
             await mgr.resume(client, old_id, cwd=str(tmp_path), claude_binary=_BIN)
         await mgr.aclose()
     # Nothing was spawned at all, so the token reached no argv. Asserted as the empty list

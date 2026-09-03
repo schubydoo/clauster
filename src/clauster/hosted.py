@@ -37,7 +37,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable, Collection, Mapping
@@ -53,7 +52,12 @@ from . import procutil
 from .claustrum_client import ClaustrumClient, ClaustrumError, ProcessStream, _Subscriber
 from .config import INHERIT_PERMISSION_MODE, PermissionMode
 from .hosted_events import GapRangeEvent, HostedEvent, StdinFrame
-from .models import InstanceStatus, RemoteControlInstance, new_instance_id
+from .models import (
+    InstanceStatus,
+    RemoteControlInstance,
+    is_session_uuid,
+    new_instance_id,
+)
 from .redact import sanitize_line
 from .state import KeyedStore
 
@@ -101,26 +105,6 @@ _REHYDRATE_MAX_TURNS = 200
 # forwarded — an unexpected role must not be able to impersonate a control frame.
 _REHYDRATE_ROLES: frozenset[str] = frozenset({"user", "assistant", "system"})
 
-# The shape a `claude_session_uuid` must have before it may become the `--resume` value
-# token. `claude`'s `--resume [sessionId]` takes an *optional* value, so a flag-shaped
-# token in that slot is read as a fresh FLAG rather than consumed as data — a persisted
-# string would then contribute an ARGUMENT to the spawn argv, which invariant 2 forbids
-# (#1392). The leading-alnum class is what closes that; the body class also rules out
-# whitespace, path separators and control characters, and the 64-char cap matches the
-# `String(64)` column the value round-trips through. `\A`/`\Z`, never `^`/`$`: `$` also
-# matches *before* a trailing newline, so `$` would admit "uuid\n".
-#
-# Deliberately a SHAPE, not the 8-4-4-4-12 format `runner._SESSION_UUID_RE` and
-# `supervisor.valid_session_id` demand — hence the different name. Those two guard an
-# *operator-supplied* id that must name a transcript file on disk, so they can insist on
-# claude's current filename format. This one guards an id claude *itself* minted and
-# handed us in an init frame; re-specifying the format here would silently cost a whole
-# session its resume the day claude changes it (a ULID, say). Keeping the token out of
-# the flag namespace is the whole job. Not format-*independence*, though: the length cap
-# is a narrower bet in the same direction, so an id longer than the column could hold
-# would be dropped on reload too. Widen the cap with the column if that day comes.
-_SESSION_UUID_SHAPE_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
-
 
 class HostedSessionError(ClaustrumError):
     """Raised when a hosted-session operation is invalid for the current state."""
@@ -156,14 +140,6 @@ def _refused_uuid_shape(value: Any) -> str:
     return "empty string" if not value else f"malformed, {len(value)} chars"
 
 
-def _is_session_uuid(value: Any) -> TypeGuard[str]:
-    """Report whether ``value`` is a str shaped like a session id.
-
-    The shape, and why it is this one, is :data:`_SESSION_UUID_SHAPE_RE`.
-    """
-    return isinstance(value, str) and _SESSION_UUID_SHAPE_RE.match(value) is not None
-
-
 def build_hosted_argv(
     claude_binary: str,
     *,
@@ -176,10 +152,14 @@ def build_hosted_argv(
     spawn is the caller's job). ``resume_uuid`` adds ``--resume <uuid>`` for
     deterministic conversation resume (CL-7); omit it for a fresh session.
 
-    ``resume_uuid`` is shape-checked *here* as well as where it is read off a persisted
-    record (:func:`_as_session_uuid`), because this is the last seam before the value
-    becomes an argv token: a future path that reaches the spawn without going through the
-    mapper still cannot put a flag-shaped string next to ``--resume`` (#1392). A refusal
+    ``resume_uuid`` is shape-checked *here* — the last seam before the value becomes an
+    argv token, and the ONE place a refusal blocks execution (#1392, #1419). The persisted
+    read (:func:`_as_session_uuid`) deliberately KEEPS an off-shape non-empty value so an
+    operator has something to repair by hand; the display gate
+    (:attr:`~clauster.models.RemoteControlInstance.claude_session_uuid_usable`) then hides
+    Resume for it. So a future path that reaches the spawn without going through those two
+    still cannot put a flag-shaped string next to ``--resume``, because this check shares
+    the :func:`~clauster.models.is_session_uuid` predicate with the display gate. A refusal
     **raises** :class:`HostedSessionError` rather than dropping the flag — dropping it
     would silently start a *fresh* conversation under a name the operator asked to
     resume, and the resume route already maps this error to 409. The refusal is described
@@ -204,7 +184,7 @@ def build_hosted_argv(
     if permission_mode != INHERIT_PERMISSION_MODE:
         argv += ["--permission-mode", permission_mode]
     if resume_uuid is not None:
-        if not _is_session_uuid(resume_uuid):
+        if not is_session_uuid(resume_uuid):
             raise HostedSessionError(
                 f"refusing an unusable resume session id: {_refused_uuid_shape(resume_uuid)}"
             )
@@ -903,14 +883,18 @@ class HostedSession:
     def _capture_session_uuid(self, frame: dict[str, Any]) -> None:
         """Latch the first ``session_id`` seen (drives ``--resume``); never overwrite it.
 
-        Deliberately NOT shape-checked (:func:`_is_session_uuid`), unlike the persisted
-        read and the argv seam (#1392). This is the value's *source* — claude's own init
-        frame — so refusing it here would mean capturing nothing at all the day claude
-        changes its id format, and a session that simply has no Resume is the silent
-        failure invariant 1 exists to prevent. Refusing at the argv seam instead makes
-        that same day produce a named 409 the operator can read. The latch cannot strand
-        a good id behind a bad one either: every frame of one session carries the same
-        ``session_id``, so "off-shape now, well-formed later" is not a state that occurs.
+        Deliberately NOT shape-checked (:func:`~clauster.models.is_session_uuid`), unlike
+        the argv seam and the display gate (#1392, #1419). This is the value's *source* —
+        claude's own init frame — so refusing it here would mean capturing nothing at all
+        the day claude changes its id format, and a session that simply has no Resume is the
+        silent failure invariant 1 exists to prevent. The argv seam instead makes that same
+        day produce a named 409 the operator can read, and
+        :attr:`~clauster.models.RemoteControlInstance.claude_session_uuid_usable` hides the
+        Resume button rather than offering one that only 409s — the SAME behaviour a
+        persisted off-shape uuid now gets, so a live-captured value and a reloaded one are
+        consistent. The latch cannot strand a good id behind a bad one either: every frame
+        of one session carries the same ``session_id``, so "off-shape now, well-formed
+        later" is not a state that occurs.
         """
         if self.claude_session_uuid is not None:
             return
@@ -1462,15 +1446,19 @@ class HostedManager:
                 "",
                 on_permission_needed=self._on_permission_needed,
             )
-            # From the rebuilt row, NOT the raw record: `_instance_from_record` is the
-            # one place a persisted value is type-checked, and this assignment is not
-            # validated (no `validate_assignment` on the model). Reading `fields` here
-            # let a non-string uuid past the mapper, where it (a) latched
-            # `_capture_session_uuid` shut so the real id from the replayed init frame
-            # was discarded for the process lifetime, and (b) reached `--resume` in
-            # `build_hosted_argv` — a persisted value the model rejected arriving in
-            # spawn argv, which invariant 2 forbids.
-            session.claude_session_uuid = instance.claude_session_uuid
+            # Pre-set the live session's uuid ONLY when the persisted value is a usable
+            # session id, so the `_capture_session_uuid` latch stays OPEN for anything else.
+            # An empty / non-string value never reached the session (the mapper nulled it),
+            # and #1419 keeps an off-shape NON-empty value on the record for repair — but a
+            # found-daemon row must still re-latch the real id from its replayed init frame,
+            # exactly as it did before #1419, so an off-shape (or absent) value is left off
+            # the session here. The record keeps the bytes regardless (`_synced` only copies
+            # a truthy session uuid back), and a later respawn is refused at the argv seam:
+            # `build_hosted_argv` rejects the off-shape `--resume` slot. Reading the rebuilt
+            # row, never the raw `fields`, keeps this the one place a persisted value is
+            # normalized (the assignment is unvalidated — no `validate_assignment`).
+            if is_session_uuid(instance.claude_session_uuid):
+                session.claude_session_uuid = instance.claude_session_uuid
             # A loader, not a pre-read list: reattach runs it AFTER the RPC has fixed
             # the daemon's lastSeq. Reading first would suppress frames emitted during
             # the read — see HostedSession._rehydrate.
@@ -1501,13 +1489,15 @@ class HostedManager:
                     # the offer is dropped and only the action that works is named.
                     #
                     # Both halves of the dashboard's gate, not just `project`: it renders
-                    # Resume on `claude_session_uuid && project`, and a row can lose the uuid
-                    # the same per-field way — `_as_session_uuid` drops one that is not
-                    # session-shaped (#1392), which widened that set well past the empty
-                    # string. Testing one half named an action the other half hid.
+                    # Resume on `claude_session_uuid_usable && project`, and a row can lose
+                    # the uuid the same per-field way. `_as_session_uuid` now KEEPS an
+                    # off-shape non-empty uuid (#1419), so the mirror tests it for SHAPE with
+                    # the same `is_session_uuid` predicate the display gate uses — not
+                    # truthiness, which would name Resume for a value `build_hosted_argv`
+                    # would only 409 on. Testing one half named an action the other half hid.
                     instance.error_detail = (
                         "survived a daemon restart — Resume to recover, or Kill"
-                        if instance.project and instance.claude_session_uuid
+                        if instance.project and is_session_uuid(instance.claude_session_uuid)
                         else "survived a daemon restart — Kill to clean up"
                     )
                 else:
@@ -1918,31 +1908,29 @@ def _as_proc_start(value: Any) -> float | None:
 
 
 def _as_session_uuid(value: Any) -> str | None:
-    """Coerce a persisted ``claude_session_uuid`` to a session-id-shaped str, else ``None``.
+    """Coerce a persisted ``claude_session_uuid`` to a non-empty str, else ``None``.
 
-    Used by BOTH mapping paths so they cannot disagree about the same bytes — the third of
-    the :func:`_as_pid` / :func:`_as_proc_start` family, and the last evidence field that was
-    not symmetric (#1380). The salvage path always normalized ``""`` away while the healthy
-    path handed the raw value to pydantic, which accepts ``""`` for a ``str | None`` field.
-    An empty uuid is ``not None``, so it latched :meth:`HostedSession._capture_session_uuid`
-    shut and the real id from the replayed init frame was discarded for the process lifetime
-    — taking ``--resume`` with it.
+    Normalizes ``""`` and any non-``str`` to ``None`` (the #1380 symmetry the sibling
+    :func:`_as_pid` / :func:`_as_proc_start` family shares), and otherwise KEEPS the bytes
+    exactly as stored — off-shape ones included (#1419). The ``""``/non-``str`` half is
+    load-bearing: an empty uuid is ``not None``, so it latched
+    :meth:`HostedSession._capture_session_uuid` shut and the real id from the replayed
+    init frame was discarded for the process lifetime — taking ``--resume`` with it.
 
-    Stricter than pydantic on purpose, for the same reason as the siblings: lax validation
-    lets the healthy path KEEP a value the salvage path drops. ``_capture_session_uuid``
-    stores only a non-empty ``str``, so nothing legitimate is refused; a refusal is logged,
-    because ``_persist`` writes the ``None`` back and a resume the row could once have
-    offered disappears with nothing else to explain it.
-
-    Non-empty is not enough on its own (#1392): the value's *executing* consumer is
-    :func:`build_hosted_argv`'s ``--resume`` slot (the rest — the transcript lookup, the
-    MCP summary, the dashboard's Resume gate — only read it), so it must also be *shaped*
-    like a session id. See :data:`_SESSION_UUID_SHAPE_RE` for why a flag-shaped token
-    there is an argv-injection seam rather than a cosmetic complaint.
-    ``ops restore`` from a tampered backup reaches this function with no code execution,
-    which is what makes the record an untrusted input in the first place.
+    Keeping an off-shape non-empty value is the #1419 reversal of #1392's read-seam nulling.
+    #1392 dropped every string that failed :func:`~clauster.models.is_session_uuid` here,
+    and ``reattach_all`` ends in ``_persist``, which then wrote the ``None`` back — so a
+    daemon-lost row lost the one thing an operator could have repaired by hand, with only a
+    redacted log line as a trace. The shape check now lives at the two seams that act on the
+    value: :func:`build_hosted_argv` still refuses an off-shape ``--resume`` slot and raises
+    (the security guard is unchanged — invariant 2 holds), and
+    :attr:`~clauster.models.RemoteControlInstance.claude_session_uuid_usable` hides the
+    dashboard's Resume button for it. So the bytes survive on disk for repair without ever
+    becoming an argv token. ``ops restore`` from a tampered backup reaches this function
+    with no code execution, which is what makes the record an untrusted input — but the two
+    executing/display seams are where that input is refused, not this read.
     """
-    if _is_session_uuid(value):
+    if isinstance(value, str) and value:
         return value
     if value is not None:
         logger.warning(

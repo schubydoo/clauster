@@ -808,7 +808,7 @@
       // Whether the Recent group actually holds a *resumable* item, so the label doesn't
       // imply resume for a set of ended background agents (which are never resumable):
       // ended bridges are resumable by definition (isResumable), ended hosted only with
-      // BOTH a claude_session_uuid and a project, ended detached agents never. (#333
+      // BOTH a usable claude_session_uuid and a project, ended detached agents never. (#333
       // Option B)
       hasResumable() {
         // "resumable" in the label must mean resumable NOW: a group whose every bridge is
@@ -817,10 +817,12 @@
         // `h.project` alongside the uuid for the same reason (#1381): a hosted row whose
         // saved record lost its project can never respawn, the row offers no Resume button,
         // and counting it here would put "/ resumable" on a group that has none. The uuid
-        // half is the same shape and this is the fifth mirror of that gate — #1392 widened
-        // the set of rows that lose it, so all five must keep testing both halves.
+        // half is the same shape and this is the fifth mirror of that gate — #1419 keeps an
+        // off-shape uuid on the record, so all five test `claude_session_uuid_usable` (the
+        // shape-checked signal), not truthiness, or the label would promise a Resume the row
+        // does not offer.
         return this.endedBridges().some((i) => !this.resumeBlockedReason(i.rk))
-          || this.endedHosted().some((h) => h.claude_session_uuid && h.project);
+          || this.endedHosted().some((h) => h.claude_session_uuid_usable && h.project);
       },
       // Status -> left-rail colour: the rail encodes liveness/attention, NOT mode (mode is
       // already the badge). live=green · starting=azure · attention=yellow · ended=grey.
@@ -5028,21 +5030,22 @@
         // Resume button that is not rendered is worse than the 409 the button used to
         // produce, so a project-less row is told WHY instead — this panel is the one place
         // that already surfaces `error_detail`, which makes it the right home for the reason.
-        // Every combination, not just two of three (#1392). The uuid half can be missing on
-        // its own now — `_as_session_uuid` drops a value that is not session-shaped, and a
-        // session that ended before its init frame never captured one at all — so a row with
-        // a project and no uuid used to fall through both branches and explain nothing,
-        // which is the "fails opaquely" failure the row chip exists to prevent. Four branches,
-        // not three: the halves are salvaged independently, so "neither" is a real state.
+        // Every combination, not just two of three (#1392). The uuid half can be off-shape
+        // on its own now — the record keeps a non-session-shaped value (#1419) but
+        // `claude_session_uuid_usable` reports it as unusable, and a session that ended
+        // before its init frame never captured one at all — so a row with a project and no
+        // usable uuid used to fall through both branches and explain nothing, which is the
+        // "fails opaquely" failure the row chip exists to prevent. Four branches, not three:
+        // the halves are salvaged independently, so "neither" is a real state.
         let resume = "";
-        if (h && h.claude_session_uuid && h.project) {
+        if (h && h.claude_session_uuid_usable && h.project) {
           resume = " Use Resume above to continue it.";
         } else if (h && h.project) {
           // No follow-up action named, for the reason the chip gives (dashboard.html): on an
           // orphan row this sentence lands beside one telling the operator to Kill, and two
           // consecutive sentences naming different actions is worse than naming none.
           resume = " It cannot be resumed: no usable conversation id was saved for it.";
-        } else if (h && h.claude_session_uuid) {
+        } else if (h && h.claude_session_uuid_usable) {
           resume = " It cannot be resumed: its project is unknown, so there is nowhere to" +
             " respawn it. Start a new session in the right project instead.";
         } else if (h) {
