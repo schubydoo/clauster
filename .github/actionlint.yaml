@@ -13,11 +13,15 @@
 # format ..."), so each needs its own ignore pattern below — one does not match the
 # other.
 #
-# ⚠️ Suppressing the format errors also silences actionlint's local-action call checks
-# for the `$/` sites (input-name typos, missing required inputs) and its
-# reusable-workflow resolution check — both gated on the `./` prefix internally.
-# `tests/test_workflow_local_actions.py` re-asserts exactly that validation over `$/`
-# and `./` alike, so the coverage is moved, not lost.
+# ⚠️ Suppressing the format errors also silences actionlint's checks that are gated on
+# the `./` prefix internally: for a composite-action `$/` site, its call validation
+# (input-name typos, missing required inputs); for the reusable-workflow `$/` call, its
+# file resolution AND its workflow_call input/secret validation.
+# `tests/test_workflow_local_actions.py` re-asserts the step-level input validation and
+# the job-level file resolution over `$/` and `./` alike. It does NOT re-assert the
+# job-level `with:`/`secrets:` check — safe only while build-binaries.yml declares a bare
+# `workflow_call:` and the call passes none. Extend the job-level test if that call gains
+# inputs or secrets.
 #
 # ⚠️ Remove this file (and close clauster issue 1361) once rhysd/actionlint issue 711
 # ships `$/` support and the pinned actionlint is bumped past it.

@@ -261,8 +261,9 @@ jobs:
           version: 0.23.0
           # Download the knope binary with the clauster-ci App token, not the
           # default GITHUB_TOKEN. The shared github-actions installation rate
-          # limit was exhausted by concurrent runs and 403'd the release-asset
-          # fetch, which blocked the release PR refresh (2026-09-03).
+          # limit was exhausted by concurrent runs and 403'd the same release-asset
+          # fetch in knope-prepare on 2026-09-03. The same limit can stop a
+          # publish here.
           github-token: ${{ steps.app-token.outputs.token }}
       # knope creates the draft, uploads dist/release-assets/*, and publishes. The
       # App token (not GITHUB_TOKEN) is what lets the published tag trigger
