@@ -431,8 +431,9 @@ normally Clauster reattaches to them at startup. One that was orphaned
 instead is cleaned up with:
 
 ```sh
-clauster keepers               # list orphaned pty keepers (no project card)
-clauster keepers --kill <pid>  # stop one by its keeper PID
+clauster keepers                      # list orphaned pty keepers (no project card)
+clauster keepers --kill <pid>         # stop one by its keeper PID
+clauster keepers --kill <pid> --force # stop a keeper still on a project card (recovery path)
 ```
 
 **Mechanism:** [`clauster keepers`](reference/cli.md#clauster-keepers-stop-an-orphaned-pty-keeper)

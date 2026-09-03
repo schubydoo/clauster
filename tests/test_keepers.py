@@ -512,3 +512,57 @@ def test_cli_kill_stops_an_orphan(tmp_path, capsys):
             proc.wait(timeout=5)
         except (OSError, subprocess.TimeoutExpired):
             pass
+
+
+def test_cli_force_kill_stops_a_carded_keeper(tmp_path, capsys):
+    # The recovery path (#1420): a keeper `_cleanup_keeper` spared on a still-carded project
+    # is refused by the orphan sweep (positive control below), but `--force` reaches it after
+    # the same PID-reuse re-verify. Without this the keeper is unreachable by every automated
+    # path and can only be killed by hand.
+    from clauster.state import StateStore
+
+    cfg = _config(tmp_path)
+    # The keeper's project ("alpha") is a current card, so the orphan sweep hides it.
+    StateStore(tmp_path / "state").save({"alpha": {"label": "alpha"}})
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    sidecar = _sidecar(tmp_path / "state" / "logs", "alpha", keeper_pid=proc.pid)
+    try:
+        assert main(["keepers", "-c", str(cfg), "--kill", str(proc.pid)]) == 2  # carded → refused
+        capsys.readouterr()
+        rc = main(["keepers", "-c", str(cfg), "--kill", str(proc.pid), "--force"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "stopped keeper" in out and "alpha" in out
+        assert procutil.proc_create_time(proc.pid) is None  # actually gone
+        assert not sidecar.exists()  # stale sidecar removed
+    finally:
+        try:
+            proc.kill()
+            proc.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+def test_cli_force_kill_still_refuses_a_dead_pid(tmp_path, capsys):
+    # `--force` overrides the orphan filter, NOT the liveness gate: a dead pid has nothing to
+    # kill and must still be refused rather than acted on.
+    cfg = _config(tmp_path)
+    _sidecar(tmp_path / "state" / "logs", "alpha", keeper_pid=_DEAD_PID)
+    rc = main(["keepers", "-c", str(cfg), "--kill", str(_DEAD_PID), "--force"])
+    assert rc == 2 and "refusing to kill" in capsys.readouterr().err
+
+
+def test_cli_force_without_kill_is_refused(tmp_path, capsys):
+    cfg = _config(tmp_path)
+    rc = main(["keepers", "-c", str(cfg), "--force"])
+    assert rc == 2 and "--force applies only with --kill" in capsys.readouterr().err
+
+
+def test_cli_force_kill_reports_failure_when_gate_refuses(tmp_path, capsys, monkeypatch):
+    # The SIGKILL is still gated by stop_keeper's PID-reuse re-verify; a refusal surfaces as a
+    # failure (exit 1), never a silent success.
+    cfg = _config(tmp_path)
+    _sidecar(tmp_path / "state" / "logs", "alpha", keeper_pid=os.getpid())
+    monkeypatch.setattr(pty_keeper, "stop_keeper", lambda pid, **kw: False)
+    rc = main(["keepers", "-c", str(cfg), "--kill", str(os.getpid()), "--force"])
+    assert rc == 1 and "failed to stop" in capsys.readouterr().err

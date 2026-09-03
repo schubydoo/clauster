@@ -182,6 +182,14 @@ def main(argv: list[str] | None = None) -> int:
         metavar="PID",
         help="stop the orphaned keeper with this keeper PID (refuses a carded keeper)",
     )
+    keepers_p.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "with --kill, stop a live keeper even on a still-carded project (after the "
+            "same PID-reuse checks) — the recovery path for a keeper the normal cleanup spared"
+        ),
+    )
 
     usage_p = sub.add_parser("usage", help="token + approx cost summary for a session transcript")
     usage_p.add_argument("transcript", help="path to a session transcript .jsonl")
@@ -337,7 +345,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "reap-environments":
         return _reap_environments(args.config, args.archive, args.force_delete)
     if args.command == "keepers":
-        return _keepers(args.config, args.kill)
+        return _keepers(args.config, args.kill, force=args.force)
     if args.command == "usage":
         return _usage(args.transcript)
     if args.command == "config":
@@ -1179,16 +1187,64 @@ def _reap_environments(config_path: str | None, archive: bool, force_delete: boo
     return 0
 
 
-def _keepers(config_path: str | None, kill_pid: int | None) -> int:
+def _stop_keeper_and_clear(kill_pid: int, target: pty_keeper.KeeperInfo, *, label: str) -> int:
+    """Stop one discovered keeper by its recorded identity, drop its sidecar, and report.
+
+    Shared by the orphan sweep and the ``--force`` override (#301, #1420). The SIGKILL is
+    gated inside :func:`pty_keeper.stop_keeper` by the same PID-reuse re-verify either way,
+    so neither caller can take down a stranger — only the keeper this PID still names.
+    """
+    if not pty_keeper.stop_keeper(
+        kill_pid,
+        expect_create_time=target.keeper_create_time,
+        expect_start_ticks=target.keeper_start_ticks,
+    ):
+        print(
+            f"clauster: failed to stop keeper {kill_pid} "
+            "(it may have exited or its PID was reused)",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        target.sidecar.unlink()  # drop the now-stale sidecar so it stops being listed
+    except OSError:
+        pass
+    print(f"clauster: stopped {label}keeper {kill_pid} (project {target.project or '?'})")
+    return 0
+
+
+def _keepers(config_path: str | None, kill_pid: int | None, *, force: bool = False) -> int:
     """List orphaned pty keepers, or stop one by keeper PID (#301).
 
     An orphan is a *live* keeper whose sidecar belongs to no current project card
     (e.g. its project was removed), so no dashboard row can show or stop it.
     ``--kill`` refuses any PID that isn't a current orphan — it never touches a
     keeper still attached to a card.
+
+    ``--force`` is the recovery path (#1420) for a keeper that ``runner._cleanup_keeper``
+    spared on a still-carded project: the row stays STOPPED-but-carded, so the orphan sweep
+    hides it and every other automated stop refuses it. ``--force`` reaches it by matching
+    the live keeper directly, past the orphan filter — the identity re-verify still gates
+    the kill, so it only ever stops a keeper this PID still names.
     """
     config = _load_or_exit(config_path)
     log_dir = (config.state_dir / "logs").expanduser()
+    if force and kill_pid is None:
+        print("clauster: --force applies only with --kill <pid>", file=sys.stderr)
+        return 2
+    if kill_pid is not None and force:
+        target = next(
+            (k for k in pty_keeper.iter_keepers(log_dir) if k.alive and k.keeper_pid == kill_pid),
+            None,
+        )
+        if target is None:
+            print(
+                f"clauster: no live keeper with pid {kill_pid} — already gone or not a "
+                "keeper; refusing to kill.",
+                file=sys.stderr,
+            )
+            return 2
+        return _stop_keeper_and_clear(kill_pid, target, label="")
     # The authoritative card set lives in the DB now. The flat state.json is renamed to
     # *.imported after the one-time JSON->DB migration, so reading it directly would see
     # an EMPTY card set and mislabel every live keeper — including carded ones — as an
@@ -1215,27 +1271,12 @@ def _keepers(config_path: str | None, kill_pid: int | None) -> int:
         if target is None:
             print(
                 f"clauster: no orphaned keeper with pid {kill_pid} — it may be carded, "
-                "already gone, or not a keeper; refusing to kill.",
+                "already gone, or not a keeper; refusing to kill. Pass --force to stop a "
+                "still-carded keeper.",
                 file=sys.stderr,
             )
             return 2
-        if not pty_keeper.stop_keeper(
-            kill_pid,
-            expect_create_time=target.keeper_create_time,
-            expect_start_ticks=target.keeper_start_ticks,
-        ):
-            print(
-                f"clauster: failed to stop keeper {kill_pid} "
-                "(it may have exited or its PID was reused)",
-                file=sys.stderr,
-            )
-            return 1
-        try:
-            target.sidecar.unlink()  # drop the now-stale sidecar so it stops being listed
-        except OSError:
-            pass
-        print(f"clauster: stopped orphaned keeper {kill_pid} (project {target.project or '?'})")
-        return 0
+        return _stop_keeper_and_clear(kill_pid, target, label="orphaned ")
     if not orphans:
         print("clauster: no orphaned keepers")
         return 0
