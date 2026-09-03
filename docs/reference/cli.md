@@ -139,11 +139,21 @@ live keeper whose sidecar belongs to no current card):
 ```sh
 clauster keepers -c /etc/clauster/clauster.yml             # list orphaned keepers
 clauster keepers -c /etc/clauster/clauster.yml --kill 12345 # stop one by keeper PID
+clauster keepers -c /etc/clauster/clauster.yml --kill 12345 --force # stop a still-carded keeper
 ```
 
 `--kill` refuses any PID that isn't a current orphan, so it can never take down a
 keeper still attached to a card. On success it stops the keeper (and its bridge
 subtree) and removes the stale sidecar.
+
+`--kill … --force` handles a rarer case. The normal stop can leave a keeper running on a
+project whose card still exists. This happens when the identity check cannot confirm the
+PID, so clauster spares the keeper rather than risk killing a recycled PID. The orphan
+list hides such a keeper, so plain `--kill` refuses it. `--force` stops it by matching the
+live keeper directly, after the same PID-reuse identity check. It never hard-kills a
+process that this PID no longer names. `--force` also stops a healthy carded keeper, so
+use it only on a keeper you know is stranded. After the keeper stops, `forget` accepts the
+row, because the keeper is no longer live.
 
 ## `clauster deps` — inspect and manage optional extras {#clauster-deps-inspect-and-manage-optional-extras}
 
