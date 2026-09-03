@@ -258,17 +258,18 @@ async def test_spawn_then_never_listens_times_out(make_daemon, monkeypatch):
     # so the connect poll runs and hits the intended never-accepted timeout in the normal case.
     daemon = make_daemon(spawn_timeout_seconds=3.0 if sys.platform == "win32" else 0.5)
 
-    # On POSIX the launcher detaches instantly, so this deterministically hits the never-accepted
-    # poll timeout (DaemonUnreachable). On Windows the launcher's own detach bounds the budget, so
-    # an unusually slow detach can instead surface as DaemonSpawnError ("did not detach") — both
-    # are the intended fail-closed outcome, so accept either there rather than depend on which
-    # timeout fires first (a fixed budget can't make that deterministic; the exception tuple can).
+    # The launcher and the connect poll share one budget (see _connect_or_spawn), so which
+    # timeout fires depends only on whether the fake detaches before the budget runs out.
+    # A fast detach surfaces the connect poll's "never accepted" (DaemonUnreachable); a slow
+    # one — observed on a loaded macOS runner, and possible on Windows under the same load —
+    # trips the launcher's own "did not detach" (DaemonSpawnError) first. Both are the intended
+    # fail-closed outcome for a daemon that never binds, so pin THAT contract on every platform,
+    # not which timeout won the race: a fixed budget can't make that deterministic, but the two
+    # recognized failure messages can.
     with pytest.raises((DaemonUnreachable, DaemonSpawnError)):
         await daemon.ensure()
-    if sys.platform == "win32":
-        assert daemon.status()["error"]
-    else:
-        assert "never accepted" in (daemon.status()["error"] or "")
+    error = daemon.status()["error"] or ""
+    assert "never accepted" in error or "did not detach" in error
 
 
 async def test_spawn_launcher_hang_times_out(make_daemon, monkeypatch):
