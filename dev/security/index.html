@@ -2122,7 +2122,10 @@ depends on them.</p>
 <li><strong>ID redaction (primary guarantee).</strong> Masks <code>env_</code> / <code>session_</code> / <code>cse_</code>
    identifiers (the prefix is kept readable) — these act as bearer-equivalent
    credentials in a URL — and <strong>bare UUIDs</strong> (account / instance identifiers the
-   bridge prints in full; not bearer credentials, but kept off the stream).</li>
+   bridge prints in full; not bearer credentials, but kept off the stream). The
+   live pty-screen view masks these to the neutral <code>&lt;redacted&gt;</code> token instead,
+   with no readable prefix. The <code>&lt;</code> the token adds is itself a word boundary, so
+   it closes an identifier welded to another identifier.</li>
 <li><strong>Secret-shape redaction (defense-in-depth).</strong> A conservative allow-list of
    obvious secret shapes — GitHub tokens (<code>ghp_</code>/<code>gho_</code>/… , <code>github_pat_</code>),
    Clauster API tokens (<code>clauster_pat_…</code>), GitLab PATs (<code>glpat-</code>), AWS access-key
@@ -2149,7 +2152,12 @@ different threat: producing it means already controlling the whole line, and
 an attacker who can print arbitrary text beside an identifier does not need
 to smuggle it past the mask. The case that matters is the escape weld, where
 Clauster's own bridge prints the real identifier and an injected escape only
-deletes the boundary.</p>
+deletes the boundary. This bounded scope is for the streamed log and the
+on-disk mirror. A terminal has already discarded the escape on the live
+pty-screen view. So that view also masks a real identifier (the <code>01</code> shape)
+welded onto the word before it, and an id welded to another id. An ordinary
+compound name such as <code>resolve_session_transcript</code> stays readable. A welded
+secret, and a welded id without the <code>01</code> shape, stay visible there.</p>
 </div>
 <h3 id="hybrid-by-default">Hybrid by default<a class="headerlink" href="#hybrid-by-default" title="Permanent link">&para;</a></h3>
 <p>Redaction is <strong>hybrid</strong> by default: the on-disk log keeps IDs verbatim (for local
