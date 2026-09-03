@@ -223,12 +223,11 @@ jobs:
   zizmor:
     name: workflow audit
     # Skip on the `synchronize` storm (pr-auto-update fans a main push across every
-    # open PR): the SARIF upload is GITHUB_TOKEN-only (codeql-action#2719), so
-    # re-running every push just taxes the 1,000/hr pool. Runs on PR
+    # open PR): re-running every push just taxes the API pools. Runs on PR
     # open/reopen/ready-for-review + push:main + weekly cron; `security required
     # checks passed` (if: always()) counts a skip as passing.
-    # …and skip on a DRAFT PR for the same reason (the SARIF upload taxes the
-    # shared GITHUB_TOKEN pool); `ready_for_review` re-fires it on the flip.
+    # …and skip on a DRAFT PR for the same reason; `ready_for_review` re-fires it
+    # on the flip.
     if: >-
       (github.event_name != 'pull_request' || github.event.action != 'synchronize')
       && github.event.pull_request.draft != true
@@ -245,8 +244,16 @@ jobs:
       # Mint a clauster-ci App token (≥5,000 REST req/hr) so zizmor's GitHub
       # API calls (e.g. the /advisories audit) don't exhaust the 1,000/hr
       # github-actions[bot] pool under bursts (observed: zizmor /advisories 403).
+      # The SARIF upload below uses the same token: the code-scanning SARIF
+      # endpoint is limited to 1,000/hr per user OR app installation, so the App
+      # gets its own bucket instead of sharing GITHUB_TOKEN's with every other job
+      # on the PR (observed 2026-09-02: "API rate limit exceeded for installation"
+      # on the upload, with the audit itself clean). The action's `token` input
+      # documents GITHUB_TOKEN only; the action passes the token through unchanged
+      # and its internal status report is warning-only, so a scoped App token with
+      # code-scanning write works (codeql-action#2719 was a scoping failure).
       # Same-repo runs only; fork PRs lack the App secrets, so the step is skipped
-      # and the token falls back to GITHUB_TOKEN below.
+      # and both fall back to GITHUB_TOKEN below.
       - name: Mint GitHub App token
         id: app-token
         if: >-
@@ -257,6 +264,8 @@ jobs:
           client-id: ${{ secrets.CLAUSTER_CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
           permission-contents: read
+          permission-actions: read
+          permission-security-events: write
       - name: Set up uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
@@ -272,6 +281,7 @@ jobs:
         with:
           sarif_file: results.sarif
           category: zizmor
+          token: ${{ steps.app-token.outputs.token || github.token }}
 
   dependency-review:
     name: dependency review
