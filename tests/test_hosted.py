@@ -1517,7 +1517,7 @@ async def test_manager_kill_orphan_by_instance_id(monkeypatch):
     killed: list[tuple] = []
     monkeypatch.setattr(
         "clauster.procutil.kill_if_match",
-        lambda pid, ps, *, start_ticks: killed.append((pid, ps, start_ticks)),
+        lambda pid, ps, *, start_ticks, boot_id: killed.append((pid, ps, start_ticks)),
     )
     mgr = HostedManager()
     inst = _orphan_instance()
@@ -2766,7 +2766,7 @@ async def test_manager_reattach_degraded_row_can_still_be_an_orphan(
     fake = await fake_claustrum()
     store = HostedStateStore(tmp_path)
     monkeypatch.setattr(
-        hosted.procutil, "is_killable_hosted", lambda pid, start, *, start_ticks: True
+        hosted.procutil, "is_killable_hosted", lambda pid, start, *, start_ticks, boot_id: True
     )
     store.save(
         {
@@ -2805,7 +2805,7 @@ async def test_manager_reattach_orphan_without_a_usable_uuid_does_not_offer_resu
     fake = await fake_claustrum()
     store = HostedStateStore(tmp_path)
     monkeypatch.setattr(
-        hosted.procutil, "is_killable_hosted", lambda pid, start, *, start_ticks: True
+        hosted.procutil, "is_killable_hosted", lambda pid, start, *, start_ticks, boot_id: True
     )
     store.save(
         {
@@ -2830,6 +2830,49 @@ async def test_manager_reattach_orphan_without_a_usable_uuid_does_not_offer_resu
         # ...so the orphan detail names only Kill, never Resume.
         assert "Kill to clean up" in (inst.error_detail or "")
         assert "Resume" not in (inst.error_detail or "")
+
+
+async def test_manager_reattach_heals_a_boot_id_less_orphan(fake_claustrum, tmp_path, monkeypatch):
+    # #1401: a pre-#1401 orphan row (agent ticks, no boot id) that reattach judges a live orphan
+    # in THIS boot gets its boot id stamped — the hosted twin of the bridge poll's self-heal — so
+    # it gains the cross-boot defense across the next restart. A row that already carries a boot
+    # id is left untouched. Gated on the ticks and drift-prone (Linux) inside reattach_all.
+    fake = await fake_claustrum()
+    store = HostedStateStore(tmp_path)
+    monkeypatch.setattr(
+        hosted.procutil, "is_killable_hosted", lambda pid, start, *, start_ticks, boot_id: True
+    )
+    monkeypatch.setattr(hosted.procutil, "start_time_is_drift_prone", lambda: True)
+    monkeypatch.setattr(hosted.procutil, "proc_boot_id", lambda: "live-boot")
+    store.save(
+        {
+            "01LEGACYPROCESS000000000": {
+                "project": "proj",
+                "label": "hosted:proj",
+                "agent_pid": 4242,
+                "agent_proc_start": 1234.5,
+                "agent_start_ticks": 770579,
+                # no agent_boot_id — a pre-#1401 row
+            },
+            "01STAMPEDPROCESS00000000": {
+                "project": "proj",
+                "label": "hosted:proj",
+                "agent_pid": 4343,
+                "agent_proc_start": 2345.6,
+                "agent_start_ticks": 880680,
+                "agent_boot_id": "recorded-boot",  # already stamped -> preserved, not re-healed
+            },
+        }
+    )
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        await mgr.reattach_all(client)
+        assert mgr.get_instance("01LEGACYPROCESS000000000").agent_boot_id == "live-boot"
+        assert mgr.get_instance("01STAMPEDPROCESS00000000").agent_boot_id == "recorded-boot"
+    # The heal is persisted, so the next restart carries the cross-boot defense.
+    reloaded = store.load()
+    assert reloaded["01LEGACYPROCESS000000000"]["agent_boot_id"] == "live-boot"
+    assert reloaded["01STAMPEDPROCESS00000000"]["agent_boot_id"] == "recorded-boot"
 
 
 @pytest.mark.parametrize(
@@ -3303,6 +3346,7 @@ def _orphan_instance(pid=4242, uuid="11111111-2222-4333-8444-555555555555"):
         agent_pid=pid,
         agent_proc_start=1000.0,
         agent_start_ticks=770579,
+        agent_boot_id="boot-orphan",
         claude_session_uuid=uuid,
         status=InstanceStatus.CRASHED,
         is_orphan=True,
@@ -3498,7 +3542,7 @@ async def test_manager_kill_orphan_terminates_and_stops(monkeypatch):
     killed: list[tuple] = []
     monkeypatch.setattr(
         "clauster.procutil.kill_if_match",
-        lambda pid, ps, *, start_ticks: killed.append((pid, ps, start_ticks)),
+        lambda pid, ps, *, start_ticks, boot_id: killed.append((pid, ps, start_ticks)),
     )
     mgr = HostedManager()
     inst = _orphan_instance()
@@ -3518,7 +3562,7 @@ async def test_manager_kill_orphan_without_pid_skips_kill(monkeypatch):
     killed: list[tuple] = []
     monkeypatch.setattr(
         "clauster.procutil.kill_if_match",
-        lambda pid, ps, *, start_ticks: killed.append((pid, ps, start_ticks)),
+        lambda pid, ps, *, start_ticks, boot_id: killed.append((pid, ps, start_ticks)),
     )
     mgr = HostedManager()
     inst = _orphan_instance(pid=None)
@@ -3539,7 +3583,7 @@ async def test_manager_resume_kills_orphan_survivor(fake_claustrum, monkeypatch)
     killed: list[tuple] = []
     monkeypatch.setattr(
         "clauster.procutil.kill_if_match",
-        lambda pid, ps, *, start_ticks: killed.append((pid, ps, start_ticks)),
+        lambda pid, ps, *, start_ticks, boot_id: killed.append((pid, ps, start_ticks)),
     )
     async with _manager(fake_claustrum) as (fake, client, mgr):
         inst = _orphan_instance()

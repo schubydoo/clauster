@@ -2988,11 +2988,16 @@ class SessionRunner:
 
         ``bridge_start_ticks`` decides when the caller AND the sidecar both carry it: both
         are raw ``/proc/<pid>/stat`` field-22 counts, so the match is exact and immune to the
-        clock drift that moves every epoch on this host (#1399) — paired with a coarse epoch
-        conjunct, because ticks restart at zero each boot. Otherwise proc-start falls back to
-        the same slack :func:`procutil.is_live_bridge` uses (the pointer's stored value and
-        the sidecar's psutil create-time are derived independently, so exact float equality
-        would be brittle); when either side is unknown, fall back to the pid-only match.
+        clock drift that moves every epoch on this host (#1399). The sidecar's recorded
+        ``boot_id`` (#1401) settles what ticks alone cannot — ticks restart at zero each boot,
+        so a sidecar that survived a reboot could collide on both pid and count. A boot id that
+        differs from the live one rejects such a sidecar on identity, and a match lets the exact
+        tick pairing stand as a complete identity without the coarse epoch, which an NTP step
+        could not survive. A pre-#1401 sidecar (no boot id) keeps that coarse epoch conjunct.
+        Otherwise proc-start falls back to the same slack :func:`procutil.is_live_bridge` uses
+        (the pointer's stored value and the sidecar's psutil create-time are derived
+        independently, so exact float equality would be brittle); when either side is unknown,
+        fall back to the pid-only match.
         """
         if bridge_pid is None:
             return None
@@ -3025,17 +3030,37 @@ class SessionRunner:
                 else None
             )
             sidecar_ticks = _row_int(info.get("bridge_start_ticks"))
-            if bridge_start_ticks is not None and sidecar_ticks is not None:
-                # Exact on the ticks, coarse on the epoch (`procutil._DRIFT_EPOCH_TOLERANCE`).
-                # Ticks restart at zero each boot, so on their own they cannot rule out a
-                # STALE sidecar that survived a reboot and happens to collide on both the
-                # bridge pid and the tick count. `is_live_process` rejects that on a recorded
-                # boot id now (#1401), but the sidecar carries none — `pty_keeper` writes it —
-                # so this path keeps the coarse epoch guard, which rejects a reboot for free
-                # (it moves the epoch by uptime + downtime). Dropping the conjunct here would
-                # NARROW the PID-reuse defense — and the recovered keeper pid reaches
-                # `_cleanup_keeper`'s `force_kill_tree`, where a different live keeper on that
-                # pid passes the cmdline gate and takes another session's bridge down with it.
+            sidecar_boot = _row_str(info.get("boot_id"))
+            live_boot = procutil.proc_boot_id()
+            if sidecar_boot is not None and live_boot is not None:
+                # The sidecar records the boot it was written in (#1401), and `pty_keeper` now
+                # writes it. The bridge here is live in the CURRENT boot (the caller gated on
+                # `is_live_bridge` first), so a sidecar boot id that differs names an EARLIER
+                # boot's process — reject on identity, immune to the clock STEP the coarse epoch
+                # below could not survive. A match confirms same-boot; the SAME-PROCESS-within-the-
+                # boot question is still decided on the exact tick pairing (a pid recycled within
+                # the boot differs by whole ticks), with the epoch NOT consulted, so an NTP step
+                # larger than `_DRIFT_EPOCH_TOLERANCE` no longer orphans a live keeper. When the
+                # ticks are unavailable (a transient field-22 read miss), fall back to the coarse
+                # `_PROC_START_TOLERANCE` epoch bound the boot-id-less path uses — boot id alone
+                # proves same-boot, NOT same process, and the recovered keeper pid reaches
+                # `_cleanup_keeper`'s `force_kill_tree`, so it must never stand on pid+boot alone.
+                if sidecar_boot != live_boot:
+                    continue
+                if bridge_start_ticks is not None and sidecar_ticks is not None:
+                    if sidecar_ticks != bridge_start_ticks:
+                        continue
+                elif epoch_gap is not None and epoch_gap > _PROC_START_TOLERANCE:
+                    continue
+            elif bridge_start_ticks is not None and sidecar_ticks is not None:
+                # No boot id (a pre-#1401 sidecar) or no live id: keep the exact-ticks + coarse-
+                # epoch pairing. Ticks restart at zero each boot, so on their own they cannot
+                # rule out a STALE sidecar that survived a reboot and happens to collide on both
+                # the bridge pid and the tick count; the epoch rejects that for free (a reboot
+                # moves it by uptime + downtime). Dropping the conjunct here would NARROW the
+                # PID-reuse defense — and the recovered keeper pid reaches `_cleanup_keeper`'s
+                # `force_kill_tree`, where a different live keeper on that pid passes the cmdline
+                # gate and takes another session's bridge down with it.
                 if sidecar_ticks != bridge_start_ticks or (
                     epoch_gap is not None and epoch_gap > procutil._DRIFT_EPOCH_TOLERANCE
                 ):
@@ -4274,11 +4299,15 @@ class SessionRunner:
                 float(ps) if isinstance(ps, (int, float)) and not isinstance(ps, bool) else None
             )
             # Same PID-reuse defense as the reattach: keeper by cmdline AND the bridge
-            # matched on its pid + proc-start pair. No `boot_id` (the sidecar records none),
-            # so `is_live_bridge` pairs the exact tick match with the coarse epoch fallback —
-            # the same "same boot?" guard `_recover_keeper_pid` keeps for this carrier (#1401).
+            # matched on its pid + proc-start pair. The sidecar's `boot_id` (#1401) is passed
+            # too, so `is_live_bridge` rejects a bridge from an EARLIER boot on identity where
+            # the ticks alone (restarting at zero each boot) could collide; it falls back to
+            # the coarse epoch for a pre-#1401 sidecar with no boot id.
             if procutil.is_keeper_process(keeper_pid) and procutil.is_live_bridge(
-                bridge_pid, proc_start, start_ticks=_row_int(info.get("bridge_start_ticks"))
+                bridge_pid,
+                proc_start,
+                start_ticks=_row_int(info.get("bridge_start_ticks")),
+                boot_id=_row_str(info.get("boot_id")),
             ):
                 return True
         return False
@@ -4356,13 +4385,17 @@ class SessionRunner:
             if not procutil.is_keeper_process(keeper_pid):
                 continue
             bridge_start_ticks = _row_int(info.get("bridge_start_ticks"))
-            # No `boot_id` in the gate (the sidecar records none), so `is_live_bridge` pairs the
-            # exact tick match with the coarse epoch fallback — the same guard
-            # `_recover_keeper_pid` keeps for this carrier (#1401). The reattached instance below
-            # is then STAMPED with the current boot id, so the persisted row gains the stronger
-            # cross-boot defense across the next restart.
+            # The sidecar's `boot_id` (#1401) is passed to the gate, so `is_live_bridge` rejects
+            # a bridge from an EARLIER boot on identity — the more important site, since this
+            # rebuilds the RUNNING instance whose `stop()` force-kills the keeper tree. It falls
+            # back to the coarse epoch for a pre-#1401 sidecar with no boot id. The reattached
+            # instance below is STAMPED with the current boot id regardless, so the persisted row
+            # carries the stronger cross-boot defense across the next restart.
             if not procutil.is_live_bridge(
-                bridge_pid, bridge_proc_start, start_ticks=bridge_start_ticks
+                bridge_pid,
+                bridge_proc_start,
+                start_ticks=bridge_start_ticks,
+                boot_id=_row_str(info.get("boot_id")),
             ):
                 continue
             # Re-bind the live tail to the log this bridge is still writing. The sidecar

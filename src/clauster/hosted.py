@@ -1108,6 +1108,12 @@ class HostedManager:
             if session.agent_pid
             else (None, None)
         )
+        # The boot these ticks belong to (#1401), so `is_killable_hosted` can reject a later
+        # boot's recycled pid on identity rather than on the wall-clock epoch NTP moves. A
+        # separate hop from the pair is fine: boot_id is a system-wide per-boot value, not a
+        # per-pid one, so it needs no atomic sample with this pid's ticks. Only stamped when we
+        # have a pid to guard — with none there is nothing to compare a boot id against.
+        boot_id = await asyncio.to_thread(procutil.proc_boot_id) if session.agent_pid else None
         instance = RemoteControlInstance(
             project=project,
             label=label,
@@ -1117,6 +1123,7 @@ class HostedManager:
             agent_pid=session.agent_pid,
             agent_proc_start=proc_start,
             agent_start_ticks=start_ticks,
+            agent_boot_id=boot_id,
             status=InstanceStatus.RUNNING,
             started_at=datetime.now(UTC),
         )
@@ -1250,6 +1257,7 @@ class HostedManager:
                 old.agent_pid,
                 old.agent_proc_start,
                 start_ticks=old.agent_start_ticks,
+                boot_id=old.agent_boot_id,
             )
         self._instances.pop(hosted_id, None)
         # Prune this id's lock too: resume retires the old hosted_id permanently (the
@@ -1283,6 +1291,7 @@ class HostedManager:
                     inst.agent_pid,
                     inst.agent_proc_start,
                     start_ticks=inst.agent_start_ticks,
+                    boot_id=inst.agent_boot_id,
                 )
             inst.is_orphan = False
             inst.intentional_stop = True
@@ -1377,6 +1386,7 @@ class HostedManager:
             instance.agent_pid,
             instance.agent_proc_start,
             start_ticks=instance.agent_start_ticks,
+            boot_id=instance.agent_boot_id,
         )
 
     async def aclose(self) -> None:
@@ -1482,6 +1492,21 @@ class HostedManager:
                 instance.status = InstanceStatus.CRASHED
                 if await self._is_orphan(instance):
                     instance.is_orphan = True
+                    # Heal a boot-id-less live orphan (a pre-#1401 row, or one spawned before
+                    # the column existed): `_is_orphan` just judged it live in THIS boot on its
+                    # drift-immune ticks, so the current boot id is its boot. Stamp it — the
+                    # `_persist` below writes it — so the row gains the cross-boot defense across
+                    # the next restart instead of standing on ticks-plus-coarse-epoch forever,
+                    # the hosted twin of the bridge poll's self-heal (#1401). Gated on the ticks
+                    # so a row judged only on the drifting epoch never reaches it, and on
+                    # drift-prone so a non-Linux row (no boot id to read) is left alone.
+                    if (
+                        instance.agent_boot_id is None
+                        and instance.agent_start_ticks is not None
+                        and procutil.start_time_is_drift_prone()
+                    ):
+                        if healed := await asyncio.to_thread(procutil.proc_boot_id):
+                            instance.agent_boot_id = healed
                     # A salvaged row can be an orphan AND have lost its `project` — the
                     # per-field salvage keeps the pid evidence while a model-rejected project
                     # falls back to empty. Naming Resume for such a row points at a button the
@@ -1635,6 +1660,7 @@ class HostedManager:
             "agent_pid": instance.agent_pid,
             "agent_proc_start": instance.agent_proc_start,
             "agent_start_ticks": instance.agent_start_ticks,
+            "agent_boot_id": instance.agent_boot_id,
             "started_at": instance.started_at.isoformat() if instance.started_at else None,
             "intentional_stop": instance.intentional_stop,
             "instance_id": instance.instance_id,
@@ -1716,6 +1742,7 @@ class HostedManager:
             agent_pid=_as_pid(agent_pid),
             agent_proc_start=_as_proc_start(proc_start),
             agent_start_ticks=_as_start_ticks(fields.get("agent_start_ticks")),
+            agent_boot_id=_as_boot_id(fields.get("agent_boot_id")),
             started_at=_as_started_at(fields.get("started_at")),
             intentional_stop=bool(fields.get("intentional_stop", False)),
             status=InstanceStatus.STARTING,
@@ -1741,6 +1768,7 @@ class HostedManager:
             agent_pid=_as_pid(fields.get("agent_pid")),
             agent_proc_start=_as_proc_start(fields.get("agent_proc_start")),
             agent_start_ticks=_as_start_ticks(fields.get("agent_start_ticks")),
+            agent_boot_id=_as_boot_id(fields.get("agent_boot_id")),
             started_at=_as_started_at(fields.get("started_at")),
             intentional_stop=bool(fields.get("intentional_stop", False)),
             status=InstanceStatus.STARTING,
@@ -2039,6 +2067,21 @@ def _as_start_ticks(value: Any) -> int | None:
             type(value).__name__,
         )
     return None
+
+
+def _as_boot_id(value: Any) -> str | None:
+    """Coerce a persisted ``agent_boot_id`` to a non-empty ``str``, else ``None`` (#1401).
+
+    The boot-id member of the :func:`_as_pid` / :func:`_as_proc_start` / :func:`_as_start_ticks`
+    family, used by BOTH mapping paths for the same reason they are: a value the healthy path
+    kept and the salvage path dropped would leave a degraded row without the cross-boot half of
+    its orphan evidence, and ``_persist`` writes that loss back. A non-string OR empty value
+    degrades to ``None`` — ticks-plus-coarse-epoch liveness, exactly as an absent boot id does —
+    rather than reaching the identity compare as the wrong type or as an ``""`` that can never
+    match a live boot id (which would read a live agent as lost). :func:`procutil.proc_boot_id`
+    maps an empty read to ``None`` too, so the two ends of the round-trip agree.
+    """
+    return value if isinstance(value, str) and value else None
 
 
 def _coerce_seq(value: Any) -> int:

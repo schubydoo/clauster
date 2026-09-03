@@ -386,11 +386,11 @@ def test_kill_if_match_kills_only_on_match(monkeypatch):
     killed: list[int] = []
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: killed.append(pid))
     monkeypatch.setattr(procutil, "is_live_process", lambda *a, **k: True)
-    assert procutil.kill_if_match(1234, 1000.0, start_ticks=None) is True
+    assert procutil.kill_if_match(1234, 1000.0, start_ticks=None, boot_id=None) is True
     assert killed == [1234]
     killed.clear()
     monkeypatch.setattr(procutil, "is_live_process", lambda *a, **k: False)
-    assert procutil.kill_if_match(1234, 1000.0, start_ticks=None) is False
+    assert procutil.kill_if_match(1234, 1000.0, start_ticks=None, boot_id=None) is False
     assert killed == []  # never killed when the match fails
 
 
@@ -400,39 +400,39 @@ def test_kill_if_match_fails_closed_without_comparable_start(monkeypatch):
     killed: list[int] = []
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: killed.append(pid))
     monkeypatch.setattr(procutil, "is_live_process", lambda *a, **k: True)
-    assert procutil.kill_if_match(1234, None, start_ticks=None) is False
-    assert procutil.kill_if_match(1234, "garbage", start_ticks=None) is False
+    assert procutil.kill_if_match(1234, None, start_ticks=None, boot_id=None) is False
+    assert procutil.kill_if_match(1234, "garbage", start_ticks=None, boot_id=None) is False
     # Recorded ticks do NOT buy a kill past the missing epoch (#1404). Reachable only on a
     # btime-less procfs, where `proc_start_pair` yields (None, ticks); sparing a live agent
     # is the safe error for a gate that force-kills a tree.
-    assert procutil.kill_if_match(1234, None, start_ticks=770579) is False
+    assert procutil.kill_if_match(1234, None, start_ticks=770579, boot_id=None) is False
     assert killed == []
 
 
-def test_kill_if_match_forwards_the_ticks_it_was_given(monkeypatch):
-    # The parameter is not decoration: `is_killable_hosted` must receive the drift-immune
-    # half, or the whole chain silently reverts to the epoch-only compare (#1404).
-    seen: list[int | None] = []
+def test_kill_if_match_forwards_the_ticks_and_boot_id_it_was_given(monkeypatch):
+    # The parameters are not decoration: `is_killable_hosted` must receive BOTH drift-immune
+    # halves, or the whole chain silently reverts to the epoch-only compare (#1404 / #1401).
+    seen: list[tuple[int | None, str | None]] = []
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: None)
     monkeypatch.setattr(
         procutil,
         "is_killable_hosted",
-        lambda pid, ps, *, start_ticks: seen.append(start_ticks) or True,
+        lambda pid, ps, *, start_ticks, boot_id: seen.append((start_ticks, boot_id)) or True,
     )
-    assert procutil.kill_if_match(1234, 1000.0, start_ticks=770579) is True
-    assert seen == [770579]
+    assert procutil.kill_if_match(1234, 1000.0, start_ticks=770579, boot_id="boot-x") is True
+    assert seen == [(770579, "boot-x")]
 
 
 def test_is_killable_hosted_requires_comparable_start(monkeypatch):
     # The shared orphan-classification/kill predicate: alive + comparable create-time.
     monkeypatch.setattr(procutil, "is_live_process", lambda *a, **k: True)
-    assert procutil.is_killable_hosted(1234, 1000.0, start_ticks=None) is True
-    assert procutil.is_killable_hosted(1234, None, start_ticks=None) is False
-    assert procutil.is_killable_hosted(1234, "garbage", start_ticks=None) is False
+    assert procutil.is_killable_hosted(1234, 1000.0, start_ticks=None, boot_id=None) is True
+    assert procutil.is_killable_hosted(1234, None, start_ticks=None, boot_id=None) is False
+    assert procutil.is_killable_hosted(1234, "garbage", start_ticks=None, boot_id=None) is False
     # Ticks alone do not satisfy the entry guard — see kill_if_match's twin above.
-    assert procutil.is_killable_hosted(1234, None, start_ticks=770579) is False
+    assert procutil.is_killable_hosted(1234, None, start_ticks=770579, boot_id=None) is False
     monkeypatch.setattr(procutil, "is_live_process", lambda *a, **k: False)
-    assert procutil.is_killable_hosted(1234, 1000.0, start_ticks=None) is False
+    assert procutil.is_killable_hosted(1234, 1000.0, start_ticks=None, boot_id=None) is False
 
 
 def test_clock_drift_no_longer_reads_a_survived_hosted_agent_as_lost(monkeypatch):
@@ -452,10 +452,10 @@ def test_clock_drift_no_longer_reads_a_survived_hosted_agent_as_lost(monkeypatch
     monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: 770579)
 
     # Epoch-only (a pre-#1404 row, or a non-Linux host): the drift IS the bug.
-    assert procutil.is_killable_hosted(1234, 1004.0, start_ticks=None) is False
+    assert procutil.is_killable_hosted(1234, 1004.0, start_ticks=None, boot_id=None) is False
     # With the boot-relative half recorded, the same drift is absorbed in both directions.
-    assert procutil.is_killable_hosted(1234, 1004.0, start_ticks=770579) is True
-    assert procutil.is_killable_hosted(1234, 996.0, start_ticks=770579) is True
+    assert procutil.is_killable_hosted(1234, 1004.0, start_ticks=770579, boot_id=None) is True
+    assert procutil.is_killable_hosted(1234, 996.0, start_ticks=770579, boot_id=None) is True
 
 
 def test_hosted_ticks_still_reject_a_recycled_pid_the_epoch_bound_would_have_admitted(
@@ -469,9 +469,9 @@ def test_hosted_ticks_still_reject_a_recycled_pid_the_epoch_bound_would_have_adm
         _fake_proc(cmdline=("claude", "--output-format", "stream-json"), ct=1000.0),
     )
     monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: 770580)
-    assert procutil.is_killable_hosted(1234, 1000.0, start_ticks=770579) is False
+    assert procutil.is_killable_hosted(1234, 1000.0, start_ticks=770579, boot_id=None) is False
     # What the epoch alone allowed, and still allows for a row that has no ticks.
-    assert procutil.is_killable_hosted(1234, 1000.01, start_ticks=None) is True
+    assert procutil.is_killable_hosted(1234, 1000.01, start_ticks=None, boot_id=None) is True
 
 
 def test_hosted_ticks_do_not_authenticate_an_agent_from_a_different_boot(monkeypatch):
@@ -483,29 +483,23 @@ def test_hosted_ticks_do_not_authenticate_an_agent_from_a_different_boot(monkeyp
         _fake_proc(cmdline=("claude", "--output-format", "stream-json"), ct=9_000_000.0),
     )
     monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: 770579)
-    assert procutil.is_killable_hosted(1234, 1000.0, start_ticks=770579) is False
+    assert procutil.is_killable_hosted(1234, 1000.0, start_ticks=770579, boot_id=None) is False
 
 
-def test_a_cross_boot_tick_collision_inside_the_epoch_window_is_admitted(monkeypatch):
-    """TODO(1401): pins the residue the ticks conjunct COSTS this gate. Flip when boot_id lands.
+def test_a_cross_boot_tick_collision_is_rejected_once_a_boot_id_is_recorded(monkeypatch):
+    """#1401: a recorded ``agent_boot_id`` closes the cross-boot residue #1404 documented.
 
-    Honest failure documentation, not an endorsement. Before #1404 this gate compared the
-    epoch at 0.05s, which no post-reboot process can pass — its create-time lies after the
-    reboot and the recorded one before it. Cross-boot PID reuse was excluded structurally.
-    The ticks conjunct trades that for ``_DRIFT_EPOCH_TOLERANCE``, so a host rebooting inside
-    an hour can present a process holding the same pid AND the same offset from boot.
+    Before boot ids, the ticks conjunct traded structural cross-boot exclusion for
+    ``_DRIFT_EPOCH_TOLERANCE``, so a host rebooting inside an hour could present a process
+    holding the same pid AND the same offset from boot: recorded at 20 min into boot N, a boot
+    N+1 that starts 31 min later, a hosted agent 20 min into it — tick counts collide, epochs
+    differ by 31 min, inside the 1h window. The operator's Kill would reach a stranger.
 
-    Recorded at 20 min into boot N; boot N+1 starts 31 min after boot N; a hosted agent
-    starts 20 min into it, so the tick counts collide and the epochs differ by 31 min — well
-    inside the 1h window. The gate says yes, and the operator's Kill would reach a stranger.
-
-    #1399 accepted this residue for a card-liveness READ; #1404 is the first to route a
-    force-kill through it. Both hosted call sites are operator-initiated (the dashboard's
-    Kill and Resume), so nothing reaps on a timer through this window — which is what makes
-    the residue tolerable in the meantime rather than merely tolerated.
-
-    TODO(1401): ``/proc/sys/kernel/random/boot_id`` settles it exactly. When that lands, the
-    first assertion below flips to ``is False`` and this test stops being a wart.
+    With the boot id recorded, that stranger is rejected on identity — the recorded boot id is
+    boot N's, the live one is boot N+1's, and a mismatch supersedes the epoch entirely, so a
+    force-kill can no longer land on the collision. A pre-#1401 row (no recorded boot id) still
+    admits it: the residue survives only until that row's next spawn or reattach stamps a boot
+    id, which is the fallback ``_DRIFT_EPOCH_TOLERANCE`` exists for.
     """
     minute = 60.0
     recorded_epoch, recorded_ticks = 20 * minute, 20 * 60 * 100  # boot N + 20 min
@@ -518,18 +512,49 @@ def test_a_cross_boot_tick_collision_inside_the_epoch_window_is_admitted(monkeyp
         ),
     )
     monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: recorded_ticks)
-    assert procutil.is_killable_hosted(1234, recorded_epoch, start_ticks=recorded_ticks) is True
-    # The bound is real, not unbounded: push the reboot past the window and it is rejected
-    # again, which is what keeps a widened _DRIFT_EPOCH_TOLERANCE from passing silently.
+    monkeypatch.setattr(procutil, "proc_boot_id", lambda: "boot-N+1")
+    # A pre-#1401 row (no boot id) still falls to the coarse epoch and admits the collision.
+    assert (
+        procutil.is_killable_hosted(1234, recorded_epoch, start_ticks=recorded_ticks, boot_id=None)
+        is True
+    )
+    # With boot N's id recorded, the live boot N+1 rejects the stranger on identity.
+    assert (
+        procutil.is_killable_hosted(
+            1234, recorded_epoch, start_ticks=recorded_ticks, boot_id="boot-N"
+        )
+        is False
+    )
+    # And a matching boot id keeps the genuine same-boot survivor killable.
+    assert (
+        procutil.is_killable_hosted(
+            1234, recorded_epoch, start_ticks=recorded_ticks, boot_id="boot-N+1"
+        )
+        is True
+    )
+
+
+def test_a_recorded_agent_boot_id_keeps_a_survived_agent_killable_across_a_clock_step(monkeypatch):
+    # THE #1401 win for hosted: a clock STEP larger than `_DRIFT_EPOCH_TOLERANCE` (a VM
+    # snapshot restore, an RTC-less board syncing late) must not fake a live hosted agent dead.
+    # The agent never restarted, so its ticks and boot id are unchanged; only the wall clock
+    # moved. A matching boot id keeps it killable despite the ~9M-second epoch gap; the
+    # no-boot-id control proves the boot id is what carries the match, not the drifting epoch.
     monkeypatch.setattr(
         procutil.psutil,
         "Process",
-        _fake_proc(
-            cmdline=("claude", "--output-format", "stream-json"),
-            ct=recorded_epoch + 61 * minute,
-        ),
+        _fake_proc(cmdline=("claude", "--output-format", "stream-json"), ct=9_000_000.0),
     )
-    assert procutil.is_killable_hosted(1234, recorded_epoch, start_ticks=recorded_ticks) is False
+    monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: 770579)
+    monkeypatch.setattr(procutil, "proc_boot_id", lambda: "live-boot-uuid")
+    assert (
+        procutil.is_killable_hosted(1234, 1000.0, start_ticks=770579, boot_id="live-boot-uuid")
+        is True
+    )
+    # Positive control: WITHOUT a recorded boot id the same huge gap falls to the coarse epoch
+    # bound and rejects it — so a pre-#1401 row still reads the survivor as lost, which is
+    # exactly the regression the boot id removes.
+    assert procutil.is_killable_hosted(1234, 1000.0, start_ticks=770579, boot_id=None) is False
 
 
 def test_a_non_hosted_cmdline_is_never_killable_however_well_the_ticks_match(monkeypatch):
@@ -539,7 +564,7 @@ def test_a_non_hosted_cmdline_is_never_killable_however_well_the_ticks_match(mon
         procutil.psutil, "Process", _fake_proc(cmdline=("claude", "remote-control"), ct=1000.0)
     )
     monkeypatch.setattr(procutil, "proc_start_ticks", lambda pid: 770579)
-    assert procutil.is_killable_hosted(1234, 1000.0, start_ticks=770579) is False
+    assert procutil.is_killable_hosted(1234, 1000.0, start_ticks=770579, boot_id=None) is False
 
 
 def test_child_env_strips_clauster_secrets(monkeypatch):

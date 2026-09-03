@@ -109,6 +109,10 @@ _HOSTED_FIELDS = (
     # The drift-immune half of the agent pair (#1404). ``_present`` drops the NULL for a row
     # from an older build, which then compares on the epoch alone — the pre-#1404 behaviour.
     "agent_start_ticks",
+    # The boot the ticks belong to (#1401): a boot_id mismatch rejects a previous-boot row on
+    # identity. ``_present`` drops the NULL for a pre-#1401 row, which then stands on its ticks
+    # plus the coarse epoch until its next spawn re-stamps this.
+    "agent_boot_id",
     "started_at",
     "intentional_stop",
     "instance_id",

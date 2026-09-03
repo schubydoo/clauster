@@ -2264,6 +2264,84 @@ def test_recover_keeper_pid_prefers_ticks_over_a_drifted_epoch(runner_config) ->
     )
 
 
+def test_recover_keeper_pid_uses_the_boot_id_across_a_clock_step(runner_config, monkeypatch):
+    # #1401: `pty_keeper` now writes the boot id into the sidecar. A clock STEP larger than
+    # _DRIFT_EPOCH_TOLERANCE (a VM snapshot restore) moves the pointer-walk epoch far from the
+    # sidecar's frozen one, but the keeper never restarted — a matching boot id recovers it on
+    # identity where the coarse epoch conjunct would have orphaned the keeper.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    runner._log_dir.mkdir(parents=True, exist_ok=True)
+    (runner._log_dir / "gamma-1700000000000-0.keeper.json").write_text(
+        json.dumps(
+            {
+                "keeper_pid": 7777,
+                "bridge_pid": 2222,
+                "bridge_proc_start": 100.0,
+                "bridge_start_ticks": 770579,
+                "boot_id": "boot-N",
+            }
+        )
+    )
+    # Epoch ~9M adrift (well past _DRIFT_EPOCH_TOLERANCE), ticks + boot id match -> recovered.
+    monkeypatch.setattr("clauster.procutil.proc_boot_id", lambda: "boot-N")
+    assert (
+        runner._recover_keeper_pid(
+            "gamma", bridge_pid=2222, bridge_proc_start=9_000_000.0, bridge_start_ticks=770579
+        )
+        == 7777
+    )
+    # A different live boot proves the sidecar is from an earlier boot -> rejected on identity,
+    # even though pid, ticks AND epoch all match here — the case a same-count reboot inside the
+    # epoch window would otherwise slip through the coarse conjunct.
+    monkeypatch.setattr("clauster.procutil.proc_boot_id", lambda: "boot-N+1")
+    assert (
+        runner._recover_keeper_pid(
+            "gamma", bridge_pid=2222, bridge_proc_start=100.0, bridge_start_ticks=770579
+        )
+        is None
+    )
+
+
+def test_recover_keeper_pid_boot_match_still_needs_the_epoch_when_ticks_are_missing(
+    runner_config, monkeypatch
+):
+    # A matching boot id proves same-BOOT, not same-PROCESS-within-the-boot. When the ticks are
+    # unavailable (a transient field-22 read miss), the gate must still apply the coarse
+    # `_PROC_START_TOLERANCE` epoch bound — boot id alone must never front `_cleanup_keeper`'s
+    # force_kill_tree on pid+boot alone.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    runner._log_dir.mkdir(parents=True, exist_ok=True)
+    (runner._log_dir / "gamma-1700000000000-0.keeper.json").write_text(
+        # No bridge_start_ticks — the ticks-missing case.
+        json.dumps(
+            {
+                "keeper_pid": 7777,
+                "bridge_pid": 2222,
+                "bridge_proc_start": 100.0,
+                "boot_id": "boot-N",
+            }
+        )
+    )
+    monkeypatch.setattr("clauster.procutil.proc_boot_id", lambda: "boot-N")
+    # Epoch within the 2.0s bound + same boot -> recovered.
+    assert (
+        runner._recover_keeper_pid(
+            "gamma", bridge_pid=2222, bridge_proc_start=100.5, bridge_start_ticks=None
+        )
+        == 7777
+    )
+    # Epoch past the 2.0s bound: same boot but NOT proven the same process -> rejected, not
+    # accepted on pid+boot alone (the laxer-than-before hole this closes).
+    assert (
+        runner._recover_keeper_pid(
+            "gamma", bridge_pid=2222, bridge_proc_start=104.0, bridge_start_ticks=None
+        )
+        is None
+    )
+
+
 @_POSIX_ONLY
 async def test_spawn_pty_error_surfaces_keeper_error_detail(
     runner_config, tmp_path, monkeypatch

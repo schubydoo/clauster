@@ -557,7 +557,7 @@ def is_live_standard_bridge(
 
 
 def is_killable_hosted(
-    pid: int, proc_start: str | float | None, *, start_ticks: int | None
+    pid: int, proc_start: str | float | None, *, start_ticks: int | None, boot_id: str | None
 ) -> bool:
     """Whether ``pid`` is a live hosted agent we can *safely* hard-kill (CL-8).
 
@@ -573,8 +573,18 @@ def is_killable_hosted(
     same pair, and it is what makes the comparison survive a clock correction (#1404): an
     epoch-only compare against ``_EXACT_PROC_START_TOLERANCE`` reads a *survived* agent as
     a different process, so the row is classified as lost instead of as a recoverable
-    orphan and this refuses its kill. Keyword-required with no default so a call site that
-    forgets the drift-immune half is a type error rather than a silent regression to the
+    orphan and this refuses its kill.
+
+    ``boot_id`` is the persisted ``agent_boot_id`` (:func:`proc_boot_id`), the hosted twin of
+    ``bridge_boot_id`` (#1401), and it closes the one thing the ticks alone could not: a row
+    from an EARLIER boot whose pid was recycled onto a process holding the same tick count. A
+    recorded boot id that differs from the live one rejects that on identity, and — being
+    boot-relative like the ticks — it survives the clock STEP the coarse epoch could not, so
+    :func:`is_live_process` uses it INSTEAD of the epoch. When it is absent (a pre-#1401 row) or
+    unreadable the exact tick match pairs with the coarse epoch again, the pre-#1401 fallback.
+
+    ``start_ticks`` and ``boot_id`` are keyword-required with no default so a call site that
+    forgets either drift-immune half is a type error rather than a silent regression to the
     epoch-only behaviour — the failure mode PR #1400 hit three review rounds running.
 
     The entry guard above deliberately still requires the *epoch*, and is not loosened to
@@ -586,45 +596,42 @@ def is_killable_hosted(
     safe error for a kill gate: a leaked agent is recoverable by hand, a kill aimed at the
     wrong process is not.
 
-    ⚠️ TODO(1401): ACROSS a reboot the pair is LAXER than what this gate used to apply, and
-    this is the first call site to route a ``SIGKILL`` through that residue — state it rather
-    than let the paragraph above read as "strictly stricter". Before ticks were recorded
-    this gate reached :func:`is_live_process` with none, so it compared the epoch at
-    ``_EXACT_PROC_START_TOLERANCE`` (0.05s), which no post-reboot process can pass: its
-    create-time lies after the reboot and the recorded one before it, so the gap is at
-    least the downtime. Cross-boot PID reuse was excluded *structurally*. With ticks the
-    conjunct becomes exact-ticks AND ``_DRIFT_EPOCH_TOLERANCE`` (1h), so a host that reboots
-    within an hour of its previous boot can admit a process holding the same pid AND the
-    same tick offset from boot — see that constant's own note, which named this residue when
-    #1399 accepted it for a card-liveness READ. A force-kill is a worse place to spend it.
-    Accepted as a documented residue, not overlooked. The fix is a second column
-    (``/proc/sys/kernel/random/boot_id``, issue #1401) that settles it exactly for all three
-    halves at once; #1404 would otherwise grow a schema change it does not need. Both hosted
-    call sites are OPERATOR-INITIATED — ``kill_orphan`` is the dashboard's Kill button and
-    ``resume`` is its Resume — so nothing reaps on a timer through this window.
-    ``test_a_cross_boot_tick_collision_inside_the_epoch_window_is_admitted`` pins the residue
-    so it cannot widen unnoticed, and is the test #1401 flips to ``is False``.
+    ⚠️ The cross-boot residue #1404 documented is CLOSED once a row carries a boot id (#1401):
+    a host that reboots within an hour of its previous boot no longer admits a process holding
+    the same pid AND the same tick offset, because the recorded boot id differs from the live
+    one. A pre-#1401 row (no ``agent_boot_id``) keeps the coarse ``_DRIFT_EPOCH_TOLERANCE``
+    conjunct and its residue until its next spawn or a reattach's drift-immune tick match
+    re-stamps the boot id. Both hosted call sites are OPERATOR-INITIATED — ``kill_orphan`` is
+    the dashboard's Kill button and ``resume`` is its Resume — so nothing reaps on a timer
+    through that remaining window.
+    ``test_a_cross_boot_tick_collision_is_rejected_once_a_boot_id_is_recorded`` pins the fix.
     """
     if _expected_epoch(proc_start) is None:
         return False
     return is_live_process(
-        pid, proc_start, require_cmdline=is_hosted_cmdline, start_ticks=start_ticks
+        pid,
+        proc_start,
+        require_cmdline=is_hosted_cmdline,
+        start_ticks=start_ticks,
+        boot_id=boot_id,
     )
 
 
-def kill_if_match(pid: int, proc_start: str | float | None, *, start_ticks: int | None) -> bool:
+def kill_if_match(
+    pid: int, proc_start: str | float | None, *, start_ticks: int | None, boot_id: str | None
+) -> bool:
     """Hard-kill a hosted agent ``pid`` (and its tree) only if it's still that process.
 
     Gated on :func:`is_killable_hosted` (live + hosted cmdline + a start-time match), so a
     reused/unrelated/uncomparable PID is never killed. Returns whether a kill was issued.
     Used by hosted orphan cleanup (CL-8).
 
-    ``start_ticks`` is keyword-required with no default for the reason given on
-    :func:`is_killable_hosted`: this signals ``SIGKILL`` at a process tree, and a call site
-    that silently fell back to the drifting epoch would refuse a kill the operator asked
-    for, leaving a survived agent running with no dashboard control (#1404).
+    ``start_ticks`` and ``boot_id`` are keyword-required with no default for the reason given
+    on :func:`is_killable_hosted`: this signals ``SIGKILL`` at a process tree, and a call site
+    that silently fell back to the drifting epoch would refuse a kill the operator asked for,
+    leaving a survived agent running with no dashboard control (#1404 / #1401).
     """
-    if not is_killable_hosted(pid, proc_start, start_ticks=start_ticks):
+    if not is_killable_hosted(pid, proc_start, start_ticks=start_ticks, boot_id=boot_id):
         return False
     force_kill_tree(pid)
     return True

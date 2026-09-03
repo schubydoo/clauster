@@ -1198,6 +1198,7 @@ def _stop_keeper_and_clear(kill_pid: int, target: pty_keeper.KeeperInfo, *, labe
         kill_pid,
         expect_create_time=target.keeper_create_time,
         expect_start_ticks=target.keeper_start_ticks,
+        expect_boot_id=target.keeper_boot_id,
     ):
         print(
             f"clauster: failed to stop keeper {kill_pid} "

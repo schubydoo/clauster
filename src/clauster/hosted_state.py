@@ -49,6 +49,10 @@ _PERSISTED_FIELDS = (
     # THIS class as the manager's store, so removing the entry makes them exercise a row
     # that lost its ticks. Absent from a record simply stays absent, as every field does.
     "agent_start_ticks",
+    # The boot the ticks belong to (#1401), kept in lockstep with ``db.stores._HOSTED_FIELDS``
+    # for the same mirror reason as ``agent_start_ticks`` above: a field one store persists and
+    # the other drops silently loses the cross-boot defense on the store the tests inject.
+    "agent_boot_id",
     "started_at",
     "intentional_stop",
     "instance_id",
