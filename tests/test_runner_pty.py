@@ -2342,6 +2342,36 @@ def test_recover_keeper_pid_boot_match_still_needs_the_epoch_when_ticks_are_miss
     )
 
 
+def test_recover_keeper_pid_rejects_a_pid_recycled_within_one_boot(runner_config, monkeypatch):
+    # runner.py 3051->3052 (#1401): the live boot id matches AND both tick counts are present,
+    # but they DIFFER — a bridge pid recycled inside a single boot. Ticks restart at zero each
+    # boot, so within a boot they pin the process exactly, and the epoch is NOT consulted; the
+    # keeper must not be recovered on pid+boot alone (the recovered pid reaches force_kill_tree).
+    # Sits between the matching-ticks boot-id test above and the ticks-missing epoch-arm test.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    runner._log_dir.mkdir(parents=True, exist_ok=True)
+    (runner._log_dir / "gamma-1700000000000-0.keeper.json").write_text(
+        json.dumps(
+            {
+                "keeper_pid": 7777,
+                "bridge_pid": 2222,
+                "bridge_proc_start": 100.0,
+                "bridge_start_ticks": 770579,
+                "boot_id": "boot-N",
+            }
+        )
+    )
+    monkeypatch.setattr("clauster.procutil.proc_boot_id", lambda: "boot-N")
+    # Same boot, epoch identical, but the ticks differ -> a within-boot pid reuse, rejected.
+    assert (
+        runner._recover_keeper_pid(
+            "gamma", bridge_pid=2222, bridge_proc_start=100.0, bridge_start_ticks=770580
+        )
+        is None
+    )
+
+
 @_POSIX_ONLY
 async def test_spawn_pty_error_surfaces_keeper_error_detail(
     runner_config, tmp_path, monkeypatch

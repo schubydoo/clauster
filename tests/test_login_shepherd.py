@@ -2543,6 +2543,40 @@ def test_teardown_clears_the_flow_even_when_terminate_raises(shepherd) -> None:
     assert not shepherd.is_active()
 
 
+def test_teardown_swallows_a_terminate_fault_on_a_faulted_conpty_handle(shepherd, caplog) -> None:
+    """A best-effort terminate on a faulted ConPTY handle must swallow a re-raise (#1422).
+
+    login_shepherd.py 1063-1064 (Windows ConPTY): a faulted handle reports the synthetic exit,
+    so `poll()` is not None and `_teardown` skips the stop-the-child block. It still makes ONE
+    best-effort `terminate()` in case the fault was transient and the child is alive — and if
+    that call re-raises on the same stale handle, the guard logs at debug and carries on. Unlike
+    the stop-block terminate above, this fault is swallowed, never propagated, so a transient
+    fault cannot strand the login `active`.
+    """
+
+    class _FaultedConPtyProc:
+        # A `_ConPtyPopen`-shaped stand-in: a faulted handle whose synthetic exit is reported by
+        # `poll()`, `fault` recording the cause, and `terminate()` re-raising on the same handle.
+        fault = "conpty liveness check failed: WinptyError"
+        stdin = None
+
+        def poll(self):
+            return ls._CONPTY_FAULT_EXIT  # not None → the stop-the-child block is skipped
+
+        def terminate(self):
+            raise RuntimeError("WinptyError: terminate on a stale ConPTY handle")
+
+    flow = ls._Flow(mode="setup-token", proc=_FaultedConPtyProc())  # type: ignore[arg-type]
+    shepherd._flow = flow  # noqa: SLF001 - internals test
+    with caplog.at_level(logging.DEBUG, logger="clauster.login_shepherd"):
+        shepherd._teardown(flow)  # noqa: SLF001 - the terminate fault must be swallowed, not raised
+    assert shepherd._flow is None  # cleared, never stranded active
+    assert not shepherd.is_active()
+    assert any(
+        "terminate on a faulted conpty handle failed" in r.getMessage() for r in caplog.records
+    )
+
+
 def test_teardown_survives_a_tree_kill_that_raises(shepherd, monkeypatch) -> None:
     """A failing tree kill degrades to the old behaviour — it never strands the flow.
 
