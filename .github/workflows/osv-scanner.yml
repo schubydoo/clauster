@@ -153,7 +153,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ ! -f results.sarif ]; then
-            echo "::warning title=osv SARIF::results.sarif is missing; the scan failed before writing it, nothing uploaded."
+            echo "::warning title=osv SARIF::results.sarif is missing; the scan failed" \
+              "before writing it, nothing uploaded."
             exit 0
           fi
           # `automationDetails.id` is the analysis category; the sarifs endpoint takes no
@@ -172,7 +173,8 @@ jobs:
           echo "Uploaded osv SARIF (id=$sarif_id); waiting for processing."
           last_err=""
           for _ in $(seq 1 30); do
-            if ! status="$(gh api "repos/$REPO/code-scanning/sarifs/$sarif_id" --jq .processing_status 2>/tmp/gh_poll_err)"; then
+            if ! status="$(gh api "repos/$REPO/code-scanning/sarifs/$sarif_id" \
+              --jq .processing_status 2>/tmp/gh_poll_err)"; then
               last_err="$(cat /tmp/gh_poll_err)"
               status="pending"
             fi
@@ -186,7 +188,8 @@ jobs:
             esac
             sleep 5
           done
-          echo "::warning title=osv SARIF::still '$status' after the bounded wait; not failing the gate. last GET error: ${last_err:-none}"
+          echo "::warning title=osv SARIF::still '$status' after the bounded wait;" \
+            "not failing the gate. last GET error: ${last_err:-none}"
           exit 0
       - name: Surface a real scanner error
         if: ${{ always() }}

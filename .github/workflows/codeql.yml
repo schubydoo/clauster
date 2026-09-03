@@ -160,7 +160,8 @@ jobs:
             last_err=""
             done_ok=""
             for _ in $(seq 1 30); do
-              if ! status="$(gh api "repos/$REPO/code-scanning/sarifs/$sarif_id" --jq .processing_status 2>/tmp/gh_poll_err)"; then
+              if ! status="$(gh api "repos/$REPO/code-scanning/sarifs/$sarif_id" \
+                --jq .processing_status 2>/tmp/gh_poll_err)"; then
                 last_err="$(cat /tmp/gh_poll_err)"
                 status="pending"
               fi
@@ -175,7 +176,8 @@ jobs:
               sleep 5
             done
             if [ -z "$done_ok" ]; then
-              echo "::warning title=CodeQL SARIF::$f still '$status' after the bounded wait; not failing the gate. last GET error: ${last_err:-none}"
+              echo "::warning title=CodeQL SARIF::$f still '$status' after the bounded wait;" \
+                "not failing the gate. last GET error: ${last_err:-none}"
             fi
           done
           if [ "$found" = 0 ]; then

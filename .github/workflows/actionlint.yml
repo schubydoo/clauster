@@ -57,5 +57,6 @@ jobs:
           # ever changes, so this never silently lints LESS than it appears to. (Comment
           # kept from starting with the word shellcheck: that reads as a shellcheck
           # directive and errors SC1072/SC1073.)
-          shellcheck --version >/dev/null || { echo "::error::shellcheck missing — run: blocks would go unlinted"; exit 1; }
+          shellcheck --version >/dev/null \
+            || { echo "::error::shellcheck missing — run: blocks would go unlinted"; exit 1; }
           ./actionlint -color
