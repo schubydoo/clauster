@@ -100,7 +100,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      security-events: write
+      # `analyze` runs with `upload: never` and a minted App token does the upload,
+      # so the job token no longer needs `security-events: write`.
       packages: read
       actions: read
       contents: read
@@ -112,6 +113,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Mint an upload-only App token (`security-events: write`) BEFORE the analysis, so
+      # the token exists regardless of the analysis outcome and the `always()` upload
+      # below can post off the App's own rate bucket (#1445). Same-repo only; a fork PR
+      # skips both the mint and the upload.
+      - name: Mint SARIF upload token
+        id: sarif-token
+        if: >-
+          ${{ github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.CLAUSTER_CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
+          permission-security-events: write
       - name: Initialize CodeQL
         uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
@@ -121,7 +136,69 @@ jobs:
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
-          category: "/language:${{ matrix.language }}"
+          # `upload: never` + `output`: write the SARIF to disk instead of uploading via
+          # the action (GITHUB_TOKEN-only; codeql-action#2719). The step below posts it
+          # to the public endpoint with the minted App token.
+          upload: never
+          output: codeql-sarif
+      - name: Upload CodeQL SARIF
+        # Post each analysis to the public `code-scanning/sarifs` endpoint with the
+        # minted App token, off the shared GITHUB_TOKEN pool (see the trivy/zizmor jobs).
+        # Every dynamic value comes through `env:`. Same-repo only: a fork PR cannot
+        # write code scanning results, so skip (`always()` counts the skip as passing).
+        if: >-
+          ${{ always()
+          && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository) }}
+        env:
+          GH_TOKEN: ${{ steps.sarif-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+          REF: ${{ github.ref }}
+          CHECKOUT_URI: file://${{ github.workspace }}
+          CATEGORY: "/language:${{ matrix.language }}"
+          SARIF_DIR: codeql-sarif
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          found=0
+          for f in "$SARIF_DIR"/*.sarif; do
+            found=1
+            # `automationDetails.id` = the analysis category, so a re-upload supersedes
+            # the prior series for this language instead of duplicating it.
+            sarif_b64="$(jq --arg cat "$CATEGORY" '.runs[].automationDetails.id = $cat' "$f" | gzip -c | base64 -w0)"
+            sarif_id="$(gh api "repos/$REPO/code-scanning/sarifs" \
+              -f "commit_sha=$COMMIT_SHA" \
+              -f "ref=$REF" \
+              -f "checkout_uri=$CHECKOUT_URI" \
+              -f "tool_name=CodeQL" \
+              -f "sarif=$sarif_b64" \
+              --jq .id)"
+            echo "Uploaded $f (id=$sarif_id); waiting for processing."
+            last_err=""
+            done_ok=""
+            for _ in $(seq 1 30); do
+              if ! status="$(gh api "repos/$REPO/code-scanning/sarifs/$sarif_id" --jq .processing_status 2>/tmp/gh_poll_err)"; then
+                last_err="$(cat /tmp/gh_poll_err)"
+                status="pending"
+              fi
+              echo "processing_status=$status"
+              case "$status" in
+                complete) done_ok=1; break ;;
+                failed)
+                  echo "CodeQL SARIF processing failed:" >&2
+                  gh api "repos/$REPO/code-scanning/sarifs/$sarif_id" --jq '.errors[]?' >&2
+                  exit 1 ;;
+              esac
+              sleep 5
+            done
+            if [ -z "$done_ok" ]; then
+              echo "::warning title=CodeQL SARIF::$f still '$status' after the bounded wait; not failing the gate. last GET error: ${last_err:-none}"
+            fi
+          done
+          if [ "$found" = 0 ]; then
+            echo "::warning title=CodeQL SARIF::no SARIF in $SARIF_DIR; nothing uploaded."
+          fi
 
   gitleaks:
     name: secret scan
