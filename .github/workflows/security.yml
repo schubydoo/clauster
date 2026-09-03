@@ -223,12 +223,11 @@ jobs:
   zizmor:
     name: workflow audit
     # Skip on the `synchronize` storm (pr-auto-update fans a main push across every
-    # open PR): the SARIF upload is GITHUB_TOKEN-only (codeql-action#2719), so
-    # re-running every push just taxes the 1,000/hr pool. Runs on PR
+    # open PR): re-running every push just taxes the API pools. Runs on PR
     # open/reopen/ready-for-review + push:main + weekly cron; `security required
     # checks passed` (if: always()) counts a skip as passing.
-    # …and skip on a DRAFT PR for the same reason (the SARIF upload taxes the
-    # shared GITHUB_TOKEN pool); `ready_for_review` re-fires it on the flip.
+    # …and skip on a DRAFT PR for the same reason; `ready_for_review` re-fires it
+    # on the flip.
     if: >-
       (github.event_name != 'pull_request' || github.event.action != 'synchronize')
       && github.event.pull_request.draft != true
@@ -245,6 +244,17 @@ jobs:
       # Mint a clauster-ci App token (≥5,000 REST req/hr) so zizmor's GitHub
       # API calls (e.g. the /advisories audit) don't exhaust the 1,000/hr
       # github-actions[bot] pool under bursts (observed: zizmor /advisories 403).
+      # The SARIF upload below stays on GITHUB_TOKEN. Verified 2026-09-03 on PR 1435
+      # (run 33700073187): with this App token carrying contents read, actions read
+      # and security-events write, `upload-sarif` answered "Not Found ... check that
+      # your token ... has contents: read, security-events: write". Inside Actions
+      # the action uploads through `PUT /repos/{owner}/{repo}/code-scanning/analysis`
+      # (its `analyses.ts`), an Actions-only route, so its `token` input really is
+      # GITHUB_TOKEN-only; codeql-action#2719 is the same failure. If GITHUB_TOKEN's
+      # shared pool is exhausted again ("API rate limit exceeded for installation"
+      # on the upload, 2026-09-02), the way out is a direct
+      # `POST /repos/{owner}/{repo}/code-scanning/sarifs` with the App token, which
+      # the REST docs limit "per user or app installation".
       # Same-repo runs only; fork PRs lack the App secrets, so the step is skipped
       # and the token falls back to GITHUB_TOKEN below.
       - name: Mint GitHub App token
@@ -268,6 +278,10 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
       - name: Upload SARIF
+        # `always()` like the trivy upload above: zizmor exits nonzero when it has
+        # findings, which is exactly when the SARIF is worth sending to the Security
+        # tab. The job still goes red on findings; only the upload no longer skips.
+        if: always()
         uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           sarif_file: results.sarif
