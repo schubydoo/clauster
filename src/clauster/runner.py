@@ -419,19 +419,25 @@ _NOTICE_MAX_CHARS = 120
 def _sidecar_notice(info: dict) -> str | None:
     """Read a keeper sidecar's advisory ``note`` as a bounded, redacted string (#1390).
 
-    THE single reader for that field, shared by the two paths that can build a RUNNING pty
-    row from a sidecar — :meth:`SessionRunner._apply_pty_info` (spawn + startup watch) and
+    THE single reader for that field, shared by the three paths that can build a RUNNING pty
+    row from a sidecar — :meth:`SessionRunner._apply_pty_info` (spawn + startup watch),
     :meth:`SessionRunner._reattach_pty_from_sidecar` (a live keeper adopted with no row to
-    correlate it to). They show the same card, so a note read on only one of them would
-    appear and then vanish.
+    correlate it to), and :meth:`SessionRunner._connect_facts_for` (a persisted row
+    reattached after a restart). They show the same card, so a note read on only some of them
+    would appear and then vanish.
 
-    :meth:`SessionRunner._connect_facts_for` deliberately does NOT read it. Its two callers
-    use the returned dict's emptiness as the readiness gate, so a note riding that dict
-    would promote a row on a non-evidence field. It also never needs to: the keeper writes
-    ``connect_url`` and ``session_id`` in one update, so that helper returns non-empty only
-    when a session id was captured — and then ``session_url`` exists and no advisory is due.
-    The consequence is named in #1390: a row rebuilt through that leg after a restart stays
-    STARTING rather than showing this notice.
+    :meth:`SessionRunner._connect_facts_for` reads it as one of its returned facts (#1438),
+    but only inside the leg already gated on ``state == "ready"`` — the readiness evidence
+    the spawn path promotes on. Its three callers (:meth:`_reattach_rows_with_pids`,
+    :meth:`_adopt_rows_from_store`, :meth:`_promote_ready_unwatched`) use the returned dict's
+    emptiness as the readiness gate, so a note that rides that dict promotes the row on the
+    ready state, not on a non-evidence field — and each must copy the ``notice`` key onto the
+    card, or the row goes RUNNING with the reason dropped. This matters because the keeper
+    writes a note exactly when it reaches ``ready`` having never captured a link (a screen
+    fault leaves ``connect_url`` unset), so a ready sidecar with a note and no link is a
+    RUNNING session that must show its reason. Before #1438 that helper skipped the note and
+    returned an empty dict for that case, so a row rebuilt through it after a restart stayed
+    STARTING with no notice — the gap #1390 named.
 
     Treated as untrusted text even though the keeper only ever writes a fixed constant: a
     sidecar is an on-disk file a hand edit or a corrupt write can put anything into (the
@@ -4639,6 +4645,11 @@ class SessionRunner:
             current.url = connect.get("url")
             current.environment_id = connect.get("environment_id")
             current.starter_session_id = connect.get("starter_session_id")
+            # Recovered from the same ready sidecar as the connect facts (#1438), so a
+            # screen-fault advisory survives a pid-adoption resync too and does not
+            # appear-then-vanish across the tick that re-owns the bridge. Absent from the
+            # dict clears a stale note, matching `_apply_pty_info`'s unconditional assign.
+            current.notice = connect.get("notice")
             current.bridge_debug_log_path = log_path
             current.bridge_raw_log_path = (
                 self._raw_log_path_for(log_path) if log_path is not None else None
@@ -4876,6 +4887,16 @@ class SessionRunner:
                     facts["url"] = info["connect_url"]
                 if info.get("session_id"):
                     facts["starter_session_id"] = info["session_id"]
+                # Lift the advisory note here too (#1438), the same field `_apply_pty_info`
+                # reads on the spawn path. This leg already required `state == "ready"` above
+                # — the readiness evidence the spawn path promotes on — so a screen-fault
+                # sidecar (`connect_url` nulled, a note written, no session id) returns
+                # NON-EMPTY, and the caller reads RUNNING with the notice instead of an empty
+                # dict that read STARTING with no reason (the gap #1390 named). The note rides
+                # a dict already gated on readiness, so it promotes on the ready state, never
+                # on itself.
+                if notice := _sidecar_notice(info):
+                    facts["notice"] = notice
                 return facts
             return {}
         ptr = pointers.pointer_for_project(proj.path)
@@ -6086,6 +6107,13 @@ class SessionRunner:
             inst.url = connect.get("url") or inst.url
             inst.environment_id = connect.get("environment_id") or inst.environment_id
             inst.starter_session_id = connect.get("starter_session_id") or inst.starter_session_id
+            # Unconditional, unlike the fields above (#1438): a note is a statement about the
+            # CURRENT sidecar, not a fact to preserve. This is the THIRD `_connect_facts_for`
+            # caller that gates on the dict — a ready screen-fault sidecar now returns a
+            # notice-only dict, so this leg promotes it too, and without this line it would go
+            # RUNNING with no link AND no reason (the exact #1438 state) on a row reattached
+            # STARTING and later promoted here.
+            inst.notice = connect.get("notice")
             inst.status = InstanceStatus.RUNNING
             if side_effects:
                 self._emit_lifecycle("ready", inst)
