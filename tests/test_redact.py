@@ -415,6 +415,17 @@ def test_single_run_flag_excludes_the_fixed_and_whitespace_cores():
     assert single[r"sk-[A-Za-z0-9_-]{16,}"] is True
 
 
+def test_is_single_class_run_rejects_whitespace_in_either_form():
+    # The check reads the pattern text, so it must reject whitespace written as the `\s`
+    # escape AND as a literal space. A future core with a literal space would otherwise pass
+    # and make the whole-run skip unsound (its run ends at the space a second match needs).
+    assert redact._is_single_class_run(r"bearer\s+[A-Za-z0-9._-]{12,}") is False
+    assert redact._is_single_class_run(r"bearer +[A-Za-z0-9._-]{12,}") is False
+    assert redact._is_single_class_run("bearer\t+[A-Za-z0-9._-]{12,}") is False
+    # A whitespace-free open-ended class run is still accepted.
+    assert redact._is_single_class_run(r"sk-[A-Za-z0-9_-]{16,}") is True
+
+
 @pytest.mark.parametrize(
     ("shape", "line"),
     [
@@ -436,9 +447,9 @@ def test_a_cut_also_supplies_the_trailing_boundary(shape, line):
 
 
 def test_masking_never_drops_below_the_pre_change_pipeline():
-    # The parity property as a test rather than a comment: the third span source in `_mask`
-    # is the old strip-then-mask view, so whatever it masked is still masked. This is the
-    # exact line the fuzzer caught the fix regressing.
+    # The parity property as a test rather than a comment: the fourth span source in
+    # `_sanitize` is the old strip-then-mask view, so whatever it masked is still masked. This
+    # is the exact line the fuzzer caught the fix regressing.
     line = "session_01ABCDEF\x07_x"
     assert "<redacted>" in redact.redact_secrets(redact.redact_ids(redact.strip_ansi(line)))
     assert "<redacted>" in redact.sanitize_line(line)

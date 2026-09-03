@@ -115,7 +115,7 @@ def TestOneInput(data: bytes) -> None:
     for m in _occurrences(out, _BARE):
         start = m.start()
         left = out[start - 1] if start else ""
-        if out[:start].endswith(_MASK):
+        if start >= len(_MASK) and out[start - len(_MASK) : start] == _MASK:
             continue
         assert any(run.startswith(m.group(0)) for run in residue.get(left, ())), (
             f"weld/split leak: {m.group(0)!r} after {left!r} survived in {out!r}"

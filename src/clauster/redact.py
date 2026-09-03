@@ -93,24 +93,33 @@ _SECRET_CORES: tuple[tuple[str, int], ...] = (
 _SECRET_RES = tuple(re.compile(rf"\b{core}\b", flags) for core, flags in _SECRET_CORES)
 
 #: A core is one greedy class run only when it ends in an OPEN-ended quantifier (``{n,}`` or
-#: ``+``), not a fixed ``{n}`` count, and contains no ``\s`` escape. The check reads the
-#: pattern text, so ``\s`` is the two-character escape, not a literal space.
+#: ``+``), not a fixed ``{n}`` count, and matches no whitespace at all. The check reads the
+#: pattern TEXT, so it must reject both the ``\s`` escape AND a literal whitespace character.
 _GREEDY_TAIL_RE = re.compile(r"(?:\{\d+,\}|\+)$")
+_WS_RE = re.compile(r"\s")
 
 
 def _is_single_class_run(core: str) -> bool:
-    r"""Report whether ``core`` is one greedy character-class run with no internal whitespace.
+    r"""Report whether ``core`` is one greedy character-class run that matches no whitespace.
 
     Only then can :func:`_cut_spans` mask the whole run from a cut and skip the cuts it
     covers: a same-shape match that starts inside one greedy class run ends no later than the
     run. A FIXED-length core (``_UUID_CORE``, the AWS ``AKIA`` key) is not such a run -- a
     second match can start inside one and end past it (two ``UUID``s that share eight hex
-    digits), so ``opened``'s end is not the run end. A core with an ``\s`` escape (the
-    ``bearer`` header) can resume past the run on its next whitespace. Both stay precise, mask
-    only to ``closed``'s end and never advance ``reach`` (#1379). Both are cheap to leave
-    unskipped -- a fixed core scans O(1) per cut, and ``bearer``'s ``\s+`` bounds every scan.
+    digits), so ``opened``'s end is not the run end. A core that can match whitespace (the
+    ``bearer`` header, whether written ``\s`` or with a literal space) can resume past the run
+    on that whitespace. Both stay precise, mask only to ``closed``'s end and never advance
+    ``reach`` (#1379). Both are cheap to leave unskipped -- a fixed core scans O(1) per cut,
+    and ``bearer``'s whitespace bounds every scan.
+
+    Rejecting a literal-space core (``bearer +...``) as well as the ``\s`` escape is a guard
+    on a future core: a literal space would otherwise pass and make the skip unsound.
     """
-    return r"\s" not in core and _GREEDY_TAIL_RE.search(core) is not None
+    return (
+        r"\s" not in core
+        and _WS_RE.search(core) is None
+        and _GREEDY_TAIL_RE.search(core) is not None
+    )
 
 
 #: Every mask, in the order the sequential passes apply them, as
@@ -348,10 +357,15 @@ def _apply_spans(visible: str, spans: list[tuple[int, int, str]]) -> str:
     one thing this design must never do. Every offered byte ends up covered, so the result
     is a union in the literal sense and cannot fall below any single source.
 
-    Spans are offered in mask order -- ids, then UUIDs, then each secret shape -- so the
-    common nesting keeps its readable form: ``Bearer env_<ULID>`` masks the id first and
-    reports ``env_<redacted>``. A clipped remainder uses the neutral token, since the
-    readable prefix is only correct for a whole id span.
+    Spans are offered in mask order -- ids, then UUIDs, then each secret shape -- so an id
+    keeps its readable prefix rather than collapsing into a wider secret match: the id span
+    lands first and reports ``env_<redacted>``. A wider secret span that overlaps it (a
+    ``Bearer env_<ULID>`` header) is then clipped, so its uncovered prefix becomes a SECOND
+    neutral ``<redacted>``: ``hdr:Bearer env_<ULID>`` on the union path reads
+    ``hdr:<redacted>env_<redacted>``, not ``hdr:Bearer env_<redacted>``. The clipped remainder
+    uses the neutral token because the readable prefix is only correct for a whole id span.
+    (The no-escape fast path keeps ``Bearer`` readable, because there the sequential
+    :func:`redact_ids` then :func:`redact_secrets` leaves the bearer regex nothing to match.)
 
     ``bytearray.find`` rather than a slice test: ``any(covered[start:end])`` copies the
     slice before ``any`` can short-circuit, which is quadratic once many spans cover one
