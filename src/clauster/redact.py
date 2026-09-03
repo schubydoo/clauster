@@ -52,7 +52,37 @@ _ANSI_RE = re.compile(_ANSI_PATTERN)
 # `redact_for_disk` must preserve. DEL (0x7F) and the 8-bit C1 range (0x80-0x9F) are
 # included for the same reason: they print nothing, and a C1 introducer that arrived
 # UTF-8-encoded is exactly the boundary-destroying byte `_ANSI_PATTERN` declines to parse.
-_INVISIBLE_PATTERN = r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]"
+#
+# The second run is the Unicode Default_Ignorable_Code_Point set — the property whose whole
+# meaning is "a conforming renderer shows nothing here": zero-width spaces and joiners, the
+# bidirectional controls, the word joiner, the BOM, the soft hyphen, the variation selectors,
+# the combining grapheme joiner, the Hangul fillers and the plane-14 tag block. One inside an
+# identifier splits it past the `\b`-anchored masks exactly as a C0 control does (#1434, the
+# #1370 shape: `env_01AB<U+200B>CDEFGHJK` reaches the reader whole while its BEL sibling is
+# masked). Removing each here turns it into a cut the cut-anchored pass masks, and the union of
+# cuts can only ever mask MORE (#1379), never legitimate text.
+#
+# This is the RIGHT property, not the `Cf` (Format) category, which is both too wide and too
+# narrow. Too wide: the prepended-concatenation marks (U+0600, U+06DD ARABIC END OF AYAH, ...)
+# are `Cf` but DO draw a sign, so stripping them would delete visible text; Default_Ignorable
+# excludes them. Too narrow: the variation selectors (U+FE0F), U+034F and the Hangul fillers are
+# invisible joiners that are NOT `Cf`, so a `Cf`-only strip would leave the same leak one code
+# point over. The ranges are `(Cf | Variation_Selector | Other_Default_Ignorable)` minus the
+# code points Unicode excludes because they render: the prepended-concatenation marks, the
+# interlinear-annotation controls (U+FFF9-FFFB) and the Egyptian format controls (U+13430-1343F).
+# `test_invisible_pattern_is_default_ignorable_not_cf` rebuilds that set from `unicodedata` and
+# reds if a Unicode bump adds a member outside these frozen ranges. U+2028/U+2029 are
+# deliberately absent: they are LINE separators (Zl/Zp) a `<pre>` renders as a line break, so
+# they SEPARATE rather than weld.
+# WARNING: a variation selector or ZWJ is stripped too, so a joined emoji sequence in the log
+# renders as its separate base glyphs — accepted: redaction (invariant 4) beats emoji fidelity.
+_INVISIBLE_PATTERN = (
+    r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F"
+    r"\u00ad\u034f\u061c\u115f-\u1160\u17b4-\u17b5\u180b-\u180f"
+    r"\u200b-\u200f\u202a-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8"
+    r"\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0000-\U000e0fff"
+    r"]"
+)
 
 # Each mask below is written ONCE, as a bare CORE with no `\b` on either end, and compiled
 # from that core three ways: `\b`core`\b` (what the existing passes use), core`\b` (a start

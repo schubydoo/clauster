@@ -288,8 +288,20 @@ The bridge debug log is streamed over a WebSocket and sanitized line by line
 (`redact.py`). Redaction runs against the view a browser **renders**. That view
 has the escape sequences removed, including the `OSC`, `DCS`, `SOS`, `PM` and
 `APC` string sequences and their payloads. It also has the invisible control
-characters removed. Neither kind of byte can therefore split an identifier into
-fragments too short for the word-boundary-anchored regexes.
+characters removed, and the invisible Unicode characters a browser draws nothing
+for: zero-width spaces and joiners, the bidirectional controls, the variation
+selectors, the soft hyphen, the byte-order mark and the other code points in the
+Unicode `Default_Ignorable_Code_Point` set. None of these can therefore split an
+identifier into fragments too short for the word-boundary-anchored regexes. A
+side effect is that these characters are deleted from every redacted view this
+code produces, not only the streamed log. `sanitize_line` also redacts each
+transcript turn (the usage view) and the streamed hosted-agent assistant text,
+and `redact_for_disk` redacts `instance.error_detail`, clone-job errors and agent
+result text. Some of those surfaces are conversational prose, so the effect is
+visible there: a joiner inside an emoji sequence (a family emoji) renders as its
+separate glyphs, and a bidirectional mark in an Arabic or Hebrew turn is dropped.
+Each is a redacted view, not the verbatim on-disk log, so this is accepted:
+redaction wins over character fidelity in a redacted copy.
 
 Removing those bytes can also *delete* a word boundary. `user<ESC>[32menv_<ULID>`
 renders as `userenv_<ULID>`, which reads exactly like ordinary compound text such

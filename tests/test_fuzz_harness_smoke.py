@@ -62,6 +62,30 @@ def _load(harness: str):
     return module
 
 
+def test_redact_fuzzer_render_matches_the_module_invisible_set() -> None:
+    """The fuzzer's `_RENDER` invisible set is a hand-kept copy of `redact._INVISIBLE_RE` (#1434).
+
+    The harness restates the render model deliberately, but its invisible ranges are the SAME
+    ground truth the module strips, copied by hand. If the copy drifts, the oracle stops
+    modelling what a `<pre>` shows and goes blind to a zero-width leak in the drifted range. A
+    single character never matches `_RENDER`'s ESC alternation (that needs two), so for a lone
+    code point `_RENDER` matches iff the character is in its invisible class — compare that to
+    the module's class over the whole range.
+    """
+    from clauster import redact
+
+    module = _load("redact_fuzzer.py")
+    mismatches = [
+        cp
+        for cp in range(0x110000)
+        if bool(redact._INVISIBLE_RE.fullmatch(chr(cp))) != bool(module._RENDER.fullmatch(chr(cp)))
+    ]
+    assert not mismatches, (
+        "redact_fuzzer._RENDER drifted from redact._INVISIBLE_RE at: "
+        f"{[hex(c) for c in mismatches[:20]]}"
+    )
+
+
 # URLs spanning every branch of the authorize-path / known-auth-host predicates:
 # the real endpoint, the bare-/authorize fallback, the query-string decoy the path
 # check exists to reject, docs/marketing exclusions, an ACCEPTED subdomain on each
