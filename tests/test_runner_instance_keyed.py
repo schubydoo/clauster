@@ -3162,3 +3162,91 @@ async def test_resync_adopts_the_screen_fault_notice_and_a_later_link_clears_it(
     assert inst.status is InstanceStatus.RUNNING
     assert inst.url == "https://claude.ai/code?environment=env_NEXT"
     assert inst.notice is None, "a stale notice must not survive a generation that has a link"
+
+
+# -- #1452: a ready sidecar with NO link and NO note reattaches RUNNING, like the spawn path --
+
+
+async def test_reattached_ready_row_with_no_link_and_no_note_still_runs(
+    runner_config, monkeypatch
+):
+    # #1452. The keeper promotes a pty session to `ready` at the URL deadline whether or not a
+    # screen fault happened, and writes a `note` only when a fault latch is set. So a sidecar
+    # can be `ready` with `connect_url: null`, no session id AND no note — a URL scrape that
+    # simply missed, with nothing to report. The spawn path (`_apply_pty_info`) promotes THAT
+    # to RUNNING on `state == "ready"` alone. Before #1452 the restart path disagreed:
+    # `_connect_facts_for` lifted the note only when present, so this sidecar returned an empty
+    # dict, read as "no evidence", and `_reattach_rows_with_pids` flipped the card to STARTING
+    # for the life of the process (the #1438 symptom minus the notice). Both paths must agree.
+    runner = _make_runner(runner_config)
+    # Deliberately NOT `_stub_connect`: drive the real recovery over a bare ready sidecar.
+    runner.persistence.state_store().save({"iid-bare": _row("alpha", pid=6003, proc_start=111.0)})
+    runner._log_dir.mkdir(parents=True, exist_ok=True)
+    (runner._log_dir / "alpha-1700000000004-0.keeper.json").write_text(
+        json.dumps(
+            {
+                "keeper_pid": 5557,
+                "bridge_pid": 6003,
+                "bridge_proc_start": 111.0,
+                "state": "ready",
+                "connect_url": None,  # the scrape missed: no link captured
+                "session_id": None,
+                # and no `note`: nothing to report, unlike the screen-fault case
+            }
+        )
+    )
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge", lambda pid, *a, **k: pid == 6003
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda pid: pid == 5557)
+    monkeypatch.setattr("clauster.runner.pointers.pointer_for_project", lambda path: None)
+
+    await runner.rediscover(persist=False)
+
+    inst = {i.instance_id: i for i in runner.list_instances()}["iid-bare"]
+    assert inst.status is InstanceStatus.RUNNING, "a ready row must run, not stick at STARTING"
+    assert inst.url is None  # the link really is gone
+    assert inst.notice is None  # and there is no reason to show — just RUNNING
+
+
+async def test_promote_ready_unwatched_promotes_a_bare_ready_sidecar(runner_config, monkeypatch):
+    # #1452, the SECOND promotion leg. A pty row reattached before its connect evidence existed
+    # comes back STARTING with no watch of its own; `_promote_ready_unwatched` re-reads the
+    # sidecar on a later tick. A bare ready sidecar (`ready`, no link, no session, no note) now
+    # returns a non-empty dict from `_connect_facts_for`, so this leg's `if not connect` gate
+    # must promote it to RUNNING instead of leaving it STARTING forever.
+    runner = _make_runner(runner_config)
+    proj = runner._discovered()["alpha"]
+    iid = "iid-bare-late"
+    runner._instances[iid] = RemoteControlInstance(
+        instance_id=iid,
+        project=proj.name,
+        label=proj.name,
+        resume_mode="pty",
+        status=InstanceStatus.STARTING,  # reattached before its connect evidence existed
+        bridge_pid=6004,
+        bridge_proc_start=111.0,
+    )
+    runner._log_dir.mkdir(parents=True, exist_ok=True)
+    (runner._log_dir / "alpha-1700000000005-0.keeper.json").write_text(
+        json.dumps(
+            {
+                "keeper_pid": 5558,
+                "bridge_pid": 6004,
+                "bridge_proc_start": 111.0,
+                "state": "ready",
+                "connect_url": None,
+                "session_id": None,
+            }
+        )
+    )
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge", lambda pid, *a, **k: pid == 6004
+    )
+
+    await runner._promote_ready_unwatched({iid: True}, side_effects=False)
+
+    inst = runner._instances[iid]
+    assert inst.status is InstanceStatus.RUNNING, "a ready row must promote here too, not stick"
+    assert inst.url is None
+    assert inst.notice is None
