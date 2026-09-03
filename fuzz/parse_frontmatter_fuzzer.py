@@ -37,7 +37,10 @@ And across the pair:
 
 ⚠️ Mapping equality goes through :func:`_same`, which falls back to ``repr``. YAML's
 ``.nan`` is real input here and ``float('nan') != float('nan')``, so a plain ``==`` would
-report two identical mappings as a divergence on the fuzzer's first ``.nan``.
+report two identical mappings as a divergence on the fuzzer's first ``.nan``. Since #1415,
+``load_frontmatter_yaml`` refuses ``.nan`` at the seam, so no ACCEPTED header holds one and
+that fallback is unreachable for this reason. ``_same`` keeps it as a belt for any other
+value that is ``repr``-equal but ``==``-unequal, which a future change might admit.
 
 Body equality was **not** asserted when this harness landed: the first run found a
 systematic divergence on its own seed corpus, because the two fence patterns disagreed on
