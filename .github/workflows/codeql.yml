@@ -115,6 +115,10 @@ jobs:
           # status reports) at the App token, off the shared pool.
           upload: never
           output: codeql-sarif
+          # Upload the POST-PROCESSED SARIF (fingerprints added), which the action writes
+          # as `upload.sarif` in this dir; `SARIF_DIR` points here. The `*.sarif` glob
+          # matches it, and the jq below still forces the category.
+          post-processed-sarif-path: codeql-sarif-processed
           token: ${{ steps.sarif-token.outputs.token || github.token }}
       - name: Upload CodeQL SARIF
         # Post each analysis to the public `code-scanning/sarifs` endpoint with the
@@ -131,8 +135,11 @@ jobs:
           COMMIT_SHA: ${{ github.sha }}
           REF: ${{ github.ref }}
           CHECKOUT_URI: file://${{ github.workspace }}
-          CATEGORY: "/language:${{ matrix.language }}"
-          SARIF_DIR: codeql-sarif
+          # Trailing slash is load-bearing: GitHub parses `automationDetails.id` as
+          # `category/run-id`, so `/language:python` with no slash records an EMPTY
+          # category. `/language:python/` gives the category with an empty run-id.
+          CATEGORY: "/language:${{ matrix.language }}/"
+          SARIF_DIR: codeql-sarif-processed
         run: |
           set -euo pipefail
           shopt -s nullglob

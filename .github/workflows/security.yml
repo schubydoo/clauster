@@ -157,6 +157,10 @@ jobs:
           # status reports) at the App token, off the shared pool.
           upload: never
           output: codeql-sarif
+          # Upload the POST-PROCESSED SARIF (fingerprints added), which the action writes
+          # as `upload.sarif` in this dir; `SARIF_DIR` points here. The `*.sarif` glob
+          # matches it, and the jq below still forces the category.
+          post-processed-sarif-path: codeql-sarif-processed
           token: ${{ steps.sarif-token.outputs.token || github.token }}
       - name: Upload CodeQL SARIF
         # Post each analysis to the public `code-scanning/sarifs` endpoint with the
@@ -173,8 +177,11 @@ jobs:
           COMMIT_SHA: ${{ github.sha }}
           REF: ${{ github.ref }}
           CHECKOUT_URI: file://${{ github.workspace }}
-          CATEGORY: "/language:${{ matrix.language }}"
-          SARIF_DIR: codeql-sarif
+          # Trailing slash is load-bearing: GitHub parses `automationDetails.id` as
+          # `category/run-id`, so `/language:python` with no slash records an EMPTY
+          # category. `/language:python/` gives the category with an empty run-id.
+          CATEGORY: "/language:${{ matrix.language }}/"
+          SARIF_DIR: codeql-sarif-processed
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -340,10 +347,16 @@ jobs:
           CHECKOUT_URI: file://${{ github.workspace }}
         run: |
           set -euo pipefail
+          if [ ! -f trivy-image.sarif ]; then
+            echo "::warning title=trivy SARIF::trivy-image.sarif is missing; the build or scan failed, nothing uploaded."
+            exit 0
+          fi
           # `automationDetails.id` is what `upload-sarif` wrote from `category:`; the
           # sarifs endpoint takes no category field, so set it here so these uploads
-          # supersede the existing `trivy-image` series instead of leaving duplicates.
-          sarif_b64="$(jq '.runs[].automationDetails.id = "trivy-image"' trivy-image.sarif | gzip -c | base64 -w0)"
+          # supersede the existing `trivy-image` series. The trailing slash is
+          # load-bearing: GitHub parses the id as `category/run-id`, so `trivy-image`
+          # without one records an EMPTY category.
+          sarif_b64="$(jq '.runs[].automationDetails.id = "trivy-image/"' trivy-image.sarif | gzip -c | base64 -w0)"
           sarif_id="$(gh api "repos/$REPO/code-scanning/sarifs" \
             -f "commit_sha=$COMMIT_SHA" \
             -f "ref=$REF" \
@@ -475,7 +488,7 @@ jobs:
           # sarifs endpoint takes no category field, so set it here so these uploads
           # supersede the existing `zizmor` analysis series instead of leaving stale
           # duplicates next to it.
-          sarif_b64="$(jq '.runs[].automationDetails.id = "zizmor"' results.sarif | gzip -c | base64 -w0)"
+          sarif_b64="$(jq '.runs[].automationDetails.id = "zizmor/"' results.sarif | gzip -c | base64 -w0)"
           sarif_id="$(gh api "repos/$REPO/code-scanning/sarifs" \
             -f "commit_sha=$COMMIT_SHA" \
             -f "ref=$REF" \
