@@ -187,6 +187,40 @@ def _redact(text: str, pasted_secrets: Iterable[str] = ()) -> str:
     return text
 
 
+#: Exit code :meth:`_ConPtyPopen.poll` / :meth:`_ConPtyPopen.wait` report when ``isalive()``
+#: FAULTS (not merely returns False): a non-zero, non-None value so the flow finalizes as a
+#: failure and the caller never re-enters pywinpty on a handle that just refused to answer.
+_CONPTY_FAULT_EXIT = 1
+
+
+def _conpty_alive(proc: Any) -> tuple[bool, str | None]:
+    """Whether the ConPTY ``proc`` is running, plus the fault text if the check itself faulted.
+
+    ``isalive()`` is the exit-vs-idle decision at four sites — the reader's two empty-read
+    branches (:func:`_pump_conpty`) and :meth:`_ConPtyPopen.poll` / :meth:`_ConPtyPopen.wait` —
+    and pywinpty raises its own ``WinptyError`` (NOT an ``OSError`` subclass, so a bare
+    ``except OSError`` misses it) out of it on a handle it can no longer query. Unguarded, one
+    such raise escaped :meth:`LoginShepherd._teardown` before it cleared the active flow, so the
+    dashboard login stayed ``active`` until restart (#1422). Reading a raise as dead is the
+    fail-closed answer: the reader breaks and the lifecycle proceeds to teardown, rather than a
+    lifecycle fault collapsing into a stuck-active state (invariant 1). Never silently — the
+    fault is logged at debug.
+
+    Returns ``(alive, error)``; a non-None ``error`` ALWAYS comes with ``alive=False``. The
+    distinction matters at ``poll``/``wait``: a genuinely-dead process is reaped with the
+    native ``wait()``, but a FAULTED handle must NOT be handed back to pywinpty's ``wait()`` —
+    it can raise again or, if the fault clears while the process still lives, block with no
+    timeout while holding the shared lock (the hazard :func:`pty_keeper._run_keeper_conpty`
+    documents). So a fault returns :data:`_CONPTY_FAULT_EXIT` instead. Mirrors the
+    ``(alive, error)`` shape of :func:`pty_keeper._conpty_alive`.
+    """
+    try:
+        return bool(proc.isalive()), None
+    except Exception as exc:  # noqa: BLE001 — any pywinpty fault means "cannot observe" → dead
+        _log.debug("login_shepherd: conpty liveness check failed: %s", exc)
+        return False, f"conpty liveness check failed: {exc}"
+
+
 class _ConPtyPopen:
     """Minimal `subprocess.Popen`-compatible lifecycle adapter over a pywinpty `PtyProcess`.
 
@@ -224,10 +258,17 @@ class _ConPtyPopen:
     def poll(self) -> int | None:
         """Return the exit code if the process has exited, else None (never blocks)."""
         with self._lock:
-            if self._proc.isalive():
+            alive, error = _conpty_alive(self._proc)
+            if alive:
                 return None
-            # Dead → `wait()` returns the cached status immediately without blocking. It may
-            # return None on some pywinpty builds → coerce to 0.
+            if error is not None:
+                # A FAULTED handle: do NOT re-enter pywinpty's `wait()` — it can raise again,
+                # or block with no timeout if the fault clears while the process still lives,
+                # holding this lock and starving the reader. Report a synthetic exit so the
+                # flow finalizes as a failure rather than stranding (#1422).
+                return _CONPTY_FAULT_EXIT
+            # Cleanly dead → `wait()` returns the cached status at once without blocking. It
+            # may return None on some pywinpty builds → coerce to 0.
             return self._proc.wait() or 0
 
     def wait(self, timeout: float | None = None) -> int:
@@ -240,7 +281,12 @@ class _ConPtyPopen:
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
             with self._lock:
-                if not self._proc.isalive():
+                alive, error = _conpty_alive(self._proc)
+                if error is not None:
+                    # Faulted handle: return a synthetic exit rather than re-entering pywinpty's
+                    # `wait()` (which can raise or block with no timeout). See `poll` (#1422).
+                    return _CONPTY_FAULT_EXIT
+                if not alive:
                     return self._proc.wait() or 0
             if deadline is not None and time.monotonic() >= deadline:
                 raise subprocess.TimeoutExpired(cmd="claude setup-token", timeout=timeout or 0)
@@ -940,70 +986,79 @@ class LoginShepherd:
         closed last (in place of the pty master). Its `close()` is broadly guarded below since a
         stale ConPTY can raise a pywinpty-specific error, not just `OSError`.
         """
-        # Stop the child FIRST — see the docstring: this is what unblocks a PTY reader.
-        if flow.proc.poll() is None:
-            # On Windows, reap the process TREE first: `terminate()` there kills only the
-            # process it is handed, never descendants, so a surviving grandchild holds our
-            # stdout open, the reader below burns its full 5s join and then LEAKS the thread
-            # (measured on a Windows VM: 5026ms with the reader still alive, vs 20ms and a
-            # clean exit with the tree killed). PREPENDED, not replacing: `terminate()` still
-            # runs below (a no-op on an already-dead process — CPython handles the
-            # ERROR_ACCESS_DENIED-means-already-exited case), so the terminate-then-escalate
-            # ordering and everything depending on it are untouched. It costs no gracefulness
-            # because on Windows `Popen.kill is Popen.terminate` (both TerminateProcess —
-            # verified True there, False on POSIX); POSIX is excluded because there
-            # `terminate()` is a real SIGTERM and the stop-child-first ordering documented
-            # above is load-bearing. Guarded on a real `pid`: the ConPTY transport's proc is a
-            # `_ConPtyPopen`, a deliberate `Popen` SUBSET (poll/wait/terminate/kill) with no
-            # `pid`, pywinpty owns that process, and its `isalive()`-polling reader never had
-            # the problem. Broadly guarded like the second `wait` below — an unguarded raise
-            # would skip the terminate, the reader join, the control-end close AND the
-            # `self._flow = None` clear, stranding the flow `active` forever, strictly worse
-            # than the leaked thread this fixes. Failing here degrades to the old behaviour.
-            tree_pid = getattr(flow.proc, "pid", None)
-            if _is_win32() and tree_pid is not None:
-                try:
-                    procutil.force_kill_tree(tree_pid)
-                except Exception as exc:  # noqa: BLE001 — a best-effort reap must never strand
-                    _log.debug("login_shepherd: %s tree kill failed: %s", flow.mode, exc)
-            flow.proc.terminate()
-            try:
-                flow.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                flow.proc.kill()
-                # Swallow a second timeout too: `_ConPtyPopen.wait` genuinely raises
-                # `TimeoutExpired` (unlike a POSIX `Popen` after SIGKILL, which reaps at once),
-                # and an unguarded raise here would skip the reader join, the control-end close,
-                # AND the `self._flow = None` clear below — stranding the flow `active` forever.
-                with contextlib.suppress(subprocess.TimeoutExpired):
-                    flow.proc.wait(timeout=5)
-        # The reader is now unblocked by the child's EOF/EIO on the still-open fd.
-        if flow.reader_thread is not None:
-            flow.reader_thread.join(timeout=5)
-        # Close our write/control end LAST — the ConPTY handle, else the pty master, else the
-        # plain-pipe stdin — once the reader has joined, so it is never pulled from under an
-        # active read. `stdin_closed` guards idempotency (and doubles as "no more writes owed").
+        # The flow clear runs in `finally` (below) so it happens even if a step here raises:
+        # a pywinpty `terminate()`/`wait()` on a stale ConPTY handle raises its own
+        # `WinptyError`, and without this an escape skipped the clear and stranded the login
+        # `active` until restart (#1422). The fault still propagates once the flow is no longer
+        # stuck active, so a teardown fault is never silent (fail closed, visibly).
         try:
-            if flow.pty_process is not None:
-                if not flow.stdin_closed:
+            # Stop the child FIRST — see the docstring: this is what unblocks a PTY reader.
+            if flow.proc.poll() is None:
+                # On Windows, reap the process TREE first: `terminate()` there kills only the
+                # process it is handed, never descendants, so a surviving grandchild holds our
+                # stdout open, the reader below burns its full 5s join and then LEAKS the thread
+                # (measured on a Windows VM: 5026ms with the reader still alive, vs 20ms and a
+                # clean exit with the tree killed). PREPENDED, not replacing: `terminate()` still
+                # runs below (a no-op on an already-dead process — CPython handles the
+                # ERROR_ACCESS_DENIED-means-already-exited case), so the terminate-then-escalate
+                # ordering and everything depending on it are untouched. It costs no gracefulness
+                # because on Windows `Popen.kill is Popen.terminate` (both TerminateProcess —
+                # verified True there, False on POSIX); POSIX is excluded because there
+                # `terminate()` is a real SIGTERM and the stop-child-first ordering documented
+                # above is load-bearing. Guarded on a real `pid`: the ConPTY transport's proc is
+                # a `_ConPtyPopen`, a deliberate `Popen` SUBSET (poll/wait/terminate/kill) with no
+                # `pid`, pywinpty owns that process, and its `isalive()`-polling reader never had
+                # the problem. Broadly guarded like the second `wait` below — an unguarded raise
+                # would skip the terminate, the reader join and the control-end close (the flow
+                # clear itself is now in `finally`). Failing here degrades to the old behaviour.
+                tree_pid = getattr(flow.proc, "pid", None)
+                if _is_win32() and tree_pid is not None:
+                    try:
+                        procutil.force_kill_tree(tree_pid)
+                    except Exception as exc:  # noqa: BLE001 — a best-effort reap must never strand
+                        _log.debug("login_shepherd: %s tree kill failed: %s", flow.mode, exc)
+                flow.proc.terminate()
+                try:
+                    flow.proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    flow.proc.kill()
+                    # Swallow a second timeout too: `_ConPtyPopen.wait` genuinely raises
+                    # `TimeoutExpired` (unlike a POSIX `Popen` after SIGKILL, which reaps at
+                    # once), and an unguarded raise here would skip the reader join and the
+                    # control-end close below.
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        flow.proc.wait(timeout=5)
+            # The reader is now unblocked by the child's EOF/EIO on the still-open fd.
+            if flow.reader_thread is not None:
+                flow.reader_thread.join(timeout=5)
+            # Close our write/control end LAST — the ConPTY handle, else the pty master, else
+            # the plain-pipe stdin — once the reader has joined, so it is never pulled from
+            # under an active read. `stdin_closed` guards idempotency (and "no more writes owed").
+            try:
+                if flow.pty_process is not None:
+                    if not flow.stdin_closed:
+                        flow.stdin_closed = True
+                        with flow.pty_lock:  # serialize the close with any last reader access
+                            flow.pty_process.close()
+                elif flow.master_fd is not None:  # pragma: skip-on-win — POSIX pty master fd
+                    if not flow.stdin_closed:
+                        flow.stdin_closed = True
+                        os.close(flow.master_fd)
+                elif flow.proc.stdin is not None:
                     flow.stdin_closed = True
-                    with flow.pty_lock:  # serialize the close with any last reader access
-                        flow.pty_process.close()
-            elif flow.master_fd is not None:  # pragma: skip-on-win — POSIX pty master fd
-                if not flow.stdin_closed:
-                    flow.stdin_closed = True
-                    os.close(flow.master_fd)
-            elif flow.proc.stdin is not None:
-                flow.stdin_closed = True
-                flow.proc.stdin.close()
-        except Exception as exc:  # noqa: BLE001 — a teardown close (incl. pywinpty) must never raise
-            # Never silently: a close failure can't be surfaced to the caller mid-teardown, but
-            # log it at debug so it isn't wholly invisible (the flow is cleared either way).
-            _log.debug("login_shepherd: closing the %s control end failed: %s", flow.mode, exc)
-        if not already_cleared:
-            with self._flow_lock:
-                if self._flow is flow:
-                    self._flow = None
+                    flow.proc.stdin.close()
+            except Exception as exc:  # noqa: BLE001 — a teardown close (incl. pywinpty) must never raise
+                # Never silently: a close failure can't be surfaced to the caller mid-teardown,
+                # but log it at debug so it isn't wholly invisible (the flow is cleared anyway).
+                _log.debug("login_shepherd: closing the %s control end failed: %s", flow.mode, exc)
+        finally:
+            # ALWAYS clear the flow, even if the teardown above raised (#1422): a stranded
+            # `active` flow is the worst outcome. `already_cleared` skips it when the caller
+            # (`cancel`, the TTL reap) already detached the flow under `_flow_lock`.
+            if not already_cleared:
+                with self._flow_lock:
+                    if self._flow is flow:
+                        self._flow = None
 
 
 def _pump_stdout(flow: _Flow) -> None:
@@ -1092,7 +1147,7 @@ def _pump_conpty(flow: _Flow) -> None:
             # EOF, or an idle non-blocking read some pywinpty builds surface as EOFError: a
             # still-alive process is merely idle (keep polling); a dead one is drained → break.
             with lock:
-                alive = pty_process.isalive()
+                alive, _ = _conpty_alive(pty_process)
             if not alive:
                 break
             data = ""
@@ -1101,7 +1156,7 @@ def _pump_conpty(flow: _Flow) -> None:
             break
         if not data:
             with lock:
-                alive = pty_process.isalive()
+                alive, _ = _conpty_alive(pty_process)
             if not alive:
                 break
             time.sleep(_POLL_INTERVAL_SECONDS)  # alive but idle; yield before re-polling
