@@ -178,7 +178,9 @@ def test_stop_keeper_refuses_to_kill_a_non_keeper_pid():
         ct = procutil.proc_create_time(proc.pid)
         assert ct is not None  # the stranger is alive...
         assert (
-            pty_keeper.stop_keeper(proc.pid, expect_create_time=ct, expect_start_ticks=None)
+            pty_keeper.stop_keeper(
+                proc.pid, expect_create_time=ct, expect_start_ticks=None, expect_boot_id=None
+            )
             is True
         )
         assert procutil.proc_create_time(proc.pid) is not None  # ...and was NOT killed

@@ -197,6 +197,13 @@ class HostedSession(Base, TimestampMixin):
     # NULL for a row written by an older build, which compares on the epoch alone — the
     # pre-#1404 behaviour, re-stamped on that session's next spawn.
     agent_start_ticks: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # The boot the ticks belong to (#1401), the hosted twin of ``Instance.bridge_boot_id``.
+    # Ticks restart at zero each boot, so a row from an earlier boot could name a recycled pid
+    # holding the same count; the per-boot ``/proc/sys/kernel/random/boot_id`` rejects that on
+    # identity, and being boot-relative it survives a clock step the coarse epoch cannot, so
+    # ``is_killable_hosted`` uses it INSTEAD of the wall-clock epoch NTP moved. NULL keeps the
+    # coarse-epoch fallback for a row written by an older build, re-stamped on its next spawn.
+    agent_boot_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     started_at: Mapped[str | None] = mapped_column(String(64), nullable=True)
     intentional_stop: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     # The per-runtime RemoteControlInstance.instance_id (#834/#840), persisted so a

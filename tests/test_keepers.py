@@ -61,6 +61,16 @@ def test_iter_keepers_reads_fields_and_liveness(tmp_path):
     assert by_project["beta"].alive is False  # dead pid
 
 
+def test_iter_keepers_reads_the_boot_id_and_stays_none_when_absent(tmp_path):
+    # #1401: the sidecar's recorded boot id is carried onto KeeperInfo so stop_keeper can
+    # reject a cross-boot recycled pid on identity. A pre-#1401 sidecar (no boot_id) loads None.
+    _sidecar(tmp_path, "alpha", keeper_pid=os.getpid(), boot_id="boot-uuid-1")
+    _sidecar(tmp_path, "beta", keeper_pid=os.getpid(), seq=1)  # no boot_id key
+    by_project = {k.project: k for k in pty_keeper.iter_keepers(tmp_path)}
+    assert by_project["alpha"].keeper_boot_id == "boot-uuid-1"
+    assert by_project["beta"].keeper_boot_id is None
+
+
 def test_iter_keepers_lists_a_live_keeper_on_a_btime_less_procfs(tmp_path, monkeypatch):
     # gVisor / WSL1 (#1402): `proc_start_pair` answers `(None, ticks)` there, because the
     # epoch needs `boot_time()` and the ticks do not. `alive` used to conjoin
@@ -175,7 +185,7 @@ def _pin_start(monkeypatch, *, epoch, ticks=lambda: None) -> None:
 def test_stop_keeper_returns_true_when_already_gone(monkeypatch):
     _pin_start(monkeypatch, epoch=lambda: None)
     monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
-    assert pty_keeper.stop_keeper(123, expect_start_ticks=None) is True
+    assert pty_keeper.stop_keeper(123, expect_start_ticks=None, expect_boot_id=None) is True
 
 
 def test_stop_keeper_force_kills_a_lingering_keeper(monkeypatch):
@@ -190,7 +200,7 @@ def test_stop_keeper_force_kills_a_lingering_keeper(monkeypatch):
         alive["v"] = False  # the hard kill succeeds
 
     monkeypatch.setattr(procutil, "force_kill_tree", _force)
-    assert pty_keeper.stop_keeper(123, expect_start_ticks=None) is True
+    assert pty_keeper.stop_keeper(123, expect_start_ticks=None, expect_boot_id=None) is True
     assert forced["n"] == 1  # grace expired → force path taken
 
 
@@ -211,7 +221,12 @@ def test_stop_keeper_winds_down_a_keeper_on_a_btime_less_procfs(monkeypatch):
         alive["v"] = False
 
     monkeypatch.setattr(procutil, "force_kill_tree", _force)
-    assert pty_keeper.stop_keeper(123, expect_create_time=None, expect_start_ticks=4200) is True
+    assert (
+        pty_keeper.stop_keeper(
+            123, expect_create_time=None, expect_start_ticks=4200, expect_boot_id=None
+        )
+        is True
+    )
     assert forced["n"] == 1, "a keeper with no readable epoch was never wound down"
 
 
@@ -243,7 +258,12 @@ def test_stop_keeper_kills_the_root_when_the_tree_cannot_read_a_clock(monkeypatc
             alive["v"] = False
 
     monkeypatch.setattr(procutil.psutil, "Process", _KeeperWithoutATree)
-    assert pty_keeper.stop_keeper(123, expect_create_time=None, expect_start_ticks=4200) is True
+    assert (
+        pty_keeper.stop_keeper(
+            123, expect_create_time=None, expect_start_ticks=4200, expect_boot_id=None
+        )
+        is True
+    )
     assert killed == [123]
 
 
@@ -253,7 +273,7 @@ def test_stop_keeper_returns_false_when_force_fails(monkeypatch):
     monkeypatch.setattr(pty_keeper.time, "sleep", lambda s: None)
     _pin_start(monkeypatch, epoch=lambda: 1.0)  # never dies
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: None)
-    assert pty_keeper.stop_keeper(123, expect_start_ticks=None) is False
+    assert pty_keeper.stop_keeper(123, expect_start_ticks=None, expect_boot_id=None) is False
 
 
 def test_stop_keeper_refuses_on_pid_reuse(monkeypatch):
@@ -264,7 +284,12 @@ def test_stop_keeper_refuses_on_pid_reuse(monkeypatch):
     monkeypatch.setattr(pty_keeper.time, "sleep", lambda s: None)
     _pin_start(monkeypatch, epoch=lambda: 999.0)  # a stranger
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.__setitem__("n", 1))
-    assert pty_keeper.stop_keeper(123, expect_create_time=100.0, expect_start_ticks=None) is False
+    assert (
+        pty_keeper.stop_keeper(
+            123, expect_create_time=100.0, expect_start_ticks=None, expect_boot_id=None
+        )
+        is False
+    )
     assert forced["n"] == 0  # never SIGKILLed the reused PID
 
 
@@ -290,7 +315,12 @@ def test_stop_keeper_refuses_a_pid_recycled_inside_its_own_grace(monkeypatch):
     # pid, which is the shape under test: a keeper by cmdline, just not OURS.
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.__setitem__("n", 1))
 
-    assert pty_keeper.stop_keeper(123, expect_create_time=100.0, expect_start_ticks=4200) is False
+    assert (
+        pty_keeper.stop_keeper(
+            123, expect_create_time=100.0, expect_start_ticks=4200, expect_boot_id=None
+        )
+        is False
+    )
     assert forced["n"] == 0, "force-killed the tree of a stranger the 2.0s epoch bound admitted"
 
 
@@ -321,8 +351,55 @@ def test_stop_keeper_kills_through_a_clock_step_when_the_ticks_hold(monkeypatch)
         alive["v"] = False
 
     monkeypatch.setattr(procutil, "force_kill_tree", _force)
-    assert pty_keeper.stop_keeper(123, expect_create_time=100.0, expect_start_ticks=4200) is True
+    assert (
+        pty_keeper.stop_keeper(
+            123, expect_create_time=100.0, expect_start_ticks=4200, expect_boot_id=None
+        )
+        is True
+    )
     assert forced["n"] == 1, "clock drift, not a pid recycle, spared a keeper that never moved"
+
+
+def test_stop_keeper_refuses_a_sidecar_from_an_earlier_boot_on_the_boot_id(monkeypatch):
+    # #1401: iter_keepers reads the keeper's ticks/epoch LIVE, so a sidecar that survived a
+    # reboot onto a recycled pid matches them exactly — the tick conjunct alone would SIGKILL
+    # the stranger. The sidecar's recorded boot id is the ORIGINAL boot's; a mismatch with the
+    # live one rejects it on identity, immune to the wall clock. Without the boot id the same
+    # setup killed the stranger, which is what this closes.
+    forced = {"n": 0}
+    monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
+    monkeypatch.setattr(pty_keeper.time, "sleep", lambda s: None)
+    _pin_start(monkeypatch, epoch=lambda: 100.0, ticks=lambda: 4200)  # matches expect exactly
+    monkeypatch.setattr(procutil, "proc_boot_id", lambda: "boot-N+1")  # the current boot
+    monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.__setitem__("n", 1))
+    assert (
+        pty_keeper.stop_keeper(
+            123, expect_create_time=100.0, expect_start_ticks=4200, expect_boot_id="boot-N"
+        )
+        is False
+    )
+    assert forced["n"] == 0, "force-killed a stranger the tick match admitted across a reboot"
+
+    # Control: a MATCHING boot id lets the genuine same-boot wind-down proceed.
+    alive = {"v": True}
+    _pin_start(
+        monkeypatch,
+        epoch=lambda: 100.0 if alive["v"] else None,
+        ticks=lambda: 4200 if alive["v"] else None,
+    )
+
+    def _force(pid):
+        forced["n"] += 1
+        alive["v"] = False
+
+    monkeypatch.setattr(procutil, "force_kill_tree", _force)
+    assert (
+        pty_keeper.stop_keeper(
+            123, expect_create_time=100.0, expect_start_ticks=4200, expect_boot_id="boot-N+1"
+        )
+        is True
+    )
+    assert forced["n"] == 1, "a matching boot id must not block a genuine wind-down"
 
 
 def test_stop_keeper_refuses_when_an_expectation_cannot_be_checked(monkeypatch):
@@ -338,7 +415,12 @@ def test_stop_keeper_refuses_when_an_expectation_cannot_be_checked(monkeypatch):
     _pin_start(monkeypatch, epoch=lambda: None, ticks=lambda: 4200)
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.__setitem__("n", 1))
 
-    assert pty_keeper.stop_keeper(123, expect_create_time=100.0, expect_start_ticks=None) is False
+    assert (
+        pty_keeper.stop_keeper(
+            123, expect_create_time=100.0, expect_start_ticks=None, expect_boot_id=None
+        )
+        is False
+    )
     assert forced["n"] == 0, "an unproven identity must never front a force_kill_tree"
 
 
@@ -360,7 +442,12 @@ def test_stop_keeper_does_not_report_success_from_an_unreadable_post_kill_poll(m
     _pin_start(monkeypatch, epoch=_epoch, ticks=lambda: 4200)
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: None)
 
-    assert pty_keeper.stop_keeper(123, expect_create_time=100.0, expect_start_ticks=None) is False
+    assert (
+        pty_keeper.stop_keeper(
+            123, expect_create_time=100.0, expect_start_ticks=None, expect_boot_id=None
+        )
+        is False
+    )
 
 
 def test_stop_keeper_true_when_exits_at_reuse_guard(monkeypatch):
@@ -374,7 +461,12 @@ def test_stop_keeper_true_when_exits_at_reuse_guard(monkeypatch):
     monkeypatch.setattr(pty_keeper.time, "sleep", lambda s: None)
     _pin_start(monkeypatch, epoch=lambda: next(seq, None))
     monkeypatch.setattr(procutil, "force_kill_tree", _no_force)
-    assert pty_keeper.stop_keeper(123, expect_create_time=1.0, expect_start_ticks=None) is True
+    assert (
+        pty_keeper.stop_keeper(
+            123, expect_create_time=1.0, expect_start_ticks=None, expect_boot_id=None
+        )
+        is True
+    )
 
 
 def test_stop_keeper_true_when_pid_reused_after_force(monkeypatch):
@@ -385,14 +477,21 @@ def test_stop_keeper_true_when_pid_reused_after_force(monkeypatch):
     monkeypatch.setattr(pty_keeper.time, "sleep", lambda s: None)
     _pin_start(monkeypatch, epoch=lambda: next(times, 999.0))
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: None)
-    assert pty_keeper.stop_keeper(123, expect_create_time=100.0, expect_start_ticks=None) is True
+    assert (
+        pty_keeper.stop_keeper(
+            123, expect_create_time=100.0, expect_start_ticks=None, expect_boot_id=None
+        )
+        is True
+    )
 
 
 def test_stop_keeper_kills_a_real_process():
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     try:
         assert procutil.proc_create_time(proc.pid) is not None
-        assert pty_keeper.stop_keeper(proc.pid, expect_start_ticks=None) is True
+        assert (
+            pty_keeper.stop_keeper(proc.pid, expect_start_ticks=None, expect_boot_id=None) is True
+        )
         assert procutil.proc_create_time(proc.pid) is None
     finally:
         try:

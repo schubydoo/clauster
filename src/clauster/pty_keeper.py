@@ -506,6 +506,13 @@ def _run_keeper_conpty(
         "bridge_pid": None,
         "bridge_proc_start": None,
         "bridge_start_ticks": None,
+        # The boot this keeper (and the bridge it is about to spawn) is running in (#1401):
+        # `/proc/sys/kernel/random/boot_id`, a system-wide per-boot value. Written once at the
+        # top so even an early-error sidecar carries it. It rejects a stale sidecar from an
+        # EARLIER boot on identity — the keeper reattach (`runner._recover_keeper_pid`) and the
+        # orphan kill (`stop_keeper`) compare it against the live boot id, where ticks alone
+        # cannot (they restart at zero each boot). None off Linux and on any read error.
+        "boot_id": procutil.proc_boot_id(),
         "connect_url": None,
         "session_id": None,
         "worktree_name": _worktree_from_argv(bridge_argv),
@@ -693,6 +700,9 @@ def run_keeper(
         "bridge_pid": None,
         "bridge_proc_start": None,
         "bridge_start_ticks": None,
+        # The boot this keeper (and the bridge it spawns) runs in (#1401); see the ConPTY base
+        # dict above for why it is written here and how the reattach/kill paths use it.
+        "boot_id": procutil.proc_boot_id(),
         "connect_url": None,
         "session_id": None,
         "worktree_name": _worktree_from_argv(bridge_argv),
@@ -870,6 +880,12 @@ class KeeperInfo:
     # a `/proc/stat` btime NTP moves, so on its own a 2.0s bound has to stay wide enough to
     # absorb drift — wide enough to admit a pid recycled during `stop_keeper`'s own grace.
     keeper_start_ticks: int | None
+    # The boot the sidecar was written in (#1401), from `/proc/sys/kernel/random/boot_id`.
+    # `keeper_start_ticks` above is read LIVE off the pid, so it always matches the current
+    # occupant; this recorded value is what tells the ORIGINAL boot from the current one, so a
+    # sidecar that survived a reboot onto a recycled pid is rejected on identity in
+    # `stop_keeper`. None for a pre-#1401 sidecar (falls back to ticks-plus-epoch) and off Linux.
+    keeper_boot_id: str | None
 
 
 def _read_sidecar(path: Path) -> dict:
@@ -915,6 +931,7 @@ def iter_keepers(log_dir: Path) -> list[KeeperInfo]:
         )
         state = data.get("state")
         session_id = data.get("session_id")
+        boot_id = data.get("boot_id")
         out.append(
             KeeperInfo(
                 sidecar=f,
@@ -938,6 +955,7 @@ def iter_keepers(log_dir: Path) -> list[KeeperInfo]:
                 alive=keeper_pid is not None and procutil.is_keeper_process(keeper_pid),
                 keeper_create_time=create_time,
                 keeper_start_ticks=start_ticks,
+                keeper_boot_id=boot_id if isinstance(boot_id, str) and boot_id else None,
             )
         )
     return out
@@ -970,6 +988,7 @@ def _start_still_matches(
     observed: tuple[float | None, int | None],
     expect_create_time: float | None,
     expect_start_ticks: int | None,
+    expect_boot_id: str | None,
 ) -> bool:
     """Whether an observed start pair is still the keeper that was classified (#1402).
 
@@ -980,6 +999,13 @@ def _start_still_matches(
     is the hole this closes. Ticks are measured from the boot instant, so they do not move at
     all while a recycled pid differs by a whole ``CLK_TCK`` of them: drift-proof *and*
     stricter than the bound it replaces.
+
+    ``expect_boot_id`` (the sidecar's recorded ``boot_id``, #1401) settles the one thing the
+    live-read ticks cannot: ``iter_keepers`` reads ``observed`` off the current occupant, so its
+    ticks always match themselves — a stale sidecar that survived a REBOOT onto a recycled pid
+    passes the tick test. The recorded boot id is the ORIGINAL boot's; compared against the live
+    ``proc_boot_id()`` a mismatch rejects that on identity, immune to the wall clock. When it is
+    absent (a pre-#1401 sidecar) or the live id is unreadable, the tick/epoch test stands alone.
 
     With **nothing** comparable this answers False — "not proven to be ours", not "ours".
     An expectation was recorded and could not be checked, and this predicate fronts a
@@ -993,6 +1019,13 @@ def _start_still_matches(
     the answer was reached from evidence — because there an unproven read must keep waiting
     rather than report a kill it cannot confirm.
     """
+    # Boot-id identity FIRST (#1401): a recorded boot id that differs from the live one proves
+    # the sidecar is from an earlier boot, so the pid names a different process regardless of
+    # the wall clock — reject before the tick/epoch test, which a live-read recycled pid passes.
+    if expect_boot_id is not None:
+        live_boot_id = procutil.proc_boot_id()
+        if live_boot_id is not None and live_boot_id != expect_boot_id:
+            return False
     epoch, ticks = observed
     if expect_start_ticks is not None and ticks is not None:
         return ticks == expect_start_ticks
@@ -1028,6 +1061,10 @@ def stop_keeper(
     # process tree, and a caller that silently defaulted the drift-immune half would leave
     # the kill gated on the 2.0s epoch bound alone. A missed site is a type error instead.
     expect_start_ticks: int | None,
+    # Keyword-required, no default (#1401): the sidecar's recorded ``boot_id``, the only half
+    # that rejects a stale sidecar from an earlier boot (the live-read ticks match the recycled
+    # occupant). A missed site would silently drop the cross-boot guard, so it is a type error.
+    expect_boot_id: str | None,
 ) -> bool:
     """Stop a keeper process: wait ~2s for it to exit on its own, then force-kill its tree.
 
@@ -1052,12 +1089,18 @@ def stop_keeper(
         if procutil.proc_is_gone(keeper_pid):
             return True
         time.sleep(0.25)
-    if expect_create_time is not None or expect_start_ticks is not None:
+    if (
+        expect_create_time is not None
+        or expect_start_ticks is not None
+        or expect_boot_id is not None
+    ):
         observed = procutil.proc_start_pair(keeper_pid)
         if observed == (None, None):
             return True  # exited during the grace window — nothing left to kill
-        if not _start_still_matches(observed, expect_create_time, expect_start_ticks):
-            return False  # PID reused onto another process — do not kill it
+        if not _start_still_matches(
+            observed, expect_create_time, expect_start_ticks, expect_boot_id
+        ):
+            return False  # PID reused onto another process (or an earlier boot) — do not kill
     # Final cmdline re-verify right before the SIGKILL (TOCTOU): the PID must still be
     # our keeper. If it exited and the OS recycled the PID onto an unrelated process
     # during the grace window, never hard-kill that stranger (#301 / RUNOPS-1).
@@ -1069,7 +1112,11 @@ def stop_keeper(
     # one) before reporting the outcome rather than racing the kill.
     # Same guard as the pre-kill gate above: with neither expectation recorded the pair
     # could not be comparable, so the `/proc` read would be discarded on every iteration.
-    expecting = expect_create_time is not None or expect_start_ticks is not None
+    expecting = (
+        expect_create_time is not None
+        or expect_start_ticks is not None
+        or expect_boot_id is not None
+    )
     for _ in range(10):
         procutil.reap_if_exited(keeper_pid)
         if procutil.proc_is_gone(keeper_pid):
@@ -1078,7 +1125,9 @@ def stop_keeper(
             observed = procutil.proc_start_pair(keeper_pid)
             if _start_is_comparable(
                 observed, expect_create_time, expect_start_ticks
-            ) and not _start_still_matches(observed, expect_create_time, expect_start_ticks):
+            ) and not _start_still_matches(
+                observed, expect_create_time, expect_start_ticks, expect_boot_id
+            ):
                 return True  # PID recycled onto a new process → the keeper we killed is gone
         time.sleep(0.1)
     return False

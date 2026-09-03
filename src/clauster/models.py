@@ -209,6 +209,13 @@ class RemoteControlInstance(BaseModel):
     # survivor as lost. Ticks are measured from the boot instant and do not move. Neither
     # half suffices alone (ticks restart at zero each boot); see procutil.is_live_process.
     agent_start_ticks: int | None = None
+    # The boot this agent started in (/proc/sys/kernel/random/boot_id), Linux-only (#1401), the
+    # hosted twin of `bridge_boot_id`. Ticks restart at zero each boot, so a row from an earlier
+    # boot could name a recycled pid holding the same count; a boot_id mismatch rejects that on
+    # identity, and being boot-relative it survives a clock step the coarse epoch cannot, so
+    # is_killable_hosted uses it INSTEAD of the epoch. None on a pre-#1401 row (which then keeps
+    # the coarse epoch fallback) and off Linux.
+    agent_boot_id: str | None = None
     claude_session_uuid: str | None = None  # RFC 4122 from the init frame; drives --resume
     daemon_last_seq: int = 0  # highest daemon frame seq seen; reattach cursor across restarts
     hosted_log_path: Path | None = None  # redacted on-disk mirror of the hosted stream
