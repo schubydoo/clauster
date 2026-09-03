@@ -1,20 +1,27 @@
 # actionlint configuration.
 #
-# The ignore below exists because actionlint (≤ v1.7.12, the latest as of 2026-08-31)
+# The ignores below exist because actionlint (≤ v1.7.12, the latest as of 2026-08-31)
 # does not yet understand GitHub's `$/` self-repository `uses:` syntax (July 2026) and
-# reports it as an invalid action reference. The syntax is deliberate — it is immune to
-# runtime filesystem substitution and GitHub treats it as pinned — so this one message
-# shape is suppressed rather than the migration reverted.
+# reports it as an invalid reference. The syntax is deliberate — it is immune to
+# runtime filesystem substitution and GitHub treats it as pinned — so these message
+# shapes are suppressed rather than the migration reverted.
 #
-# ⚠️ Suppressing the format error also silences actionlint's local-action call checks
-# for the `$/` sites (input-name typos, missing required inputs) — those are gated on
-# the `./` prefix internally. `tests/test_workflow_local_actions.py` re-asserts exactly
-# that validation, so the coverage is moved, not lost.
+# Every local `uses:` in the tree now uses the `$/` form, including
+# `knope-release.yml`'s JOB-level reusable-workflow call. actionlint emits a DIFFERENT
+# message for a reusable-workflow `uses:` ("reusable workflow call ... is not following
+# the format ...") than for a composite-action one ("specifying action ... in invalid
+# format ..."), so each needs its own ignore pattern below — one does not match the
+# other.
 #
-# The one deliberate exception: `knope-release.yml`'s JOB-level reusable-workflow call
-# stays `./` — that grammar is exercised only at release time (nothing pre-merge runs
-# it), and the release path is not the place to prove out new syntax. Hence no
-# reusable-workflow ignore pattern here.
+# ⚠️ Suppressing the format errors also silences actionlint's checks that are gated on
+# the `./` prefix internally: for a composite-action `$/` site, its call validation
+# (input-name typos, missing required inputs); for the reusable-workflow `$/` call, its
+# file resolution AND its workflow_call input/secret validation.
+# `tests/test_workflow_local_actions.py` re-asserts the step-level input validation and
+# the job-level file resolution over `$/` and `./` alike. It does NOT re-assert the
+# job-level `with:`/`secrets:` check — safe only while build-binaries.yml declares a bare
+# `workflow_call:` and the call passes none. Extend the job-level test if that call gains
+# inputs or secrets.
 #
 # ⚠️ Remove this file (and close clauster issue 1361) once rhysd/actionlint issue 711
 # ships `$/` support and the pinned actionlint is bumped past it.
@@ -22,3 +29,4 @@ paths:
   .github/workflows/**/*.{yaml,yml}:
     ignore:
       - 'specifying action "\$/.+" in invalid format because ref is missing'
+      - 'reusable workflow call "\$/.+" at "uses" is not following the format'
