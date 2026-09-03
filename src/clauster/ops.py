@@ -95,6 +95,19 @@ def run_doctor(
         # and never opens a file, so nothing from the document can be in it.
         checks.append(Check("config", FAIL, f"no config found: {exc}"))
         config = None
+    except OSError as exc:
+        # A config file that EXISTS but cannot be READ — the common case is a root-owned
+        # 0600 file under a service user raising ``PermissionError`` (an ``IsADirectoryError``
+        # for a path that is a directory is the same shape). ``load_config`` opens the found
+        # path OUTSIDE its parse ``try`` (config.py), so this OSError arrives here raw. Without
+        # this arm it propagated out of ``run_doctor`` and ``/api/doctor`` answered 500 on the
+        # one panel whose whole job is diagnosing a bad config (#1439). Fail closed with the
+        # error class and the path; no file CONTENTS can be present, because the read never
+        # completed. ``FileNotFoundError`` is a subclass and is handled above, so this catches
+        # only the remaining OSErrors.
+        path = exc.filename or config_path or "clauster.yml"
+        checks.append(Check("config", FAIL, f"config unreadable: {type(exc).__name__} on {path}"))
+        config = None
     except ValidationError as exc:
         # Must precede the ``ValueError`` arm: pydantic's ``ValidationError`` IS a
         # ``ValueError``, so the broad arm below would swallow it.

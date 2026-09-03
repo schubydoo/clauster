@@ -140,6 +140,39 @@ def test_doctor_invalid_config_fails(tmp_path):
     assert ok is False and checks[0].name == "config" and checks[0].status == FAIL
 
 
+def test_doctor_unreadable_config_reports_a_row_not_a_500(write_config, tmp_path, monkeypatch):
+    # #1439: a config file that EXISTS but cannot be READ (a root-owned 0600 file under a
+    # service user raising PermissionError) had no arm in `run_doctor`, so the OSError
+    # propagated and `/api/doctor` answered 500 on the panel whose whole job is diagnosing a
+    # bad config. The row must fail closed instead — plainly, and without the file's contents.
+    #
+    # The read is monkeypatched, never a file mode: Windows does not honor 0600, so a
+    # mode-based test would not reproduce on the CI leg the fix must also cover. The file is
+    # real so `load_config`'s `is_file()` passes and the failure lands at its `open()`.
+    cfg = Path(_cfg_file(write_config, tmp_path, f"# {_CFG_CANARY}\n"))
+    real_open = Path.open
+
+    def deny(self, *args, **kwargs):
+        try:
+            same = Path(self).resolve() == cfg.resolve()
+        except OSError:
+            same = os.fspath(self) == os.fspath(cfg)
+        if same:
+            raise PermissionError(13, "Permission denied", os.fspath(cfg))
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", deny)
+    checks, ok = run_doctor(str(cfg), check_port=False)  # must NOT raise a 500
+    row = checks[0]
+    assert row.name == "config" and row.status == FAIL and ok is False
+    # Fail closed and plainly: names the failure and the path, so an operator knows to fix the
+    # file's permissions, not its contents.
+    assert "unreadable" in row.detail and "PermissionError" in row.detail
+    assert os.fspath(cfg) in row.detail
+    # The read never completed, so no byte of the file — not even a canary comment — can be here.
+    assert _CFG_CANARY not in row.detail
+
+
 # ----- the config row never echoes the file's own contents (#1395) ------
 #
 # `/api/doctor` returns `Check.detail` verbatim with no redaction of its own, so a
