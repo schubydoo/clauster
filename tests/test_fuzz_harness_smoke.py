@@ -420,6 +420,39 @@ def test_parse_frontmatter_body_oracle_fires_on_a_broken_implementation(
         harness.check(text)
 
 
+@pytest.mark.parametrize(
+    "unsafe_header",
+    [
+        pytest.param({"a": float("inf")}, id="non-finite-float"),
+        # A lone surrogate: json.dumps accepts it, but the response body's `.encode("utf-8")`
+        # does not. Only caught because the oracle models the FULL render (ensure_ascii=False
+        # + encode), not a weaker `json.dumps` subset.
+        pytest.param({"a": "\ud800"}, id="lone-surrogate"),
+    ],
+)
+def test_parse_frontmatter_serializer_oracle_fires_on_a_json_unsafe_header(
+    monkeypatch: pytest.MonkeyPatch, unsafe_header: dict
+) -> None:
+    """A header that parses but 500s on the JSON response path must fail the harness (#1415).
+
+    ``load_frontmatter_yaml`` refuses the #1415 shapes at the seam, so the fuzzer never reaches
+    the serializer oracle with one -- unless that guard regresses. Simulate the regression by
+    making both parsers return an unsafe header, and the oracle must catch it before the drift
+    check.
+    """
+    from clauster import config_write_skills, config_write_subagents
+
+    harness = _load("parse_frontmatter_fuzzer.py")
+    text = "---\nname: a\ndescription: d\n---\nbody\n"
+    harness.check(text)  # unbroken: passes
+
+    unsafe = (unsafe_header, "body\n")
+    monkeypatch.setattr(config_write_subagents, "parse_frontmatter", lambda content: unsafe)
+    monkeypatch.setattr(config_write_skills, "parse_frontmatter", lambda content: unsafe)
+    with pytest.raises(AssertionError, match="^serializer:"):
+        harness.check(text)
+
+
 # --- hosted_redact_obj_fuzzer --------------------------------------------------------
 
 
