@@ -688,7 +688,12 @@ def _load_or_exit(config_path: str | None):
     """
     try:
         return load_config(config_path)
-    except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        # ``OSError`` (widened from ``FileNotFoundError``, #1439) so a config that EXISTS but
+        # cannot be read — a root-owned 0600 file under a service user raising
+        # ``PermissionError`` — exits 2 with the same ``config error:`` line as a missing or
+        # malformed one, rather than tracebacking. ``FileNotFoundError`` is an ``OSError``, so
+        # a genuinely absent file still lands here unchanged.
         print(f"clauster: config error: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
 
@@ -1517,11 +1522,14 @@ def _run(config_path: str | None) -> int:
         # First run: no clauster.yml exists yet. Serve the loopback setup wizard to write one,
         # then re-exec onto it (#978). A malformed EXISTING config still errors below.
         return _run_setup_wizard(config_path)
-    except (ValueError, yaml.YAMLError) as exc:
-        # `yaml.YAMLError` is NOT a `ValueError`, so it needs naming. It belongs on THIS arm,
-        # not the wizard one: a config that exists but does not parse is a broken config to
-        # report, not a missing one to replace — routing it to the wizard would offer to
-        # overwrite a file the operator merely typo'd.
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        # `yaml.YAMLError` is NOT a `ValueError`, so it needs naming. `OSError` (#1439) catches
+        # a config that EXISTS but cannot be read — a `PermissionError` on a root-owned file —
+        # and reports it here rather than tracebacking. All three belong on THIS arm, not the
+        # wizard one: a config that exists but cannot be loaded is a broken config to report,
+        # not a missing one to replace — routing it to the wizard would offer to overwrite a
+        # file the operator merely typo'd or cannot read. The `FileNotFoundError` arm above
+        # still wins for a genuinely absent file, because it precedes this tuple.
         print(f"clauster: config error: {exc}", file=sys.stderr)
         return 2
 

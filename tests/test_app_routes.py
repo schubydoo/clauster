@@ -118,6 +118,37 @@ def test_doctor_endpoint_never_echoes_a_broken_configs_contents(write_config, tm
     assert detail.startswith("config is not valid YAML (")
 
 
+def test_doctor_endpoint_reports_a_row_for_an_unreadable_config_not_a_500(
+    write_config, tmp_path, monkeypatch
+):
+    # #1439 at the route: /api/doctor re-reads config.source_path, so a file that becomes
+    # UNREADABLE after boot (a permission change on a root-owned clauster.yml) reaches
+    # run_doctor as an OSError. The endpoint must answer 200 with a FAIL `config` row — the
+    # same fail-closed shape #1395 gives a malformed file — never a 500 on the panel whose
+    # whole job is diagnosing a bad config. The run_doctor unit is in tests/test_ops.py; this
+    # proves the row survives the whole route. The read is monkeypatched, not a file mode, so
+    # it reproduces on the Windows CI leg too (0600 is a no-op there).
+    cfg = write_config(f"claude:\n  binary: {FAKE_CLAUDE}\nstate_dir: {tmp_path}/.s\n")
+    client = TestClient(create_app(load_config(cfg)))
+    real_open = Path.open
+
+    def deny(self, *args, **kwargs):
+        try:
+            same = Path(self).resolve() == cfg.resolve()
+        except OSError:
+            same = os.fspath(self) == os.fspath(cfg)
+        if same:
+            raise PermissionError(13, "Permission denied", os.fspath(cfg))
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", deny)
+    r = client.get("/api/doctor")
+    assert r.status_code == 200
+    row = next(c for c in r.json()["checks"] if c["name"] == "config")
+    assert row["status"] == "fail"
+    assert "unreadable" in row["detail"] and "PermissionError" in row["detail"]
+
+
 # ----- per-project preflight (spawn-readiness for one project) ----------
 
 

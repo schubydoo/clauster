@@ -303,6 +303,50 @@ def test_run_invalid_existing_config_exits_2(write_config, monkeypatch):
     assert cli.main(["run", "-c", bad]) == 2
 
 
+def _deny_open_of(cfg: Path):
+    """Return a ``Path.open`` replacement that denies *cfg* and delegates every other path."""
+    real_open = Path.open
+
+    def deny(self, *args, **kwargs):
+        try:
+            same = Path(self).resolve() == cfg.resolve()
+        except OSError:
+            same = os.fspath(self) == os.fspath(cfg)
+        if same:
+            raise PermissionError(13, "Permission denied", os.fspath(cfg))
+        return real_open(self, *args, **kwargs)
+
+    return deny
+
+
+def test_run_unreadable_existing_config_exits_2(write_config, tmp_path, monkeypatch, capsys):
+    # #1439: a config that EXISTS but cannot be read (a root-owned 0600 file under a service
+    # user raising PermissionError) is a broken config to report, not a missing one for the
+    # wizard. `run` must exit 2 with `clauster: config error:`, never fall through to the setup
+    # wizard and offer to overwrite a file the operator merely cannot read — the
+    # FileNotFoundError->wizard arm precedes the OSError arm, so a genuinely absent file still
+    # wizards (test above). The read is monkeypatched, not a file mode: 0600 is a no-op on the
+    # Windows CI leg this must also cover.
+    _stub_server(monkeypatch)
+    cfg = Path(_cfg(write_config, tmp_path))
+    monkeypatch.setattr(Path, "open", _deny_open_of(cfg))
+    assert cli.main(["run", "-c", str(cfg)]) == 2
+    assert "config error" in capsys.readouterr().err
+
+
+def test_load_or_exit_unreadable_config_exits_2(write_config, tmp_path, monkeypatch, capsys):
+    # #1439: the shared loader for the non-`run` verbs (deps/backup/restore/migrate/...) widened
+    # its catch to OSError, so an unreadable existing config exits 2 with `clauster: config
+    # error:` like a missing or malformed one — the CLI counterpart of the doctor row — rather
+    # than tracebacking. Same monkeypatched read as the route/doctor tests (mode-independent).
+    cfg = Path(_cfg(write_config, tmp_path))
+    monkeypatch.setattr(Path, "open", _deny_open_of(cfg))
+    with pytest.raises(SystemExit) as ei:
+        cli._load_or_exit(str(cfg))
+    assert ei.value.code == 2
+    assert "config error" in capsys.readouterr().err
+
+
 def test_run_claude_not_found_exits_2(write_config, tmp_path, monkeypatch):
     _stub_server(monkeypatch)
     # point the binary at something that won't resolve
