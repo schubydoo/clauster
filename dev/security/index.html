@@ -2097,8 +2097,20 @@ flags yourself.</p>
 (<code>redact.py</code>). Redaction runs against the view a browser <strong>renders</strong>. That view
 has the escape sequences removed, including the <code>OSC</code>, <code>DCS</code>, <code>SOS</code>, <code>PM</code> and
 <code>APC</code> string sequences and their payloads. It also has the invisible control
-characters removed. Neither kind of byte can therefore split an identifier into
-fragments too short for the word-boundary-anchored regexes.</p>
+characters removed, and the invisible Unicode characters a browser draws nothing
+for: zero-width spaces and joiners, the bidirectional controls, the variation
+selectors, the soft hyphen, the byte-order mark and the other code points in the
+Unicode <code>Default_Ignorable_Code_Point</code> set. None of these can therefore split an
+identifier into fragments too short for the word-boundary-anchored regexes. A
+side effect is that these characters are deleted from every redacted view this
+code produces, not only the streamed log. <code>sanitize_line</code> also redacts each
+transcript turn (the usage view) and the streamed hosted-agent assistant text,
+and <code>redact_for_disk</code> redacts <code>instance.error_detail</code>, clone-job errors and agent
+result text. Some of those surfaces are conversational prose, so the effect is
+visible there: a joiner inside an emoji sequence (a family emoji) renders as its
+separate glyphs, and a bidirectional mark in an Arabic or Hebrew turn is dropped.
+Each is a redacted view, not the verbatim on-disk log, so this is accepted:
+redaction wins over character fidelity in a redacted copy.</p>
 <p>Removing those bytes can also <em>delete</em> a word boundary. <code>user&lt;ESC&gt;[32menv_&lt;ULID&gt;</code>
 renders as <code>userenv_&lt;ULID&gt;</code>, which reads exactly like ordinary compound text such
 as <code>userenv_production</code>. Clauster therefore records where each removal happened
