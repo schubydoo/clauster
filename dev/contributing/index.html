@@ -1556,7 +1556,10 @@ the CI coverage-gate interpreter (<code>uv</code> still supports the full 3.11+ 
   <code>uv run ruff check . &amp;&amp; uv run ruff format --check . &amp;&amp; uv run pyright src/clauster</code></li>
 <li><strong>Docs lint (Markdown + YAML)</strong> — <code>bash scripts/lint-docs.sh</code> (markdownlint-cli2
   from <code>npm ci</code>, pinned in <code>package.json</code>; <code>yamllint</code> from <code>uv sync --extra dev</code>).
-  Same command CI runs in the <code>lint</code> job.</li>
+  Same command CI runs in the <code>lint</code> job. The script calls <code>npx --no-install</code>, which
+  needs a local <code>node_modules</code>: in a fresh git worktree, run <code>npm ci</code> there first.
+  Without it the lookup walks up to a parent checkout's <code>node_modules</code> and uses that
+  version, or fails when the worktree sits outside any such checkout.</li>
 <li><strong>pre-commit (recommended)</strong> — <code>uv run pre-commit install</code> once; ruff
   (check + format), yamllint, and markdownlint then run automatically on each
   commit using the same pinned tools as CI. Check everything on demand with
