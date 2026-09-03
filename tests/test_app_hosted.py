@@ -292,6 +292,40 @@ def test_api_hosted_empty_when_no_sessions(write_config, projects_root):
     assert r.json() == []
 
 
+def test_api_hosted_serializes_claude_session_uuid_usable(write_config, projects_root):
+    """#1419: the mirror the dashboard gates Resume on must carry the shape-checked signal.
+
+    `api_hosted` returns the model, serialized to JSON, so the `claude_session_uuid_usable`
+    computed field is the single signal the dashboard reads. A valid session-shaped uuid is
+    usable; an off-shape one is KEPT on the record (for repair) but reported unusable, so the
+    Resume gate hides consistently before and after a restart.
+    """
+    manager = _StubManager()
+    manager.instances["ok"] = RemoteControlInstance(
+        project="alpha",
+        label="hosted:alpha",
+        channel="hosted",
+        claustrum_process_id="ok",
+        status=InstanceStatus.CRASHED,
+        claude_session_uuid="aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    )
+    manager.instances["bad"] = RemoteControlInstance(
+        project="alpha",
+        label="hosted:alpha",
+        channel="hosted",
+        claustrum_process_id="bad",
+        status=InstanceStatus.CRASHED,
+        claude_session_uuid="--dangerously-skip-permissions",
+    )
+    app = _app(write_config, manager=manager)
+    with TestClient(app) as client:
+        body = {h["claustrum_process_id"]: h for h in client.get("/api/hosted").json()}
+    assert body["ok"]["claude_session_uuid_usable"] is True
+    # Kept verbatim on the wire, but flagged unusable so the front-end gate can hide Resume.
+    assert body["bad"]["claude_session_uuid"] == "--dangerously-skip-permissions"
+    assert body["bad"]["claude_session_uuid_usable"] is False
+
+
 # -- dashboard panel gating (claustrum.enabled) ----------------------------
 
 
@@ -408,9 +442,11 @@ def test_hosted_resume_gate_says_the_same_thing_in_all_five_places(
     The mirrors are the Resume button, the orphan badge's tooltip, the "resume unavailable"
     chip, `hasResumable` (the Recent group label), and `_hostedEndedReason` (the View
     panel's ended banner). #1381 aligned the project half; #1392 widened the set of rows
-    that lose the *uuid* half well past the empty string, so every one of them has to test
-    both -- and all five spell the gate `h.claude_session_uuid && h.project`, in that order,
-    so a reader comparing them is comparing identical text.
+    that lose the *uuid* half well past the empty string; #1419 then KEEPS an off-shape uuid
+    on the record and moves the display gate to `claude_session_uuid_usable` (the model's
+    shape-checked computed field), so every one of them has to test both -- and all five
+    spell the gate `h.claude_session_uuid_usable && h.project`, in that order, so a reader
+    comparing them is comparing identical text.
 
     Substring pins in the style of `resumeBlockedReason` above: brittle by design, so a
     reflow forces a re-read instead of passing silently.
@@ -425,27 +461,29 @@ def test_hosted_resume_gate_says_the_same_thing_in_all_five_places(
     # SUBSTRING of the chip's negation, of `hasResumable` and of `_hostedEndedReason` -- on
     # its own it would stay green with the Resume `x-if` deleted outright.
     assert (
-        "['crashed', 'stopped', 'error'].includes(h.status) && h.claude_session_uuid"
+        "['crashed', 'stopped', 'error'].includes(h.status) && h.claude_session_uuid_usable"
         " && h.project" in body
     )
     # 2. the orphan badge's tooltip, 3. the "resume unavailable" chip.
-    assert "h.claude_session_uuid && h.project ?" in body
-    assert "!(h.claude_session_uuid && h.project)" in body
+    assert "h.claude_session_uuid_usable && h.project ?" in body
+    assert "!(h.claude_session_uuid_usable && h.project)" in body
     # 4. `hasResumable`, the Recent group label. Mutation-verified as the one mirror with no
     # pin: dropping its `&& h.project` left the whole suite green.
-    assert "endedHosted().some((h) => h.claude_session_uuid && h.project)" in body
+    assert "endedHosted().some((h) => h.claude_session_uuid_usable && h.project)" in body
     # The chip's reason is VISIBLE text, not a tooltip: a title never fires on touch, and
     # this is a phone-first product. Same contract as the bridge rows' `resume-blocked`.
     assert 'data-test="hosted-resume-blocked"' in body
-    assert "resume unavailable — conversation id unknown" in body
+    # "no usable", not "unknown": the record may HOLD an id kept for repair (#1419), and a
+    # chip that calls it absent points the operator away from the field to fix.
+    assert "resume unavailable — no usable conversation id" in body
     # ...and the case where BOTH halves are gone. `_degraded_row` salvages per field, so one
     # tampered record can drop the uuid and the project independently; falling back to the
     # project-only wording would have the operator repair one field and hit the same wall.
-    assert "resume unavailable — project and conversation id unknown" in body
+    assert "resume unavailable — no project, no usable conversation id" in body
     assert "resume unavailable — project unknown" in body
     # 5. the View panel's ended banner: a project-ful, uuid-less row used to fall through
     # every branch and explain nothing -- the "fails opaquely" failure one layer down.
-    assert "no usable conversation id was saved for it" in body
+    assert "it has no usable conversation id (none was saved," in body
     # Pinned on the banner's OWN wording, not the shared phrase: the chip's `:title` also
     # says "neither a project nor a usable conversation id saved", so the shorter substring
     # passed with this branch deleted (caught by mutating it). "It cannot be resumed: it

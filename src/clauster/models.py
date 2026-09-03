@@ -13,10 +13,12 @@ nullable so a row of either channel validates.
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Any, TypeGuard
 
 from pydantic import BaseModel, Field, computed_field
 
@@ -26,6 +28,42 @@ from .config import PermissionMode, ResumeMode, SandboxMode, SessionChannel, Spa
 def new_instance_id() -> str:
     """Generate a fresh RFC 4122 UUID for a new managed instance."""
     return str(uuid.uuid4())
+
+
+# The shape a `claude_session_uuid` must have before it may become the `--resume` value
+# token. `claude`'s `--resume [sessionId]` takes an *optional* value, so a flag-shaped
+# token in that slot is read as a fresh FLAG rather than consumed as data — a persisted
+# string would then contribute an ARGUMENT to the spawn argv, which invariant 2 forbids
+# (#1392). The leading-alnum class is what closes that; the body class also rules out
+# whitespace, path separators and control characters, and the 64-char cap matches the
+# `String(64)` column the value round-trips through. `\A`/`\Z`, never `^`/`$`: `$` also
+# matches *before* a trailing newline, so `$` would admit "uuid\n".
+#
+# Deliberately a SHAPE, not the 8-4-4-4-12 format `runner._SESSION_UUID_RE` and
+# `supervisor.valid_session_id` demand — hence the different name. Those two guard an
+# *operator-supplied* id that must name a transcript file on disk, so they can insist on
+# claude's current filename format. This one guards an id claude *itself* minted and
+# handed us in an init frame; re-specifying the format here would silently cost a whole
+# session its resume the day claude changes it (a ULID, say). Keeping the token out of
+# the flag namespace is the whole job. Not format-*independence*, though: the length cap
+# is a narrower bet in the same direction, so an id longer than the column could hold
+# would be refused at the argv seam too. Widen the cap with the column if that day comes.
+#
+# Lives here rather than in `hosted.py` (its executing consumer) so both the model — via
+# the `claude_session_uuid_usable` computed field the dashboard gates on — and
+# `build_hosted_argv` share ONE shape definition. `hosted.py` imports `models`, never the
+# reverse, so the predicate cannot live there without a cycle.
+_SESSION_UUID_SHAPE_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+
+
+def is_session_uuid(value: Any) -> TypeGuard[str]:
+    """Report whether ``value`` is a str shaped like a session id.
+
+    The shape, and why it is this one, is :data:`_SESSION_UUID_SHAPE_RE`. Public because
+    two callers share it: :func:`clauster.hosted.build_hosted_argv`, the executing seam,
+    and :attr:`RemoteControlInstance.claude_session_uuid_usable`, the display gate.
+    """
+    return isinstance(value, str) and _SESSION_UUID_SHAPE_RE.match(value) is not None
 
 
 class InstanceStatus(StrEnum):
@@ -187,6 +225,21 @@ class RemoteControlInstance(BaseModel):
         if self.starter_session_id is None:
             return None
         return f"https://claude.ai/code/{self.starter_session_id}?from=cli"
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def claude_session_uuid_usable(self) -> bool:
+        """Whether ``claude_session_uuid`` is shaped like a usable ``--resume`` token.
+
+        One shape-checked signal for the dashboard's Resume gate, so a live-captured OR
+        persisted off-shape uuid is refused Resume consistently — before AND after a
+        restart. The bytes are kept on the record for an operator to repair by hand
+        (:func:`clauster.hosted._as_session_uuid` keeps a non-empty value regardless of
+        shape); this reports whether they are *usable*, which the executing seam
+        (:func:`clauster.hosted.build_hosted_argv`) enforces with the same
+        :func:`is_session_uuid` predicate.
+        """
+        return is_session_uuid(self.claude_session_uuid)
 
 
 class ClaudeMdDoc(BaseModel):
