@@ -3322,9 +3322,11 @@ class SessionRunner:
         # compares the persisted pair against the live pid, so a stranger already on the pid
         # carries different persisted ticks and is rejected. It reuses `is_live_process`'s
         # exact-tick / coarse-epoch discriminator; the keeper's row carries no boot id (only
-        # the sidecar the `keepers` CLI reads does), so the coarse epoch is its "same boot?"
-        # fallback, exactly as there. A row with no recorded start (pre-#1178) has nothing to
-        # compare and degrades to this live-snapshot gate — never more permissive than before.
+        # the sidecar the `keepers` CLI reads does). When the row recorded ticks, that coarse
+        # epoch is its "same boot?" fallback, exactly as there; a row that recorded a start but
+        # no ticks (pre-#1402) has `is_live_keeper` compare on the exact epoch bound instead. A
+        # row with no recorded start (pre-#1178) has nothing to compare and degrades to this
+        # live-snapshot gate — never more permissive than before.
         #
         # Compared EXACTLY, and deliberately not with the tolerance its siblings use — on
         # the boot-relative tick count (`proc_start_ticks`, field 22 of `/proc/<pid>/stat`)
@@ -3361,8 +3363,10 @@ class SessionRunner:
         # exactly. A keeper spared here is a keeper NO automated path recovers: `stop()` has
         # already left the instance carded (STOPPED, still persisted), and
         # `pty_keeper.find_orphan_keepers` — whose only caller is the `clauster keepers` CLI —
-        # filters out every keeper whose project is carded, so `keepers --kill` refuses it and
-        # `forget` refuses it too, as still-live. It leaks until someone kills it by hand. We
+        # filters out every keeper whose project is carded, so plain `keepers --kill` refuses it
+        # and `forget` refuses it too, as still-live. The recovery path is the explicit
+        # `keepers --kill <pid> --force` (#1420), which targets the pid past that filter, or
+        # killing it by hand. We
         # take that over the alternative anyway: the alternative is a `force_kill_tree` aimed
         # at a stranger, which takes down a process we do not own and, if the stranger is
         # itself a keeper, its live bridge with it. A leak is recoverable by hand; a wrong
@@ -3759,13 +3763,19 @@ class SessionRunner:
             # gone; capture it up front. A reattached keeper is NOT our child —
             # `_cleanup_keeper` re-verifies identity before it kills anything.
             keeper_pid = instance.keeper_pid
+            # Read the recorded keeper start pair together with the pid, before the awaits
+            # below, so the identity trio travels as one snapshot (#1303 review). Under the
+            # spawn lock these row fields cannot change, so a later read would be equivalent —
+            # capturing them here keeps the pid and its start pair a single read.
+            keeper_proc_start = instance.keeper_proc_start
+            keeper_start_ticks = instance.keeper_start_ticks
             if pid is None:
                 if keeper_pid is not None:
                     await asyncio.to_thread(
                         self._cleanup_keeper,
                         keeper_pid,
-                        keeper_proc_start=instance.keeper_proc_start,
-                        keeper_start_ticks=instance.keeper_start_ticks,
+                        keeper_proc_start=keeper_proc_start,
+                        keeper_start_ticks=keeper_start_ticks,
                     )
                 instance.status = InstanceStatus.STOPPED
                 await asyncio.to_thread(self._unlock_pty_worktree, instance)  # #1089
@@ -3796,8 +3806,8 @@ class SessionRunner:
                 await asyncio.to_thread(
                     self._cleanup_keeper,
                     keeper_pid,
-                    keeper_proc_start=instance.keeper_proc_start,
-                    keeper_start_ticks=instance.keeper_start_ticks,
+                    keeper_proc_start=keeper_proc_start,
+                    keeper_start_ticks=keeper_start_ticks,
                 )
             instance.status = InstanceStatus.STOPPED
             await asyncio.to_thread(self._unlock_pty_worktree, instance)  # #1089

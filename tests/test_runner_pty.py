@@ -1040,15 +1040,25 @@ async def test_stop_cleans_keeper_when_bridge_pid_absent(runner_config, monkeypa
         label="alpha",
         resume_mode="pty",
         keeper_pid=4242,
+        keeper_proc_start=123.5,
+        keeper_start_ticks=4200,
         bridge_pid=None,
         status=InstanceStatus.RUNNING,
     )
     runner._instances[inst.instance_id] = inst
-    cleaned: list[int] = []
-    monkeypatch.setattr(runner, "_cleanup_keeper", lambda pid, **_kw: cleaned.append(pid))
+    forwarded: list[tuple[int, float | None, int | None]] = []
+    monkeypatch.setattr(
+        runner,
+        "_cleanup_keeper",
+        lambda pid, *, keeper_proc_start, keeper_start_ticks: forwarded.append(
+            (pid, keeper_proc_start, keeper_start_ticks)
+        ),
+    )
 
     stopped = await runner.stop(inst.instance_id)
-    assert cleaned == [4242]
+    # stop() must forward the RECORDED keeper pair, not just the pid (#1303 review): an edit
+    # that dropped either kwarg would silently bypass the recycled-pid gate; assert it does not.
+    assert forwarded == [(4242, 123.5, 4200)]
     assert stopped.status is InstanceStatus.STOPPED
 
 
@@ -1861,6 +1871,35 @@ def test_cleanup_keeper_older_row_skips_the_recorded_pair_conjunct(
 
     runner._cleanup_keeper(777, keeper_proc_start=None, keeper_start_ticks=None)
     assert forced == [777], "an older row without a recorded pair must keep today's behaviour"
+
+
+def test_cleanup_keeper_recorded_start_without_ticks_rejects_a_stranger(
+    runner_config, monkeypatch, caplog
+) -> None:
+    """A row with a recorded keeper start but NO ticks (pre-#1402) still refuses a stranger.
+
+    With no recorded ticks, `is_live_keeper` compares on the exact epoch bound, not the coarse
+    one — the branch the tick tests above do not reach (#1303 review). The recorded epoch is the
+    original keeper's (1.0); the stranger now on the pid reports 5.0, so the conjunct rejects it
+    rather than force-killing an unrelated process's tree.
+    """
+    runner, _ = _pty_runner(runner_config)
+    monkeypatch.setattr("clauster.runner.time.sleep", lambda _s: None)
+    monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
+    # The pid holds the STRANGER: its live start (5.0, no ticks) matches the live snapshot, so
+    # only the recorded-pair conjunct can reject it — and here it compares on the exact epoch.
+    _patch_keeper_start(monkeypatch, epoch=lambda: 5.0, ticks=lambda: None)
+    monkeypatch.setattr(procutil.psutil, "Process", _keeper_process_stub(create_time=5.0))
+    forced: list[int] = []
+    monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
+
+    with caplog.at_level("WARNING", logger="clauster.runner"):
+        # Recorded start 1.0, NO ticks — the exact epoch compare refuses the 5.0 stranger.
+        runner._cleanup_keeper(777, keeper_proc_start=1.0, keeper_start_ticks=None)
+    assert forced == [], "an exact epoch mismatch must refuse the stranger even with no ticks"
+    assert any("no longer that keeper" in r.getMessage() for r in caplog.records), (
+        "the refusal must come from the recorded-pair conjunct's exact epoch compare"
+    )
 
 
 def test_backfill_starter_session_from_debug_file_on_resume(runner_config, tmp_path) -> None:
