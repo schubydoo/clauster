@@ -296,6 +296,8 @@ _SETTINGS_BODIES = [
     b"{}",
     b'{"a": 1}',
     b'{"a": NaN}',
+    b'{"a": Infinity}',
+    b'{"a": ' + b"9" * 5000 + b"}",
     b"[1]",
     b'"str"',
     b"null",

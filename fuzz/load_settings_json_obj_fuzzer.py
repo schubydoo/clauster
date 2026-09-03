@@ -9,9 +9,11 @@ direct unit tests** of its own.
 
 Its contract is short and entirely about failing closed: return a ``dict`` (``{}``
 for empty or whitespace-only input), or raise ``InvalidCandidateError`` — non-UTF-8,
-malformed JSON, JSON nested past CPython's recursive scanner, and a well-formed
-non-object each map to that one structural error, because *"we will not overwrite a
-file we could not parse."*
+malformed JSON, JSON nested past CPython's recursive scanner, a well-formed non-object,
+and a well-formed object holding a scalar the JSON response path cannot represent (a
+huge integer or a non-finite float, #1449) each map to that one structural error,
+because *"we will not overwrite a file we could not parse"* — and, for the last, will
+not 500 a read route documented to fail as 422.
 
 Three properties per input:
 
@@ -21,19 +23,24 @@ Three properties per input:
    path whose next step writes a file. Every other exception is left uncaught, so the
    fuzzer reports it as a crash.
 2. **Accept/reject agreement.** Whether the function accepts is compared against the
-   documented rule re-derived from ``bytes.decode`` + ``json.loads`` + an
-   ``isinstance`` check — not from the function's own branches. This is the direction
-   that matters: a *widened* accept path would hand a caller something it then merges
-   into a settings file. The rejections it must make are asserted; the reasons are not.
+   documented rule re-derived from ``bytes.decode`` + ``json.loads`` + an ``isinstance``
+   check — not from the function's own branches. This is the direction that matters: a
+   *widened* accept path would hand a caller something it then merges into a settings
+   file, or a scalar that 500s the read route. The one exception is the
+   response-path-unsafe scalar boundary (a huge int or a non-finite float, #1449), which
+   is shared with the seam's own ``_first_json_unsafe`` on purpose — see :func:`_reference`
+   for why an independent serialize probe would flag the seam's deliberate conservative
+   integer bound as a false crash. The rejections it must make are asserted; the reasons
+   are not.
 3. **Value agreement.** An accepted result must equal what plain ``json.loads``
    produced — the function is a guard, not a transform, and a caller round-trips the
    returned mapping straight back to disk through ``render_json``.
 
-⚠️ Equality is compared through ``json.dumps(..., sort_keys=True)`` rather than ``==``
-because JSON's ``NaN`` extension is real input here: ``json.loads(b'{"a": NaN}')``
-succeeds, and ``float('nan') != float('nan')``, so a plain ``==`` would report a
-correct implementation as a crash on the fuzzer's first ``NaN``. Serializing both
-sides renders it as the same ``NaN`` token.
+Equality is compared through ``json.dumps(..., sort_keys=True)`` rather than ``==`` so
+key order and other serialization-equivalent shapes do not read as a difference. A
+non-finite float can no longer reach this comparison: ``json.loads(b'{"a": NaN}')``
+still succeeds, but both the guard and :func:`_reference` now reject the result before
+it is returned (#1449), so an accepted value holds only finite JSON scalars.
 
 Not asserted: that ``render_json(load(raw))`` round-trips to the same bytes. It does
 not, by design — ``render_json`` re-indents and normalizes — so pinning it would
@@ -79,9 +86,27 @@ def _reference(raw: bytes) -> tuple[bool, object]:
         return True, {}
     try:
         data = json.loads(text)
-    except (json.JSONDecodeError, RecursionError):
+    except (json.JSONDecodeError, RecursionError, ValueError):
+        # ValueError: json builds an int literal with int(<digits>), which raises past
+        # sys.get_int_max_str_digits() — NOT a JSONDecodeError, so it is a fifth rejection
+        # the seam must fail closed on (#1449). JSONDecodeError is a ValueError subclass, so
+        # the tuple would catch it anyway; it is named for the reader.
         return False, None
-    return (True, data) if isinstance(data, dict) else (False, None)
+    if not isinstance(data, dict):
+        return False, None
+    if config_write._first_json_unsafe(data) is not None:
+        # A scalar that parses but cannot cross the JSON response path — a non-finite float
+        # (the bare NaN/Infinity literals json accepts, or an overflowing 1e400 that parses to
+        # inf) or a lone-surrogate str the encode rejects — 500s the read route, so the seam
+        # rejects it and the reference must agree (#1449). This narrow boundary is derived from
+        # the seam's own guard ON PURPOSE, not from an independent json.dumps probe: the seam
+        # bounds a large int by a bit-length OVER-estimate that json.loads already caps at
+        # get_int_max_str_digits() decimal digits, so an int of exactly that many digits parses
+        # and serializes yet the seam rejects it. A serialize-based reference would call that
+        # deliberate conservative rejection a false crash. The STRUCTURAL contract above stays
+        # an independent re-derivation; only this scalar boundary is shared.
+        return False, None
+    return True, data
 
 
 def check(raw: bytes) -> None:

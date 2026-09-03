@@ -730,6 +730,30 @@ def test_route_read_non_object_project_file_is_422(write_config, tmp_path, proje
         assert c.get(f"{_URL}?project=alpha").status_code == 422
 
 
+def test_route_read_huge_int_project_file_is_422(write_config, tmp_path, projects_root) -> None:
+    # A settings.json holding an over-large integer literal raised a plain ValueError out of
+    # json.loads (past sys.get_int_max_str_digits()), which escaped the seam handler and 500ed
+    # this GET (#1449). The seam now rejects it, so the route answers a clean 422 — not a 500.
+    settings = projects_root / "alpha" / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text('{"x": ' + "9" * 5000 + "}", encoding="utf-8")
+    with _client(write_config, tmp_path, _ON) as c:
+        assert c.get(f"{_URL}?project=alpha").status_code == 422
+
+
+def test_route_read_non_finite_float_project_file_is_422(
+    write_config, tmp_path, projects_root
+) -> None:
+    # json.loads accepts the bare NaN literal, and the float reached the route's return dict,
+    # which Starlette renders with allow_nan=False and 500s (#1449). The seam now rejects it, so
+    # the GET answers a clean 422 — not a 500.
+    settings = projects_root / "alpha" / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text('{"x": NaN}', encoding="utf-8")
+    with _client(write_config, tmp_path, _ON) as c:
+        assert c.get(f"{_URL}?project=alpha").status_code == 422
+
+
 def test_route_read_corrupt_user_file_is_422(write_config, tmp_path) -> None:
     cfg = write_config(f"claude:\n  binary: {FAKE_CLAUDE}\nstate_dir: {tmp_path}/.s\n{_ON}")
     app = create_app(load_config(cfg))

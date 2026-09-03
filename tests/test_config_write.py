@@ -238,6 +238,48 @@ def test_load_settings_json_obj_rejects_recursion_overflow_on_any_interpreter(
         cw.load_settings_json_obj(b"[[1]]")
 
 
+def test_load_settings_json_obj_rejects_huge_integer() -> None:
+    # Same class as #1415's frontmatter seam, on the JSON sibling (#1449): json builds an int
+    # literal with int(<digits>), which raises a plain ValueError — NOT a JSONDecodeError — past
+    # sys.get_int_max_str_digits(). That escaped the handler and 500ed the read route where the
+    # contract is 422. Reject as a structural error, class name only, never the value.
+    raw = b'{"x": ' + b"9" * 5000 + b"}"
+    with pytest.raises(cw.InvalidCandidateError, match="integer too large"):
+        cw.load_settings_json_obj(raw)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(b'{"x": NaN}', id="nan"),
+        pytest.param(b'{"x": Infinity}', id="infinity"),
+        pytest.param(b'{"x": -Infinity}', id="neg-infinity"),
+        pytest.param(b'{"x": 1e400}', id="overflow-float"),
+        pytest.param(b'{"a": [1, NaN]}', id="nested-nan"),
+    ],
+)
+def test_load_settings_json_obj_rejects_non_finite_float(raw: bytes) -> None:
+    # json.loads accepts the bare NaN/Infinity/-Infinity literals by default, and an overflowing
+    # magnitude like 1e400 parses straight to inf. Each reaches the route's return dict, which
+    # Starlette renders with allow_nan=False and 500s (#1449). Reject at the seam as a 422.
+    with pytest.raises(cw.InvalidCandidateError, match="non-finite float"):
+        cw.load_settings_json_obj(raw)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(b'{"x": ' + b"9" * 100 + b"}", id="ordinary-large-int"),
+        pytest.param(b'{"x": 1.5}', id="ordinary-float"),
+        pytest.param(b'{"x": 1e300}', id="finite-big-float"),
+    ],
+)
+def test_load_settings_json_obj_keeps_ordinary_numbers(raw: bytes) -> None:
+    # Positive control: the huge-int and non-finite guards must not refuse an ordinary large
+    # integer, a plain float, or a finite large-magnitude float that all serialize fine.
+    assert isinstance(cw.load_settings_json_obj(raw), dict)
+
+
 # --- stale-hash external-edit guard (409) ------------------------------------------
 
 
