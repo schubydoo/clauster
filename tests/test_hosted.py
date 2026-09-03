@@ -2875,6 +2875,51 @@ async def test_manager_reattach_heals_a_boot_id_less_orphan(fake_claustrum, tmp_
     assert reloaded["01STAMPEDPROCESS00000000"]["agent_boot_id"] == "recorded-boot"
 
 
+async def test_manager_reattach_does_not_stamp_a_boot_id_on_an_empty_live_read(
+    fake_claustrum, tmp_path, monkeypatch
+):
+    # hosted.py 1508->1523: the heal reads the live boot id off /proc, but a transient empty
+    # read (`proc_boot_id()` -> "") must leave `agent_boot_id` None rather than stamping a falsy
+    # id — the row keeps its ticks-plus-coarse-epoch defense until a real read heals it. The
+    # falsy arm of the `if healed := ...` walrus, paired with the stamping test above.
+    fake = await fake_claustrum()
+    store = HostedStateStore(tmp_path)
+    monkeypatch.setattr(
+        hosted.procutil, "is_killable_hosted", lambda pid, start, *, start_ticks, boot_id: True
+    )
+    monkeypatch.setattr(hosted.procutil, "start_time_is_drift_prone", lambda: True)
+    boot_reads: list[int] = []
+
+    def _empty_boot_read() -> str:
+        # Record the call so the assertion below can tell the target world (the walrus at
+        # hosted.py:1508 evaluated and returned falsy) from a heal gate that never ran at all.
+        boot_reads.append(1)
+        return ""
+
+    monkeypatch.setattr(hosted.procutil, "proc_boot_id", _empty_boot_read)  # transient empty read
+    store.save(
+        {
+            "01LEGACYPROCESS000000000": {
+                "project": "proj",
+                "label": "hosted:proj",
+                "agent_pid": 4242,
+                "agent_proc_start": 1234.5,
+                "agent_start_ticks": 770579,
+                # no agent_boot_id — a pre-#1401 row the heal would stamp on a real read
+            },
+        }
+    )
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        await mgr.reattach_all(client)
+        inst = mgr.get_instance("01LEGACYPROCESS000000000")
+        assert inst.is_orphan is True  # a live orphan — the heal gate was reached
+        assert boot_reads  # the walrus at 1508 read the live boot id (the target branch ran)
+        assert inst.agent_boot_id is None  # ...but an empty read never stamped a falsy id
+    # And the non-stamp is durable: the row still carries no boot id after the closing persist.
+    assert store.load()["01LEGACYPROCESS000000000"].get("agent_boot_id") is None
+
+
 @pytest.mark.parametrize(
     "bad_uuid",
     ["", ["not-a-uuid"], "--dangerously-skip-permissions"],

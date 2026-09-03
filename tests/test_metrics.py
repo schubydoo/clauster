@@ -27,6 +27,18 @@ def test_sample_tree_gone_pid_returns_none():
     assert metrics.sample_tree(2_147_483_646, interval=0.01) is None
 
 
+def test_sample_tree_root_vanishes_before_the_children_walk_returns_none(monkeypatch):
+    # metrics.py 60: `psutil.Process(pid)` succeeds, then the root exits before
+    # `root.children(recursive=True)` runs, so the walk raises a _GONE member. That second
+    # `except _GONE: return None` arm — distinct from the no-btime RuntimeError arm (#1429,
+    # already covered) — returns None rather than faulting the whole sample.
+    def boom(self, recursive=False):
+        raise psutil.NoSuchProcess(self.pid)
+
+    monkeypatch.setattr(psutil.Process, "children", boom)
+    assert metrics.sample_tree(os.getpid(), interval=0.01) is None
+
+
 def test_sample_tree_disk_unavailable_yields_none(monkeypatch):
     # Simulate a platform without io_counters (e.g. macOS): disk fields fall to None.
     def boom(self):
