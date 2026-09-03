@@ -1435,8 +1435,30 @@ def load_settings_json_obj(raw: bytes) -> dict[str, Any]:
         raise InvalidCandidateError(
             "existing settings file is nested too deeply to parse"
         ) from exc
+    except ValueError as exc:
+        # json builds an int literal with int(<digits>), which raises a plain ValueError
+        # (NOT a JSONDecodeError, though JSONDecodeError subclasses it) once the decimal length
+        # passes sys.get_int_max_str_digits(). It escaped the handler above and left this
+        # function raising outside its documented contract, 500ing the read route where this
+        # tier's contract is 422 (#1449). Fail closed as the same structural rejection. Class
+        # name only, never `exc`: its message names the digit count, and this string is surfaced
+        # to the browser, so echoing it would put a huge value pasted into settings.json onto the
+        # dashboard (invariant 4). It is the parse-time twin of the _first_json_unsafe int reason.
+        raise InvalidCandidateError(
+            "existing settings file contains an integer too large for the interpreter to serialize"
+        ) from exc
     if not isinstance(data, dict):
         raise InvalidCandidateError("existing settings file is not a JSON object")
+    if (reason := _first_json_unsafe(data)) is not None:
+        # Parses and is an object, but a scalar in it cannot cross the JSON response path
+        # (#1449): a non-finite float — the bare NaN/Infinity/-Infinity literals json accepts by
+        # default AND an overflowing magnitude like 1e400 that parses straight to inf — or a
+        # lone-surrogate string the response body's UTF-8 encode rejects. Either 500s the read
+        # route where this tier's contract is 422. Same class and same guard PR 1448 welded onto
+        # the YAML seam (:func:`load_frontmatter_yaml`); JSON keys are always strings, so the
+        # KEY-position huge int that motivated the walk there cannot occur here. The reason is a
+        # static class label, never the offending scalar — invariant 4.
+        raise InvalidCandidateError(f"existing settings file contains {reason}")
     return data
 
 
