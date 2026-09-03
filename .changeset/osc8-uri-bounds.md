@@ -2,4 +2,4 @@
 default: patch
 ---
 
-Stop an unterminated OSC 8 hyperlink from swallowing the following line into its URI, which could hand the operator a corrupted (unopenable) `claude setup-token` authorize URL on the Windows ConPTY login path, where the hyperlink target is the only recoverable copy.
+An unterminated OSC 8 (terminal hyperlink) escape no longer swallows the following line into its URI. Before, on the Windows ConPTY login path, that could hand the operator a corrupted, unopenable `claude setup-token` authorize URL. On that path the hyperlink target is the only recoverable copy.
