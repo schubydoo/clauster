@@ -2094,9 +2094,17 @@ On by default (<code>claude.auto_enable_remote_control</code>); set <code>false<
 flags yourself.</p>
 <h2 id="log-redaction">Log redaction<a class="headerlink" href="#log-redaction" title="Permanent link">&para;</a></h2>
 <p>The bridge debug log is streamed over a WebSocket and sanitized line by line
-(<code>redact.py</code>). Redaction always runs against an <strong>ANSI-stripped</strong> view, so escape
-sequences can't split an identifier and smuggle a secret past the
-word-boundary-anchored regexes.</p>
+(<code>redact.py</code>). Redaction runs against the view a browser <strong>renders</strong>. That view
+has the escape sequences removed, including the <code>OSC</code>, <code>DCS</code>, <code>SOS</code>, <code>PM</code> and
+<code>APC</code> string sequences and their payloads. It also has the invisible control
+characters removed. Neither kind of byte can therefore split an identifier into
+fragments too short for the word-boundary-anchored regexes.</p>
+<p>Removing those bytes can also <em>delete</em> a word boundary. <code>user&lt;ESC&gt;[32menv_&lt;ULID&gt;</code>
+renders as <code>userenv_&lt;ULID&gt;</code>, which reads exactly like ordinary compound text such
+as <code>userenv_production</code>. Clauster therefore records where each removal happened
+and re-tries the same masks anchored at those positions. Tab, carriage return and
+newline are never removed. They are visible separators, and the line structure
+depends on them.</p>
 <p>Three layers:</p>
 <ol>
 <li><strong>ID redaction (primary guarantee).</strong> Masks <code>env_</code> / <code>session_</code> / <code>cse_</code>
@@ -2119,6 +2127,17 @@ whose prefix isn't listed. That is acceptable because it is
 defense-in-depth: the primary WebSocket guarantee is the
 <code>env_</code>/<code>session_</code>/<code>cse_</code> + UUID redaction. Add new shapes as they appear
 rather than assuming coverage.</p>
+</div>
+<div class="admonition warning">
+<p class="admonition-title">Bounded scope: an identifier written mid-token stays visible</p>
+<p>A mask needs a word boundary before the identifier, or the position of a
+removed escape. An identifier whose preceding characters were written as
+plain text (<code>xyzenv_&lt;ULID&gt;</code>) has neither, so it is not masked. That is a
+different threat: producing it means already controlling the whole line, and
+an attacker who can print arbitrary text beside an identifier does not need
+to smuggle it past the mask. The case that matters is the escape weld, where
+Clauster's own bridge prints the real identifier and an injected escape only
+deletes the boundary.</p>
 </div>
 <h3 id="hybrid-by-default">Hybrid by default<a class="headerlink" href="#hybrid-by-default" title="Permanent link">&para;</a></h3>
 <p>Redaction is <strong>hybrid</strong> by default: the on-disk log keeps IDs verbatim (for local

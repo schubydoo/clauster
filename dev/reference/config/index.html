@@ -2510,7 +2510,7 @@ path.</p>
 <td><code>strip_ansi_in_stream</code></td>
 <td>bool</td>
 <td><code>true</code></td>
-<td>Strip ANSI escape sequences from the streamed log.</td>
+<td>Strip ANSI escape sequences from the streamed log. Turning this off keeps a line's colour only when that line is provably as redacted with the escapes as without them; otherwise the stripped form is streamed instead, so colour is never kept at the cost of a leak.</td>
 </tr>
 <tr>
 <td><code>retention_max_age_days</code></td>
