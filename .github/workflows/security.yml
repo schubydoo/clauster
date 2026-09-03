@@ -260,6 +260,23 @@ jobs:
           client-id: ${{ secrets.CLAUSTER_CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
           permission-contents: read
+      # A SECOND App token, `security-events: write` only, for the code-scanning/sarifs
+      # POST below. Minted here, next to the first, so BOTH tokens exist before the audit
+      # runs. `Run zizmor` exits nonzero on findings, and a mint placed after it with a
+      # bare `if:` (implicit `success()`) would then be skipped, leaving the `always()`
+      # upload with no token — the exact path `always()` exists for. Separate from the
+      # audit token so the `zizmor` binary never holds the write scope (#1437). Same
+      # same-repo `if:` as the first mint.
+      - name: Mint SARIF upload token
+        id: sarif-token
+        if: >-
+          ${{ github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.CLAUSTER_CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
+          permission-security-events: write
       - name: Set up uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
@@ -274,19 +291,6 @@ jobs:
         run: zizmor --format sarif . > results.sarif
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
-      # A SECOND App token, `security-events: write` only, for the code-scanning/sarifs
-      # POST below. Separate from the audit token above so the `zizmor` binary never
-      # holds the write scope (#1437). Same `if:` as the first mint.
-      - name: Mint SARIF upload token
-        id: sarif-token
-        if: >-
-          ${{ github.event_name != 'pull_request'
-          || github.event.pull_request.head.repo.full_name == github.repository }}
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ secrets.CLAUSTER_CI_APP_CLIENT_ID }}
-          private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
-          permission-security-events: write
       - name: Upload SARIF
         # `always()` like the trivy upload above: zizmor exits nonzero when it has
         # findings, which is exactly when the SARIF is worth sending to the Security
@@ -302,7 +306,8 @@ jobs:
         # audit). The upload token is required here, not GITHUB_TOKEN: this step's `if:`
         # already limits it to same-repo, where the mint runs, and a fork PR cannot write
         # code scanning results, so skip rather than red the required gate (`always()`
-        # counts the skip as passing).
+        # counts the skip as passing). Both tokens are minted before `Run zizmor`, so a
+        # findings-nonzero audit cannot skip this token via a mint's implicit `success()`.
         if: >-
           ${{ always()
           && (github.event_name != 'pull_request'
