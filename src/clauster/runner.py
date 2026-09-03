@@ -3267,7 +3267,9 @@ class SessionRunner:
             self._start_startup_watch(instance.instance_id)
         return instance
 
-    def _cleanup_keeper(self, pid: int) -> None:
+    def _cleanup_keeper(
+        self, pid: int, *, keeper_proc_start: float | None, keeper_start_ticks: int | None
+    ) -> None:
         """Wind the keeper down: reap it, then force its tree down if it lingers.
 
         The keeper self-exits once its bridge is gone, so for a keeper this process
@@ -3275,6 +3277,12 @@ class SessionRunner:
         sidecar/row another process wrote, #1088) is not our child — ``reap_if_exited``
         is a no-op on it, and the real path is the grace loop plus the start-time
         re-verify before ``force_kill_tree``.
+
+        ``keeper_proc_start`` and ``keeper_start_ticks`` are the instance row's RECORDED
+        keeper start pair (#1303). They are the only thing that rejects a ``keeper_pid`` a
+        row wrote which was already recycled onto a stranger BEFORE this ran; the live
+        snapshot below matches such a stranger against itself. Keyword-required with no
+        default so a call site that forgets them is a type error, not a silent regression.
         """
         # Identity, snapshotted BEFORE the grace: `is_keeper_process` alone answers "is this
         # pid *a* keeper", never "is it *THIS* keeper", and on a host that spawns keepers
@@ -3305,21 +3313,20 @@ class SessionRunner:
         # tree of whatever now holds it would take down an unrelated process — including,
         # if the recycled holder is itself a keeper, that keeper's live bridge.
         #
-        # ⚠️ Scope, stated honestly rather than borrowed: `procutil.kill_if_match` compares
-        # against a PERSISTED `proc_start` and refuses outright without one, so it can reject
-        # a pid that was already stale before the call. This snapshot is taken off the live
-        # pid moments earlier, so it detects a recycle INSIDE the grace loop and nothing
-        # before it — a `keeper_pid` that a row another process wrote had already lost to a
-        # stranger keeper matches itself here and passes. Closing that needs the RECORDED
-        # keeper trio threaded in as a conjunct. `instance.keeper_start_ticks` now exists
-        # (#1402), so the missing column is no longer the blocker; what remains is the
-        # tolerance decision a `force_kill_tree` gate forces and the plumbing of the trio
-        # down to this method, which today receives only a pid. Issue #1303 tracks exactly
-        # that and names the tolerance decision.
-        # Until then the cmdline gate is the only thing separating those two, exactly as
-        # before this change; what the boot-relative compare removes is the intermittent
-        # drift that used to spare such a stranger BY ACCIDENT — the accident issue #1403
-        # asked us to stop relying on.
+        # This live snapshot is taken off the pid moments earlier, so it detects a recycle
+        # INSIDE the grace loop and nothing before it — a `keeper_pid` that a row another
+        # process wrote (#1088) had already lost to a stranger keeper matches itself here and
+        # passes. The RECORDED keeper pair closes that (#1303): `keeper_proc_start` and
+        # `keeper_start_ticks` come from the instance row and are ANDed below as
+        # `procutil.is_live_keeper` — the same predicate `forget`'s keeper gate uses, which
+        # compares the persisted pair against the live pid, so a stranger already on the pid
+        # carries different persisted ticks and is rejected. It reuses `is_live_process`'s
+        # exact-tick / coarse-epoch discriminator; the keeper's row carries no boot id (only
+        # the sidecar the `keepers` CLI reads does). When the row recorded ticks, that coarse
+        # epoch is its "same boot?" fallback, exactly as there; a row that recorded a start but
+        # no ticks (pre-#1402) has `is_live_keeper` compare on the exact epoch bound instead. A
+        # row with no recorded start (pre-#1178) has nothing to compare and degrades to this
+        # live-snapshot gate — never more permissive than before.
         #
         # Compared EXACTLY, and deliberately not with the tolerance its siblings use — on
         # the boot-relative tick count (`proc_start_ticks`, field 22 of `/proc/<pid>/stat`)
@@ -3356,8 +3363,10 @@ class SessionRunner:
         # exactly. A keeper spared here is a keeper NO automated path recovers: `stop()` has
         # already left the instance carded (STOPPED, still persisted), and
         # `pty_keeper.find_orphan_keepers` — whose only caller is the `clauster keepers` CLI —
-        # filters out every keeper whose project is carded, so `keepers --kill` refuses it and
-        # `forget` refuses it too, as still-live. It leaks until someone kills it by hand. We
+        # filters out every keeper whose project is carded, so plain `keepers --kill` refuses it
+        # and `forget` refuses it too, as still-live. The recovery path is the explicit
+        # `keepers --kill <pid> --force` (#1420), which targets the pid past that filter, or
+        # killing it by hand. We
         # take that over the alternative anyway: the alternative is a `force_kill_tree` aimed
         # at a stranger, which takes down a process we do not own and, if the stranger is
         # itself a keeper, its live bridge with it. A leak is recoverable by hand; a wrong
@@ -3383,6 +3392,15 @@ class SessionRunner:
             if expected_ticks is not None
             else expected_start is not None and procutil.proc_create_time(pid) == expected_start
         )
+        # AND the RECORDED keeper pair (#1303). The live-snapshot compare above cannot see a
+        # pid recycled BEFORE this method ran, so it is checked against the persisted
+        # `(keeper_proc_start, keeper_start_ticks)` too: a stranger already holding the pid
+        # carries different persisted ticks and is refused. Only consulted when a start was
+        # recorded — an older row without one keeps the live-snapshot answer, unchanged.
+        if still_this_keeper and keeper_proc_start is not None:
+            still_this_keeper = procutil.is_live_keeper(
+                pid, keeper_proc_start, start_ticks=keeper_start_ticks
+            )
         if not still_this_keeper:
             _log.warning("keeper pid %s is no longer that keeper — not force-killing", pid)
             return
@@ -3745,9 +3763,20 @@ class SessionRunner:
             # gone; capture it up front. A reattached keeper is NOT our child —
             # `_cleanup_keeper` re-verifies identity before it kills anything.
             keeper_pid = instance.keeper_pid
+            # Read the recorded keeper start pair together with the pid, before the awaits
+            # below, so the identity trio travels as one snapshot (#1303 review). Under the
+            # spawn lock these row fields cannot change, so a later read would be equivalent —
+            # capturing them here keeps the pid and its start pair a single read.
+            keeper_proc_start = instance.keeper_proc_start
+            keeper_start_ticks = instance.keeper_start_ticks
             if pid is None:
                 if keeper_pid is not None:
-                    await asyncio.to_thread(self._cleanup_keeper, keeper_pid)
+                    await asyncio.to_thread(
+                        self._cleanup_keeper,
+                        keeper_pid,
+                        keeper_proc_start=keeper_proc_start,
+                        keeper_start_ticks=keeper_start_ticks,
+                    )
                 instance.status = InstanceStatus.STOPPED
                 await asyncio.to_thread(self._unlock_pty_worktree, instance)  # #1089
                 self._procs.pop(instance_id, None)  # release dead Popen handle; resume re-adds it
@@ -3774,7 +3803,12 @@ class SessionRunner:
                     boot_id=instance.bridge_boot_id,
                 )
             if keeper_pid is not None:  # pragma: skip-on-win
-                await asyncio.to_thread(self._cleanup_keeper, keeper_pid)
+                await asyncio.to_thread(
+                    self._cleanup_keeper,
+                    keeper_pid,
+                    keeper_proc_start=keeper_proc_start,
+                    keeper_start_ticks=keeper_start_ticks,
+                )
             instance.status = InstanceStatus.STOPPED
             await asyncio.to_thread(self._unlock_pty_worktree, instance)  # #1089
             self._procs.pop(instance_id, None)  # release dead Popen handle; resume re-adds it
