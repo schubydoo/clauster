@@ -262,6 +262,35 @@ _ULID = "01ABCDEFGHJKMNPQRSTVWXYZ01"
         ("csi split", "env_01ABCDEFG\x1b[0mHIJKLMNOP tail"),
         ("bare C0 split, no ESC (#1370)", "env_01AB\x07CDEFGH"),
         ("8-bit C1 split", "env_01AB\x9bCDEFGH"),
+        # Default-ignorable Unicode splits: each half is too short for {6,} on its own, so
+        # before #1434 the char stayed in the rendered view and the id reached the reader
+        # whole. Each mirrors the BEL split above with a code point a `<pre>` shows nothing
+        # for. Positive control: without widening `_INVISIBLE_PATTERN` the char is not cut,
+        # the halves stay split, no mask fires, `env_<redacted>` is absent, so each case fails.
+        # The first group is `Cf` (format); the second is default-ignorable but NOT `Cf` (a
+        # variation selector, the combining grapheme joiner, a Hangul filler, a supplement
+        # selector) — the leak a `Cf`-only strip would have left one code point over.
+        ("zero-width space split (U+200B)", "env_01AB\u200bCDEFGH"),
+        ("zero-width non-joiner split (U+200C)", "env_01AB\u200cCDEFGH"),
+        ("zero-width joiner split (U+200D)", "env_01AB\u200dCDEFGH"),
+        ("word joiner split (U+2060)", "env_01AB\u2060CDEFGH"),
+        ("BOM / ZWNBSP split (U+FEFF)", "env_01AB\ufeffCDEFGH"),
+        ("soft hyphen split (U+00AD)", "env_01AB\u00adCDEFGH"),
+        ("bidi override split (U+202E)", "env_01AB\u202eCDEFGH"),
+        ("tag-block split (U+E0041)", "env_01AB\U000e0041CDEFGH"),
+        ("variation selector split (U+FE0F)", "env_01AB\ufe0fCDEFGH"),
+        ("combining grapheme joiner split (U+034F)", "env_01AB\u034fCDEFGH"),
+        ("hangul filler split (U+3164)", "env_01AB\u3164CDEFGH"),
+        ("variation selector supplement split (U+E0100)", "env_01AB\U000e0100CDEFGH"),
+        # Default-ignorable WELDs, not splits: the char sits BEFORE the id and deletes the word
+        # boundary its `\b` needs, so the id start is supplied by the cut instead. Drives
+        # `_cut_spans` (source 2), where the splits above drive the `\b`-anchored pass. The
+        # positive control here is a Hangul filler (category `Lo`, a word character), so `\b`
+        # does NOT hold after it and the id welds \u2014 main leaks it whole. The U+200B weld is a
+        # weaker case (a `Cf` char is not a word character, so `\b` already holds after it and
+        # main masks it), kept only to exercise `_cut_spans` on the fixed path.
+        ("hangul-filler weld (U+3164)", f"user\u3164env_{_ULID} x"),
+        ("zero-width weld (U+200B)", f"user\u200benv_{_ULID} x"),
         # Two sequences in opposite directions on one token: one welds the start away,
         # the other splits the body.
         ("weld + split", "a\x1b[32menv_01ABCDEFG\x1b[0mHIJKLMNOP tail"),
@@ -271,6 +300,84 @@ def test_sanitize_line_masks_a_welded_or_split_identifier(shape, line):
     out = redact.sanitize_line(line)
     assert "env_<redacted>" in out, shape
     assert _ULID not in out and "01ABCDEFG" not in out, shape
+
+
+def test_invisible_pattern_is_default_ignorable_not_cf():
+    # #1434: the widened set must be the Unicode Default_Ignorable_Code_Point property (what a
+    # `<pre>` renders as nothing), NOT the `Cf` category. This DERIVES that property from
+    # `unicodedata` and asserts `_INVISIBLE_RE` covers all of it, so a Unicode bump that adds a
+    # default-ignorable code point outside the frozen ranges (or a dropped range endpoint) reds
+    # here rather than becoming a silent weld leak. The component sets are the fixed Unicode
+    # properties; only `Cf` is version-varying, and it is read live.
+    import sys
+    import unicodedata
+
+    variation_selector = (
+        set(range(0x180B, 0x180E))
+        | {0x180F}
+        | set(range(0xFE00, 0xFE10))
+        | set(range(0xE0100, 0xE01F0))
+    )
+    other_default_ignorable = (
+        {0x034F}
+        | set(range(0x115F, 0x1161))
+        | set(range(0x17B4, 0x17B6))
+        | {0x2065, 0x3164, 0xFFA0}
+        | set(range(0xFFF0, 0xFFF9))
+        | {0xE0000}
+        | set(range(0xE0002, 0xE0020))
+        | set(range(0xE0080, 0xE0100))
+        | set(range(0xE01F0, 0xE1000))
+    )
+    # Cf code points Unicode EXCLUDES from Default_Ignorable because they DO render:
+    prepended_concatenation_mark = {
+        0x0600,
+        0x0601,
+        0x0602,
+        0x0603,
+        0x0604,
+        0x0605,
+        0x06DD,
+        0x070F,
+        0x0890,
+        0x0891,
+        0x08E2,
+        0x110BD,
+        0x110CD,
+    }
+    other_excluded = set(range(0xFFF9, 0xFFFC)) | set(
+        range(0x13430, 0x13440)
+    )  # interlinear, Egyptian
+    cf = {c for c in range(sys.maxunicode + 1) if unicodedata.category(chr(c)) == "Cf"}
+    default_ignorable = (
+        (cf | variation_selector | other_default_ignorable)
+        - prepended_concatenation_mark
+        - other_excluded
+    )
+
+    controls = (
+        set(range(0x00, 0x09)) | {0x0B, 0x0C} | set(range(0x0E, 0x20)) | set(range(0x7F, 0xA0))
+    )
+    stripped = {cp for cp in range(sys.maxunicode + 1) if redact._INVISIBLE_RE.fullmatch(chr(cp))}
+
+    # Leak direction: EVERY default-ignorable code point must be stripped, or it welds. One here
+    # but not in `stripped` is a member `_INVISIBLE_PATTERN` must gain — UNLESS a Unicode bump
+    # made it a prepended-concatenation mark that now renders, in which case it belongs in
+    # `prepended_concatenation_mark` above, not in the pattern.
+    missed = sorted(default_ignorable - stripped)
+    assert not missed, (
+        f"default-ignorable code points not stripped: {[hex(c) for c in missed[:20]]} — widen "
+        "_INVISIBLE_PATTERN, or if the new point RENDERS add it to prepended_concatenation_mark"
+    )
+    # Over-strip direction, EXACT rather than a sample: nothing beyond the controls and the derived
+    # set may be stripped, or a range endpoint has overshot into visible text (e.g. `⁠-ⁿ`
+    # swallowing the superscripts, or a raw-`Cf` widening eating ARABIC END OF AYAH). The visible
+    # prepended-concatenation marks, U+2028/U+2029 and TAB/CR/LF all fall outside `stripped` here.
+    over = sorted(stripped - controls - default_ignorable)
+    assert not over, (
+        f"code points stripped that are NOT default-ignorable: {[hex(c) for c in over[:20]]} — "
+        "narrow _INVISIBLE_PATTERN; it must never delete a character a browser draws"
+    )
 
 
 @pytest.mark.parametrize(

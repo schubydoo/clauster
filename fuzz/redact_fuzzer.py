@@ -45,11 +45,24 @@ _OPEN = re.compile(r"(env|session|cse)_[A-Za-z0-9]{6,}")
 _MASK = "<redacted>"
 
 # The render model, restated. ESC-introduced sequences first (an ESC that introduces one
-# is part of it), then any invisible control character — C0 minus the visible separators
-# TAB/CR/LF, DEL, and the 8-bit C1 range.
+# is part of it), then any invisible character — C0 minus the visible separators TAB/CR/LF,
+# DEL, the 8-bit C1 range, AND the Unicode Default_Ignorable_Code_Point set (zero-width,
+# bidirectional, variation-selector, joiner, filler and tag code points a `<pre>` shows
+# nothing for, #1434). The ID/secret PATTERNS and the ESC alternation are the parts restated
+# independently of the module, so a mask-logic bug cannot move both sides together. The
+# invisible ranges are the ground truth of what renders as nothing, so they are necessarily the
+# same set the module strips — a frozen copy of it, kept in sync by hand. Two tests guard that:
+# `test_redact.py::test_invisible_pattern_is_default_ignorable_not_cf` rebuilds the property from
+# `unicodedata` and reds if the MODULE table drifts from it, and
+# `test_fuzz_harness_smoke.py::test_redact_fuzzer_render_matches_the_module_invisible_set` reds if
+# this copy drifts from the module. Without this run the oracle is blind to a zero-width leak
+# exactly as it was to the #1370 control split before C0 was added.
 _RENDER = re.compile(
     r"\x1B(?:[\]PX^_][^\x07\x1B\r\n]*(?:\x07|\x1B\\)|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])"
-    r"|[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]"
+    r"|[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F"
+    r"\u00ad\u034f\u061c\u115f-\u1160\u17b4-\u17b5\u180b-\u180f"
+    r"\u200b-\u200f\u202a-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8"
+    r"\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0000-\U000e0fff]"
 )
 
 _WORD = re.compile(r"\w")

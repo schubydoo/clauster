@@ -34,3 +34,13 @@
 "\x1b]"
 "\x07"
 "-"
+# default-ignorable splitters (#1434), UTF-8 encoded: Cf and non-Cf (variation
+# selector, combining grapheme joiner, Hangul filler) — the leak a Cf-only set missed
+"\xe2\x80\x8b"
+"\xe2\x80\x8d"
+"\xe2\x81\xa0"
+"\xef\xbb\xbf"
+"\xc2\xad"
+"\xef\xb8\x8f"
+"\xcd\x8f"
+"\xe3\x85\xa4"
