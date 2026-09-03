@@ -44,8 +44,9 @@ the CI coverage-gate interpreter (`uv` still supports the full 3.11+ floor).
 - **Docs lint (Markdown + YAML)** — `bash scripts/lint-docs.sh` (markdownlint-cli2
   from `npm ci`, pinned in `package.json`; `yamllint` from `uv sync --extra dev`).
   Same command CI runs in the `lint` job. The script calls `npx --no-install`, which
-  needs a local `node_modules`: in a fresh git worktree, run `npm ci` there first, or
-  the tool lookup walks up to a parent checkout.
+  needs a local `node_modules`: in a fresh git worktree, run `npm ci` there first.
+  Without it the lookup walks up to a parent checkout's `node_modules` and uses that
+  version, or fails when the worktree sits outside any such checkout.
 - **pre-commit (recommended)** — `uv run pre-commit install` once; ruff
   (check + format), yamllint, and markdownlint then run automatically on each
   commit using the same pinned tools as CI. Check everything on demand with
