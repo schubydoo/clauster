@@ -2075,6 +2075,53 @@ def test_conpty_popen_wait_reads_an_isalive_fault_as_a_synthetic_exit() -> None:
     assert ls._ConPtyPopen(_IsaliveRaisesProc()).wait(timeout=5) == ls._CONPTY_FAULT_EXIT
 
 
+def test_conpty_fault_exit_is_out_of_band_and_records_the_cause() -> None:
+    # A real `claude` failure exits 1, and `_finalize_exited` builds the operator message
+    # from the number, so the synthetic fault code must not collide with it. The shim also
+    # keeps the fault text, which `_conpty_alive` would otherwise drop at every call site.
+    assert ls._CONPTY_FAULT_EXIT not in (0, 1)
+    popen = ls._ConPtyPopen(_IsaliveRaisesProc())
+    assert popen.fault is None
+    assert popen.poll() == ls._CONPTY_FAULT_EXIT
+    assert popen.fault is not None and "conpty liveness check failed" in popen.fault
+
+
+def test_conpty_handle_fault_names_the_cause_and_still_stops_the_child(
+    shepherd, monkeypatch
+) -> None:
+    # The two halves of a faulted ConPTY handle that the synthetic exit alone would hide:
+    # 1. the terminal result must say the HANDLE faulted (and why), not "claude setup-token
+    #    exited with code N" as if the login itself had been refused;
+    # 2. `_teardown` skips its stop-the-child block on a faulted handle (`poll()` is not None),
+    #    so it must still make one best-effort `terminate()` — otherwise a transient fault on
+    #    a still-alive child leaves the login process to outlive its flow (#1422).
+    class _FaultingProc(_IsaliveRaisesProc):
+        def __init__(self):
+            self.terminated: list[bool] = []
+
+        def terminate(self, force=False):
+            self.terminated.append(force)
+
+    fake = _make_fake_conpty()
+    _use_conpty(monkeypatch, fake)
+    shepherd.start("setup-token")
+    flow = shepherd._flow  # noqa: SLF001 - internals test
+    # Let the reader thread finish on its own (the fake's stream ends), then swap the shim's
+    # handle for one that faults on every `isalive()`: from here every liveness check faults.
+    flow.pty_process._alive = False  # noqa: SLF001 - fake internals
+    faulting = _FaultingProc()
+    flow.proc._proc = faulting  # noqa: SLF001 - internals test
+
+    result = shepherd.poll()
+
+    assert result["ok"] is False
+    assert "lost its terminal handle" in result["message"]
+    assert "conpty liveness check failed" in result["message"]
+    assert f"exited with code {ls._CONPTY_FAULT_EXIT}" not in result["message"]
+    assert not shepherd.is_active()  # the flow is cleared, not stranded active
+    assert faulting.terminated == [False]  # one best-effort graceful stop, no kill escalation
+
+
 # --- _spawn_conpty + full start/submit flow -----------------------------------------
 
 

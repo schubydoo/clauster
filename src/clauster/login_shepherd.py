@@ -190,7 +190,12 @@ def _redact(text: str, pasted_secrets: Iterable[str] = ()) -> str:
 #: Exit code :meth:`_ConPtyPopen.poll` / :meth:`_ConPtyPopen.wait` report when ``isalive()``
 #: FAULTS (not merely returns False): a non-zero, non-None value so the flow finalizes as a
 #: failure and the caller never re-enters pywinpty on a handle that just refused to answer.
-_CONPTY_FAULT_EXIT = 1
+#: Out of band on purpose: ``1`` is what a real ``claude`` failure reports, and the operator
+#: message is built from the number, so a handle fault must not read as a login failure.
+#: ``73`` is the same "no exit status available" convention :mod:`~clauster.pty_keeper` uses
+#: for a bridge whose status could not be read; :meth:`LoginShepherd._finalize_exited` names
+#: the fault text alongside it.
+_CONPTY_FAULT_EXIT = 73
 
 
 def _conpty_alive(proc: Any) -> tuple[bool, str | None]:
@@ -254,6 +259,11 @@ class _ConPtyPopen:
         """Wrap the live pywinpty `PtyProcess`, serializing handle access behind `lock`."""
         self._proc = proc
         self._lock = lock or threading.Lock()
+        #: The fault text from the first `isalive()` fault `poll`/`wait` saw, else None. The
+        #: synthetic :data:`_CONPTY_FAULT_EXIT` says only THAT the handle faulted; this says
+        #: WHY, so `_finalize_exited` can put the cause in the operator message and `_teardown`
+        #: can tell a faulted handle from a cleanly-exited child (#1422).
+        self.fault: str | None = None
 
     def poll(self) -> int | None:
         """Return the exit code if the process has exited, else None (never blocks)."""
@@ -266,6 +276,7 @@ class _ConPtyPopen:
                 # or block with no timeout if the fault clears while the process still lives,
                 # holding this lock and starving the reader. Report a synthetic exit so the
                 # flow finalizes as a failure rather than stranding (#1422).
+                self.fault = self.fault or error
                 return _CONPTY_FAULT_EXIT
             # Cleanly dead → `wait()` returns the cached status at once without blocking. It
             # may return None on some pywinpty builds → coerce to 0.
@@ -285,6 +296,7 @@ class _ConPtyPopen:
                 if error is not None:
                     # Faulted handle: return a synthetic exit rather than re-entering pywinpty's
                     # `wait()` (which can raise or block with no timeout). See `poll` (#1422).
+                    self.fault = self.fault or error
                     return _CONPTY_FAULT_EXIT
                 if not alive:
                     return self._proc.wait() or 0
@@ -948,10 +960,21 @@ class LoginShepherd:
                 )
             )
         else:
-            message = (
-                f"claude {flow.mode} exited with code {exit_code}. "
-                f"Captured output:\n{_redact(output, flow.pasted_secrets)}"
-            )
+            fault = getattr(flow.proc, "fault", None)
+            if exit_code == _CONPTY_FAULT_EXIT and fault is not None:
+                # A ConPTY handle fault, not a `claude` exit: the synthetic code alone would
+                # read as a login failure (#1422). Name the cause, which only the debug log
+                # held before, so the operator can tell a stale handle from a refused code.
+                message = (
+                    f"claude {flow.mode} lost its terminal handle before it reported an exit "
+                    f"({fault}); treated as a failed {flow.mode}. "
+                    f"Captured output:\n{_redact(output, flow.pasted_secrets)}"
+                )
+            else:
+                message = (
+                    f"claude {flow.mode} exited with code {exit_code}. "
+                    f"Captured output:\n{_redact(output, flow.pasted_secrets)}"
+                )
         result: dict = {"ok": ok, "message": message}
         if token:
             result["token"] = token
@@ -1028,6 +1051,21 @@ class LoginShepherd:
                     # control-end close below.
                     with contextlib.suppress(subprocess.TimeoutExpired):
                         flow.proc.wait(timeout=5)
+            elif getattr(flow.proc, "fault", None) is not None:
+                # A FAULTED ConPTY handle reports the synthetic exit above, so the stop block
+                # is skipped — yet if the fault was transient the child may still be alive,
+                # and `pty_process.close()` below would be the only stop. One best-effort
+                # `terminate()`, broadly guarded (the same stale handle can raise again), so a
+                # login process cannot outlive its flow (#1422). Nothing to reap: `wait()` on
+                # that handle is exactly the re-entry `_ConPtyPopen` refuses.
+                try:
+                    flow.proc.terminate()
+                except Exception as exc:  # noqa: BLE001 — best effort on a faulted handle
+                    _log.debug(
+                        "login_shepherd: %s terminate on a faulted conpty handle failed: %s",
+                        flow.mode,
+                        exc,
+                    )
             # The reader is now unblocked by the child's EOF/EIO on the still-open fd.
             if flow.reader_thread is not None:
                 flow.reader_thread.join(timeout=5)
