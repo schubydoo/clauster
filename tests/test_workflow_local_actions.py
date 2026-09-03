@@ -69,9 +69,8 @@ def test_local_action_call_matches_its_declared_inputs(workflow, job, uses, supp
 def test_job_level_reusable_workflow_refs_resolve():
     """A job-level local `uses:` (reusable workflow) must point at an existing file.
 
-    knope-release.yml deliberately keeps the `./` form for its job-level call — that
-    grammar is exercised only at release time, so it is not migrated to `$/` — and
-    this pins that the target exists either way.
+    knope-release.yml's job-level call uses the `$/` form like every other local
+    `uses:`; this pins that the target resolves for the `$/` and `./` forms alike.
     """
     seen = 0
     for wf in sorted(WORKFLOWS.glob("*.yml")):

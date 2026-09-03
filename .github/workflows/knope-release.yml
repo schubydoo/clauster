@@ -50,7 +50,7 @@ jobs:
               && github.ref == 'refs/heads/main') }}
     permissions:
       contents: read
-    uses: ./.github/workflows/build-binaries.yml
+    uses: $/.github/workflows/build-binaries.yml
 
   # --- Build the dists in a job with NO signing identity ----------------------
   # ⚠️ Deliberately NOT part of the `release` job below. `uv build` executes the
