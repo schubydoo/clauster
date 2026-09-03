@@ -2045,6 +2045,83 @@ def test_conpty_popen_terminate_and_kill_map_to_pywinpty() -> None:
     assert proc.terminated == [False, True]  # terminate → force=False, kill → force=True
 
 
+class _IsaliveRaisesProc:
+    """pywinpty stand-in whose `isalive()` raises a WinptyError-like fault (NOT an OSError).
+
+    `wait()` also raises, standing in for pywinpty's `wait()` re-entering the same faulted
+    handle: `poll`/`wait` must NOT call it — they report the synthetic fault exit instead.
+    """
+
+    def isalive(self):
+        raise RuntimeError("WinptyError: cannot query a stale ConPTY handle")
+
+    def wait(self):
+        raise AssertionError("wait() must not be re-entered on a faulted handle")
+
+    def terminate(self, force=False):
+        pass
+
+
+def test_conpty_popen_poll_reads_an_isalive_fault_as_a_synthetic_exit() -> None:
+    # pywinpty's `isalive()` raises its own WinptyError (not an OSError) on a stale handle.
+    # `poll()` reports a synthetic exit and must NOT re-enter pywinpty's `wait()`, which could
+    # raise again or block with no timeout (#1422). The fake's `wait()` asserts if reached.
+    assert ls._ConPtyPopen(_IsaliveRaisesProc()).poll() == ls._CONPTY_FAULT_EXIT
+
+
+def test_conpty_popen_wait_reads_an_isalive_fault_as_a_synthetic_exit() -> None:
+    # Same fault under `wait()`: it reports the synthetic exit at once, never re-entering the
+    # faulted handle's `wait()` nor spinning to its deadline (#1422).
+    assert ls._ConPtyPopen(_IsaliveRaisesProc()).wait(timeout=5) == ls._CONPTY_FAULT_EXIT
+
+
+def test_conpty_fault_exit_is_out_of_band_and_records_the_cause() -> None:
+    # A real `claude` failure exits 1, and `_finalize_exited` builds the operator message
+    # from the number, so the synthetic fault code must not collide with it. The shim also
+    # keeps the fault text, which `_conpty_alive` would otherwise drop at every call site.
+    assert ls._CONPTY_FAULT_EXIT not in (0, 1)
+    popen = ls._ConPtyPopen(_IsaliveRaisesProc())
+    assert popen.fault is None
+    assert popen.poll() == ls._CONPTY_FAULT_EXIT
+    assert popen.fault is not None and "conpty liveness check failed" in popen.fault
+
+
+def test_conpty_handle_fault_names_the_cause_and_still_stops_the_child(
+    shepherd, monkeypatch
+) -> None:
+    # The two halves of a faulted ConPTY handle that the synthetic exit alone would hide:
+    # 1. the terminal result must say the HANDLE faulted (and why), not "claude setup-token
+    #    exited with code N" as if the login itself had been refused;
+    # 2. `_teardown` skips its stop-the-child block on a faulted handle (`poll()` is not None),
+    #    so it must still make one best-effort `terminate()` — otherwise a transient fault on
+    #    a still-alive child leaves the login process to outlive its flow (#1422).
+    class _FaultingProc(_IsaliveRaisesProc):
+        def __init__(self):
+            self.terminated: list[bool] = []
+
+        def terminate(self, force=False):
+            self.terminated.append(force)
+
+    fake = _make_fake_conpty()
+    _use_conpty(monkeypatch, fake)
+    shepherd.start("setup-token")
+    flow = shepherd._flow  # noqa: SLF001 - internals test
+    # Let the reader thread finish on its own (the fake's stream ends), then swap the shim's
+    # handle for one that faults on every `isalive()`: from here every liveness check faults.
+    flow.pty_process._alive = False  # noqa: SLF001 - fake internals
+    faulting = _FaultingProc()
+    flow.proc._proc = faulting  # noqa: SLF001 - internals test
+
+    result = shepherd.poll()
+
+    assert result["ok"] is False
+    assert "lost its terminal handle" in result["message"]
+    assert "conpty liveness check failed" in result["message"]
+    assert f"exited with code {ls._CONPTY_FAULT_EXIT}" not in result["message"]
+    assert not shepherd.is_active()  # the flow is cleared, not stranded active
+    assert faulting.terminated == [False]  # one best-effort graceful stop, no kill escalation
+
+
 # --- _spawn_conpty + full start/submit flow -----------------------------------------
 
 
@@ -2296,6 +2373,38 @@ def test_pump_conpty_noop_when_unpaired() -> None:
     assert flow.snapshot() == ""
 
 
+def test_pump_conpty_isalive_raise_after_an_empty_read_ends_the_loop() -> None:
+    # The empty-read branch: a raising `isalive()` reads as dead, so the reader breaks instead
+    # of propagating the WinptyError out of the daemon thread (#1422).
+    scr = ls.PtyScreen()
+
+    class _Pty:
+        def read(self, _n):
+            return ""  # idle non-blocking read
+
+        def isalive(self):
+            raise RuntimeError("WinptyError: cannot query a stale ConPTY handle")
+
+    flow = ls._Flow(mode="setup-token", proc=object(), screen=scr, pty_process=_Pty())  # type: ignore[arg-type]
+    ls._pump_conpty(flow)  # must return, not raise
+
+
+def test_pump_conpty_isalive_raise_after_an_eoferror_ends_the_loop() -> None:
+    # The EOFError branch: same guard. A raising `isalive()` after an idle EOFError reads as
+    # dead -> clean break, never propagating (#1422).
+    scr = ls.PtyScreen()
+
+    class _Pty:
+        def read(self, _n):
+            raise EOFError
+
+        def isalive(self):
+            raise RuntimeError("WinptyError: cannot query a stale ConPTY handle")
+
+    flow = ls._Flow(mode="setup-token", proc=object(), screen=scr, pty_process=_Pty())  # type: ignore[arg-type]
+    ls._pump_conpty(flow)  # must return, not raise
+
+
 # --- _teardown (ConPTY branch) ------------------------------------------------------
 
 
@@ -2410,6 +2519,28 @@ def test_teardown_skips_the_tree_kill_for_a_conpty_proc(shepherd, monkeypatch) -
 
     assert killed == [], "a pid-less ConPTY proc must not be tree-killed"
     assert proc.terminated, "it still gets the normal terminate()"
+
+
+def test_teardown_clears_the_flow_even_when_terminate_raises(shepherd) -> None:
+    """A pywinpty raise in teardown must not strand the login `active` (#1422).
+
+    `_teardown`'s flow clear is in a `finally`, so a `WinptyError` out of `terminate()` on a
+    stale ConPTY handle still ends the flow. The fault propagates (fail closed, never silently)
+    once the flow is no longer stuck active. Before the finally, the raise skipped the clear and
+    the dashboard login stayed `active` until restart.
+    """
+
+    class _Proc(_TeardownProc):
+        def terminate(self):
+            raise RuntimeError("WinptyError: terminate on a stale ConPTY handle")
+
+    flow = ls._Flow(mode="login", proc=_Proc(pid=None))  # type: ignore[arg-type]
+    shepherd._flow = flow
+    assert shepherd.is_active()
+    with pytest.raises(RuntimeError, match="WinptyError"):
+        shepherd._teardown(flow)
+    assert shepherd._flow is None  # cleared via `finally` — not stranded active
+    assert not shepherd.is_active()
 
 
 def test_teardown_survives_a_tree_kill_that_raises(shepherd, monkeypatch) -> None:
