@@ -244,17 +244,19 @@ jobs:
       # Mint a clauster-ci App token (≥5,000 REST req/hr) so zizmor's GitHub
       # API calls (e.g. the /advisories audit) don't exhaust the 1,000/hr
       # github-actions[bot] pool under bursts (observed: zizmor /advisories 403).
-      # The SARIF upload below uses the same token. The REST docs for "Upload an
-      # analysis as SARIF data" say the endpoint "is limited to 1,000 requests per
-      # hour for each user or app installation calling it", and the installation
-      # primary limit is per token too, so the App gets its own buckets instead of
-      # sharing GITHUB_TOKEN's with every other job on the PR (observed 2026-09-02:
-      # "API rate limit exceeded for installation" on the upload, audit clean). The action's `token` input
-      # documents GITHUB_TOKEN only; the action passes the token through unchanged
-      # and its internal status report is warning-only, so a scoped App token with
-      # code-scanning write works (codeql-action#2719 was a scoping failure).
+      # The SARIF upload below stays on GITHUB_TOKEN. Verified 2026-09-03 on PR 1435
+      # (run 33700073187): with this App token carrying contents read, actions read
+      # and security-events write, `upload-sarif` answered "Not Found ... check that
+      # your token ... has contents: read, security-events: write". Inside Actions
+      # the action uploads through `PUT /repos/{owner}/{repo}/code-scanning/analysis`
+      # (its `analyses.ts`), an Actions-only route, so its `token` input really is
+      # GITHUB_TOKEN-only; codeql-action#2719 is the same failure. If GITHUB_TOKEN's
+      # shared pool is exhausted again ("API rate limit exceeded for installation"
+      # on the upload, 2026-09-02), the way out is a direct
+      # `POST /repos/{owner}/{repo}/code-scanning/sarifs` with the App token, which
+      # the REST docs limit "per user or app installation".
       # Same-repo runs only; fork PRs lack the App secrets, so the step is skipped
-      # and both fall back to GITHUB_TOKEN below.
+      # and the token falls back to GITHUB_TOKEN below.
       - name: Mint GitHub App token
         id: app-token
         if: >-
@@ -265,8 +267,6 @@ jobs:
           client-id: ${{ secrets.CLAUSTER_CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
           permission-contents: read
-          permission-actions: read
-          permission-security-events: write
       - name: Set up uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
@@ -286,7 +286,6 @@ jobs:
         with:
           sarif_file: results.sarif
           category: zizmor
-          token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
 
   dependency-review:
     name: dependency review
