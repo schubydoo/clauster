@@ -615,6 +615,25 @@ def test_frame_re_redacts_a_row_the_width_refit_sheared():
     assert delivered == "<redacted><redacted"
 
 
+def test_frame_re_redacts_a_trailing_welded_id_the_width_refit_exposes():
+    # #1359/#1471, safety invariant 4. The sibling test above trims inside a `<redacted>`
+    # token, so it stays green even if the re-redact belt is deleted -- a false guard. This
+    # case makes the belt load-bearing: `cse_ABCDEFGH_` is welded to a trailing `_`, so the
+    # `\b`-anchored id mask leaves it whole (no boundary between `H` and `_`) on the first
+    # pass. `Bearer env_01ABCDEF` grows the row by one (`<redacted><redacted>`, 20 for 19), so
+    # the re-fit trims exactly the trailing `_` and manufactures the boundary the mask needed,
+    # baring `cse_ABCDEFGH`. Only `_fit_redacted_row`'s re-redact masks it; drop that pass and
+    # this row ships `<redacted><redacted> cse_ABCDEFGH` and the assertions below go red.
+    raw = "Bearer env_01ABCDEF cse_ABCDEFGH_"
+    scr = PtyScreen(cols=len(raw), rows=1)
+    scr.feed(raw.encode())
+    delivered = scr.frame()["rows"][0]
+    assert len(delivered) == len(raw)
+    assert not _BARE_ID_RE.search(delivered), f"the re-fit exposed an identifier: {delivered!r}"
+    assert "cse_ABCDEFGH" not in delivered
+    assert delivered == "<redacted><redacted> <redacted>  "
+
+
 def test_frame_leaves_an_unshorn_row_to_the_single_redaction_pass():
     # The other side of that branch: masking a long secret SHORTENS the row, so the re-fit
     # trims nothing, no word boundary can have been manufactured, and the row ships exactly
