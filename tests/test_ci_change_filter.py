@@ -38,7 +38,7 @@ CHANGED_CODE = REPO / ".github" / "actions" / "changed-code" / "action.yml"
 OSV = WORKFLOWS / "osv-scanner.yml"
 RULESET = REPO / ".github" / "rulesets" / "main.json"
 
-# Lockfile/manifest basenames OSV-Scanner resolves packages from. `scan-scheduled` runs
+# Lockfile/manifest basenames OSV-Scanner resolves packages from. The `scan` job runs
 # `osv-scanner scan source -r .` over the whole tree, so ANY tracked file with one of these
 # names is in scope — which is what makes the PR `paths:` filter checkable rather than a
 # hand-maintained list that quietly rots when a new ecosystem lands.
@@ -223,10 +223,10 @@ def test_osv_paths_filter_is_only_safe_because_it_gates_nothing_required():
     doc = yaml.safe_load(OSV.read_text(encoding="utf-8"))
     for key, job in doc["jobs"].items():
         name = job.get("name", key)
-        # Two shapes, because `scan-pr` is a reusable-workflow call (`uses:`) and GitHub
-        # reports those as "<key> / <inner job name>", never the bare key. An equality
-        # check alone would let a required `scan-pr / osv-scan` slip through and reopen
-        # the #196 trap this test exists to close.
+        # Two shapes: the `scan` job reports under its own `name`, but if a reusable-workflow
+        # call (`uses:`) is ever re-added here GitHub reports those as "<key> / <inner job
+        # name>", never the bare key. An equality check alone would let such a required
+        # "<key> / ..." context slip through and reopen the #196 trap this test exists to close.
         clash = [r for r in required if r == name or r.startswith(f"{key} / ")]
         assert not clash, (
             f"{clash} is a REQUIRED check but osv-scanner.yml is path-filtered — a PR that "

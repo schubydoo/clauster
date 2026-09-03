@@ -109,7 +109,6 @@ jobs:
           permission-security-events: write
       - name: Install OSV-Scanner (pinned release, checksum-verified)
         env:
-          GH_TOKEN: ${{ github.token }}
           # renovate: datasource=github-releases depName=google/osv-scanner
           OSV_VERSION: "v2.5.1"
           # Bump together with OSV_VERSION: sha256 of osv-scanner_linux_amd64 from the release's
@@ -118,8 +117,13 @@ jobs:
           OSV_SHA256: "f9f25499a2c8cc367b3af45df2ea7eeca7fbccceab9c35079968f4b3652194be"
         run: |
           set -euo pipefail
-          gh release download "$OSV_VERSION" --repo google/osv-scanner \
-            --pattern osv-scanner_linux_amd64 --output osv-scanner
+          # Fetch the pinned asset by its public release URL with curl — NO GitHub API, so no
+          # GITHUB_TOKEN and no installation rate limit (this whole workflow exists to leave that
+          # shared pool, and `gh release download` on `github.token` 403'd there). A clauster App
+          # token cannot read a third-party repo's releases either, so the download stays
+          # unauthenticated and the sha256sum -c below is the integrity control.
+          curl -sSfL --retry 3 --retry-connrefused -o osv-scanner \
+            "https://github.com/google/osv-scanner/releases/download/${OSV_VERSION}/osv-scanner_linux_amd64"
           echo "${OSV_SHA256}  osv-scanner" | sha256sum -c -
           chmod +x osv-scanner
       - name: Scan committed lockfiles (report-only)

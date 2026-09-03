@@ -145,6 +145,22 @@ def test_osv_mints_an_upload_only_app_token():
     assert extra_writes == ["permission-security-events"], f"no extra write grants: {extra_writes}"
 
 
+def test_osv_mint_and_upload_are_gated_same_repo():
+    # A fork PR lacks the App secrets and cannot write code-scanning results, so BOTH the token
+    # mint and the SARIF upload must be gated same-repo — the `head.repo.full_name == repository`
+    # conjunct (OR event != pull_request for push/schedule/dispatch). Without it a fork PR would
+    # try to mint / upload and fail, or worse expose the flow to fork code. Guard both steps.
+    doc = _doc()
+    same_repo = "github.event.pull_request.head.repo.full_name == github.repository"
+    not_pr = "github.event_name != 'pull_request'"
+    for step_name in ("Mint SARIF upload token", "Upload SARIF"):
+        step = _step_by_name(doc, "scan", step_name)
+        assert step is not None, f"expected a `{step_name}` step"
+        cond = step.get("if", "")
+        assert same_repo in cond, f"{step_name}: must carry the same-repo guard for fork safety"
+        assert not_pr in cond, f"{step_name}: must let push/schedule/dispatch through the guard"
+
+
 def test_osv_permissions_are_minimal():
     # Explicit workflow-level default-deny (`permissions: {}`) so we never inherit the broad
     # default token (zizmor excessive-permissions). The job token now needs only `contents: read`
