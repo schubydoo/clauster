@@ -2747,8 +2747,9 @@ its keeper) still running with no project card that controls it.</p>
 survive a <code>systemctl restart</code> under the shipped unit's <code>KillMode=process</code>;
 normally Clauster reattaches to them at startup. One that was orphaned
 instead is cleaned up with:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a>clauster<span class="w"> </span>keepers<span class="w">               </span><span class="c1"># list orphaned pty keepers (no project card)</span>
-<a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a>clauster<span class="w"> </span>keepers<span class="w"> </span>--kill<span class="w"> </span>&lt;pid&gt;<span class="w">  </span><span class="c1"># stop one by its keeper PID</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a>clauster<span class="w"> </span>keepers<span class="w">                      </span><span class="c1"># list orphaned pty keepers (no project card)</span>
+<a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a>clauster<span class="w"> </span>keepers<span class="w"> </span>--kill<span class="w"> </span>&lt;pid&gt;<span class="w">         </span><span class="c1"># stop one by its keeper PID</span>
+<a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a>clauster<span class="w"> </span>keepers<span class="w"> </span>--kill<span class="w"> </span>&lt;pid&gt;<span class="w"> </span>--force<span class="w"> </span><span class="c1"># stop a keeper still on a project card (recovery path)</span>
 </code></pre></div>
 <p><strong>Mechanism:</strong> <a href="../reference/cli/#clauster-keepers-stop-an-orphaned-pty-keeper"><code>clauster keepers</code></a>
 · <a href="../operations/#restart">the <code>KillMode</code> / restart caveat</a>.</p>

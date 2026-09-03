@@ -1877,10 +1877,19 @@ running invisibly.</p>
 live keeper whose sidecar belongs to no current card):</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>clauster<span class="w"> </span>keepers<span class="w"> </span>-c<span class="w"> </span>/etc/clauster/clauster.yml<span class="w">             </span><span class="c1"># list orphaned keepers</span>
 <a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>clauster<span class="w"> </span>keepers<span class="w"> </span>-c<span class="w"> </span>/etc/clauster/clauster.yml<span class="w"> </span>--kill<span class="w"> </span><span class="m">12345</span><span class="w"> </span><span class="c1"># stop one by keeper PID</span>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>clauster<span class="w"> </span>keepers<span class="w"> </span>-c<span class="w"> </span>/etc/clauster/clauster.yml<span class="w"> </span>--kill<span class="w"> </span><span class="m">12345</span><span class="w"> </span>--force<span class="w"> </span><span class="c1"># stop a still-carded keeper</span>
 </code></pre></div>
 <p><code>--kill</code> refuses any PID that isn't a current orphan, so it can never take down a
 keeper still attached to a card. On success it stops the keeper (and its bridge
 subtree) and removes the stale sidecar.</p>
+<p><code>--kill … --force</code> handles a rarer case. The normal stop can leave a keeper running on a
+project whose card still exists. This happens when the identity check cannot confirm the
+PID, so clauster spares the keeper rather than risk killing a recycled PID. The orphan
+list hides such a keeper, so plain <code>--kill</code> refuses it. <code>--force</code> stops it by matching the
+live keeper directly, after the same PID-reuse identity check. It never hard-kills a
+process that this PID no longer names. <code>--force</code> also stops a healthy carded keeper, so
+use it only on a keeper you know is stranded. After the keeper stops, <code>forget</code> accepts the
+row, because the keeper is no longer live.</p>
 <h2 id="clauster-deps-inspect-and-manage-optional-extras"><code>clauster deps</code> — inspect and manage optional extras<a class="headerlink" href="#clauster-deps-inspect-and-manage-optional-extras" title="Permanent link">&para;</a></h2>
 <p>A few capabilities live behind optional <code>pip</code> <strong>extras</strong> the signed standalone
 binary deliberately does not bundle (<code>pty</code> → <code>pyte</code>/<code>pywinpty</code>, <code>notify</code> →
