@@ -434,7 +434,7 @@ def _sidecar_notice(info: dict) -> str | None:
     ready state, not on a non-evidence field — and each must copy the ``notice`` key onto the
     card, or the row goes RUNNING with the reason dropped. This matters because the keeper
     writes a note exactly when it reaches ``ready`` having never captured a link (a screen
-    fault leaves ``connect_url`` unset), so a ready sidecar with a note and no link is a
+    fault leaves ``connect_url`` null), so a ready sidecar with a note and no link is a
     RUNNING session that must show its reason. Before #1438 that helper skipped the note and
     returned an empty dict for that case, so a row rebuilt through it after a restart stayed
     STARTING with no notice — the gap #1390 named.
@@ -4849,18 +4849,23 @@ class SessionRunner:
         *,
         start_ticks: int | None,  # keyword-required — see _recover_keeper_pid (#1399)
     ) -> dict:
-        """Recover a reattached bridge's connect URL / env id / starter session (#1088).
+        """Recover a reattached bridge's connect URL / env id / starter session / notice.
 
         The persisted row carries identity and liveness, deliberately — but not the facts a
-        human needs to actually *use* the bridge. Those are written by the bridge itself:
+        human needs to actually *use* the bridge (#1088). Those are written by the bridge
+        itself:
 
         * **standard** — the Anthropic ``bridge-pointer.json`` (environment id + session id);
-        * **pty** — the keeper sidecar, which records the connect URL directly.
+        * **pty** — the keeper sidecar, which records the connect URL directly, plus the
+          advisory ``notice`` a screen-fault keeper writes instead of a link (#1438).
 
         Both are matched against THIS instance's pid before being believed, so a pointer left
         by a different bridge at the same project path can't lend its environment to somebody
         else's row. Returns ``{}`` when nothing matches — the dashboard then shows the
-        "preparing connect link" state, which is honest, rather than a wrong link.
+        "preparing connect link" state, which is honest, rather than a wrong link. Every
+        caller gates promotion on the dict being non-empty, and a ``notice`` alone makes it
+        non-empty: a ready sidecar with a note and no link IS a running session (see
+        :func:`_sidecar_notice`), so each caller must copy ``notice`` onto the card too.
         """
         if resume_mode == "pty":
             for sidecar in sorted(self._keeper_sidecars_for(proj.name), reverse=True):

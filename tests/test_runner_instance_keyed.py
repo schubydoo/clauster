@@ -3082,3 +3082,83 @@ async def test_promote_ready_unwatched_lifts_the_screen_fault_notice(runner_conf
     assert inst.status is InstanceStatus.RUNNING, "a ready row with no link must promote here too"
     assert inst.notice == _SCREEN_FAULT_NOTE, "the promote leg dropped the screen-fault notice"
     assert inst.url is None
+
+
+async def test_resync_adopts_the_screen_fault_notice_and_a_later_link_clears_it(
+    runner_config, monkeypatch
+):
+    # #1438, the THIRD promotion leg: `_adopt_rows_from_store` through `poll_once`, the
+    # cross-process resync that adopts another process's live bridge. The real
+    # `_connect_facts_for` (no `_stub_connect`) reads a ready screen-fault sidecar as a
+    # notice-only dict, so the adopted row must land RUNNING with the notice. And because the
+    # assign is unconditional, a LATER generation whose sidecar carries a link and no note
+    # clears the stale notice instead of carrying it beside a working link.
+    from clauster.pty_keeper import _SCREEN_FAULT_NOTE
+
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    runner._instances["iid-pty"] = RemoteControlInstance(
+        instance_id="iid-pty",
+        project="alpha",
+        label="alpha",
+        resume_mode="pty",
+        status=InstanceStatus.STOPPED,
+        bridge_pid=4401,
+        bridge_proc_start=100.0,
+    )
+    live = {4402}
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None, **_kw: pid in live
+    )
+    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s, **_kw: 2222)
+    monkeypatch.setattr("clauster.procutil.proc_start_ticks", lambda pid: 222222)
+    monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", lambda ticks: 222.0)
+    runner._log_dir.mkdir(parents=True, exist_ok=True)
+
+    def sidecar(name: str, pid: int, **fields) -> None:
+        (runner._log_dir / name).write_text(
+            json.dumps(
+                {
+                    "keeper_pid": 5555,
+                    "bridge_pid": pid,
+                    "bridge_proc_start": 200.0,
+                    "state": "ready",
+                    "connect_url": None,
+                    "session_id": None,
+                    **fields,
+                }
+            )
+        )
+
+    # Generation 1: a screen-fault keeper — ready, no link, a note.
+    sidecar("alpha-1700000000002-0.keeper.json", 4402, note=_SCREEN_FAULT_NOTE)
+    runner.persistence.state_store().save({"iid-pty": _row("alpha", pid=4402, proc_start=200.0)})
+
+    await runner.poll_once()
+
+    inst = runner.get_instance("iid-pty")
+    assert inst is not None
+    assert inst.status is InstanceStatus.RUNNING, "a ready row with no link must run, not STARTING"
+    assert inst.notice == _SCREEN_FAULT_NOTE, "the resync leg dropped the screen-fault notice"
+    assert inst.url is None
+
+    # Generation 2: the next bridge captured its link and wrote no note. The resync must
+    # replace the notice with nothing, not carry the old reason beside a working link.
+    live.clear()
+    live.add(4403)
+    sidecar(
+        "alpha-1700000000003-0.keeper.json",
+        4403,
+        connect_url="https://claude.ai/code?environment=env_NEXT",
+        session_id="ses_next",
+    )
+    runner.persistence.state_store().save({"iid-pty": _row("alpha", pid=4403, proc_start=200.0)})
+
+    await runner.poll_once()
+
+    inst = runner.get_instance("iid-pty")
+    assert inst is not None
+    assert inst.bridge_pid == 4403
+    assert inst.status is InstanceStatus.RUNNING
+    assert inst.url == "https://claude.ai/code?environment=env_NEXT"
+    assert inst.notice is None, "a stale notice must not survive a generation that has a link"
