@@ -6,6 +6,6 @@
   "license": "Apache-2.0",
   "dependencies": {
     "@puppeteer/browsers": "3.2.1",
-    "agent-browser": "0.35.1"
+    "agent-browser": "0.35.2"
   }
 }
