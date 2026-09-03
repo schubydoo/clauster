@@ -356,8 +356,10 @@ def test_doctor_secret_file_error_stays_readable(write_config, tmp_path, monkeyp
     empty.write_text("   \n", encoding="utf-8")
     monkeypatch.setenv("CLAUSTER_AUTH_PASSWORD_HASH_FILE", str(empty))
     detail = run_doctor(_cfg_file(write_config, tmp_path), check_port=False)[0][0].detail
+    # `_read_secret_file` formats the path with `!r`, so match repr, not hand-written quotes:
+    # on Windows repr doubles the backslashes and a hand-quoted path would differ (PR 1478 nit).
     assert detail == (
-        f"invalid config: CLAUSTER_AUTH_PASSWORD_HASH_FILE points to an empty file '{empty}'"
+        f"invalid config: CLAUSTER_AUTH_PASSWORD_HASH_FILE points to an empty file {str(empty)!r}"
     )
 
 

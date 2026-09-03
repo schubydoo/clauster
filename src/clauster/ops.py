@@ -175,11 +175,14 @@ def run_doctor(
         # mid-prose after ``base 10:`` — is now re-raised as `UnconstructableYamlValueError` and
         # caught by the YAML arm above, so it never reaches here.
         #
-        # This used to wrap ``str(exc)`` in `redact_secret_lines` as a net, but that helper is
-        # KEY-anchored — it masks only a ``<secret-ish key>: value`` line whose key is a single
-        # spaceless token — and no message on this arm has that shape, so it masked nothing
-        # (#1472). A new message on this path must likewise carry no config value; do not add
-        # one and lean on a redactor that cannot reach a value sitting mid-prose.
+        # This used to wrap ``str(exc)`` in `redact_secret_lines` as a net (#1472). That helper
+        # runs three masks per line: a KEY-anchored ``<secret-ish key>: value`` rule, plus a
+        # ``${...}`` mask and a ``scheme://user@host`` mask anywhere in the line. No message on
+        # this arm carries a ``key: value`` token, and its only free text is a filesystem path or
+        # an env-var name — operator configuration, never a runtime secret, and a local path holds
+        # no ``scheme://user@host`` — so none of the three masks protected a secret here. A new
+        # message on this path must likewise carry no config value; do not add one and lean on a
+        # redactor that cannot reach a value sitting mid-prose.
         checks.append(Check("config", FAIL, f"invalid config: {exc}"))
         config = None
 
