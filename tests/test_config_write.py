@@ -825,6 +825,157 @@ def test_expands_beyond_counts_a_diamond_once_and_sizes_scalars_by_length() -> N
     assert not cw._expands_beyond({"f": 1.0}, 5)  # 1 + 1 + len("1.0") = 5, not 34
 
 
+# --- #1417: a merge-key (`<<`) pyramid detonates INSIDE safe_load ------------------------
+#
+# Unlike the plain-alias pyramid above -- whose blow-up is a post-parse consumer walking
+# O(distinct paths) -- a `<<` merge flattens at CONSTRUCTION: PyYAML's `flatten_mapping`
+# splices each merged mapping's entries into a fresh list before `construct_mapping` dedupes
+# them, so a level referencing the one below N times over L levels builds an N**L-entry list
+# INSIDE `safe_load`. The dict it finally returns is tiny (the merged keys dedupe), so no
+# post-parse guard -- `_is_self_referential`, `_expands_beyond`, `_first_json_unsafe` -- can
+# see it: they only run on the returned object, and reaching it took 7s for 456 bytes. The
+# fix refuses it on the composed NODE graph, which `yaml.compose` builds WITHOUT flattening.
+
+
+def _merge_pyramid(*, levels: int, refs: int) -> str:
+    """Build a `<<` merge header: `levels` levels, each merging the one below `refs` times."""
+    lines = ["a0: &a0 {k: v}"]
+    for i in range(1, levels + 1):
+        merged = "[" + ",".join([f"*a{i - 1}"] * refs) + "]"
+        lines.append(f"a{i}: &a{i} {{<<: {merged}, k: v}}")
+    return "\n".join(lines) + "\n"
+
+
+def test_the_merge_pyramid_reproducer_is_a_positive_control() -> None:
+    """PIN: `safe_load` flattens a `<<` pyramid at construction while `compose` does not.
+
+    Both halves are why the guard is pre-parse. If a PyYAML release moved merge flattening off
+    the construct path, or `compose` began flattening merges, the guard would be in the wrong
+    place and this test should fail rather than let the fix pass vacuously.
+    """
+    header = _merge_pyramid(levels=6, refs=8)  # ~300k flattened pairs from < 400 bytes
+    assert len(header.encode()) < 400  # orders of magnitude under every byte cap
+    # `compose` builds the node DAG without following a single merge -- milliseconds.
+    started = time.perf_counter()
+    root = yaml.compose(header, Loader=yaml.SafeLoader)
+    assert time.perf_counter() - started < 0.2
+    assert cw._merge_expands_beyond(root, cw.MAX_MERGE_EXPANDED_PAIRS)
+    # `safe_load` DOES flatten, and the dict it returns is tiny (the merged `k` dedupes to one),
+    # so the cost is entirely in the parse where no post-parse guard can reach it.
+    value = yaml.safe_load(header)
+    assert value["a6"] == {"k": "v"}
+    assert not cw._expands_beyond(value, cw.MAX_EXPANDED_CHARS)  # post-parse guard is blind here
+
+
+def test_load_frontmatter_yaml_rejects_a_merge_pyramid_before_it_detonates() -> None:
+    # The whole point: refuse it FAST, before `safe_load` flattens. Without the pre-parse guard
+    # this header holds a worker thread for ~7s (#1417); with it, the compose walk short-circuits
+    # at the pair cap in milliseconds. The 1s bound is a positive control -- reverting the guard
+    # makes `safe_load` run to completion (no raise, ~7s) and fails BOTH assertions.
+    header = _merge_pyramid(levels=8, refs=8)  # ~19M flattened pairs -> ~7s in `safe_load`
+    assert len(header.encode()) < 550  # ~503 bytes, inside every byte cap
+    started = time.perf_counter()
+    with pytest.raises(cw.InvalidCandidateError, match="pair cap through its YAML merge keys"):
+        cw.load_frontmatter_yaml(header, what="frontmatter", line_offset=1)
+    assert time.perf_counter() - started < 1.0  # the guarded parse never reaches the flatten
+
+
+def test_the_merge_pyramid_rejection_carries_no_document_payload() -> None:
+    # invariant 4: the rejection reaches the browser as a skill's `frontmatter_error`. The
+    # anchor names could be credential-shaped, so the static message must echo none of them.
+    # Low-entropy padding on purpose (a real secret-shaped literal fails the gitleaks gate).
+    token = "FAKEFAKEFAKEFAKEFAKEfake42"
+    lines = [f"a0: &{token}0 {{k: v}}"]
+    for i in range(1, 9):
+        merged = "[" + ",".join([f"*{token}{i - 1}"] * 8) + "]"
+        lines.append(f"a{i}: &{token}{i} {{<<: {merged}, k: v}}")
+    with pytest.raises(cw.InvalidCandidateError) as exc_info:
+        cw.load_frontmatter_yaml("\n".join(lines) + "\n", what="frontmatter")
+    assert token not in str(exc_info.value)
+
+
+def test_load_frontmatter_yaml_accepts_an_ordinary_merge_key() -> None:
+    # Positive control: a `<<` merge is legal, useful YAML and must still parse. The guard
+    # counts flattened pairs, so a single small merge is nowhere near the cap.
+    value = cw.load_frontmatter_yaml(
+        "defaults: &d {model: opus, tools: [a, b]}\nagent: {<<: *d, name: x}\n",
+        what="frontmatter",
+    )
+    assert value["agent"] == {"model": "opus", "tools": ["a", "b"], "name": "x"}
+
+
+def test_load_frontmatter_yaml_accepts_many_independent_merges() -> None:
+    # The guard bounds the CUMULATIVE flattened pairs, not merge USE. Hundreds of siblings each
+    # merging one shared base flatten to only ~4 pairs apiece, so the sum (~2k here) stays far
+    # below the cap and this must pass where the pyramid does not. A flat `total alias
+    # references` cap (the other option in #1417) counts references, not sizes, so it would
+    # wrongly reject these 400 tiny merges -- which is why the bound is by flattened SIZE.
+    base = "base: &b {a: 1, b: 2, c: 3}\n"
+    body = "\n".join(f"e{i}: {{<<: *b, id: {i}}}" for i in range(400))
+    value = cw.load_frontmatter_yaml(base + body + "\n", what="frontmatter")
+    assert value["e399"] == {"a": 1, "b": 2, "c": 3, "id": 399}
+
+
+def test_load_frontmatter_yaml_accepts_a_comment_that_merely_mentions_merge() -> None:
+    # The `<<` fast-path is a substring test, so a comment mentioning `<<` triggers the compose
+    # but composes to no merge -- or, if the header is only that comment, to nothing at all
+    # (`root is None`). Both must be accepted, not error on the extra compose.
+    assert cw.load_frontmatter_yaml("# uses << merge\nname: r\n", what="frontmatter") == {
+        "name": "r"
+    }
+    assert cw.load_frontmatter_yaml("# just << here\n", what="frontmatter") is None
+
+
+def test_merge_expands_beyond_sums_flattened_pairs_across_mappings() -> None:
+    # Unit-level: the cap is on the CUMULATIVE flattened pairs -- the total list
+    # `flatten_mapping` builds across every mapping -- because `safe_load`'s cost is that sum,
+    # not the largest single mapping. A shared target is sized once for itself and again inside
+    # each mapping that merges it, and a shared anchor is discovered once (memoized) so the walk
+    # is linear in the DAG, not exponential in its paths.
+    def compose(src: str) -> yaml.Node:
+        return yaml.compose(src, Loader=yaml.SafeLoader)
+
+    # a = {k: v} = 1; b = <<:[*a,*a] + own `k` = 3; root has 2 literal keys = 2. Sum = 6.
+    root = compose("a: &a {k: v}\nb: {<<: [*a, *a], k: v}\n")
+    assert not cw._merge_expands_beyond(root, 6)
+    assert cw._merge_expands_beyond(root, 5)  # short-circuits when the running total crosses
+    # Many tiny siblings sum past the cap even though each mapping is small -- the WIDE shape a
+    # per-mapping cap misses. d = {a,b} = 2; each of 10 `e{i}: {<<: *d}` = 2; root has 11 literal
+    # keys. Sum = 2 + 10*2 + 11 = 33.
+    wide = compose("d: &d {a: 1, b: 2}\n" + "\n".join(f"e{i}: {{<<: *d}}" for i in range(10)))
+    assert cw._merge_expands_beyond(wide, 32)
+    assert not cw._merge_expands_beyond(wide, 33)
+    # A merge-free mapping contributes only its literal key count -- never tripped by a `<<`.
+    assert not cw._merge_expands_beyond(compose("a: 1\nb: 2\nc: 3\n"), 3)
+    assert cw._merge_expands_beyond(compose("a: 1\nb: 2\nc: 3\nd: 4\n"), 3)
+    # A `<<` pointing at a single mapping (not a sequence) is followed too: a=3, b=3, root=2 = 8.
+    assert cw._merge_expands_beyond(compose("a: &a {p: 1, q: 2, r: 3}\nb: {<<: *a}\n"), 7)
+
+
+def test_load_frontmatter_yaml_rejects_wide_sibling_merges_that_each_stay_small() -> None:
+    # The bound is cumulative, not per mapping. Many sibling mappings each merging one shared,
+    # under-cap target keep every mapping small, but `safe_load` still flattens the SUM: a ~few-KB
+    # header of them held a worker for seconds on every list, and the read path caps no bytes.
+    # Positive control: without the cumulative bound the per-mapping sizes here are all tiny and
+    # the header passes -- reverting to a per-mapping cap makes this NOT raise.
+    shared = _merge_pyramid(levels=4, refs=7)  # `a4` flattens to 2_801 pairs, tiny per mapping
+    siblings = "\n".join(f"s{i}: {{<<: *a4, id: {i}}}" for i in range(50))  # ~50 * 2_802 pairs
+    header = shared + siblings + "\n"
+    started = time.perf_counter()
+    with pytest.raises(cw.InvalidCandidateError, match="pair cap through its YAML merge keys"):
+        cw.load_frontmatter_yaml(header, what="frontmatter")
+    assert time.perf_counter() - started < 1.0  # refused on the node graph, before the flatten
+
+
+def test_load_frontmatter_yaml_leaves_a_self_referential_merge_to_safe_load() -> None:
+    # A `<<` that merges its own anchor cannot be sized on the node graph (its target is never
+    # memoized), so the guard counts it as zero and passes it through. `safe_load` then handles
+    # it without hanging: `flatten_mapping` deletes the merge key before recursing, so the
+    # self-merge is a no-op and the mapping keeps its own keys.
+    value = cw.load_frontmatter_yaml("x: &x {<<: *x, k: v}\n", what="frontmatter")
+    assert value == {"x": {"k": "v"}}
+
+
 # --- #1369: a YAMLError's prose must not echo the offending token -------------------------
 #
 # The rejection message reaches the browser (`list_skills` surfaces it as a skill's
