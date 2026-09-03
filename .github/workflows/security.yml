@@ -202,7 +202,8 @@ jobs:
             last_err=""
             done_ok=""
             for _ in $(seq 1 30); do
-              if ! status="$(gh api "repos/$REPO/code-scanning/sarifs/$sarif_id" --jq .processing_status 2>/tmp/gh_poll_err)"; then
+              if ! status="$(gh api "repos/$REPO/code-scanning/sarifs/$sarif_id" \
+                --jq .processing_status 2>/tmp/gh_poll_err)"; then
                 last_err="$(cat /tmp/gh_poll_err)"
                 status="pending"
               fi
@@ -217,7 +218,8 @@ jobs:
               sleep 5
             done
             if [ -z "$done_ok" ]; then
-              echo "::warning title=CodeQL SARIF::$f still '$status' after the bounded wait; not failing the gate. last GET error: ${last_err:-none}"
+              echo "::warning title=CodeQL SARIF::$f still '$status' after the bounded wait;" \
+                "not failing the gate. last GET error: ${last_err:-none}"
             fi
           done
           if [ "$found" = 0 ]; then
@@ -348,7 +350,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ ! -f trivy-image.sarif ]; then
-            echo "::warning title=trivy SARIF::trivy-image.sarif is missing; the build or scan failed, nothing uploaded."
+            echo "::warning title=trivy SARIF::trivy-image.sarif is missing; the build or scan" \
+              "failed, nothing uploaded."
             exit 0
           fi
           # `automationDetails.id` is what `upload-sarif` wrote from `category:`; the
@@ -367,7 +370,8 @@ jobs:
           echo "Uploaded trivy SARIF (id=$sarif_id); waiting for processing."
           last_err=""
           for _ in $(seq 1 30); do
-            if ! status="$(gh api "repos/$REPO/code-scanning/sarifs/$sarif_id" --jq .processing_status 2>/tmp/gh_poll_err)"; then
+            if ! status="$(gh api "repos/$REPO/code-scanning/sarifs/$sarif_id" \
+              --jq .processing_status 2>/tmp/gh_poll_err)"; then
               last_err="$(cat /tmp/gh_poll_err)"
               status="pending"
             fi
@@ -381,7 +385,8 @@ jobs:
             esac
             sleep 5
           done
-          echo "::warning title=trivy SARIF::still '$status' after the bounded wait; not failing the gate. last GET error: ${last_err:-none}"
+          echo "::warning title=trivy SARIF::still '$status' after the bounded wait;" \
+            "not failing the gate. last GET error: ${last_err:-none}"
           exit 0
 
   zizmor:
@@ -501,7 +506,8 @@ jobs:
           for _ in $(seq 1 30); do
             # A transient GET error must not red an upload that already succeeded, so
             # keep polling and remember the last error for the timeout message below.
-            if ! status="$(gh api "repos/$REPO/code-scanning/sarifs/$sarif_id" --jq .processing_status 2>/tmp/gh_poll_err)"; then
+            if ! status="$(gh api "repos/$REPO/code-scanning/sarifs/$sarif_id" \
+              --jq .processing_status 2>/tmp/gh_poll_err)"; then
               last_err="$(cat /tmp/gh_poll_err)"
               status="pending"
             fi
@@ -519,7 +525,8 @@ jobs:
           # verdict is the Run zizmor step, and the analysis lands a moment later. Warn
           # and pass, but surface the last GET error so a persistent id or permission
           # problem is not misread as a slow upload.
-          echo "::warning title=zizmor SARIF::still '$status' after the bounded wait; not failing the gate. last GET error: ${last_err:-none}"
+          echo "::warning title=zizmor SARIF::still '$status' after the bounded wait;" \
+            "not failing the gate. last GET error: ${last_err:-none}"
           exit 0
 
   dependency-review:

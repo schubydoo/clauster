@@ -91,7 +91,8 @@ jobs:
           # renovate: datasource=custom.chrome-for-testing depName=chrome-for-testing
           CHROME_VERSION: "152.0.7977.75"
         run: |
-          exe=$(node_modules/.bin/browsers install "chrome@${CHROME_VERSION}" --path "$RUNNER_TEMP/cft" | awk 'END{print $NF}')
+          exe=$(node_modules/.bin/browsers install "chrome@${CHROME_VERSION}" --path "$RUNNER_TEMP/cft" \
+            | awk 'END{print $NF}')
           test -x "$exe"
           echo "AGENT_BROWSER_EXECUTABLE_PATH=$exe" >> "$GITHUB_ENV"
           echo "CHROME_VERSION=$CHROME_VERSION" >> "$GITHUB_ENV"
