@@ -418,8 +418,8 @@
                    else, so no single sentence fits both. #}
                 <span class="text-secondary small me-1" x-cloak data-test="hosted-resume-blocked"
                       x-show="['crashed', 'stopped', 'error'].includes(h.status) && !(h.claude_session_uuid_usable && h.project)"
-                      :title="h.claude_session_uuid_usable ? 'This session has no project saved, so there is nowhere to respawn it.' : h.project ? 'No usable conversation id was saved for this session, so a respawn would have nothing to reload.' : 'This session has neither a project nor a usable conversation id saved, so there is nothing to respawn and nowhere to put it.'"
-                      x-text="h.claude_session_uuid_usable ? 'resume unavailable — project unknown' : h.project ? 'resume unavailable — conversation id unknown' : 'resume unavailable — project and conversation id unknown'">resume unavailable</span>
+                      :title="h.claude_session_uuid_usable ? 'This session has no project saved, so there is nowhere to respawn it.' : h.project ? 'This session has no usable conversation id: none was saved, or the saved one is kept on the record in a shape Resume cannot use. A respawn would have nothing to reload.' : 'This session has neither a project nor a usable conversation id saved, so there is nothing to respawn and nowhere to put it.'"
+                      x-text="h.claude_session_uuid_usable ? 'resume unavailable — project unknown' : h.project ? 'resume unavailable — no usable conversation id' : 'resume unavailable — no project, no usable conversation id'">resume unavailable</span>
                 {# `:disabled` is coerced with `!!` on every busy-state binding below. These
                    buttons live in an x-for clone and the busy maps (hostedStopping/hostedResuming/
                    agentStopping) start without the row's key. Alpine 3.15.x renders a bare

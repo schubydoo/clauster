@@ -5044,7 +5044,8 @@
           // No follow-up action named, for the reason the chip gives (dashboard.html): on an
           // orphan row this sentence lands beside one telling the operator to Kill, and two
           // consecutive sentences naming different actions is worse than naming none.
-          resume = " It cannot be resumed: no usable conversation id was saved for it.";
+          resume = " It cannot be resumed: it has no usable conversation id (none was saved," +
+            " or the saved one is kept in a shape Resume cannot use).";
         } else if (h && h.claude_session_uuid_usable) {
           resume = " It cannot be resumed: its project is unknown, so there is nowhere to" +
             " respawn it. Start a new session in the right project instead.";

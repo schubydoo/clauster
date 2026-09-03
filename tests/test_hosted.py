@@ -2348,6 +2348,29 @@ def test_an_off_shape_persisted_session_uuid_is_kept_but_not_usable_and_never_re
     assert HostedManager._row_from_record(_PID, kept).claude_session_uuid_usable is True
 
 
+def test_a_kept_but_unusable_session_uuid_is_logged_without_its_bytes(caplog) -> None:
+    """#1419: keeping the off-shape bytes must not make the read seam silent.
+
+    The dashboard chip is one report; a log-scraping operator needs the other. The line
+    names the shape and the length only (`_refused_uuid_shape`), never the value, so the
+    trace obeys invariant 4 the same way the refusal branch does. A usable id logs nothing.
+    """
+    record = {"project": "proj", "label": "hosted:proj"}
+    junk = "--dangerously-skip-permissions"
+    with caplog.at_level(logging.WARNING, logger="clauster.hosted"):
+        row = HostedManager._row_from_record(_PID, {**record, "claude_session_uuid": junk})
+    assert row.claude_session_uuid == junk  # still kept
+    assert "keeping an unusable claude_session_uuid" in caplog.text
+    assert junk not in caplog.text  # shape and length only, never the bytes
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="clauster.hosted"):
+        HostedManager._row_from_record(
+            _PID, {**record, "claude_session_uuid": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"}
+        )
+    assert caplog.text == ""
+
+
 def test_a_refused_claude_session_uuid_is_named_not_typed_in_the_log(caplog) -> None:
     """`_as_session_uuid` is the one member of the family whose message branches.
 
@@ -2369,9 +2392,9 @@ def test_a_refused_claude_session_uuid_is_named_not_typed_in_the_log(caplog) -> 
     # string carries its own comma and would otherwise nest a parenthesis inside one.
     assert ": int;" in caplog.text and "empty string" not in caplog.text
 
-    # An off-shape NON-EMPTY string is now KEPT at the read seam (#1419), so the read logs
-    # nothing about it — there is no lost resume evidence to warn about. It is refused
-    # instead at the argv seam, where `build_hosted_argv` describes it by SHAPE AND LENGTH,
+    # An off-shape NON-EMPTY string is now KEPT at the read seam (#1419). The read still
+    # logs one line so the server holds a trace, but that line describes the value by SHAPE
+    # AND LENGTH only, exactly as the argv-seam refusal in `build_hosted_argv` does, and
     # never by its bytes (#1392, CodeQL "clear-text logging of sensitive information"). A
     # session id is exactly the class `redact.py` masks, and the day this refusal fires on a
     # real id is the day claude changed its format -- so a sanitized or truncated copy would
@@ -2381,7 +2404,9 @@ def test_a_refused_claude_session_uuid_is_named_not_typed_in_the_log(caplog) -> 
     with caplog.at_level(logging.WARNING, logger="clauster.hosted"):
         kept = HostedManager._row_from_record(_PID, {**record, "claude_session_uuid": "--rm\n-rf"})
     assert kept.claude_session_uuid == "--rm\n-rf"  # kept, not dropped
-    assert "claude_session_uuid" not in caplog.text  # ...and silently, no warning
+    assert "keeping an unusable claude_session_uuid" in caplog.text  # ...with a trace...
+    assert "malformed, 8 chars" in caplog.text  # ...that names the shape and length...
+    assert "--rm" not in caplog.text and "\\n-rf" not in caplog.text  # ...never the bytes
     with pytest.raises(HostedSessionError, match="unusable resume session id") as exc:
         build_hosted_argv(_BIN, permission_mode="default", resume_uuid="--rm\n-rf")
     assert "malformed, 8 chars" in str(exc.value)
@@ -2399,10 +2424,12 @@ def test_a_refused_claude_session_uuid_is_named_not_typed_in_the_log(caplog) -> 
     assert "ghp_" not in str(exc.value)
     assert "<redacted>" not in str(exc.value)  # nothing to redact -- nothing was copied
 
-    # ...and a legitimate uuid says nothing at all.
+    # ...and a legitimate (real-shape) uuid says nothing at all.
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="clauster.hosted"):
-        HostedManager._row_from_record(_PID, {**record, "claude_session_uuid": "a-real-uuid"})
+        HostedManager._row_from_record(
+            _PID, {**record, "claude_session_uuid": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"}
+        )
     assert "claude_session_uuid" not in caplog.text
 
 

@@ -1931,6 +1931,15 @@ def _as_session_uuid(value: Any) -> str | None:
     executing/display seams are where that input is refused, not this read.
     """
     if isinstance(value, str) and value:
+        if not is_session_uuid(value):
+            # Kept, not dropped, but still logged: without this line the server holds no
+            # trace that the record is unusable, and the dashboard chip is the only report.
+            # Same shape-only description as the refusal below; no bytes reach the log.
+            logger.warning(
+                "hosted: keeping an unusable claude_session_uuid from a persisted record: "
+                "%s; Resume stays hidden until the record is repaired",
+                _refused_uuid_shape(value),
+            )
         return value
     if value is not None:
         logger.warning(

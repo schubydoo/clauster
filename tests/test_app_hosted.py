@@ -473,15 +473,17 @@ def test_hosted_resume_gate_says_the_same_thing_in_all_five_places(
     # The chip's reason is VISIBLE text, not a tooltip: a title never fires on touch, and
     # this is a phone-first product. Same contract as the bridge rows' `resume-blocked`.
     assert 'data-test="hosted-resume-blocked"' in body
-    assert "resume unavailable — conversation id unknown" in body
+    # "no usable", not "unknown": the record may HOLD an id kept for repair (#1419), and a
+    # chip that calls it absent points the operator away from the field to fix.
+    assert "resume unavailable — no usable conversation id" in body
     # ...and the case where BOTH halves are gone. `_degraded_row` salvages per field, so one
     # tampered record can drop the uuid and the project independently; falling back to the
     # project-only wording would have the operator repair one field and hit the same wall.
-    assert "resume unavailable — project and conversation id unknown" in body
+    assert "resume unavailable — no project, no usable conversation id" in body
     assert "resume unavailable — project unknown" in body
     # 5. the View panel's ended banner: a project-ful, uuid-less row used to fall through
     # every branch and explain nothing -- the "fails opaquely" failure one layer down.
-    assert "no usable conversation id was saved for it" in body
+    assert "it has no usable conversation id (none was saved," in body
     # Pinned on the banner's OWN wording, not the shared phrase: the chip's `:title` also
     # says "neither a project nor a usable conversation id saved", so the shorter substring
     # passed with this branch deleted (caught by mutating it). "It cannot be resumed: it
