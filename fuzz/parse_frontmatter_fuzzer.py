@@ -37,7 +37,10 @@ And across the pair:
 
 ⚠️ Mapping equality goes through :func:`_same`, which falls back to ``repr``. YAML's
 ``.nan`` is real input here and ``float('nan') != float('nan')``, so a plain ``==`` would
-report two identical mappings as a divergence on the fuzzer's first ``.nan``.
+report two identical mappings as a divergence on the fuzzer's first ``.nan``. Since #1415,
+``load_frontmatter_yaml`` refuses ``.nan`` at the seam, so no ACCEPTED header holds one and
+that fallback is unreachable for this reason. ``_same`` keeps it as a belt for any other
+value that is ``repr``-equal but ``==``-unequal, which a future change might admit.
 
 Body equality was **not** asserted when this harness landed: the first run found a
 systematic divergence on its own seed corpus, because the two fence patterns disagreed on
@@ -50,9 +53,11 @@ Not asserted: any particular parse of the YAML itself. Both call ``yaml.safe_loa
 harness is about the framing around it, not about re-implementing a YAML parser.
 """
 
+import json
 import sys
 
 import atheris
+from fastapi.encoders import jsonable_encoder
 
 with atheris.instrument_imports():
     # In-block per fuzz/README.md. `yaml` is the parser inside both targets — it is pure
@@ -80,6 +85,27 @@ def _parse(parser, text: str) -> tuple[dict, str] | None:
         return None
 
 
+def _assert_response_serializable(label: str, header: dict) -> None:
+    """Assert an accepted header survives the JSON response path (#1415).
+
+    An accepted header reaches the route as JSON, where Starlette's ``JSONResponse`` renders it
+    as ``json.dumps(jsonable_encoder(obj), allow_nan=False, ensure_ascii=False).encode("utf-8")``
+    — the exact call, so the oracle measures the whole path, not a weaker subset. A scalar that
+    parses but cannot cross it — a non-finite float, a non-UTF-8 ``!!binary``, an int past
+    ``sys.get_int_max_str_digits()`` (in a VALUE or a KEY, since ``json.dumps`` stringifies an
+    int key too), or a lone-surrogate ``str`` that ``.encode("utf-8")`` rejects — 500s a tier
+    documented to fail as 422. ``load_frontmatter_yaml`` refuses those at the seam
+    (:func:`config_write._first_json_unsafe`), so one reaching here means that guard regressed
+    and the class has reopened.
+    """
+    try:
+        json.dumps(jsonable_encoder(header), allow_nan=False, ensure_ascii=False).encode("utf-8")
+    except (ValueError, TypeError) as exc:  # UnicodeEncode/DecodeError are ValueError subclasses
+        raise AssertionError(
+            f"serializer: {label} header 500s on the JSON response path: {exc}"
+        ) from exc
+
+
 def check(text: str) -> None:
     """Assert every property above for one candidate file.
 
@@ -99,6 +125,7 @@ def check(text: str) -> None:
         assert isinstance(header, dict), f"{label}: header is not a mapping: {header!r}"
         assert isinstance(body, str), f"{label}: body is not a str: {body!r}"
         assert text.endswith(body), f"{label}: body is not a suffix of the input: {body!r}"
+        _assert_response_serializable(label, header)
         results[label] = (header, body)
 
     if len(results) == 2:

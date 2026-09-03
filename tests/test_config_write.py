@@ -614,21 +614,116 @@ def test_load_frontmatter_yaml_rejects_a_pyramid_whose_leaf_is_a_yaml_set() -> N
         cw.load_frontmatter_yaml(header, what="frontmatter")
 
 
-def test_load_frontmatter_yaml_accepts_a_huge_alias_free_hex_integer() -> None:
-    # The cap's whole claim is that it fires on alias AMPLIFICATION and never on an alias-free
-    # document, and a hex integer is the densest alias-free expansion there is: `safe_load`
-    # turns 65_500 hex digits into ~78_900 decimal ones. Counting an int's BITS -- the first
-    # attempt -- over-stated that by 3.3x (262_000) and rejected this header, which carries no
-    # alias at all. `safe_load` itself refuses the same value spelled in decimal (CPython caps
-    # int(str) at 4300 digits), so hex is the only spelling that gets this far.
-    # DELIBERATE, not an oversight: this header is accepted here and still 500s further down,
-    # where `json.dumps` refuses an int of that many digits. That failure pre-dates this guard
-    # and has nothing to do with aliases -- it is issue #1415, with `.nan` and a non-UTF-8
-    # `!!binary`. Do not "fix" it by turning this assertion into a rejection: the size cap must
-    # keep accepting an alias-free document, and #1415 is where that 500 gets closed.
+def test_the_size_cap_does_not_fire_on_a_huge_alias_free_hex_integer() -> None:
+    # The size cap's whole claim is that it fires on alias AMPLIFICATION and never on an
+    # alias-free document, and a hex integer is the densest alias-free expansion there is:
+    # `safe_load` turns 65_500 hex digits into ~78_900 decimal ones. Counting an int's BITS
+    # -- the first attempt -- over-stated that by 3.3x (262_000) and rejected this header,
+    # which carries no alias at all. `safe_load` itself refuses the same value spelled in
+    # decimal (CPython caps int(str) at 4300 digits), so hex is the only spelling that
+    # reaches the seam. `_expands_beyond` must NOT fire on it.
     header = "n: 0x" + "f" * 65_500 + "\n"
     assert len(header.encode()) < config_write_subagents.MAX_BYTES
-    assert cw.load_frontmatter_yaml(header, what="frontmatter")["n"].bit_length() == 262_000
+    value = yaml.safe_load(header)
+    assert value["n"].bit_length() == 262_000
+    assert cw._expands_beyond(value, cw.MAX_EXPANDED_CHARS) is False
+    # #1415: `load_frontmatter_yaml` NOW rejects this int at the seam, because `str(int)`
+    # past the digit limit 500s the response. That rejection is a SEPARATE guard
+    # (`_first_json_unsafe`), not the size cap -- the size cap still accepts it above.
+    with pytest.raises(cw.InvalidCandidateError, match="too large"):
+        cw.load_frontmatter_yaml(header, what="frontmatter")
+
+
+# --- #1415: scalars that parse but cannot cross the JSON response path -------------------
+
+
+@pytest.mark.parametrize("scalar", [".nan", ".inf", "-.inf"])
+def test_load_frontmatter_yaml_rejects_a_non_finite_float(scalar: str) -> None:
+    # `.nan`/`.inf` parse to a float the response `json.dumps` (allow_nan=False, Starlette's
+    # JSONResponse) refuses, 500ing a tier documented to fail as 422 (#1415).
+    with pytest.raises(cw.InvalidCandidateError, match="non-finite float"):
+        cw.load_frontmatter_yaml(f"a: {scalar}\n", what="frontmatter")
+
+
+def test_load_frontmatter_yaml_rejects_a_non_utf8_binary() -> None:
+    # `!!binary` of a byte that is not UTF-8 (0xff) parses to `bytes` that `jsonable_encoder`
+    # cannot decode for the response (#1415).
+    with pytest.raises(cw.InvalidCandidateError, match="not valid UTF-8"):
+        cw.load_frontmatter_yaml('a: !!binary "/w=="\n', what="frontmatter")
+
+
+def test_load_frontmatter_yaml_accepts_a_utf8_binary() -> None:
+    # A `!!binary` whose bytes ARE UTF-8 decodes fine, so it is not rejected: the guard is
+    # byte-content specific, not a blanket `!!binary` ban.
+    value = cw.load_frontmatter_yaml('a: !!binary "aGk="\n', what="frontmatter")
+    assert value["a"] == b"hi"
+
+
+_HUGE_INT = "0x" + "f" * 5_000  # ~6_000 decimal digits, past CPython's 4300-digit str() limit
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        pytest.param(f"n: {_HUGE_INT}\n", id="value"),
+        pytest.param(f"?\n  {_HUGE_INT}\n:\n  v\n", id="explicit-key"),
+        pytest.param(f"a: !!omap\n- ? {_HUGE_INT}\n  : v\n", id="omap-key"),
+    ],
+)
+def test_load_frontmatter_yaml_rejects_a_huge_int_in_any_position(header: str) -> None:
+    # A hex int past `sys.get_int_max_str_digits()` 500s on `str(int)`: `json.dumps` in a
+    # VALUE position, `redact_secrets`' `str(k)` in a KEY position. PyYAML's explicit `?` key
+    # syntax bypasses the 1024-char simple-key cap, so the key variants reach it (#1415). The
+    # guard walks keys as well as values, so all three are refused.
+    with pytest.raises(cw.InvalidCandidateError, match="too large"):
+        cw.load_frontmatter_yaml(header, what="frontmatter")
+
+
+def test_the_json_unsafe_rejection_message_carries_no_document_payload() -> None:
+    # invariant 4: the rejection reaches the browser as a `frontmatter_error`, so it names the
+    # scalar's CLASS only, never the value -- a huge int pasted as a credential-shaped literal
+    # must not echo back.
+    with pytest.raises(cw.InvalidCandidateError) as exc_info:
+        cw.load_frontmatter_yaml(f"n: {_HUGE_INT}\n", what="frontmatter")
+    msg = str(exc_info.value)
+    assert "0x" not in msg and "ffff" not in msg
+
+
+def test_load_frontmatter_yaml_accepts_ordinary_finite_scalars() -> None:
+    # Positive control: the guard does not over-reject. A finite float, a small int, a bool,
+    # and a null all parse and serialize, so they pass untouched.
+    value = cw.load_frontmatter_yaml("f: 1.5\ni: 42\nb: true\nz: null\n", what="frontmatter")
+    assert value == {"f": 1.5, "i": 42, "b": True, "z": None}
+
+
+def test_load_frontmatter_yaml_rejects_a_lone_surrogate_string() -> None:
+    # A `\uD800` escape resolves to a lone-surrogate `str` that JSON accepts but the response
+    # body's `.encode("utf-8")` (Starlette renders with ensure_ascii=False) refuses -- the
+    # fourth shape of the #1415 class, in a value here and a key below.
+    with pytest.raises(cw.InvalidCandidateError, match="lone surrogate"):
+        cw.load_frontmatter_yaml('a: "\\uD800"\n', what="frontmatter")
+    with pytest.raises(cw.InvalidCandidateError, match="lone surrogate"):
+        cw.load_frontmatter_yaml('? "\\uD800"\n:\n  v\n', what="frontmatter")
+
+
+def test_load_frontmatter_yaml_accepts_a_non_ascii_string() -> None:
+    # Positive control: an ordinary non-ASCII string encodes fine, so the surrogate guard does
+    # not become a blanket non-ASCII ban.
+    value = cw.load_frontmatter_yaml("a: café ☕\n", what="frontmatter")
+    assert value == {"a": "café ☕"}
+
+
+def test_a_disabled_int_str_limit_accepts_every_integer(monkeypatch: pytest.MonkeyPatch) -> None:
+    # CPython lets the int-to-str limit be turned off (PYTHONINTMAXSTRDIGITS=0,
+    # sys.set_int_max_str_digits(0)); `get_int_max_str_digits()` then returns 0, and `str(int)`
+    # never raises, so NO int 500s and the guard must accept every int. A `> 0` test would
+    # instead reject `timeout: 30`. Modelled by patching the query to 0 -- the guard reads it
+    # there and must special-case it. Precondition pinned so the arm cannot go green wrongly.
+    monkeypatch.setattr(cw.sys, "get_int_max_str_digits", lambda: 0)
+    assert cw.sys.get_int_max_str_digits() == 0
+    value = cw.load_frontmatter_yaml(f"small: 30\nbig: {_HUGE_INT}\n", what="frontmatter")
+    assert value["small"] == 30
+    assert value["big"].bit_length() == 20_000
 
 
 def test_byte_caps_stay_under_the_expansion_cap() -> None:

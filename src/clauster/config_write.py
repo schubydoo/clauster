@@ -51,7 +51,9 @@ import contextvars
 import datetime
 import hashlib
 import json
+import math
 import re
+import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, Literal
@@ -1102,6 +1104,84 @@ def _yaml_error_where(exc: yaml.YAMLError, line_offset: int = 0, *, block_name: 
     return f" ({kind})"
 
 
+def _json_unsafe(node: Any) -> str | None:
+    """Reason ``node`` cannot cross the JSON response path, or ``None`` if it can.
+
+    ``safe_load`` builds four scalar shapes that pass every parse and structural guard and
+    then raise on the route's serializer — the response body is
+    ``json.dumps(jsonable_encoder(obj), allow_nan=False, ensure_ascii=False).encode("utf-8")``
+    (Starlette's ``JSONResponse``) — or, for a huge int in KEY position, inside
+    :func:`redact_secrets`' ``str(k)`` before any serializer runs (#1415):
+
+    * a non-finite float (``.nan``/``.inf``/``-.inf``): ``allow_nan=False`` makes ``json.dumps``
+      raise ``ValueError``.
+    * an int whose decimal length exceeds :func:`sys.get_int_max_str_digits`: ``str(int)``
+      raises, felling both ``json.dumps`` and ``redact_secrets``' key stringification. A hex
+      literal reaches this size where the same value in decimal is refused by ``safe_load``
+      itself. Measured by ``bit_length``, never by ``str(node)``, because forming that string
+      is the raise this guard avoids — the estimate (``log10(2)`` as a ratio of integers,
+      rounded up) is never short, like :func:`_scalar_chars`, at the cost of refusing an int
+      of exactly the limit's digit count on the rare bit-length that rounds up by one. When
+      the limit is DISABLED (``get_int_max_str_digits()`` returns ``0``), ``str(int)`` never
+      raises, so no int is refused.
+    * a ``str`` holding a lone surrogate code point (U+D800 to U+DFFF): JSON accepts it, but
+      the ``.encode("utf-8")`` of the response body raises ``UnicodeEncodeError``.
+    * ``!!binary`` bytes that are not valid UTF-8: ``jsonable_encoder`` raises
+      ``UnicodeDecodeError`` decoding them for the response.
+    """
+    if isinstance(node, bool):
+        return None  # a bool is an int subclass, and serializes fine
+    if isinstance(node, float):
+        if not math.isfinite(node):
+            return "a non-finite float (.nan/.inf) that JSON cannot represent"
+        return None
+    if isinstance(node, int):
+        limit = sys.get_int_max_str_digits()
+        if limit and node.bit_length() * 30_103 // 100_000 + 1 > limit:
+            return "an integer too large for the interpreter to serialize"
+        return None
+    if isinstance(node, str):
+        try:
+            node.encode()
+        except UnicodeEncodeError:
+            return "a string with a lone surrogate that UTF-8 cannot encode"
+        return None
+    if isinstance(node, bytes):
+        try:
+            node.decode()
+        except UnicodeDecodeError:
+            return "a !!binary value whose bytes are not valid UTF-8"
+        return None
+    return None
+
+
+def _first_json_unsafe(value: Any) -> str | None:
+    """First :func:`_json_unsafe` reason among ``value``'s scalars, KEYS included, or None.
+
+    Walks keys as well as values (:func:`_emitted_children`) so a huge int in a ``?``-explicit
+    or ``!!omap`` KEY — which reaches ``str(k)`` in :func:`redact_secrets` before any
+    serializer, and whose ``?`` syntax bypasses PyYAML's 1024-character simple-key cap
+    (#1415) — is refused too, not only a value-position one.
+
+    Iterative, and runs after :func:`_is_self_referential`, for the same reason as
+    :func:`_expands_beyond`: the acyclic structure bounds the walk, and ``seen`` keeps a
+    shared (aliased) subtree from being re-walked.
+    """
+    seen: set[int] = set()
+    stack: list[Any] = [value]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, _YAML_CONTAINERS):
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            stack.extend(_emitted_children(node))
+            continue
+        if (reason := _json_unsafe(node)) is not None:
+            return reason
+    return None
+
+
 def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> Any:
     """``safe_load`` a frontmatter ``header``, mapping every failure to a rejection.
 
@@ -1134,11 +1214,13 @@ def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> An
     refuse to act on it. Fails closed: this only ever converts a crash into a rejection,
     never a rejection into an accept.
 
-    Two rejections are NOT parse failures. A header that parses fine but builds a
+    Three rejections are NOT parse failures. A header that parses fine but builds a
     self-referential structure (:func:`_is_self_referential`) is refused after the load,
     because no consumer can finish walking it; so is one that parses fine but expands past
     :data:`MAX_EXPANDED_CHARS` through its aliases (:func:`_expands_beyond`), because no
-    consumer can finish serializing it.
+    consumer can finish serializing it; and so is one that parses fine but holds a scalar
+    the JSON response path cannot represent (:func:`_first_json_unsafe`), because that
+    scalar would 500 the route where this tier's contract is 422 (#1415).
 
     ``line_offset`` is added to any line number the rejection reports, so a caller passing a
     slice of a larger file can have the message name the line in the FILE. Both
@@ -1193,6 +1275,14 @@ def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> An
         raise InvalidCandidateError(
             f"{what} expands past the {MAX_EXPANDED_CHARS} character cap through its YAML aliases"
         )
+    if (reason := _first_json_unsafe(value)) is not None:
+        # Parses and fits every size guard, but a scalar in it cannot cross the JSON
+        # response path (#1415): the route would 500 where this tier's contract is 422.
+        # Rejecting at the seam covers KEY positions too, which a coerce-just-before-the-
+        # response fix misses — a huge int in a key hits `str(k)` in `redact_secrets` before
+        # any serializer. The reason is a static class label, never the offending scalar —
+        # invariant 4.
+        raise InvalidCandidateError(f"{what} contains {reason}")
     return value
 
 
