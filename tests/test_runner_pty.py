@@ -1045,7 +1045,7 @@ async def test_stop_cleans_keeper_when_bridge_pid_absent(runner_config, monkeypa
     )
     runner._instances[inst.instance_id] = inst
     cleaned: list[int] = []
-    monkeypatch.setattr(runner, "_cleanup_keeper", lambda pid: cleaned.append(pid))
+    monkeypatch.setattr(runner, "_cleanup_keeper", lambda pid, **_kw: cleaned.append(pid))
 
     stopped = await runner.stop(inst.instance_id)
     assert cleaned == [4242]
@@ -1413,7 +1413,7 @@ def test_cleanup_keeper_forces_a_lingering_keeper(runner_config, monkeypatch) ->
     forced: list[int] = []
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
 
-    runner._cleanup_keeper(777)
+    runner._cleanup_keeper(777, keeper_proc_start=None, keeper_start_ticks=None)
     assert forced == [777]
 
 
@@ -1438,7 +1438,7 @@ def test_cleanup_keeper_winds_down_a_keeper_on_a_btime_less_procfs(
     forced: list[int] = []
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
 
-    runner._cleanup_keeper(777)
+    runner._cleanup_keeper(777, keeper_proc_start=None, keeper_start_ticks=None)
     assert forced == [777], "a keeper with no readable epoch was never wound down"
 
 
@@ -1476,7 +1476,7 @@ def test_cleanup_keeper_reaches_the_cmdline_gate_without_a_clock(
     forced: list[int] = []
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
 
-    runner._cleanup_keeper(777)
+    runner._cleanup_keeper(777, keeper_proc_start=None, keeper_start_ticks=None)
     assert forced == [777], "the real cmdline gate must pass a clockless keeper through"
 
 
@@ -1505,7 +1505,9 @@ def test_cleanup_keeper_spares_rather_than_raises_when_the_constructor_wants_a_c
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
 
     with caplog.at_level("WARNING", logger="clauster.runner"):
-        runner._cleanup_keeper(777)  # must return, not raise
+        runner._cleanup_keeper(
+            777, keeper_proc_start=None, keeper_start_ticks=None
+        )  # must return, not raise
     assert forced == []
     assert "no longer that keeper" in caplog.text
 
@@ -1545,7 +1547,9 @@ def test_cleanup_keeper_kills_the_root_when_the_tree_cannot_read_a_clock(
 
     monkeypatch.setattr(procutil.psutil, "Process", _KeeperWithoutATree)
 
-    runner._cleanup_keeper(777)  # must return, not raise
+    runner._cleanup_keeper(
+        777, keeper_proc_start=None, keeper_start_ticks=None
+    )  # must return, not raise
     assert killed == [777], "the root must die even when its tree cannot be read"
 
 
@@ -1576,7 +1580,7 @@ def test_cleanup_keeper_force_kills_through_a_clock_step(runner_config, monkeypa
     forced: list[int] = []
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
 
-    runner._cleanup_keeper(777)
+    runner._cleanup_keeper(777, keeper_proc_start=None, keeper_start_ticks=None)
     assert forced == [777], "clock drift, not a pid recycle, spared a keeper that never moved"
 
 
@@ -1601,7 +1605,7 @@ def test_cleanup_keeper_refuses_a_keeper_whose_ticks_moved(runner_config, monkey
     forced: list[int] = []
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
 
-    runner._cleanup_keeper(777)
+    runner._cleanup_keeper(777, keeper_proc_start=None, keeper_start_ticks=None)
     assert forced == [], "force-killed a DIFFERENT keeper's tree, taking its live bridge down"
 
 
@@ -1637,7 +1641,7 @@ def test_cleanup_keeper_spares_a_keeper_whose_ticks_go_unreadable(
     forced: list[int] = []
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
 
-    runner._cleanup_keeper(777)
+    runner._cleanup_keeper(777, keeper_proc_start=None, keeper_start_ticks=None)
     assert forced == [], "an unreadable tick count must spare the keeper, never widen the kill"
 
 
@@ -1657,7 +1661,7 @@ def test_cleanup_keeper_refuses_to_force_kill_a_recycled_pid(runner_config, monk
     forced: list[int] = []
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
 
-    runner._cleanup_keeper(777)
+    runner._cleanup_keeper(777, keeper_proc_start=None, keeper_start_ticks=None)
     assert forced == [], "a recycled pid's process tree must never be force-killed"
 
 
@@ -1691,7 +1695,7 @@ def test_cleanup_keeper_refuses_a_pid_recycled_onto_a_different_keeper(
     forced: list[int] = []
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
 
-    runner._cleanup_keeper(777)
+    runner._cleanup_keeper(777, keeper_proc_start=None, keeper_start_ticks=None)
     assert forced == [], "force-killed a DIFFERENT keeper's tree, taking its live bridge down"
 
 
@@ -1732,7 +1736,7 @@ def test_cleanup_keeper_refuses_a_snapshot_with_no_readable_start(
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
 
     with caplog.at_level("WARNING", logger="clauster.runner"):
-        runner._cleanup_keeper(777)
+        runner._cleanup_keeper(777, keeper_proc_start=None, keeper_start_ticks=None)
     assert forced == [], "an unreadable start time must never authenticate a force-kill"
     assert any("no longer that keeper" in r.getMessage() for r in caplog.records), (
         "the grace loop returned early — the guard under test was never reached"
@@ -1755,8 +1759,108 @@ def test_cleanup_keeper_forces_a_lingering_keeper_without_ticks(
     forced: list[int] = []
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
 
-    runner._cleanup_keeper(777)
+    runner._cleanup_keeper(777, keeper_proc_start=None, keeper_start_ticks=None)
     assert forced == [777]
+
+
+def _keeper_process_stub(create_time):
+    """A `psutil.Process` shaped like a live pty keeper, its create-time pinned.
+
+    Drives the REAL `is_keeper_process` / `is_live_keeper` gates against a fixed pid so
+    the recorded-pair conjunct is exercised end to end, not through a stub of itself.
+    """
+
+    class _Keeper:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def status(self):
+            return psutil.STATUS_RUNNING
+
+        def cmdline(self):
+            return [sys.executable, "-m", "clauster.pty_keeper", "--sidecar", "/tmp/k.json"]
+
+        def create_time(self):
+            return create_time
+
+    return _Keeper
+
+
+def test_cleanup_keeper_refuses_a_pid_recycled_before_stop_ran(
+    runner_config, monkeypatch, caplog
+) -> None:
+    """A `keeper_pid` a row wrote can already hold a STRANGER before cleanup runs (#1303).
+
+    The live-snapshot compare is taken off the pid at entry, so a stranger already on it
+    matches ITSELF and passes — the recycle happened before this method, not during its
+    grace. The RECORDED keeper pair is the only thing that rejects it: the persisted ticks
+    are the original keeper's (4200), and the stranger now on the pid carries 9900. Without
+    this conjunct `force_kill_tree` would take down an unrelated keeper's whole tree, and
+    with it that keeper's live bridge.
+    """
+    runner, _ = _pty_runner(runner_config)
+    monkeypatch.setattr("clauster.runner.time.sleep", lambda _s: None)
+    monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
+    # The pid holds the STRANGER throughout: its live start (5.0 / 9900) never moves, so the
+    # live-snapshot compare matches itself and passes — the exact gap #1303 closes.
+    _patch_keeper_start(monkeypatch, epoch=lambda: 5.0, ticks=lambda: 9900)
+    monkeypatch.setattr(procutil.psutil, "Process", _keeper_process_stub(create_time=5.0))
+    forced: list[int] = []
+    monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
+
+    with caplog.at_level("WARNING", logger="clauster.runner"):
+        # The RECORDED keeper is a DIFFERENT process — ticks 4200, not the stranger's 9900.
+        runner._cleanup_keeper(777, keeper_proc_start=1.0, keeper_start_ticks=4200)
+    assert forced == [], "force-killed a stranger keeper's tree the pid was recycled onto"
+    assert any("no longer that keeper" in r.getMessage() for r in caplog.records), (
+        "the refusal must come from the recorded-pair conjunct under test"
+    )
+
+
+def test_cleanup_keeper_forces_a_keeper_whose_recorded_pair_matches(
+    runner_config, monkeypatch
+) -> None:
+    """The recorded-pair conjunct still winds down the genuine keeper it can prove (#1303).
+
+    The counterexample to the refusal above: a keeper whose live start matches the persisted
+    pair (5.0 / 4200 here) is our keeper, so cleanup must still force its lingering tree down.
+    """
+    runner, _ = _pty_runner(runner_config)
+    monkeypatch.setattr("clauster.runner.time.sleep", lambda _s: None)
+    monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
+    _patch_keeper_start(monkeypatch, epoch=lambda: 5.0, ticks=lambda: 4200)
+    monkeypatch.setattr(procutil.psutil, "Process", _keeper_process_stub(create_time=5.0))
+    forced: list[int] = []
+    monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
+
+    runner._cleanup_keeper(777, keeper_proc_start=5.0, keeper_start_ticks=4200)
+    assert forced == [777], "the recorded pair matched a genuine keeper, which must be killed"
+
+
+def test_cleanup_keeper_older_row_skips_the_recorded_pair_conjunct(
+    runner_config, monkeypatch
+) -> None:
+    """A pre-#1178 row carries no recorded keeper start, so the conjunct is skipped (#1303).
+
+    Such a row must keep exactly today's behaviour — the live-snapshot gate decides — and
+    `is_live_keeper` must never be consulted for it, never making the gate more permissive
+    nor blocking on a pair the row does not have.
+    """
+    runner, _ = _pty_runner(runner_config)
+    monkeypatch.setattr("clauster.runner.time.sleep", lambda _s: None)
+    monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
+    _patch_keeper_start(monkeypatch, epoch=lambda: 1.0, ticks=lambda: 4200)
+    monkeypatch.setattr(procutil, "is_keeper_process", lambda pid: True)
+
+    def _must_not_run(*_a, **_kw):
+        raise AssertionError("is_live_keeper consulted for a row with no recorded keeper start")
+
+    monkeypatch.setattr(procutil, "is_live_keeper", _must_not_run)
+    forced: list[int] = []
+    monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
+
+    runner._cleanup_keeper(777, keeper_proc_start=None, keeper_start_ticks=None)
+    assert forced == [777], "an older row without a recorded pair must keep today's behaviour"
 
 
 def test_backfill_starter_session_from_debug_file_on_resume(runner_config, tmp_path) -> None:
