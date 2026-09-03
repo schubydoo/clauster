@@ -261,10 +261,11 @@ async def test_spawn_then_never_listens_times_out(make_daemon, monkeypatch):
     # The launcher and the connect poll share one budget (see _connect_or_spawn), so which
     # timeout fires depends only on whether the fake detaches before the budget runs out.
     # A fast detach surfaces the connect poll's "never accepted" (DaemonUnreachable); a slow
-    # one — seen on loaded Windows AND macOS runners — trips the launcher's own "did not detach"
-    # (DaemonSpawnError) first. Both are the intended fail-closed outcome for a daemon that never
-    # binds, so pin THAT contract on every platform, not which timeout won the race: a fixed
-    # budget can't make that deterministic, but the two recognized failure messages can.
+    # one — observed on a loaded macOS runner, and possible on Windows under the same load —
+    # trips the launcher's own "did not detach" (DaemonSpawnError) first. Both are the intended
+    # fail-closed outcome for a daemon that never binds, so pin THAT contract on every platform,
+    # not which timeout won the race: a fixed budget can't make that deterministic, but the two
+    # recognized failure messages can.
     with pytest.raises((DaemonUnreachable, DaemonSpawnError)):
         await daemon.ensure()
     error = daemon.status()["error"] or ""
