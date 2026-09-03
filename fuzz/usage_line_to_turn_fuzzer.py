@@ -74,8 +74,9 @@ def _reference_is_renderable(line: str) -> bool:
     Re-derived from the documented rules — blank, not JSON, not a dict, no ``message``
     dict, no non-empty string ``role`` — using ``json.loads`` directly, so it is not a
     restatement of ``_line_to_turn``'s control flow. ``RecursionError`` is caught for the
-    same reason the target catches it: CPython's recursive scanner raises it (and it is
-    not a ``ValueError``) before ``json`` can report a decode error.
+    same reason the target catches it: the recursive scanner raises it (and it is not a
+    ``ValueError``) on a deeply-nested line on every supported interpreter, before ``json``
+    can report a decode error.
     """
     line = line.strip()
     if not line:

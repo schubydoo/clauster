@@ -433,12 +433,12 @@ database (see Routine backup, above). The workspace-trust writes to
 > does nothing.
 >
 > A damaged legacy file no longer stops that boot. Two shapes used to crash it:
-> deeply-nested JSON (on interpreters before CPython 3.14.7), and an integer
-> literal of more than 4300 digits. Three more always degraded, and degraded in
-> silence: bytes that are not UTF-8 at all, malformed JSON syntax, and JSON that
-> parses but is not an object or whose record map is not one. All five now import
-> no records, log a warning naming the failure, and leave a one-time byte-exact
-> copy beside the file as `state.json.corrupt.bak`. The original is still renamed
+> deeply-nested JSON, and an integer literal of more than 4300 digits. Three
+> more always degraded, and degraded in silence: bytes that are not UTF-8 at
+> all, malformed JSON syntax, and JSON that parses but is not an object or whose
+> record map is not one. All five now import no records, log a warning naming
+> the failure, and leave a one-time byte-exact copy beside the file as
+> `state.json.corrupt.bak`. The original is still renamed
 > `state.json.imported`. Only a file Clauster cannot *read* at all (permissions,
 > IO) is logged without a copy, because there is nothing to copy. The same applies
 > to `hosted_state.json`, which keeps its own `hosted_state.json.corrupt.bak`.

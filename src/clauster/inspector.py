@@ -71,9 +71,11 @@ def parse_agents_json(stdout: str) -> list[WorkingSession]:
     try:
         data = json.loads(text)
     except RecursionError as exc:
-        # Deeply-nested JSON overflows CPython's recursive scanner before json can
-        # raise JSONDecodeError; surface it as the same strict "unparseable" failure
-        # so callers already handling JSONDecodeError (e.g. the runner's best-effort
+        # Deeply-nested JSON overflows CPython's recursive scanner and raises
+        # RecursionError on every supported interpreter (the scanner's message changed
+        # from "maximum recursion depth exceeded" on <=3.13 to "Stack overflow" on 3.14+,
+        # but the exception type is unchanged). Convert it to the same strict "unparseable"
+        # failure so callers already handling JSONDecodeError (e.g. the runner's best-effort
         # cross-check, runner.py) degrade uniformly instead of a stray RecursionError.
         raise json.JSONDecodeError("Exceeded maximum recursion depth", text, 0) from exc
     if isinstance(data, list):

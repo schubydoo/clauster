@@ -53,5 +53,5 @@
 "\x1b["
 "\x1b[0m"
 
-# deep nesting, the RecursionError path json.loads takes before JSONDecodeError
+# deep nesting: the RecursionError path json.loads takes on every supported interpreter
 "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[["

@@ -810,13 +810,15 @@ class HostedSession:
             frame = json.loads(line)
         except (ValueError, RecursionError):
             # Not NDJSON — forward as opaque text rather than dropping it silently.
-            # RecursionError: a deeply-nested line overflows CPython's recursive JSON
-            # scanner, and it is not a ValueError — so it escaped this handler into
+            # RecursionError: a deeply-nested line overflows the recursive JSON scanner and
+            # raises RecursionError on every supported interpreter (the message changed from
+            # "maximum recursion depth exceeded" on <=3.13 to "Stack overflow" on 3.14+, but
+            # not the type), and it is not a ValueError — so without this arm it escapes into
             # `_pump`, which catches only CancelledError/ClaustrumError. The pump task
-            # died and the session went dark with no `lost` event (a fail-silent that
-            # invariant 1 forbids). The scanner's ceiling is version-dependent — ~994 on
-            # the 3.11 floor (a ~1 KB line), ~3000 on Windows and ~10000 elsewhere from
-            # 3.12 — and the agent output line is unbounded, so every leg is reachable.
+            # would die and the session go dark with no `lost` event (a fail-silent that
+            # invariant 1 forbids). The scanner's depth ceiling is low — on the order of a
+            # thousand nested levels — and the agent output line is unbounded, so a hostile
+            # line reaches it on every platform.
             # Degrading to opaque text isolates the bad frame instead of the stream.
             self._emit({"type": "text", "text": sanitize_line(line)})
             return

@@ -360,11 +360,13 @@ async def test_non_dict_json_forwarded_as_text(fake_claustrum):
 async def test_deeply_nested_stdout_line_does_not_kill_the_pump(fake_claustrum):
     """A frame too deep for ``json.loads`` degrades to text; the pump keeps running.
 
-    ``json.loads`` raises RecursionError — not a ValueError — on a deeply-nested line,
-    so it escaped ``_on_line``'s handler into ``_pump``, which catches only
-    CancelledError/ClaustrumError. The pump task died and the session went dark with
-    **no** ``lost`` event: the fail-silent invariant 1 forbids. The scanner's ceiling is
-    version-dependent (~994 on the 3.11 floor), so a ~40 KB line reaches it everywhere.
+    ``json.loads`` raises RecursionError — not a ValueError — on a deeply-nested line on
+    every supported interpreter, so without ``_on_line``'s arm it would escape into
+    ``_pump``, which catches only CancelledError/ClaustrumError. The pump task would die
+    and the session go dark with **no** ``lost`` event: the fail-silent invariant 1
+    forbids. The scanner's ceiling is version-dependent (~994 on the 3.11 floor), so a
+    ~40 KB line reaches it everywhere. The message changed to "Stack overflow" on 3.14+,
+    but the type is RecursionError throughout.
     """
     async with _session(fake_claustrum) as (fake, session):
         queue = session.subscribe()

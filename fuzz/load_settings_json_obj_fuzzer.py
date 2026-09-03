@@ -9,9 +9,10 @@ direct unit tests** of its own.
 
 Its contract is short and entirely about failing closed: return a ``dict`` (``{}``
 for empty or whitespace-only input), or raise ``InvalidCandidateError`` — non-UTF-8,
-malformed JSON, JSON nested past CPython's recursive scanner, a well-formed non-object,
-and a well-formed object holding a scalar the JSON response path cannot represent (a
-huge integer or a non-finite float, #1449) each map to that one structural error,
+malformed JSON, JSON nested too deeply to parse (a RecursionError from the recursive
+scanner on every supported interpreter), a well-formed non-object, and a well-formed
+object holding a scalar the JSON response path cannot represent (a huge integer or a
+non-finite float, #1449) each map to that one structural error,
 because *"we will not overwrite a file we could not parse"* — and, for the last, will
 not 500 a read route documented to fail as 422.
 

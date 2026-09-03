@@ -61,10 +61,11 @@ def _load_trusted_paths(claude_json: Path) -> set[Path]:
     try:
         data = json.loads(claude_json.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError, OSError, RecursionError):
-        # A non-UTF-8 file (UnicodeDecodeError, a ValueError) or deeply-nested JSON
-        # (RecursionError, which CPython's recursive scanner raises before it can
-        # raise JSONDecodeError) degrades to the same "nothing trusted" result as any
-        # other malformed claude.json — the contract is to never raise.
+        # A non-UTF-8 file (UnicodeDecodeError, a ValueError) or deeply-nested JSON (a
+        # RecursionError, which the recursive scanner raises on every supported interpreter
+        # — the message changed from "maximum recursion depth exceeded" on <=3.13 to "Stack
+        # overflow" on 3.14+, but not the type) degrades to the same "nothing trusted"
+        # result as any other malformed claude.json — the contract is to never raise.
         return set()
     # A valid-JSON-but-non-dict top level (e.g. `[]`, `"x"`, `5`) parses fine but
     # has no `.get` — degrade it to "nothing trusted" like any other malformed file.

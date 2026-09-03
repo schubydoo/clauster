@@ -52,10 +52,11 @@ def test_load_pointer_non_utf8_returns_none(tmp_path: Path):
 
 
 def test_load_pointer_deeply_nested_json_returns_none(tmp_path: Path):
-    # Deeply-nested JSON overflows CPython's recursive scanner, which raises
-    # RecursionError *before* json can raise JSONDecodeError. RecursionError is not a
-    # ValueError, so it used to escape the handler and break the malformed -> None
-    # contract, propagating to whatever surface called it.
+    # Deeply-nested JSON overflows CPython's recursive scanner, which raises RecursionError
+    # on every supported interpreter (the message changed from "maximum recursion depth
+    # exceeded" on <=3.13 to "Stack overflow" on 3.14+, but not the type). RecursionError
+    # is not a ValueError, so without this arm it would escape the handler and break the
+    # malformed -> None contract, propagating to whatever surface called it.
     bad = tmp_path / "nested.json"
     bad.write_text("[" * 100_000)
     assert pointers.load_pointer(bad) is None

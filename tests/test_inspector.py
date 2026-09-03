@@ -50,16 +50,34 @@ def test_parse_agents_json_tolerates_unexpected_shapes():
 
 
 def test_parse_agents_json_deep_nesting_converts_to_jsondecode():
-    # Deeply-nested JSON overflows CPython's recursive scanner; parse_agents_json
-    # converts that RecursionError to JSONDecodeError so callers that already handle
-    # the strict-parse failure (e.g. the runner cross-check) degrade uniformly rather
-    # than on a stray RecursionError.
+    # Deeply-nested JSON overflows CPython's recursive scanner and raises RecursionError on
+    # every supported interpreter; parse_agents_json converts that to JSONDecodeError so
+    # callers that already handle the strict-parse failure (e.g. the runner cross-check)
+    # degrade uniformly rather than on a stray RecursionError. This exercises the conversion
+    # branch; the monkeypatch test below pins it deterministically.
     try:
         inspector.parse_agents_json("[" * 100_000)
     except json.JSONDecodeError:
         pass
     else:
         raise AssertionError("expected JSONDecodeError on deeply-nested JSON")
+
+
+def test_parse_agents_json_recursion_error_converts_to_jsondecode(monkeypatch):
+    # Pins the RecursionError -> JSONDecodeError conversion directly with a shallow input,
+    # independent of the scanner's actual overflow depth: the arm converts RecursionError to
+    # JSONDecodeError so callers see one strict-parse failure. Mirrors the config_write
+    # guard for the same handler shape (PR 1408).
+    def _overflow(_text):
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(inspector.json, "loads", _overflow)
+    try:
+        inspector.parse_agents_json("[[1]]")
+    except json.JSONDecodeError as exc:
+        assert "recursion" in str(exc).lower()
+    else:
+        raise AssertionError("expected JSONDecodeError from the RecursionError handler")
 
 
 def test_reconcile_attributes_by_resolved_cwd(tmp_path: Path):

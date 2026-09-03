@@ -1426,12 +1426,13 @@ def load_settings_json_obj(raw: bytes) -> dict[str, Any]:
     except json.JSONDecodeError as exc:
         raise InvalidCandidateError(f"existing settings file is not valid JSON: {exc}") from exc
     except RecursionError as exc:
-        # Before CPython 3.14.7, deeply-nested JSON overflowed the recursive scanner before
-        # json could raise JSONDecodeError, and RecursionError is not a ValueError — so it
-        # escaped the handler above and left this function raising outside its documented
-        # contract. (3.14.7+ bounds the depth itself and raises JSONDecodeError, which the
-        # handler above already maps.) Fail closed as the same structural error: we still
-        # refuse to overwrite it.
+        # Deeply-nested JSON overflows CPython's recursive scanner and raises RecursionError
+        # on every supported interpreter, and RecursionError is not a ValueError — so
+        # without this arm it escapes the handler above and leaves this function raising
+        # outside its documented contract. (The scanner's message changed from "maximum
+        # recursion depth exceeded" on <=3.13 to "Stack overflow" on 3.14+, but not the
+        # type, so this arm is needed on every version.) Fail closed as the same structural
+        # error: we still refuse to overwrite it.
         raise InvalidCandidateError(
             "existing settings file is nested too deeply to parse"
         ) from exc

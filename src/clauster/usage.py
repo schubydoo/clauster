@@ -219,9 +219,11 @@ def parse_transcript(path: Path) -> TranscriptUsage:
         try:
             record = json.loads(line)
         except (json.JSONDecodeError, ValueError, RecursionError):
-            # RecursionError: CPython's recursive scanner overflows on deeply-nested
-            # JSON *before* json can raise JSONDecodeError, and it is not a ValueError
-            # — so it escaped this handler and 500'd the whole project's usage tally.
+            # RecursionError: the recursive scanner overflows on deeply-nested JSON and
+            # raises RecursionError on every supported interpreter (the message changed from
+            # "maximum recursion depth exceeded" on <=3.13 to "Stack overflow" on 3.14+, but
+            # not the type), and it is not a ValueError — so without this arm it escapes this
+            # handler and 500's the whole project's usage tally.
             continue  # skip a corrupt line rather than abort the whole tally
         if not isinstance(record, dict):
             # Valid JSON that isn't an object (`5`, `null`, `[1,2]`) has no `.get`;
@@ -346,12 +348,14 @@ def _recorded_cwd(path: Path, max_lines: int = 200) -> str | None:
                     # `json.loads` sites in this module catch the same trio now (not just this
                     # security-decision one), so a hostile line degrades to skip-the-line
                     # everywhere rather than 500-ing whichever surface reads it.
-                    # RecursionError: CPython's recursive scanner overflows on deeply-nested
-                    # JSON *before* json can raise JSONDecodeError, and it is not a
-                    # ValueError — so it escaped both handlers here. This helper backs
-                    # `_transcript_is_owned`, reached from the usage tally and the transcript
-                    # viewer via `transcript_paths_for`, and `app._list` catches only OSError:
-                    # one hostile line 500'd those surfaces. Skipping the line degrades to
+                    # RecursionError: the recursive scanner overflows on deeply-nested JSON
+                    # and raises RecursionError on every supported interpreter (the message
+                    # changed from "maximum recursion depth exceeded" on <=3.13 to "Stack
+                    # overflow" on 3.14+, but not the type), and it is not a ValueError — so
+                    # without this arm it escapes both handlers here. This
+                    # helper backs `_transcript_is_owned`, reached from the usage tally and the
+                    # transcript viewer via `transcript_paths_for`, and `app._list` catches only
+                    # OSError: one hostile line 500'd those surfaces. Skipping the line degrades to
                     # "this record states no cwd", and a transcript with no proven cwd is
                     # refused by `_transcript_is_owned` — the fail-closed direction.
                     continue
@@ -458,9 +462,11 @@ def _line_to_turn(line: str) -> dict | None:
     try:
         record = json.loads(line)
     except (json.JSONDecodeError, ValueError, RecursionError):
-        # RecursionError (deeply-nested JSON, raised by CPython's recursive scanner
-        # before json can raise JSONDecodeError) is not a ValueError, so it would
-        # escape and break the "never raises on a malformed line" contract above.
+        # RecursionError (deeply-nested JSON, raised by the recursive scanner on every
+        # supported interpreter — the message changed from "maximum recursion depth
+        # exceeded" on <=3.13 to "Stack overflow" on 3.14+, but not the type) is not a
+        # ValueError, so without this arm it would escape and break the "never raises
+        # on a malformed line" contract above.
         return None  # skip a corrupt line rather than abort the whole page
     if not isinstance(record, dict):
         return None
@@ -556,10 +562,12 @@ def _is_subagent_transcript(path: Path, max_records: int = 200) -> bool:
                 try:
                     record = json.loads(line)
                 except (json.JSONDecodeError, ValueError, RecursionError):
-                    # RecursionError: deeply-nested JSON overflows CPython's recursive
-                    # scanner before json can raise JSONDecodeError, and it is not a
-                    # ValueError — so it escaped this handler and broke the docstring's
-                    # "an unparseable line is skipped rather than raising", 500'ing the
+                    # RecursionError: deeply-nested JSON overflows the recursive scanner and
+                    # raises RecursionError on every supported interpreter (the message changed
+                    # from "maximum recursion depth exceeded" on <=3.13 to "Stack overflow" on
+                    # 3.14+, but not the type), and it is not a ValueError — so without this arm
+                    # it escapes this handler and breaks the
+                    # docstring's "an unparseable line is skipped rather than raising", 500'ing the
                     # transcript listing. Skipping keeps the documented bias intact: the
                     # line carries no marker, so the file stays a "real conversation".
                     continue
