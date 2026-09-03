@@ -179,12 +179,28 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      security-events: write
+      # The SARIF upload uses a minted App token, so the job token needs only
+      # `contents: read` (checkout and the Trivy DB pull).
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Mint an upload-only App token (`security-events: write`) BEFORE the scan, so a
+      # findings-nonzero Trivy step (exit-code 1) cannot skip a mint gated on the
+      # implicit `success()` and leave the `always()` upload with no token (#1444). The
+      # same-repo `if:` is for parity; this job never runs on a pull_request, so it is
+      # always true here.
+      - name: Mint SARIF upload token
+        id: sarif-token
+        if: >-
+          ${{ github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.CLAUSTER_CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
+          permission-security-events: write
       - name: Set up Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       # Build the amd64 image once and load it locally for the scan (no push).
@@ -214,11 +230,52 @@ jobs:
           # push + the weekly cron — always enforce (fail on findings).
           exit-code: "1"
       - name: Upload SARIF
+        # Post to the public `code-scanning/sarifs` endpoint with the minted App token,
+        # the same path the zizmor job uses, so this upload draws on the App's own
+        # per-installation rate bucket instead of the shared GITHUB_TOKEN pool that hit
+        # "API rate limit exceeded for installation" on PR 1431. `upload-sarif` cannot
+        # take an App token (codeql-action#2719). Every dynamic value comes through
+        # `env:`, so nothing is interpolated into the script body. `always()` so a
+        # findings run (exit-code 1 above) still uploads.
         if: always()
-        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
-        with:
-          sarif_file: trivy-image.sarif
-          category: trivy-image
+        env:
+          GH_TOKEN: ${{ steps.sarif-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+          REF: ${{ github.ref }}
+          CHECKOUT_URI: file://${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          # `automationDetails.id` is what `upload-sarif` wrote from `category:`; the
+          # sarifs endpoint takes no category field, so set it here so these uploads
+          # supersede the existing `trivy-image` series instead of leaving duplicates.
+          sarif_b64="$(jq '.runs[].automationDetails.id = "trivy-image"' trivy-image.sarif | gzip -c | base64 -w0)"
+          sarif_id="$(gh api "repos/$REPO/code-scanning/sarifs" \
+            -f "commit_sha=$COMMIT_SHA" \
+            -f "ref=$REF" \
+            -f "checkout_uri=$CHECKOUT_URI" \
+            -f "tool_name=trivy" \
+            -f "sarif=$sarif_b64" \
+            --jq .id)"
+          echo "Uploaded trivy SARIF (id=$sarif_id); waiting for processing."
+          last_err=""
+          for _ in $(seq 1 30); do
+            if ! status="$(gh api "repos/$REPO/code-scanning/sarifs/$sarif_id" --jq .processing_status 2>/tmp/gh_poll_err)"; then
+              last_err="$(cat /tmp/gh_poll_err)"
+              status="pending"
+            fi
+            echo "processing_status=$status"
+            case "$status" in
+              complete) exit 0 ;;
+              failed)
+                echo "trivy SARIF processing failed:" >&2
+                gh api "repos/$REPO/code-scanning/sarifs/$sarif_id" --jq '.errors[]?' >&2
+                exit 1 ;;
+            esac
+            sleep 5
+          done
+          echo "::warning title=trivy SARIF::still '$status' after the bounded wait; not failing the gate. last GET error: ${last_err:-none}"
+          exit 0
 
   zizmor:
     name: workflow audit
