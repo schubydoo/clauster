@@ -224,8 +224,9 @@ service](installation.md#run-as-a-systemd-service-linux).
 
 ### "no config found" / "invalid config"
 
-**What you see:** `doctor` fails the `config` row with one of three details —
-`no config found: ...`, `invalid config: ...`, or `config is not valid YAML
+**What you see:** `doctor` fails the `config` row with one of four details —
+`no config found: ...`, `config unreadable: ...`, `invalid config: ...`, or
+`config is not valid YAML
 ...` — and most other verbs exit `2` with a `clauster: config error:` message.
 That message carries the raw parser or validation error, except for the two
 fixed verdicts in the table below. Three verbs behave differently: `doctor`
@@ -234,13 +235,14 @@ opens the setup wizard rather than failing, and `install-service` still renders
 a unit using defaults.
 
 **Most likely cause:** no `clauster.yml` where Clauster looks for one, or a
-mistake inside it. The three details separate the cases, which is what tells you
+mistake inside it. The four details separate the cases, which is what tells you
 where to look. `config is not valid YAML` covers two rows below. One row carries
 a position. The other states a fixed verdict:
 
 | Detail | What is wrong | Where the message points |
 | --- | --- | --- |
 | `no config found` | No file at any searched path | The search order |
+| `config unreadable` | The file exists but cannot be read — most often a permission problem, such as a root-owned file under a service user | The error's class and the path. Fix the file's permissions, not its contents |
 | `config is not valid YAML (...)` | The file does not parse — a stray tab, an unclosed quote | The error's class, plus a line and column. When the parser knows where the construct opened, a second position follows. A control character gives a character offset instead |
 | `config is not valid YAML: ...` | A value no type can be built from (`a: 2020-13-45`), or a file nested too deep | A fixed sentence, with no position. The rejected value is withheld (see below) |
 | `invalid config` | The file parses but a value is rejected | One `key.path: reason` entry per rejected key — or, for a root that is not a mapping, the root's type and the file |
@@ -604,7 +606,7 @@ present in every run:
 
 | Row | OK means | A warn/fail usually means |
 | --- | --- | --- |
-| `config` | `clauster.yml` found and valid | `no config found: ...` / `config is not valid YAML ...` / `invalid config: ...` (the "no config found" section above breaks these down) |
+| `config` | `clauster.yml` found and valid | `no config found: ...` / `config unreadable: ...` / `config is not valid YAML ...` / `invalid config: ...` (the "no config found" section above breaks these down) |
 | `claude` | binary found, version ≥ `min_version` | not on PATH, or too old — see above |
 | `claude-login` | usable `claude` credentials | not logged in — bridges will spawn then hang |
 | `projects_root` | the directory exists | wrong path in config |
