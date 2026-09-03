@@ -285,9 +285,18 @@ flags yourself.
 ## Log redaction
 
 The bridge debug log is streamed over a WebSocket and sanitized line by line
-(`redact.py`). Redaction always runs against an **ANSI-stripped** view, so escape
-sequences can't split an identifier and smuggle a secret past the
-word-boundary-anchored regexes.
+(`redact.py`). Redaction runs against the view a browser **renders**. That view
+has the escape sequences removed, including the `OSC`, `DCS`, `SOS`, `PM` and
+`APC` string sequences and their payloads. It also has the invisible control
+characters removed. Neither kind of byte can therefore split an identifier into
+fragments too short for the word-boundary-anchored regexes.
+
+Removing those bytes can also *delete* a word boundary. `user<ESC>[32menv_<ULID>`
+renders as `userenv_<ULID>`, which reads exactly like ordinary compound text such
+as `userenv_production`. Clauster therefore records where each removal happened
+and re-tries the same masks anchored at those positions. Tab, carriage return and
+newline are never removed. They are visible separators, and the line structure
+depends on them.
 
 Three layers:
 
@@ -310,6 +319,16 @@ Three layers:
     defense-in-depth: the primary WebSocket guarantee is the
     `env_`/`session_`/`cse_` + UUID redaction. Add new shapes as they appear
     rather than assuming coverage.
+
+!!! warning "Bounded scope: an identifier written mid-token stays visible"
+    A mask needs a word boundary before the identifier, or the position of a
+    removed escape. An identifier whose preceding characters were written as
+    plain text (`xyzenv_<ULID>`) has neither, so it is not masked. That is a
+    different threat: producing it means already controlling the whole line, and
+    an attacker who can print arbitrary text beside an identifier does not need
+    to smuggle it past the mask. The case that matters is the escape weld, where
+    Clauster's own bridge prints the real identifier and an injected escape only
+    deletes the boundary.
 
 ### Hybrid by default
 

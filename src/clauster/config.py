@@ -749,7 +749,11 @@ class LogsConfig(BaseModel):
         "protected by `state_dir` permissions.",
     )
     strip_ansi_in_stream: bool = Field(
-        default=True, description="Strip ANSI escape sequences from the streamed log."
+        default=True,
+        description="Strip ANSI escape sequences from the streamed log. Turning this off "
+        "keeps a line's colour only when that line is provably as redacted with the "
+        "escapes as without them; otherwise the stripped form is streamed instead, so "
+        "colour is never kept at the cost of a leak.",
     )
     retention_max_age_days: int = Field(
         default=30,

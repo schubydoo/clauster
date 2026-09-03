@@ -20,13 +20,14 @@ from . import redact
 
 
 def _redact(text: str) -> str:
-    r"""Strip secrets/ids from a log string (the same passes the live stream uses).
+    r"""Strip secrets/ids from a log string (the same pass the live stream uses).
 
-    Runs against an ANSI-stripped view first — as ``redact.sanitize_line`` does — so a
-    colorised library log can't smuggle a secret past the ``\b``-anchored id/secret
-    regexes by splitting an identifier with an escape sequence.
+    Delegates to :func:`redact.redact_for_disk` rather than re-composing the passes here:
+    a rendered log record is a multi-line chunk (message + traceback), and hand-composing
+    them is what let this path miss the cut-anchored mask that closed the escape-weld leak
+    (#1379). One call site, one pipeline, nothing to drift.
     """
-    return redact.redact_secrets(redact.redact_ids(redact.strip_ansi(text)))
+    return redact.redact_for_disk(text)
 
 
 class RedactingTextFormatter(logging.Formatter):
