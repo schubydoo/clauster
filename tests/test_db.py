@@ -254,6 +254,29 @@ def test_state_worktree_name_round_trips_and_stays_absent_when_unset(persistence
     assert "worktree_name" not in loaded["iid-derived"]
 
 
+def test_state_bridge_boot_id_round_trips_and_stays_absent_when_unset(persistence):
+    # #1401: the boot id must survive the store beside the pair, or a spawned bridge's
+    # cross-boot defense is lost on the first restart. A row without it (a pre-#1401 row, or
+    # a pointer/sidecar reattach) round-trips unchanged — `_present` drops the NULL — so an
+    # older build's row keeps loading on ticks alone.
+    store = persistence.state_store()
+    store.save(
+        {
+            "iid-spawned": {
+                "project_name": "alpha",
+                "bridge_pid": 4242,
+                "bridge_proc_start": 1000.0,
+                "bridge_start_ticks": 770579,
+                "bridge_boot_id": "boot-uuid-1",
+            },
+            "iid-legacy": {"project_name": "alpha", "bridge_pid": 4243},
+        }
+    )
+    loaded = store.load()
+    assert loaded["iid-spawned"]["bridge_boot_id"] == "boot-uuid-1"
+    assert "bridge_boot_id" not in loaded["iid-legacy"]
+
+
 # ----- fail-closed read + raising save -----------------------------------
 
 
@@ -875,19 +898,47 @@ def test_hosted_agent_start_ticks_migration_adds_and_drops_nullable_column(tmp_p
         engine.dispose()
 
 
-def test_the_migration_chain_has_exactly_one_head():
-    """A second Alembic head must red CI here, not fail every app boot (#1404).
+def test_instance_bridge_boot_id_migration_adds_and_drops_nullable_column(tmp_path):
+    # 0012 adds a nullable bridge_boot_id column to instances (#1401). Upgrading to head must
+    # expose it, and downgrading one step must remove it without disturbing the rest of the
+    # table — SQLite has no native ALTER, so this also covers the batch_alter_table add/drop
+    # path, which rebuilds the table.
+    from alembic import command
 
-    Alembic chains on revision IDs, not filenames, so two PRs authored in parallel can each
-    set ``down_revision`` to the same parent and each look fine alone. Merged together they
-    are two heads, and ``bootstrap._pending_revision`` calls
+    engine = create_db_engine(tmp_path)
+    try:
+        with engine.connect() as conn:
+            cfg = Config(str(bootstrap._ALEMBIC_INI))
+            cfg.set_main_option("script_location", str(bootstrap._MIGRATIONS_DIR))
+            cfg.attributes["connection"] = conn
+            command.upgrade(cfg, "head")
+            columns = {row[1] for row in conn.execute(text("PRAGMA table_info(instances)")).all()}
+            assert "bridge_boot_id" in columns
+
+            # Pinned by revision id, not "-1". A relative step silently re-aims at whatever
+            # ends up below this migration, so it would keep passing after the parent is
+            # retargeted even if the retarget were wrong.
+            command.downgrade(cfg, "c4f1b6a2e590")  # 0011 — this migration's parent
+            columns = {row[1] for row in conn.execute(text("PRAGMA table_info(instances)")).all()}
+            assert "bridge_boot_id" not in columns
+            # The rest of the table survives the rebuild, including the pair it completes.
+            assert {"bridge_pid", "bridge_proc_start", "bridge_start_ticks"} <= columns
+    finally:
+        engine.dispose()
+
+
+def test_the_migration_chain_has_exactly_one_head():
+    """A second Alembic head must red CI here, not fail every app boot (#1401).
+
+    Alembic chains on revision IDs, not filenames, so PRs authored in parallel can each set
+    ``down_revision`` to the same parent and each look fine alone. Merged together they are
+    multiple heads, and ``bootstrap._pending_revision`` calls
     ``ScriptDirectory.get_current_head()``, which raises ``MultipleHeads`` — so the damage is
     not a broken migration but a refusal to BOOT, for every user, on upgrade.
 
-    This is a cheap structural assertion with no engine and no database: it walks the
-    versions directory only. It is written for the general case rather than for #1404's own
-    ordering, so it keeps earning its place after this branch's provisional parent is
-    retargeted at 0010.
+    This is a cheap structural assertion with no engine and no database: it walks the versions
+    directory only. It is written for the general case rather than for one PR's own ordering,
+    so it keeps earning its place as the chain grows.
     """
     from alembic.script import ScriptDirectory
 

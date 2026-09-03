@@ -21,7 +21,7 @@ Key modules under `src/clauster/`:
 | `logstream.py` | Tail the bridge debug log for the WebSocket stream. |
 | `redact.py` | ANSI-strip + ID/secret redaction for the WS stream. |
 | `inspector.py` | `claude agents --json` cross-check — the liveness source. |
-| `procutil.py` | `psutil`-based process introspection: liveness with PID-reuse defense (start-time pair + cmdline match) and the match-gated kill behind bridge rediscovery and hosted orphan recovery. |
+| `procutil.py` | `psutil`-based process introspection: liveness with PID-reuse defense (start-time pair, a per-boot id for the bridge path, and cmdline match) and the match-gated kill behind bridge rediscovery and hosted orphan recovery. |
 | `auth.py` | Auth foundation (fail-closed; pure functions, no FastAPI import). |
 | `config.py` | Config load, env-override, and validation (`ClausterConfig`). |
 | `config_editor.py` · `config_write*.py` | Tier-A config-editor write backends — read/validate/write the runtime `claude` config surfaces (settings, permissions, hooks, MCP, plugins, skills, subagents) from the dashboard, behind the `config_write` gates. |

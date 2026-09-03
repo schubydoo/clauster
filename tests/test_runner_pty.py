@@ -564,6 +564,29 @@ def test_apply_pty_info_ready_without_url_is_running(runner_config) -> None:
     assert inst.notice is None  # ... and no advisory: nothing said WHY, so we claim nothing
 
 
+def test_apply_pty_info_stamps_the_current_boot_id_beside_the_ticks(runner_config, monkeypatch):
+    # #1401: a pty spawn folds the sidecar through `_apply_pty_info`, not `_spawn_locked`'s own
+    # stamp, so the boot id must land here beside the ticks. Without it a pty bridge persists
+    # boot-id-less and keeps the coarse-epoch comparison until a later reattach re-stamps it.
+    from clauster.models import RemoteControlInstance
+
+    runner, _ = _pty_runner(runner_config)
+    monkeypatch.setattr("clauster.runner.procutil.proc_boot_id", lambda: "spawn-boot-uuid")
+    inst = RemoteControlInstance(project="alpha", label="alpha")
+    runner._apply_pty_info(
+        inst,
+        {
+            "bridge_pid": 7,
+            "bridge_proc_start": 1.0,
+            "bridge_start_ticks": 770579,
+            "state": "ready",
+        },
+        _FakeProc(alive=True),
+    )
+    assert inst.bridge_start_ticks == 770579
+    assert inst.bridge_boot_id == "spawn-boot-uuid", "the pty spawn must stamp the boot id too"
+
+
 # -- #1390: the keeper's advisory `note` reaches the card as `notice` -------------------
 
 
@@ -2076,6 +2099,33 @@ def test_keeper_reattach_carries_the_sidecar_note_onto_the_card(
     assert inst.status is InstanceStatus.RUNNING  # the note never downgrades the row
     assert inst.url is None
     assert inst.notice == note  # `None` arm is the positive control: no note, no chip
+
+
+async def test_pty_sidecar_reattach_stamps_the_current_boot_id(runner_config, monkeypatch) -> None:
+    # #1401: the sidecar records no boot id, but the live keeper proves the current boot, so
+    # the reattached instance must be STAMPED with it — otherwise the persisted row loses the
+    # cross-boot defense on the next restart, on a row this method itself creates.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    runner._log_dir.mkdir(parents=True, exist_ok=True)
+    (runner._log_dir / "alpha-1700000000000-0.keeper.json").write_text(
+        json.dumps(
+            {"keeper_pid": 7777, "bridge_pid": 8888, "bridge_proc_start": 333.0, "state": "ready"}
+        )
+    )
+    saved = {"project_name": "alpha", "label": "alpha", "resume_mode": "pty"}
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda pid: pid == 7777)
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge", lambda pid, start=None, **k: pid == 8888
+    )
+    monkeypatch.setattr("clauster.runner.procutil.proc_boot_id", lambda: "live-boot-uuid")
+
+    inst = runner._reattach_pty_from_sidecar("alpha", saved)
+
+    assert inst is not None
+    assert inst.bridge_boot_id == "live-boot-uuid", (
+        "the reattached row must carry the live boot id"
+    )
 
 
 @_POSIX_ONLY

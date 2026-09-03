@@ -2402,8 +2402,8 @@ async def test_resync_refuses_an_instance_that_is_no_longer_the_registered_one(r
         "iid-a",
         stale,
         {"project_name": "alpha"},
-        (4402, 200.0, 4402000),
-        (4401, 100.0, InstanceStatus.STOPPED, False, None),
+        (4402, 200.0, 4402000, "boot-x"),  # pair now carries bridge_boot_id (#1401)
+        (4401, 100.0, InstanceStatus.STOPPED, False, None, None),  # ours_generation gains it too
         runner._discovered(),
     )
 
@@ -2883,6 +2883,42 @@ async def test_poll_stamps_a_tracked_tick_less_instance_on_an_exact_match(
     _drifted(monkeypatch)
     await runner.poll_once()
     assert inst.status is InstanceStatus.RUNNING, "a drifted epoch must not demote a stamped card"
+
+
+async def test_poll_stamps_a_boot_id_less_instances_boot_id_on_a_live_tick(
+    runner_config, monkeypatch
+):
+    # #1401: an instance with ticks but no boot id (a pre-#1401 bridge row, or one
+    # pointer/sidecar-reattached before boot ids existed) gains its boot id on a live tick, so
+    # the persisted row carries the cross-boot defense across the next restart instead of
+    # falling back to the coarse epoch forever.
+    runner = _make_runner(runner_config)
+    _stub_poll_env(monkeypatch)
+    inst = RemoteControlInstance(
+        instance_id="iid-old",
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.RUNNING,
+        resume_mode="standard",
+        bridge_pid=5001,
+        bridge_proc_start=1000.0,
+        bridge_start_ticks=770579,  # has ticks already; only the boot id is missing
+    )
+    runner._instances[inst.instance_id] = inst
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    monkeypatch.setattr("clauster.runner.procutil.proc_boot_id", lambda: "heal-boot-uuid")
+
+    await runner.poll_once()
+    assert inst.bridge_boot_id == "heal-boot-uuid", "a live tick must heal the missing boot id"
+    assert await runner._refresh_persisted()
+    assert runner._persisted["iid-old"]["bridge_boot_id"] == "heal-boot-uuid"
+
+    # An unreadable live boot id (non-Linux, or /proc/sys lost) leaves the field None rather
+    # than stamping a blank — the same "only on success" rule the tick stamp follows.
+    inst.bridge_boot_id = None
+    monkeypatch.setattr("clauster.runner.procutil.proc_boot_id", lambda: None)
+    await runner.poll_once()
+    assert inst.bridge_boot_id is None, "an unreadable boot id must not overwrite with a blank"
 
 
 async def test_observation_only_poll_stamps_in_memory_but_does_not_write(
