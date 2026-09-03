@@ -1633,7 +1633,7 @@ Tabler UI from <code>templates/</code> (with <code>jinja2-fragments</code>) and 
 </tr>
 <tr>
 <td><code>procutil.py</code></td>
-<td><code>psutil</code>-based process introspection: liveness with PID-reuse defense (start-time pair + cmdline match) and the match-gated kill behind bridge rediscovery and hosted orphan recovery.</td>
+<td><code>psutil</code>-based process introspection: liveness with PID-reuse defense (start-time pair, a per-boot id for the bridge path, and cmdline match) and the match-gated kill behind bridge rediscovery and hosted orphan recovery.</td>
 </tr>
 <tr>
 <td><code>auth.py</code></td>
