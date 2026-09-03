@@ -731,20 +731,19 @@ def test_pty_screen_frame_width_refit_cannot_expose_an_identifier() -> None:
     test hand-built the row and sliced it, which meant a fix inside ``frame`` would have left
     it green either way — it proved nothing about the delivered frame.
 
-    The screen masks to the neutral ``<redacted>`` token, and masking ``session_ABCDEF``
-    SHRINKS this row, so the width re-fit does not trim it and cannot manufacture the word
-    boundary a ``\\b``-anchored mask needs (safety invariant 4). A row that GROWS past ``cols``
-    (a clipped ``Bearer`` piece) is sheared and re-redacted by ``_fit_redacted_row`` -- see
-    ``test_pty_screen.py::test_frame_re_redacts_a_row_the_width_refit_sheared``.
-    ``pty_screen_feed_fuzzer`` asserts the leak property on every delivered row.
+    `_apply_spans` clips the ``Bearer `` piece to the full neutral token, so
+    ``Bearer env_01ABCDEF`` GROWS from 19 to 20 characters. frame() trims it back to ``cols``
+    and re-redacts the shortened row (the ``if fitted != row`` belt in ``_fit_redacted_row``),
+    so the trim cannot manufacture the word boundary a ``\\b``-anchored mask needs (safety
+    invariant 4). ``pty_screen_feed_fuzzer`` asserts the leak property on every delivered row.
     """
     import re
 
     pty_screen = pytest.importorskip("clauster.pty_screen")
     pytest.importorskip("pyte")
 
-    cols = 40
-    row = "session_ABCDEF yyyyyyyy cse_ABCDEFGH_zzz"
+    cols = 19
+    row = "Bearer env_01ABCDEF"
     assert len(row) == cols
     screen = pty_screen.PtyScreen(cols=cols, rows=3)
     screen.feed(row.encode())
@@ -753,9 +752,9 @@ def test_pty_screen_frame_width_refit_cannot_expose_an_identifier() -> None:
     leak = re.compile(r"\b(env|session|cse)_[A-Za-z0-9]{6,}\b")
     assert not leak.search(delivered), f"frame() exposed a bare identifier: {delivered!r}"
     assert len(delivered) == cols, "the row must still be exactly one screen wide"
-    # session_ABCDEF masks to the neutral token and shrinks the row, so nothing is sheared;
-    # cse_ABCDEFGH_zzz is correctly not an id (trailing `_zzz`) and stays readable.
-    assert delivered == "<redacted> yyyyyyyy cse_ABCDEFGH_zzz".ljust(cols)
+    # The masked row is 20 chars (the `Bearer ` piece clips to the 10-char token), so the
+    # re-fit trims it and the belt runs; the final cut lands inside a `<redacted>` token.
+    assert delivered == "<redacted><redacted"
 
 
 def test_usage_line_to_turn_sanitizes_every_returned_string_field() -> None:

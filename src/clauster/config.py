@@ -214,8 +214,9 @@ class ClaudeConfig(BaseModel):
         "render is best-effort secret-redacted, so treat the live view as auth-gated, not "
         "secret-proof. It also masks a real identifier welded onto the word before it by a "
         "discarded escape, so `agentenv_01<id>` masks while an ordinary name such as "
-        "`resolve_session_transcript` stays readable. A welded secret, and a welded identifier "
-        "without the leading `01` shape, stay visible on this view.",
+        "`resolve_session_transcript` stays readable. A masked identifier shows the neutral "
+        "`<redacted>` token here, without the `env_`/`session_`/`cse_` prefix the log keeps. A "
+        "welded secret, and a welded identifier without the leading `01` shape, stay visible.",
     )
     path_append: list[str] = Field(
         default_factory=list,

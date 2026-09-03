@@ -292,27 +292,21 @@ def test_redact_screen_text_leaves_a_welded_secret_as_residue():
 
 
 @pytest.mark.parametrize(
-    ("row", "masked"),
+    "row",
     [
         # A glued id is masked ONLY when it has the real id shape (prefix + `01` + eight or
-        # more), so a live weld cannot leave a bearer-equivalent id readable...
-        ("agentenv_01BX5ZZKBKACTAV9WEVGEMMVRZ", True),
-        ("prefixsession_01ABCDEFGH", True),  # a different glued prefix, real id shape
-        # ...but an ordinary compound name that merely embeds the prefix stays readable.
-        ("resolve_session_transcript", False),
-        ("venv_project1", False),
-        ("venv_01abc", False),  # too short after `01`
+        # more), so a live weld cannot leave a bearer-equivalent id readable. The ordinary
+        # names that must STAY readable are covered by
+        # test_redact_screen_text_does_not_over_mask_ordinary_text.
+        "agentenv_01BX5ZZKBKACTAV9WEVGEMMVRZ",
+        "prefixsession_01ABCDEFGH",  # a different glued prefix, real id shape
     ],
 )
-def test_redact_screen_text_masks_only_a_glued_real_id(row, masked):
+def test_redact_screen_text_masks_a_glued_real_id(row):
     # The maintainer's tight core for #1433: the glued (no-leading-boundary) id match requires
-    # `(env|session|cse)_01` + eight or more, so the screen masks a welded REAL id without
-    # over-masking ordinary snake_case names.
+    # `(env|session|cse)_01` + eight or more, so the screen masks a welded REAL id.
     out = redact.redact_screen_text([row])[0]
-    if masked:
-        assert "<redacted>" in out and row not in out, out
-    else:
-        assert out == row, out
+    assert "<redacted>" in out and row not in out, out
 
 
 def test_sanitize_redacts_secret_split_by_ansi_even_when_strip_disabled():

@@ -315,7 +315,10 @@ Three layers:
 1. **ID redaction (primary guarantee).** Masks `env_` / `session_` / `cse_`
    identifiers (the prefix is kept readable) — these act as bearer-equivalent
    credentials in a URL — and **bare UUIDs** (account / instance identifiers the
-   bridge prints in full; not bearer credentials, but kept off the stream).
+   bridge prints in full; not bearer credentials, but kept off the stream). The
+   live pty-screen view masks these to the neutral `<redacted>` token instead,
+   with no readable prefix. The `<` the token adds is itself a word boundary, so
+   it closes an identifier welded to another identifier.
 2. **Secret-shape redaction (defense-in-depth).** A conservative allow-list of
    obvious secret shapes — GitHub tokens (`ghp_`/`gho_`/… , `github_pat_`),
    Clauster API tokens (`clauster_pat_…`), GitLab PATs (`glpat-`), AWS access-key
