@@ -2570,8 +2570,9 @@ user under systemd) does not own the state directory (default <code>~/.clauster<
 <p><strong>Mechanism:</strong> <a href="../installation/#run-as-a-systemd-service-linux">Run as a systemd
 service</a>.</p>
 <h3 id="no-config-found-invalid-config">"no config found" / "invalid config"<a class="headerlink" href="#no-config-found-invalid-config" title="Permanent link">&para;</a></h3>
-<p><strong>What you see:</strong> <code>doctor</code> fails the <code>config</code> row with one of three details —
-<code>no config found: ...</code>, <code>invalid config: ...</code>, or <code>config is not valid YAML
+<p><strong>What you see:</strong> <code>doctor</code> fails the <code>config</code> row with one of four details —
+<code>no config found: ...</code>, <code>config unreadable: ...</code>, <code>invalid config: ...</code>, or
+<code>config is not valid YAML
 ...</code> — and most other verbs exit <code>2</code> with a <code>clauster: config error:</code> message.
 That message carries the raw parser or validation error, except for the two
 fixed verdicts in the table below. Three verbs behave differently: <code>doctor</code>
@@ -2579,7 +2580,7 @@ itself exits <code>1</code> with the table above, <code>clauster run</code> with
 opens the setup wizard rather than failing, and <code>install-service</code> still renders
 a unit using defaults.</p>
 <p><strong>Most likely cause:</strong> no <code>clauster.yml</code> where Clauster looks for one, or a
-mistake inside it. The three details separate the cases, which is what tells you
+mistake inside it. The four details separate the cases, which is what tells you
 where to look. <code>config is not valid YAML</code> covers two rows below. One row carries
 a position. The other states a fixed verdict:</p>
 <table>
@@ -2595,6 +2596,11 @@ a position. The other states a fixed verdict:</p>
 <td><code>no config found</code></td>
 <td>No file at any searched path</td>
 <td>The search order</td>
+</tr>
+<tr>
+<td><code>config unreadable</code></td>
+<td>The file exists but cannot be read — most often a permission problem, such as a root-owned file under a service user</td>
+<td>The error's class and the path. Fix the file's permissions, not its contents</td>
 </tr>
 <tr>
 <td><code>config is not valid YAML (...)</code></td>
@@ -2882,7 +2888,7 @@ present in every run:</p>
 <tr>
 <td><code>config</code></td>
 <td><code>clauster.yml</code> found and valid</td>
-<td><code>no config found: ...</code> / <code>config is not valid YAML ...</code> / <code>invalid config: ...</code> (the "no config found" section above breaks these down)</td>
+<td><code>no config found: ...</code> / <code>config unreadable: ...</code> / <code>config is not valid YAML ...</code> / <code>invalid config: ...</code> (the "no config found" section above breaks these down)</td>
 </tr>
 <tr>
 <td><code>claude</code></td>
