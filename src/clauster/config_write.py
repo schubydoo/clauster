@@ -1032,6 +1032,104 @@ def _expands_beyond(value: Any, limit: int) -> bool:
     return False
 
 
+#: The tag PyYAML resolves a ``<<`` mapping key to. A key carrying it makes
+#: ``SafeConstructor.flatten_mapping`` splice the referenced mapping(s) in at *construction*
+#: time — the step a merge-key pyramid detonates in, before any object is returned.
+_YAML_MERGE_TAG = "tag:yaml.org,2002:merge"
+
+#: Cap on the key-value pairs a header is allowed to flatten to once its ``<<`` merge keys are
+#: followed — counted CUMULATIVELY across every mapping, not per mapping. A merge-key pyramid
+#: (each level merging the level below N times over L levels) flattens to an ``N**L``-entry list,
+#: and PyYAML builds that whole list inside the parse (#1417): a 503-byte header reached ``6 s``
+#: on the dev host, holding a worker thread for the GET that lists agents or skills. But the same
+#: cost is reached WIDE, not just deep — many sibling mappings each merging one shared, small
+#: target keep every mapping tiny while ``safe_load`` still flattens the SUM of them all — so the
+#: bound is the total, which is what construction cost is linear in (measured: ~19 M pairs → 6 s,
+#: ~300 K → 90 ms, ~100 K → 30 ms). Refusing above this keeps the follow-on ``safe_load`` in a
+#: few dozen milliseconds. The value is far above any real subagent or skill header, which
+#: carries a handful of keys, so no ordinary document — even one that uses ``<<`` the way YAML
+#: intends — reaches it.
+MAX_MERGE_EXPANDED_PAIRS = 100_000
+
+
+def _merge_expands_beyond(root: yaml.Node, limit: int) -> bool:
+    """Whether composed ``root`` flattens past ``limit`` pairs, summed, via its ``<<`` merges.
+
+    The sibling guards (:func:`_is_self_referential`, :func:`_expands_beyond`,
+    :func:`_first_json_unsafe`) all run on the object ``safe_load`` returns. A merge-key
+    pyramid never lets it return: PyYAML flattens each ``<<`` into a fresh merged list at
+    construction, so a shared anchor referenced ``N`` times per level across ``L`` levels
+    builds an ``N**L``-entry list *before* any object exists (#1417). The cost is inside the
+    parse, where no post-parse guard can see it — the built dict is small (the merged keys
+    dedupe), but reaching it took ``7 s`` for 456 bytes.
+
+    So this runs on the composed NODE graph instead. ``yaml.compose`` builds the graph without
+    flattening any merge — an alias resolves to the SAME node object it anchors, so the graph
+    is a small DAG a pyramid composes into in ~2 ms where it takes seconds to construct. It
+    counts, per mapping node, the pairs that mapping flattens to once its ``<<`` targets are
+    spliced in — exactly the length of the list ``flatten_mapping`` builds for it — and sums
+    those across every mapping, refusing the moment the running total exceeds ``limit``.
+
+    The sum, not the per-mapping max, is the bound, because ``safe_load``'s cost is the sum:
+    many sibling mappings each merging one shared, small target keep every mapping tiny while
+    construction still builds every one of their lists (a ~25 KB header of them reached seconds,
+    and the read path caps no bytes). A shared target is counted once for itself and again
+    inside each mapping that merges it — exactly as ``flatten_mapping`` re-splices its entries.
+
+    Only mappings reached through a ``<<`` key amplify, so the caller runs this solely when the
+    header text contains ``<<``: a merge-free document is never even composed here. A plain
+    (non-merge) alias is likewise left to ``safe_load`` and the post-parse
+    :func:`_expands_beyond`, which is the guard for that shape (#1393).
+
+    Iterative and memoized, for the same reasons as :func:`_expands_beyond`: it runs right
+    before a ``safe_load`` whose ``RecursionError`` the caller catches, so it must add no stack
+    frames of its own, and a shared node sized once keeps the walk linear in the DAG rather
+    than exponential in its paths. A ``<<`` that cycles back on itself leaves its target
+    un-memoized (sized as zero here) and falls through to ``safe_load``, whose own
+    ``flatten_mapping`` deletes the merge key before it recurses, so such a header neither hangs
+    nor needs detecting here.
+    """
+    flattened: dict[int, int] = {}
+    started: set[int] = set()
+    running = 0  # cumulative flattened pairs across every mapping sized so far
+    stack: list[tuple[yaml.Node, bool]] = [(root, False)]
+    while stack:
+        node, leaving = stack.pop()
+        is_map = isinstance(node, yaml.MappingNode)
+        if not (is_map or isinstance(node, yaml.SequenceNode)):
+            continue  # a scalar node has no children and contributes no merge-flattened pair
+        if leaving:
+            # Post-order: every descendant — a merge target is one, reached through this
+            # mapping's `<<` sequence — has ascended and memoized its own size by now.
+            total = 0
+            for key_node, value_node in node.value:
+                if key_node.tag == _YAML_MERGE_TAG:
+                    targets = (
+                        value_node.value
+                        if isinstance(value_node, yaml.SequenceNode)
+                        else [value_node]
+                    )
+                    total += sum(flattened.get(id(target), 0) for target in targets)
+                else:
+                    total += 1
+                if running + total > limit:  # the running total short-circuits deep AND wide
+                    return True
+            flattened[id(node)] = total
+            running += total
+            continue
+        if id(node) in started:
+            continue  # sized once, then reused: this is what keeps the walk linear
+        started.add(id(node))
+        if is_map:
+            stack.append((node, True))  # the "ascend" marker: popped after this node's children
+            for key_node, value_node in node.value:
+                stack.append((key_node, False))  # a complex key can hide another mapping
+                stack.append((value_node, False))
+        else:  # a sequence has no size of its own — only mappings to discover beneath it
+            stack.extend((child, False) for child in node.value)
+    return False
+
+
 def _yaml_error_where(exc: yaml.YAMLError, line_offset: int = 0, *, block_name: str) -> str:
     """Describe *where* a ``YAMLError`` happened, using nothing derived from the document.
 
@@ -1238,6 +1336,20 @@ def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> An
     which begins after the opening ``---`` fence — exactly one line in.
     """
     try:
+        if "<<" in header:
+            # A `<<` merge key flattens at *construction* time, so — unlike the alias pyramid
+            # #1393 whose blow-up is post-parse — a merge-key pyramid detonates inside
+            # ``safe_load`` itself, before any post-parse guard can run (#1417). Compose the
+            # node graph first (linear, no flattening) and refuse a mapping that would flatten
+            # past the pair cap. Gated on the `<<` substring: a header without one cannot carry
+            # a merge key, so the ordinary case skips the extra parse entirely. ``compose``
+            # raises the same ``YAMLError``/``RecursionError`` ``safe_load`` would, mapped below.
+            root = yaml.compose(header, Loader=yaml.SafeLoader)
+            if root is not None and _merge_expands_beyond(root, MAX_MERGE_EXPANDED_PAIRS):
+                raise InvalidCandidateError(
+                    f"{what} expands past the {MAX_MERGE_EXPANDED_PAIRS} pair cap "
+                    f"through its YAML merge keys"
+                )
         value = yaml.safe_load(header)
     except yaml.YAMLError as exc:
         raise InvalidCandidateError(
