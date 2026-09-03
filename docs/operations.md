@@ -339,8 +339,8 @@ A bridge stuck in `starting` → `error` most often means a `claude-login` probl
 
 A bridge **adopted from another Clauster process** (one started by `clauster start` or
 `clauster mcp`, or one that outlived a restart) has no `startup_grace_seconds` deadline of
-its own, so it never flips to `error`: it shows `starting` until its connect details are
-readable, then moves to `running` on the next poll.
+its own, so it never flips to `error`: it shows `starting` until it is observed ready,
+then moves to `running` on the next poll.
 
 ## The `KillMode` / `systemctl restart` caveat { #restart }
 
