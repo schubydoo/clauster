@@ -84,11 +84,25 @@ jobs:
         with:
           client-id: ${{ secrets.CLAUSTER_CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
+          # `analyze` resolves an "analysis key" through the Actions API even with
+          # `upload: never`, so the mint needs `actions: read` (and `contents: read` for
+          # the bundle and repo reads), and CodeQL's own `token` is routed at this App
+          # token below. Otherwise that lookup stays on GITHUB_TOKEN and throws under pool
+          # exhaustion after the SARIF is already written.
+          permission-actions: read
+          permission-contents: read
           permission-security-events: write
       - name: Initialize CodeQL
         uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           languages: ${{ matrix.language }}
+          # Route every CodeQL API call (bundle lookup, feature flags, analysis key,
+          # status reports) at the App token, off the shared GITHUB_TOKEN pool. This is
+          # NOT the SARIF upload route: `upload: never` means the action never posts, and
+          # that route rejects App tokens (PR 1435). The internal endpoints degrade to
+          # warnings with a non-Actions token (status-report.ts and feature-flags.ts map
+          # 403/404 to `core.warning`).
+          token: ${{ steps.sarif-token.outputs.token || github.token }}
       - name: Autobuild
         uses: github/codeql-action/autobuild@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
       - name: Perform CodeQL Analysis
@@ -96,9 +110,12 @@ jobs:
         with:
           # `upload: never` + `output`: write the SARIF to disk instead of uploading via
           # the action (GITHUB_TOKEN-only; codeql-action#2719). The step below posts it
-          # to the public endpoint with the minted App token.
+          # to the public endpoint with the minted App token. `token` routes analyze's own
+          # API calls (the analysis-key lookup that runs even under `upload: never`, plus
+          # status reports) at the App token, off the shared pool.
           upload: never
           output: codeql-sarif
+          token: ${{ steps.sarif-token.outputs.token || github.token }}
       - name: Upload CodeQL SARIF
         # Post each analysis to the public `code-scanning/sarifs` endpoint with the
         # minted App token, off the shared GITHUB_TOKEN pool (see security.yml). Every
