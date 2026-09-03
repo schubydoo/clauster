@@ -100,7 +100,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      security-events: write
+      # `analyze` runs with `upload: never` and a minted App token does the upload,
+      # so the job token no longer needs `security-events: write`.
       packages: read
       actions: read
       contents: read
@@ -112,16 +113,116 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Mint an upload-only App token (`security-events: write`) BEFORE the analysis, so
+      # the token exists regardless of the analysis outcome and the `always()` upload
+      # below can post off the App's own rate bucket (#1445). Same-repo only; a fork PR
+      # skips both the mint and the upload.
+      - name: Mint SARIF upload token
+        id: sarif-token
+        if: >-
+          ${{ github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.CLAUSTER_CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
+          # `analyze` resolves an "analysis key" through the Actions API even with
+          # `upload: never`, so the mint needs `actions: read` (and `contents: read` for
+          # the bundle and repo reads), and CodeQL's own `token` is routed at this App
+          # token below. Otherwise that lookup stays on GITHUB_TOKEN and throws under pool
+          # exhaustion after the SARIF is already written.
+          permission-actions: read
+          permission-contents: read
+          permission-security-events: write
       - name: Initialize CodeQL
         uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           languages: ${{ matrix.language }}
+          # Route every CodeQL API call (bundle lookup, feature flags, analysis key,
+          # status reports) at the App token, off the shared GITHUB_TOKEN pool. This is
+          # NOT the SARIF upload route: `upload: never` means the action never posts, and
+          # that route rejects App tokens (PR 1435). The internal endpoints degrade to
+          # warnings with a non-Actions token (status-report.ts and feature-flags.ts map
+          # 403/404 to `core.warning`).
+          token: ${{ steps.sarif-token.outputs.token || github.token }}
       - name: Autobuild
         uses: github/codeql-action/autobuild@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
-          category: "/language:${{ matrix.language }}"
+          # `upload: never` + `output`: write the SARIF to disk instead of uploading via
+          # the action (GITHUB_TOKEN-only; codeql-action#2719). The step below posts it
+          # to the public endpoint with the minted App token. `token` routes analyze's own
+          # API calls (the analysis-key lookup that runs even under `upload: never`, plus
+          # status reports) at the App token, off the shared pool.
+          upload: never
+          output: codeql-sarif
+          # Upload the POST-PROCESSED SARIF (fingerprints added), which the action writes
+          # as `upload.sarif` in this dir; `SARIF_DIR` points here. The `*.sarif` glob
+          # matches it, and the jq below still forces the category.
+          post-processed-sarif-path: codeql-sarif-processed
+          token: ${{ steps.sarif-token.outputs.token || github.token }}
+      - name: Upload CodeQL SARIF
+        # Post each analysis to the public `code-scanning/sarifs` endpoint with the
+        # minted App token, off the shared GITHUB_TOKEN pool (see the trivy/zizmor jobs).
+        # Every dynamic value comes through `env:`. Same-repo only: a fork PR cannot
+        # write code scanning results, so skip (`always()` counts the skip as passing).
+        if: >-
+          ${{ always()
+          && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository) }}
+        env:
+          GH_TOKEN: ${{ steps.sarif-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+          REF: ${{ github.ref }}
+          CHECKOUT_URI: file://${{ github.workspace }}
+          # Trailing slash is load-bearing: GitHub parses `automationDetails.id` as
+          # `category/run-id`, so `/language:python` with no slash records an EMPTY
+          # category. `/language:python/` gives the category with an empty run-id.
+          CATEGORY: "/language:${{ matrix.language }}/"
+          SARIF_DIR: codeql-sarif-processed
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          found=0
+          for f in "$SARIF_DIR"/*.sarif; do
+            found=1
+            # `automationDetails.id` = the analysis category, so a re-upload supersedes
+            # the prior series for this language instead of duplicating it.
+            sarif_b64="$(jq --arg cat "$CATEGORY" '.runs[].automationDetails.id = $cat' "$f" | gzip -c | base64 -w0)"
+            sarif_id="$(gh api "repos/$REPO/code-scanning/sarifs" \
+              -f "commit_sha=$COMMIT_SHA" \
+              -f "ref=$REF" \
+              -f "checkout_uri=$CHECKOUT_URI" \
+              -f "tool_name=CodeQL" \
+              -f "sarif=$sarif_b64" \
+              --jq .id)"
+            echo "Uploaded $f (id=$sarif_id); waiting for processing."
+            last_err=""
+            done_ok=""
+            for _ in $(seq 1 30); do
+              if ! status="$(gh api "repos/$REPO/code-scanning/sarifs/$sarif_id" --jq .processing_status 2>/tmp/gh_poll_err)"; then
+                last_err="$(cat /tmp/gh_poll_err)"
+                status="pending"
+              fi
+              echo "processing_status=$status"
+              case "$status" in
+                complete) done_ok=1; break ;;
+                failed)
+                  echo "CodeQL SARIF processing failed:" >&2
+                  gh api "repos/$REPO/code-scanning/sarifs/$sarif_id" --jq '.errors[]?' >&2
+                  exit 1 ;;
+              esac
+              sleep 5
+            done
+            if [ -z "$done_ok" ]; then
+              echo "::warning title=CodeQL SARIF::$f still '$status' after the bounded wait; not failing the gate. last GET error: ${last_err:-none}"
+            fi
+          done
+          if [ "$found" = 0 ]; then
+            echo "::warning title=CodeQL SARIF::no SARIF in $SARIF_DIR; nothing uploaded."
+          fi
 
   gitleaks:
     name: secret scan
@@ -179,12 +280,28 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      security-events: write
+      # The SARIF upload uses a minted App token, so the job token needs only
+      # `contents: read` (checkout and the Trivy DB pull).
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Mint an upload-only App token (`security-events: write`) BEFORE the scan, so a
+      # findings-nonzero Trivy step (exit-code 1) cannot skip a mint gated on the
+      # implicit `success()` and leave the `always()` upload with no token (#1444). The
+      # same-repo `if:` is for parity; this job never runs on a pull_request, so it is
+      # always true here.
+      - name: Mint SARIF upload token
+        id: sarif-token
+        if: >-
+          ${{ github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.CLAUSTER_CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
+          permission-security-events: write
       - name: Set up Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       # Build the amd64 image once and load it locally for the scan (no push).
@@ -214,11 +331,58 @@ jobs:
           # push + the weekly cron — always enforce (fail on findings).
           exit-code: "1"
       - name: Upload SARIF
+        # Post to the public `code-scanning/sarifs` endpoint with the minted App token,
+        # the same path the zizmor job uses, so this upload draws on the App's own
+        # per-installation rate bucket instead of the shared GITHUB_TOKEN pool that hit
+        # "API rate limit exceeded for installation" on PR 1431. `upload-sarif` cannot
+        # take an App token (codeql-action#2719). Every dynamic value comes through
+        # `env:`, so nothing is interpolated into the script body. `always()` so a
+        # findings run (exit-code 1 above) still uploads.
         if: always()
-        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
-        with:
-          sarif_file: trivy-image.sarif
-          category: trivy-image
+        env:
+          GH_TOKEN: ${{ steps.sarif-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+          REF: ${{ github.ref }}
+          CHECKOUT_URI: file://${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          if [ ! -f trivy-image.sarif ]; then
+            echo "::warning title=trivy SARIF::trivy-image.sarif is missing; the build or scan failed, nothing uploaded."
+            exit 0
+          fi
+          # `automationDetails.id` is what `upload-sarif` wrote from `category:`; the
+          # sarifs endpoint takes no category field, so set it here so these uploads
+          # supersede the existing `trivy-image` series. The trailing slash is
+          # load-bearing: GitHub parses the id as `category/run-id`, so `trivy-image`
+          # without one records an EMPTY category.
+          sarif_b64="$(jq '.runs[].automationDetails.id = "trivy-image/"' trivy-image.sarif | gzip -c | base64 -w0)"
+          sarif_id="$(gh api "repos/$REPO/code-scanning/sarifs" \
+            -f "commit_sha=$COMMIT_SHA" \
+            -f "ref=$REF" \
+            -f "checkout_uri=$CHECKOUT_URI" \
+            -f "tool_name=trivy" \
+            -f "sarif=$sarif_b64" \
+            --jq .id)"
+          echo "Uploaded trivy SARIF (id=$sarif_id); waiting for processing."
+          last_err=""
+          for _ in $(seq 1 30); do
+            if ! status="$(gh api "repos/$REPO/code-scanning/sarifs/$sarif_id" --jq .processing_status 2>/tmp/gh_poll_err)"; then
+              last_err="$(cat /tmp/gh_poll_err)"
+              status="pending"
+            fi
+            echo "processing_status=$status"
+            case "$status" in
+              complete) exit 0 ;;
+              failed)
+                echo "trivy SARIF processing failed:" >&2
+                gh api "repos/$REPO/code-scanning/sarifs/$sarif_id" --jq '.errors[]?' >&2
+                exit 1 ;;
+            esac
+            sleep 5
+          done
+          echo "::warning title=trivy SARIF::still '$status' after the bounded wait; not failing the gate. last GET error: ${last_err:-none}"
+          exit 0
 
   zizmor:
     name: workflow audit
@@ -324,7 +488,7 @@ jobs:
           # sarifs endpoint takes no category field, so set it here so these uploads
           # supersede the existing `zizmor` analysis series instead of leaving stale
           # duplicates next to it.
-          sarif_b64="$(jq '.runs[].automationDetails.id = "zizmor"' results.sarif | gzip -c | base64 -w0)"
+          sarif_b64="$(jq '.runs[].automationDetails.id = "zizmor/"' results.sarif | gzip -c | base64 -w0)"
           sarif_id="$(gh api "repos/$REPO/code-scanning/sarifs" \
             -f "commit_sha=$COMMIT_SHA" \
             -f "ref=$REF" \
