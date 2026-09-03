@@ -2,4 +2,4 @@
 default: patch
 ---
 
-Reject a self-referential YAML alias in subagent/skill frontmatter at the parse seam (a 422) instead of accepting the write and then failing with a 500 when the stored value is read back.
+A self-referential YAML alias in subagent or skill frontmatter is now rejected as a 422 at write time. Before, the write was accepted and reading the stored value back failed with a 500.

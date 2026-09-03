@@ -2,4 +2,4 @@
 default: patch
 ---
 
-A pyte render fault on the PTY keeper's connect-URL scrape no longer kills the keeper and strands its discovery sidecar at `starting`/`ready` with the bridge orphaned — the scrape skips that chunk and retries on the next one.
+A pyte render fault during the PTY keeper's connect-URL scrape no longer kills the keeper. Before, it stranded the discovery sidecar at `starting` or `ready` with the bridge orphaned. The scrape now skips that chunk and retries on the next one.
