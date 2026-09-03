@@ -2888,7 +2888,15 @@ async def test_manager_reattach_does_not_stamp_a_boot_id_on_an_empty_live_read(
         hosted.procutil, "is_killable_hosted", lambda pid, start, *, start_ticks, boot_id: True
     )
     monkeypatch.setattr(hosted.procutil, "start_time_is_drift_prone", lambda: True)
-    monkeypatch.setattr(hosted.procutil, "proc_boot_id", lambda: "")  # a transient empty read
+    boot_reads: list[int] = []
+
+    def _empty_boot_read() -> str:
+        # Record the call so the assertion below can tell the target world (the walrus at
+        # hosted.py:1508 evaluated and returned falsy) from a heal gate that never ran at all.
+        boot_reads.append(1)
+        return ""
+
+    monkeypatch.setattr(hosted.procutil, "proc_boot_id", _empty_boot_read)  # transient empty read
     store.save(
         {
             "01LEGACYPROCESS000000000": {
@@ -2906,6 +2914,7 @@ async def test_manager_reattach_does_not_stamp_a_boot_id_on_an_empty_live_read(
         await mgr.reattach_all(client)
         inst = mgr.get_instance("01LEGACYPROCESS000000000")
         assert inst.is_orphan is True  # a live orphan — the heal gate was reached
+        assert boot_reads  # the walrus at 1508 read the live boot id (the target branch ran)
         assert inst.agent_boot_id is None  # ...but an empty read never stamped a falsy id
     # And the non-stamp is durable: the row still carries no boot id after the closing persist.
     assert store.load()["01LEGACYPROCESS000000000"].get("agent_boot_id") is None

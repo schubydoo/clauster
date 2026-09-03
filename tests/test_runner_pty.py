@@ -2363,6 +2363,15 @@ def test_recover_keeper_pid_rejects_a_pid_recycled_within_one_boot(runner_config
         )
     )
     monkeypatch.setattr("clauster.procutil.proc_boot_id", lambda: "boot-N")
+    # Positive control: matching ticks on the same boot DO recover. This proves the sidecar is
+    # found, read, and the bridge pid matches, so the `is None` below can only come from the
+    # tick comparison (3051->3052), not a no-sidecar / rejected-file / pid-mismatch fall-through.
+    assert (
+        runner._recover_keeper_pid(
+            "gamma", bridge_pid=2222, bridge_proc_start=100.0, bridge_start_ticks=770579
+        )
+        == 7777
+    )
     # Same boot, epoch identical, but the ticks differ -> a within-boot pid reuse, rejected.
     assert (
         runner._recover_keeper_pid(
