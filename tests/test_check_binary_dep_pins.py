@@ -18,6 +18,11 @@ from pathlib import Path
 
 import pytest
 
+# These tests assert on `.github/workflows/*.yml` pin lines, so they must run in the always-on
+# `lint` job too: the `tests` matrix is skipped on a `.github/**`-only PR, exactly the PR the
+# workflow-pin guards police (enforced by test_ci_change_filter's repo_meta-marker guard).
+pytestmark = pytest.mark.repo_meta
+
 _SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "check_binary_dep_pins.py"
 
 # Realistic 64-hex sha256 payloads — the classifier now rejects anything that isn't one, so the
