@@ -1546,10 +1546,16 @@ def ensure_gitignored(
 def _is_gitignored_by_existing_rules(relative_path: str, existing_content: str) -> bool:
     """Check whether ``relative_path`` is already covered by a rule in ``existing_content``.
 
+    Conservative, not a full gitignore engine: only returns True when an
+    existing rule clearly covers the target without being overridden by a
+    subsequent negation (``!``) rule. When in doubt or if an override might
+    leave the path tracked, returns False so the caller can safely append (#1484).
+
     Recognizes:
     - Exact line matches (with or without a leading slash, surrounding whitespace ignored).
     - Ancestor directory rules (e.g. ``/.claude``, ``.claude/``, ``.claude``, ``foo/``, ``a/b/``).
     - Basename wildcards (e.g. ``*.bak``).
+    - Negation lines (``!pattern``) that un-ignore the target path.
     """
     norm_target = relative_path.replace("\\", "/").strip().lstrip("/")
     if not norm_target:
@@ -1557,44 +1563,47 @@ def _is_gitignored_by_existing_rules(relative_path: str, existing_content: str) 
 
     parts = norm_target.split("/")
     filename = parts[-1]
-    ancestors = ["/".join(parts[:i]) for i in range(1, len(parts))]
     dir_components = set(parts[:-1])
 
-    for line in existing_content.splitlines():
-        rule = line.strip()
-        if not rule or rule.startswith("#") or rule.startswith("!"):
-            continue
+    is_ignored = False
 
-        rule = rule.replace("\\", "/")
-
-        clean_rule = rule.lstrip("/")
+    def _rule_matches(rule_text: str) -> bool:
+        clean_rule = rule_text.lstrip("/")
         if clean_rule == norm_target:
             return True
 
-        clean_dir = rule.rstrip("/")
-        if rule.startswith("/"):
-            anchored_dir = rule[1:].rstrip("/")
-            if (
-                anchored_dir in ancestors
-                or norm_target == anchored_dir
-                or norm_target.startswith(anchored_dir + "/")
-            ):
+        clean_dir = rule_text.rstrip("/")
+        if rule_text.startswith("/"):
+            anchored_dir = rule_text[1:].rstrip("/")
+            if norm_target == anchored_dir or norm_target.startswith(anchored_dir + "/"):
                 return True
         elif "/" in clean_dir:
-            if (
-                clean_dir in ancestors
-                or norm_target == clean_dir
-                or norm_target.startswith(clean_dir + "/")
-            ):
+            if norm_target == clean_dir or norm_target.startswith(clean_dir + "/"):
                 return True
         else:
             if clean_dir in dir_components or norm_target == clean_dir:
                 return True
 
-        if "/" not in rule and fnmatch.fnmatch(filename, rule):
+        if "/" not in rule_text and fnmatch.fnmatchcase(filename, rule_text):
             return True
 
-    return False
+        return False
+
+    for line in existing_content.splitlines():
+        raw_rule = line.strip()
+        if not raw_rule or raw_rule.startswith("#"):
+            continue
+
+        rule = raw_rule.replace("\\", "/")
+        if rule.startswith("!"):
+            neg_rule = rule[1:].strip()
+            if _rule_matches(neg_rule):
+                is_ignored = False
+        else:
+            if _rule_matches(rule):
+                is_ignored = True
+
+    return is_ignored
 
 
 def write_settings_subtree(

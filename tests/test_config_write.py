@@ -1380,6 +1380,20 @@ def test_ensure_gitignored_backup_sibling_covered_by_wildcard(tmp_path: Path) ->
     assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == "*.bak\n.claude/settings.local.json\n"
 
 
+def test_ensure_gitignored_appends_when_negation_line_overrides_wildcard(tmp_path: Path) -> None:
+    # Negation !settings.local.json re-includes file excluded by *.json, so it must still be appended
+    (tmp_path / ".gitignore").write_text("*.json\n!settings.local.json\n", encoding="utf-8")
+    cw.ensure_gitignored(tmp_path, "settings.local.json")
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == "*.json\n!settings.local.json\nsettings.local.json\n"
+
+
+def test_ensure_gitignored_case_sensitive_matching(tmp_path: Path) -> None:
+    # Gitignore matching is case-sensitive across platforms
+    (tmp_path / ".gitignore").write_text("*.BAK\n", encoding="utf-8")
+    cw.ensure_gitignored(tmp_path, ".claude/settings.local.json", ignore_backup_sibling=True)
+    assert ".claude/settings.local.json.bak\n" in (tmp_path / ".gitignore").read_text(encoding="utf-8")
+
+
 def test_project_local_settings_path() -> None:
     project_dir = Path("/repo/alpha")
     assert cw.project_local_settings_path(project_dir) == project_dir / ".claude" / (
