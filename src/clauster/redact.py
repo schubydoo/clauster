@@ -543,6 +543,20 @@ def redact_for_disk(text: str) -> str:
 _SCREEN_GLUED_ID_RE = re.compile(r"(env|session|cse)_01[A-Za-z0-9]{8,}\b")
 
 
+def _screen_spans(text: str) -> list[tuple[int, int, str]]:
+    """Return every redaction span for one rendered screen line.
+
+    The spans are the anchored id/secret masks (:data:`_MASKS`) plus the one unanchored
+    welded-id shape (:data:`_SCREEN_GLUED_ID_RE`). The caller unions them through
+    :func:`_apply_spans`. See :func:`_redact_screen_row` for why each mask stays anchored.
+    """
+    spans = [
+        (m.start(), m.end(), _REDACTED) for anchored, *_ in _MASKS for m in anchored.finditer(text)
+    ]
+    spans += [(m.start(), m.end(), _REDACTED) for m in _SCREEN_GLUED_ID_RE.finditer(text)]
+    return spans
+
+
 def _redact_screen_row(row: str) -> str:
     r"""Mask id/secret shapes in one pyte-rendered row, plus a real id welded onto a word.
 
@@ -581,13 +595,7 @@ def _redact_screen_row(row: str) -> str:
     halves into one matchable run the anchored pass catches.
     """
     while True:
-        spans = [
-            (m.start(), m.end(), _REDACTED)
-            for anchored, *_ in _MASKS
-            for m in anchored.finditer(row)
-        ]
-        spans += [(m.start(), m.end(), _REDACTED) for m in _SCREEN_GLUED_ID_RE.finditer(row)]
-        masked = _apply_spans(row, spans)
+        masked = _apply_spans(row, _screen_spans(row))
         if masked == row:
             return row
         row = masked
@@ -618,3 +626,83 @@ def redact_screen_text(rows: list[str]) -> list[str]:
     control; this only narrows the obvious-identifier surface a live screen exposes.
     """
     return [_redact_screen_row(row) for row in rows]
+
+
+def redact_wrapped_screen_rows(rows: list[str]) -> list[str]:
+    r"""Redact a hard-wrapped run of screen rows, returning one redacted row per input row.
+
+    pyte fills a hard-wrapped row edge-to-edge and continues the text on the next row, so a
+    token the wrap breaks becomes two fragments that neither row matches, and it reaches the
+    browser unmasked (#1487, safety invariant 4). Per-row redaction, on the other hand, masks
+    every WHOLE token a row holds -- including one welded at the row's own edge, because the
+    edge supplies the boundary -- so the only gap it leaves is the SPLIT token.
+
+    So this masks BOTH, but as TWO independent fixed points that meet only at render. A single
+    shared map would be order-dependent: a greedy joined match could mark a row-local token's head
+    before the round that would match it, and a covered cell never un-covers, so the tail would
+    leak. Instead:
+
+    * ``row_cov`` scans each row on its OWN edges to a fixed point, over a probe built from
+      ``row_cov`` alone. This reproduces :func:`_redact_screen_row` per row exactly, so by
+      construction it can never mask LESS than the per-row pass -- including a token welded at the
+      row's edge, and one a neighbour's mask exposes.
+    * ``join_cov`` scans the whole joined line to a fixed point, over a probe built from
+      ``join_cov`` alone. This is the SPLIT-token catch the wrap needs.
+
+    Each scan uses a LENGTH-PRESERVING probe (a masked cell reads as NUL: it matches no core and
+    gives its neighbours the ``\b`` a freshly-masked run exposes). Because neither map feeds the
+    other, neither can delete a boundary the other needs. Each row is then rendered from the UNION
+    of the two maps -- every masked run becomes ``<redacted>`` inside that row -- so a mask that
+    shortens or grows a row never shifts a NEIGHBOUR row, and the caller fits each returned row to
+    the fixed width.
+
+    A benign word the wrap splits so a fragment looks like a token (``resolve_`` on one row,
+    ``session_transcript`` on the next) is masked by ``row_cov``, exactly as it was before the
+    wrap-aware path existed. That is the safe direction: on this surface, not leaking beats
+    keeping a look-alike readable (safety invariant 4).
+    """
+    joined = "".join(rows)
+    n = len(joined)
+    bounds: list[tuple[int, int]] = []
+    offset = 0
+    for row in rows:
+        bounds.append((offset, offset + len(row)))
+        offset += len(row)
+
+    def fixed_point(ranges: list[tuple[int, int]]) -> bytearray:
+        # Iterate the screen scan over each range until nothing new is covered, marking a map fed
+        # ONLY by its own coverage, so no other scan can remove a boundary this one relies on. NUL
+        # stands in for a masked cell: it preserves length and matches no core, and gives its
+        # neighbours the `\b` a freshly-masked run exposes.
+        cov = bytearray(n)
+        while True:
+            probe = "".join("\x00" if cov[i] else ch for i, ch in enumerate(joined))
+            added = False
+            for lo, hi in ranges:
+                for s, e, _ in _screen_spans(probe[lo:hi]):
+                    s, e = lo + s, lo + e
+                    if cov.find(0, s, e) >= 0:
+                        cov[s:e] = b"\x01" * (e - s)
+                        added = True
+            if not added:
+                break
+        return cov
+
+    row_cov = fixed_point(bounds)  # each row on its own edges: reproduces the per-row pass exactly
+    join_cov = fixed_point([(0, n)])  # the whole joined line: catches a token the wrap SPLIT
+
+    out: list[str] = []
+    for lo, hi in bounds:
+        runs: list[tuple[int, int, str]] = []
+        i = lo
+        while i < hi:
+            if row_cov[i] or join_cov[i]:
+                j = i + 1
+                while j < hi and (row_cov[j] or join_cov[j]):
+                    j += 1
+                runs.append((i - lo, j - lo, _REDACTED))
+                i = j
+            else:
+                i += 1
+        out.append(_apply_spans(joined[lo:hi], runs))
+    return out
