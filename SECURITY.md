@@ -47,11 +47,14 @@ The threat model above is backed by controls you can inspect in
 
 - **Static + dependency analysis on every PR** — CodeQL, OSV-Scanner, and
   GitHub dependency review; secret scanning and Trivy image scanning run in the
-  security workflow. A fork PR is the one exception for CodeQL. The fork's own
-  run produces its CodeQL result, so that result is self-attested. The
-  `code_scanning` check is advisory for a fork, not a hard gate. Before merge, a
-  maintainer reads the fork's full diff, including any `.github/workflows/`
-  change. For an in-repo PR the check stays a real gate.
+  security workflow. A fork PR is the one exception for CodeQL. A `pull_request`
+  run executes the fork's own workflow copy. So the fork controls the uploaded
+  SARIF, and the CodeQL result is self-attested. The `code_scanning` rule is one
+  repo-wide rule with no fork carve-out, so it still blocks merge for a fork. But
+  a green check carries no security assurance for a fork, because the fork
+  attested the result. Before merge, a maintainer reads the fork's full diff,
+  including any `.github/workflows/` change. For an in-repo PR the check stays a
+  real gate.
 - **Continuous fuzzing** — ClusterFuzzLite runs the Atheris harnesses in
   [`fuzz/`](https://github.com/schubydoo/clauster/tree/main/fuzz) on PRs and on
   a schedule.
