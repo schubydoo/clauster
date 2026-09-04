@@ -1567,7 +1567,7 @@ def _is_gitignored_by_existing_rules(relative_path: str, existing_content: str) 
 
     is_ignored = False
 
-    def _rule_matches(rule_text: str) -> bool:
+    def _rule_matches(rule_text: str, *, negation: bool = False) -> bool:
         clean_rule = rule_text.lstrip("/")
         if clean_rule == norm_target:
             return True
@@ -1588,8 +1588,14 @@ def _is_gitignored_by_existing_rules(relative_path: str, existing_content: str) 
         if "/" not in rule_text and fnmatch.fnmatchcase(filename, rule_text):
             return True
 
-        # Path-based wildcard (contains slash, e.g. .claude/*.json, **/settings.local.json)
-        if "/" in rule_text:
+        # Path-based wildcard (contains a slash, e.g. .claude/*.json, **/settings.local.json).
+        # Only trust it for a NEGATION. `fnmatch` drops git's leading-slash anchor and its `*`
+        # crosses `/`, so a POSITIVE slash-wildcard can report coverage git does not give -- e.g.
+        # `/*.json` is root-only in git, but `fnmatch` matches `.claude/settings.local.json` --
+        # which would wrongly SKIP the append and leave a secret-bearing file tracked (#1484). A
+        # negation match only CLEARS `is_ignored`, so over-matching there just appends, the safe
+        # direction; a positive slash-wildcard over-appends instead, which is also safe.
+        if negation and "/" in rule_text:
             if fnmatch.fnmatchcase(norm_target, clean_rule):
                 return True
             if clean_rule.startswith("**/"):
@@ -1609,7 +1615,7 @@ def _is_gitignored_by_existing_rules(relative_path: str, existing_content: str) 
         rule = raw_rule.replace("\\", "/")
         if rule.startswith("!"):
             neg_rule = rule[1:].strip()
-            if _rule_matches(neg_rule):
+            if _rule_matches(neg_rule, negation=True):
                 is_ignored = False
         else:
             if _rule_matches(rule):
