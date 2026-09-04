@@ -1338,6 +1338,48 @@ def test_ensure_gitignored_adds_only_missing_backup_sibling(tmp_path: Path) -> N
     assert text == ".claude/settings.local.json\n.claude/settings.local.json.bak\n"
 
 
+def test_ensure_gitignored_noop_when_root_anchored_ancestor_rule_present(tmp_path: Path) -> None:
+    # #1484: /.claude covers .claude/settings.local.json and its .bak sibling
+    (tmp_path / ".gitignore").write_text("/.claude\n", encoding="utf-8")
+    cw.ensure_gitignored(tmp_path, ".claude/settings.local.json", ignore_backup_sibling=True)
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == "/.claude\n"
+
+
+def test_ensure_gitignored_noop_when_trailing_slash_ancestor_rule_present(tmp_path: Path) -> None:
+    # #1484: .claude/ covers all files under .claude/
+    (tmp_path / ".gitignore").write_text(".claude/\n", encoding="utf-8")
+    cw.ensure_gitignored(tmp_path, ".claude/settings.local.json", ignore_backup_sibling=True)
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == ".claude/\n"
+
+
+def test_ensure_gitignored_noop_when_bare_ancestor_rule_present(tmp_path: Path) -> None:
+    # #1484: .claude covers all files under .claude
+    (tmp_path / ".gitignore").write_text(".claude\n", encoding="utf-8")
+    cw.ensure_gitignored(tmp_path, ".claude/settings.local.json", ignore_backup_sibling=True)
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == ".claude\n"
+
+
+def test_ensure_gitignored_noop_when_nested_ancestor_directory_rule_present(tmp_path: Path) -> None:
+    # #1484: a/b/ covers nested paths like a/b/c/local.json
+    (tmp_path / ".gitignore").write_text("a/b/\n", encoding="utf-8")
+    cw.ensure_gitignored(tmp_path, "a/b/c/local.json")
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == "a/b/\n"
+
+
+def test_ensure_gitignored_appends_uncovered_path_even_if_unrelated_rule_present(tmp_path: Path) -> None:
+    # A rule that merely shares a prefix like .claude-other does not cover .claude
+    (tmp_path / ".gitignore").write_text(".claude-other/\n", encoding="utf-8")
+    cw.ensure_gitignored(tmp_path, ".claude/settings.local.json")
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == ".claude-other/\n.claude/settings.local.json\n"
+
+
+def test_ensure_gitignored_backup_sibling_covered_by_wildcard(tmp_path: Path) -> None:
+    # *.bak covers the sibling, so only the file itself is appended
+    (tmp_path / ".gitignore").write_text("*.bak\n", encoding="utf-8")
+    cw.ensure_gitignored(tmp_path, ".claude/settings.local.json", ignore_backup_sibling=True)
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == "*.bak\n.claude/settings.local.json\n"
+
+
 def test_project_local_settings_path() -> None:
     project_dir = Path("/repo/alpha")
     assert cw.project_local_settings_path(project_dir) == project_dir / ".claude" / (

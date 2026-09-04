@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import contextvars
 import datetime
+import fnmatch
 import hashlib
 import json
 import math
@@ -1517,24 +1518,22 @@ def ensure_gitignored(
     (``CLAUDE.local.md`` is replaced without one) leave this off, so no phantom
     ``.bak`` entry is added for a file that never exists.
 
-    Idempotent: an entry already present as an exact line (surrounding whitespace
-    ignored) is left untouched — no duplicate append, and the existing content is
-    never rewritten or reordered (only ever appended to). A missing ``.gitignore`` is
-    created. This is deliberately a simple exact-line check, not a full
-    gitignore-pattern matcher — good enough for the fixed, known entries this surface
-    writes, and conservative (a near-duplicate pattern is harmless, just untidy, never
-    unsafe).
+    Idempotent: an entry already covered by an existing rule or exact line
+    (surrounding whitespace ignored) is left untouched — no redundant append, and
+    the existing content is never rewritten or reordered (only ever appended to).
+    A missing ``.gitignore`` is created. An ancestor directory rule (e.g. ``/.claude``,
+    ``.claude/``, ``.claude``, or ``foo/``) or an exact match skips the append as a
+    no-op (#1484).
     """
     gitignore = project_dir / ".gitignore"
     try:
         existing = gitignore.read_text(encoding="utf-8")
     except FileNotFoundError:
         existing = ""
-    present = {line.strip() for line in existing.splitlines()}
     wanted = [relative_path]
     if ignore_backup_sibling:
         wanted.append(relative_path + ".bak")
-    missing = [entry for entry in wanted if entry not in present]
+    missing = [entry for entry in wanted if not _is_gitignored_by_existing_rules(entry, existing)]
     if not missing:
         return
     with gitignore.open("a", encoding="utf-8") as fh:
@@ -1542,6 +1541,60 @@ def ensure_gitignored(
             fh.write("\n")
         for entry in missing:
             fh.write(entry + "\n")
+
+
+def _is_gitignored_by_existing_rules(relative_path: str, existing_content: str) -> bool:
+    """Check whether ``relative_path`` is already covered by a rule in ``existing_content``.
+
+    Recognizes:
+    - Exact line matches (with or without a leading slash, surrounding whitespace ignored).
+    - Ancestor directory rules (e.g. ``/.claude``, ``.claude/``, ``.claude``, ``foo/``, ``a/b/``).
+    - Basename wildcards (e.g. ``*.bak``).
+    """
+    norm_target = relative_path.replace("\\", "/").strip().lstrip("/")
+    if not norm_target:
+        return False
+
+    parts = norm_target.split("/")
+    filename = parts[-1]
+    ancestors = ["/".join(parts[:i]) for i in range(1, len(parts))]
+    dir_components = set(parts[:-1])
+
+    for line in existing_content.splitlines():
+        rule = line.strip()
+        if not rule or rule.startswith("#") or rule.startswith("!"):
+            continue
+
+        rule = rule.replace("\\", "/")
+
+        clean_rule = rule.lstrip("/")
+        if clean_rule == norm_target:
+            return True
+
+        clean_dir = rule.rstrip("/")
+        if rule.startswith("/"):
+            anchored_dir = rule[1:].rstrip("/")
+            if (
+                anchored_dir in ancestors
+                or norm_target == anchored_dir
+                or norm_target.startswith(anchored_dir + "/")
+            ):
+                return True
+        elif "/" in clean_dir:
+            if (
+                clean_dir in ancestors
+                or norm_target == clean_dir
+                or norm_target.startswith(clean_dir + "/")
+            ):
+                return True
+        else:
+            if clean_dir in dir_components or norm_target == clean_dir:
+                return True
+
+        if "/" not in rule and fnmatch.fnmatch(filename, rule):
+            return True
+
+    return False
 
 
 def write_settings_subtree(
