@@ -64,6 +64,8 @@ jobs:
         uses: $/.github/actions/changed-code
 
   codeql:
+    # codeql-fork-upload.yml matches this job by name PREFIX ("codeql analyze") to read
+    # its conclusion; a rename there fails that consumer closed (loud), not silently.
     name: codeql analyze
     # ALWAYS run — never gate on the docs-only classifier. The `main` ruleset has
     # a `code_scanning` rule requiring the CodeQL tool to have results; GitHub's
@@ -225,6 +227,58 @@ jobs:
           if [ "$found" = 0 ]; then
             echo "::warning title=CodeQL SARIF::no SARIF in $SARIF_DIR; nothing uploaded."
           fi
+      - name: Save fork CodeQL SARIF artifact
+        # FORK PR ONLY. The same-repo upload above is skipped for a fork (a fork's
+        # job token cannot write code scanning results), so publish the
+        # post-processed SARIF as an artifact instead. codeql-fork-upload.yml — a
+        # `workflow_run` workflow running in the BASE-repo context with the
+        # clauster-ci App token — downloads it and binds it to the PR's stable HEAD
+        # SHA via the public `code-scanning/sarifs` endpoint, so the `code_scanning`
+        # merge rule stops re-sticking as `main` moves and churns `refs/pull/N/merge`
+        # (#1498). This job runs on `refs/pull/N/merge` for a fork with a read-only
+        # GITHUB_TOKEN and no App secrets, so it CANNOT upload here; the consumer
+        # does. No PR metadata is written into the artifact: the consumer derives the
+        # PR number from the trusted `workflow_run.head_sha`, never from this
+        # (fork-influenced) artifact. Single-language (python) matrix, so the fixed
+        # artifact name cannot collide; add `-${{ matrix.language }}` if it grows.
+        if: >-
+          ${{ always()
+          && github.event_name == 'pull_request'
+          && github.event.pull_request.head.repo.full_name != github.repository }}
+        # Keep an artifact-service hiccup off the required `codeql` job result so a 5xx
+        # cannot red the job directly. This is NOT a silent fail-open: a fork PR has NO
+        # merge-ref analysis to fall back on. The `Upload CodeQL SARIF` step above is
+        # same-repo only, `analyze` runs `upload: never`, and codeql.yml is `on: push`,
+        # which a fork never fires here — so a broken upload leaves ZERO code-scanning
+        # results and a BLOCKED PR. The consumer (codeql-fork-upload.yml) therefore reads
+        # this job's conclusion and FAILS CLOSED when the artifact is absent yet codeql
+        # analyze concluded success, surfacing the broken producer instead of hiding it
+        # (AGENTS.md invariant 1). Dropping continue-on-error here would trade that split
+        # for a required check that reds on a transient hiccup, so the split lives in the
+        # consumer. This step only ADDS head-SHA coverage; it must not block.
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codeql-fork-sarif
+          # EXACT FILE, not a `*.sarif` glob. `post-processed-sarif-path` is not cleared
+          # before analysis and lives under the fork's checkout, so a fork PR could commit
+          # `codeql-sarif-processed/zz.sarif` and ship a SECOND file the consumer would
+          # then post (issue 1500). CodeQL always writes its post-processed output to the
+          # fixed name `upload.sarif` (verified from a live run) AFTER checkout, overwriting
+          # any committed file at that name, so pinning the path removes the ACCIDENTAL
+          # multi-file path. It does not make the file trustworthy: a `pull_request` run
+          # executes the fork's own workflow, so a fork that rewrites this workflow can still
+          # control what `upload.sarif` holds — which is why the `code_scanning` gate is
+          # ADVISORY for forks (see the codeql-fork-upload.yml header). The consumer
+          # additionally refuses an artifact holding more than one SARIF (AGENTS.md invariant 3).
+          path: codeql-sarif-processed/upload.sarif
+          # `error`, not `warn`: a broken producer (a github/codeql-action bump moving the
+          # output off this pinned path) then reds a visible annotation in the fork PR's own
+          # checks. `continue-on-error: true` above still keeps the `codeql` job green, so the
+          # required check and merge gate are unchanged — this only ADDS a second signal
+          # alongside the consumer's fail-closed conclusion read.
+          if-no-files-found: error
+          retention-days: 1
 
   gitleaks:
     name: secret scan
