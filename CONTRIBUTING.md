@@ -55,7 +55,11 @@ the CI coverage-gate interpreter (`uv` still supports the full 3.11+ floor).
 - **Security checks** — nothing extra to run locally: Bandit-style SAST is ruff's
   `S` rules, already covered by the `ruff check .` above. CI additionally runs
   CodeQL, Trivy (filesystem + image), dependency review, and a workflow audit
-  (zizmor).
+  (zizmor). For a fork PR the CodeQL result is self-attested. The fork's own run
+  produces it, so the `code_scanning` check is advisory for a fork. A green check
+  does not shorten review. A maintainer reads the fork's full diff, including any
+  `.github/workflows/` change, before merge. For an in-repo PR the check stays a
+  real gate.
 - **Conventional Commits** — your PR **title** must follow
   [Conventional Commits](https://www.conventionalcommits.org/)
   (`feat:`, `fix:`, `docs:`, `chore:`, `ci:`, …). PRs are squash-merged, so the
