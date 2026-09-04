@@ -184,7 +184,7 @@ The branch ruleset enforces this; CI and review are the merge gate.
 | Gate | Detail |
 | --- | --- |
 | CI, all three OSes | Linux, macOS, Windows |
-| CodeQL / code scanning | A real gate for an in-repo PR. For a fork PR the result is self-attested and advisory. The fork's own `pull_request` run produces the SARIF, so a green `code_scanning` check carries no assurance for a fork. A maintainer reads the fork's full diff, including any `.github/workflows/` change, before merge. See `.github/workflows/codeql-fork-upload.yml`. |
+| CodeQL / code scanning | A real gate for an in-repo PR. For a fork PR the rule still blocks merge (a fork is not exempt), but the result is self-attested: the fork's own `pull_request` run produces the SARIF, so a green `code_scanning` check carries no assurance for a fork. A maintainer reads the fork's full diff, including any `.github/workflows/` change, before merge. See `.github/workflows/codeql-fork-upload.yml`. |
 | Coverage | ≥96% total (pytest `--cov-fail-under`). Codecov additionally flags patch coverage below 95% on changed lines — an advisory red X, not merge-blocking, but fix uncovered new lines rather than merging past it. |
 | `ruff check` + `ruff format` | 99 cols, docstrings required |
 | Type check + docs lint | `just check` runs everything locally |
