@@ -2155,9 +2155,13 @@ Clauster's own bridge prints the real identifier and an injected escape only
 deletes the boundary. This bounded scope is for the streamed log and the
 on-disk mirror. A terminal has already discarded the escape on the live
 pty-screen view. So that view also masks a real identifier (the <code>01</code> shape)
-welded onto the word before it, and an id welded to another id. An ordinary
-compound name such as <code>resolve_session_transcript</code> stays readable. A welded
-secret, and a welded id without the <code>01</code> shape, stay visible there.</p>
+welded onto the word before it, and an id welded to another id. It also masks
+a UUID that a greedy id or secret token welded onto. A <code>ghp_</code> or
+<code>github_pat_</code> token has no separator, so it eats the UUID's leading hex
+digits. An ordinary compound name such as <code>resolve_session_transcript</code> stays
+readable. A welded secret, and a welded id without the <code>01</code> shape, stay
+visible there. The fixed-length <code>AKIA…</code> key stays visible together with the
+UUID it welds to, because it cannot backtrack.</p>
 </div>
 <h3 id="hybrid-by-default">Hybrid by default<a class="headerlink" href="#hybrid-by-default" title="Permanent link">&para;</a></h3>
 <p>Redaction is <strong>hybrid</strong> by default: the on-disk log keeps IDs verbatim (for local
