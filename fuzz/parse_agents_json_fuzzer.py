@@ -4,8 +4,9 @@
 subprocess — third-party CLI output whose shape is Anthropic-controlled and
 version-dependent, i.e. genuinely external bytes. It stays strict on malformed
 JSON: it raises ``json.JSONDecodeError`` (its documented fail-closed contract),
-which now also wraps the ``RecursionError`` CPython's recursive scanner raises on a
-deeply-nested payload, so the only expected parse-failure is ``JSONDecodeError``
+which also wraps the ``RecursionError`` the recursive scanner raises on a deeply-nested
+payload on every supported interpreter, so the only expected parse-failure is
+``JSONDecodeError``
 (caught here). The per-item ``KeyError``/``TypeError``/``ValueError`` are swallowed
 inside the loop, so any OTHER exception that escapes is a real bug.
 """

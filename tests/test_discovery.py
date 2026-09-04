@@ -108,9 +108,11 @@ def test_load_trusted_paths_non_utf8_returns_empty(tmp_path):
 
 def test_load_trusted_paths_non_dict_json_returns_empty(tmp_path):
     # A valid-JSON-but-non-dict top level (`[]`, `"x"`, `5`) has no `.get`, and a
-    # deeply-nested doc raises RecursionError before json can raise JSONDecodeError;
-    # both must degrade to "nothing trusted" like any other malformed claude.json
-    # (the #122 never-raise contract) instead of raising AttributeError/RecursionError.
+    # deeply-nested doc raises RecursionError before json returns a value on every
+    # supported interpreter (the message changed from "maximum recursion depth exceeded"
+    # on <=3.13 to "Stack overflow" on 3.14+, but not the type); both must degrade to
+    # "nothing trusted" like any other malformed claude.json (the #122 never-raise
+    # contract) instead of raising AttributeError/RecursionError.
     from clauster.discovery import _load_trusted_paths
 
     claude_json = tmp_path / ".claude.json"

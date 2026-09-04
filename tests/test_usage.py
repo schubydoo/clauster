@@ -203,8 +203,10 @@ def test_parse_tolerates_non_dict_and_deeply_nested_records(tmp_path):
     #  - valid JSON that is not an object (`5`, `null`, `[1,2]`) has no `.get`, so the
     #    unguarded `record.get("message")` raised AttributeError;
     #  - a deeply-nested line overflows CPython's recursive JSON scanner, which raises
-    #    RecursionError *before* json can raise JSONDecodeError — and RecursionError is
-    #    not a ValueError, so it sailed past the `except json.JSONDecodeError`.
+    #    RecursionError on every supported interpreter (the message changed from "maximum
+    #    recursion depth exceeded" on <=3.13 to "Stack overflow" on 3.14+, but not the
+    #    type) — and RecursionError is not a ValueError, so it sailed past the
+    #    `except json.JSONDecodeError`.
     # Either one 500'd the usage endpoint for the whole project. Both must now skip,
     # and the good line after them must still be tallied (the walk is not aborted).
     p = tmp_path / "t.jsonl"
@@ -217,9 +219,10 @@ def test_parse_tolerates_non_dict_and_deeply_nested_records(tmp_path):
 
 def test_line_to_turn_tolerates_deeply_nested_json():
     # `_line_to_turn` documents "Never raises on a malformed line", and it already
-    # guards the non-dict case — but a deeply-nested line raised RecursionError out of
-    # json.loads, which is not a ValueError and so escaped the JSONDecodeError handler,
-    # breaking the transcript viewer and its live tail. It must skip like any other
+    # guards the non-dict case — but a deeply-nested line raises RecursionError out of
+    # json.loads on every supported interpreter, which is not a ValueError and so escapes
+    # the JSONDecodeError handler, breaking the transcript viewer and its live tail. It
+    # must skip like any other
     # corrupt line, and a well-formed line must still parse.
     from clauster.usage import _line_to_turn
 
@@ -433,8 +436,9 @@ def test_recorded_cwd_gives_up_past_the_line_bound(short_tmp_root):
 
 
 def test_recorded_cwd_tolerates_deeply_nested_json(short_tmp_root):
-    # A deeply-nested line raised RecursionError out of json.loads — not a ValueError, so
-    # it escaped both handlers here. `_recorded_cwd` backs `_transcript_is_owned`, reached
+    # A deeply-nested line raises RecursionError out of json.loads on every supported
+    # interpreter — not a ValueError, so it escapes both handlers here. `_recorded_cwd`
+    # backs `_transcript_is_owned`, reached
     # from the usage tally and the transcript viewer, and `app._list` catches only OSError:
     # one hostile line 500'd those surfaces (issue 1341). The line must be skipped like any
     # other corrupt one, and a later record must still be found.
@@ -1235,9 +1239,10 @@ def test_is_subagent_transcript_ignores_malformed_and_non_dict_records(tmp_path)
 
 
 def test_is_subagent_transcript_tolerates_deeply_nested_json(tmp_path):
-    # Same escape as `_recorded_cwd` (issue 1341): a deeply-nested line raised
-    # RecursionError out of json.loads, which is not a ValueError, so it escaped the
-    # JSONDecodeError handler and 500'd the transcript listing instead of being skipped
+    # Same escape as `_recorded_cwd` (issue 1341): a deeply-nested line raises
+    # RecursionError out of json.loads on every supported interpreter, which is not a
+    # ValueError, so it escaped the JSONDecodeError handler and 500'd the transcript
+    # listing instead of being skipped
     # as the docstring promises. Skipping preserves the documented bias — the remaining
     # records still decide, and a file that is nothing but junk reads as a conversation.
     from clauster.usage import _is_subagent_transcript

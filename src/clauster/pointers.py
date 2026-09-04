@@ -64,8 +64,10 @@ def load_pointer(path: Path) -> BridgePointer | None:
         # syntax, and a *bare* ValueError from the base-10 integer-string-conversion
         # limit (CVE-2020-10735), on by default for a >4300-digit int literal on every
         # supported interpreter (>=3.11). RecursionError is neither a ValueError nor an
-        # OSError: CPython's recursive scanner overflows on deeply-nested JSON before
-        # json can raise JSONDecodeError, so it used to escape and propagate out of the
+        # OSError: the recursive scanner overflows on deeply-nested JSON and raises
+        # RecursionError on every supported interpreter (the message changed from "maximum
+        # recursion depth exceeded" on <=3.13 to "Stack overflow" on 3.14+, but not the
+        # type), so without this arm it escapes and propagates out of the
         # documented malformed -> None contract. `usage` catches the same
         # (JSONDecodeError, ValueError, RecursionError) trio at all four of its
         # json.loads sites (PR 1372); OSError is this seam's own, because the read

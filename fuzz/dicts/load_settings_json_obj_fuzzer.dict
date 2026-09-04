@@ -59,6 +59,6 @@
 "\xf0\x9f"
 "\xff\xfe"
 
-# deep nesting, the RecursionError path the decoder takes before JSONDecodeError
+# deep nesting: the RecursionError path the decoder takes on every supported interpreter
 "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[["
 "{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":"

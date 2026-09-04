@@ -37,8 +37,8 @@ def test_non_utf8_file_tolerated(tmp_path):
 
 # A parse failure that is not a JSONDecodeError. Both used to escape KeyedJsonStore.load
 # and propagate out of a startup read, taking the app down instead of degrading to {}.
-# (CPython 3.14.7+ bounds the JSON scanner's depth itself and raises JSONDecodeError for
-# the nested one -- see the control below. Either way it reaches the same handler.)
+# (The deeply-nested one raises RecursionError -- not a ValueError -- on every supported
+# interpreter; the oversized int raises a bare ValueError. Both reach the same handler.)
 _HOSTILE = [
     pytest.param("[" * 100_000, id="deeply-nested"),
     pytest.param("1" * 5000, id="oversized-int-literal"),
@@ -63,20 +63,21 @@ def test_oversized_int_literal_is_a_bare_value_error():
 
 
 def test_deeply_nested_json_raises_before_it_can_be_parsed():
-    # The other positive control, and which exception it is depends on the interpreter:
-    # before CPython 3.14.7 the recursive scanner overflowed with RecursionError -- not a
-    # ValueError, which is exactly how it escaped the old handler -- while 3.14.7+ bounds
-    # the depth itself and raises JSONDecodeError (PR 1408 hit the same split). The
-    # handler catches both, so the parametrized cases reach it on every supported
-    # interpreter; the test below pins the RecursionError arm independently of this one.
+    # The other positive control: the deeply-nested input raises before json returns a
+    # value, so it never degrades at the isinstance check. On every supported interpreter
+    # tested that is RecursionError -- not a ValueError, which is exactly how it escaped the
+    # old handler -- but the raises tuple also accepts JSONDecodeError defensively, so this
+    # control never fails if an interpreter reports the overflow as a decode error. The test
+    # below pins the RecursionError arm independently of this one.
     with pytest.raises((RecursionError, json.JSONDecodeError)):
         json.loads("[" * 100_000)
 
 
 def test_recursion_error_degrades_on_any_interpreter(tmp_path, caplog, monkeypatch):
-    # Pins the RecursionError half of the handler directly: on 3.14.7+ no real input
-    # reaches it any more, and it stays load-bearing for an interpreter without the
-    # bounded C scanner. Coverage cannot catch its loss -- the tuple is one line.
+    # Pins the RecursionError half of the handler directly, independent of the scanner's
+    # exact error text: the deeply-nested input raises RecursionError on every supported
+    # interpreter, and this arm is load-bearing. Coverage cannot catch its loss -- the
+    # tuple is one line.
     (tmp_path / "state.json").write_text("{}", encoding="utf-8")
 
     def _overflow(_text):

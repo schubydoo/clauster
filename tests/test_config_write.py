@@ -213,13 +213,15 @@ def test_load_settings_json_obj_rejects_non_object(raw: bytes) -> None:
 def test_load_settings_json_obj_rejects_deeply_nested_json() -> None:
     # The contract is InvalidCandidateError only (the caller maps it to 422: "we will
     # not overwrite a file we could not parse"). A deeply-nested settings file — which
-    # can arrive with a cloned repository — raised RecursionError out of CPython's
-    # recursive JSON scanner (before 3.14.7) before json could raise JSONDecodeError,
-    # and RecursionError is not a ValueError, so it escaped the handler and left this
-    # code-executing write tier raising outside its contract. It must fail closed as a
-    # structural error. CPython 3.14.7+ bounds the scanner's depth itself and raises
-    # JSONDecodeError for the same input, so the message differs by interpreter; the
-    # contract (the exception type) is what the test pins, and both branches map to it.
+    # can arrive with a cloned repository — raises RecursionError out of CPython's
+    # recursive JSON scanner on every supported interpreter (the scanner's message
+    # changed from "maximum recursion depth exceeded" on <=3.13 to "Stack overflow" on
+    # 3.14+, but not the type), and RecursionError is not a ValueError, so without the
+    # handler's arm it escapes and leaves this code-executing write tier raising outside
+    # its contract. It must fail closed as a structural error. The type the test pins is
+    # InvalidCandidateError; the RecursionError arm maps this input to the fixed "nested
+    # too deeply to parse" message, so "too deeply" is what matches. The "|not valid JSON"
+    # alternative is a defensive allowance, not an asserted behavior.
     with pytest.raises(cw.InvalidCandidateError, match="too deeply|not valid JSON"):
         cw.load_settings_json_obj(b"[" * 100_000)
 
@@ -227,9 +229,9 @@ def test_load_settings_json_obj_rejects_deeply_nested_json() -> None:
 def test_load_settings_json_obj_rejects_recursion_overflow_on_any_interpreter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Pins the RecursionError handler directly, independent of which CPython runs the
-    # suite: on 3.14.7+ the real deep-nesting input above no longer reaches it, and the
-    # handler still matters for an interpreter without the C scanner.
+    # Pins the RecursionError handler directly, independent of the scanner's exact error
+    # text: the real deep-nesting input above raises RecursionError on every supported
+    # interpreter, and this arm is what maps it to the structural contract.
     def _overflow(_text: str) -> None:
         raise RecursionError("maximum recursion depth exceeded")
 

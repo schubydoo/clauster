@@ -141,10 +141,11 @@ class KeyedJsonStore:
             # base-10 integer-string-conversion limit (CVE-2020-10735), on by default
             # for a >4300-digit int literal on every supported interpreter (>=3.11), and
             # RecursionError, which is not a ValueError at all — CPython's recursive
-            # scanner overflows on deeply-nested JSON before json can raise (3.14.7+
-            # bounds the depth itself and raises JSONDecodeError instead). Both used to
-            # escape and propagate; this store is read at startup, so that took the app
-            # down instead of degrading. `pointers.load_pointer` and `usage` catch the
+            # scanner overflows on deeply-nested JSON and raises RecursionError on every
+            # supported interpreter (the message changed from "maximum recursion depth
+            # exceeded" on <=3.13 to "Stack overflow" on 3.14+, but not the type). Both
+            # used to escape and propagate; this store is read at startup, so that took the
+            # app down instead of degrading. `pointers.load_pointer` and `usage` catch the
             # same pair. No `OSError` here: the read is its own try above.
             raise CorruptStateFile(_describe(exc)) from exc
         if not isinstance(data, dict):
