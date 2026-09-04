@@ -1,12 +1,13 @@
 name: Binary dep pins
 
-# Verify each managed-binary pin in deps.py (BINARY_DEPS, e.g. Shawl) still matches
-# GitHub's published release-asset sha256 digest (#934). Renovate bumps the version +
-# derived URL but CANNOT rewrite the source-pinned checksum (its github-releases digest
-# is the git-tag commit, not the asset file hash), so this catches a bumped-but-stale hash.
+# Verify each pinned release-asset sha256 still matches GitHub's published digest (#934):
+# the managed-binary pins in deps.py (BINARY_DEPS, e.g. Shawl) AND the version+sha256 pairs
+# the osv-scanner / actionlint workflows download inline. Renovate bumps the version but
+# CANNOT rewrite the source-pinned checksum (its github-releases digest is the git-tag commit,
+# not the asset file hash), so this catches a bumped-but-stale hash in either source.
 #
-# Path-filtered on purpose: it runs ONLY when deps.py (or the check script) changes, so it
-# never touches an unrelated PR — which also lets it be STRICT (a fetch error or a mismatch
+# Path-filtered on purpose: it runs ONLY when a pinned file (or the check script) changes, so
+# it never touches an unrelated PR — which also lets it be STRICT (a fetch error or a mismatch
 # fails) without a GitHub API hiccup ever blocking someone else's merge. It is deliberately
 # NOT a required status check: a required + path-filtered check leaves every PR that doesn't
 # touch these paths stuck "waiting" for a status that never posts.
@@ -19,11 +20,15 @@ on:
     paths:
       - "src/clauster/deps.py"
       - "scripts/check_binary_dep_pins.py"
+      - ".github/workflows/osv-scanner.yml"
+      - ".github/workflows/actionlint.yml"
   push:
     branches: [main]
     paths:
       - "src/clauster/deps.py"
       - "scripts/check_binary_dep_pins.py"
+      - ".github/workflows/osv-scanner.yml"
+      - ".github/workflows/actionlint.yml"
 
 permissions:
   contents: read
