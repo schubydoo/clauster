@@ -812,6 +812,24 @@ def test_frame_masks_a_uuid_whose_head_a_joined_greedy_match_would_cover():
     assert "123456789abc" not in joined
 
 
+def test_frame_masks_a_uuid_a_greedy_secret_ate_and_the_wrap_split():
+    # #1496 on the wrap path, driven through the real `frame()` surface (unlike the direct
+    # `redact_wrapped_screen_rows` unit case in `tests/test_redact.py`). A greedy `ghp_` eats the
+    # UUID's leading hex group and, with NO trailing id to anchor on (unlike
+    # `test_frame_masks_a_uuid_whose_head_a_joined_greedy_match_would_cover`), the middle
+    # `-1234-...` used to leak. Here pyte hard-wraps the UUID mid-token, so this exercises
+    # `_redact_display`'s wrap grouping, `redact_wrapped_screen_rows`, and `_fit_redacted_row`.
+    scr = PtyScreen(cols=80, rows=10)
+    # 48 pad + space + `ghp_` + 16 B + the UUID = 80 cells before the UUID's tail, so the token
+    # hard-wraps inside the UUID onto row1 with no trailing id to anchor on.
+    raw = "A" * 48 + " ghp_" + "B" * 16 + "12345678-1234-1234-1234-123456789abc"
+    scr.feed(raw.encode())
+    joined = "".join(scr.frame()["rows"])
+    assert "-1234-" not in joined  # no fragment of the UUID survives on either row
+    assert "123456789abc" not in joined
+    assert "<redacted>" in joined
+
+
 def test_frame_masks_a_wrapped_look_alike_the_safe_direction():
     # #1487 review, finding 1 tradeoff. When `resolve_session_transcript` wraps so a row starts
     # with `session_transcript`, the per-row pass masks that fragment. It is a benign word, so
