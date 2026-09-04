@@ -256,9 +256,12 @@ jobs:
           # `codeql-sarif-processed/zz.sarif` and ship a SECOND file the consumer would
           # then post (issue 1500). CodeQL always writes its post-processed output to the
           # fixed name `upload.sarif` (verified from a live run) AFTER checkout, overwriting
-          # any committed file at that name, so pinning the path to `upload.sarif` uploads
-          # only CodeQL's own analysis. The consumer additionally refuses an artifact that
-          # holds more than one SARIF (codeql-fork-upload.yml, AGENTS.md invariant 3).
+          # any committed file at that name, so pinning the path removes the ACCIDENTAL
+          # multi-file path. It does not make the file trustworthy: a `pull_request` run
+          # executes the fork's own workflow, so a fork that rewrites this workflow can still
+          # control what `upload.sarif` holds — which is why the `code_scanning` gate is
+          # ADVISORY for forks (see the codeql-fork-upload.yml header). The consumer
+          # additionally refuses an artifact holding more than one SARIF (AGENTS.md invariant 3).
           path: codeql-sarif-processed/upload.sarif
           if-no-files-found: warn
           retention-days: 1
