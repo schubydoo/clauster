@@ -2254,12 +2254,12 @@ file is imported into <code>clauster.db</code> once on first boot and renamed
 <code>state.json.imported</code>. It is never read or written again, so moving it aside
 does nothing.</p>
 <p>A damaged legacy file no longer stops that boot. Two shapes used to crash it:
-deeply-nested JSON (on interpreters before CPython 3.14.7), and an integer
-literal of more than 4300 digits. Three more always degraded, and degraded in
-silence: bytes that are not UTF-8 at all, malformed JSON syntax, and JSON that
-parses but is not an object or whose record map is not one. All five now import
-no records, log a warning naming the failure, and leave a one-time byte-exact
-copy beside the file as <code>state.json.corrupt.bak</code>. The original is still renamed
+deeply-nested JSON, and an integer literal of more than 4300 digits. Three
+more always degraded, and degraded in silence: bytes that are not UTF-8 at
+all, malformed JSON syntax, and JSON that parses but is not an object or whose
+record map is not one. All five now import no records, log a warning naming
+the failure, and leave a one-time byte-exact copy beside the file as
+<code>state.json.corrupt.bak</code>. The original is still renamed
 <code>state.json.imported</code>. Only a file Clauster cannot <em>read</em> at all (permissions,
 IO) is logged without a copy, because there is nothing to copy. The same applies
 to <code>hosted_state.json</code>, which keeps its own <code>hosted_state.json.corrupt.bak</code>.</p>
