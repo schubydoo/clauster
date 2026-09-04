@@ -542,8 +542,8 @@ def redact_for_disk(text: str) -> str:
 #: caught, and (see :func:`_redact_screen_row`) neither is a welded secret.
 _SCREEN_GLUED_ID_RE = re.compile(r"(env|session|cse)_01[A-Za-z0-9]{8,}\b")
 
-#: The UUID shape with NO ``\b`` on either end, for finding a UUID a greedy secret core welded
-#: onto itself (#1496). Reused from the UUID mask's cut-supplied (core-alone) variant rather than
+#: The UUID shape with NO ``\b`` on either end, for finding a UUID that a greedy core welded
+#: onto (#1496). Reused from the UUID mask's cut-supplied (core-alone) variant rather than
 #: recompiled, so it stays inside the anti-drift guard
 #: (:func:`test_cut_masks_cannot_drift_from_the_anchored_ones`) instead of becoming a fourth
 #: independent compile of the same core. See :func:`_screen_welded_uuid_spans`.
@@ -551,22 +551,23 @@ _UUID_CORE_RE = _MASKS[1][1]
 
 
 def _screen_welded_uuid_spans(
-    text: str, secret_spans: list[tuple[int, int]]
+    text: str, greedy_spans: list[tuple[int, int]]
 ) -> list[tuple[int, int, str]]:
-    r"""Mask a UUID whose leading hex group a greedy secret core consumed (#1496).
+    r"""Mask a UUID whose leading hex group a greedy core consumed (#1496).
 
-    A greedy secret core such as ``ghp_[A-Za-z0-9]{16,}`` or ``github_pat_[A-Za-z0-9_]{20,}``
-    runs over a class that INCLUDES the UUID's leading ``[0-9a-fA-F]{8}`` group but NOT the
-    ``-`` that separates it, so welded with no separator (``ghp_<16 hex chars>12345678-...``)
-    it eats that first group and stops at the ``-``. The anchored ``_UUID_RE`` needs eight
-    leading hex digits behind a ``\b``, and neither is left, so it never matches and the middle
-    ``-1234-...`` reaches the browser. The secret itself still masks (it stays anchored -- the
-    residue policy the issue keeps intact); this only adds the UUID the secret's greedy match
-    would otherwise hide. ``secret_spans`` are the anchored secret matches :func:`_screen_spans`
-    already found, passed in so this does not re-scan ``_SECRET_RES``.
+    A greedy core such as ``(env|session|cse)_[A-Za-z0-9]{6,}`` (an id), ``ghp_[A-Za-z0-9]{16,}``
+    or ``github_pat_[A-Za-z0-9_]{20,}`` (a secret) runs over a class that INCLUDES the UUID's
+    leading ``[0-9a-fA-F]{8}`` group but NOT the ``-`` that separates it, so welded with no
+    separator (``ghp_<16 hex chars>12345678-...``) it eats that first group and stops at the
+    ``-``. The anchored ``_UUID_RE`` needs eight leading hex digits behind a ``\b``, and neither
+    is left, so it never matches and the middle ``-1234-...`` reaches the browser. The id or
+    secret itself still masks (it stays anchored -- the residue policy the issue keeps intact);
+    this only adds the UUID the greedy match would otherwise hide. ``greedy_spans`` are the
+    anchored id and secret matches :func:`_screen_spans` already found, passed in so this does
+    not re-scan ``_ID_RE`` or ``_SECRET_RES``.
 
-    This masks EVERY UUID whose start falls strictly inside a secret span, which never masks
-    LESS than before in either direction. A pure-word-char greedy core (``ghp_``,
+    This masks EVERY UUID whose start falls strictly inside a greedy span, which never masks
+    LESS than before in either direction. A pure-word-char greedy core (an id, ``ghp_``,
     ``github_pat_``) stops at the ``-`` and leaves the UUID's middle bare -- the residue this
     helper exists to cover. A core whose run carries an interior boundary -- a hyphen-bearing
     class (``sk-``, ``glpat-``, ``xox``, ``clauster_pat_``) or ``bearer``'s ``\s+`` -- has
@@ -580,12 +581,12 @@ def _screen_welded_uuid_spans(
     pty-screen surface is AUTH-gated; naming the gap keeps the helper simple rather than
     widening the scan.
     """
-    if not secret_spans:
+    if not greedy_spans:
         return []
     return [
         (uuid.start(), uuid.end(), _REDACTED)
         for uuid in _UUID_CORE_RE.finditer(text)
-        if any(start < uuid.start() < end for start, end in secret_spans)
+        if any(start < uuid.start() < end for start, end in greedy_spans)
     ]
 
 
@@ -593,19 +594,19 @@ def _screen_spans(text: str) -> list[tuple[int, int, str]]:
     """Return every redaction span for one rendered screen line.
 
     The spans are the anchored id/secret masks (:data:`_MASKS`), the one unanchored welded-id
-    shape (:data:`_SCREEN_GLUED_ID_RE`), and a UUID a greedy secret core welded onto itself
+    shape (:data:`_SCREEN_GLUED_ID_RE`), and a UUID that a greedy id or secret core welded onto
     (:func:`_screen_welded_uuid_spans`). The caller unions them through :func:`_apply_spans`.
     See :func:`_redact_screen_row` for why each mask stays anchored.
     """
     spans: list[tuple[int, int, str]] = []
-    secret_spans: list[tuple[int, int]] = []
+    greedy_spans: list[tuple[int, int]] = []
     for anchored, *_rest in _MASKS:
         matches = [(m.start(), m.end()) for m in anchored.finditer(text)]
         spans += [(s, e, _REDACTED) for s, e in matches]
-        if anchored in _SECRET_RES:  # reuse these secret matches; do not re-scan in the helper
-            secret_spans += matches
+        if anchored is _ID_RE or anchored in _SECRET_RES:  # reuse these; do not re-scan in helper
+            greedy_spans += matches
     spans += [(m.start(), m.end(), _REDACTED) for m in _SCREEN_GLUED_ID_RE.finditer(text)]
-    spans += _screen_welded_uuid_spans(text, secret_spans)
+    spans += _screen_welded_uuid_spans(text, greedy_spans)
     return spans
 
 
@@ -622,8 +623,9 @@ def _redact_screen_row(row: str) -> str:
     a standalone id or secret masks as before and no ordinary word is over-masked. Two
     UNANCHORED matches join them: :data:`_SCREEN_GLUED_ID_RE`, the real id shape, which covers
     an id a consumed escape welded onto the word before it (``agentenv_01<...>``); and
-    :func:`_screen_welded_uuid_spans`, a UUID whose leading hex group a greedy secret core ate,
-    welding it onto the secret (``ghp_<16 hex chars>12345678-...``, #1496). The secrets stay
+    :func:`_screen_welded_uuid_spans`, a UUID whose leading hex group a greedy id or secret core
+    ate, welding it onto that id or secret (``ghp_<16 hex chars>12345678-...``, #1496). The
+    secrets stay
     anchored on purpose: a glued secret core (``sk-``, ``glpat-``, ``xoxb-``) matches inside an
     ordinary hyphenated word (``risk-assessment-checklist`` -> ``ri<redacted>``), so with no
     cut to confirm a real weld, unanchoring them destroys readable text.

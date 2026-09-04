@@ -352,6 +352,29 @@ def test_redact_screen_text_masks_a_uuid_welded_onto_any_greedy_core(prefixed):
     assert "-1234-" not in out and "123456789abc" not in out, out
 
 
+@pytest.mark.parametrize(
+    "prefixed",
+    [
+        "session_" + "B" * 6,  # `(env|session|cse)_[A-Za-z0-9]{6,}`: class [A-Za-z0-9], no `-`
+        "cse_" + "B" * 6,
+        "env_" + "B" * 6,
+    ],
+)
+def test_redact_screen_text_masks_a_uuid_welded_onto_a_greedy_id(prefixed):
+    # The greedy-core twin folded into #1496: clauster's own id cores are open-ended over a class
+    # that includes the UUID's leading hex group but not its `-`, so `session_<...>12345678-...`
+    # eats the first hex group and stops, and the anchored `_UUID_RE` never matches. The middle
+    # `-1234-1234-1234-123456789abc` used to reach the browser exactly as the secret cores did.
+    row = prefixed + _UUID_1496
+    out = redact.redact_screen_text([row])[0]
+    assert "-1234-" not in out and "123456789abc" not in out, out
+    assert "<redacted>" in out
+    # Positive control: the pre-fix anchored screen pass (still the log path's behaviour) keeps the
+    # `session_`/`cse_`/`env_` prefix and leaves the UUID body bare. Reverting the fold (dropping
+    # `_ID_RE` from `_screen_spans`' greedy_spans) makes the assertion above fail on exactly this.
+    assert "-1234-1234-1234-123456789abc" in redact.redact_secrets(redact.redact_ids(row))
+
+
 def test_redact_screen_text_masks_a_uuid_welded_onto_a_second_uuid_after_a_secret():
     # A secret welded onto two UUIDs back to back: the first UUID's head the secret ate, and the
     # second UUID welded onto the first. The fixed point must mask both, so neither body leaks.
