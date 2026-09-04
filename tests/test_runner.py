@@ -3468,6 +3468,7 @@ def test_popen_keeper_win32_detaches_process(runner_config, monkeypatch, tmp_pat
         runner_config[0].projects_root / "alpha",
         tmp_path / "b.keeper.json",
         ["claude", "--remote-control"],
+        state_dir=tmp_path / "state",
     )
     assert captured["creationflags"] == (0x00000008 | 0x00000200)
     assert "start_new_session" not in captured

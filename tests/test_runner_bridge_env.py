@@ -44,7 +44,12 @@ def _capture_env(target, runner: SessionRunner, monkeypatch, tmp_path: Path) -> 
     if target == "popen":
         runner._popen(cwd, tmp_path / "bridge.log", "alpha", "same-dir", "default")
     else:
-        runner._popen_keeper(cwd, tmp_path / "bridge.keeper.json", ["claude", "--remote-control"])
+        runner._popen_keeper(
+            cwd,
+            tmp_path / "bridge.keeper.json",
+            ["claude", "--remote-control"],
+            state_dir=tmp_path / "state",
+        )
     return captured["env"]
 
 

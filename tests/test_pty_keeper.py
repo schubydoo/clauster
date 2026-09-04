@@ -242,6 +242,64 @@ def test_main_requires_bridge_argv_inprocess(tmp_path: Path) -> None:
         pty_keeper.main(["--sidecar", str(tmp_path / "k.json")])
 
 
+def test_main_loads_managed_deps_dir_before_building_the_screen(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The keeper puts `<state_dir>/deps` on sys.path (frozen) before it builds the screen (#1486).
+
+    The keeper is dispatched before the server's own `add_deps_dir_to_sys_path`, so without
+    this a `clauster deps install pty`'d pyte never loads in the frozen binary's keeper and
+    the live terminal stays blank while `doctor` reports pyte available. Frozen-simulated so
+    the managed dir is actually consulted; `run_keeper` (which constructs `PtyScreen`) is
+    stubbed to snapshot sys.path AT its call, proving the add happened first.
+    """
+    from clauster import deps, pty_keeper
+
+    state_dir = tmp_path / "state"
+    managed = state_dir / "deps"
+    managed.mkdir(parents=True)
+    # add_deps_dir_to_sys_path is a no-op off-frozen; simulate the standalone binary.
+    monkeypatch.setattr(pty_keeper.deps, "is_frozen", lambda: True)
+    seen: dict = {}
+    real_add = deps.add_deps_dir_to_sys_path
+
+    def _spy_add(sd: object) -> None:
+        seen["state_dir"] = sd
+        real_add(sd)
+
+    monkeypatch.setattr(pty_keeper.deps, "add_deps_dir_to_sys_path", _spy_add)
+    captured_path: list[str] = []
+
+    def _stub_run_keeper(bridge_argv, sidecar, cwd=None, screen_sidecar=None):
+        captured_path.extend(sys.path)
+        return 0
+
+    monkeypatch.setattr(pty_keeper, "run_keeper", _stub_run_keeper)
+    try:
+        rc = pty_keeper.main(
+            ["--sidecar", str(tmp_path / "k.json"), "--state-dir", str(state_dir), "--", "claude"]
+        )
+        assert rc == 0
+        assert seen["state_dir"] == state_dir
+        # It was on sys.path by the time run_keeper (which builds PtyScreen) was reached.
+        assert str(managed) in captured_path
+    finally:
+        while str(managed) in sys.path:
+            sys.path.remove(str(managed))
+
+
+def test_main_without_state_dir_never_touches_sys_path(tmp_path: Path, monkeypatch) -> None:
+    """A keeper launched with no `--state-dir` (a hand-launch) skips the deps add (#1486)."""
+    from clauster import pty_keeper
+
+    called: list[object] = []
+    monkeypatch.setattr(pty_keeper.deps, "add_deps_dir_to_sys_path", lambda sd: called.append(sd))
+    monkeypatch.setattr(pty_keeper, "run_keeper", lambda *a, **k: 0)
+    rc = pty_keeper.main(["--sidecar", str(tmp_path / "k.json"), "--", "claude"])
+    assert rc == 0
+    assert called == []
+
+
 def test_proc_start_pair_is_derived_from_one_read_and_degrades_together(monkeypatch) -> None:
     """The sidecar's two start values come from ONE /proc read, and fail as a unit.
 

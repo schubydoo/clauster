@@ -2868,7 +2868,12 @@ class SessionRunner:
 
     @staticmethod
     def _keeper_launch_cmd(
-        sidecar: Path, cwd: Path, bridge_argv: list[str], screen_sidecar: Path | None = None
+        sidecar: Path,
+        cwd: Path,
+        bridge_argv: list[str],
+        screen_sidecar: Path | None = None,
+        *,
+        state_dir: Path,
     ) -> list[str]:
         """Wrap the bridge argv in a PTY-keeper launcher.
 
@@ -2877,6 +2882,11 @@ class SessionRunner:
         argparse rejects it — so it re-invokes itself with the hidden
         :data:`~clauster.procutil.KEEPER_SUBCOMMAND` (routed in
         :func:`clauster.__main__.main`, mirroring the recap hook).
+
+        ``--state-dir`` is passed so the keeper can add the managed ``<state_dir>/deps``
+        directory to its ``sys.path`` before it builds the pyte screen (#1486). The keeper
+        is dispatched before the server's own ``add_deps_dir_to_sys_path``, so without this
+        a ``clauster deps install pty``'d pyte never loads in the frozen binary's keeper.
         """
         if getattr(sys, "frozen", False):
             launcher = [sys.executable, procutil.KEEPER_SUBCOMMAND]
@@ -2888,6 +2898,8 @@ class SessionRunner:
             str(sidecar),
             "--cwd",
             str(cwd),
+            "--state-dir",
+            str(state_dir),
         ]
         if screen_sidecar is not None:
             cmd += ["--screen-sidecar", str(screen_sidecar)]
@@ -2900,6 +2912,8 @@ class SessionRunner:
         sidecar: Path,
         bridge_argv: list[str],
         screen_sidecar: Path | None = None,
+        *,
+        state_dir: Path,
     ) -> subprocess.Popen:
         """Launch the PTY keeper detached so it outlives a Clauster restart.
 
@@ -2907,8 +2921,12 @@ class SessionRunner:
         stdout+stderr to a file), plus stdin detached on EVERY platform — `_popen` does
         that only on Windows. The keeper, not Clauster, holds the bridge's terminal, so
         it survives independently and keeps the bridge alive.
+
+        ``state_dir`` is threaded to the keeper so a side-installed ``pyte`` loads (#1486).
         """
-        cmd = self._keeper_launch_cmd(sidecar, cwd, bridge_argv, screen_sidecar)
+        cmd = self._keeper_launch_cmd(
+            sidecar, cwd, bridge_argv, screen_sidecar, state_dir=state_dir
+        )
         keeper_log = sidecar.with_suffix(".log")  # the keeper's own stdout/stderr
         err_fh = keeper_log.open("wb")
         try:
@@ -3222,7 +3240,12 @@ class SessionRunner:
         try:
             bridge_argv[0] = resolve_binary(bridge_argv[0])
             proc = await asyncio.to_thread(
-                self._popen_keeper, proj.path, sidecar, bridge_argv, screen_sidecar
+                self._popen_keeper,
+                proj.path,
+                sidecar,
+                bridge_argv,
+                screen_sidecar,
+                state_dir=self._config.state_dir,
             )
         except (OSError, ClaudeNotFound) as exc:
             _log.warning("pty spawn of %s failed to launch: %s", name, exc)

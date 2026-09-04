@@ -54,10 +54,16 @@ def _pty_runner(runner_config) -> tuple[SessionRunner, Path]:
 
 def test_keeper_launch_cmd_includes_screen_sidecar_only_when_given() -> None:
     """The `--screen-sidecar` flag is passed to the keeper only when a path is supplied (#534)."""
-    off = SessionRunner._keeper_launch_cmd(Path("/s.json"), Path("/cwd"), ["claude", "x"])
+    off = SessionRunner._keeper_launch_cmd(
+        Path("/s.json"), Path("/cwd"), ["claude", "x"], state_dir=Path("/state")
+    )
     assert "--screen-sidecar" not in off
     on = SessionRunner._keeper_launch_cmd(
-        Path("/s.json"), Path("/cwd"), ["claude", "x"], Path("/s.screen.json")
+        Path("/s.json"),
+        Path("/cwd"),
+        ["claude", "x"],
+        Path("/s.screen.json"),
+        state_dir=Path("/state"),
     )
     # str(Path(...)) so the expected value is OS-portable (backslash path on Windows CI).
     assert on[on.index("--screen-sidecar") + 1] == str(Path("/s.screen.json"))
@@ -66,10 +72,23 @@ def test_keeper_launch_cmd_includes_screen_sidecar_only_when_given() -> None:
     assert off[off.index("--") + 1 :] == ["claude", "x"]
 
 
+def test_keeper_launch_cmd_passes_state_dir_for_managed_deps() -> None:
+    """The keeper cmd carries `--state-dir` so a `deps install`'d pyte can load (#1486)."""
+    cmd = SessionRunner._keeper_launch_cmd(
+        Path("/s.json"), Path("/cwd"), ["claude", "x"], state_dir=Path("/var/lib/clauster")
+    )
+    # str(Path(...)) so the expected value is OS-portable (backslash path on Windows CI).
+    assert cmd[cmd.index("--state-dir") + 1] == str(Path("/var/lib/clauster"))
+    # the flag sits before the `--` separator, never inside the bridge argv
+    assert cmd.index("--state-dir") < cmd.index("--")
+
+
 def test_keeper_launch_cmd_uses_module_form_when_not_frozen(monkeypatch) -> None:
     """A source/venv install runs the keeper as `<python> -m clauster.pty_keeper …`."""
     monkeypatch.delattr(sys, "frozen", raising=False)
-    cmd = SessionRunner._keeper_launch_cmd(Path("/s.json"), Path("/cwd"), ["claude", "x"])
+    cmd = SessionRunner._keeper_launch_cmd(
+        Path("/s.json"), Path("/cwd"), ["claude", "x"], state_dir=Path("/state")
+    )
     assert cmd[:3] == [sys.executable, "-m", "clauster.pty_keeper"]
     assert procutil.KEEPER_SUBCOMMAND not in cmd
 
@@ -83,7 +102,9 @@ def test_keeper_launch_cmd_uses_subcommand_when_frozen(monkeypatch) -> None:
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     # In a real frozen build sys.executable is the clauster binary, not the test's python.
     monkeypatch.setattr(sys, "executable", "/opt/clauster/clauster")
-    cmd = SessionRunner._keeper_launch_cmd(Path("/s.json"), Path("/cwd"), ["claude", "x"])
+    cmd = SessionRunner._keeper_launch_cmd(
+        Path("/s.json"), Path("/cwd"), ["claude", "x"], state_dir=Path("/state")
+    )
     assert cmd[:2] == ["/opt/clauster/clauster", procutil.KEEPER_SUBCOMMAND]
     assert "-m" not in cmd
     # the bridge argv still survives intact after the `--` separator
@@ -474,7 +495,7 @@ async def test_spawn_pty_screen_sidecar_gated_on_config(
 
     captured: dict = {}
 
-    def _capture(cwd, sidecar, bridge_argv, screen_sidecar=None):
+    def _capture(cwd, sidecar, bridge_argv, screen_sidecar=None, *, state_dir=None):
         captured["screen_sidecar"] = screen_sidecar
         raise OSError("captured — stop before the real keeper launch")
 
@@ -2065,15 +2086,20 @@ async def test_spawn_pty_worktree_passes_flag_and_resume_reuses_name(
     """
     runner, _ = _pty_runner(runner_config)
     seen: list[list[str]] = []
+    seen_state_dir: list[Path] = []
     real = SessionRunner._popen_keeper
 
-    def _capture(self, cwd, sidecar, bridge_argv, screen_sidecar=None):
+    def _capture(self, cwd, sidecar, bridge_argv, screen_sidecar=None, *, state_dir):
         seen.append(list(bridge_argv))
-        return real(self, cwd, sidecar, bridge_argv, screen_sidecar)
+        seen_state_dir.append(state_dir)
+        return real(self, cwd, sidecar, bridge_argv, screen_sidecar, state_dir=state_dir)
 
     monkeypatch.setattr(SessionRunner, "_popen_keeper", _capture)
     pty = await runner.spawn("alpha", resume_mode="pty", spawn_mode="worktree")
     assert pty.status is InstanceStatus.RUNNING
+    # The spawn threads the CONFIG state_dir (not the log dir, #1486) so a `deps install`'d
+    # pyte resolves against `<state_dir>/deps` in the keeper.
+    assert seen_state_dir[-1] == runner._config.state_dir
     first = seen[-1]
     i = first.index("--worktree")
     expected = f"clauster-{pty.instance_id[:8]}"
@@ -2280,9 +2306,9 @@ async def test_resume_keeps_an_explicit_worktree_name(runner_config, monkeypatch
     seen: list[list[str]] = []
     real = SessionRunner._popen_keeper
 
-    def _capture(self, cwd, sidecar, bridge_argv, screen_sidecar=None):
+    def _capture(self, cwd, sidecar, bridge_argv, screen_sidecar=None, *, state_dir):
         seen.append(list(bridge_argv))
-        return real(self, cwd, sidecar, bridge_argv, screen_sidecar)
+        return real(self, cwd, sidecar, bridge_argv, screen_sidecar, state_dir=state_dir)
 
     monkeypatch.setattr(SessionRunner, "_popen_keeper", _capture)
     pty = await runner.spawn("alpha", resume_mode="pty", spawn_mode="worktree")
