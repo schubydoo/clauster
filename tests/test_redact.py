@@ -309,6 +309,61 @@ def test_redact_screen_text_masks_a_glued_real_id(row):
     assert "<redacted>" in out and row not in out, out
 
 
+# --- #1496: a greedy secret core welds onto a UUID and hides its body on the screen surface ---
+_UUID_1496 = "12345678-1234-1234-1234-123456789abc"
+
+
+def test_redact_screen_text_masks_a_uuid_welded_onto_a_greedy_secret():
+    # The issue's exact reproduce: `ghp_[A-Za-z0-9]{16,}` is greedy over a class that includes
+    # the UUID's leading hex group but not its `-`, so it eats `12345678` and stops, and the
+    # anchored `_UUID_RE` (eight leading hex behind a `\b`) never matches. The middle
+    # `-1234-1234-1234-123456789abc` used to reach the browser (#1496).
+    row = "ghp_" + "B" * 16 + _UUID_1496
+    out = redact.redact_screen_text([row])[0]
+    assert "-1234-" not in out and "123456789abc" not in out, out
+    assert "<redacted>" in out
+    # Positive control: the pre-fix anchored screen pass (still the log path's behaviour) leaves
+    # the UUID body bare. Reverting the fix makes the assertion above fail on exactly this.
+    assert "-1234-1234-1234-123456789abc" in redact.redact_secrets(redact.redact_ids(row))
+
+
+@pytest.mark.parametrize(
+    "prefixed",
+    [
+        "ghp_" + "B" * 16,  # class [A-Za-z0-9], no `-`: eats the first hex group, leaks the middle
+        "ghs_" + "B" * 16,  # the same gh[pousr]_ family
+        "github_pat_" + "B" * 20,  # class [A-Za-z0-9_], no `-`: same leak shape
+        "sk-" + "B" * 16,  # hyphen-bearing class: swallows the WHOLE UUID (no residue)
+        "glpat-" + "B" * 16,
+        "xoxb-" + "B" * 16,
+        "clauster_pat_" + "B" * 16,
+    ],
+)
+def test_redact_screen_text_masks_a_uuid_welded_onto_any_greedy_core(prefixed):
+    # Every greedy secret core in `_SECRET_CORES` welded onto a UUID with no separator. Whether
+    # the core's class excludes `-` (eats only the first hex group, leaking the middle) or
+    # includes it (swallows the whole UUID), no fragment of the UUID may survive (#1496).
+    out = redact.redact_screen_text([prefixed + _UUID_1496])[0]
+    assert "-1234-" not in out and "123456789abc" not in out, out
+
+
+def test_redact_screen_text_masks_a_uuid_welded_onto_a_second_uuid_after_a_secret():
+    # A secret welded onto two UUIDs back to back: the first UUID's head the secret ate, and the
+    # second UUID welded onto the first. The fixed point must mask both, so neither body leaks.
+    row = "ghp_" + "B" * 16 + _UUID_1496 + _UUID_1496
+    out = redact.redact_screen_text([row])[0]
+    assert "-1234-" not in out and "123456789abc" not in out, out
+
+
+def test_redact_screen_text_leaves_a_uuid_welded_onto_a_plain_word_as_residue():
+    # Scope boundary for #1496, mirroring the surface's welded-secret / non-`01`-id residue: the
+    # fix keys on a real SECRET shape eating the head. A UUID welded onto an ORDINARY word (no
+    # secret, no cut) stays residue exactly as before -- masking it would need unanchoring UUID
+    # everywhere and would eat ordinary hex compounds.
+    row = "commit" + _UUID_1496  # `commit` is not a secret shape
+    assert redact.redact_screen_text([row]) == [row]
+
+
 def test_sanitize_redacts_secret_split_by_ansi_even_when_strip_disabled():
     # ANSI bytes interleaved inside an identifier must NOT let it bypass redaction
     # when strip_ansi_in_stream is disabled. Redaction runs against a stripped view;

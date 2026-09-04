@@ -812,6 +812,21 @@ def test_frame_masks_a_uuid_whose_head_a_joined_greedy_match_would_cover():
     assert "123456789abc" not in joined
 
 
+def test_redact_wrapped_rows_masks_a_uuid_a_greedy_secret_ate_across_the_wrap():
+    # #1496 on the wrap path. A greedy `ghp_` on the JOINED line eats the UUID's leading hex
+    # group; with the head consumed and NO trailing id to anchor on (unlike the test above), the
+    # middle `-1234-...` used to leak. The join scan now masks the welded UUID through
+    # `_screen_spans`, so the wrap path masks no fewer cells than the per-row path. The UUID is
+    # split across the wrap so neither row matches it on its own.
+    from clauster import redact
+
+    row0 = "ghp_" + "B" * 16 + "12345678-12"
+    row1 = "34-1234-1234-123456789abc"
+    out = redact.redact_wrapped_screen_rows([row0, row1])
+    assert "-1234-" not in "".join(out) and "123456789abc" not in "".join(out)
+    assert "<redacted>" in out[0]
+
+
 def test_frame_masks_a_wrapped_look_alike_the_safe_direction():
     # #1487 review, finding 1 tradeoff. When `resolve_session_transcript` wraps so a row starts
     # with `session_transcript`, the per-row pass masks that fragment. It is a benign word, so

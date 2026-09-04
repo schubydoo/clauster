@@ -346,7 +346,9 @@ Three layers:
     deletes the boundary. This bounded scope is for the streamed log and the
     on-disk mirror. A terminal has already discarded the escape on the live
     pty-screen view. So that view also masks a real identifier (the `01` shape)
-    welded onto the word before it, and an id welded to another id. An ordinary
+    welded onto the word before it, and an id welded to another id. It also masks
+    a UUID a greedy secret token welded onto itself. A `ghp_` or `github_pat_`
+    token has no separator, so it eats the UUID's leading hex digits. An ordinary
     compound name such as `resolve_session_transcript` stays readable. A welded
     secret, and a welded id without the `01` shape, stay visible there.
 
