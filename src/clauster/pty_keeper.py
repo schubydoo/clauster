@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import procutil
+from . import deps, procutil
 
 # pty_screen is first-party and always importable (it lazy-imports the optional `pyte`
 # itself, only when a PtyScreen is actually constructed), so importing it here never pulls
@@ -831,11 +831,26 @@ def main(argv: list[str] | None = None) -> int:
         help="optional JSON file for the redacted live-screen frames (#534)",
     )
     parser.add_argument(
+        "--state-dir",
+        default=None,
+        type=Path,
+        help="Clauster state dir, so a `deps install`'d extra (pyte) can load (#1486)",
+    )
+    parser.add_argument(
         "bridge_argv",
         nargs=argparse.REMAINDER,
         help="the bridge command line, after a `--` separator",
     )
     ns = parser.parse_args(argv)
+    # Put a `clauster deps install pty`'d pyte on sys.path BEFORE run_keeper builds the
+    # PtyScreen (#1486). The keeper is dispatched before the server's own
+    # `add_deps_dir_to_sys_path` (__main__ run startup), so without this the frozen binary's
+    # keeper imports the managed pyte only when CLAUSTER_PYTE_PATH is also set — and doctor,
+    # which does add the dir, over-reports the live terminal as available. Frozen-only +
+    # best-effort (a missing state dir or deps dir never raises out of keeper startup); the
+    # runner always passes it, and `None` (a hand-launched keeper) simply skips the add.
+    if ns.state_dir is not None:
+        deps.add_deps_dir_to_sys_path(ns.state_dir)
     bridge_argv = ns.bridge_argv
     if bridge_argv and bridge_argv[0] == "--":
         bridge_argv = bridge_argv[1:]
