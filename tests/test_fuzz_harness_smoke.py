@@ -760,17 +760,17 @@ def test_pty_screen_display_readers_raise_on_a_half_overwritten_wide_char() -> N
 
 
 def test_pty_screen_frame_width_refit_cannot_expose_an_identifier() -> None:
-    """Regression (#1359): the width re-fit must not shear an identifier into a frame.
+    """Regression (#1359, #1487): the wrap-aware redaction must not shear an id into a frame.
 
     Driven through ``PtyScreen.frame()`` itself, deliberately: an earlier version of this
     test hand-built the row and sliced it, which meant a fix inside ``frame`` would have left
     it green either way — it proved nothing about the delivered frame.
 
-    `_apply_spans` clips the ``Bearer `` piece to the full neutral token, so
-    ``Bearer env_01ABCDEF`` GROWS from 19 to 20 characters. frame() trims it back to ``cols``
-    and re-redacts the shortened row (the ``if fitted != row`` belt in ``_fit_redacted_row``),
-    so the trim cannot manufacture the word boundary a ``\\b``-anchored mask needs (safety
-    invariant 4). ``pty_screen_feed_fuzzer`` asserts the leak property on every delivered row.
+    ``Bearer env_01ABCDEF`` fills the row, so ``_redact_display`` groups it with the blank row
+    that follows and masks it wrap-aware: the whole ``Bearer <id>`` run is covered and rendered
+    as one ``<redacted>``, then fit to ``cols``. No bare identifier survives and the row stays
+    exactly one screen wide (safety invariant 4). ``pty_screen_feed_fuzzer`` asserts the leak
+    property on every delivered row.
     """
     import re
 
@@ -787,9 +787,8 @@ def test_pty_screen_frame_width_refit_cannot_expose_an_identifier() -> None:
     leak = re.compile(r"\b(env|session|cse)_[A-Za-z0-9]{6,}\b")
     assert not leak.search(delivered), f"frame() exposed a bare identifier: {delivered!r}"
     assert len(delivered) == cols, "the row must still be exactly one screen wide"
-    # The masked row is 20 chars (the `Bearer ` piece clips to the 10-char token), so the
-    # re-fit trims it and the belt runs; the final cut lands inside a `<redacted>` token.
-    assert delivered == "<redacted><redacted"
+    # The whole `Bearer <id>` run masks to a single neutral token, then pads to the fixed width.
+    assert delivered == "<redacted>".ljust(cols)
 
 
 def test_usage_line_to_turn_sanitizes_every_returned_string_field() -> None:

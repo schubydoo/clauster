@@ -632,24 +632,75 @@ class PtyScreen:
             fitted = redact_screen_text([fitted])[0][: self.cols]
         return fitted.ljust(self.cols)
 
+    def _redact_display(self, display: list[str]) -> list[str]:
+        r"""Redact ``display`` wrap-aware, returning exactly ``len(display)`` rows of ``cols``.
+
+        Per-row redaction misses a token the terminal hard-wraps across the fixed width
+        (#1487, safety invariant 4). pyte fills a wrapped row edge-to-edge and continues the
+        text on the next row, so a single logical id/secret becomes two row fragments and
+        neither fragment matches a pattern — the token reaches the browser unmasked.
+
+        So a hard-wrapped RUN of rows is redacted together by
+        :func:`redact.redact_wrapped_screen_rows`, which masks a token the wrap SPLIT (found on
+        the joined line) plus each row's own whole tokens, and returns one redacted row per input
+        row. A row CONTINUES into the next when it is filled edge-to-edge: its last cell is not a
+        space, OR it ends in a single trailing space after content -- the shape a wrap AT a space
+        leaves (a ``bearer <value>`` header wrapped on its internal space), where a bare
+        last-cell-is-a-space test would stop and leak the value (#1487). Over-including such a row
+        is safe: rows a real line break separates keep their padding between them, so no false
+        weld forms. An unwrapped single row takes the plain per-row path
+        (:meth:`_fit_redacted_row`), whose width-refit belt (#1359) still guards a trailing-welded
+        id there. Each returned row is fit to the fixed width.
+        """
+        out: list[str] = []
+        i = 0
+        total_rows = len(display)
+        while i < total_rows:
+            start = i
+            # A row continues into the next when it is filled edge-to-edge: a non-space last cell
+            # (a hard wrap), or a single trailing space after content (a wrap AT a space, e.g. a
+            # `bearer ` header whose value went to the next row). A padded line-end has several
+            # trailing spaces, so it does not continue.
+            while (
+                i < total_rows - 1
+                and display[i]
+                and (
+                    not display[i][-1].isspace()
+                    or (len(display[i]) >= 2 and not display[i][-2].isspace())
+                )
+            ):
+                i += 1
+            group = display[start : i + 1]
+            i += 1
+            if len(group) == 1:
+                out.append(self._fit_redacted_row(redact_screen_text(group)[0]))
+            else:
+                out.extend(
+                    self._fit_redacted_row(r) for r in redact.redact_wrapped_screen_rows(group)
+                )
+        return out
+
     def frame(self) -> dict[str, Any]:
         """Return the current screen as a redacted, cells-only frame.
 
         Shape: ``{"rows": [<redacted line>, ...], "cursor": {"x": int, "y": int},
         "cols": int, "rows_count": int}``. No raw ANSI and no terminal title ever appear:
-        the rows are pyte-rendered plaintext run through :func:`redact_screen_text`.
+        the rows are pyte-rendered plaintext, redacted before they leave this method.
 
-        Each row is re-fit to exactly ``cols`` characters after redaction — masking can
-        shorten or lengthen a row (see :func:`redact_screen_text`), and the client draws a
-        fixed ``cols`` x ``rows_count`` grid, so an off-width row would corrupt the
-        geometry (a too-long row wraps). Because that re-fit can *create* a match the
-        redactor was right to leave alone, :meth:`_fit_redacted_row` redacts the fitted
-        text again — see there for why one extra pass is enough (#1359).
+        Redaction runs wrap-aware (:meth:`_redact_display`): a token the terminal hard-wraps
+        across the fixed width is caught from the joined line, closing the wrap-boundary leak a
+        naive per-row pass leaves (#1487, safety invariant 4), while each mask is applied inside
+        its own row so one row's length change never reflows a neighbour. Each row is then re-fit
+        to exactly ``cols`` characters — masking can shorten or lengthen a row (see
+        :func:`redact_screen_text`), and the client draws a fixed ``cols`` x ``rows_count`` grid,
+        so an off-width row would corrupt the geometry (a too-long row wraps). Because a re-fit
+        can *create* a match the redactor was right to leave alone, the fitted text is redacted
+        again — see :meth:`_fit_redacted_row` for why one extra pass is enough (#1359).
         """
         with self._lock:
             cursor_x, cursor_y = self._screen.cursor.x, self._screen.cursor.y
             display = list(self._screen.display)
-        rows = [self._fit_redacted_row(row) for row in redact_screen_text(display)]
+        rows = self._redact_display(display)
         return {
             "rows": rows,
             "cursor": {"x": cursor_x, "y": cursor_y},

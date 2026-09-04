@@ -651,6 +651,183 @@ def test_frame_leaves_an_unshorn_row_to_the_single_redaction_pass():
     assert scr.frame()["rows"][0] == "token <redacted> ok".ljust(40)
 
 
+# --- #1487: a redactable token the terminal hard-wraps across the fixed width -----------
+# Per-row redaction sees each pyte display row alone, so a token pyte wraps at column 120
+# is split into two fragments that neither match -> it reaches the browser unmasked. frame()
+# now joins a wrapped row with its continuation, redacts the whole logical line, and refits.
+
+# Each token is long enough to straddle the 120-col wrap when pushed past column 110, and is
+# split so NEITHER row fragment matches on its own: the row0 tail is too short after its
+# prefix (or lacks the prefix), and the row1 head has no prefix at all.
+_WRAP_LEAK_TOKENS = [
+    "session_01ABCDEFGHIJKLMNOPqrstuvwx",  # `_ID_RE`: row0 tail `session_01` is too short
+    "12345678-1234-1234-1234-123456789abc",  # `_UUID_RE`: row0 tail `12345678-1` is partial
+    "sk-ABCDEFGHIJKLMNOPQRSTUV",  # `_SECRET_RES`: row0 tail `sk-ABCDEFG` is too short
+]
+
+
+@pytest.mark.parametrize("token", _WRAP_LEAK_TOKENS)
+def test_frame_masks_a_token_that_wraps_across_the_fixed_width(token):
+    # The bug (found dogfooding v1.2): at 120 cols a redactable id/UUID/key printed past
+    # column 110 wraps, and per-row redaction masks neither fragment. Push it so the wrap
+    # splits it after column 110, then prove no part of it survives on either row. The
+    # prefix ends in a space so the `\b`-anchored UUID/key patterns have a real boundary
+    # before the token (a word-char pad would weld it and defeat even the joined match).
+    prefix = "A" * 109 + " "
+    scr = PtyScreen(cols=120, rows=40)
+    scr.feed((prefix + token).encode())
+    rows = scr.frame()["rows"]
+    # row0 fills the width (it wrapped) and row1 carries the continuation; joined edge-to-edge
+    # they are the logical line the browser reconstructs.
+    joined = rows[0] + rows[1]
+    assert token not in joined  # reverting the wrap-join leaves the whole token here -> red
+    # No fragment of any shape survives: check a distinctive interior slice, because
+    # `_BARE_ID_RE` matches only the session/env/cse shape and is inert for the UUID and sk-
+    # rows.
+    assert token[10:26] not in joined
+    assert "<redacted>" in rows[0]  # the token was masked, not merely trimmed off the edge
+
+
+def test_frame_masks_a_fixed_length_token_welded_at_the_wrap_boundary():
+    # Regression guard (#1487 review). A UUID that ends exactly at the wrap column, with a
+    # word char starting the next row, welds into the joined line and loses the `\b` it needs.
+    # The per-row pass must still mask it: on row0 alone the UUID ends at the row edge, a real
+    # boundary. A joined-only mask leaks it.
+    uuid = "12345678-1234-1234-1234-123456789abc"  # 36 chars, fixed-length `_UUID_RE`
+    scr = PtyScreen(cols=120, rows=40)
+    # A SPACE before the UUID gives it a clean leading boundary (a word-char pad would weld the
+    # front and no pass could ever match it). 83 pad + space + 36 UUID fills row0 to exactly
+    # column 120 (UUID at cols 84-119, ending the row), then `def` welds onto the UUID's tail
+    # at the start of row1 -- the joined view loses the trailing `\b`, so only row0's own pass
+    # keeps it masked.
+    scr.feed(("A" * 83 + " " + uuid + "def").encode())
+    rows = scr.frame()["rows"]
+    joined = "".join(rows)
+    assert uuid not in joined  # the welded UUID must not survive
+    assert "123456789abc" not in joined  # nor its tail fragment on either row
+    assert "<redacted>" in rows[0]
+
+
+def test_frame_wrap_redaction_keeps_the_fixed_geometry():
+    # The wire carries no resize negotiation, so every frame must stay exactly cols x rows
+    # even after a wrapped token is masked and the group is refit.
+    scr = PtyScreen(cols=120, rows=40)
+    scr.feed(("A" * 109 + " session_01ABCDEFGHIJKLMNOPqrstuvwx").encode())
+    frame = scr.frame()
+    assert frame["cols"] == 120 and frame["rows_count"] == 40
+    assert len(frame["rows"]) == 40
+    assert all(len(row) == 120 for row in frame["rows"])
+
+
+def test_frame_masks_a_secret_that_wraps_across_three_rows():
+    # A token long enough to span more than two rows: the whole wrap group is joined,
+    # redacted, and refit back into its own row count -- no fragment leaks on any row.
+    secret = "sk-" + "B" * 260  # 263 chars: spans row0 tail, a full row1, into row2
+    scr = PtyScreen(cols=120, rows=40)
+    scr.feed(("prefix " + secret).encode())
+    rows = scr.frame()["rows"]
+    joined = "".join(rows[:3])
+    assert secret not in joined
+    assert "B" * 20 not in joined  # no run of the key body survives on any of the three rows
+    assert "<redacted>" in joined
+    assert all(len(row) == 120 for row in rows)
+
+
+def test_frame_masks_an_id_welded_at_the_wrap_boundary():
+    # #1487 review, finding 1, safety invariant 4. An id that is a WHOLE token on its own row,
+    # ending exactly at the wrap column, welds on the joined line to the word char that starts
+    # the next row (`session_01ABCDEFGH` + `_backup`). The joined pass loses the trailing `\b`
+    # and matches nothing. The per-row pass must still mask it, because on row0 alone the id
+    # ends at the row edge, a real boundary. A joined-only mask leaks the bare id here.
+    scr = PtyScreen(cols=120, rows=40)
+    # 101 pad + space + `session_01ABCDEFGH` (18) fills row0 to exactly column 120; `_backup`
+    # welds onto the id at the start of row1.
+    scr.feed(("A" * 101 + " session_01ABCDEFGH" + "_backup").encode())
+    rows = scr.frame()["rows"]
+    joined = "".join(rows)
+    assert "session_01ABCDEFGH" not in joined  # the welded id must not survive on either row
+    assert "<redacted>" in rows[0]
+
+
+def test_redact_wrapped_rows_masks_inside_each_row_without_reflow():
+    # #1487 review, finding 2. A mask that shrinks one row must not shift a neighbour row's
+    # text. redact_wrapped_screen_rows returns one redacted row per input row, masked in place,
+    # even for a false-positive group (row0 ends in a non-space, so it is grouped with an
+    # unrelated row1). The old join-then-reslice path shifted row1's content left into the space
+    # row0's shorter mask freed.
+    from clauster import redact
+
+    row0 = "session_01ABCDEFGHIJ" + " " * 20  # 40 wide; the id masks to a shorter <redacted>
+    row1 = "K" * 40  # unrelated full-width content swept into the same group
+    out = redact.redact_wrapped_screen_rows([row0, row1])
+    assert out[1] == row1  # row1 verbatim -- not reflowed by row0's shorter mask
+    assert "<redacted>" in out[0] and "session_01" not in out[0]
+
+
+def test_redact_wrapped_rows_unions_welded_secret_tokens():
+    # #1487 review, round 2, safety invariant 4. Two secrets welded across the wrap column:
+    # `ghp_...` greedily extends over the next row's `sk` on the joined line, so its span, clipped
+    # to row1 and applied in SEQUENCE, masks the `sk` and leaves the `sk-` tail bare. The joined
+    # and per-row spans must be UNIONED and applied together, or the tail leaks.
+    from clauster import redact
+
+    out = redact.redact_wrapped_screen_rows(
+        ["ghp_ABCDEFGHIJKLMNOPQRST", "sk-ABCDEFGHIJKLMNOPQRSTB", "l4zR"]
+    )
+    # The shared body appears in BOTH secrets; it must survive in neither row (sequential
+    # application leaves the sk- tail, the union masks it).
+    assert "ABCDEFGHIJKLMNOPQRST" not in "".join(out)
+
+
+def test_frame_masks_a_bearer_value_that_wraps_at_its_internal_space():
+    # #1487 final fuzz review. A bearer header can wrap at the space inside `bearer <value>`, so
+    # the row ENDS in that space. A run heuristic that continues a group only on a non-space last
+    # cell stops there and never joins the value, leaking it. Joining the whole display for
+    # split-detection catches it (safety invariant 4).
+    scr = PtyScreen(cols=80, rows=10)
+    # 72 pad + space + "bearer" + space fills row0 to column 80, so the value lands on row1.
+    scr.feed(("A" * 72 + " bearer TOKENVALUE123456").encode())
+    joined = "".join(scr.frame()["rows"])
+    assert "TOKENVALUE123456" not in joined
+    assert "<redacted>" in joined
+
+
+def test_frame_masks_a_uuid_whose_head_a_joined_greedy_match_would_cover():
+    # #1487 review, rounds 3/5, safety invariant 4. A greedy `ghp_` on the JOINED line eats the
+    # next row's UUID leading hex digits. With ONE shared coverage map that marks them before the
+    # row-local pass can expose the UUID (which is welded to a trailing id), the UUID middle
+    # leaks. Two INDEPENDENT maps -- per-row and joined, unioned only at render -- keep the
+    # row-local pass able to mask the whole UUID.
+    scr = PtyScreen(cols=120, rows=10)
+    raw = (
+        "A" * 99
+        + " ghp_"
+        + "B" * 16
+        + "12345678-1234-1234-1234-123456789abc"
+        + "session_01BBBBBBBB"
+    )
+    scr.feed(raw.encode())
+    joined = "".join(scr.frame()["rows"])
+    assert "-1234-" not in joined  # no fragment of the UUID survives on either row
+    assert "123456789abc" not in joined
+
+
+def test_frame_masks_a_wrapped_look_alike_the_safe_direction():
+    # #1487 review, finding 1 tradeoff. When `resolve_session_transcript` wraps so a row starts
+    # with `session_transcript`, the per-row pass masks that fragment. It is a benign word, so
+    # this over-masks a look-alike. That is the accepted SAFE direction on this surface: not
+    # leaking a real id beats keeping a look-alike readable (safety invariant 4). Masking only
+    # the joined line would leave a real welded id bare, the leak this path closes.
+    word = "resolve_session_transcript"
+    scr = PtyScreen(cols=120, rows=40)
+    # Pad by 112 so the wrap falls right after `resolve_`, starting the next row with
+    # `session_transcript`.
+    scr.feed(("A" * 112 + word).encode())
+    joined = "".join(scr.frame()["rows"])
+    assert "session_transcript" not in joined  # the look-alike fragment is masked (safe)
+    assert "<redacted>" in joined
+
+
 def test_no_control_bytes_ever_reach_rows():
     # Lock the cells-only invariant against a future pyte change: a corpus of adversarial
     # control/escape sequences (7-bit + 8-bit C1 OSC, DCS, APC, CSI, lone ESC, NUL/BEL/DEL)
