@@ -1598,10 +1598,22 @@ def _is_gitignored_by_existing_rules(relative_path: str, existing_content: str) 
         if negation and "/" in rule_text:
             if fnmatch.fnmatchcase(norm_target, clean_rule):
                 return True
+            if "/**/" in clean_rule and fnmatch.fnmatchcase(
+                norm_target, clean_rule.replace("/**/", "/")
+            ):
+                return True
             if clean_rule.startswith("**/"):
                 sub_pattern = clean_rule[3:]
-                if fnmatch.fnmatchcase(norm_target, sub_pattern) or fnmatch.fnmatchcase(
-                    filename, sub_pattern
+                if (
+                    fnmatch.fnmatchcase(norm_target, sub_pattern)
+                    or fnmatch.fnmatchcase(filename, sub_pattern)
+                    or (
+                        "/**/" in sub_pattern
+                        and (
+                            fnmatch.fnmatchcase(norm_target, sub_pattern.replace("/**/", "/"))
+                            or fnmatch.fnmatchcase(filename, sub_pattern.replace("/**/", "/"))
+                        )
+                    )
                 ):
                     return True
 

@@ -1402,6 +1402,18 @@ def test_ensure_gitignored_appends_when_slash_negation_overrides_wildcard(tmp_pa
     assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == expected
 
 
+def test_ensure_gitignored_appends_when_doublestar_negation_matches_zero_directories(
+    tmp_path: Path,
+) -> None:
+    # A negation !a/**/b matches when **/ stands for zero directories (a/b)
+    (tmp_path / ".gitignore").write_text(
+        "*.json\n!.claude/**/settings.local.json\n", encoding="utf-8"
+    )
+    cw.ensure_gitignored(tmp_path, ".claude/settings.local.json")
+    expected = "*.json\n!.claude/**/settings.local.json\n.claude/settings.local.json\n"
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == expected
+
+
 def test_ensure_gitignored_case_sensitive_matching(tmp_path: Path) -> None:
     # Gitignore matching is case-sensitive across platforms
     (tmp_path / ".gitignore").write_text("*.BAK\n", encoding="utf-8")
