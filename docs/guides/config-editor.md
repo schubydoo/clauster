@@ -168,8 +168,13 @@ Common mechanics across the modal:
 - **Typed confirmation** — every document save asks you to type the scope
   name; destructive list actions (delete, reset, plugin install) have their
   own typed confirms.
-- **Secret masking** — secret-shaped values are masked on read and a masked
-  value left untouched keeps the stored secret on write.
+- **Secret masking** — the Settings, MCP, and Skills surfaces mask secret-shaped
+  values on read. On Settings and MCP, a masked value left untouched keeps the
+  stored secret on write. The Skills editor masks on read but restores nothing on
+  write, so a save writes the mask over the stored value. The CLAUDE.md,
+  Permissions, Hooks, and Subagents surfaces return the raw content, because they
+  round-trip the exact text on write. Do not put a secret anywhere in a subagent
+  file, for example in an inline `mcpServers` block in the frontmatter.
 
 The surface tabs:
 
