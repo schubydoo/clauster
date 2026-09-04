@@ -272,7 +272,12 @@ jobs:
           # ADVISORY for forks (see the codeql-fork-upload.yml header). The consumer
           # additionally refuses an artifact holding more than one SARIF (AGENTS.md invariant 3).
           path: codeql-sarif-processed/upload.sarif
-          if-no-files-found: warn
+          # `error`, not `warn`: a broken producer (a github/codeql-action bump moving the
+          # output off this pinned path) then reds a visible annotation in the fork PR's own
+          # checks. `continue-on-error: true` above still keeps the `codeql` job green, so the
+          # required check and merge gate are unchanged — this only ADDS a second signal
+          # alongside the consumer's fail-closed conclusion read.
+          if-no-files-found: error
           retention-days: 1
 
   gitleaks:

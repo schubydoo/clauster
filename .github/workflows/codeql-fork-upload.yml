@@ -97,28 +97,11 @@ jobs:
       # the job token needs no `security-events`/`pull-requests` scope.
       actions: read # read + download the codeql-fork-sarif artifact from the triggering run
     steps:
-      # Mint an upload token on the App's own bucket. `security-events: write` posts the
-      # SARIF; `pull-requests: read` + `contents: read` resolve the PR number from the
-      # trusted head SHA (`GET /commits/{sha}/pulls`). NO `|| github.token` fallback: the
-      # job token cannot write code scanning results, so a failed mint must fail loud.
-      - name: Mint SARIF upload token
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ secrets.CLAUSTER_CI_APP_CLIENT_ID }}
-          private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
-          permission-security-events: write
-          permission-pull-requests: read
-          permission-contents: read
-      - name: Verify App token was minted
-        if: ${{ steps.app-token.outputs.token == '' }}
-        run: |
-          echo "::error::clauster-ci App token mint produced an empty token; \
-          refusing to proceed. Check the CLAUSTER_CI_APP_CLIENT_ID / \
-          CLAUSTER_CI_APP_PRIVATE_KEY secrets and the clauster-ci App installation."
-          exit 1
-      # A fork DRAFT skips the codeql job, so its Security run produces no artifact.
-      # Probe first: a live artifact is uploaded; an ABSENT one is a benign draft skip
+      # Probe for the artifact BEFORE minting a token. A fork DRAFT skips the codeql job, so
+      # its Security run produces no artifact and there is nothing to upload — minting an App
+      # token first would spend one from the App's own rate bucket on that benign draft path.
+      # This probe runs on `github.token` (no minted token needed), so it can lead.
+      # A live artifact is uploaded; an ABSENT one is a benign draft skip
       # ONLY when the producing codeql job was itself skipped — otherwise it is a broken
       # producer and must fail closed (see below), not skip cleanly.
       - name: Check for fork SARIF artifact
@@ -179,6 +162,30 @@ jobs:
             fi
           done <<< "$conclusions"
           echo "::notice::no codeql-fork-sarif artifact on run $RUN_ID; codeql analyze was skipped (fork draft). Nothing to upload."
+      # Mint an upload token on the App's own bucket — only once the probe confirmed a live
+      # artifact, so a benign fork-draft skip (no artifact) never spends one. `security-events:
+      # write` posts the SARIF; `pull-requests: read` + `contents: read` resolve the PR number
+      # from the trusted head SHA (`GET /commits/{sha}/pulls`). NO `|| github.token` fallback:
+      # the job token cannot write code scanning results, so a failed mint must fail loud.
+      - name: Mint SARIF upload token
+        id: app-token
+        if: ${{ steps.check.outputs.present == 'true' }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.CLAUSTER_CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
+          permission-security-events: write
+          permission-pull-requests: read
+          permission-contents: read
+      # Carry the probe term too: a skipped mint on the benign draft path leaves an empty
+      # token, and without `present == 'true'` this guard would then error on that path.
+      - name: Verify App token was minted
+        if: ${{ steps.check.outputs.present == 'true' && steps.app-token.outputs.token == '' }}
+        run: |
+          echo "::error::clauster-ci App token mint produced an empty token; \
+          refusing to proceed. Check the CLAUSTER_CI_APP_CLIENT_ID / \
+          CLAUSTER_CI_APP_PRIVATE_KEY secrets and the clauster-ci App installation."
+          exit 1
       - name: Download fork CodeQL SARIF
         if: ${{ steps.check.outputs.present == 'true' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -251,15 +258,35 @@ jobs:
           n="$(printf '%s' "$prs" | jq 'length')"
           open_n="$(printf '%s' "$all" | jq '[.[] | select(.state == "open")] | length')"
           if [ "$n" -eq 0 ]; then
-            # Distinguish a broken filter from a benign race instead of exiting green on both.
-            # Open PR(s) list this commit but NONE has it as head: the head-SHA filter matched
-            # nothing it should have. Exiting 0 here would make the workflow a permanent green
-            # no-op — a workflow_run run is not in the PR checks, so no one reads it — leaving
-            # the fork PR blocked, the exact bug this workflow fixes. Fail the step so the
-            # anomaly surfaces (AGENTS.md invariant 1: fail closed, never silently).
+            # No OPEN PR is headed by this SHA. Two benign races and one genuine anomaly land
+            # here; keep exit 0 for the races and fail closed only on the anomaly, since a
+            # green no-op leaves the fork PR blocked (a workflow_run run is not in the PR
+            # checks, so no one reads it) — the exact bug this workflow fixes.
             if [ "$open_n" -gt 0 ]; then
-              echo "::error::$open_n open PR(s) list commit $HEAD_SHA but none has it as head; refusing to exit green on a broken filter."
-              exit 1
+              # Open PR(s) list this commit but none was kept by the head-SHA filter. Separate a
+              # benign head-moved race from a broken filter by checking the response SHAPE, not by
+              # re-running the value match (that would just reproduce n == 0 and prove nothing).
+              # `shaped_n` counts open PRs that expose a comparable string `.head.sha` at all:
+              #  * HEAD-MOVED RACE (shaped_n > 0) — the open PR(s) DO carry a `.head.sha` string,
+              #    it simply differs from $HEAD_SHA. The fork pushed a newer commit, or a maintainer
+              #    re-ran an older Security run, after this run concluded; the PR still CONTAINS
+              #    $HEAD_SHA (`GET /commits/{sha}/pulls` lists containers, see above) but its head
+              #    advanced. Nothing is broken — the newer Security run performs the upload — so warn
+              #    and exit 0 rather than reddening the Actions tab on an ordinary race.
+              #  * BROKEN FILTER (shaped_n == 0) — an open PR lists the commit yet none exposes a
+              #    string `.head.sha` the filter could match on: the response shape changed under us
+              #    (for example a `github` API rename of `.head.sha`), so the value filter silently
+              #    matched nothing. Unexplained, so fail closed (AGENTS.md invariant 1). This gate is
+              #    a DIFFERENT predicate from the value match, so it stays a real discriminator: a
+              #    shape change that zeroes n also zeroes shaped_n and takes the error path.
+              shaped_n="$(printf '%s' "$all" | jq \
+                '[.[] | select(.state == "open" and (.head.sha | type == "string"))] | length')"
+              if [ "$shaped_n" -eq 0 ]; then
+                echo "::error::$open_n open PR(s) list commit $HEAD_SHA but none exposes a comparable head.sha; response shape unexpected. Refusing to exit green on a broken filter."
+                exit 1
+              fi
+              echo "::warning::$open_n open PR(s) list commit $HEAD_SHA but its head has moved past it (head-moved race); the newer Security run uploads for the current head. Nothing to do here."
+              exit 0
             fi
             # No open PR at this commit at all = the fork PR merged or closed between the
             # Security run and now. Benign race (nothing left to unblock), so skip cleanly
