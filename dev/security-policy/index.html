@@ -1516,7 +1516,14 @@ operator can manage their own host," are generally out of scope.</p>
 <ul>
 <li><strong>Static + dependency analysis on every PR</strong> — CodeQL, OSV-Scanner, and
   GitHub dependency review; secret scanning and Trivy image scanning run in the
-  security workflow.</li>
+  security workflow. A fork PR is the one exception for CodeQL. A <code>pull_request</code>
+  run executes the fork's own workflow copy. So the fork controls the uploaded
+  SARIF, and the CodeQL result is self-attested. The <code>code_scanning</code> rule is one
+  repo-wide rule with no fork carve-out, so it still blocks merge for a fork. But
+  a green check carries no security assurance for a fork, because the fork
+  attested the result. Before merge, a maintainer reads the fork's full diff,
+  including any <code>.github/workflows/</code> change. For an in-repo PR the check stays a
+  real gate.</li>
 <li><strong>Continuous fuzzing</strong> — ClusterFuzzLite runs the Atheris harnesses in
   <a href="https://github.com/schubydoo/clauster/tree/main/fuzz"><code>fuzz/</code></a> on PRs and on
   a schedule.</li>
