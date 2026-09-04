@@ -28,19 +28,35 @@
 # untrusted fork code with write scope and the App secrets in scope — the classic "pwn
 # request". This `workflow_run` job NEVER checks out or executes fork code. It handles
 # only the produced SARIF artifact, which it treats as untrusted DATA: it validates the
-# file is a SARIF JSON document, caps its size, and never evals or unpacks it as code.
-# The binding target (commit SHA + PR number) is derived from the TRUSTED
-# `workflow_run.head_sha` and the base-repo API — never from the fork-influenced
-# artifact — so a tampered artifact can only re-describe the fork's OWN head commit,
-# which a human reviewer and Greptile still gate before merge.
+# file is a SARIF JSON document, caps its size, refuses an artifact that holds more than
+# one SARIF, and never evals or unpacks it as code. The binding target (commit SHA + PR
+# number) is derived from the TRUSTED `workflow_run.head_sha` and the base-repo API,
+# never from the fork-influenced artifact, so the upload can only ever be bound to the
+# fork's OWN head commit.
+#
+# ADVISORY GATE FOR FORKS — read the fork's full diff before merge (AGENTS.md invariant 3)
+# For a fork PR the CodeQL analysis is SELF-ATTESTED. A `pull_request` run executes the
+# fork's OWN copy of security.yml (that is why the fork job holds a read-only token and no
+# secrets), so the fork controls the SARIF this workflow uploads. Binding that SARIF to
+# the fork's own head commit is EXACTLY what the `code_scanning` merge rule then consumes,
+# so a fork can hand itself a clean or fabricated result. This is not a leak to plug from
+# the base side: re-running the analysis in a trusted context would execute fork build
+# steps and needs its own review (issue 1500 option 2, not taken here). So the
+# `code_scanning` rule is ADVISORY for fork PRs. That is a deliberate, documented advisory
+# gate, NOT a silently widened boundary (AGENTS.md invariant 3): the maintainer MUST read
+# the fork's FULL diff before merge — including any change under `.github/workflows/` —
+# and rely on human + Greptile review, not this workflow's green check, for a fork's code
+# scanning. The producer/consumer hardening below only removes the EASY path (a fork
+# committing an extra SARIF into the post-processed dir); it does not make a fork's
+# self-attested result trustworthy.
 #
 # SCOPE / SAFETY
 # - Same-repo, main, and schedule Security runs produce no fork artifact; the job `if:`
 #   below skips them (it runs only when the triggering run was a fork `pull_request`).
-# - `permission-security-events: write` is minted on the App's own rate bucket (≥1,000
-#   REST req/hr per installation), off the shared GITHUB_TOKEN pool. A re-run re-POSTs
-#   and supersedes the prior series (via `automationDetails.id`), so it is idempotent and
-#   never fails on a duplicate.
+# - `permission-security-events: write` is minted on the App's own rate bucket (≥5,000
+#   REST req/hr per installation — the same App bucket the zizmor job cites), off the
+#   shared GITHUB_TOKEN pool. A re-run re-POSTs and supersedes the prior series (via
+#   `automationDetails.id`), so it is idempotent and never fails on a duplicate.
 # - PRE-MERGE LIMITATION: `workflow_run` executes the workflow file from the DEFAULT
 #   branch, so this file cannot exercise itself on its own PR. It takes effect only once
 #   merged; verify it against the next fork / Renovate PR after merge.
@@ -65,9 +81,13 @@ jobs:
     name: upload fork SARIF for head SHA
     # FORK pull_request runs only. head_repository != repository means the triggering
     # Security run analysed a fork; in-repo PRs, push:main, and the weekly cron never
-    # match, so they cost nothing here.
+    # match, so they cost nothing here. `conclusion == 'success'` ignores a cancelled
+    # Security run: security.yml sets `cancel-in-progress`, so a fork that pushes twice in
+    # quick succession leaves a cancelled run whose `always()` upload still holds a SARIF
+    # for a now-superseded head SHA — don't mint a token and post for that stale head.
     if: >-
       github.event.workflow_run.event == 'pull_request'
+      && github.event.workflow_run.conclusion == 'success'
       && github.event.workflow_run.head_repository.full_name != github.event.workflow_run.repository.full_name
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -107,8 +127,11 @@ jobs:
           RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
           set -euo pipefail
+          # `.expired == false`: the artifacts API keeps returning an artifact after its
+          # retention-days:1 window with `"expired": true`, so a re-run two days later
+          # would count it present and then fail the download. Only a live artifact counts.
           count="$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" \
-            --jq '[.artifacts[] | select(.name == "codeql-fork-sarif")] | length')"
+            --jq '[.artifacts[] | select(.name == "codeql-fork-sarif" and .expired == false)] | length')"
           echo "artifact count=$count"
           if [ "$count" -gt 0 ]; then
             echo "present=true" >> "$GITHUB_OUTPUT"
@@ -124,6 +147,26 @@ jobs:
           path: fork-sarif
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ github.token }}
+      - name: Require exactly one SARIF in the fork artifact
+        if: ${{ steps.check.outputs.present == 'true' }}
+        # Fail CLOSED on a tampered artifact. The producer uploads only CodeQL's own
+        # `upload.sarif` by exact name (security.yml), so a genuine artifact carries
+        # exactly one SARIF. Any other count means the artifact was manipulated — e.g. a
+        # fork committed a second `*.sarif` into the post-processed dir — so refuse it and
+        # red the run instead of posting fork-chosen content (AGENTS.md invariant 3). This
+        # closes the "extra SARIF" path; it does NOT make a fork's own SARIF trustworthy
+        # (see the ADVISORY GATE note in the header).
+        env:
+          SARIF_DIR: fork-sarif
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=("$SARIF_DIR"/*.sarif)
+          if [ "${#files[@]}" -ne 1 ]; then
+            echo "::error::fork artifact holds ${#files[@]} SARIF files; expected exactly 1. Refusing to upload."
+            exit 1
+          fi
+          echo "fork artifact holds a single SARIF: ${files[0]}"
       - name: Upload SARIF for the head SHA
         if: ${{ steps.check.outputs.present == 'true' }}
         # Post the fork analysis to the public `code-scanning/sarifs` endpoint bound to
@@ -153,15 +196,28 @@ jobs:
           # Derive the PR number from the trusted head SHA via the base-repo API — NEVER
           # from the fork-influenced artifact. A fork head commit is reachable in the base
           # repo only through refs/pull/N/head, so N is required for the binding.
-          PR="$(gh api "repos/$REPO/commits/$HEAD_SHA/pulls" \
-            --jq 'map(select(.state == "open")) | .[0].number // empty')"
-          # No open PR = the fork PR merged or closed between the Security run and now.
-          # That is a benign race (nothing left to unblock), so skip cleanly like the
+          # Keep only OPEN PRs whose HEAD is this exact SHA. `GET /commits/{sha}/pulls`
+          # also lists PRs that merely CONTAIN the commit, and one SHA can head more than
+          # one open PR; `.head.sha == env.HEAD_SHA` drops the "contains" matches, then the
+          # count below refuses to guess when the head is still ambiguous.
+          prs="$(gh api "repos/$REPO/commits/$HEAD_SHA/pulls" \
+            --jq '[.[] | select(.state == "open" and .head.sha == env.HEAD_SHA) | .number]')"
+          n="$(printf '%s' "$prs" | jq 'length')"
+          # No matching open PR = the fork PR merged or closed between the Security run and
+          # now. That is a benign race (nothing left to unblock), so skip cleanly like the
           # missing-artifact path rather than reddening the workflow_run.
-          if [ -z "$PR" ]; then
-            echo "::notice::no open PR for head SHA $HEAD_SHA (merged or closed before this ran); nothing to upload."
+          if [ "$n" -eq 0 ]; then
+            echo "::notice::no open PR whose head is $HEAD_SHA (merged or closed before this ran); nothing to upload."
             exit 0
           fi
+          # More than one open PR headed by this SHA: the binding target is ambiguous, so
+          # skip rather than bind the analysis to an arbitrary one (leaving the others
+          # blocked). Log it so the ambiguous case is visible instead of silent.
+          if [ "$n" -ne 1 ]; then
+            echo "::notice::head SHA $HEAD_SHA heads $n open PRs ($prs); ambiguous binding, skipping."
+            exit 0
+          fi
+          PR="$(printf '%s' "$prs" | jq -r '.[0]')"
           case "$PR" in
             *[!0-9]*) echo "::error::PR lookup returned non-numeric '$PR' for $HEAD_SHA"; exit 1 ;;
           esac
@@ -186,6 +242,14 @@ jobs:
             # `automationDetails.id` = the analysis category, so a re-upload supersedes the
             # prior series for this language instead of duplicating it (idempotent re-run).
             sarif_b64="$(jq --arg cat "$CATEGORY" '.runs[].automationDetails.id = $cat' "$f" | gzip -c | base64 -w0)"
+            # `checkout_uri` is intentionally omitted here (unlike the three same-repo
+            # SARIF posts). Those run WITH the source checked out and pass
+            # `file://$GITHUB_WORKSPACE`; this consumer never checks out the fork tree, so
+            # that base workspace path does not exist in its context. The post-processed
+            # CodeQL SARIF carries repo-relative `originalUriBaseIds`, so processing resolves
+            # paths without it. UNVERIFIED until the first live fork PR after merge: if
+            # `processing_status` reaches `complete` with correct file paths, the omission
+            # is confirmed (see the PR body's "not verifiable pre-merge" note).
             sarif_id="$(gh api "repos/$REPO/code-scanning/sarifs" \
               -f "commit_sha=$HEAD_SHA" \
               -f "ref=$REF" \

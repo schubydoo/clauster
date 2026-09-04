@@ -251,7 +251,15 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: codeql-fork-sarif
-          path: codeql-sarif-processed/*.sarif
+          # EXACT FILE, not a `*.sarif` glob. `post-processed-sarif-path` is not cleared
+          # before analysis and lives under the fork's checkout, so a fork PR could commit
+          # `codeql-sarif-processed/zz.sarif` and ship a SECOND file the consumer would
+          # then post (issue 1500). CodeQL always writes its post-processed output to the
+          # fixed name `upload.sarif` (verified from a live run) AFTER checkout, overwriting
+          # any committed file at that name, so pinning the path to `upload.sarif` uploads
+          # only CodeQL's own analysis. The consumer additionally refuses an artifact that
+          # holds more than one SARIF (codeql-fork-upload.yml, AGENTS.md invariant 3).
+          path: codeql-sarif-processed/upload.sarif
           if-no-files-found: warn
           retention-days: 1
 
