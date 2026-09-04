@@ -82,7 +82,14 @@ jobs:
           node-version: "24"
           cache: npm
       - name: Install Node deps
-        run: npm ci
+        # `npm ci` has stalled for minutes on a slow registry fetch and starved the
+        # 5-minute job budget, which cancels the required `lint` check. Prefer the
+        # setup-node cache, skip the audit network call with `--no-audit`, and drop the
+        # funding message with `--no-fund`. Cap the step so a stalled fetch fails fast
+        # instead of the whole job timing out. 3 minutes leaves headroom for a cold-cache
+        # install while still failing well before the 5-minute job cap.
+        timeout-minutes: 3
+        run: npm ci --prefer-offline --no-audit --no-fund
       # Markdown + YAML lint — the same script developers run locally.
       - name: markdown + yaml lint
         run: bash scripts/lint-docs.sh
