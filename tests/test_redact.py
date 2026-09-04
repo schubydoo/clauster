@@ -337,12 +337,17 @@ def test_redact_screen_text_masks_a_uuid_welded_onto_a_greedy_secret():
         "glpat-" + "B" * 16,
         "xoxb-" + "B" * 16,
         "clauster_pat_" + "B" * 16,
+        "bearer " + "B" * 12,  # `\s+` + a `-`/`.`-bearing class: swallows the WHOLE UUID
     ],
 )
 def test_redact_screen_text_masks_a_uuid_welded_onto_any_greedy_core(prefixed):
-    # Every greedy secret core in `_SECRET_CORES` welded onto a UUID with no separator. Whether
-    # the core's class excludes `-` (eats only the first hex group, leaking the middle) or
-    # includes it (swallows the whole UUID), no fragment of the UUID may survive (#1496).
+    # Every OPEN-ended (greedy) core in `_SECRET_CORES` welded onto a UUID with no separator: the
+    # `gh[pousr]_`/`github_pat_` family plus the hyphen-bearing `sk-`/`glpat-`/`xox`/
+    # `clauster_pat_` cores and `bearer …`. Whether the core's class excludes `-` (eats only the
+    # first hex group, leaking the middle) or includes it (swallows the whole UUID), no fragment
+    # of the UUID may survive (#1496). The fixed-count `AKIA[0-9A-Z]{16}` core is out of scope: it
+    # cannot backtrack, so `AKIA`+16 welded to a UUID leaks both (pre-existing accepted residue,
+    # noted at `docs/security.md`'s bounded-scope warning).
     out = redact.redact_screen_text([prefixed + _UUID_1496])[0]
     assert "-1234-" not in out and "123456789abc" not in out, out
 
@@ -362,6 +367,20 @@ def test_redact_screen_text_leaves_a_uuid_welded_onto_a_plain_word_as_residue():
     # everywhere and would eat ordinary hex compounds.
     row = "commit" + _UUID_1496  # `commit` is not a secret shape
     assert redact.redact_screen_text([row]) == [row]
+
+
+def test_redact_wrapped_rows_masks_a_uuid_a_greedy_secret_ate_across_the_wrap():
+    # #1496 on the wrap path. A greedy `ghp_` on the JOINED line eats the UUID's leading hex
+    # group; with the head consumed and NO trailing id to anchor on, the middle `-1234-...` used
+    # to leak. The join scan now masks the welded UUID through `_screen_spans`, so the wrap path
+    # masks no fewer cells than the per-row path. The UUID is split across the wrap so neither
+    # row matches it on its own. `tests/test_pty_screen.py` drives the same shape through
+    # `frame()` for the pyte + width-refit surface.
+    row0 = "ghp_" + "B" * 16 + "12345678-12"
+    row1 = "34-1234-1234-123456789abc"
+    out = redact.redact_wrapped_screen_rows([row0, row1])
+    assert "-1234-" not in "".join(out) and "123456789abc" not in "".join(out)
+    assert "<redacted>" in out[0]
 
 
 def test_sanitize_redacts_secret_split_by_ansi_even_when_strip_disabled():

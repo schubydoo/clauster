@@ -543,11 +543,16 @@ def redact_for_disk(text: str) -> str:
 _SCREEN_GLUED_ID_RE = re.compile(r"(env|session|cse)_01[A-Za-z0-9]{8,}\b")
 
 #: The UUID shape with NO ``\b`` on either end, for finding a UUID a greedy secret core welded
-#: onto itself (#1496). See :func:`_screen_welded_uuid_spans`.
-_UUID_CORE_RE = re.compile(_UUID_CORE)
+#: onto itself (#1496). Reused from the UUID mask's cut-supplied (core-alone) variant rather than
+#: recompiled, so it stays inside the anti-drift guard
+#: (:func:`test_cut_masks_cannot_drift_from_the_anchored_ones`) instead of becoming a fourth
+#: independent compile of the same core. See :func:`_screen_welded_uuid_spans`.
+_UUID_CORE_RE = _MASKS[1][1]
 
 
-def _screen_welded_uuid_spans(text: str) -> list[tuple[int, int, str]]:
+def _screen_welded_uuid_spans(
+    text: str, secret_spans: list[tuple[int, int]]
+) -> list[tuple[int, int, str]]:
     r"""Mask a UUID whose leading hex group a greedy secret core consumed (#1496).
 
     A greedy secret core such as ``ghp_[A-Za-z0-9]{16,}`` or ``github_pat_[A-Za-z0-9_]{20,}``
@@ -557,17 +562,24 @@ def _screen_welded_uuid_spans(text: str) -> list[tuple[int, int, str]]:
     leading hex digits behind a ``\b``, and neither is left, so it never matches and the middle
     ``-1234-...`` reaches the browser. The secret itself still masks (it stays anchored -- the
     residue policy the issue keeps intact); this only adds the UUID the secret's greedy match
-    would otherwise hide.
+    would otherwise hide. ``secret_spans`` are the anchored secret matches :func:`_screen_spans`
+    already found, passed in so this does not re-scan ``_SECRET_RES``.
 
-    A UUID welded this way begins INSIDE the secret's masked run -- its head is one of the
-    characters the greedy core consumed, and a run of secret-class word characters has no
-    interior ``\b``, so a UUID starting there is welded by construction. A hyphen-bearing core
-    (``sk-``, ``glpat-``, ``xox``, ``clauster_pat_``) instead swallows the whole UUID and
-    leaves no residue; masking its already-covered UUID again through :func:`_apply_spans` is a
-    harmless union, never LESS than before. A standalone UUID at a real boundary is caught by
+    This masks EVERY UUID whose start falls strictly inside a secret span, which never masks
+    LESS than before in either direction. A pure-word-char greedy core (``ghp_``,
+    ``github_pat_``) stops at the ``-`` and leaves the UUID's middle bare -- the residue this
+    helper exists to cover. A core whose run carries an interior boundary -- a hyphen-bearing
+    class (``sk-``, ``glpat-``, ``xox``, ``clauster_pat_``) or ``bearer``'s ``\s+`` -- has
+    already swallowed the whole UUID, so re-masking that already-covered UUID through
+    :func:`_apply_spans` is a harmless union. A standalone UUID at a real boundary is caught by
     the anchored ``_UUID_RE`` and is not welded, so it is not this helper's concern.
+
+    RESIDUE: ``_UUID_CORE_RE.finditer`` is non-overlapping, so a second UUID that overlaps the
+    first by its leading hex group keeps its tail visible (two all-hex UUIDs sharing eight
+    digits). This still masks strictly more than the pre-fix anchored pass, and the live
+    pty-screen surface is AUTH-gated; naming the gap keeps the helper simple rather than
+    widening the scan.
     """
-    secret_spans = [(m.start(), m.end()) for rx in _SECRET_RES for m in rx.finditer(text)]
     if not secret_spans:
         return []
     return [
@@ -585,11 +597,15 @@ def _screen_spans(text: str) -> list[tuple[int, int, str]]:
     (:func:`_screen_welded_uuid_spans`). The caller unions them through :func:`_apply_spans`.
     See :func:`_redact_screen_row` for why each mask stays anchored.
     """
-    spans = [
-        (m.start(), m.end(), _REDACTED) for anchored, *_ in _MASKS for m in anchored.finditer(text)
-    ]
+    spans: list[tuple[int, int, str]] = []
+    secret_spans: list[tuple[int, int]] = []
+    for anchored, *_rest in _MASKS:
+        matches = [(m.start(), m.end()) for m in anchored.finditer(text)]
+        spans += [(s, e, _REDACTED) for s, e in matches]
+        if anchored in _SECRET_RES:  # reuse these secret matches; do not re-scan in the helper
+            secret_spans += matches
     spans += [(m.start(), m.end(), _REDACTED) for m in _SCREEN_GLUED_ID_RE.finditer(text)]
-    spans += _screen_welded_uuid_spans(text)
+    spans += _screen_welded_uuid_spans(text, secret_spans)
     return spans
 
 

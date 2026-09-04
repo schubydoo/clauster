@@ -350,7 +350,9 @@ Three layers:
     a UUID a greedy secret token welded onto itself. A `ghp_` or `github_pat_`
     token has no separator, so it eats the UUID's leading hex digits. An ordinary
     compound name such as `resolve_session_transcript` stays readable. A welded
-    secret, and a welded id without the `01` shape, stay visible there.
+    secret, and a welded id without the `01` shape, stay visible there. The
+    fixed-length `AKIA…` key is the one shape that shape-masking cannot recover
+    when welded to a UUID: it cannot backtrack, so both stay visible.
 
 ### Hybrid by default
 

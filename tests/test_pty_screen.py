@@ -812,19 +812,22 @@ def test_frame_masks_a_uuid_whose_head_a_joined_greedy_match_would_cover():
     assert "123456789abc" not in joined
 
 
-def test_redact_wrapped_rows_masks_a_uuid_a_greedy_secret_ate_across_the_wrap():
-    # #1496 on the wrap path. A greedy `ghp_` on the JOINED line eats the UUID's leading hex
-    # group; with the head consumed and NO trailing id to anchor on (unlike the test above), the
-    # middle `-1234-...` used to leak. The join scan now masks the welded UUID through
-    # `_screen_spans`, so the wrap path masks no fewer cells than the per-row path. The UUID is
-    # split across the wrap so neither row matches it on its own.
-    from clauster import redact
-
-    row0 = "ghp_" + "B" * 16 + "12345678-12"
-    row1 = "34-1234-1234-123456789abc"
-    out = redact.redact_wrapped_screen_rows([row0, row1])
-    assert "-1234-" not in "".join(out) and "123456789abc" not in "".join(out)
-    assert "<redacted>" in out[0]
+def test_frame_masks_a_uuid_a_greedy_secret_ate_and_the_wrap_split():
+    # #1496 on the wrap path, driven through the real `frame()` surface (unlike the direct
+    # `redact_wrapped_screen_rows` unit case in `tests/test_redact.py`). A greedy `ghp_` eats the
+    # UUID's leading hex group and, with NO trailing id to anchor on (unlike
+    # `test_frame_masks_a_uuid_whose_head_a_joined_greedy_match_would_cover`), the middle
+    # `-1234-...` used to leak. Here pyte hard-wraps the UUID mid-token, so this exercises
+    # `_redact_display`'s wrap grouping, `redact_wrapped_screen_rows`, and `_fit_redacted_row`.
+    scr = PtyScreen(cols=80, rows=10)
+    # 48 pad + space + `ghp_` + 16 B + the UUID = 80 cells before the UUID's tail, so the token
+    # hard-wraps inside the UUID onto row1 with no trailing id to anchor on.
+    raw = "A" * 48 + " ghp_" + "B" * 16 + "12345678-1234-1234-1234-123456789abc"
+    scr.feed(raw.encode())
+    joined = "".join(scr.frame()["rows"])
+    assert "-1234-" not in joined  # no fragment of the UUID survives on either row
+    assert "123456789abc" not in joined
+    assert "<redacted>" in joined
 
 
 def test_frame_masks_a_wrapped_look_alike_the_safe_direction():
