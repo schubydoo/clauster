@@ -1,0 +1,221 @@
+# Bind a head-SHA CodeQL analysis to a FORK pull request, so it stops sticking at
+# mergeStateStatus=BLOCKED on the `code_scanning` merge rule.
+#
+# WHY THIS EXISTS — the fork half of the "stuck PR" class
+# The `main` ruleset's `code_scanning` rule blocks a PR until CodeQL has a current
+# analysis mapped onto it. It accepts the analysis for the PR's HEAD SHA (stable) OR
+# for the merge ref `refs/pull/N/merge` (churns). codeql.yml gives in-repo branches a
+# stable head-SHA analysis on `push`; a FORK author's push fires `on: push` in THEIR
+# repo, never here, so a fork only ever gets the merge-ref analysis from security.yml's
+# `pull_request` codeql job. GitHub RECOMPUTES that merge ref every time `main` moves,
+# fires no `pull_request` event, and the result goes stale — so a fork PR re-sticks at
+# BLOCKED after every base move even with every required check green (evidence: PR 1485,
+# which merged only via a one-time ruleset admin bypass). This workflow closes that gap.
+#
+# THE FLOW
+# 1. security.yml's fork `pull_request` codeql job runs `analyze` with `upload: never`
+#    (a fork's read-only job token cannot post code scanning results) and saves the
+#    post-processed SARIF as the `codeql-fork-sarif` artifact.
+# 2. This `workflow_run` workflow fires when that Security run completes. It runs in the
+#    BASE-repo context off the DEFAULT branch, so it has the clauster-ci App secrets and
+#    `security-events` scope. It downloads the artifact and POSTs it to the public
+#    `code-scanning/sarifs` endpoint (the App-token path; `upload-sarif` cannot take an
+#    App token — github/codeql-action#2719, PR 1435) bound to the PR's stable HEAD SHA
+#    via `refs/pull/N/head`. That satisfies the rule regardless of merge-ref churn.
+#
+# WHY NOT `pull_request_target`
+# codeql.yml already declines it: `pull_request_target` would reach the head SHA but run
+# untrusted fork code with write scope and the App secrets in scope — the classic "pwn
+# request". This `workflow_run` job NEVER checks out or executes fork code. It handles
+# only the produced SARIF artifact, which it treats as untrusted DATA: it validates the
+# file is a SARIF JSON document, caps its size, and never evals or unpacks it as code.
+# The binding target (commit SHA + PR number) is derived from the TRUSTED
+# `workflow_run.head_sha` and the base-repo API — never from the fork-influenced
+# artifact — so a tampered artifact can only re-describe the fork's OWN head commit,
+# which a human reviewer and Greptile still gate before merge.
+#
+# SCOPE / SAFETY
+# - Same-repo, main, and schedule Security runs produce no fork artifact; the job `if:`
+#   below skips them (it runs only when the triggering run was a fork `pull_request`).
+# - `permission-security-events: write` is minted on the App's own rate bucket (≥1,000
+#   REST req/hr per installation), off the shared GITHUB_TOKEN pool. A re-run re-POSTs
+#   and supersedes the prior series (via `automationDetails.id`), so it is idempotent and
+#   never fails on a duplicate.
+# - PRE-MERGE LIMITATION: `workflow_run` executes the workflow file from the DEFAULT
+#   branch, so this file cannot exercise itself on its own PR. It takes effect only once
+#   merged; verify it against the next fork / Renovate PR after merge.
+name: CodeQL fork upload
+
+on: # zizmor: ignore[dangerous-triggers] — data-only artifact, no fork code runs (see header)
+  workflow_run:
+    workflows: ["Security"]
+    types: [completed]
+
+permissions: {}
+
+concurrency:
+  # One in-flight upload per fork head SHA. NOT cancel-in-progress: a newer Security run
+  # for the same head supersedes via automationDetails.id anyway, and cancelling mid-POST
+  # buys nothing — let each bounded upload finish.
+  group: codeql-fork-upload-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    name: upload fork SARIF for head SHA
+    # FORK pull_request runs only. head_repository != repository means the triggering
+    # Security run analysed a fork; in-repo PRs, push:main, and the weekly cron never
+    # match, so they cost nothing here.
+    if: >-
+      github.event.workflow_run.event == 'pull_request'
+      && github.event.workflow_run.head_repository.full_name != github.event.workflow_run.repository.full_name
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # The job's GITHUB_TOKEN lists + downloads the artifact from the triggering run.
+      # The SARIF upload and the head-SHA→PR lookup use the minted App token below, so
+      # the job token needs no `security-events`/`pull-requests` scope.
+      actions: read # read + download the codeql-fork-sarif artifact from the triggering run
+    steps:
+      # Mint an upload token on the App's own bucket. `security-events: write` posts the
+      # SARIF; `pull-requests: read` + `contents: read` resolve the PR number from the
+      # trusted head SHA (`GET /commits/{sha}/pulls`). NO `|| github.token` fallback: the
+      # job token cannot write code scanning results, so a failed mint must fail loud.
+      - name: Mint SARIF upload token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.CLAUSTER_CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
+          permission-security-events: write
+          permission-pull-requests: read
+          permission-contents: read
+      - name: Verify App token was minted
+        if: ${{ steps.app-token.outputs.token == '' }}
+        run: |
+          echo "::error::clauster-ci App token mint produced an empty token; \
+          refusing to proceed. Check the CLAUSTER_CI_APP_CLIENT_ID / \
+          CLAUSTER_CI_APP_PRIVATE_KEY secrets and the clauster-ci App installation."
+          exit 1
+      # A fork DRAFT skips the codeql job, so its Security run produces no artifact.
+      # Probe first and skip cleanly instead of failing the download on a missing name.
+      - name: Check for fork SARIF artifact
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          count="$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" \
+            --jq '[.artifacts[] | select(.name == "codeql-fork-sarif")] | length')"
+          echo "artifact count=$count"
+          if [ "$count" -gt 0 ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::no codeql-fork-sarif artifact on run $RUN_ID (fork draft skip); nothing to upload."
+          fi
+      - name: Download fork CodeQL SARIF
+        if: ${{ steps.check.outputs.present == 'true' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: codeql-fork-sarif
+          path: fork-sarif
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - name: Upload SARIF for the head SHA
+        if: ${{ steps.check.outputs.present == 'true' }}
+        # Post the fork analysis to the public `code-scanning/sarifs` endpoint bound to
+        # the PR's stable HEAD SHA. Every dynamic value comes through `env:`; the artifact
+        # is treated as untrusted DATA (validated as SARIF JSON, size-capped, never
+        # executed). The binding SHA + PR come from the trusted event / base-repo API.
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          SARIF_DIR: fork-sarif
+          # Trailing slash is load-bearing (see security.yml): GitHub parses
+          # `automationDetails.id` as `category/run-id`, so `/language:python` with no
+          # slash records an EMPTY category. Single-language (python) matrix; track it if
+          # the security.yml codeql matrix grows.
+          CATEGORY: "/language:python/"
+        run: |
+          set -euo pipefail
+          # The head SHA comes from the trusted workflow_run payload; validate its shape
+          # before it reaches an API path.
+          case "$HEAD_SHA" in
+            *[!0-9a-f]* | "") echo "::error::head SHA '$HEAD_SHA' is not lowercase hex"; exit 1 ;;
+          esac
+          if [ "${#HEAD_SHA}" -ne 40 ]; then
+            echo "::error::head SHA '$HEAD_SHA' is not 40 characters"; exit 1
+          fi
+          # Derive the PR number from the trusted head SHA via the base-repo API — NEVER
+          # from the fork-influenced artifact. A fork head commit is reachable in the base
+          # repo only through refs/pull/N/head, so N is required for the binding.
+          PR="$(gh api "repos/$REPO/commits/$HEAD_SHA/pulls" \
+            --jq 'map(select(.state == "open")) | .[0].number // empty')"
+          # No open PR = the fork PR merged or closed between the Security run and now.
+          # That is a benign race (nothing left to unblock), so skip cleanly like the
+          # missing-artifact path rather than reddening the workflow_run.
+          if [ -z "$PR" ]; then
+            echo "::notice::no open PR for head SHA $HEAD_SHA (merged or closed before this ran); nothing to upload."
+            exit 0
+          fi
+          case "$PR" in
+            *[!0-9]*) echo "::error::PR lookup returned non-numeric '$PR' for $HEAD_SHA"; exit 1 ;;
+          esac
+          REF="refs/pull/$PR/head"
+          echo "Binding fork SARIF to $REF at $HEAD_SHA"
+          shopt -s nullglob
+          found=0
+          for f in "$SARIF_DIR"/*.sarif; do
+            found=1
+            # Size cap: the endpoint rejects a gzip payload over 10 MiB; refuse a raw
+            # SARIF over 20 MiB up front so a bloated/hostile artifact cannot waste the
+            # upload or the API budget.
+            sz="$(wc -c < "$f")"
+            if [ "$sz" -gt 20971520 ]; then
+              echo "::error::SARIF $f is $sz bytes (> 20 MiB cap); refusing to upload."; exit 1
+            fi
+            # Data-only validation: the artifact is untrusted fork output. Require a JSON
+            # object with a `.runs` array (a SARIF log). It is parsed, never executed.
+            if ! jq -e 'type == "object" and (.runs | type == "array")' "$f" >/dev/null; then
+              echo "::error::$f is not a SARIF document (no .runs array); refusing to upload."; exit 1
+            fi
+            # `automationDetails.id` = the analysis category, so a re-upload supersedes the
+            # prior series for this language instead of duplicating it (idempotent re-run).
+            sarif_b64="$(jq --arg cat "$CATEGORY" '.runs[].automationDetails.id = $cat' "$f" | gzip -c | base64 -w0)"
+            sarif_id="$(gh api "repos/$REPO/code-scanning/sarifs" \
+              -f "commit_sha=$HEAD_SHA" \
+              -f "ref=$REF" \
+              -f "tool_name=CodeQL" \
+              -f "sarif=$sarif_b64" \
+              --jq .id)"
+            echo "Uploaded $f (id=$sarif_id); waiting for processing."
+            last_err=""
+            done_ok=""
+            for _ in $(seq 1 30); do
+              if ! status="$(gh api "repos/$REPO/code-scanning/sarifs/$sarif_id" \
+                --jq .processing_status 2>/tmp/gh_poll_err)"; then
+                last_err="$(cat /tmp/gh_poll_err)"
+                status="pending"
+              fi
+              echo "processing_status=$status"
+              case "$status" in
+                complete) done_ok=1; break ;;
+                failed)
+                  echo "CodeQL SARIF processing failed:" >&2
+                  gh api "repos/$REPO/code-scanning/sarifs/$sarif_id" --jq '.errors[]?' >&2
+                  exit 1 ;;
+              esac
+              sleep 5
+            done
+            if [ -z "$done_ok" ]; then
+              echo "::warning title=CodeQL fork SARIF::$f still '$status' after the bounded wait;" \
+                "not failing the gate. last GET error: ${last_err:-none}"
+            fi
+          done
+          if [ "$found" = 0 ]; then
+            echo "::warning title=CodeQL fork SARIF::no SARIF in $SARIF_DIR; nothing uploaded."
+          fi

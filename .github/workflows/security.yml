@@ -225,6 +225,35 @@ jobs:
           if [ "$found" = 0 ]; then
             echo "::warning title=CodeQL SARIF::no SARIF in $SARIF_DIR; nothing uploaded."
           fi
+      - name: Save fork CodeQL SARIF artifact
+        # FORK PR ONLY. The same-repo upload above is skipped for a fork (a fork's
+        # job token cannot write code scanning results), so publish the
+        # post-processed SARIF as an artifact instead. codeql-fork-upload.yml — a
+        # `workflow_run` workflow running in the BASE-repo context with the
+        # clauster-ci App token — downloads it and binds it to the PR's stable HEAD
+        # SHA via the public `code-scanning/sarifs` endpoint, so the `code_scanning`
+        # merge rule stops re-sticking as `main` moves and churns `refs/pull/N/merge`
+        # (#1498). This job runs on `refs/pull/N/merge` for a fork with a read-only
+        # GITHUB_TOKEN and no App secrets, so it CANNOT upload here; the consumer
+        # does. No PR metadata is written into the artifact: the consumer derives the
+        # PR number from the trusted `workflow_run.head_sha`, never from this
+        # (fork-influenced) artifact. Single-language (python) matrix, so the fixed
+        # artifact name cannot collide; add `-${{ matrix.language }}` if it grows.
+        if: >-
+          ${{ always()
+          && github.event_name == 'pull_request'
+          && github.event.pull_request.head.repo.full_name != github.repository }}
+        # Never red the required `codeql` job on an artifact hiccup: a failed upload just
+        # means codeql-fork-upload.yml finds nothing and skips, leaving the fork on its
+        # pre-existing merge-ref analysis — the same fail-safe as the consumer's
+        # missing-artifact path. This step only ADDS head-SHA coverage; it must not block.
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codeql-fork-sarif
+          path: codeql-sarif-processed/*.sarif
+          if-no-files-found: warn
+          retention-days: 1
 
   gitleaks:
     name: secret scan
