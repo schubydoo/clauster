@@ -291,8 +291,30 @@ def test_real_workflow_pins_are_parseable_in_the_committed_files(script):
         smatch = pin.sha_re.search(text)
         assert vmatch and smatch, f"{pin.path}: VERSION/SHA256 pin not found by its regex"
         assert re.fullmatch(r"[0-9a-f]{64}", smatch.group(1))  # a real committed asset digest
-        assert pin.tag(vmatch.group(1)).startswith("v")
-        assert pin.asset(vmatch.group(1))  # non-empty derived asset name
+        version = vmatch.group(1)
+        tag, asset = pin.tag(version), pin.asset(version)
+        # Assert the EXACT derivation, not just "non-empty" (#1482 review nit): a drifted
+        # tag/asset lambda would resolve the wrong release or asset and 404 at fetch time.
+        if pin.repo == "osv-scanner":
+            assert tag == version  # OSV_VERSION already carries the leading "v"
+            assert asset == "osv-scanner_linux_amd64"  # a constant asset name
+        else:  # actionlint: a bare version -> "v"+version tag + a version-stamped tarball
+            assert tag == f"v{version}"
+            assert asset == f"actionlint_{version}_linux_amd64.tar.gz"
+
+
+def test_every_workflow_pin_is_in_the_binary_dep_pins_paths_filter(script):
+    # binary-dep-pins.yml's paths: filters are hand-kept in sync with _WORKFLOW_PINS (#1482
+    # review nit). A pin whose file is missing from a filter would silently skip the check on a
+    # bump PR. Assert every pin path is in BOTH the pull_request and push paths lists (2 blocks).
+    wf = (script._repo_root() / ".github/workflows/binary-dep-pins.yml").read_text(
+        encoding="utf-8"
+    )
+    for pin in script._WORKFLOW_PINS:
+        assert wf.count(f'"{pin.path}"') >= 2, (
+            f'"{pin.path}" must be in both the pull_request and push paths: filters of '
+            "binary-dep-pins.yml, or a bump to it will not run this check"
+        )
 
 
 def test_resolve_workflow_pin_ok(script, monkeypatch, tmp_path):
