@@ -563,23 +563,29 @@ def _screen_welded_uuid_spans(
     is left, so it never matches and the middle ``-1234-...`` reaches the browser. The id or
     secret itself still masks (it stays anchored -- the residue policy the issue keeps intact);
     this only adds the UUID the greedy match would otherwise hide. ``greedy_spans`` are the
-    anchored id and secret matches :func:`_screen_spans` already found, passed in so this does
-    not re-scan ``_ID_RE`` or ``_SECRET_RES``.
+    anchored id and secret matches AND the unanchored ``_SCREEN_GLUED_ID_RE`` matches that
+    :func:`_screen_spans` already found, passed in so this does not re-scan ``_ID_RE``,
+    ``_SECRET_RES`` or ``_SCREEN_GLUED_ID_RE``. The glued-id shape is another greedy id core
+    (an open-ended ``[A-Za-z0-9]{8,}`` run, no leading ``\b``), so a UUID welded onto it eats
+    the leading hex group exactly the same way (#1496).
 
     This masks EVERY UUID whose start falls strictly inside a greedy span, which never masks
-    LESS than before in either direction. A pure-word-char greedy core (an id, ``ghp_``,
-    ``github_pat_``) stops at the ``-`` and leaves the UUID's middle bare -- the residue this
-    helper exists to cover. A core whose run carries an interior boundary -- a hyphen-bearing
-    class (``sk-``, ``glpat-``, ``xox``, ``clauster_pat_``) or ``bearer``'s ``\s+`` -- has
-    already swallowed the whole UUID, so re-masking that already-covered UUID through
-    :func:`_apply_spans` is a harmless union. A standalone UUID at a real boundary is caught by
-    the anchored ``_UUID_RE`` and is not welded, so it is not this helper's concern.
+    LESS than before in either direction. A pure-word-char greedy core (an id, a glued id,
+    ``ghp_``, ``github_pat_``) stops at the ``-`` and leaves the UUID's middle bare -- the
+    residue this helper exists to cover. A core whose run carries an interior boundary -- a
+    hyphen-bearing class (``sk-``, ``glpat-``, ``xox``, ``clauster_pat_``) or ``bearer``'s
+    ``\s+`` -- has already swallowed the whole UUID, so re-masking that already-covered UUID
+    through :func:`_apply_spans` is a harmless union. A standalone UUID at a real boundary is
+    caught by the anchored ``_UUID_RE`` and is not welded, so it is not this helper's concern.
 
-    RESIDUE: ``_UUID_CORE_RE.finditer`` is non-overlapping, so a second UUID that overlaps the
-    first by its leading hex group keeps its tail visible (two all-hex UUIDs sharing eight
-    digits). This still masks strictly more than the pre-fix anchored pass, and the live
-    pty-screen surface is AUTH-gated; naming the gap keeps the helper simple rather than
-    widening the scan.
+    RESIDUE: two gaps stay, both AUTH-gated behind an attacker-influenced bridge escape, and
+    both masking strictly more than the pre-fix anchored pass. First, ``_UUID_CORE_RE.finditer``
+    is non-overlapping, so a second UUID that overlaps the first by its leading hex group keeps
+    its tail visible (two all-hex UUIDs sharing eight digits). Second, the fixed-count ``AKIA``
+    key (``\bAKIA[0-9A-Z]{16}\b``) cannot see a directly welded UUID at all: the trailing
+    ``\b`` fails when a word char follows the 16th, the whole anchored match fails, so it never
+    reaches ``greedy_spans`` and both the key and the UUID stay visible. Naming the gaps keeps
+    the helper simple rather than widening the scan.
     """
     if not greedy_spans:
         return []
@@ -605,7 +611,9 @@ def _screen_spans(text: str) -> list[tuple[int, int, str]]:
         spans += [(s, e, _REDACTED) for s, e in matches]
         if anchored is _ID_RE or anchored in _SECRET_RES:  # reuse these; do not re-scan in helper
             greedy_spans += matches
-    spans += [(m.start(), m.end(), _REDACTED) for m in _SCREEN_GLUED_ID_RE.finditer(text)]
+    glued = [(m.start(), m.end()) for m in _SCREEN_GLUED_ID_RE.finditer(text)]
+    spans += [(s, e, _REDACTED) for s, e in glued]
+    greedy_spans += glued  # a glued id core is greedy too: a UUID can weld onto it (#1496)
     spans += _screen_welded_uuid_spans(text, greedy_spans)
     return spans
 
@@ -623,10 +631,10 @@ def _redact_screen_row(row: str) -> str:
     a standalone id or secret masks as before and no ordinary word is over-masked. Two
     UNANCHORED matches join them: :data:`_SCREEN_GLUED_ID_RE`, the real id shape, which covers
     an id a consumed escape welded onto the word before it (``agentenv_01<...>``); and
-    :func:`_screen_welded_uuid_spans`, a UUID whose leading hex group a greedy id or secret core
-    ate, welding it onto that id or secret (``ghp_<16 hex chars>12345678-...``, #1496). The
-    secrets stay
-    anchored on purpose: a glued secret core (``sk-``, ``glpat-``, ``xoxb-``) matches inside an
+    :func:`_screen_welded_uuid_spans`, a UUID whose leading hex group a greedy id, glued id or
+    secret core ate, welding it onto that core (``ghp_<16 hex chars>12345678-...``, or the
+    glued ``agentenv_01<...>12345678-...``, #1496). The secrets stay anchored on purpose: a
+    glued secret core (``sk-``, ``glpat-``, ``xoxb-``) matches inside an
     ordinary hyphenated word (``risk-assessment-checklist`` -> ``ri<redacted>``), so with no
     cut to confirm a real weld, unanchoring them destroys readable text.
 
@@ -645,9 +653,14 @@ def _redact_screen_row(row: str) -> str:
     more and a ``<redacted>`` token never matches a core.
 
     RESIDUE on this surface, stated because there is no cut to distinguish it: a welded SECRET
-    (secrets stay anchored) and a welded id that lacks the ``01`` shape are not masked. Both
-    need an attacker-influenced escape from Clauster's own bridge, and the endpoint is
-    AUTH-gated. The split case (a control char INSIDE an id) is not a gap: pyte joins the
+    (secrets stay anchored) and a welded id that lacks the ``01`` shape are not masked. A welded
+    UUID is now masked for every open-ended greedy core -- an id, a glued id (#1496) and the
+    open-ended secret cores -- but two welded-UUID gaps stay, both named in
+    :func:`_screen_welded_uuid_spans`: a second UUID overlapping the first by its leading hex
+    group, and the fixed-count ``AKIA`` key, whose anchored match fails entirely on a direct
+    weld and so never reaches the helper.
+    All of these need an attacker-influenced escape from Clauster's own bridge, and the endpoint
+    is AUTH-gated. The split case (a control char INSIDE an id) is not a gap: pyte joins the
     halves into one matchable run the anchored pass catches.
     """
     while True:

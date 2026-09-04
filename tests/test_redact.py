@@ -375,6 +375,32 @@ def test_redact_screen_text_masks_a_uuid_welded_onto_a_greedy_id(prefixed):
     assert "-1234-1234-1234-123456789abc" in redact.redact_secrets(redact.redact_ids(row))
 
 
+@pytest.mark.parametrize(
+    "glued",
+    [
+        "env_01" + "B" * 8,  # `_SCREEN_GLUED_ID_RE`: `(env|session|cse)_01[A-Za-z0-9]{8,}`
+        "session_01" + "B" * 8,
+        "cse_01" + "B" * 8,
+    ],
+)
+def test_redact_screen_text_masks_a_uuid_welded_onto_a_glued_id(glued):
+    # The glued-id core folded into #1496: `_SCREEN_GLUED_ID_RE` is a greedy id core (open-ended
+    # `[A-Za-z0-9]{8,}`, no leading `\b`) that a consumed escape welds onto the word before it. It
+    # includes the UUID's leading hex group but not its `-`, so `agentenv_01<...>12345678-...`
+    # eats the first hex group and stops at the `-`. `_ID_RE` never matches (a word char precedes
+    # the id, no `\b`) and neither does the anchored `_UUID_RE` (a word char precedes the hex),
+    # so the middle `-1234-1234-1234-123456789abc` used to reach the browser.
+    row = "agent" + glued + _UUID_1496  # `agent` welds the escape-glued id onto a word
+    out = redact.redact_screen_text([row])[0]
+    assert "-1234-" not in out and "123456789abc" not in out, out
+    assert "<redacted>" in out
+    # Positive control: the pre-fix anchored pass (the log path's behaviour) cannot see the glued
+    # id at all -- `_ID_RE` needs a leading `\b` -- so the whole id + UUID body stays bare.
+    # Reverting the fold (dropping the `_SCREEN_GLUED_ID_RE` matches from `_screen_spans`'
+    # greedy_spans) makes the assertion above fail on exactly this UUID body.
+    assert "-1234-1234-1234-123456789abc" in redact.redact_secrets(redact.redact_ids(row))
+
+
 def test_redact_screen_text_masks_a_uuid_welded_onto_a_second_uuid_after_a_secret():
     # A secret welded onto two UUIDs back to back: the first UUID's head the secret ate, and the
     # second UUID welded onto the first. The fixed point must mask both, so neither body leaks.
