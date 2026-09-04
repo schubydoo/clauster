@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import contextvars
 import datetime
+import fnmatch
 import hashlib
 import json
 import math
@@ -1517,24 +1518,22 @@ def ensure_gitignored(
     (``CLAUDE.local.md`` is replaced without one) leave this off, so no phantom
     ``.bak`` entry is added for a file that never exists.
 
-    Idempotent: an entry already present as an exact line (surrounding whitespace
-    ignored) is left untouched — no duplicate append, and the existing content is
-    never rewritten or reordered (only ever appended to). A missing ``.gitignore`` is
-    created. This is deliberately a simple exact-line check, not a full
-    gitignore-pattern matcher — good enough for the fixed, known entries this surface
-    writes, and conservative (a near-duplicate pattern is harmless, just untidy, never
-    unsafe).
+    Idempotent: an entry already covered by an existing rule or exact line
+    (surrounding whitespace ignored) is left untouched — no redundant append, and
+    the existing content is never rewritten or reordered (only ever appended to).
+    A missing ``.gitignore`` is created. An ancestor directory rule (e.g. ``/.claude``,
+    ``.claude/``, ``.claude``, or ``foo/``) or an exact match skips the append as a
+    no-op (#1484).
     """
     gitignore = project_dir / ".gitignore"
     try:
         existing = gitignore.read_text(encoding="utf-8")
     except FileNotFoundError:
         existing = ""
-    present = {line.strip() for line in existing.splitlines()}
     wanted = [relative_path]
     if ignore_backup_sibling:
         wanted.append(relative_path + ".bak")
-    missing = [entry for entry in wanted if entry not in present]
+    missing = [entry for entry in wanted if not _is_gitignored_by_existing_rules(entry, existing)]
     if not missing:
         return
     with gitignore.open("a", encoding="utf-8") as fh:
@@ -1542,6 +1541,99 @@ def ensure_gitignored(
             fh.write("\n")
         for entry in missing:
             fh.write(entry + "\n")
+
+
+def _is_gitignored_by_existing_rules(relative_path: str, existing_content: str) -> bool:
+    """Check whether ``relative_path`` is already covered by a rule in ``existing_content``.
+
+    Conservative, not a full gitignore engine: only returns True when an
+    existing rule clearly covers the target without being overridden by a
+    subsequent negation (``!``) rule. When in doubt or if an override might
+    leave the path tracked, returns False so the caller can safely append (#1484).
+
+    Recognizes:
+    - Exact line matches (with or without a leading slash, surrounding whitespace ignored).
+    - Ancestor directory rules (e.g. ``/.claude``, ``.claude/``, ``.claude``, ``foo/``, ``a/b/``).
+    - Basename wildcards (e.g. ``*.bak``).
+    - Negation lines (``!pattern``) that un-ignore the target path.
+    """
+    norm_target = relative_path.replace("\\", "/").strip().lstrip("/")
+    if not norm_target:
+        return False
+
+    parts = norm_target.split("/")
+    filename = parts[-1]
+    dir_components = set(parts[:-1])
+
+    is_ignored = False
+
+    def _rule_matches(rule_text: str, *, negation: bool = False) -> bool:
+        clean_rule = rule_text.lstrip("/")
+        if clean_rule == norm_target:
+            return True
+
+        clean_dir = rule_text.rstrip("/")
+        if rule_text.startswith("/"):
+            anchored_dir = rule_text[1:].rstrip("/")
+            if norm_target == anchored_dir or norm_target.startswith(anchored_dir + "/"):
+                return True
+        elif "/" in clean_dir:
+            if norm_target == clean_dir or norm_target.startswith(clean_dir + "/"):
+                return True
+        else:
+            if clean_dir in dir_components or norm_target == clean_dir:
+                return True
+
+        # Basename wildcard (no slash in rule, e.g. *.bak, *.json)
+        if "/" not in rule_text and fnmatch.fnmatchcase(filename, rule_text):
+            return True
+
+        # Path-based wildcard (contains a slash, e.g. .claude/*.json, **/settings.local.json).
+        # Only trust it for a NEGATION. `fnmatch` drops git's leading-slash anchor and its `*`
+        # crosses `/`, so a POSITIVE slash-wildcard can report coverage git does not give -- e.g.
+        # `/*.json` is root-only in git, but `fnmatch` matches `.claude/settings.local.json` --
+        # which would wrongly SKIP the append and leave a secret-bearing file tracked (#1484). A
+        # negation match only CLEARS `is_ignored`, so over-matching there just appends, the safe
+        # direction; a positive slash-wildcard over-appends instead, which is also safe.
+        if negation and "/" in rule_text:
+            if fnmatch.fnmatchcase(norm_target, clean_rule):
+                return True
+            if "/**/" in clean_rule and fnmatch.fnmatchcase(
+                norm_target, clean_rule.replace("/**/", "/")
+            ):
+                return True
+            if clean_rule.startswith("**/"):
+                sub_pattern = clean_rule[3:]
+                if (
+                    fnmatch.fnmatchcase(norm_target, sub_pattern)
+                    or fnmatch.fnmatchcase(filename, sub_pattern)
+                    or (
+                        "/**/" in sub_pattern
+                        and (
+                            fnmatch.fnmatchcase(norm_target, sub_pattern.replace("/**/", "/"))
+                            or fnmatch.fnmatchcase(filename, sub_pattern.replace("/**/", "/"))
+                        )
+                    )
+                ):
+                    return True
+
+        return False
+
+    for line in existing_content.splitlines():
+        raw_rule = line.strip()
+        if not raw_rule or raw_rule.startswith("#"):
+            continue
+
+        rule = raw_rule.replace("\\", "/")
+        if rule.startswith("!"):
+            neg_rule = rule[1:].strip()
+            if _rule_matches(neg_rule, negation=True):
+                is_ignored = False
+        else:
+            if _rule_matches(rule):
+                is_ignored = True
+
+    return is_ignored
 
 
 def write_settings_subtree(

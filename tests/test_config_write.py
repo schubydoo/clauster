@@ -1338,6 +1338,161 @@ def test_ensure_gitignored_adds_only_missing_backup_sibling(tmp_path: Path) -> N
     assert text == ".claude/settings.local.json\n.claude/settings.local.json.bak\n"
 
 
+def test_ensure_gitignored_noop_when_root_anchored_ancestor_rule_present(tmp_path: Path) -> None:
+    # #1484: /.claude covers .claude/settings.local.json and its .bak sibling
+    (tmp_path / ".gitignore").write_text("/.claude\n", encoding="utf-8")
+    cw.ensure_gitignored(tmp_path, ".claude/settings.local.json", ignore_backup_sibling=True)
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == "/.claude\n"
+
+
+def test_ensure_gitignored_noop_when_trailing_slash_ancestor_rule_present(tmp_path: Path) -> None:
+    # #1484: .claude/ covers all files under .claude/
+    (tmp_path / ".gitignore").write_text(".claude/\n", encoding="utf-8")
+    cw.ensure_gitignored(tmp_path, ".claude/settings.local.json", ignore_backup_sibling=True)
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == ".claude/\n"
+
+
+def test_ensure_gitignored_noop_when_bare_ancestor_rule_present(tmp_path: Path) -> None:
+    # #1484: .claude covers all files under .claude
+    (tmp_path / ".gitignore").write_text(".claude\n", encoding="utf-8")
+    cw.ensure_gitignored(tmp_path, ".claude/settings.local.json", ignore_backup_sibling=True)
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == ".claude\n"
+
+
+def test_ensure_gitignored_noop_when_nested_ancestor_directory_rule_present(
+    tmp_path: Path,
+) -> None:
+    # #1484: a/b/ covers nested paths like a/b/c/local.json
+    (tmp_path / ".gitignore").write_text("a/b/\n", encoding="utf-8")
+    cw.ensure_gitignored(tmp_path, "a/b/c/local.json")
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == "a/b/\n"
+
+
+def test_ensure_gitignored_appends_uncovered_path_when_unrelated_rule_present(
+    tmp_path: Path,
+) -> None:
+    # A rule that merely shares a prefix like .claude-other does not cover .claude
+    (tmp_path / ".gitignore").write_text(".claude-other/\n", encoding="utf-8")
+    cw.ensure_gitignored(tmp_path, ".claude/settings.local.json")
+    expected = ".claude-other/\n.claude/settings.local.json\n"
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == expected
+
+
+def test_ensure_gitignored_backup_sibling_covered_by_wildcard(tmp_path: Path) -> None:
+    # *.bak covers the sibling, so only the file itself is appended
+    (tmp_path / ".gitignore").write_text("*.bak\n", encoding="utf-8")
+    cw.ensure_gitignored(tmp_path, ".claude/settings.local.json", ignore_backup_sibling=True)
+    expected = "*.bak\n.claude/settings.local.json\n"
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == expected
+
+
+def test_ensure_gitignored_appends_when_negation_line_overrides_wildcard(tmp_path: Path) -> None:
+    # Negation !settings.local.json re-includes file excluded by *.json, so must append
+    (tmp_path / ".gitignore").write_text("*.json\n!settings.local.json\n", encoding="utf-8")
+    cw.ensure_gitignored(tmp_path, "settings.local.json")
+    expected = "*.json\n!settings.local.json\nsettings.local.json\n"
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == expected
+
+
+def test_ensure_gitignored_appends_when_slash_negation_overrides_wildcard(tmp_path: Path) -> None:
+    # Negation with path / glob pattern (e.g. !.claude/*.json) re-includes file
+    (tmp_path / ".gitignore").write_text("*.json\n!.claude/*.json\n", encoding="utf-8")
+    cw.ensure_gitignored(tmp_path, ".claude/settings.local.json")
+    expected = "*.json\n!.claude/*.json\n.claude/settings.local.json\n"
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == expected
+
+
+def test_ensure_gitignored_appends_when_doublestar_negation_matches_zero_directories(
+    tmp_path: Path,
+) -> None:
+    # A negation !a/**/b matches when **/ stands for zero directories (a/b)
+    (tmp_path / ".gitignore").write_text(
+        "*.json\n!.claude/**/settings.local.json\n", encoding="utf-8"
+    )
+    cw.ensure_gitignored(tmp_path, ".claude/settings.local.json")
+    expected = "*.json\n!.claude/**/settings.local.json\n.claude/settings.local.json\n"
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == expected
+
+
+def test_ensure_gitignored_case_sensitive_matching(tmp_path: Path) -> None:
+    # Gitignore matching is case-sensitive across platforms
+    (tmp_path / ".gitignore").write_text("*.BAK\n", encoding="utf-8")
+    cw.ensure_gitignored(tmp_path, ".claude/settings.local.json", ignore_backup_sibling=True)
+    content = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert ".claude/settings.local.json.bak\n" in content
+
+
+def test_ensure_gitignored_appends_when_root_anchored_glob_does_not_cover_nested(
+    tmp_path: Path,
+) -> None:
+    # #1484 review: `/*.json` is root-anchored in git (root-level *.json only, not nested), so it
+    # does NOT cover `.claude/settings.local.json`. The helper must not strip the anchor and skip
+    # the append, or the secret-bearing file stays git-tracked.
+    (tmp_path / ".gitignore").write_text("/*.json\n", encoding="utf-8")
+    cw.ensure_gitignored(tmp_path, ".claude/settings.local.json")
+    expected = "/*.json\n.claude/settings.local.json\n"
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == expected
+
+
+def test_ensure_gitignored_over_appends_a_positive_slash_wildcard(tmp_path: Path) -> None:
+    # A POSITIVE slash-wildcard is not trusted (fnmatch's `*` crosses `/` and drops git's anchor),
+    # so the helper appends rather than risk skipping. `.claude/*.json` may or may not cover the
+    # path in git; over-appending is the safe direction (#1484 review).
+    (tmp_path / ".gitignore").write_text(".claude/*.json\n", encoding="utf-8")
+    cw.ensure_gitignored(tmp_path, ".claude/settings.local.json")
+    expected = ".claude/*.json\n.claude/settings.local.json\n"
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == expected
+
+
+def test_ensure_gitignored_appends_when_doublestar_negation_matches_root_file(
+    tmp_path: Path,
+) -> None:
+    # `!**/foo` re-includes a ROOT-level `foo` (git's `**/` matches zero or more leading
+    # directories). A root target does not match the whole-path form, so this exercises the
+    # `**/` sub-pattern branch, which is trusted only for a negation.
+    (tmp_path / ".gitignore").write_text("*.json\n!**/settings.local.json\n", encoding="utf-8")
+    cw.ensure_gitignored(tmp_path, "settings.local.json")
+    expected = "*.json\n!**/settings.local.json\nsettings.local.json\n"
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == expected
+
+
+def test_ensure_gitignored_ignores_comment_and_blank_lines(tmp_path: Path) -> None:
+    # Comment (`#`) and blank lines are skipped; the real ancestor rule still covers the path.
+    (tmp_path / ".gitignore").write_text("# a comment\n\n/.claude\n", encoding="utf-8")
+    cw.ensure_gitignored(tmp_path, ".claude/settings.local.json")
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == "# a comment\n\n/.claude\n"
+
+
+def test_ensure_gitignored_noop_when_negation_does_not_match(tmp_path: Path) -> None:
+    # A negation for an UNRELATED path does not clear the wildcard's coverage, so the file stays
+    # ignored and nothing is appended.
+    (tmp_path / ".gitignore").write_text("*.json\n!other.json\n", encoding="utf-8")
+    cw.ensure_gitignored(tmp_path, "settings.local.json")
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == "*.json\n!other.json\n"
+
+
+def test_ensure_gitignored_noop_when_doublestar_negation_does_not_match(tmp_path: Path) -> None:
+    # A `!**/...` negation whose sub-pattern does not match leaves the wildcard's coverage
+    # intact (the `**/` no-match fall-through), so the file stays ignored and nothing is added.
+    (tmp_path / ".gitignore").write_text("*.json\n!**/unrelated.txt\n", encoding="utf-8")
+    cw.ensure_gitignored(tmp_path, "settings.local.json")
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == "*.json\n!**/unrelated.txt\n"
+
+
+def test_ensure_gitignored_noop_when_slash_negation_does_not_match(tmp_path: Path) -> None:
+    # A slash-wildcard negation that is not `**/` and does not match falls through (the
+    # `startswith("**/")` false edge), leaving the file ignored and nothing appended.
+    (tmp_path / ".gitignore").write_text("*.json\n!.claude/other.json\n", encoding="utf-8")
+    cw.ensure_gitignored(tmp_path, "settings.local.json")
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == "*.json\n!.claude/other.json\n"
+
+
+def test_is_gitignored_helper_returns_false_for_empty_target() -> None:
+    # A path that normalizes to empty (e.g. "" or "/") is never "already covered".
+    assert cw._is_gitignored_by_existing_rules("", "*.json") is False
+    assert cw._is_gitignored_by_existing_rules("/", "*.json") is False
+
+
 def test_project_local_settings_path() -> None:
     project_dir = Path("/repo/alpha")
     assert cw.project_local_settings_path(project_dir) == project_dir / ".claude" / (
