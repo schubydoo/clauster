@@ -1584,8 +1584,20 @@ def _is_gitignored_by_existing_rules(relative_path: str, existing_content: str) 
             if clean_dir in dir_components or norm_target == clean_dir:
                 return True
 
+        # Basename wildcard (no slash in rule, e.g. *.bak, *.json)
         if "/" not in rule_text and fnmatch.fnmatchcase(filename, rule_text):
             return True
+
+        # Path-based wildcard (contains slash, e.g. .claude/*.json, **/settings.local.json)
+        if "/" in rule_text:
+            if fnmatch.fnmatchcase(norm_target, clean_rule):
+                return True
+            if clean_rule.startswith("**/"):
+                sub_pattern = clean_rule[3:]
+                if fnmatch.fnmatchcase(norm_target, sub_pattern) or fnmatch.fnmatchcase(
+                    filename, sub_pattern
+                ):
+                    return True
 
         return False
 
