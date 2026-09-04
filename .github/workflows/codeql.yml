@@ -22,9 +22,11 @@
 # a synchronize, so the IN-REPO skipped classes above (bot/Renovate,
 # `dependencies`-labelled, already-current) stop getting stuck too. NOT fork PRs:
 # a fork author's pushes fire `on: push` in THEIR repo, never here, so this
-# workflow can't reach them — fork PRs remain on the merge-ref codeql + a manual
-# close/reopen to recover. Inherent gap: `pull_request_target` could reach the
-# head SHA but runs untrusted code with write scope, which we won't do.
+# workflow can't reach them. codeql-fork-upload.yml now closes that gap: on a fork
+# PR it binds a head-SHA analysis from the SARIF security.yml's fork `pull_request`
+# codeql job produces (advisory for forks — the fork self-attests it; see that
+# workflow's header). `pull_request_target` could reach the head SHA directly but
+# runs untrusted code with write scope, which we won't do.
 #
 # SCOPE / SAFETY
 # - Additive: security.yml's `pull_request` codeql job (merge-ref + PR-diff-aware

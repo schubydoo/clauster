@@ -118,7 +118,9 @@ jobs:
           CLAUSTER_CI_APP_PRIVATE_KEY secrets and the clauster-ci App installation."
           exit 1
       # A fork DRAFT skips the codeql job, so its Security run produces no artifact.
-      # Probe first and skip cleanly instead of failing the download on a missing name.
+      # Probe first: a live artifact is uploaded; an ABSENT one is a benign draft skip
+      # ONLY when the producing codeql job was itself skipped — otherwise it is a broken
+      # producer and must fail closed (see below), not skip cleanly.
       - name: Check for fork SARIF artifact
         id: check
         env:
@@ -135,10 +137,48 @@ jobs:
           echo "artifact count=$count"
           if [ "$count" -gt 0 ]; then
             echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::no codeql-fork-sarif artifact on run $RUN_ID (fork draft skip); nothing to upload."
+            exit 0
           fi
+          echo "present=false" >> "$GITHUB_OUTPUT"
+          # No live artifact. Distinguish a benign fork-DRAFT skip from a BROKEN PRODUCER
+          # instead of blaming every absence on a draft. A broken producer leaves the same
+          # absence: the `Save fork CodeQL SARIF artifact` step (security.yml) can fail
+          # under `continue-on-error: true` (artifact-service 5xx) or write nothing (a
+          # github/codeql-action bump moving the output off the pinned
+          # `codeql-sarif-processed/upload.sarif` path, softened by `if-no-files-found:
+          # warn`). In both cases `codeql analyze` stays GREEN, the Security run concludes
+          # success, and exiting 0 here would attribute it to a draft skip, mint nothing,
+          # and leave the fork PR stuck at mergeStateStatus=BLOCKED — the exact bug this
+          # workflow fixes (a fork PR has NO merge-ref fallback: see security.yml). So read
+          # the producing job's conclusion and fail closed on the broken-producer case,
+          # mirroring the broken-filter branch in the upload step (AGENTS.md invariant 1:
+          # fail closed, never silently). A failed `gh api` aborts the step under `set -e`
+          # rather than yielding an empty string that would read as a skip. The job holds
+          # `actions: read`, so no new scope is needed. Match the codeql job by name prefix
+          # so the `language:python` matrix suffix (and a future added language) still
+          # matches. A MANUAL re-run of this workflow after the artifact's retention-days:1
+          # window (`.expired == true`, so count 0) also lands here while codeql analyze is
+          # still `success`; failing closed is correct there too — re-run Security to
+          # regenerate the artifact rather than leaving the PR silently blocked.
+          conclusions="$(gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/jobs" \
+            --jq '.jobs[] | select(.name | startswith("codeql analyze")) | .conclusion')"
+          if [ -z "$conclusions" ]; then
+            echo "::error::no 'codeql analyze' job on run $RUN_ID; cannot tell a fork-draft skip from a broken producer. Refusing to exit green (AGENTS.md invariant 1)."
+            exit 1
+          fi
+          # The job `if:` already required workflow_run.conclusion == 'success', so a codeql
+          # job that FAILED or was CANCELLED cannot reach here — it would red or cancel the
+          # whole Security run, which the consumer's `if:` then skips. `skipped` is the only
+          # benign, expected value (a fork DRAFT skips the codeql job, security.yml). Treat
+          # every other conclusion — `success` with no live artifact, or any unexpected
+          # value — as a broken producer and fail closed.
+          while IFS= read -r c; do
+            if [ "$c" != "skipped" ]; then
+              echo "::error::codeql analyze concluded '$c' but produced no live codeql-fork-sarif artifact on run $RUN_ID; a broken producer, not a fork-draft skip. Refusing to exit green (AGENTS.md invariant 1)."
+              exit 1
+            fi
+          done <<< "$conclusions"
+          echo "::notice::no codeql-fork-sarif artifact on run $RUN_ID; codeql analyze was skipped (fork draft). Nothing to upload."
       - name: Download fork CodeQL SARIF
         if: ${{ steps.check.outputs.present == 'true' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1

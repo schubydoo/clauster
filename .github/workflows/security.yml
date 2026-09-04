@@ -64,6 +64,8 @@ jobs:
         uses: $/.github/actions/changed-code
 
   codeql:
+    # codeql-fork-upload.yml matches this job by name PREFIX ("codeql analyze") to read
+    # its conclusion; a rename there fails that consumer closed (loud), not silently.
     name: codeql analyze
     # ALWAYS run — never gate on the docs-only classifier. The `main` ruleset has
     # a `code_scanning` rule requiring the CodeQL tool to have results; GitHub's
@@ -243,10 +245,17 @@ jobs:
           ${{ always()
           && github.event_name == 'pull_request'
           && github.event.pull_request.head.repo.full_name != github.repository }}
-        # Never red the required `codeql` job on an artifact hiccup: a failed upload just
-        # means codeql-fork-upload.yml finds nothing and skips, leaving the fork on its
-        # pre-existing merge-ref analysis — the same fail-safe as the consumer's
-        # missing-artifact path. This step only ADDS head-SHA coverage; it must not block.
+        # Keep an artifact-service hiccup off the required `codeql` job result so a 5xx
+        # cannot red the job directly. This is NOT a silent fail-open: a fork PR has NO
+        # merge-ref analysis to fall back on. The `Upload CodeQL SARIF` step above is
+        # same-repo only, `analyze` runs `upload: never`, and codeql.yml is `on: push`,
+        # which a fork never fires here — so a broken upload leaves ZERO code-scanning
+        # results and a BLOCKED PR. The consumer (codeql-fork-upload.yml) therefore reads
+        # this job's conclusion and FAILS CLOSED when the artifact is absent yet codeql
+        # analyze concluded success, surfacing the broken producer instead of hiding it
+        # (AGENTS.md invariant 1). Dropping continue-on-error here would trade that split
+        # for a required check that reds on a transient hiccup, so the split lives in the
+        # consumer. This step only ADDS head-SHA coverage; it must not block.
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
