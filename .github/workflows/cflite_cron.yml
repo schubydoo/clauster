@@ -174,8 +174,13 @@ jobs:
           FUZZ_STORAGE_TOKEN: ${{ secrets.FUZZ_STORAGE_TOKEN }}
         run: |
           set -euo pipefail
-          # Pin the major: the generator uses coverage's 7.x CoverageData API.
-          python3 -m pip install --quiet 'coverage>=7,<8'
+          # Hash-pin the install: this step holds the FUZZ_STORAGE_TOKEN, so an unpinned
+          # pip fetch is a PAT-exfil surface (Scorecard Pinned-Dependencies). coverage has no
+          # runtime deps, so --no-deps. Regenerate the pin on a bump:
+          #   echo 'coverage>=7,<8' | uv pip compile - --generate-hashes --no-annotate \
+          #     --no-header -o .github/gen-fuzzer-stats-requirements.txt
+          python3 -m pip install --quiet --require-hashes --no-deps \
+            -r _srcgen/.github/gen-fuzzer-stats-requirements.txt
           work="$(mktemp -d)"
           git clone --depth 1 --branch gh-pages \
             "https://${FUZZ_STORAGE_TOKEN}@github.com/schubydoo/clauster-fuzz-corpus.git" "$work"
