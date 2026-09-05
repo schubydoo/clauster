@@ -53,6 +53,7 @@ on:
       - "pyproject.toml"
       - ".clusterfuzzlite/requirements.txt"
       - ".clusterfuzzlite/build-requirements.txt"
+      - ".github/gen-fuzzer-stats-requirements.txt"
       - "package.json"
       - "package-lock.json"
       - "tests/e2e/package.json"

@@ -42,6 +42,10 @@ RULESET = REPO / ".github" / "rulesets" / "main.json"
 # `osv-scanner scan source -r .` over the whole tree, so ANY tracked file with one of these
 # names is in scope — which is what makes the PR `paths:` filter checkable rather than a
 # hand-maintained list that quietly rots when a new ecosystem lands.
+# ⚠️ The pip requirements extractor is NOT an exact-name match: it scans any
+# `*requirements*.txt` (verified against osv-scanner v2.5.1), so a file like
+# `.github/gen-fuzzer-stats-requirements.txt` is in scope too. `_osv_scans_basename` below
+# folds that pattern in; `requirements.txt` stays here only to document the ecosystem.
 OSV_LOCKFILE_NAMES = frozenset(
     {
         "uv.lock",
@@ -96,6 +100,19 @@ def _tracked_files():
     if proc.returncode != 0:
         pytest.skip("not a git checkout")
     return [p for p in proc.stdout.split("\0") if p]
+
+
+def _osv_scans_basename(basename):
+    """Return True if `osv-scanner scan source` extracts packages from this basename.
+
+    Most ecosystems match an exact lockfile name (OSV_LOCKFILE_NAMES). The pip
+    requirements extractor is the exception: it matches any `*requirements*.txt`, not the
+    exact `requirements.txt`, so those files are in scope and must be covered by the PR
+    paths filter too.
+    """
+    if basename in OSV_LOCKFILE_NAMES:
+        return True
+    return basename.endswith(".txt") and "requirements" in basename
 
 
 def _osv_pr_paths():
@@ -197,7 +214,7 @@ def test_osv_pr_paths_cover_every_lockfile_in_the_repo():
     # requirements.txt) fails here until the PR trigger is widened to match, instead of
     # silently never firing for it.
     tracked = _tracked_files()
-    in_scope = sorted(f for f in tracked if os.path.basename(f) in OSV_LOCKFILE_NAMES)
+    in_scope = sorted(f for f in tracked if _osv_scans_basename(os.path.basename(f)))
     assert in_scope, "expected at least uv.lock to be tracked"
     paths = _osv_pr_paths()
     missing = [f for f in in_scope if f not in paths]
