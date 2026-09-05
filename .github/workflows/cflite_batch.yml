@@ -11,8 +11,10 @@
 # reaches the deeper bugs a from-seed run never finds. The write PAT is an environment
 # secret (`fuzz-corpus`, `main`-only branch policy that GitHub enforces server-side — see
 # the job `if:` below), reachable only from these main-branch jobs (cron + a main-gated
-# workflow_dispatch, no fork exposure); cflite_pr.yml deliberately
-# does NOT carry it (a fork PR with a write secret is an exfil surface). If the
+# workflow_dispatch, no fork exposure). cflite_pr.yml never carries this WRITE PAT
+# (a fork PR with a write secret is an exfil surface); for its per-PR code-change run it
+# instead mints a separate READ-ONLY clauster-ci App token, scoped to the corpus repo and
+# fork-gated, to LOAD the corpus (issue 1497 — read-only, it can never push). If the
 # PAT is ever rotated/expired, this job keeps passing but silently stops
 # accumulating. See https://google.github.io/clusterfuzzlite/.
 #
