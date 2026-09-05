@@ -64,17 +64,10 @@ PR_EXCLUDED = "github.event_name != 'pull_request'"
 
 # The four workflows backing a required status context. They are evaluated per head SHA,
 # so dropping `synchronize` would leave a fixup push's head with no check run and hang
-# the PR at "Expected — waiting for status". osv-scanner and repo-config-drift trim
-# their types deliberately and are NOT in this set.
+# the PR at "Expected — waiting for status". osv-scanner, repo-config-drift, and
+# cflite_pr trim their types deliberately and are NOT in this set.
 REQUIRED_CTX_WORKFLOWS = frozenset({"ci.yml", "lint.yml", "security.yml", "pr-title.yml"})
 DEFAULT_PR_TYPES = frozenset({"opened", "reopened", "synchronize"})
-
-# ClusterFuzzLite's per-PR workflow is exempt: a separate in-flight change owns that file,
-# so this branch must not edit it. It still fires its 18-harness build on a draft's
-# `opened`. The exemption PERMITS the guard rather than forbidding it, so adding
-# `if: github.event.pull_request.draft != true` to its `pr-fuzzing` job — which is what
-# it needs — will not break this test, and this entry can then be deleted.
-EXEMPT_WORKFLOWS = frozenset({"cflite_pr.yml"})
 
 
 def _is_merge_time_only(types):
@@ -115,8 +108,6 @@ def _pr_workflows():
     """Yield (filename, pull_request-trigger, jobs) for workflows this guard covers."""
     files = sorted([*WORKFLOWS.glob("*.yml"), *WORKFLOWS.glob("*.yaml")])
     for wf in files:
-        if wf.name in EXEMPT_WORKFLOWS:
-            continue
         doc = yaml.safe_load(wf.read_text(encoding="utf-8"))
         triggers = _triggers(doc)
         if "pull_request" not in triggers:
