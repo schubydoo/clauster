@@ -55,7 +55,9 @@
 #   ⚠️ Expect the artefact SHAPE to change on the Python path even when it works:
 #   `<harness>.log` still gets written, but `_error.log` and the MERGE-INNER/OUTER
 #   lines are C/C++-only and should disappear, and `fuzzer_stats/<harness>.json`
-#   becomes a dummy `{}`. Update this list and fuzz/README.md once observed.
+#   is written as a dummy `{}` by the base-runner. The two steps at the end of the
+#   `coverage` job rebuild those into real per-target stats (see issue 1503 and
+#   scripts/gen_fuzzer_stats.py), which is what code-change pruning reads.
 #   What has landed to date (under the `c++` default):
 #     coverage/latest/logs/<harness>.log             — that harness's libFuzzer
 #       replay log (stdout+stderr); its LAST `#N DONE cov: E ft: F` line is the edge
@@ -188,3 +190,52 @@ jobs:
           storage-repo: https://${{ secrets.FUZZ_STORAGE_TOKEN }}@github.com/schubydoo/clauster-fuzz-corpus.git
           storage-repo-branch: main
           storage-repo-branch-coverage: gh-pages
+      # The base-runner writes a dummy `{}` fuzzer_stats/<target>.json on the Python path
+      # (llvm-cov summaries are C/C++-only), so cifuzz's code-change pruning sees no coverage
+      # and keeps every target. Rebuild the real per-target stats from the base-runner's own
+      # per-target coverage data (coverage_d_<target>, left in build-out/) and push them over
+      # the dummies on gh-pages, so the per-PR job can prune to affected targets. The generator
+      # reads the data with coverage's CoverageData API (no source tree needed on the runner).
+      # See scripts/gen_fuzzer_stats.py and issue 1503.
+      - name: Check out clauster for the stats generator
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: _srcgen
+          persist-credentials: false
+      - name: Rebuild real per-target fuzzer_stats and push to gh-pages
+        shell: bash
+        env:
+          FUZZ_STORAGE_TOKEN: ${{ secrets.FUZZ_STORAGE_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Pin the major: the generator uses coverage's 7.x CoverageData API.
+          python3 -m pip install --quiet 'coverage>=7,<8'
+          work="$(mktemp -d)"
+          git clone --depth 1 --branch gh-pages \
+            "https://${FUZZ_STORAGE_TOKEN}@github.com/schubydoo/clauster-fuzz-corpus.git" "$work"
+          python3 _srcgen/scripts/gen_fuzzer_stats.py \
+            --coverage-dir "$GITHUB_WORKSPACE/build-out" \
+            --out-dir "$work/coverage/latest/fuzzer_stats"
+          # A harness that dies mid-replay leaves no coverage_d_<target> file, so its stats
+          # stay a dummy {} and it will not prune. That direction is safe but silent, so a
+          # shrinking set is surfaced loudly rather than read off gh-pages (issue 1503 review).
+          built="$(find "$GITHUB_WORKSPACE/build-out" -maxdepth 1 -name 'coverage_d_*' | wc -l)"
+          # grep -c prints the count and exits 1 on zero matches, so guard with `|| true`
+          # (not `|| echo 0`, which would append a second line) and default an empty result.
+          expected="$(grep -c . "$work/coverage/latest/fuzzer_stats/coverage_targets.txt" 2>/dev/null || true)"
+          expected="${expected:-0}"
+          if [ "$built" -lt "$expected" ]; then
+            msg="fuzzer_stats: rebuilt $built of $expected targets; the rest keep dummy {} and will not prune (a harness may have died mid-replay)"
+            echo "::warning::$msg"
+            echo "⚠️ $msg" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          cd "$work"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add coverage/latest/fuzzer_stats
+          if git diff --cached --quiet; then
+            echo "fuzzer_stats unchanged"
+            exit 0
+          fi
+          git commit -m "Real per-target fuzzer_stats for code-change pruning (issue 1503)"
+          git push origin gh-pages
