@@ -9,76 +9,44 @@
 #   through ClusterFuzz's stack parser, so a genuine crash SIGNATURE does surface.
 #   Read it as a signature, not as a reproduction.
 # - coverage: builds the harnesses with the `coverage` sanitizer, replays the whole
-#   persisted corpus, and pushes the replay artefacts to the corpus repo's
+#   persisted corpus, and pushes the coverage artefacts to the corpus repo's
 #   `gh-pages` branch under `coverage/latest/`.
-#   ⚠️ Through 2026-08-30 no HTML line-coverage report had ever landed — verified
-#   against the corpus repo. The cause was NOT "impossible for Python": oss-fuzz's
-#   base-runner `coverage` script has a coverage.py branch that builds an htmlcov
-#   report and moves it to $COVERAGE_OUTPUT_DIR/report/$PLATFORM. We never reached
-#   it, because the `run_fuzzers` step below passed no `language` (only the BUILD
-#   step did) and that input defaults to `c++`, so the script took its LLVM branch.
-#   Proof, from the uploaded logs themselves: they carried `-merge=1`
-#   MERGE-INNER/MERGE-OUTER lines, which only the C/C++ path emits — the Python path
-#   runs `-atheris_runs=N` and emits none. `language: python` is now set on the run
-#   step (#1327; #1322 is the umbrella), but it is NECESSARY, not proven SUFFICIENT:
-#   the Python report stage also unzips a `${fuzzer}.pkg.deps.zip` out of the coverage
-#   BUILD. That one should already be produced — base-builder's compile_python_fuzzer
-#   emits it whenever SANITIZER matches *coverage*, which the build step below sets —
-#   but it has never been OBSERVED here, so treat it as the open question. (The other
-#   input, `.coverage_$target`, the run step writes at the end of each target that
-#   exits cleanly; a target that dies mid-replay skips it.)
-#   ⚠️ So on the NEXT SCHEDULED RUN, check three things on `gh-pages`: whether
-#   `coverage/latest/report/` appeared, whether the per-harness logs below SURVIVED,
-#   and whether their `DONE cov: E ft: F` lines are still there.
-#   ⚠️ A `report/` directory is NOT by itself proof the numbers are right. The report
-#   loop has no `set -e`: if a harness's `.coverage_$fuzzer` is missing (it dies
-#   mid-replay), the `mv` fails silently and the PREVIOUS harness's data is
-#   re-translated under this one's name. Two ways to catch that, because they cover
-#   different halves: a `.coverage_*` count below the harness count catches only the
-#   missing-file variant — in the stale case the count still MATCHES and only the
-#   content is wrong, which shows up as two or more BYTE-IDENTICAL files
-#   (`md5sum report/linux/.coverage_*`). ⚠️ And if `report/` carries no `.coverage_*`
-#   at all, do not read that as failure until it is checked: upstream runs
-#   coverage.py `combine` WITHOUT `--keep`, which deletes those files, so they may
-#   never reach the upload. In that case fall back to the logs — a harness whose log
-#   stops before its `DONE` line is the trigger for the stale re-translate.
-#   Those logs are the only fuzz-coverage signal we have; if the Python
-#   path stops producing them without yet producing a report, revert `language` on
-#   THIS job only — batch and PR need it for the reproduce timeout regardless.
-#   Wait for the cron rather than reaching for `workflow_dispatch`. The write PAT is an
-#   environment secret in `fuzz-corpus`, whose `main`-only deployment-branch policy GitHub
-#   enforces server-side (issue 1348), so a dispatch from a feature branch cannot reach it —
-#   the `if:` on both jobs is belt-and-braces. A dispatch FROM MAIN still runs, and still
-#   writes the real `gh-pages` with the PAT, so the wait-for-cron advice above stands.
-#   Note the job passes either way — CFLite discards the coverage
-#   script's output — so a green run proves nothing; only `gh-pages` does.
-#   ⚠️ Expect the artefact SHAPE to change on the Python path even when it works:
-#   `<harness>.log` still gets written, but `_error.log` and the MERGE-INNER/OUTER
-#   lines are C/C++-only and should disappear, and `fuzzer_stats/<harness>.json`
-#   is written as a dummy `{}` by the base-runner. The two steps at the end of the
-#   `coverage` job rebuild those into real per-target stats (see issue 1503 and
-#   scripts/gen_fuzzer_stats.py), which is what code-change pruning reads.
-#   What has landed to date (under the `c++` default):
-#     coverage/latest/logs/<harness>.log             — that harness's libFuzzer
-#       replay log (stdout+stderr); its LAST `#N DONE cov: E ft: F` line is the edge
-#       (E) and feature (F) count reached over the whole persisted corpus. It is not
-#       the last line of the file — MERGE-OUTER: lines follow it
-#     coverage/latest/logs/<harness>_error.log       — always EMPTY, and empty means
-#       "no crash line matched": the C/C++ path creates it by redirecting a grep for
-#       libFuzzer `ERROR:` lines, which is why the file exists at all
-#     coverage/latest/fuzzer_stats/coverage_targets.txt — the harness list
-#   Those per-harness edge counts are the signal we actually have that the harness
-#   set has kept up with the code: a harness pinned at a handful of edges is one
-#   whose corpus never gets past the guard clause, and a module with no harness at
-#   all simply does not appear. There is no per-line/per-module view yet — reading it
-#   needs the human judgement fuzz/README.md ("Reading the weekly coverage signal")
-#   describes. The corpus repo is private, so read the logs by cloning `gh-pages`.
+#   Those artefacts are: an HTML line-coverage
+#   report (report/linux/, summary.json, textcov_reports/), the per-harness libFuzzer replay
+#   logs (logs/<harness>.log), the per-target fuzzer_stats/<harness>.json the per-PR
+#   code-change job reads to prune to affected harnesses, and the
+#   fuzzer_stats/coverage_targets.txt harness list. The base-runner writes those fuzzer_stats
+#   as a dummy `{}` on the Python path, so the two steps at the end of this `coverage` job
+#   rebuild them into real per-target stats (issue 1503, scripts/gen_fuzzer_stats.py). For how
+#   to read these artefacts, see fuzz/README.md ("Reading the weekly coverage signal").
+#
+#   The report + real stats land only because `language: python` is set on the run step below
+#   (#1327; #1322 is the umbrella); at the `c++` default the script takes its LLVM branch and
+#   the Atheris wrappers feed it nothing (the old runs uploaded only the replay logs plus
+#   coverage_targets.txt). Reverting
+#   `language` on THIS job is a trade, not a free fallback: the run returns to the LLVM branch
+#   and writes no `coverage_d_*`, so the rebuild step's generator exits 1 and FAILS the
+#   coverage job; the per-target fuzzer_stats on gh-pages stay stale (not overwritten). The
+#   report stops refreshing, and the per-PR job then prunes against older coverage
+#   (cflite_pr.yml, which warns past 15 days).
+#   Batch and PR keep `language: python` for the reproduce timeout regardless.
+#
+#   Dispatch only from main. The write PAT is an environment secret in `fuzz-corpus` whose
+#   `main`-only deployment-branch policy GitHub enforces server-side (issue 1348), so a
+#   feature-branch dispatch cannot reach it (the `if:` on both jobs is belt-and-braces). A
+#   dispatch FROM MAIN runs and writes the real `gh-pages`. CFLite discards the coverage
+#   script's own exit, so the report and logs are not proven by job colour; read `gh-pages`
+#   for those. The rebuild step DOES fail the job, though, when it finds no
+#   `coverage_d_*` (the revert case above).
 #
 # Both reuse the same private storage-repo + FUZZ_STORAGE_TOKEN PAT as the batch.
 # WEEKLY (not daily): a coverage build + full-corpus replay is far heavier than a
 # time-boxed fuzz run, and the corpus changes slowly. NOT a required check — it
-# signals, it never gates. If the PAT is rotated/expired these jobs keep passing
-# but silently stop pruning/uploading. See https://google.github.io/clusterfuzzlite/.
+# signals, it never gates. A rotated or expired PAT REDs both cron jobs at their `run_fuzzers`
+# step, not silently: the storage-repo URL becomes unclonable, and cifuzz's `GitFilestore`
+# clones it eagerly in its constructor with an uncaught `subprocess.check_call` (the same eager
+# clone cflite_pr.yml gates with a `git ls-remote` pre-check). See
+# https://google.github.io/clusterfuzzlite/.
 name: ClusterFuzzLite cron (prune + coverage)
 
 on:
@@ -166,10 +134,8 @@ jobs:
           language: python
           github-token: ${{ secrets.GITHUB_TOKEN }}
           sanitizer: coverage
-      # Replays the persisted corpus and uploads the per-harness libFuzzer logs to
-      # gh-pages. No HTML report has reached us yet — see the file header for what
-      # has landed under coverage/latest/, and for the three things to check on the
-      # next run now that `language: python` is set.
+      # Replays the persisted corpus and uploads the report, the logs, and the per-target
+      # stats to gh-pages under coverage/latest/. See the file header.
       - name: Replay the corpus and upload the edge stats
         id: run
         uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
@@ -178,7 +144,7 @@ jobs:
           # FUZZING_LANGUAGE in the runner, which is what oss-fuzz's base-runner
           # `coverage` script branches on. At the default it took the LLVM branch and
           # never reached the coverage.py one that builds the htmlcov report. See the
-          # file header for what that changes and what still has to be checked.
+          # file header for what that changes.
           language: python
           github-token: ${{ secrets.GITHUB_TOKEN }}
           # Inert here: CFLite's CoverageTargetRunner overrides the per-target loop and

@@ -85,30 +85,34 @@ per-target line coverage from the base-runner `coverage_d_<harness>` data (see
 "no coverage" and keeps the harness, so pruning never drops a harness it lacks data for.
 
 The per-harness replay logs are the edge counts. Each `coverage/latest/logs/<harness>.log`
-records that harness's libFuzzer replay. Its last `DONE cov: E ft: F` line is the edge
-(`E`) and feature (`F`) count reached over the whole corpus. A harness pinned at a
+records that harness's libFuzzer replay. Its last `cov: E ft: F` figure is the edge (`E`)
+and feature (`F`) count over the corpus. It sits on a libFuzzer `#N` status line. A harness pinned at a
 handful of edges is one whose corpus never gets past its guard clause. A module with no
 harness does not appear at all.
 
 Operational notes:
 
-- A green cron job does not prove the upload. ClusterFuzzLite discards the coverage
-  script's output, so read `gh-pages` to confirm, not the job status.
+- A green cron job does not prove the report and log upload, because ClusterFuzzLite
+  discards the coverage script's exit. Read `gh-pages` for those. The rebuild step does
+  gate the job, so it fails when no `coverage_d_*` is produced.
 - Do not dispatch the prune or coverage job from a feature branch. The write PAT is an
   environment secret in `fuzz-corpus` with a `main`-only deployment-branch policy that
   GitHub enforces server-side, so the job's `if: github.ref == 'refs/heads/main'` guard
   matches it. A dispatch from `main` runs and writes the real `gh-pages`.
 - If the Python path stops producing the logs, revert `language` on the coverage job
-  only. The PR and batch jobs need it for the crash-reproduce timeout. On prune it is
-  inert, because cifuzz's prune path returns `testcase=None` and never reaches the
-  reproduce step.
+  only. That is a trade, not a free fallback. The run returns to the LLVM branch and writes
+  no `coverage_d_*`, so the rebuild step's generator exits 1 and fails the coverage job. The
+  report stops refreshing, and the per-target `fuzzer_stats` on `gh-pages` go stale. The per-PR
+  job then prunes against older coverage (`cflite_pr.yml` warns past 15 days). The PR and
+  batch jobs need `language` for the crash-reproduce timeout. On prune it is inert, because
+  cifuzz's prune path returns `testcase=None` and never reaches the reproduce step.
 
 The artifacts on `gh-pages`, under `coverage/latest/`:
 
 | Path | What it is |
 | --- | --- |
 | `report/linux/index.html` | the HTML line-coverage report, with `summary.json` and `textcov_reports/all_cov.json` beside it |
-| `logs/<harness>.log` | that harness's libFuzzer replay log (stdout and stderr together). Its last `DONE cov: E ft: F` line is the edge (`E`) and feature (`F`) count over the whole corpus. `MERGE-OUTER:` lines follow it, so grep for `DONE` rather than `tail -1` |
+| `logs/<harness>.log` | that harness's libFuzzer replay log (stdout and stderr together). Its last `cov: E ft: F` figure is the edge (`E`) and feature (`F`) count over the corpus. It sits on a `#N` status line, with a final `Done N in ...` after. Grep for `cov:` and take the last, not `tail -1` |
 | `fuzzer_stats/<harness>.json` | per-target line coverage in the llvm-cov shape cifuzz reads for code-change pruning, rebuilt from `coverage_d_<harness>` by `scripts/gen_fuzzer_stats.py` (the base-runner itself writes a dummy `{}` here) |
 | `fuzzer_stats/coverage_targets.txt` | the harnesses the replay covered |
 
@@ -118,7 +122,7 @@ The corpus repo is private, so read them from a clone rather than a Pages URL:
 git clone --depth 1 -b gh-pages git@github.com:schubydoo/clauster-fuzz-corpus.git
 cd clauster-fuzz-corpus
 for f in coverage/latest/logs/*_fuzzer.log; do
-  printf '%-34s %s\n' "$(basename "$f" .log)" "$(grep -o 'DONE .*' "$f" | tail -1)"
+  printf '%-34s %s\n' "$(basename "$f" .log)" "$(grep -oE 'cov: [0-9]+ ft: [0-9]+' "$f" | tail -1)"
 done | sort
 ```
 
