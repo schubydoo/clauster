@@ -24,7 +24,7 @@ runs:
         # network call that flakes). Renovate's github-actions manager tracks this `version:`
         # input for astral-sh/setup-uv and opens a bump PR — keep the pin in the other workflows
         # (build-binaries, security, release, knope-*, nightly) in step with this one.
-        version: "0.12.9"
+        version: "0.12.10"
         enable-cache: true
     # The version flows through an env var (not inlined into `run:`) so zizmor's
     # template-injection analysis stays quiet; the value is always a hard-coded
