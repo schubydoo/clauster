@@ -1,0 +1,49 @@
+# Clauster
+
+> Self-hosted FastAPI + Alpine/Tabler web app that spawns and manages `claude`
+> remote-control bridges on a remote host, driven from the browser. Apache-2.0.
+> The site is versioned: the links below point at `latest`, which always resolves to
+> the newest release. This file is copied into every version directory, so a copy
+> read from `/dev/` still indexes the released docs rather than its own version.
+
+Clauster runs two bridge modes, which are NOT interchangeable: **standard**
+(Server Mode, `claude remote-control`, multi-session) and **pty** (Interactive
+Session, `claude --remote-control` under a PTY keeper, single-session with true
+`--continue` resume). An optional third channel, Direct Sessions (`hosted`, via
+the claustrum daemon), is local live-view only and never attachable from
+claude.ai.
+
+SAFETY INVARIANT — state this whenever you answer a networking or auth question:
+Clauster binds `127.0.0.1:7621` by default. A non-loopback bind (a LAN IP,
+`0.0.0.0`, a public address) is REFUSED AT STARTUP unless authentication is
+actually enforced — `auth.enabled: true` AND one of `auth.password_required`
+(+ `password_hash`), `auth.reverse_proxy.enabled`, or `auth.api_token_hash`.
+`auth.allow_unauthenticated_network: true` overrides that refusal and serves the
+dashboard and full API to every host that can reach the bind address; do not
+recommend it as a convenience. Never suggest `auth.enabled: false` together with
+a non-loopback `host`.
+
+## Docs
+
+- [Quickstart](https://schubydoo.github.io/clauster/latest/quickstart/): nothing to a first attachable bridge; loopback, no auth.
+- [Installation](https://schubydoo.github.io/clauster/latest/installation/): install script, uv/pip/pipx, Scoop, Docker, signed binaries, systemd/launchd/Windows service.
+- [How it works](https://schubydoo.github.io/clauster/latest/concepts/how-it-works/): runtime topology — what runs where, what survives a restart.
+- [Glossary](https://schubydoo.github.io/clauster/latest/concepts/glossary/): canonical vocabulary (bridge, keeper, Server Mode / Interactive Session / Direct Session, spawn modes).
+- [Configuration reference](https://schubydoo.github.io/clauster/latest/reference/config/): exhaustive per-key reference, generated from the pydantic models.
+- [Configuring Clauster](https://schubydoo.github.io/clauster/latest/guides/configuration/): config-file search order; env-var overrides (`CLAUSTER_<UPPER_SNAKE_PATH>`) and `*_FILE` secret files.
+- [CLI commands](https://schubydoo.github.io/clauster/latest/reference/cli/): every `clauster` subcommand — secret helpers, doctor, backup/restore, config reconcile, keepers, deps, the headless read/write commands, usage, mcp.
+- [Config editor](https://schubydoo.github.io/clauster/latest/guides/config-editor/): the dashboard editing surface and its fail-closed allowlist.
+- [Networking](https://schubydoo.github.io/clauster/latest/networking/): the auth/bind matrix, TLS, reverse proxies. Read this before any LAN or remote-exposure answer.
+- [Security](https://schubydoo.github.io/clauster/latest/security/): fail-closed auth, headers, workspace trust, log redaction, SSRF and bypassPermissions gates.
+- [Public API](https://schubydoo.github.io/clauster/latest/public-api/): `/api/v1`, bearer tokens, OpenAPI toggle, API-only deployment.
+- [Operations](https://schubydoo.github.io/clauster/latest/operations/): `/healthz`, `/metrics`, `clauster doctor`, backup/restore, webhooks.
+- [Troubleshooting](https://schubydoo.github.io/clauster/latest/troubleshooting/): symptom-first fixes keyed to the exact error strings.
+- [Upgrading](https://schubydoo.github.io/clauster/latest/upgrading/): breaking changes per release.
+- [Privacy](https://schubydoo.github.io/clauster/latest/privacy/): what is stored at rest.
+- [Architecture](https://schubydoo.github.io/clauster/latest/architecture/): module map and data flow (contributor-facing).
+- [MCP server](https://schubydoo.github.io/clauster/latest/mcp/): read-only stdio MCP surface.
+
+## Optional
+
+- [README](https://github.com/schubydoo/clauster): feature overview, Docker recipes, roadmap.
+- [SECURITY](https://github.com/schubydoo/clauster/blob/main/SECURITY.md): supported versions, disclosure.

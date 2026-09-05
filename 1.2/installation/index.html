@@ -1,0 +1,2335 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Self-hosted web UI for spawning and managing Claude Code remote-control bridges on a remote host.">
+      
+      
+      
+        <link rel="canonical" href="https://schubydoo.github.io/clauster/1.2/installation/">
+      
+      
+        <link rel="prev" href="../quickstart/">
+      
+      
+        <link rel="next" href="../concepts/how-it-works/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Installation - Clauster</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#installation" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+          <aside class="md-banner md-banner--warning">
+            <div class="md-banner__inner md-grid md-typeset">
+              
+  You are not reading the documentation for the latest release.
+  <a href="../..">
+    <strong>Go to the latest release.</strong>
+  </a>
+
+            </div>
+            <script>var el=document.querySelector("[data-md-component=outdated]"),base=new URL(".."),outdated=__md_get("__outdated",sessionStorage,base);!0===outdated&&el&&(el.hidden=!1)</script>
+          </aside>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="Clauster" class="md-header__button md-logo" aria-label="Clauster" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Clauster
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Installation
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/schubydoo/clauster" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    schubydoo/clauster
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="Clauster" class="md-nav__button md-logo" aria-label="Clauster" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    Clauster
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/schubydoo/clauster" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    schubydoo/clauster
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quickstart
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#which-install-method" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Which install method?
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#with-uv-recommended" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        With uv (recommended)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#with-pip-pipx" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        With pip / pipx
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#install-script-linux-macos-no-python" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Install script (Linux &amp; macOS, no Python)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#install-script-windows-powershell" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Install script (Windows, PowerShell)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#standalone-binary-no-python" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Standalone binary (no Python)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#scoop-windows" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Scoop (Windows)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#homebrew-macos-linux" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Homebrew (macOS &amp; Linux)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#nix-flake" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Nix (flake)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#from-source-development" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        From source (development)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#docker" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Docker
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Docker">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#docker-compose" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Docker Compose
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#running" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Running
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Running">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#other-subcommands" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Other subcommands
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#run-as-a-systemd-service-linux" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run as a systemd service (Linux)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#uninstalling" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Uninstalling
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concepts
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Concepts
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../concepts/how-it-works/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    How it works
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../concepts/glossary/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Glossary
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture (contributors)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    How Clauster secures itself
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../privacy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Privacy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuring Clauster
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/config-editor/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The in-app config editor
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../networking/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Networking & exposing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI commands
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../public-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Public API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../mcp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MCP server
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/platforms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Platform support
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations runbook
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../upgrading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Upgrading
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Project
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../support/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Support
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security-policy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reporting a vulnerability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#which-install-method" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Which install method?
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#with-uv-recommended" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        With uv (recommended)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#with-pip-pipx" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        With pip / pipx
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#install-script-linux-macos-no-python" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Install script (Linux &amp; macOS, no Python)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#install-script-windows-powershell" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Install script (Windows, PowerShell)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#standalone-binary-no-python" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Standalone binary (no Python)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#scoop-windows" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Scoop (Windows)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#homebrew-macos-linux" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Homebrew (macOS &amp; Linux)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#nix-flake" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Nix (flake)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#from-source-development" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        From source (development)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#docker" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Docker
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Docker">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#docker-compose" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Docker Compose
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#running" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Running
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Running">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#other-subcommands" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Other subcommands
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#run-as-a-systemd-service-linux" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run as a systemd service (Linux)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#uninstalling" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Uninstalling
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="installation">Installation<a class="headerlink" href="#installation" title="Permanent link">&para;</a></h1>
+<p>Clauster needs the <code>claude</code> CLI on the host's <code>PATH</code> — Clauster spawns <code>claude</code>,
+it does <strong>not</strong> vendor it. Install Claude Code separately and make sure it is new
+enough (the default floor is the <code>claude.min_version</code> config default; run
+<code>clauster doctor</code> to check the installed <code>claude</code> against it). The
+<code>uv</code> / <code>pip</code> / <code>pipx</code> installs below also need <strong>Python 3.11+</strong>; the standalone
+binary, install script, Scoop, Homebrew, and Nix paths do not.</p>
+<h2 id="which-install-method">Which install method?<a class="headerlink" href="#which-install-method" title="Permanent link">&para;</a></h2>
+<p>Ten ways in, one decision: pick the row that matches your host, then jump to
+its section — the methods are interchangeable, and every one still needs the
+<code>claude</code> CLI on <code>PATH</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Platforms</th>
+<th>Needs Python 3.11+</th>
+<th>Update with</th>
+<th>Pick it when</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="#with-uv-recommended">uv</a> <em>(recommended)</em></td>
+<td>Linux · macOS · Windows</td>
+<td>yes</td>
+<td><code>uv tool upgrade clauster</code></td>
+<td>You have Python and no strong reason otherwise</td>
+</tr>
+<tr>
+<td><a href="#with-pip-pipx">pip / pipx</a></td>
+<td>Linux · macOS · Windows</td>
+<td>yes</td>
+<td><code>pip install -U clauster</code> / <code>pipx upgrade clauster</code></td>
+<td>You already manage tools with pip/pipx</td>
+</tr>
+<tr>
+<td><a href="#install-script-linux-macos-no-python">Install script</a></td>
+<td>Linux · macOS</td>
+<td>no</td>
+<td>re-run the one-liner</td>
+<td>Fastest checksum-verified binary install, no Python</td>
+</tr>
+<tr>
+<td><a href="#install-script-windows-powershell">Install script (PowerShell)</a></td>
+<td>Windows</td>
+<td>no</td>
+<td>re-run the one-liner</td>
+<td>Same, on Windows</td>
+</tr>
+<tr>
+<td><a href="#standalone-binary-no-python">Standalone binary</a></td>
+<td>Linux (x86_64/arm64) · macOS (arm64/x86_64) · Windows (x86_64)</td>
+<td>no</td>
+<td>download the next release</td>
+<td>You want to verify Sigstore / SLSA provenance yourself</td>
+</tr>
+<tr>
+<td><a href="#scoop-windows">Scoop</a></td>
+<td>Windows</td>
+<td>no</td>
+<td><code>scoop update clauster</code></td>
+<td>Windows with managed updates</td>
+</tr>
+<tr>
+<td><a href="#homebrew-macos-linux">Homebrew</a></td>
+<td>macOS · Linux</td>
+<td>no</td>
+<td><code>brew update &amp;&amp; brew upgrade clauster</code></td>
+<td>Your host is brew-managed</td>
+</tr>
+<tr>
+<td><a href="#nix-flake">Nix</a></td>
+<td>Linux · macOS</td>
+<td>no</td>
+<td><code>nix profile upgrade</code></td>
+<td>Your host is Nix/flake-managed</td>
+</tr>
+<tr>
+<td><a href="#from-source-development">From source</a></td>
+<td>anywhere with <code>uv</code></td>
+<td>yes</td>
+<td><code>git pull &amp;&amp; uv sync --extra dev</code></td>
+<td>Contributing to Clauster</td>
+</tr>
+<tr>
+<td><a href="#docker">Docker</a></td>
+<td>any <code>linux/amd64</code> / <code>linux/arm64</code> host</td>
+<td>no</td>
+<td>pull the new image tag</td>
+<td>Container stacks — needs <code>claude</code> mounted in and enforced auth</td>
+</tr>
+</tbody>
+</table>
+<h2 id="with-uv-recommended">With uv (recommended)<a class="headerlink" href="#with-uv-recommended" title="Permanent link">&para;</a></h2>
+<p><a href="https://docs.astral.sh/uv/"><code>uv</code></a> can install Clauster as a standalone tool:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>uv<span class="w"> </span>tool<span class="w"> </span>install<span class="w"> </span>clauster
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>clauster<span class="w"> </span>run<span class="w"> </span>-c<span class="w"> </span>clauster.yml
+</code></pre></div>
+<p>Upgrade later with:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>uv<span class="w"> </span>tool<span class="w"> </span>upgrade<span class="w"> </span>clauster
+</code></pre></div>
+<p>Or run it <strong>without installing</strong> — <code>uvx</code> fetches and runs Clauster in one shot,
+handy for a quick try or a one-off command:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>uvx<span class="w"> </span>clauster<span class="w"> </span>run<span class="w"> </span>-c<span class="w"> </span>clauster.yml<span class="w">      </span><span class="c1"># or: uvx clauster doctor / hash-password</span>
+</code></pre></div>
+<p><code>uvx</code> re-resolves the package on every invocation, so for a server you keep
+running prefer <code>uv tool install</code> above; pin a version for a reproducible one-off
+with <code>uvx clauster@&lt;version&gt; run -c clauster.yml</code>.</p>
+<h2 id="with-pip-pipx">With pip / pipx<a class="headerlink" href="#with-pip-pipx" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>pip<span class="w"> </span>install<span class="w"> </span>clauster<span class="w">        </span><span class="c1"># or: pipx install clauster</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>clauster<span class="w"> </span>run<span class="w"> </span>-c<span class="w"> </span>clauster.yml
+</code></pre></div>
+<p>The package installs a single <code>clauster</code> console entry point
+(<code>clauster.__main__:main</code>); <code>python -m clauster</code> is equivalent.</p>
+<h2 id="install-script-linux-macos-no-python">Install script (Linux &amp; macOS, no Python)<a class="headerlink" href="#install-script-linux-macos-no-python" title="Permanent link">&para;</a></h2>
+<p>The quickest way to get the standalone binary. The script detects your OS +
+architecture, downloads the matching binary from the latest release, <strong>verifies
+its SHA-256</strong> against the release's signed <code>SHA256SUMS</code>, and installs it to
+<code>~/.local/bin</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>curl<span class="w"> </span>-fsSL<span class="w"> </span>https://raw.githubusercontent.com/schubydoo/clauster/main/install.sh<span class="w"> </span><span class="p">|</span><span class="w"> </span>bash
+</code></pre></div>
+<p><code>wget -qO- &lt;url&gt; | bash</code> works too. Environment overrides:</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>CLAUSTER_VERSION</code></td>
+<td>Pin a version (e.g. <code>0.10.0</code>) instead of the latest release</td>
+</tr>
+<tr>
+<td><code>CLAUSTER_INSTALL_DIR</code></td>
+<td>Install directory (default <code>~/.local/bin</code>)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Prefer to read before you pipe?</strong> Piping a script straight into <code>bash</code> runs
+remote code sight-unseen. To review it first, download, inspect, then run:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>curl<span class="w"> </span>-fsSL<span class="w"> </span>-o<span class="w"> </span>clauster-install.sh<span class="w"> </span>https://raw.githubusercontent.com/schubydoo/clauster/main/install.sh
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>less<span class="w"> </span>clauster-install.sh<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>bash<span class="w"> </span>clauster-install.sh
+</code></pre></div>
+<p>If no binary is published for your platform yet, the script prints a <code>pip</code>/<code>uvx</code>
+fallback and exits. On <strong>Windows</strong>, use the <a href="#install-script-windows-powershell">PowerShell
+installer</a> or <a href="#scoop-windows">Scoop</a>.</p>
+<p>The script authenticates the binary by SHA-256 against the release's
+<code>SHA256SUMS</code>, which it trusts over HTTPS from GitHub — the standard
+<code>curl … | bash</code> trust model. For the stronger keyless-signature check (verifying
+<code>SHA256SUMS</code> and the binary against their <code>.sigstore.json</code> bundles), download the
+binary yourself and use the <code>cosign</code> / <code>gh attestation verify</code> flow under
+<a href="#standalone-binary-no-python">Standalone binary</a> below.</p>
+<h2 id="install-script-windows-powershell">Install script (Windows, PowerShell)<a class="headerlink" href="#install-script-windows-powershell" title="Permanent link">&para;</a></h2>
+<p>The PowerShell equivalent of the script above. It resolves the latest release,
+downloads <code>clauster.exe</code>, <strong>verifies its SHA-256</strong> against the release's
+<code>SHA256SUMS</code>, installs it under <code>%LOCALAPPDATA%\Programs\clauster</code>, and adds that
+directory to your user <code>PATH</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="nb">irm </span><span class="n">https</span><span class="p">://</span><span class="n">raw</span><span class="p">.</span><span class="n">githubusercontent</span><span class="p">.</span><span class="n">com</span><span class="p">/</span><span class="n">schubydoo</span><span class="p">/</span><span class="n">clauster</span><span class="p">/</span><span class="n">main</span><span class="p">/</span><span class="n">install</span><span class="p">.</span><span class="n">ps1</span> <span class="p">|</span> <span class="nb">iex</span>
+</code></pre></div>
+<p>Environment overrides: <code>$env:CLAUSTER_VERSION</code> pins a version, and
+<code>$env:CLAUSTER_INSTALL_DIR</code> overrides the install directory. To review the script
+before running it (it trusts <code>SHA256SUMS</code> over HTTPS, the same as the Unix
+one-liner):</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="nb">irm </span><span class="n">https</span><span class="p">://</span><span class="n">raw</span><span class="p">.</span><span class="n">githubusercontent</span><span class="p">.</span><span class="n">com</span><span class="p">/</span><span class="n">schubydoo</span><span class="p">/</span><span class="n">clauster</span><span class="p">/</span><span class="n">main</span><span class="p">/</span><span class="n">install</span><span class="p">.</span><span class="n">ps1</span> <span class="n">-OutFile</span> <span class="n">install</span><span class="p">.</span><span class="n">ps1</span>
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="n">notepad</span> <span class="n">install</span><span class="p">.</span><span class="n">ps1</span> <span class="p">;</span> <span class="p">.\</span><span class="n">install</span><span class="p">.</span><span class="n">ps1</span>
+</code></pre></div>
+<p>The binary is Sigstore-signed but not authenticode-signed, so SmartScreen may
+warn on first run — the installer clears the file's mark-of-the-web after the
+checksum passes, but a fresh download via the browser may still prompt.</p>
+<h2 id="standalone-binary-no-python">Standalone binary (no Python)<a class="headerlink" href="#standalone-binary-no-python" title="Permanent link">&para;</a></h2>
+<p>Prefer to grab the file yourself? Each release attaches a single-file binary per
+OS + architecture, built with PyInstaller. It still spawns <code>claude</code>, so the CLI
+must be on your <code>PATH</code>.</p>
+<table>
+<thead>
+<tr>
+<th>OS / arch</th>
+<th>Asset</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Linux x86_64</td>
+<td><code>clauster-&lt;version&gt;-linux-x86_64</code></td>
+</tr>
+<tr>
+<td>Linux arm64</td>
+<td><code>clauster-&lt;version&gt;-linux-arm64</code></td>
+</tr>
+<tr>
+<td>macOS arm64 (Apple Silicon)</td>
+<td><code>clauster-&lt;version&gt;-macos-arm64</code></td>
+</tr>
+<tr>
+<td>macOS x86_64 (Intel)</td>
+<td><code>clauster-&lt;version&gt;-macos-x86_64</code></td>
+</tr>
+<tr>
+<td>Windows x86_64</td>
+<td><code>clauster-&lt;version&gt;-windows-x86_64.exe</code></td>
+</tr>
+</tbody>
+</table>
+<p>Download from the <a href="https://github.com/schubydoo/clauster/releases/latest">latest release</a>,
+<strong>verify the checksum</strong> against the release's <code>SHA256SUMS</code>, then run it. The asset
+name carries the version, so resolve it first (GitHub's <code>latest/download/</code>
+redirect needs the exact filename):</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="c1"># Linux x86_64 — swap clauster-$VER-linux-x86_64 for clauster-$VER-macos-arm64 on Apple Silicon</span>
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="nv">VER</span><span class="o">=</span><span class="k">$(</span>curl<span class="w"> </span>-fsSL<span class="w"> </span>https://api.github.com/repos/schubydoo/clauster/releases/latest<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="w">  </span><span class="p">|</span><span class="w"> </span>sed<span class="w"> </span>-n<span class="w"> </span><span class="s1">'s/.*"tag_name": *"v\([^"]*\)".*/\1/p'</span><span class="k">)</span>
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a>curl<span class="w"> </span>-LO<span class="w"> </span>https://github.com/schubydoo/clauster/releases/download/v<span class="nv">$VER</span>/clauster-<span class="nv">$VER</span>-linux-x86_64
+<a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a>curl<span class="w"> </span>-LO<span class="w"> </span>https://github.com/schubydoo/clauster/releases/download/v<span class="nv">$VER</span>/SHA256SUMS
+<a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a>sha256sum<span class="w"> </span>--check<span class="w"> </span>--ignore-missing<span class="w"> </span>SHA256SUMS<span class="w">    </span><span class="c1"># expect: clauster-$VER-linux-x86_64: OK</span>
+<a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a>chmod<span class="w"> </span>+x<span class="w"> </span>clauster-<span class="nv">$VER</span>-linux-x86_64
+<a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a>./clauster-<span class="nv">$VER</span>-linux-x86_64<span class="w"> </span>run<span class="w"> </span>-c<span class="w"> </span>clauster.yml
+</code></pre></div>
+<p>Every binary is also <strong>Sigstore-signed</strong> (keyless) — a <code>&lt;asset&gt;.sigstore.json</code>
+bundle sits beside it, and the release carries SLSA provenance
+(<code>*.intoto.jsonl</code>). Verify the build with the
+<a href="https://docs.sigstore.dev/"><code>cosign</code></a> / <code>gh attestation verify</code> toolchain if you
+want the full supply-chain check.</p>
+<div class="admonition note">
+<p class="admonition-title">Unsigned for the OS, on purpose</p>
+<p>The binaries are Sigstore-signed but not yet OS code-signed, so the first run
+needs one extra step. On <strong>macOS</strong>, Gatekeeper quarantines a downloaded
+binary — clear it with <code>xattr -d com.apple.quarantine
+clauster-&lt;version&gt;-macos-arm64</code>, or right-click → <strong>Open</strong> once. On
+<strong>Windows</strong>, SmartScreen may warn on first launch; choose <strong>More info → Run
+anyway</strong> (installing via Scoop, below, avoids the browser-download prompt).</p>
+</div>
+<div class="admonition note">
+<p class="admonition-title">The live terminal view needs the <code>pty</code> extra</p>
+<p>The optional read-only live terminal view (<a href="../reference/config/"><code>pty_screen_enabled</code></a>)
+depends on <a href="https://pypi.org/project/pyte/"><code>pyte</code></a>, which
+is LGPL-licensed and so <strong>is not bundled in the standalone binary</strong>. On the binary, install
+it with <code>clauster deps install pty</code> (the binary bundles <code>pip</code> and side-installs the wheel
+into <code>&lt;state_dir&gt;/deps</code>, which it adds to <code>sys.path</code> at startup — no LGPL code is relinked
+into the Apache-2.0 binary); restart afterwards. From a <code>pip</code>/<code>uv</code>/<code>pipx</code> install, use the
+<code>[pty]</code> extra instead (<code>pip install 'clauster[pty]'</code>). As a manual alternative on the binary,
+<code>pip install --target=/your/chosen/dir pyte</code> and set <code>CLAUSTER_PYTE_PATH</code> to that directory.</p>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Optional extras</p>
+<p>A few capabilities live behind optional <code>pip</code> <strong>extras</strong> that the default install and
+the signed standalone binary deliberately do not bundle. The <code>pty</code> extra
+(<code>pip install 'clauster[pty]'</code>) enables the read-only live terminal view (<code>pyte</code>, LGPL)
+and the Windows ConPTY keeper for Interactive Session (<code>pywinpty</code>, Windows-only); the
+<code>notify</code> extra (<code>pip install 'clauster[notify]'</code>) enables outbound bridge-lifecycle
+notifications (<code>apprise</code>). Each is optional — a missing extra only leaves its feature
+dormant, never breaks a launch. <code>clauster doctor</code> reports every extra (<code>OK</code> when present,
+<code>WARN</code> when missing, with the install hint), and on the standalone binary the hint points
+at the side-install path instead of <code>pip</code>.
+On the standalone binary you don't need to set <code>CLAUSTER_PYTE_PATH</code> per-extra: the binary
+also adds a managed <code>&lt;state_dir&gt;/deps</code> directory to its import path at startup, so anything
+installed there (<code>pip install --target=&lt;state_dir&gt;/deps &lt;dist&gt;</code> from any Python) loads on the
+next start —
+<a href="../reference/cli/#clauster-deps-inspect-and-manage-optional-extras"><code>clauster deps</code></a>
+manages that directory (<code>clauster deps list</code> shows each extra's status; <code>clauster deps install
+&lt;extra&gt;</code> / <code>uninstall &lt;extra&gt;</code> populate or clear it).</p>
+</div>
+<h2 id="scoop-windows">Scoop (Windows)<a class="headerlink" href="#scoop-windows" title="Permanent link">&para;</a></h2>
+<p>On Windows, <a href="https://scoop.sh">Scoop</a> installs the standalone binary and keeps it
+updated. This repository doubles as a Scoop bucket:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="n">scoop</span> <span class="n">bucket</span> <span class="n">add</span> <span class="n">clauster</span> <span class="n">https</span><span class="p">://</span><span class="n">github</span><span class="p">.</span><span class="n">com</span><span class="p">/</span><span class="n">schubydoo</span><span class="p">/</span><span class="n">clauster</span>
+<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="n">scoop</span> <span class="n">install</span> <span class="n">clauster</span>
+<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="n">clauster</span> <span class="n">run</span> <span class="n">-c</span> <span class="n">clauster</span><span class="p">.</span><span class="n">yml</span>
+</code></pre></div>
+<p><code>scoop update clauster</code> picks up new releases automatically (the manifest tracks
+GitHub releases and re-verifies the checksum on each update).</p>
+<h2 id="homebrew-macos-linux">Homebrew (macOS &amp; Linux)<a class="headerlink" href="#homebrew-macos-linux" title="Permanent link">&para;</a></h2>
+<p><a href="https://brew.sh">Homebrew</a> installs the standalone binary on macOS (Apple Silicon
+and Intel) and Linux (x86_64 and arm64) from the project's tap:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a>brew<span class="w"> </span>install<span class="w"> </span>schubydoo/clauster/clauster
+<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>clauster<span class="w"> </span>run<span class="w"> </span>-c<span class="w"> </span>clauster.yml
+</code></pre></div>
+<p>That auto-taps <code>schubydoo/homebrew-clauster</code>; the two-step form is <code>brew tap
+schubydoo/clauster</code> then <code>brew install clauster</code>. Upgrade with <code>brew update &amp;&amp; brew
+upgrade clauster</code> — the tap mirrors each release automatically and Homebrew verifies
+the SHA-256, so the unsigned-binary prompt the manual download warns about doesn't
+apply here. <code>clauster</code> still spawns <code>claude</code>, so keep Claude Code on your <code>PATH</code>.</p>
+<h2 id="nix-flake">Nix (flake)<a class="headerlink" href="#nix-flake" title="Permanent link">&para;</a></h2>
+<p>The repository is a <a href="https://nixos.org/">Nix flake</a> exposing the standalone binary
+for <code>x86_64</code>/<code>aarch64</code> Linux and macOS. Run it ad hoc, or install it into a profile:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="c1"># Run without installing (forward args after --):</span>
+<a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a>nix<span class="w"> </span>run<span class="w"> </span>github:schubydoo/clauster<span class="w"> </span>--<span class="w"> </span>run<span class="w"> </span>-c<span class="w"> </span>clauster.yml
+<a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a>
+<a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a><span class="c1"># Or install persistently:</span>
+<a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a>nix<span class="w"> </span>profile<span class="w"> </span>install<span class="w"> </span>github:schubydoo/clauster
+</code></pre></div>
+<p>The flake pins each release's signed binary by SHA-256, so <code>nix profile upgrade</code>
+picks up new releases. Windows is not a Nix target — use Scoop there.</p>
+<h2 id="from-source-development">From source (development)<a class="headerlink" href="#from-source-development" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>uv<span class="w"> </span>sync<span class="w"> </span>--extra<span class="w"> </span>dev
+<a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>cp<span class="w"> </span>clauster.yml.example<span class="w"> </span>clauster.yml<span class="w">    </span><span class="c1"># edit projects_root</span>
+<a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a>uv<span class="w"> </span>run<span class="w"> </span>clauster
+</code></pre></div>
+<p>Then open <a href="http://127.0.0.1:7621">http://127.0.0.1:7621</a>. <code>claude</code> must be on your <code>PATH</code>.</p>
+<h2 id="docker">Docker<a class="headerlink" href="#docker" title="Permanent link">&para;</a></h2>
+<p>A multi-arch (<code>linux/amd64</code>, <code>linux/arm64</code>) image is published to
+<code>ghcr.io/schubydoo/clauster</code>. It is built on an <code>alpine</code> (musl) base with
+explicitly pinned apk packages, runs <strong>non-root</strong> with PUID/PGID remapping, and
+ships a <code>HEALTHCHECK</code> against <code>/healthz</code>.</p>
+<div class="admonition warning">
+<p class="admonition-title">The <code>claude</code> CLI is not baked into the image</p>
+<p>Clauster spawns <code>claude remote-control</code>, so you must provide the CLI at
+runtime — mount it onto <code>PATH</code> (or build a derived image that installs it) —
+along with the runtime user's <code>~/.claude</code> credentials and your projects
+directory.</p>
+</div>
+<p>The image mounts two volumes:</p>
+<table>
+<thead>
+<tr>
+<th>Mount</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/config</code></td>
+<td><code>clauster.yml</code> + the <code>state_dir</code></td>
+</tr>
+<tr>
+<td><code>/projects</code></td>
+<td>the <code>projects_root</code> to manage</td>
+</tr>
+</tbody>
+</table>
+<p>The container binds <code>0.0.0.0</code>, so it <strong>requires enforced auth to start</strong> (see
+<a href="../networking/">Networking</a>). Generate a password hash without anything on the
+host:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>docker<span class="w"> </span>compose<span class="w"> </span>run<span class="w"> </span>--rm<span class="w"> </span>clauster<span class="w"> </span>clauster<span class="w"> </span>hash-password
+</code></pre></div>
+<div class="admonition tip">
+<p class="admonition-title">First-run without a hash: the setup wizard</p>
+<p>Start the container with an <strong>empty <code>/config</code></strong> and <strong>without</strong> the
+<code>CLAUSTER_AUTH_*</code> vars and Clauster serves the <a href="../guides/configuration/">first-run setup
+wizard</a> instead of exiting. In a container the wizard
+binds all interfaces (<code>CLAUSTER_SETUP_HOST=0.0.0.0</code>, baked into the image) so a
+published port can reach it, and it is gated by a <strong>one-time token</strong> printed to
+the log — <code>docker logs &lt;name&gt;</code> shows a
+<code>http://&lt;this-host&gt;:7621/?token=…</code> URL. Open it, set <code>projects_root</code>
+(<code>/projects</code>), a bind host, and a password; the wizard writes an auth-enabled
+<code>clauster.yml</code> to the <strong>persistent <code>/config</code> volume</strong>
+(<code>CLAUSTER_CONFIG=/config/clauster.yml</code>, so it survives recreate) and restarts
+onto it. The token gates the reachable, not-yet-authed wizard; a plain
+non-loopback bind with no config is otherwise refused at load (#88).</p>
+</div>
+<h3 id="docker-compose">Docker Compose<a class="headerlink" href="#docker-compose" title="Permanent link">&para;</a></h3>
+<p>A ready-to-edit <a href="https://github.com/schubydoo/clauster/blob/main/compose.yaml"><code>compose.yaml</code></a>
+is included:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a><span class="c1"># 1. generate a password hash (runs inside the image)</span>
+<a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a>docker<span class="w"> </span>compose<span class="w"> </span>run<span class="w"> </span>--rm<span class="w"> </span>clauster<span class="w"> </span>clauster<span class="w"> </span>hash-password
+<a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a><span class="c1"># 2. export it single-quoted (single quotes stop the shell expanding the `$`)</span>
+<a id="__codelineno-14-4" name="__codelineno-14-4" href="#__codelineno-14-4"></a><span class="nb">export</span><span class="w"> </span><span class="nv">CLAUSTER_AUTH_PASSWORD_HASH</span><span class="o">=</span><span class="s1">'$argon2id$v=19$...'</span>
+<a id="__codelineno-14-5" name="__codelineno-14-5" href="#__codelineno-14-5"></a><span class="c1"># 3. point the projects/claude volumes at your host, then start</span>
+<a id="__codelineno-14-6" name="__codelineno-14-6" href="#__codelineno-14-6"></a>docker<span class="w"> </span>compose<span class="w"> </span>up<span class="w"> </span>-d
+</code></pre></div>
+<p>The bundled Compose file sets the mandatory auth env vars for a non-loopback
+bind:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a><span class="nt">environment</span><span class="p">:</span>
+<a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a><span class="w">  </span><span class="nt">CLAUSTER_AUTH_ENABLED</span><span class="p">:</span><span class="w"> </span><span class="s">"true"</span>
+<a id="__codelineno-15-3" name="__codelineno-15-3" href="#__codelineno-15-3"></a><span class="w">  </span><span class="nt">CLAUSTER_AUTH_PASSWORD_REQUIRED</span><span class="p">:</span><span class="w"> </span><span class="s">"true"</span>
+<a id="__codelineno-15-4" name="__codelineno-15-4" href="#__codelineno-15-4"></a><span class="w">  </span><span class="nt">CLAUSTER_AUTH_PASSWORD_HASH</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">${CLAUSTER_AUTH_PASSWORD_HASH:?...}</span>
+<a id="__codelineno-15-5" name="__codelineno-15-5" href="#__codelineno-15-5"></a><span class="w">  </span><span class="nt">CLAUSTER_AUTH_ALLOWED_ORIGINS</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">${CLAUSTER_AUTH_ALLOWED_ORIGINS:-http://localhost:7621}</span>
+<a id="__codelineno-15-6" name="__codelineno-15-6" href="#__codelineno-15-6"></a><span class="w">  </span><span class="nt">PUID</span><span class="p">:</span><span class="w"> </span><span class="s">"1000"</span>
+<a id="__codelineno-15-7" name="__codelineno-15-7" href="#__codelineno-15-7"></a><span class="w">  </span><span class="nt">PGID</span><span class="p">:</span><span class="w"> </span><span class="s">"1000"</span>
+</code></pre></div>
+<div class="admonition warning">
+<p class="admonition-title">Set the origin you browse to</p>
+<p>The container binds <code>0.0.0.0</code>, which auto-allows <strong>no</strong> browser origin — only
+a loopback bind gets <code>localhost</code> for free. If the origin you open the
+dashboard at is not listed in <code>auth.allowed_origins</code>, the login POST is
+refused with <code>403 origin check failed</code> and the dashboard is unreachable.
+Completing the <strong>first-run setup wizard</strong> records the origin you used
+automatically, so this only needs setting when you configure by environment
+instead.</p>
+</div>
+<p>The Compose file defaults that origin to <code>http://localhost:7621</code>. Override it for
+a LAN address, hostname, or reverse proxy — comma-separate to list several:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a><span class="nb">export</span><span class="w"> </span><span class="nv">CLAUSTER_AUTH_ALLOWED_ORIGINS</span><span class="o">=</span><span class="s1">'http://nas.local:7621,http://192.168.1.50:7621'</span>
+</code></pre></div>
+<div class="admonition note">
+<p class="admonition-title">Hashes in a <code>.env</code> file</p>
+<p>An <code>$argon2id$…</code> hash is full of <code>$</code>. Exported single-quoted on the command
+line it is safe, but in a <code>.env</code> file beside the Compose file you must
+<strong>double every <code>$</code> to <code>$$</code></strong> so Compose does not try to interpolate it.</p>
+</div>
+<h2 id="running">Running<a class="headerlink" href="#running" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a>clauster<span class="w"> </span>run<span class="w"> </span>-c<span class="w"> </span>clauster.yml
+</code></pre></div>
+<p><code>run</code> is the default subcommand, so bare <code>clauster</code> and <code>clauster -c &lt;cfg&gt;</code> also
+start the server (for backward compatibility). If no config is passed, Clauster
+searches <code>$CLAUSTER_CONFIG</code>, then <code>./clauster.yml</code>, then
+<code>$CLAUSTER_HOME/clauster.yml</code>.</p>
+<h3 id="other-subcommands">Other subcommands<a class="headerlink" href="#other-subcommands" title="Permanent link">&para;</a></h3>
+<p>Everything else — the secret/token helpers, <code>doctor</code>, backup/restore,
+<code>config reconcile</code>, <code>keepers</code>, <code>deps</code>, the headless read/write commands
+(<code>projects</code>, <code>status</code>, <code>sessions</code>, <code>logs</code>, <code>open</code>, <code>start</code>, <code>stop</code>), <code>usage</code>,
+and the MCP server — is catalogued in
+<a href="../reference/cli/">CLI commands</a>.</p>
+<p><code>clauster doctor</code> confirms <code>claude</code> is found and new enough and that
+<code>projects_root</code> and the state dir are usable — run it before your first spawn
+and fix any ✗.</p>
+<h2 id="run-as-a-systemd-service-linux">Run as a systemd service (Linux)<a class="headerlink" href="#run-as-a-systemd-service-linux" title="Permanent link">&para;</a></h2>
+<p><code>clauster install-service systemd</code> <strong>prints</strong> a ready-to-use unit (it does not
+install it), so you can review it before writing it into place. Run Clauster as a
+<strong>dedicated user</strong> — it spawns <code>claude</code> and needs that user's <code>~/.claude</code>
+credentials:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a><span class="c1"># 1. Put the config where the unit expects it (default: /etc/clauster/clauster.yml)</span>
+<a id="__codelineno-18-2" name="__codelineno-18-2" href="#__codelineno-18-2"></a>sudo<span class="w"> </span>install<span class="w"> </span>-Dm600<span class="w"> </span>clauster.yml<span class="w"> </span>/etc/clauster/clauster.yml
+<a id="__codelineno-18-3" name="__codelineno-18-3" href="#__codelineno-18-3"></a>
+<a id="__codelineno-18-4" name="__codelineno-18-4" href="#__codelineno-18-4"></a><span class="c1"># 2. Generate the unit with the SAME clauster you installed (so ExecStart resolves to</span>
+<a id="__codelineno-18-5" name="__codelineno-18-5" href="#__codelineno-18-5"></a><span class="c1">#    the right clauster entry point — the binary/console-script for a uv/pip/pipx/binary</span>
+<a id="__codelineno-18-6" name="__codelineno-18-6" href="#__codelineno-18-6"></a><span class="c1">#    install, or `python -m clauster` only for a bare dev interpreter), run-as the</span>
+<a id="__codelineno-18-7" name="__codelineno-18-7" href="#__codelineno-18-7"></a><span class="c1">#    clauster user, and write it into place</span>
+<a id="__codelineno-18-8" name="__codelineno-18-8" href="#__codelineno-18-8"></a>clauster<span class="w"> </span>install-service<span class="w"> </span>systemd<span class="w"> </span>--user<span class="w"> </span>clauster<span class="w"> </span><span class="p">|</span><span class="w"> </span>sudo<span class="w"> </span>tee<span class="w"> </span>/etc/systemd/system/clauster.service
+<a id="__codelineno-18-9" name="__codelineno-18-9" href="#__codelineno-18-9"></a>
+<a id="__codelineno-18-10" name="__codelineno-18-10" href="#__codelineno-18-10"></a><span class="c1"># 3. Enable + start; follow the logs with journalctl</span>
+<a id="__codelineno-18-11" name="__codelineno-18-11" href="#__codelineno-18-11"></a>sudo<span class="w"> </span>systemctl<span class="w"> </span>daemon-reload
+<a id="__codelineno-18-12" name="__codelineno-18-12" href="#__codelineno-18-12"></a>sudo<span class="w"> </span>systemctl<span class="w"> </span><span class="nb">enable</span><span class="w"> </span>--now<span class="w"> </span>clauster
+<a id="__codelineno-18-13" name="__codelineno-18-13" href="#__codelineno-18-13"></a>journalctl<span class="w"> </span>-u<span class="w"> </span>clauster<span class="w"> </span>-f
+</code></pre></div>
+<p>The generated unit:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a><span class="k">[Unit]</span>
+<a id="__codelineno-19-2" name="__codelineno-19-2" href="#__codelineno-19-2"></a><span class="na">Description</span><span class="o">=</span><span class="s">Clauster — browser-driven claude remote-control manager</span>
+<a id="__codelineno-19-3" name="__codelineno-19-3" href="#__codelineno-19-3"></a><span class="na">After</span><span class="o">=</span><span class="s">network-online.target</span>
+<a id="__codelineno-19-4" name="__codelineno-19-4" href="#__codelineno-19-4"></a><span class="na">Wants</span><span class="o">=</span><span class="s">network-online.target</span>
+<a id="__codelineno-19-5" name="__codelineno-19-5" href="#__codelineno-19-5"></a>
+<a id="__codelineno-19-6" name="__codelineno-19-6" href="#__codelineno-19-6"></a><span class="k">[Service]</span>
+<a id="__codelineno-19-7" name="__codelineno-19-7" href="#__codelineno-19-7"></a><span class="na">Type</span><span class="o">=</span><span class="s">simple</span>
+<a id="__codelineno-19-8" name="__codelineno-19-8" href="#__codelineno-19-8"></a><span class="na">User</span><span class="o">=</span><span class="s">clauster</span>
+<a id="__codelineno-19-9" name="__codelineno-19-9" href="#__codelineno-19-9"></a><span class="na">ExecStart</span><span class="o">=</span><span class="s">/home/clauster/.local/bin/clauster run -c /etc/clauster/clauster.yml</span>
+<a id="__codelineno-19-10" name="__codelineno-19-10" href="#__codelineno-19-10"></a><span class="na">WorkingDirectory</span><span class="o">=</span><span class="s">/etc/clauster</span>
+<a id="__codelineno-19-11" name="__codelineno-19-11" href="#__codelineno-19-11"></a><span class="na">Environment</span><span class="o">=</span><span class="s">CLAUSTER_CONFIG=/etc/clauster/clauster.yml</span>
+<a id="__codelineno-19-12" name="__codelineno-19-12" href="#__codelineno-19-12"></a><span class="c1"># Spawned bridges inherit this PATH (see note below); ~/.local/bin covers uv-installed tools.</span>
+<a id="__codelineno-19-13" name="__codelineno-19-13" href="#__codelineno-19-13"></a><span class="na">Environment</span><span class="o">=</span><span class="s">"PATH=/home/clauster/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"</span>
+<a id="__codelineno-19-14" name="__codelineno-19-14" href="#__codelineno-19-14"></a><span class="na">Restart</span><span class="o">=</span><span class="s">on-failure</span>
+<a id="__codelineno-19-15" name="__codelineno-19-15" href="#__codelineno-19-15"></a><span class="na">RestartSec</span><span class="o">=</span><span class="s">5</span>
+<a id="__codelineno-19-16" name="__codelineno-19-16" href="#__codelineno-19-16"></a><span class="c1"># Leave detached pty (true-resume) bridges running across a restart (see below).</span>
+<a id="__codelineno-19-17" name="__codelineno-19-17" href="#__codelineno-19-17"></a><span class="na">KillMode</span><span class="o">=</span><span class="s">process</span>
+<a id="__codelineno-19-18" name="__codelineno-19-18" href="#__codelineno-19-18"></a>
+<a id="__codelineno-19-19" name="__codelineno-19-19" href="#__codelineno-19-19"></a><span class="k">[Install]</span>
+<a id="__codelineno-19-20" name="__codelineno-19-20" href="#__codelineno-19-20"></a><span class="na">WantedBy</span><span class="o">=</span><span class="s">multi-user.target</span>
+</code></pre></div>
+<p><code>install-service</code> auto-detects how Clauster is installed and bakes the entry point
+straight into <code>ExecStart</code>: a frozen standalone binary or a <code>clauster</code> console
+script (uv tool / pip / pipx) is invoked directly, as shown above. Only a bare dev
+interpreter falls back to the <code>python -m clauster run …</code> form.</p>
+<div class="admonition note">
+<p class="admonition-title"><code>KillMode=process</code> keeps bridges alive across a restart</p>
+<p>The generated unit sets <strong><code>KillMode=process</code></strong> (not systemd's default
+<code>KillMode=control-group</code>), so a <code>systemctl restart</code> / <code>stop</code> signals only the
+Clauster process — detached bridges, including <code>pty</code> true-resume sessions, keep
+running and Clauster reattaches them on startup. <code>clauster doctor</code> warns if an
+older loaded unit still uses a reaping <code>KillMode</code>. See
+<a href="../operations/#restart">Operations → the <code>KillMode</code> / <code>systemctl restart</code> caveat</a>
+for the full rationale and recovery steps.</p>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Bridges inherit the unit's <code>PATH</code></p>
+<p>Under systemd a service gets a minimal default <code>PATH</code>, and Clauster propagates
+its environment to every <code>claude</code> bridge it spawns — so without a <code>PATH</code> in the
+unit, an agent inside a bridge can't resolve user-local tools (<code>uv</code>, <code>ruff</code>,
+<code>pytest</code>, …) that work fine in your interactive shell. The generated unit bakes
+the run-as user's <code>~/.local/bin</code> plus the standard system dirs (resolved from
+the <code>--user</code> you pass, so regenerate if you change it). For <strong>shell-managed</strong>
+toolchains a static directory can't cover — nvm/pyenv <code>node</code>, <code>cargo</code>, Go —
+extend it with <a href="../reference/config/#claude-binary-bridge-spawn-claudeconfig"><code>claude.path_append</code> / <code>claude.env</code></a>
+in <code>clauster.yml</code>; those append to (never replace) this baked <code>PATH</code>.</p>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Auth + sandboxing</p>
+<p>A non-loopback bind <strong>refuses to start without enforced auth</strong> — set the
+<code>CLAUSTER_AUTH_*</code> vars and a password hash, or bind to loopback (see
+<a href="../networking/">Networking</a>). Be conservative with systemd sandboxing:
+Clauster needs the run-as user's real <code>~/.claude</code> and spawns <code>claude</code>
+subprocesses, so options like <code>ProtectHome=</code>, <code>PrivateUsers=</code>, or a
+restrictive <code>SystemCallFilter=</code> can break it. <code>NoNewPrivileges=true</code> plus
+<code>ProtectSystem=strict</code> (with the <code>state_dir</code> and <code>~/.claude</code> listed under
+<code>ReadWritePaths=</code>) are reasonable starting points — test a spawn after adding
+any hardening.</p>
+</div>
+<h2 id="uninstalling">Uninstalling<a class="headerlink" href="#uninstalling" title="Permanent link">&para;</a></h2>
+<p>The uninstaller is the counterpart to the install script. It auto-detects how
+Clauster was installed (the standalone binary, or a <code>uv tool</code> / <code>pipx</code> / <code>pip</code> /
+<code>scoop</code> package), removes the right artifact, stops and removes a Clauster service
+unit if one was installed, and removes the state directory (<code>clauster.db</code>,
+<code>state.json</code>, <code>hosted_state.json</code>, <code>tls/</code>, <code>backups/</code>, sockets, logs) and the
+config yaml.</p>
+<p><strong>Linux &amp; macOS:</strong></p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a><span class="c1"># Preview first — lists exactly what would be removed, changes nothing:</span>
+<a id="__codelineno-20-2" name="__codelineno-20-2" href="#__codelineno-20-2"></a>curl<span class="w"> </span>-fsSL<span class="w"> </span>https://raw.githubusercontent.com/schubydoo/clauster/main/uninstall.sh<span class="w"> </span><span class="p">|</span><span class="w"> </span>bash<span class="w"> </span>-s<span class="w"> </span>--<span class="w"> </span>--dry-run
+<a id="__codelineno-20-3" name="__codelineno-20-3" href="#__codelineno-20-3"></a>
+<a id="__codelineno-20-4" name="__codelineno-20-4" href="#__codelineno-20-4"></a><span class="c1"># Then remove:</span>
+<a id="__codelineno-20-5" name="__codelineno-20-5" href="#__codelineno-20-5"></a>curl<span class="w"> </span>-fsSL<span class="w"> </span>https://raw.githubusercontent.com/schubydoo/clauster/main/uninstall.sh<span class="w"> </span><span class="p">|</span><span class="w"> </span>bash
+</code></pre></div>
+<p><strong>Windows (PowerShell):</strong></p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-21-1" name="__codelineno-21-1" href="#__codelineno-21-1"></a><span class="nb">irm </span><span class="n">https</span><span class="p">://</span><span class="n">raw</span><span class="p">.</span><span class="n">githubusercontent</span><span class="p">.</span><span class="n">com</span><span class="p">/</span><span class="n">schubydoo</span><span class="p">/</span><span class="n">clauster</span><span class="p">/</span><span class="n">main</span><span class="p">/</span><span class="n">uninstall</span><span class="p">.</span><span class="n">ps1</span> <span class="p">|</span> <span class="nb">iex</span>
+<a id="__codelineno-21-2" name="__codelineno-21-2" href="#__codelineno-21-2"></a><span class="c"># Preview first:  &amp;([scriptblock]::Create((irm https://raw.githubusercontent.com/schubydoo/clauster/main/uninstall.ps1))) -DryRun</span>
+</code></pre></div>
+<p>Options (same names on both, <code>--flag</code> on the shell script, <code>-Flag</code> on PowerShell):</p>
+<ul>
+<li><code>--dry-run</code> / <code>-DryRun</code> — show what would be removed without removing anything.</li>
+<li><code>--keep-config</code> / <code>-KeepConfig</code> — preserve <code>clauster.yml</code> for a future reinstall
+  (moved aside to a printed backup path).</li>
+<li><code>--keep-data</code> / <code>-KeepData</code> — preserve <code>clauster.db</code> the same way.</li>
+<li><code>--keep-deps</code> / <code>-KeepDeps</code> — preserve side-installed optional deps (the <code>pty</code>/<code>notify</code>
+  extras and Shawl in <code>&lt;state_dir&gt;/deps</code>) the same way, so a reinstall needn't re-download
+  them. The uninstaller enumerates what it found there before removing anything.</li>
+<li><code>-y</code> / <code>-Yes</code> — skip the confirmation prompt.</li>
+</ul>
+<p>The uninstaller is deliberately conservative: it never deletes a path outside the
+known Clauster locations, refuses a <code>state_dir</code> that resolves to your home directory
+or a drive root, and — if it can't identify how Clauster was installed — reports what
+it found and exits without deleting anything rather than guessing. It leaves Claude
+Code (the <code>claude</code> CLI) untouched, since that is installed separately.</p>
+<div class="admonition note">
+<p class="admonition-title">systemd service needs privileges</p>
+<p>If you installed the systemd unit, removing it needs <code>sudo</code>; the script prints the
+exact <code>systemctl stop/disable</code> + <code>rm</code> commands it runs so you can see (or run) the
+privileged step yourself. A relocated <code>state_dir</code> or config is picked up from the
+same <code>CLAUSTER_STATE_DIR</code> / <code>CLAUSTER_CONFIG</code> overrides the app uses.</p>
+</div>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; schubydoo — Apache-2.0
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.top", "navigation.instant", "navigation.tracking", "toc.follow", "content.code.copy", "search.suggest", "search.highlight"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
