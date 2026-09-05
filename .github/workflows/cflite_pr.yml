@@ -2,7 +2,12 @@
 # Informational/Phase-1: a short per-PR run on the `address` sanitizer; it is NOT
 # a required check, so a flaky finding never blocks a merge, but a reproducible
 # crash surfaces here (and as SARIF in the Security tab). Longer corpus-building
-# runs belong in the scheduled cflite_batch.yml.
+# runs belong in the scheduled cflite_batch.yml, but this per-PR run now LOADS that
+# persisted corpus read-only (fork-gated, fail-soft) so a diff fuzzes WITH the accumulated
+# corpus as SEEDS and is coverage-guided against the PR's changed lines (issue 1497). It
+# reads the per-target coverage stats on the corpus repo's gh-pages branch (storage-repo-branch-
+# coverage), which the weekly cflite_cron.yml refreshes, so code-change mode prunes to the
+# harnesses the diff affects instead of running every target from empty (see fuzz/README.md).
 # Docs: https://google.github.io/clusterfuzzlite/
 name: ClusterFuzzLite PR fuzzing
 
@@ -46,8 +51,9 @@ jobs:
     # successful runs (11m09s–38m54s): the driver is NOT `fuzz-seconds: 180` but the
     # BUILD of all 18 harnesses (~41s of PyInstaller each, ≈12 min), which is why this
     # job sits at or above the band of batch/prune (55) and coverage (60) despite the
-    # far smaller fuzz budget. 75 rather than 60 so the headroom holds at the OBSERVED
-    # MAX and not merely at a typical run: 39 + one full crash-triage cycle (10
+    # far smaller fuzz budget. Now it also clones the persisted corpus once (build) and
+    # once (run); each clone is small, but 75 rather than 60 holds the headroom at the
+    # OBSERVED MAX and not merely at a typical run: 39 + one full crash-triage cycle (10
     # reproduce attempts x 120s = 20 min, the python reproduce timeout that
     # `language: python` selects) = 59, which 60 would clear by a single minute.
     # A hung job now dies in 75 min instead of 360.
@@ -63,6 +69,107 @@ jobs:
       matrix:
         sanitizer: [address]
     steps:
+      # Load the persisted fuzz corpus for this code-change run so a diff fuzzes WITH the
+      # accumulated corpus as SEEDS and is coverage-guided (issue 1497). It reads both the
+      # corpus (storage-repo-branch: main) and the per-target coverage stats the weekly
+      # cflite_cron.yml refreshes (storage-repo-branch-coverage: gh-pages), so code-change
+      # mode prunes to the harnesses the diff affects (see fuzz/README.md). The corpus lives
+      # in the PRIVATE schubydoo/clauster-fuzz-corpus repo, which GITHUB_TOKEN cannot read, so
+      # mint a READ-ONLY clauster-ci App token scoped to that one repo (contents: read only).
+      # code-change is read-only against the corpus — cifuzz's CiFuzzTargetRunner never
+      # uploads — so contents: read is the whole grant and a PR run can never push.
+      #
+      # The option's caveat, kept beside it (AGENTS.md invariant 6): forks receive no
+      # secrets, so the mint is skipped on fork PRs; `continue-on-error` lets a broken App
+      # install (not installed, key rotated) DEGRADE rather than fail the run. The resolve
+      # step below turns every failure mode into a `::warning::` and an empty storage-repo, so
+      # cifuzz falls back to the GitHub-artifacts filestore (today's behaviour). The WRITE PAT
+      # (FUZZ_STORAGE_TOKEN) is never exposed to a PR run; this token cannot push, and
+      # create-github-app-token registers it as a masked secret so it never reaches a log.
+      - name: Mint a read-only clauster-ci App token for the fuzz corpus
+        id: app-token
+        # Same-repo PRs only (a fork's head repo differs); forks get no secrets anyway.
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        # Never fail the job on a broken mint — degrade to the empty-corpus fallback.
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.CLAUSTER_CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
+          owner: schubydoo
+          repositories: clauster-fuzz-corpus
+          permission-contents: read # read the corpus only; code-change never pushes
+      # Resolve the storage-repo inputs the two cifuzz steps consume, GATED on the corpus
+      # actually being reachable. cifuzz's GitFilestore clones the storage-repo eagerly in its
+      # constructor (subprocess.check_call, uncaught — oss-fuzz infra/cifuzz/filestore/git),
+      # so a URL that is set but unclonable (a token that mints without real corpus access, a
+      # renamed branch) would RED the build rather than degrade. So emit a non-empty URL only
+      # when a read `git ls-remote` succeeds; otherwise emit empty and cifuzz falls back to
+      # the GitHub-artifacts filestore (today's behaviour). Every failure warns and never
+      # fails the job (issue 1497): a fork PR, a broken App install, an unreachable corpus, or
+      # a missing/stale coverage report each leave the run coverage-degraded, not failed. The
+      # token reaches git/curl through env (never `${{ }}` in run:), and create-github-app-token
+      # masks it, so it never reaches a log — output included, where it is a masked secret.
+      - name: Resolve and verify the corpus storage-repo inputs
+        id: corpus
+        continue-on-error: true
+        env:
+          TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          warn() { echo "::warning::$1 This run is coverage-degraded, not failed (issue 1497)."; }
+          emit() { { echo "url=$1"; echo "branch=$2"; echo "branch_coverage=$3"; } >> "$GITHUB_OUTPUT"; }
+          if [ -z "$TOKEN" ]; then
+            m="No read-only corpus token (fork PR, or the clauster-ci App is not installed on"
+            m="$m schubydoo/clauster-fuzz-corpus with contents:read); fuzzing from an empty corpus."
+            warn "$m"; emit "" "" ""; exit 0
+          fi
+          url="https://x-access-token:${TOKEN}@github.com/schubydoo/clauster-fuzz-corpus.git"
+          if ! refs="$(git ls-remote --heads "$url" main gh-pages 2>/dev/null)"; then
+            m="Could not read the fuzz corpus with the minted token (broken App install"
+            m="$m or auth failure); fuzzing from an empty corpus."
+            warn "$m"; emit "" "" ""; exit 0
+          fi
+          # Reachable: emit now, before the non-fatal report probe below, so a probe hiccup can
+          # never drop a corpus we already proved clonable.
+          emit "$url" "main" "gh-pages"
+          for b in main gh-pages; do
+            printf '%s\n' "$refs" | grep -q "refs/heads/$b" \
+              || warn "Fuzz corpus branch '$b' is missing on schubydoo/clauster-fuzz-corpus (renamed or removed)."
+          done
+          # cifuzz reads coverage/latest/fuzzer_stats/<target>.json for affected-target
+          # pruning, so probe a real per-target stats file as the report-present signal, not
+          # just the gh-pages branch (which the ls-remote above already proved).
+          api="https://api.github.com/repos/schubydoo/clauster-fuzz-corpus"
+          report="coverage/latest/fuzzer_stats/redact_fuzzer.json"
+          if http="$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "${api}/contents/${report}?ref=gh-pages" 2>/dev/null)"; then
+            if [ "$http" != "200" ]; then
+              m="Fuzz coverage stats ${report} are missing on gh-pages (HTTP ${http});"
+              m="$m code-change pruning has no per-target coverage to read."
+              warn "$m"
+            else
+              committed="$(curl -sS \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "${api}/commits?path=${report}&sha=gh-pages&per_page=1" 2>/dev/null \
+                | grep -m1 '"date"' | sed -E 's/.*"date": *"([^"]+)".*/\1/' || true)"
+              epoch="$(date -u -d "$committed" +%s 2>/dev/null || true)"
+              if [ -n "$epoch" ]; then
+                age=$(( ( $(date -u +%s) - epoch ) / 86400 ))
+                if [ "$age" -gt 15 ]; then
+                  m="Fuzz coverage stats ${report} are ${age} days old (> two weekly"
+                  m="$m cron cycles); code-change pruning is reading stale coverage."
+                  warn "$m"
+                fi
+              fi
+            fi
+          else
+            warn "Could not query the fuzz coverage stats on gh-pages (network or auth error)."
+          fi
       - name: Build fuzzers (${{ matrix.sanitizer }})
         id: build
         uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
@@ -70,6 +177,13 @@ jobs:
           language: python
           github-token: ${{ secrets.GITHUB_TOKEN }}
           sanitizer: ${{ matrix.sanitizer }}
+          # From the single `corpus` step above: the composed URL + branches when the corpus
+          # is reachable, empty otherwise => cifuzz reverts to the GitHub-artifacts filestore.
+          # The coverage branch (gh-pages) carries the per-target coverage stats code-change
+          # mode prunes affected targets against; the weekly cflite_cron.yml refreshes it (1497).
+          storage-repo: ${{ steps.corpus.outputs.url }}
+          storage-repo-branch: ${{ steps.corpus.outputs.branch }}
+          storage-repo-branch-coverage: ${{ steps.corpus.outputs.branch_coverage }}
       - name: Run fuzzers (${{ matrix.sanitizer }})
         id: run
         uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
@@ -86,3 +200,10 @@ jobs:
           mode: code-change
           sanitizer: ${{ matrix.sanitizer }}
           output-sarif: true
+          # Load the persisted corpus read-only for the code-change run (issue 1497), from
+          # the same single `corpus` step; empty falls back to the GitHub-artifacts
+          # filestore, the same as before this change. The coverage branch (gh-pages) supplies
+          # the per-target coverage stats that guide affected-target selection (issue 1497).
+          storage-repo: ${{ steps.corpus.outputs.url }}
+          storage-repo-branch: ${{ steps.corpus.outputs.branch }}
+          storage-repo-branch-coverage: ${{ steps.corpus.outputs.branch_coverage }}
