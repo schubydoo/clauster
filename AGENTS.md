@@ -63,7 +63,9 @@ CI gate; `scripts/e2e.sh` clears the addopts and runs it.
 **A standard spawn, end to end:** route in `app.py` → `runner.SessionRunner.spawn` →
 `trust.trust_directory` + `ensure_remote_control_enabled` (both must pass — fail closed) →
 subprocess → `bridge_log` parses the debug log → `logstream` tails it → `redact` →
-WebSocket. Read that path before changing any part of it.
+WebSocket. Read that path before changing any part of it — and when reviewing a diff, read
+the referenced function itself rather than trusting a comment's claim about what it
+validates, catches, or drops.
 
 Modules under `src/clauster/`, by subsystem:
 
