@@ -392,6 +392,7 @@ class HostedSession:
                 source = self._source
 
                 async def _spill() -> None:
+                    """Drain the source queue into the local backlog while history loads."""
                     while True:
                         backlog.append(await source.get())
 
