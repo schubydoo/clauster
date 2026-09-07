@@ -56,7 +56,10 @@ CI gate; `scripts/e2e.sh` clears the addopts and runs it.
 
 ## Architecture
 
-`app.py` is both the FastAPI app factory and where every route lives. The entry point is
+`app.py` is the FastAPI app factory and still holds most route handlers. Routes are being
+split by domain into `routes/*.py` `APIRouter` modules (#1156), each reading its
+collaborators through the typed accessors in `dependencies.py`. `create_app` wires them with
+`include_router`. The entry point is
 `clauster.__main__:main`, which owns argument parsing for all subcommands plus the hidden
 `__pty-keeper__` / `__recap-hook__` forms a frozen build re-invokes itself with.
 

@@ -22,10 +22,10 @@ alike. Dependencies resolve before ``accept()``, so a dependency
 objects, not string forward references. A ``routes/*.py`` module uses
 ``from __future__ import annotations``, so FastAPI resolves ``cfg: ConfigDep``
 against that module's globals; a forward reference inside the alias would name a
-type that module never imported. Neither :mod:`clauster.config` nor
-:mod:`clauster.runner` imports :mod:`clauster.app`, so these imports are
-cycle-free, and ``app`` already imports both. Do not import :mod:`clauster.app`
-here.
+type that module never imported. None of :mod:`clauster.config`,
+:mod:`clauster.runner`, or :mod:`clauster.hosted` imports :mod:`clauster.app`, so
+these imports are cycle-free, and ``app`` already imports all three. Do not import
+:mod:`clauster.app` here.
 """
 
 from __future__ import annotations
@@ -36,12 +36,26 @@ from fastapi import Depends, HTTPException
 from starlette.requests import HTTPConnection
 
 from .config import ClausterConfig
+from .hosted import HostedManager
 from .runner import SessionRunner
 
 
 def get_config(conn: HTTPConnection) -> ClausterConfig:
     """Return the ClausterConfig stored on ``app.state`` at build time."""
     return conn.app.state.config
+
+
+def get_hosted(conn: HTTPConnection) -> HostedManager:
+    """Return the HostedManager from ``app.state``, or fail closed with a 404.
+
+    ``create_app`` sets it unconditionally, so an absent or ``None`` value happens
+    only in a harness that skipped the wiring. Fails closed like :func:`get_runner`
+    rather than dereferencing ``None`` into an unhandled 500.
+    """
+    hosted = getattr(conn.app.state, "hosted", None)
+    if hosted is None:
+        raise HTTPException(status_code=404, detail="hosted channel unavailable")
+    return hosted
 
 
 def get_runner(conn: HTTPConnection) -> SessionRunner:
@@ -61,4 +75,5 @@ def get_runner(conn: HTTPConnection) -> SessionRunner:
 
 
 ConfigDep = Annotated[ClausterConfig, Depends(get_config)]
+HostedDep = Annotated[HostedManager, Depends(get_hosted)]
 RunnerDep = Annotated[SessionRunner, Depends(get_runner)]
