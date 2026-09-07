@@ -11,7 +11,9 @@ plus their `v1` mirror aliases, the WebSocket routes, and the `/static` mount --
 matches the committed snapshot as a multiset, so an added, removed, or duplicated
 route trips it. Reordering benign (non-overlapping) routes does not, which is
 what a handler move does; the per-route functional tests in ``test_app_routes.py``
-guard the ordering of the few overlapping literal-vs-parameter paths.
+guard the ordering of the few overlapping literal-vs-parameter paths. Each row's
+methods are compared sorted, so a multi-method route matches regardless of the
+order stored in the JSON.
 
 ``test_ui_only_routes_all_resolve`` closes the `_UI_ONLY_ROUTES` fail-open: unlike
 `_mirror_v1_routes`, nothing at runtime asserts each kill-switch entry still names
@@ -20,10 +22,14 @@ route is renamed. This test fails loudly instead.
 
 The snapshot is captured with ``api.openapi_enabled`` off (the default), so it
 omits ``/docs`` and ``/openapi.json``. Update ``route_table_snapshot.json`` only
-for a DELIBERATE route change, never to make a refactor pass.
+for a DELIBERATE route change, never to make a refactor pass. To regenerate it::
+
+    CLAUSTER_UPDATE_ROUTE_SNAPSHOT=1 uv run pytest -o addopts="" \\
+        tests/test_route_table_snapshot.py
 """
 
 import json
+import os
 from collections import Counter
 from pathlib import Path
 
@@ -34,6 +40,7 @@ from clauster.app import _UI_ONLY_ROUTES, create_app
 from clauster.config import load_config
 
 _SNAPSHOT = Path(__file__).parent / "route_table_snapshot.json"
+_UPDATE = os.environ.get("CLAUSTER_UPDATE_ROUTE_SNAPSHOT") == "1"
 
 
 def _route_rows(app) -> list[tuple[tuple[str, ...], str]]:
@@ -53,11 +60,16 @@ def _route_rows(app) -> list[tuple[tuple[str, ...], str]]:
 
 
 def test_route_table_matches_snapshot(write_config):
-    expected = Counter(
-        (tuple(methods), path) for methods, path in json.loads(_SNAPSHOT.read_text("utf-8"))
-    )
-    actual = Counter(_route_rows(create_app(load_config(write_config()))))
+    actual_rows = _route_rows(create_app(load_config(write_config())))
+    if _UPDATE:  # pragma: no cover - dev-only snapshot regeneration
+        payload = sorted([list(methods), path] for methods, path in actual_rows)
+        _SNAPSHOT.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
+    expected = Counter(
+        (tuple(sorted(methods)), path)
+        for methods, path in json.loads(_SNAPSHOT.read_text("utf-8"))
+    )
+    actual = Counter(actual_rows)
     added = sorted((actual - expected).elements())
     removed = sorted((expected - actual).elements())
     assert actual == expected, (

@@ -1,15 +1,16 @@
 """Tests for the typed request-scoped accessors (#1156).
 
 The ``Annotated[..., Depends(...)]`` aliases must inject exactly the object
-``create_app`` put on ``app.state``, ``get_runner`` must fail closed when no
-runner is wired, and the accessors must read the attribute names the real
-``create_app`` actually sets.
+``create_app`` put on ``app.state`` on BOTH an HTTP route and a WebSocket route,
+``get_runner`` must fail closed when no runner is wired, and the accessors must
+read the attribute names the real ``create_app`` actually sets.
 """
 
 from typing import cast
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, WebSocket
 from fastapi.testclient import TestClient
+from starlette.requests import HTTPConnection
 
 from clauster.app import create_app
 from clauster.config import load_config
@@ -21,14 +22,14 @@ class _Marker:
         self.name = name
 
 
-class _ReqShim:
-    """Minimal stand-in exposing only ``request.app.state``, which is all the accessors read."""
+class _ConnShim:
+    """Minimal stand-in exposing only ``conn.app.state``, which is all the accessors read."""
 
     def __init__(self, app: FastAPI) -> None:
         self.app = app
 
 
-def test_deps_inject_the_app_state_objects():
+def test_deps_inject_on_an_http_route():
     config, runner = _Marker("config"), _Marker("runner")
     app = FastAPI()
     app.state.config = config
@@ -39,6 +40,22 @@ def test_deps_inject_the_app_state_objects():
         return {"config_ok": cfg is app.state.config, "runner_ok": run is app.state.runner}
 
     assert TestClient(app).get("/probe").json() == {"config_ok": True, "runner_ok": True}
+
+
+def test_deps_inject_on_a_websocket_route():
+    config, runner = _Marker("config"), _Marker("runner")
+    app = FastAPI()
+    app.state.config = config
+    app.state.runner = runner
+
+    @app.websocket("/ws")
+    async def ws(websocket: WebSocket, cfg: ConfigDep, run: RunnerDep) -> None:
+        await websocket.accept()
+        await websocket.send_json({"ok": cfg is app.state.config and run is app.state.runner})
+        await websocket.close()
+
+    with TestClient(app).websocket_connect("/ws") as conn:
+        assert conn.receive_json() == {"ok": True}
 
 
 def test_runner_dep_fails_closed_when_no_runner_is_wired():
@@ -54,8 +71,18 @@ def test_runner_dep_fails_closed_when_no_runner_is_wired():
     assert resp.json()["detail"] == "runner unavailable"
 
 
+def test_runner_dep_fails_closed_when_runner_attribute_is_absent():
+    app = FastAPI()  # never sets app.state.runner at all
+
+    @app.get("/needs-runner")
+    def needs_runner(run: RunnerDep) -> dict:
+        return {"unreachable": True}
+
+    assert TestClient(app).get("/needs-runner").status_code == 404
+
+
 def test_accessors_read_the_real_create_app_state(write_config):
     app = create_app(load_config(write_config()))
-    request = cast(Request, _ReqShim(app))
-    assert get_config(request) is app.state.config
-    assert get_runner(request) is app.state.runner
+    conn = cast(HTTPConnection, _ConnShim(app))
+    assert get_config(conn) is app.state.config
+    assert get_runner(conn) is app.state.runner

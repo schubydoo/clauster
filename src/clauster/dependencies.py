@@ -10,7 +10,12 @@ longer close over them, and ``app.state`` is typed ``Any`` -- so a bare
 Each accessor here reads one ``app.state`` object and returns it with a concrete
 type, so a moved handler keeps the typing the closure gave it. Declare the
 matching ``Annotated`` alias as a parameter, for example ``runner: RunnerDep``,
-and FastAPI injects it per request.
+and FastAPI injects it per request. The accessors take
+:class:`~starlette.requests.HTTPConnection`, the shared base of ``Request`` and
+``WebSocket``, so the same alias injects on an HTTP route and a WebSocket route
+alike. Dependencies resolve before ``accept()``, so a dependency
+``HTTPException`` on a WebSocket denies the handshake with that HTTP status
+(a 404 body), not a 1008 close.
 
 Add a new accessor in the same PR that first moves a route needing it. Do not
 import :mod:`clauster.app` here: once a router uses these, ``app`` imports this
@@ -21,27 +26,30 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Annotated
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, HTTPException
+from starlette.requests import HTTPConnection
 
 if TYPE_CHECKING:
     from .config import ClausterConfig
     from .runner import SessionRunner
 
 
-def get_config(request: Request) -> ClausterConfig:
+def get_config(conn: HTTPConnection) -> ClausterConfig:
     """Return the ClausterConfig stored on ``app.state`` at build time."""
-    return request.app.state.config
+    return conn.app.state.config
 
 
-def get_runner(request: Request) -> SessionRunner:
+def get_runner(conn: HTTPConnection) -> SessionRunner:
     """Return the SessionRunner from ``app.state``, or fail closed with a 404.
 
-    ``create_app`` always wires a runner, so ``None`` happens only in a harness or
-    CLI context that skipped the ``SessionRunner`` coercion. Failing closed here
-    keeps a moved handler from dereferencing ``None`` into an unhandled 500 -- the
-    same 404-invisible shape the config-write user-scope routes already use.
+    ``create_app`` always wires a runner, so an absent or ``None`` value happens
+    only in a harness or CLI context that skipped the ``SessionRunner`` coercion.
+    Failing closed here keeps a moved handler from dereferencing ``None`` into an
+    unhandled 500 -- the same 404-invisible shape the config-write user-scope
+    routes already use. On a WebSocket route this denies the handshake with a
+    404 (dependencies resolve before ``accept()``), never a 500.
     """
-    runner = request.app.state.runner
+    runner = getattr(conn.app.state, "runner", None)
     if runner is None:
         raise HTTPException(status_code=404, detail="runner unavailable")
     return runner
