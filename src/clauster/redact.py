@@ -739,6 +739,7 @@ def redact_wrapped_screen_rows(rows: list[str]) -> list[str]:
         offset += len(row)
 
     def fixed_point(ranges: list[tuple[int, int]]) -> bytearray:
+        """Return the coverage bytemap after scanning each range to a fixed point."""
         # Iterate the screen scan over each range until nothing new is covered, marking a map fed
         # ONLY by its own coverage, so no other scan can remove a boundary this one relies on. NUL
         # stands in for a masked cell: it preserves length and matches no core, and gives its

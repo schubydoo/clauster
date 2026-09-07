@@ -1568,6 +1568,7 @@ def _is_gitignored_by_existing_rules(relative_path: str, existing_content: str) 
     is_ignored = False
 
     def _rule_matches(rule_text: str, *, negation: bool = False) -> bool:
+        """Return whether one gitignore rule matches the normalized target path."""
         clean_rule = rule_text.lstrip("/")
         if clean_rule == norm_target:
             return True
