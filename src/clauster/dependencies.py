@@ -17,21 +17,26 @@ alike. Dependencies resolve before ``accept()``, so a dependency
 ``HTTPException`` on a WebSocket denies the handshake with that HTTP status
 (a 404 body), not a 1008 close.
 
-Add a new accessor in the same PR that first moves a route needing it. Do not
-import :mod:`clauster.app` here: once a router uses these, ``app`` imports this
-module, so the reverse would be a cycle.
+``ClausterConfig`` and ``SessionRunner`` are imported at runtime (not under
+``TYPE_CHECKING``) on purpose: the ``Annotated`` aliases must hold the real class
+objects, not string forward references. A ``routes/*.py`` module uses
+``from __future__ import annotations``, so FastAPI resolves ``cfg: ConfigDep``
+against that module's globals; a forward reference inside the alias would name a
+type that module never imported. Neither :mod:`clauster.config` nor
+:mod:`clauster.runner` imports :mod:`clauster.app`, so these imports are
+cycle-free, and ``app`` already imports both. Do not import :mod:`clauster.app`
+here.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated
+from typing import Annotated
 
 from fastapi import Depends, HTTPException
 from starlette.requests import HTTPConnection
 
-if TYPE_CHECKING:
-    from .config import ClausterConfig
-    from .runner import SessionRunner
+from .config import ClausterConfig
+from .runner import SessionRunner
 
 
 def get_config(conn: HTTPConnection) -> ClausterConfig:
@@ -46,8 +51,8 @@ def get_runner(conn: HTTPConnection) -> SessionRunner:
     only in a harness or CLI context that skipped the ``SessionRunner`` coercion.
     Failing closed here keeps a moved handler from dereferencing ``None`` into an
     unhandled 500 -- the same 404-invisible shape the config-write user-scope
-    routes already use. On a WebSocket route this denies the handshake with a
-    404 (dependencies resolve before ``accept()``), never a 500.
+    routes already use. On a WebSocket route this denies the handshake with a 404
+    (dependencies resolve before ``accept()``), never a 500.
     """
     runner = getattr(conn.app.state, "runner", None)
     if runner is None:
@@ -55,5 +60,5 @@ def get_runner(conn: HTTPConnection) -> SessionRunner:
     return runner
 
 
-ConfigDep = Annotated["ClausterConfig", Depends(get_config)]
-RunnerDep = Annotated["SessionRunner", Depends(get_runner)]
+ConfigDep = Annotated[ClausterConfig, Depends(get_config)]
+RunnerDep = Annotated[SessionRunner, Depends(get_runner)]

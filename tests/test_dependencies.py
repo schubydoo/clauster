@@ -4,7 +4,14 @@ The ``Annotated[..., Depends(...)]`` aliases must inject exactly the object
 ``create_app`` put on ``app.state`` on BOTH an HTTP route and a WebSocket route,
 ``get_runner`` must fail closed when no runner is wired, and the accessors must
 read the attribute names the real ``create_app`` actually sets.
+
+This module keeps ``from __future__ import annotations`` on purpose: a real
+``routes/*.py`` consumer uses it, so FastAPI resolves ``cfg: ConfigDep`` as a
+string against this module's globals. That exercises the forward-reference path a
+plain (non-future) test module would skip.
 """
+
+from __future__ import annotations
 
 from typing import cast
 
