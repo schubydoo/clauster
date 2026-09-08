@@ -46,15 +46,6 @@ if TYPE_CHECKING:
 
 router = APIRouter()
 
-# Session/elevation cookie names, the elevation unlock window, and the single-user actor.
-# Mirror ``app._SESSION_COOKIE`` / ``_ELEVATION_COOKIE`` / ``_ELEVATION_MAX_AGE_SECONDS`` /
-# ``_SESSION_USER``: the app.py copies are still read by ``_authenticate`` and
-# ``require_elevated`` (which stay there), so both files name the same constants (#1156).
-_SESSION_COOKIE = "clauster_session"
-_ELEVATION_COOKIE = "clauster_elevation"
-_ELEVATION_MAX_AGE_SECONDS = 600  # 10-minute unlock window; re-prove the password after
-_SESSION_USER = "admin"  # single-user in v0.2; multi-user is v0.3
-
 
 def _throttle_key(config: ClausterConfig, request: Request) -> tuple[str | None, bool]:
     """Return the login-throttle key and whether it is shared across users."""
@@ -163,8 +154,8 @@ async def login_submit(
         throttle.reset(throttle_key)
         resp = RedirectResponse(f"{config.root_path}/", status_code=303)
         resp.set_cookie(
-            _SESSION_COOKIE,
-            auth.issue_session(serializer, _SESSION_USER, request.app.state.session_epoch),
+            auth.SESSION_COOKIE,
+            auth.issue_session(serializer, auth.SESSION_USER, request.app.state.session_epoch),
             max_age=config.auth.session_max_age_seconds,
             httponly=True,
             # SameSite=Lax (deliberate UX trade-off): a top-level cross-site GET carries
@@ -193,10 +184,10 @@ async def logout(request: Request, config: ConfigDep) -> Response:
         auth.bump_epoch, config.state_dir, request.app.state.session_epoch
     )
     resp = RedirectResponse(f"{config.root_path}/login", status_code=303)
-    resp.delete_cookie(_SESSION_COOKIE, path=config.root_path or "/")
+    resp.delete_cookie(auth.SESSION_COOKIE, path=config.root_path or "/")
     # The epoch bump above already revokes any outstanding elevation token (#978);
     # clear its cookie too so a stale value doesn't linger in the browser.
-    resp.delete_cookie(_ELEVATION_COOKIE, path=config.root_path or "/")
+    resp.delete_cookie(auth.ELEVATION_COOKIE, path=config.root_path or "/")
     return resp
 
 
@@ -213,7 +204,7 @@ async def reauth(
 
     Step-up authentication: the caller is already logged in, but privileged
     config writes require a fresh password proof. On success, set a short-lived
-    elevation cookie (``_ELEVATION_MAX_AGE_SECONDS``). Shares the login throttle
+    elevation cookie (``auth.ELEVATION_MAX_AGE_SECONDS``). Shares the login throttle
     so it can't be brute-forced, and — like login — verifies against a dummy
     hash when no password is set, so "no password configured" isn't a timing
     oracle and reauth simply never succeeds (Tier-B stays locked).
@@ -231,13 +222,13 @@ async def reauth(
     password = str(body.get("password", "")) if isinstance(body, dict) else ""
     if auth.verify_password(hasher, config.auth.password_hash, password):
         throttle.reset(throttle_key)
-        resp = JSONResponse({"elevated": True, "expires_in": _ELEVATION_MAX_AGE_SECONDS})
+        resp = JSONResponse({"elevated": True, "expires_in": auth.ELEVATION_MAX_AGE_SECONDS})
         resp.set_cookie(
-            _ELEVATION_COOKIE,
+            auth.ELEVATION_COOKIE,
             auth.issue_elevation(
-                elevation_serializer, _SESSION_USER, request.app.state.session_epoch
+                elevation_serializer, auth.SESSION_USER, request.app.state.session_epoch
             ),
-            max_age=_ELEVATION_MAX_AGE_SECONDS,
+            max_age=auth.ELEVATION_MAX_AGE_SECONDS,
             httponly=True,
             samesite="lax",
             secure=cookie_secure(request),

@@ -10,17 +10,16 @@ conversation (send a turn, answer a parked permission request).
 Handlers read collaborators through the typed accessors in
 :mod:`clauster.dependencies` (``RunnerDep``, ``HostedDep``, ``ConfigDep``,
 ``EngineDep``, ``ClaustrumDaemonDep``) rather than closing over ``create_app``.
-Project-name resolution reuses :func:`clauster.routes.projects._resolve_project_path`
-and :func:`clauster.routes.projects._list_projects`, so the traversal defense
+Project-name resolution reuses :func:`clauster.routes._common.resolve_project_path`
+and :func:`clauster.routes._common.list_projects`, so the traversal defense
 (:func:`clauster.discovery.is_valid_project_name`) has a single home.
 
 The hosted spawn path fails closed: it resolves the project first, validates the
 permission mode, mirrors the project's ``allow_bypass_permissions`` ceiling
-(:func:`_enforce_bypass_ceiling`), and refuses an untrusted workspace with a 409
-before any daemon spawn (invariants 1 and 2). ``_enforce_bypass_ceiling`` here is
-the hosted twin of the one in :mod:`clauster.routes.agents`; both defer to the
-single :meth:`ClausterConfig.bypass_denied` decision and share its
-:meth:`ClausterConfig.bypass_denied_detail` message, so neither can diverge.
+(:func:`clauster.routes._common.enforce_bypass_ceiling`), and refuses an untrusted
+workspace with a 409 before any daemon spawn (invariants 1 and 2). That shared helper
+defers to the single :meth:`ClausterConfig.bypass_denied` decision and shares its
+:meth:`ClausterConfig.bypass_denied_detail` message, so no channel can diverge.
 """
 
 from __future__ import annotations
@@ -55,11 +54,7 @@ from ..runner import (
     UnknownProject,
 )
 from ..trust import is_trusted
-
-# Shared project helpers that currently live in routes/projects.py; they move to a
-# public routes/ helper module in #1523 (the underscore names are package-internal,
-# not module-private, until then).
-from .projects import _list_projects, _resolve_project_path
+from ._common import enforce_bypass_ceiling, list_projects, resolve_project_path
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -106,26 +101,6 @@ def _unresolved_bridge(
             detail=(f"ambiguous {instance_id!r} — matches {', '.join(candidates)}; {hint}"),
         )
     return HTTPException(status_code=404, detail=not_found_detail)
-
-
-def _enforce_bypass_ceiling(
-    config: ClausterConfig, project: str, permission_mode: str | None
-) -> None:
-    """Reject ``bypassPermissions`` when a project's config ceiling forbids it.
-
-    The runner enforces this hard ceiling for the bridge channel
-    (:class:`PermissionModeNotAllowed`, mapped to 403 below). The hosted
-    channel spawns outside the runner, so it mirrors the gate here or a crafted
-    request could run a session in bypass mode that the project's
-    ``allow_bypass_permissions`` ceiling explicitly forbids. A twin in
-    ``routes/agents.py`` guards the background-agent channel the same way; both
-    defer to the single :meth:`ClausterConfig.bypass_denied` decision and share
-    its :meth:`ClausterConfig.bypass_denied_detail` message, so neither can
-    diverge. The two thin twins fold into a shared ``routes/`` helper in #1523;
-    kept duplicated here to hold this PR to the instances move alone.
-    """
-    if config.bypass_denied(project, permission_mode):
-        raise HTTPException(status_code=403, detail=config.bypass_denied_detail(project))
 
 
 async def _spawn_or_http(coro: Awaitable[_SpawnT]) -> _SpawnT:
@@ -187,7 +162,7 @@ async def _hosted_prereqs(
             status_code=503,
             detail="hosted channel unavailable: claustrum daemon not connected",
         )
-    path = await _resolve_project_path(project, engine)
+    path = await resolve_project_path(project, engine)
     if not await asyncio.to_thread(is_trusted, path, runner.claude_json):
         raise HTTPException(
             status_code=409,
@@ -213,7 +188,7 @@ async def _spawn_hosted(
     """Start a hosted (claustrum stream-json) session for ``project``."""
     # Confirm the project exists first so a missing name 404s instead of leaking a 403
     # from the ceiling, then gate the effective mode before any daemon/trust/spawn work.
-    await _resolve_project_path(project, engine)
+    await resolve_project_path(project, engine)
     pm = permission_mode or config.instance_defaults.permission_mode
     # Validate the mode before any daemon/spawn work — parity with the bridge channel
     # (runner rejects an unknown mode pre-argv). Not exploitable (list-argv, no
@@ -224,7 +199,7 @@ async def _spawn_hosted(
             status_code=422,
             detail=f"invalid permission_mode {pm!r}; expected one of {PERMISSION_MODES}",
         )
-    _enforce_bypass_ceiling(config, project, pm)
+    enforce_bypass_ceiling(config, project, pm)
     client, path, binary = await _hosted_prereqs(
         project, daemon=daemon, runner=runner, config=config, engine=engine
     )
@@ -348,7 +323,7 @@ async def api_widget(runner: RunnerDep, engine: EngineDep) -> dict:
     by_status = {status.value: 0 for status in InstanceStatus}
     for inst in instances:
         by_status[inst.status.value] += 1
-    projects = await _list_projects(engine)
+    projects = await list_projects(engine)
     return {
         "projects_total": len(projects),
         "bridges": by_status,

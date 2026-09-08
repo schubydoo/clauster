@@ -360,51 +360,15 @@ def test_card_renders_known_project(write_config, tmp_path):
     assert "Run Claude here" in r.text  # it's a real row, not an empty stub
 
 
-def test_projects_route_duplicates_match_app():
-    # routes/projects.py deliberately duplicates these (a routes/* module cannot import
-    # clauster.app without a cycle). Guard against drift until the config-write domain
-    # moves and the two copies merge (#1156): _SESSION_USER is the CLAUDE.md write-audit
-    # actor written from both paths, and _pty_supported feeds the row's launch picker.
+def test_projects_route_pty_supported_matches_app():
+    # routes/projects.py deliberately duplicates _pty_supported (a routes/* module cannot
+    # import clauster.app without a cycle): app.py keeps the canonical copy the row's launch
+    # picker asserts against. Guard against drift. (The auth actor/cookie constants no longer
+    # need such a guard -- they now share a single source in clauster.auth, #1523.)
     from clauster import app as app_mod
     from clauster.routes import projects as projects_routes
 
-    assert projects_routes._SESSION_USER == app_mod._SESSION_USER
     assert projects_routes._pty_supported() == app_mod._pty_supported()
-
-
-def test_ops_route_duplicate_matches_app():
-    # routes/ops.py duplicates _SESSION_USER too -- the actor recorded on every Tier-B
-    # config-write audit line. Guard against drift with the app.py copy (still read by
-    # _authenticate) until a shared actor constant lands and the copies merge (#1156).
-    from clauster import app as app_mod
-    from clauster.routes import ops as ops_routes
-
-    assert ops_routes._SESSION_USER == app_mod._SESSION_USER
-
-
-def test_config_write_base_actor_matches_app():
-    # routes/config_write/_base.py holds SESSION_USER -- the actor stamped on every
-    # config-write audit line by the moved config-write handlers (the whole domain now
-    # lives in routes/config_write/). app.py keeps its own _SESSION_USER for _authenticate;
-    # a drift between the two would write two different actors into the same audit trail,
-    # so pin them equal until a shared actor constant lands and the copies merge (#1156).
-    from clauster import app as app_mod
-    from clauster.routes.config_write import _base
-
-    assert _base.SESSION_USER == app_mod._SESSION_USER
-
-
-def test_login_route_module_mirrors_app_auth_constants():
-    # routes/login.py mirrors the cookie names, elevation window, and actor that app.py still
-    # owns (_authenticate + require_elevated read the app.py copies). Nothing else pins the two
-    # in sync, and a silent drift in a cookie NAME would lock users out -- so assert equal (#1156).
-    from clauster import app as app_mod
-    from clauster.routes import login as login_mod
-
-    assert login_mod._SESSION_COOKIE == app_mod._SESSION_COOKIE
-    assert login_mod._ELEVATION_COOKIE == app_mod._ELEVATION_COOKIE
-    assert login_mod._ELEVATION_MAX_AGE_SECONDS == app_mod._ELEVATION_MAX_AGE_SECONDS
-    assert login_mod._SESSION_USER == app_mod._SESSION_USER
 
 
 def test_card_reflects_project_shape(write_config, tmp_path):
