@@ -44,6 +44,7 @@ from clauster.dependencies import (
     get_render,
     get_require_elevated,
     get_runner,
+    get_runner_or_none,
 )
 
 
@@ -111,6 +112,17 @@ def test_runner_dep_fails_closed_when_runner_attribute_is_absent():
     assert TestClient(app).get("/needs-runner").status_code == 404
 
 
+def test_runner_or_none_returns_none_when_unwired():
+    # Unlike get_runner, the nullable accessor hands back None rather than raising, so a
+    # moved permissions/hooks route keeps the capability check first and only the
+    # user-scope branch (via user_settings_json) fail-closes on the absent runner (#1156).
+    absent = FastAPI()  # never sets app.state.runner at all
+    assert get_runner_or_none(cast(HTTPConnection, _ConnShim(absent))) is None
+    nulled = FastAPI()
+    nulled.state.runner = None
+    assert get_runner_or_none(cast(HTTPConnection, _ConnShim(nulled))) is None
+
+
 def test_hosted_dep_fails_closed_when_hosted_is_absent():
     app = FastAPI()  # never sets app.state.hosted at all
 
@@ -128,6 +140,9 @@ def test_accessors_read_the_real_create_app_state(write_config):
     conn = cast(HTTPConnection, _ConnShim(app))
     assert get_config(conn) is app.state.config
     assert get_runner(conn) is app.state.runner
+    # #1156 config-write A: the nullable runner accessor the moved permissions/hooks
+    # routes inject reads the same live app.state.runner get_runner does.
+    assert get_runner_or_none(conn) is app.state.runner
     assert get_hosted(conn) is app.state.hosted
     assert get_engine(conn) is app.state.engine
     assert get_clone_jobs(conn) is app.state.clone_jobs

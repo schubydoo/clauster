@@ -27,10 +27,6 @@ from . import (
     claude_md,
     config_audit,
     config_write,
-    config_write_hooks,
-    config_write_mcp,
-    config_write_mcp_cli,
-    config_write_permissions,
     config_write_plugins,
     config_write_settings,
     config_write_skills,
@@ -56,9 +52,11 @@ from .models import (
 )
 from .redact import sanitize_line
 from .routes import agents, dashboard, instances, login, transcripts, websockets
+from .routes import config_write as config_write_routes
 from .routes import ops as ops_routes
 from .routes import projects as projects_routes
 from .routes import usage as usage_routes
+from .routes.config_write import _base as config_write_base
 from .runner import (
     SessionRunner,
     _conpty_keeper_available,
@@ -977,708 +975,34 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     # ----- config-write (Tier-B): MCP, permissions, hooks, CLAUDE.md, subagents, -----------------
     # -----   skills, settings, plugins, marketplaces ---------------------------------------------
-    @app.get("/api/config-write/status")
-    async def api_config_write_status() -> dict:
-        """Report the config-write opt-in flags, or 404 when the capability is off."""
-        # Foundation surface for the code-executing config-write trust tier (#347/#687);
-        # the concrete writers (#688-#691) sit behind this same gate. It fail-closes:
-        # when config_write.enabled is off this 404s (the surface is invisible, same as
-        # the reaper), so a disabled deployment exposes nothing. The body reflects only
-        # the two opt-in flags, never any config content.
-        config_write.require_capability(config, "project")
-        return config_write.capability_status(config)
-
+    # config-write A (status, the MCP surface, permissions, hooks) moved to
+    # routes/config_write/ (#1156); those handlers reach the shared pipeline in
+    # routes/config_write/_base.py directly. The B handlers below (claude-md, subagents,
+    # skills, settings, plugins, marketplaces) still live here and reach the same pipeline
+    # through these thin wrappers, which bind create_app's ``config`` and ``runner``.
     def _resolve_cw_project(name: object, *, require_exists: bool = False) -> Path:
-        """Resolve a project-scope config-write path, validating containment before any I/O.
-
-        A missing or non-string name is a 422 and an escaping one a 400; with
-        ``require_exists`` an absent project directory is a clean 404 rather than an
-        unhandled error inside the writer.
-        """
-        # Validate-before-I/O path containment: an escaping path raises PathEscapeError
-        # before any write. The name is also the type-the-name confirm token
-        # (server-re-derived below).
-        # ``require_exists`` is set on the WRITE path only: a contained-but-absent
-        # project dir would make the atomic writer's ``mkstemp(dir=path.parent)``
-        # raise ``FileNotFoundError`` (an OSError outside the ConfigWriteError guard)
-        # → an unhandled 500. Surface it as a clean 404 instead. The READ path leaves
-        # it False so a missing dir still reads as an empty server map (harmless).
-        if not isinstance(name, str) or not name:
-            raise HTTPException(status_code=422, detail="body must include a 'project' string")
-        try:
-            project_dir = config_write.resolve_project_dir(config.projects_root, name)
-        except config_write.PathEscapeError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if require_exists and not project_dir.is_dir():
-            raise HTTPException(status_code=404, detail=f"project directory not found: {name!r}")
-        return project_dir
+        """Resolve a project-scope config-write path via the shared base helper."""
+        return config_write_base.resolve_cw_project(config, name, require_exists=require_exists)
 
     def _map_config_write_error(exc: config_write.ConfigWriteError) -> HTTPException:
-        """Map a typed config-write failure to its fail-closed HTTP status."""
-        # InvalidCandidate ⇒ 422 (bad shape); Stale/ServerExists ⇒ 409; ServerNotFound,
-        # AgentNotFound, PluginNotFound, MarketplaceNotFound ⇒ 404; ReadOnlyAgent ⇒ 403.
-        # Every other ConfigWriteError — including PathEscapeError, which the routes catch
-        # earlier as a 400 before the writer is even reached — falls through to a 400.
-        if isinstance(exc, config_write.InvalidCandidateError):
-            return HTTPException(status_code=422, detail=str(exc))
-        if isinstance(exc, config_write.StaleConfigWriteError):
-            return HTTPException(status_code=409, detail=str(exc))
-        if isinstance(exc, config_write_mcp.ServerExistsError):
-            return HTTPException(status_code=409, detail=str(exc))
-        if isinstance(exc, config_write_mcp.ServerNotFoundError):
-            return HTTPException(status_code=404, detail=str(exc))
-        if isinstance(exc, config_write_subagents.AgentNotFoundError):
-            return HTTPException(status_code=404, detail=str(exc))
-        if isinstance(exc, config_write_subagents.ReadOnlyAgentError):
-            return HTTPException(status_code=403, detail=str(exc))
-        if isinstance(exc, config_write_skills.ScriptConfirmRequiredError):
-            # A skill upload included non-SKILL.md files without echoing the extra
-            # script-body confirm token — a distinct 400 gate on top of the ordinary
-            # type-the-name confirm (see config_write_skills' module docstring).
-            return HTTPException(status_code=400, detail=str(exc))
-        if isinstance(exc, config_write_plugins.PluginNotFoundError):
-            return HTTPException(status_code=404, detail=str(exc))
-        if isinstance(exc, config_write_plugins.MarketplaceNotFoundError):
-            return HTTPException(status_code=404, detail=str(exc))
-        return HTTPException(status_code=400, detail=str(exc))
+        """Map a typed config-write failure to its fail-closed HTTP status (shared base)."""
+        return config_write_base.map_config_write_error(exc)
 
     def _config_write_watch(project_dir: Path) -> list[Path]:
-        """Return the config files a `claude mcp`/`claude plugin` write could touch.
-
-        A comprehensive candidate set across scopes for the #958 P6 before/after audit
-        fingerprint — an unchanged file simply never appears in the diff, so watching a
-        superset is harmless and avoids per-scope path guesswork.
-        """
-        home = runner.claude_json.parent
-        return [
-            runner.claude_json,
-            home / ".claude" / "settings.json",
-            home / ".claude" / "plugins" / "known_marketplaces.json",
-            project_dir / ".claude" / "settings.json",
-            project_dir / ".claude" / "settings.local.json",
-            project_dir / ".mcp.json",
-        ]
+        """Return the config files a config-write could touch (shared base)."""
+        return config_write_base.config_write_watch(runner, project_dir)
 
     async def _audit_config_write(
         *, work: Callable[[], None], watch: list[Path], **fields: Any
     ) -> None:
-        """Record a committed config-write's audit line + its file/argv side effects (#958 P6).
-
-        Runs ``work`` off-thread, then records the base audit line enriched with (a) which
-        watched files it changed — path + sha256 + size, never contents — and (b) the redacted
-        ``claude …`` argv any spawned CLI ran.
-        Lets :class:`~config_write.ConfigWriteError` propagate (the caller maps it) and records
-        ONLY on success. The argv is captured via :data:`config_write.cli_argv_sink`, which
-        propagates into the worker thread; the audit append itself is best-effort and never
-        fails the already-committed write.
-
-        Best-effort fingerprint, not a transactional attribution: the snapshots bracket the
-        write but are not inside its file lock, and ``watch`` is a cross-scope superset, so
-        under (rare, single-operator) concurrent writes the diff can attribute another
-        request's change. It's a forensic hint of where a change landed — the base line's
-        surface/scope/target/action names the operation exactly.
-        """
-        before = await asyncio.to_thread(config_audit.file_fingerprints, watch)
-        sink: list[list[str]] = []
-        token = config_write.cli_argv_sink.set(sink)
-        try:
-            await asyncio.to_thread(work)
-        finally:
-            config_write.cli_argv_sink.reset(token)
-        after = await asyncio.to_thread(config_audit.file_fingerprints, watch)
-        extra: dict[str, Any] = {"files": config_audit.diff_fingerprints(before, after)}
-        if sink:
-            extra["argv"] = sink
-        await config_audit.arecord(config.state_dir, extra=extra, **fields)
-
-    @app.get("/api/config-write/mcp")
-    async def api_config_write_mcp_read(scope: str = "project", project: str = "") -> dict:
-        """Return the structurally redacted MCP server map for a surface."""
-        # Gated exactly like the status route: 404 when config-write is off, and 404 for
-        # user scope when allow_user_scope is off — the surface is invisible, never 403.
-        # Capability gate FIRST, before the scope-enum check, so a disabled surface 404s for ANY
-        # request (a bogus scope included) instead of leaking existence via a differing
-        # 422 — the #819/#768 invisible-surface invariant.
-        config_write.require_capability(config, scope)  # type: ignore[arg-type]
-        if scope not in ("project", "user", "local"):
-            raise HTTPException(
-                status_code=422, detail="scope must be 'project', 'user', or 'local'"
-            )
-        if scope == "user":
-            try:
-                servers = await asyncio.to_thread(
-                    config_write_mcp.read_user_servers, runner.claude_json
-                )
-            except config_write.ConfigWriteError as exc:
-                # A corrupt/non-object/non-UTF-8 ~/.claude.json raises InvalidCandidateError
-                # from _load_json_obj — same as the project read below; map it to a clean 422
-                # rather than letting it escape as an unhandled 500.
-                raise _map_config_write_error(exc) from exc
-            return {"scope": "user", "servers": servers, "hash": None}
-        if scope == "local":
-            project_dir = _resolve_cw_project(project)
-            try:
-                servers = await asyncio.to_thread(
-                    config_write_mcp.read_project_local_servers, runner.claude_json, project_dir
-                )
-            except config_write.ConfigWriteError as exc:
-                raise _map_config_write_error(exc) from exc
-            return {"scope": "local", "project": project, "servers": servers, "hash": None}
-        project_dir = _resolve_cw_project(project)
-        try:
-            servers, file_hash = await asyncio.to_thread(
-                config_write_mcp.read_project_servers, project_dir
-            )
-        except config_write.ConfigWriteError as exc:
-            # A corrupt/non-object on-disk .mcp.json raises InvalidCandidateError from
-            # _load_json_obj. Map it through the same helper as the PUT route so a
-            # hand-edited or partially-written file is reported as a clean 422, never
-            # an unhandled 500.
-            raise _map_config_write_error(exc) from exc
-        return {"scope": "project", "project": project, "servers": servers, "hash": file_hash}
-
-    async def _put_config_write(
-        body: dict,
-        payload_key: str,
-        write_user_fn: Callable[..., None],
-        write_project_fn: Callable[[Path, dict, str | None], None],
-        write_local_fn: Callable[..., None],
-        *,
-        surface: str,
-        get_user_path: Callable[[], Path],
-        user_fn_has_hash: bool = True,
-        local_fn_has_hash: bool = True,
-        get_local_target: Callable[[], Path] | None = None,
-    ) -> dict:
-        """Shared Foundation pipeline for the three PUT /api/config-write/* routes.
-
-        Order: capability (404, FIRST — invisible-surface #819/#768) → scope-enum (422)
-        → confirm (400, FIRST semantic gate) →
-        payload shape check (422) → path resolve/contain → stale-hash guard (409) →
-        atomic write. Any step aborts before the write.
-
-        ``user_fn_has_hash=False`` is only correct for writers that own their own
-        hash/locking mechanism (currently: MCP user scope via ``write_user_servers``).
-        ``local_fn_has_hash=False`` is the same shape for the local-scope twin (MCP
-        local scope via ``write_project_local_servers``, which nests into
-        ``~/.claude.json`` rather than a separate hashable file) — when set,
-        ``get_local_target`` supplies the extra positional argument (the
-        ``~/.claude.json`` path) the writer needs ahead of ``project_dir``. Every other
-        surface should leave both hash flags at the default ``True`` so the stale-hash
-        guard is enforced. Any ``"hash"`` key the client sends is intentionally not
-        forwarded when the relevant flag is ``False``.
-        """
-        scope = body.get("scope", "project")
-        # Capability gate FIRST, before the scope-enum check, so a disabled surface 404s
-        # for ANY request (a bogus scope included), never a differing 422 (#819/#768).
-        config_write.require_capability(config, scope)
-        if scope not in ("project", "user", "local"):
-            raise HTTPException(
-                status_code=422, detail="scope must be 'project', 'user', or 'local'"
-            )
-        if scope == "user":
-            config_write.require_confirm("user", None, body.get("confirm"))
-            payload = body.get(payload_key)
-            if not isinstance(payload, dict):
-                raise HTTPException(
-                    status_code=422, detail=f"body must include a '{payload_key}' object"
-                )
-            user_path = get_user_path()
-            if user_fn_has_hash:
-                expected: str | None = body.get("hash")
-                if expected is not None and not isinstance(expected, str):
-                    raise HTTPException(
-                        status_code=422, detail="'hash' must be a string when present"
-                    )
-                try:
-                    await asyncio.to_thread(write_user_fn, user_path, payload, expected)
-                except config_write.ConfigWriteError as exc:
-                    raise _map_config_write_error(exc) from exc
-            else:
-                # writer owns its own hash/locking (e.g. MCP); "hash" from body is
-                # intentionally not forwarded — see user_fn_has_hash docstring above.
-                try:
-                    await asyncio.to_thread(write_user_fn, user_path, payload)
-                except config_write.ConfigWriteError as exc:
-                    raise _map_config_write_error(exc) from exc
-            await config_audit.arecord(
-                config.state_dir,
-                surface=surface,
-                scope="user",
-                target=str(user_path),
-                action="update",
-                actor=_SESSION_USER,
-                keys=sorted(payload),
-            )
-            return {"scope": "user", "ok": True}
-        if scope == "local":
-            project = body.get("project")
-            config_write.require_confirm("local", project, body.get("confirm"))
-            payload = body.get(payload_key)
-            if not isinstance(payload, dict):
-                raise HTTPException(
-                    status_code=422, detail=f"body must include a '{payload_key}' object"
-                )
-            project_dir = _resolve_cw_project(project, require_exists=True)
-            if local_fn_has_hash:
-                expected = body.get("hash")
-                if expected is not None and not isinstance(expected, str):
-                    raise HTTPException(
-                        status_code=422, detail="'hash' must be a string when present"
-                    )
-                try:
-                    await asyncio.to_thread(write_local_fn, project_dir, payload, expected)
-                except config_write.ConfigWriteError as exc:
-                    raise _map_config_write_error(exc) from exc
-            else:
-                # writer owns its own hash/locking (MCP local scope, nested into
-                # ~/.claude.json); "hash" from body is intentionally not forwarded.
-                if get_local_target is None:  # pragma: no cover - wiring bug, not user-reachable
-                    raise HTTPException(status_code=500, detail="local scope writer misconfigured")
-                local_target = get_local_target()
-                try:
-                    await asyncio.to_thread(write_local_fn, local_target, project_dir, payload)
-                except config_write.ConfigWriteError as exc:
-                    raise _map_config_write_error(exc) from exc
-            # The written file is the project dir's settings file (hash-guarded surfaces) or
-            # the ~/.claude.json the MCP local writer nests into; `surface` disambiguates.
-            await config_audit.arecord(
-                config.state_dir,
-                surface=surface,
-                scope="local",
-                target=str(project_dir if local_fn_has_hash else local_target),
-                action="update",
-                actor=_SESSION_USER,
-                keys=sorted(payload),
-            )
-            return {"scope": "local", "project": project, "ok": True}
-        project = body.get("project")
-        config_write.require_confirm("project", project, body.get("confirm"))
-        payload = body.get(payload_key)
-        if not isinstance(payload, dict):
-            raise HTTPException(
-                status_code=422, detail=f"body must include a '{payload_key}' object"
-            )
-        project_dir = _resolve_cw_project(project, require_exists=True)
-        expected = body.get("hash")
-        if expected is not None and not isinstance(expected, str):
-            raise HTTPException(status_code=422, detail="'hash' must be a string when present")
-        try:
-            await asyncio.to_thread(write_project_fn, project_dir, payload, expected)
-        except config_write.ConfigWriteError as exc:
-            raise _map_config_write_error(exc) from exc
-        await config_audit.arecord(
-            config.state_dir,
-            surface=surface,
-            scope="project",
-            target=str(project_dir),
-            action="update",
-            actor=_SESSION_USER,
-            keys=sorted(payload),
-        )
-        return {"scope": "project", "project": project, "ok": True}
-
-    @app.put("/api/config-write/mcp")
-    async def api_config_write_mcp_write(body: dict) -> dict:
-        """Replace the whole MCP server map for a surface."""
-        return await _put_config_write(
-            body,
-            "servers",
-            surface="mcp",
-            write_user_fn=config_write_mcp.write_user_servers,
-            write_project_fn=config_write_mcp.write_project_servers,
-            write_local_fn=config_write_mcp.write_project_local_servers,
-            get_user_path=lambda: runner.claude_json,
-            user_fn_has_hash=False,
-            local_fn_has_hash=False,
-            get_local_target=lambda: runner.claude_json,
-        )
-
-    @app.post("/api/config-write/mcp/server")
-    async def api_config_write_mcp_server(body: dict) -> dict:
-        """Add, edit, or remove a single MCP server entry behind the config-write gate."""
-        # CLI-driven add/remove/edit (#769) over the same Foundation gate the PUT
-        # (whole-map) route uses. Order mirrors the Foundation docstring exactly:
-        # capability (404, FIRST — a disabled surface 404s for ANY request, a bogus
-        # scope included, so it never leaks existence via a differing 422; #819/#768)
-        # -> scope shape (422) -> confirm (400, FIRST semantic gate, so it fires even
-        # against a garbled op/name/entry) -> op/name/entry shape (422) -> path resolve
-        # (400/404) -> the CLI/direct-write dispatch itself (409 already-exists, 404
-        # not-found, or 400 for any other CLI failure).
-        scope = body.get("scope", "project")
-        config_write.require_capability(config, scope)  # type: ignore[arg-type]
-        if scope not in ("project", "user", "local"):
-            raise HTTPException(
-                status_code=422, detail="scope must be 'project', 'user', or 'local'"
-            )
-
-        project = body.get("project")
-        config_write.require_confirm(
-            scope,
-            None if scope == "user" else project,
-            body.get("confirm"),  # type: ignore[arg-type]
-        )
-
-        op = body.get("op")
-        if op not in ("add", "remove", "edit"):
-            raise HTTPException(status_code=422, detail="op must be 'add', 'remove', or 'edit'")
-        name = body.get("name")
-        if not isinstance(name, str) or not name:
-            raise HTTPException(
-                status_code=422, detail="body must include a non-empty 'name' string"
-            )
-
-        entry = None
-        if op in ("add", "edit"):
-            entry = body.get("entry")
-            if not isinstance(entry, dict):
-                raise HTTPException(
-                    status_code=422, detail="body must include an 'entry' object for add/edit"
-                )
-            try:
-                config_write.validate_candidate(
-                    {name: entry}, config_write_mcp.validate_mcp_servers
-                )
-            except config_write.InvalidCandidateError as exc:
-                raise _map_config_write_error(exc) from exc
-
-        client_secret = body.get("client_secret")
-        if client_secret is not None and not isinstance(client_secret, str):
-            raise HTTPException(
-                status_code=422, detail="'client_secret' must be a string when present"
-            )
-        # An OAuth client-secret is only deliverable through the CLI (which passes it via
-        # MCP_CLIENT_SECRET in the child env). An entry that must bypass the CLI — inline
-        # env/headers, or a url carrying a query/userinfo/fragment — takes the direct
-        # writer, which has nowhere to put it. Refuse rather than write the entry and
-        # silently drop the secret: the operator would believe it was stored and only
-        # discover otherwise when the server fails to authenticate.
-        if client_secret is not None and entry is not None:
-            if config_write_mcp_cli.entry_needs_direct_write(entry):
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        "'client_secret' cannot be stored for this entry: it carries a "
-                        "value that must be kept off the CLI's argv (inline env/headers, "
-                        "or a url with a query string, userinfo, or fragment), so it is "
-                        "written directly to the config file, which has no way to deliver "
-                        "the secret. Put the credential in the entry's 'env' or 'headers' "
-                        "instead."
-                    ),
-                )
-
-        if scope == "user":
-            cli_cwd = runner.claude_json.parent
-        else:
-            cli_cwd = _resolve_cw_project(project, require_exists=True)
-        binary = config.claude.binary
-
-        def _direct_write(target_entry: dict, target_op: str) -> None:
-            """Write one entry with this scope's direct, non-spawning writer."""
-            # The #766 direct (non-spawning) writers, one per scope. Used for any entry
-            # that must never reach the CLI's argv, and as the edit-rollback restore.
-            if scope == "user":
-                config_write_mcp.write_user_server_entry(
-                    runner.claude_json, name, target_entry, op=target_op
-                )
-            elif scope == "local":
-                config_write_mcp.write_project_local_server_entry(
-                    runner.claude_json, cli_cwd, name, target_entry, op=target_op
-                )
-            else:
-                config_write_mcp.write_project_server_entry(
-                    cli_cwd, name, target_entry, op=target_op
-                )
-
-        def _snapshot_prior() -> dict | None:
-            """Read the current entry unredacted, in memory only, to enable an edit rollback."""
-            # UNREDACTED single-entry read for the edit-rollback (in-memory, same request,
-            # never serialized to a response/log — see config_write_mcp.snapshot_server_entry).
-            return config_write_mcp.snapshot_server_entry(
-                scope,  # type: ignore[arg-type]
-                name,
-                claude_json=runner.claude_json,
-                project_dir=cli_cwd,
-            )
-
-        def _work() -> None:
-            """Dispatch the add/edit/remove to the CLI or to the direct writer."""
-            if op == "remove":
-                config_write_mcp_cli.cli_remove_server(binary, cli_cwd, name, scope)  # type: ignore[arg-type]
-                return
-            # add / edit always carry an `entry` (validated above); narrow it here so the
-            # writers see a concrete dict (defensive — the op-gate guarantees it is set).
-            if entry is None:  # pragma: no cover - add/edit always populate `entry` above
-                raise RuntimeError("internal: add/edit reached _work with no entry")
-            # An entry carrying an inline env/headers value (or a secret-shaped url) can
-            # never reach the CLI's argv — err toward the direct #766 writer (same file
-            # state, no subprocess). See entry_needs_direct_write.
-            if config_write_mcp_cli.entry_needs_direct_write(entry):
-                _direct_write(entry, op)
-                return
-            if op == "add":
-                config_write_mcp_cli.cli_add_server(
-                    binary,
-                    cli_cwd,
-                    name,
-                    entry,
-                    scope,
-                    client_secret=client_secret,  # type: ignore[arg-type]
-                )
-            else:
-                # Capture the prior definition BEFORE cli_edit_server runs the remove, so
-                # a re-add failure can restore it verbatim via the direct writer (a prior
-                # secret is thus never re-exposed on argv). op="edit" overwrites in place.
-                prior = _snapshot_prior()
-
-                def _restore() -> bool:
-                    """Put the pre-edit entry back, reporting whether one actually existed."""
-                    # Return whether a prior actually existed and was restored, so
-                    # cli_edit_server reports "restored" only when that is true.
-                    if prior is None:
-                        return False
-                    _direct_write(prior, "edit")
-                    return True
-
-                config_write_mcp_cli.cli_edit_server(
-                    binary,
-                    cli_cwd,
-                    name,
-                    entry,
-                    scope,
-                    client_secret=client_secret,  # type: ignore[arg-type]
-                    restore=_restore,
-                )
-
-        # Run the mutation (direct OR CLI-driven) and record the base audit line enriched
-        # with which files it changed + the redacted `claude mcp` argv it ran (#958 P6).
-        try:
-            await _audit_config_write(
-                work=_work,
-                watch=_config_write_watch(cli_cwd),
-                surface="mcp",
-                scope=scope,  # type: ignore[arg-type]
-                target=name,
-                action=op,
-                actor=_SESSION_USER,
-            )
-        except config_write.ConfigWriteError as exc:
-            raise _map_config_write_error(exc) from exc
-        result = {"scope": scope, "name": name, "op": op, "ok": True}
-        if scope != "user":
-            result["project"] = project
-        return result
-
-    @app.get("/api/config-write/mcp/approvals")
-    async def api_config_write_mcp_approvals_read(project: str = "") -> dict:
-        """Return the project's ``.mcp.json`` server approval lists."""
-        # Project `.mcp.json` server approvals (#769) are inherently project-scope
-        # only — local/user-scope servers carry no approval step, only a committed
-        # .mcp.json server does — so this reads/writes at "project" scope alone,
-        # gated exactly like the other config-write surfaces (404 when disabled).
-        config_write.require_capability(config, "project")
-        project_dir = _resolve_cw_project(project)
-        approvals = await asyncio.to_thread(
-            config_write_mcp.read_project_approvals, runner.claude_json, project_dir
-        )
-        return {"project": project, **approvals}
-
-    @app.put("/api/config-write/mcp/approvals")
-    async def api_config_write_mcp_approvals_write(body: dict) -> dict:
-        """Replace the project's enabled/disabled MCP approval lists."""
-        config_write.require_capability(config, "project")
-        project = body.get("project")
-        config_write.require_confirm("project", project, body.get("confirm"))
-        enabled = body.get("enabled")
-        disabled = body.get("disabled")
-        if not isinstance(enabled, list) or not isinstance(disabled, list):
-            raise HTTPException(
-                status_code=422, detail="body must include 'enabled' and 'disabled' lists"
-            )
-        project_dir = _resolve_cw_project(project, require_exists=True)
-        try:
-            await _audit_config_write(
-                work=lambda: config_write_mcp.write_project_approvals(
-                    runner.claude_json, project_dir, enabled, disabled
-                ),
-                watch=_config_write_watch(project_dir),
-                surface="mcp-approvals",
-                scope="project",
-                target=str(runner.claude_json),
-                action="update",
-                actor=_SESSION_USER,
-                keys=sorted(set(enabled) | set(disabled)),
-            )
-        except config_write.ConfigWriteError as exc:
-            raise _map_config_write_error(exc) from exc
-        return {"project": project, "ok": True}
-
-    @app.post("/api/config-write/mcp/reset-project-choices")
-    async def api_config_write_mcp_reset_project_choices(body: dict) -> dict:
-        """Clear both of the project's approval lists via the CLI's reset verb."""
-        # The one enable/disable-adjacent operation with a real CLI verb (#769) —
-        # `claude mcp reset-project-choices` clears both approval lists for the
-        # project at `cli_cwd`. Gated + confirmed like the approvals routes above.
-        config_write.require_capability(config, "project")
-        project = body.get("project")
-        config_write.require_confirm("project", project, body.get("confirm"))
-        project_dir = _resolve_cw_project(project, require_exists=True)
-        try:
-            await _audit_config_write(
-                work=lambda: config_write_mcp_cli.cli_reset_project_choices(
-                    config.claude.binary, project_dir
-                ),
-                watch=_config_write_watch(project_dir),
-                surface="mcp-approvals",
-                scope="project",
-                target=str(runner.claude_json),
-                action="reset",
-                actor=_SESSION_USER,
-            )
-        except config_write.ConfigWriteError as exc:
-            raise _map_config_write_error(exc) from exc
-        return {"project": project, "ok": True}
+        """Record a committed config-write's audit line + its side effects (shared base)."""
+        await config_write_base.audit_config_write(config, work=work, watch=watch, **fields)
 
     def _user_settings_json() -> Path:
-        """Resolve the user-scope ``settings.json``, failing closed with a 404 without a runner."""
-        # User-scope permission rules live in ~/.claude/settings.json (the settings
-        # file), NOT ~/.claude.json. Derive it the same way the runner does internally
-        # (beside the claude.json whose trusted-dirs we honor) so the two never diverge.
-        #
-        # The user-scope surface needs a runner to resolve that path. If none is wired
-        # (create_app's runner is None — test harnesses / CLI tooling that skip the
-        # SessionRunner coercion), fail CLOSED with the same 404-invisible shape
-        # require_capability uses for a disabled user scope, rather than letting
-        # runner.claude_json raise an AttributeError that escapes as an unhandled 500.
-        active_runner = app.state.runner
-        if active_runner is None:
-            raise HTTPException(status_code=404, detail="config-write user scope is unavailable")
-        return active_runner.claude_json.parent / ".claude" / "settings.json"
-
-    @app.get("/api/config-write/permissions")
-    async def api_config_write_permissions_read(scope: str = "project", project: str = "") -> dict:
-        """Return the permission-rules block for a surface, 404 when the surface is gated off."""
-        # Gated exactly like the MCP/status routes: 404 when config-write is off, and 404
-        # for user scope when allow_user_scope is off — the surface is invisible, never
-        # 403. A corrupt/non-object on-disk
-        # settings.json raises InvalidCandidateError from _load_json_obj; map it through the
-        # same helper as the PUT route so a hand-edited file is a clean 422, never a 500.
-        # Capability gate FIRST, before the scope-enum check, so a disabled surface 404s
-        # for ANY request (a bogus scope included), never a differing 422 (#819/#768).
-        config_write.require_capability(config, scope)  # type: ignore[arg-type]
-        if scope not in ("project", "user", "local"):
-            raise HTTPException(
-                status_code=422, detail="scope must be 'project', 'user', or 'local'"
-            )
-        if scope == "user":
-            try:
-                permissions, file_hash = await asyncio.to_thread(
-                    config_write_permissions.read_user_permissions, _user_settings_json()
-                )
-            except config_write.ConfigWriteError as exc:
-                raise _map_config_write_error(exc) from exc
-            return {"scope": "user", "permissions": permissions, "hash": file_hash}
-        if scope == "local":
-            project_dir = _resolve_cw_project(project)
-            try:
-                permissions, file_hash = await asyncio.to_thread(
-                    config_write_permissions.read_project_local_permissions, project_dir
-                )
-            except config_write.ConfigWriteError as exc:
-                raise _map_config_write_error(exc) from exc
-            return {
-                "scope": "local",
-                "project": project,
-                "permissions": permissions,
-                "hash": file_hash,
-            }
-        project_dir = _resolve_cw_project(project)
-        try:
-            permissions, file_hash = await asyncio.to_thread(
-                config_write_permissions.read_project_permissions, project_dir
-            )
-        except config_write.ConfigWriteError as exc:
-            raise _map_config_write_error(exc) from exc
-        return {
-            "scope": "project",
-            "project": project,
-            "permissions": permissions,
-            "hash": file_hash,
-        }
-
-    @app.put("/api/config-write/permissions")
-    async def api_config_write_permissions_write(body: dict) -> dict:
-        """Replace the permission-rules block for a surface."""
-        # bypassPermissions can never be set here: the validator rejects it as a
-        # defaultMode (422), keeping it behind the footgun gate.
-        return await _put_config_write(
-            body,
-            "permissions",
-            surface="permissions",
-            write_user_fn=config_write_permissions.write_user_permissions,
-            write_project_fn=config_write_permissions.write_project_permissions,
-            write_local_fn=config_write_permissions.write_project_local_permissions,
-            get_user_path=_user_settings_json,
-        )
-
-    @app.get("/api/config-write/hooks")
-    async def api_config_write_hooks_read(scope: str = "project", project: str = "") -> dict:
-        """Return the stored (inert) hooks block for a surface; reading never runs a command."""
-        # Gated exactly like the permissions/MCP/status routes: 404 when config-write is
-        # off, and 404 for user scope when allow_user_scope is off — the surface is
-        # invisible, never 403. A corrupt/non-object on-disk settings.json raises
-        # InvalidCandidateError from _load_json_obj; map it through the same helper as the
-        # PUT route so a hand-edited file is a clean 422, never a 500.
-        # Capability gate FIRST, before the scope-enum check, so a disabled surface 404s
-        # for ANY request (a bogus scope included), never a differing 422 (#819/#768).
-        config_write.require_capability(config, scope)  # type: ignore[arg-type]
-        if scope not in ("project", "user", "local"):
-            raise HTTPException(
-                status_code=422, detail="scope must be 'project', 'user', or 'local'"
-            )
-        if scope == "user":
-            try:
-                hooks, file_hash = await asyncio.to_thread(
-                    config_write_hooks.read_user_hooks, _user_settings_json()
-                )
-            except config_write.ConfigWriteError as exc:
-                raise _map_config_write_error(exc) from exc
-            return {"scope": "user", "hooks": hooks, "hash": file_hash}
-        if scope == "local":
-            project_dir = _resolve_cw_project(project)
-            try:
-                hooks, file_hash = await asyncio.to_thread(
-                    config_write_hooks.read_project_local_hooks, project_dir
-                )
-            except config_write.ConfigWriteError as exc:
-                raise _map_config_write_error(exc) from exc
-            return {"scope": "local", "project": project, "hooks": hooks, "hash": file_hash}
-        project_dir = _resolve_cw_project(project)
-        try:
-            hooks, file_hash = await asyncio.to_thread(
-                config_write_hooks.read_project_hooks, project_dir
-            )
-        except config_write.ConfigWriteError as exc:
-            raise _map_config_write_error(exc) from exc
-        return {"scope": "project", "project": project, "hooks": hooks, "hash": file_hash}
-
-    @app.put("/api/config-write/hooks")
-    async def api_config_write_hooks_write(body: dict) -> dict:
-        """Replace the hooks block for a surface, storing commands as inert, unexecuted data."""
-        # SECURITY: hooks are shell commands claude runs on lifecycle events. The
-        # structural validator NEVER resolves, spawns, or shell-parses a command
-        # string; it is stored as inert data and only runs inside a real claude
-        # process. The off-by-default gate + validate-never-execute invariant are
-        # what prevent a browser write from reaching host RCE.
-        return await _put_config_write(
-            body,
-            "hooks",
-            surface="hooks",
-            write_user_fn=config_write_hooks.write_user_hooks,
-            write_project_fn=config_write_hooks.write_project_hooks,
-            write_local_fn=config_write_hooks.write_project_local_hooks,
-            get_user_path=_user_settings_json,
-        )
+        """Resolve the user-scope ``settings.json`` via the shared base helper."""
+        # Reads the LIVE app.state.runner (nullable) so a harness that nulls it out still
+        # fail-closes to 404, exactly as before the base helper existed.
+        return config_write_base.user_settings_json(app.state.runner)
 
     @app.get("/api/config-write/claude-md")
     async def api_config_write_claude_md_read(scope: str = "project", project: str = "") -> dict:
@@ -1742,7 +1066,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # is no structural shape to validate beyond "a string under the size cap" and
         # no redaction on write (nothing here is ever assembled from a secret sentinel).
         # The payload is a single `content` string, not a named JSON subtree, so this
-        # route can't reuse `_put_config_write` (which assumes a dict payload) — the
+        # route can't reuse `config_write_base.put_config_write` (a dict payload) — the
         # gate order is identical though: capability -> confirm -> shape -> path
         # resolve/contain -> stale-hash guard (inside the writer) -> atomic write.
         #
@@ -2224,7 +1548,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # mirrors the CLAUDE.md/settings routes (capability -> scope-enum 422 ->
         # confirm 400 -> payload shape 422 -> path resolve/contain -> stale-hash guard
         # (inside the writer) -> atomic write) -- the #819 fix, not the older
-        # _put_config_write helper's order (scope-enum before capability).
+        # config_write_base.put_config_write ordering (scope-enum before capability).
         scope = body.get("scope", "project")
         config_write.require_capability(config, scope)
         if scope not in ("project", "user", "local"):
@@ -2362,7 +1686,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # Gate order mirrors the CLAUDE.md route (capability -> scope-enum 422 ->
         # confirm 400 -> payload shape 422 -> path resolve/contain -> stale-hash
         # guard (inside the writer) -> atomic write) -- the #819/#768 fix, not the
-        # older `_put_config_write` helper's order (scope-enum before capability).
+        # older `config_write_base.put_config_write` ordering (scope-enum before capability).
         scope = body.get("scope", "project")
         config_write.require_capability(config, scope)
         if scope not in ("project", "user", "local"):
@@ -2823,6 +2147,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     app.include_router(websockets.router)
     app.include_router(login.router)
     app.include_router(dashboard.router)
+    app.include_router(config_write_routes.router)
 
     # Must run LAST: every /api/... route the public v1 surface aliases has to
     # already be registered above (#302).

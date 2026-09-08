@@ -87,6 +87,22 @@ def get_runner(conn: HTTPConnection) -> SessionRunner:
     return runner
 
 
+def get_runner_or_none(conn: HTTPConnection) -> SessionRunner | None:
+    """Return the SessionRunner from ``app.state``, or ``None`` when unwired.
+
+    Unlike :func:`get_runner` this does NOT fail closed at dependency resolution: it
+    hands back the raw ``runner | None`` so the moved config-write permissions/hooks
+    routes keep the exact gate order they had as ``create_app`` closures -- the
+    capability check (404, invisible surface) runs FIRST in the handler body, and only
+    the user-scope branch then resolves the user ``settings.json`` via
+    :func:`clauster.routes.config_write._base.user_settings_json`, which fail-closes to
+    a 404 when the runner is absent. A project/local-scope read never touches the runner
+    and so keeps working with none wired, exactly as before the move. ``getattr`` guards
+    a harness that never set the attribute at all.
+    """
+    return getattr(conn.app.state, "runner", None)
+
+
 def get_engine(conn: HTTPConnection) -> ClausterEngine:
     """Return the ClausterEngine stored on ``app.state`` at build time.
 
@@ -259,6 +275,7 @@ def get_login_shepherd(conn: HTTPConnection) -> LoginShepherd:
 ConfigDep = Annotated[ClausterConfig, Depends(get_config)]
 HostedDep = Annotated[HostedManager, Depends(get_hosted)]
 RunnerDep = Annotated[SessionRunner, Depends(get_runner)]
+RunnerOrNoneDep = Annotated[SessionRunner | None, Depends(get_runner_or_none)]
 EngineDep = Annotated[ClausterEngine, Depends(get_engine)]
 RenderDep = Annotated[Callable[..., Response], Depends(get_render)]
 CloneJobsDep = Annotated[CloneJobManager, Depends(get_clone_jobs)]
