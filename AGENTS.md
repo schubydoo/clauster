@@ -56,15 +56,16 @@ CI gate; `scripts/e2e.sh` clears the addopts and runs it.
 
 ## Architecture
 
-`app.py` is the FastAPI app factory and still holds most route handlers. Routes are being
-split by domain into `routes/` `APIRouter` modules and subpackages (e.g.
-`routes/config_write/`, #1156), each reading its collaborators through the typed accessors
-in `dependencies.py`. `create_app` wires them with
+`app.py` is the FastAPI app factory: it wires middleware, the auth/session closures, the
+`v1` route mirror, and the static mount, but no longer defines route handlers. Every route
+handler now lives in a per-domain `routes/` `APIRouter` module or subpackage (e.g.
+`routes/config_write/`, the last domain to move, #1156), each reading its collaborators
+through the typed accessors in `dependencies.py`. `create_app` wires them with
 `include_router`. The entry point is
 `clauster.__main__:main`, which owns argument parsing for all subcommands plus the hidden
 `__pty-keeper__` / `__recap-hook__` forms a frozen build re-invokes itself with.
 
-**A standard spawn, end to end:** route in `app.py` → `runner.SessionRunner.spawn` →
+**A standard spawn, end to end:** route handler (in `routes/`) → `runner.SessionRunner.spawn` →
 `trust.trust_directory` + `ensure_remote_control_enabled` (both must pass — fail closed) →
 subprocess → `bridge_log` parses the debug log → `logstream` tails it → `redact` →
 WebSocket. Read that path before changing any part of it — and when reviewing a diff, read

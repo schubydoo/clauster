@@ -12,7 +12,7 @@ Key modules under `src/clauster/`:
 
 | Module | Responsibility |
 | --- | --- |
-| `app.py` | FastAPI app factory; middleware, the auth/session closures, and the routes not yet split out. |
+| `app.py` | FastAPI app factory; middleware, the auth/session closures, the `v1` route mirror, and the static mount. Route handlers all live in `routes/` (#1156). |
 | `dependencies.py` | Typed `app.state` accessors (`RunnerDep`, `ConfigDep`, `HostedDep`) for handlers moved into routers. |
 | `routes/` | Per-domain `APIRouter` modules (and subpackages, e.g. `routes/config_write/`) split from `create_app` (#1156). |
 | `__main__.py` | CLI entry point and subcommands (`run`, `hash-password`, `hash-token`, `hash-metrics-token`, `api-token` (`issue`/`list`/`rotate`/`revoke`), `mcp`, `doctor`, `backup`/`restore`/`migrate`, `install-service`, `reap-environments`, `keepers`, `usage`, `config` (with `config reconcile`), `deps` (`list`/`install`/`uninstall` optional extras), and the headless session commands `start`/`stop`/`status`/`sessions`/`projects`/`logs`/`open`). |

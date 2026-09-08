@@ -82,8 +82,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # Single-user actor for the CLAUDE.md write audit trail (single-user in v0.2; multi-user
-# is v0.3). Mirrors ``app._SESSION_USER`` -- the config-write CLAUDE.md route still uses
-# the app.py copy; the two merge when that domain also moves to ``routes/`` (#1156).
+# is v0.3). Mirrors ``app._SESSION_USER`` (still read by ``_authenticate`` in app.py) and
+# ``routes.config_write._base.SESSION_USER``; the copies hold the same value and merge when
+# a shared actor constant lands (#1156).
 _SESSION_USER = "admin"
 
 # Drop a finished clone job after this grace so a client that disconnected mid-clone can

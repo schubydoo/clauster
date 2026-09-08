@@ -3,9 +3,9 @@
 These functions were closures inside :func:`clauster.app.create_app`. They are the
 code-executing config-write trust tier's shared plumbing: path-containment
 resolution, typed-error mapping, the audit-fingerprint recorder, and the whole PUT
-pipeline. The config-write route modules under this package call them directly, and
-the config-write handlers still living in :mod:`clauster.app` call them through thin
-closure wrappers that bind ``create_app``'s ``config`` and ``runner`` (#1156).
+pipeline. Every config-write route module under this package calls them directly; the
+whole domain now lives in this package, so :mod:`clauster.app` no longer holds any
+config-write handler or wrapper (#1156).
 
 Every collaborator the closures used to capture -- ``config``, ``runner`` -- is now
 an explicit parameter, so a missed call site is a type error rather than a silent
@@ -38,8 +38,9 @@ if TYPE_CHECKING:
     from ...runner import SessionRunner
 
 # Single-user actor for the config-write audit trail (single-user in v0.2; multi-user
-# is v0.3). Mirrors ``app._SESSION_USER``; the config-write handlers still in app.py use
-# the app.py copy, and the two merge when that domain fully moves to ``routes/`` (#1156).
+# is v0.3). Mirrors ``app._SESSION_USER``, which still exists because ``_authenticate``
+# in app.py stamps that copy on the request user; the config-write routes here use this
+# copy. The two hold the same value and merge when a shared actor constant lands (#1156).
 SESSION_USER = "admin"
 
 
@@ -301,3 +302,35 @@ def user_settings_json(runner: SessionRunner | None) -> Path:
     if runner is None:
         raise HTTPException(status_code=404, detail="config-write user scope is unavailable")
     return runner.claude_json.parent / ".claude" / "settings.json"
+
+
+def user_claude_json(runner: SessionRunner | None) -> Path:
+    """Resolve the user-scope ``~/.claude.json``, failing closed with a 404 without a runner."""
+    # The user-scope skills directory (~/.claude/skills/) and the user-scope CLAUDE.md /
+    # subagent files all hang off ~/.claude.json. Like user_settings_json this needs a
+    # runner to resolve that path; without one wired (a harness/CLI that skipped the
+    # SessionRunner coercion) fail CLOSED with the same 404-invisible shape
+    # require_capability uses for a disabled user scope, rather than letting a None runner
+    # raise an AttributeError that escapes as an unhandled 500. Mirrors the old
+    # ``app._user_claude_json_guarded`` closure (#1156).
+    if runner is None:
+        raise HTTPException(status_code=404, detail="config-write user scope is unavailable")
+    return runner.claude_json
+
+
+def plugin_cli_cwd(
+    config: ClausterConfig, runner: SessionRunner | None, scope: str, project: str
+) -> Path:
+    """Resolve the directory ``claude plugin ...`` should be spawned from for this scope.
+
+    User scope has no project -- the CLI ignores the cwd, so the runner's
+    ``~/.claude.json`` parent is a safe, always-present directory (the same choice
+    :mod:`config_write_mcp_cli` makes for MCP user-scope calls); fail closed to 404 when no
+    runner is wired. Project/local scope MUST exist on disk (``require_exists=True``):
+    several verbs' output genuinely depends on this cwd (plugin ``list``'s per-entry
+    ``enabled`` field, marketplace declarations visible from it). Mirrors the old
+    ``app._plugin_cli_cwd`` closure (#1156).
+    """
+    if scope == "user":
+        return user_claude_json(runner).parent
+    return resolve_cw_project(config, project, require_exists=True)
