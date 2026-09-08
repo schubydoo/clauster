@@ -38,12 +38,12 @@ def _enforce_bypass_ceiling(
     (``PermissionModeNotAllowed`` -> 403 on the bridge path). The background-agent
     channel spawns outside the runner, so it mirrors the gate here or a crafted
     request could run a session in bypass mode the project's
-    ``allow_bypass_permissions`` ceiling forbids. A twin in ``app.py`` guards the
-    hosted channel the same way; both defer to the single
+    ``allow_bypass_permissions`` ceiling forbids. A twin in ``routes/instances.py``
+    guards the hosted channel the same way; both defer to the single
     :meth:`ClausterConfig.bypass_denied` decision and share its
     :meth:`ClausterConfig.bypass_denied_detail` message, so neither the decision nor
-    the wording can diverge. The two merge when the hosted domain also moves to
-    ``routes/`` (#1156).
+    the wording can diverge. The two thin twins fold into a shared ``routes/`` helper
+    in #1523.
     """
     if config.bypass_denied(project, permission_mode):
         raise HTTPException(status_code=403, detail=config.bypass_denied_detail(project))

@@ -130,6 +130,7 @@ component_management:
         # component matcher does not expand globs, so an unlisted module goes uncounted.
         - src/clauster/routes/__init__.py
         - src/clauster/routes/agents.py
+        - src/clauster/routes/instances.py
         - src/clauster/routes/projects.py
         - src/clauster/routes/transcripts.py
         - src/clauster/routes/usage.py

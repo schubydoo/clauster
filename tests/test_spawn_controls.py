@@ -1004,7 +1004,7 @@ def test_bypass_denied_unknown_project_denies_bypass(projects_root):
 # stops routing through the shared predicate, exactly one row here flips.
 #
 #   bridge     -> POST /api/instances (default channel)        runner._validate_spawn_options
-#   hosted     -> POST /api/instances {channel: hosted}        app._enforce_bypass_ceiling
+#   hosted     -> POST /api/instances {channel: hosted}  routes.instances._enforce_bypass_ceiling
 #   background -> POST /api/agents                    routes.agents._enforce_bypass_ceiling
 #
 # These exercise only the REJECT paths, which short-circuit in validation before any process

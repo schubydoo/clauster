@@ -123,10 +123,11 @@ async def _project_by_name(name: str, engine: ClausterEngine) -> Project:
 async def _resolve_project_path(name: str, engine: ClausterEngine) -> Path:
     """Map a project name to its path, refusing unknown/unsafe names (traversal).
 
-    Mirrors ``app._resolve_project_path``, which still serves the not-yet-moved
-    config-write routes; the two merge when the config-write domain moves (#1156).
-    The traversal defense itself is the shared :func:`is_valid_project_name`, so the
-    copies cannot diverge on the security check.
+    The shared project-path resolver for the ``routes/*`` modules: ``routes/instances.py``
+    imports it for the hosted spawn/resume path (#1156). The traversal defense itself is
+    the shared :func:`is_valid_project_name`, so no caller can diverge on the security
+    check. (``app.py``'s config-write routes resolve their own cwd via
+    ``_resolve_cw_project``.)
     """
     if not is_valid_project_name(name):
         raise HTTPException(status_code=404, detail=f"project {name!r} not found")

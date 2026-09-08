@@ -25,6 +25,7 @@ from clauster.dependencies import (
     ConfigDep,
     HostedDep,
     RunnerDep,
+    get_claustrum_daemon,
     get_clone_jobs,
     get_clone_tasks,
     get_config,
@@ -120,5 +121,8 @@ def test_accessors_read_the_real_create_app_state(write_config):
     assert get_engine(conn) is app.state.engine
     assert get_clone_jobs(conn) is app.state.clone_jobs
     assert get_clone_tasks(conn) is app.state.clone_tasks
+    # claustrum_daemon is published as None at build time (the lifespan swaps in the live
+    # daemon only when claustrum.enabled); the accessor still reads the same attribute.
+    assert get_claustrum_daemon(conn) is app.state.claustrum_daemon
     # get_render returns the closure create_app published, not an app.state-typed object.
     assert get_render(conn) is app.state.render

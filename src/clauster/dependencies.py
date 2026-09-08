@@ -23,10 +23,10 @@ objects, not string forward references. A ``routes/*.py`` module uses
 ``from __future__ import annotations``, so FastAPI resolves ``cfg: ConfigDep``
 against that module's globals; a forward reference inside the alias would name a
 type that module never imported. None of :mod:`clauster.config`,
-:mod:`clauster.runner`, :mod:`clauster.hosted`, :mod:`clauster.engine`, or
-:mod:`clauster.clone_jobs` imports :mod:`clauster.app`, so these imports are
-cycle-free, and ``app`` already imports all of them. Do not import
-:mod:`clauster.app` here.
+:mod:`clauster.runner`, :mod:`clauster.hosted`, :mod:`clauster.engine`,
+:mod:`clauster.clone_jobs`, or :mod:`clauster.claustrum_daemon` imports
+:mod:`clauster.app`, so these imports are cycle-free, and ``app`` already imports
+all of them. Do not import :mod:`clauster.app` here.
 """
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ from fastapi import Depends, HTTPException
 from starlette.requests import HTTPConnection
 from starlette.responses import Response
 
+from .claustrum_daemon import ClaustrumDaemon
 from .clone_jobs import CloneJobManager
 from .config import ClausterConfig
 from .engine import ClausterEngine
@@ -117,6 +118,19 @@ def get_clone_tasks(conn: HTTPConnection) -> set[asyncio.Task]:
     return conn.app.state.clone_tasks
 
 
+def get_claustrum_daemon(conn: HTTPConnection) -> ClaustrumDaemon | None:
+    """Return the ClaustrumDaemon from ``app.state``, or ``None`` when unwired.
+
+    ``create_app`` publishes ``None`` at build time and the lifespan swaps in the
+    live daemon only when ``claustrum.enabled``. Unlike :func:`get_runner` this does
+    not fail closed: the hosted spawn/resume path treats a missing daemon (or a
+    daemon whose ``client`` is not yet connected) as a 503 with its own message, so
+    the accessor hands back the raw ``daemon | None`` and leaves that decision to the
+    handler. ``getattr`` guards a harness that never set the attribute at all.
+    """
+    return getattr(conn.app.state, "claustrum_daemon", None)
+
+
 ConfigDep = Annotated[ClausterConfig, Depends(get_config)]
 HostedDep = Annotated[HostedManager, Depends(get_hosted)]
 RunnerDep = Annotated[SessionRunner, Depends(get_runner)]
@@ -124,3 +138,4 @@ EngineDep = Annotated[ClausterEngine, Depends(get_engine)]
 RenderDep = Annotated[Callable[..., Response], Depends(get_render)]
 CloneJobsDep = Annotated[CloneJobManager, Depends(get_clone_jobs)]
 CloneTasksDep = Annotated[set[asyncio.Task], Depends(get_clone_tasks)]
+ClaustrumDaemonDep = Annotated[ClaustrumDaemon | None, Depends(get_claustrum_daemon)]
