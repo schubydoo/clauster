@@ -19,12 +19,14 @@ from fastapi import FastAPI, WebSocket
 from fastapi.testclient import TestClient
 from starlette.requests import HTTPConnection
 
+from clauster import auth
 from clauster.app import create_app
 from clauster.config import load_config
 from clauster.dependencies import (
     ConfigDep,
     HostedDep,
     RunnerDep,
+    get_allowed_origins,
     get_authenticate,
     get_claustrum_daemon,
     get_clone_jobs,
@@ -134,3 +136,7 @@ def test_accessors_read_the_real_create_app_state(write_config):
     assert get_login_status_cache(conn) is app.state.login_status_cache
     assert get_authenticate(conn) is app.state.authenticate
     assert get_require_elevated(conn) is app.state.require_elevated
+    # #1156 websockets domain: the moved WS gate reads the same Origin allowlist
+    # (built once from the auth config) the in-app HTTP CSRF gate uses.
+    assert get_allowed_origins(conn) is app.state.allowed_origins
+    assert app.state.allowed_origins == auth.build_allowed_origins(app.state.config)

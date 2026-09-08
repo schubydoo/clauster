@@ -15,10 +15,10 @@ import pytest
 import starlette.websockets
 from fastapi.testclient import TestClient
 
-from clauster import app as app_module
 from clauster import pty_screen
 from clauster.app import create_app
 from clauster.models import InstanceStatus, RemoteControlInstance
+from clauster.routes import websockets as ws_module
 from clauster.runner import SessionRunner
 
 
@@ -69,7 +69,7 @@ def test_absent_sidecar_poll_is_skipped(runner_config, tmp_path: Path, monkeypat
     # The keeper may not have written the sidecar yet (first connect / pre-flush): the first
     # read returns None, so that poll is skipped and the loop waits; the next read yields a
     # real frame. Covers the `frame is not None` False arc. Poll interval zeroed for speed.
-    monkeypatch.setattr(app_module, "_SCREEN_POLL_INTERVAL", 0)
+    monkeypatch.setattr(ws_module, "_SCREEN_POLL_INTERVAL", 0)
     calls = {"n": 0}
 
     def _read(_path):
@@ -89,7 +89,7 @@ def test_unchanged_frame_is_not_resent(runner_config, tmp_path: Path, monkeypatc
     # When the keeper hasn't updated the sidecar between two polls the reader sees the same
     # seq twice and must skip the duplicate, forwarding only on a strictly higher seq. Covers
     # the `seq > last_seq` False arc (the de-dup skip).
-    monkeypatch.setattr(app_module, "_SCREEN_POLL_INTERVAL", 0)
+    monkeypatch.setattr(ws_module, "_SCREEN_POLL_INTERVAL", 0)
     calls = {"n": 0}
 
     def _read(_path):
@@ -127,7 +127,7 @@ def test_stream_teardown_returns_cleanly(runner_config, tmp_path: Path, monkeypa
     # interval is zeroed so that raise fires in the same burst as the send — before the
     # client's disconnect can win the race — mirroring the proven
     # test_app_hosted.test_ws_hosted_handles_stream_teardown.
-    monkeypatch.setattr(app_module, "_SCREEN_POLL_INTERVAL", 0)
+    monkeypatch.setattr(ws_module, "_SCREEN_POLL_INTERVAL", 0)
     calls = {"n": 0}
 
     def _read(_path):
