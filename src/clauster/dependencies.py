@@ -32,11 +32,11 @@ all of them. Do not import :mod:`clauster.app` here.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Annotated
 
 from fastapi import Depends, HTTPException
-from starlette.requests import HTTPConnection
+from starlette.requests import HTTPConnection, Request
 from starlette.responses import Response
 
 from .claustrum_daemon import ClaustrumDaemon
@@ -44,6 +44,7 @@ from .clone_jobs import CloneJobManager
 from .config import ClausterConfig
 from .engine import ClausterEngine
 from .hosted import HostedManager
+from .login_status import LoginStatusCache
 from .runner import SessionRunner
 
 
@@ -118,6 +119,16 @@ def get_clone_tasks(conn: HTTPConnection) -> set[asyncio.Task]:
     return conn.app.state.clone_tasks
 
 
+def get_login_status_cache(conn: HTTPConnection) -> LoginStatusCache:
+    """Return the LoginStatusCache stored on ``app.state`` at build time.
+
+    ``create_app`` builds it unconditionally, so ``/healthz`` and the login badge read
+    login state from a non-blocking stale-while-revalidate cache. This is a plain read
+    like :func:`get_config` -- the cache object itself never goes absent in a wired app.
+    """
+    return conn.app.state.login_status_cache
+
+
 def get_claustrum_daemon(conn: HTTPConnection) -> ClaustrumDaemon | None:
     """Return the ClaustrumDaemon from ``app.state``, or ``None`` when unwired.
 
@@ -131,6 +142,36 @@ def get_claustrum_daemon(conn: HTTPConnection) -> ClaustrumDaemon | None:
     return getattr(conn.app.state, "claustrum_daemon", None)
 
 
+def get_authenticate(
+    conn: HTTPConnection,
+) -> Callable[[HTTPConnection], Awaitable[tuple[str | None, bool, bool]]]:
+    """Return the ``_authenticate`` coroutine ``create_app`` published on ``app.state``.
+
+    Like :func:`get_render` this returns the closure itself, not an ``app.state``-typed
+    object: ``_authenticate`` closes over the auth config, signing serializer, and token
+    store, so it stays defined in :mod:`clauster.app` and a moved ``/healthz`` calls it
+    through here. It accepts a ``Request`` or ``WebSocket`` and returns
+    ``(user, via_proxy, via_token)``. The move changes no auth logic -- the handler still
+    calls the exact same function. Always published (like :func:`get_render`), so it does
+    not fail closed: an unwired harness raises ``AttributeError`` while resolving the
+    dependency, before the handler runs -- a 500 denial, never an authenticated response.
+    """
+    return conn.app.state.authenticate
+
+
+def get_require_elevated(conn: HTTPConnection) -> Callable[[Request], None]:
+    """Return the ``require_elevated`` step-up gate ``create_app`` published on ``app.state``.
+
+    Returns the closure itself (like :func:`get_render`): ``require_elevated`` closes over
+    the elevation serializer and reads the live ``app.state.session_epoch``, so it stays in
+    :mod:`clauster.app`. A moved Tier-B config route calls it to enforce the fail-closed
+    403 ``reauth_required`` gate; the gate itself is unchanged by the move. Always
+    published (like :func:`get_render`), so an unwired harness 500s while resolving the
+    dependency, before any write -- a denial, not a bypass.
+    """
+    return conn.app.state.require_elevated
+
+
 ConfigDep = Annotated[ClausterConfig, Depends(get_config)]
 HostedDep = Annotated[HostedManager, Depends(get_hosted)]
 RunnerDep = Annotated[SessionRunner, Depends(get_runner)]
@@ -138,4 +179,10 @@ EngineDep = Annotated[ClausterEngine, Depends(get_engine)]
 RenderDep = Annotated[Callable[..., Response], Depends(get_render)]
 CloneJobsDep = Annotated[CloneJobManager, Depends(get_clone_jobs)]
 CloneTasksDep = Annotated[set[asyncio.Task], Depends(get_clone_tasks)]
+LoginStatusCacheDep = Annotated[LoginStatusCache, Depends(get_login_status_cache)]
 ClaustrumDaemonDep = Annotated[ClaustrumDaemon | None, Depends(get_claustrum_daemon)]
+AuthenticateDep = Annotated[
+    Callable[[HTTPConnection], Awaitable[tuple[str | None, bool, bool]]],
+    Depends(get_authenticate),
+]
+RequireElevatedDep = Annotated[Callable[[Request], None], Depends(get_require_elevated)]
