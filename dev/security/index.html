@@ -1847,8 +1847,8 @@ dashboard to the network is refused at startup rather than quietly accepted.</p>
 <a href="../privacy/">Privacy &amp; data at rest</a>.</p>
 <h2 id="authentication-fail-closed">Authentication (fail-closed)<a class="headerlink" href="#authentication-fail-closed" title="Permanent link">&para;</a></h2>
 <p>The auth foundation lives in <code>auth.py</code> as pure, FastAPI-free functions (the web
-wiring — middleware and cookie handling in <code>app.py</code>, route handlers in <code>app.py</code>
-and the <code>routes/*.py</code> modules — sits above it). It offers
+wiring — middleware and cookie handling in <code>app.py</code>, route handlers in the
+<code>routes/*.py</code> modules — sits above it). It offers
 three trust paths:</p>
 <ul>
 <li><strong>Password login</strong> → a signed-cookie session (<code>issue_session</code> /
