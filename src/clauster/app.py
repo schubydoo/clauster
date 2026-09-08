@@ -1066,7 +1066,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # is no structural shape to validate beyond "a string under the size cap" and
         # no redaction on write (nothing here is ever assembled from a secret sentinel).
         # The payload is a single `content` string, not a named JSON subtree, so this
-        # route can't reuse `_put_config_write` (which assumes a dict payload) — the
+        # route can't reuse `config_write_base.put_config_write` (a dict payload) — the
         # gate order is identical though: capability -> confirm -> shape -> path
         # resolve/contain -> stale-hash guard (inside the writer) -> atomic write.
         #
@@ -1548,7 +1548,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # mirrors the CLAUDE.md/settings routes (capability -> scope-enum 422 ->
         # confirm 400 -> payload shape 422 -> path resolve/contain -> stale-hash guard
         # (inside the writer) -> atomic write) -- the #819 fix, not the older
-        # _put_config_write helper's order (scope-enum before capability).
+        # config_write_base.put_config_write ordering (scope-enum before capability).
         scope = body.get("scope", "project")
         config_write.require_capability(config, scope)
         if scope not in ("project", "user", "local"):
@@ -1686,7 +1686,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # Gate order mirrors the CLAUDE.md route (capability -> scope-enum 422 ->
         # confirm 400 -> payload shape 422 -> path resolve/contain -> stale-hash
         # guard (inside the writer) -> atomic write) -- the #819/#768 fix, not the
-        # older `_put_config_write` helper's order (scope-enum before capability).
+        # older `config_write_base.put_config_write` ordering (scope-enum before capability).
         scope = body.get("scope", "project")
         config_write.require_capability(config, scope)
         if scope not in ("project", "user", "local"):

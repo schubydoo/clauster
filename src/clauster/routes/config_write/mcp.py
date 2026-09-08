@@ -6,6 +6,17 @@ direct-writer driven), and read/replace/reset a project's ``.mcp.json`` approval
 lists. Every route runs behind the same fail-closed gate order as the rest of the
 tier: capability first (404, invisible surface), then confirm, then path containment
 before any I/O.
+
+Every route here injects ``RunnerDep`` (fail-closed): the whole-map write, the
+single-entry ``mcp/server`` op, the approvals read/write, and the reset all dereference
+``runner.claude_json``. ``create_app`` coerces ``runner = runner or SessionRunner(config)``
+and publishes that object, so ``app.state.runner`` is never ``None`` in a wired app; the
+accessor's 404 fires only in a harness that nulls it out, and it fires ahead of the
+capability check. That is the one spot in the config-write tier where the runner accessor
+resolves before ``require_capability`` -- but it returns the same 404 a disabled surface
+would, so the invisible-surface invariant still holds. Failing closed here (404) is also
+safer than the nullable accessor the permissions/hooks reads use, whose user/local branches
+would raise an unhandled 500 on a ``None`` runner.
 """
 
 from __future__ import annotations

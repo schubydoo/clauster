@@ -382,6 +382,18 @@ def test_ops_route_duplicate_matches_app():
     assert ops_routes._SESSION_USER == app_mod._SESSION_USER
 
 
+def test_config_write_base_actor_matches_app():
+    # routes/config_write/_base.py holds SESSION_USER -- the actor stamped on every
+    # config-write audit line by both the moved A handlers and, via the thin wrappers,
+    # the B handlers still in app.py (which use app.py's _SESSION_USER). A drift between
+    # the two would write two different actors into the same audit trail, so pin them
+    # equal until the config-write domain fully moves and the copies merge (#1156).
+    from clauster import app as app_mod
+    from clauster.routes.config_write import _base
+
+    assert _base.SESSION_USER == app_mod._SESSION_USER
+
+
 def test_login_route_module_mirrors_app_auth_constants():
     # routes/login.py mirrors the cookie names, elevation window, and actor that app.py still
     # owns (_authenticate + require_elevated read the app.py copies). Nothing else pins the two
