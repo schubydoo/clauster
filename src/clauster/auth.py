@@ -4,7 +4,8 @@ Mostly pure functions and small helpers, plus the stateful in-process
 :class:`LoginThrottle` brute-force limiter — deliberately free of any
 FastAPI/Starlette import so the security-sensitive logic is unit-testable in
 isolation. The web wiring (middleware, routes, cookie handling) lives in
-``app.py`` and the ``routes/*.py`` modules.
+``app.py`` and the ``routes/*.py`` modules; the cookie names and the elevation
+window are defined here (below) as the single source both of them read.
 
 Four trust paths:
   - password login  -> signed-cookie session  (``issue_session`` / ``read_session``)
@@ -43,6 +44,18 @@ _ELEVATION_SALT = "clauster-elevation"
 # A real argon2id hash used to keep verify timing constant when no password is
 # configured — defends against a "no password set" oracle.
 _DUMMY_HASH = PasswordHasher().hash("clauster-dummy-do-not-use")
+
+# Session/elevation cookie names, the elevation unlock window, and the single-user actor.
+# These are the single source (#1523): ``app.py``'s ``_authenticate`` and ``require_elevated``
+# read the cookies, ``routes/login.py`` sets and clears them, and the config-write routes stamp
+# the audit actor -- so the on-the-wire cookie names and the actor cannot drift across modules.
+SESSION_COOKIE = "clauster_session"
+# Step-up re-auth cookie for the privileged Tier-B "Advanced" config surface (#978):
+# short-lived, distinct from the session cookie, and only ever consulted by the
+# Tier-B config-write routes — never a general access credential.
+ELEVATION_COOKIE = "clauster_elevation"
+ELEVATION_MAX_AGE_SECONDS = 600  # 10-minute unlock window; re-prove the password after
+SESSION_USER = "admin"  # single-user in v0.2; multi-user is v0.3
 
 
 # ----- session secret -----------------------------------------------------

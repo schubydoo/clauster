@@ -41,6 +41,7 @@ from .. import (
     ops,
     prometheus,
 )
+from ..auth import SESSION_USER
 from ..dependencies import (
     AuthenticateDep,
     ClaustrumDaemonDep,
@@ -60,12 +61,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-# Single-user actor for the config-write audit trail (single-user in v0.2; multi-user
-# is v0.3). Mirrors ``app._SESSION_USER`` (still read by ``_authenticate`` in app.py) and
-# ``routes.config_write._base.SESSION_USER``; the three hold the same value and merge when
-# a shared actor constant lands (#1156).
-_SESSION_USER = "admin"
 
 
 # ----- liveness, the Prometheus endpoint, and system doctor ----------------------------------
@@ -476,7 +471,7 @@ async def api_config_advanced_put(
         scope="global",
         target=str(path),
         action="edit",
-        actor=_SESSION_USER,
+        actor=SESSION_USER,
         keys=sorted(edits),
     )
     return {"hash": new_hash, "restart_required": True}

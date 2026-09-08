@@ -25,7 +25,6 @@ import logging
 import shutil
 import subprocess
 import sys
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException, Request
@@ -33,6 +32,7 @@ from fastapi.responses import HTMLResponse, Response
 from sqlalchemy.exc import SQLAlchemyError
 
 from .. import ops
+from ..auth import SESSION_USER
 from ..claude_md import (
     ClaudeMdConflict,
     ClaudeMdError,
@@ -70,6 +70,7 @@ from ..runner import (
     UnknownProject,
     _conpty_keeper_available,
 )
+from ._common import list_projects, resolve_project_path
 
 if TYPE_CHECKING:
     from ..clone_jobs import CloneJob, CloneJobManager
@@ -80,12 +81,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-# Single-user actor for the CLAUDE.md write audit trail (single-user in v0.2; multi-user
-# is v0.3). Mirrors ``app._SESSION_USER`` (still read by ``_authenticate`` in app.py) and
-# ``routes.config_write._base.SESSION_USER``; the copies hold the same value and merge when
-# a shared actor constant lands (#1156).
-_SESSION_USER = "admin"
 
 # Drop a finished clone job after this grace so a client that disconnected mid-clone can
 # reconnect and still read the terminal frame.
@@ -102,40 +97,16 @@ def _pty_supported() -> bool:
     return sys.platform != "win32" or _conpty_keeper_available()
 
 
-async def _list_projects(engine: ClausterEngine) -> list[Project]:
-    """Return the discovered projects through the same facade the CLI uses."""
-    # Shared facade (#775): the CLI and this route go through the same
-    # discover-then-stamp-bypass path, so the two can't drift.
-    return await asyncio.to_thread(engine.list_projects)
-
-
 async def _project_by_name(name: str, engine: ClausterEngine) -> Project:
     """Return the discovered project with this name, or 500 if provisioning lost it.
 
     Reads through the discovery cache -- the caller invalidates it first when it needs
     a just-created project to be visible.
     """
-    for proj in await _list_projects(engine):
+    for proj in await list_projects(engine):
         if proj.name == name:
             return proj
     raise HTTPException(status_code=500, detail=f"project {name!r} missing after provisioning")
-
-
-async def _resolve_project_path(name: str, engine: ClausterEngine) -> Path:
-    """Map a project name to its path, refusing unknown/unsafe names (traversal).
-
-    The shared project-path resolver for the ``routes/*`` modules: ``routes/instances.py``
-    imports it for the hosted spawn/resume path (#1156). The traversal defense itself is
-    the shared :func:`is_valid_project_name`, so no caller can diverge on the security
-    check. (``app.py``'s config-write routes resolve their own cwd via
-    ``_resolve_cw_project``.)
-    """
-    if not is_valid_project_name(name):
-        raise HTTPException(status_code=404, detail=f"project {name!r} not found")
-    for proj in await _list_projects(engine):
-        if proj.name == name:
-            return proj.path
-    raise HTTPException(status_code=404, detail=f"project {name!r} not found")
 
 
 def _bridge_running(runner: SessionRunner, name: str) -> bool:
@@ -152,7 +123,7 @@ def _bridge_running(runner: SessionRunner, name: str) -> bool:
 @router.get("/api/projects")
 async def api_projects(engine: EngineDep) -> list[Project]:
     """Return every discovered project."""
-    return await _list_projects(engine)
+    return await list_projects(engine)
 
 
 @router.get("/api/projects/preflight")
@@ -171,7 +142,7 @@ async def api_projects_preflight(engine: EngineDep, runner: RunnerDep) -> dict:
     so it must not block the event loop.
     """
     result: dict[str, dict] = {}
-    for proj in await _list_projects(engine):
+    for proj in await list_projects(engine):
         checks = await asyncio.to_thread(ops.project_preflight_checks, proj, runner.claude_json)
         result[proj.name] = {
             "ok": all(c.status != ops.FAIL for c in checks),
@@ -194,7 +165,7 @@ async def api_projects_sortmeta(engine: EngineDep, runner: RunnerDep) -> dict:
     dashboard; the try/except is just an outer net for an engine/IO fault. Invalid
     project names are dropped before use.
     """
-    names = [p.name for p in await _list_projects(engine) if is_valid_project_name(p.name)]
+    names = [p.name for p in await list_projects(engine) if is_valid_project_name(p.name)]
 
     def _collect() -> dict[str, dict]:
         """Read each project's last-used timestamp and rolled-up cost from history."""
@@ -233,7 +204,7 @@ async def api_project_preflight(name: str, engine: EngineDep, runner: RunnerDep)
     """
     if not is_valid_project_name(name):
         raise HTTPException(status_code=422, detail="invalid project name")
-    proj = next((p for p in await _list_projects(engine) if p.name == name), None)
+    proj = next((p for p in await list_projects(engine) if p.name == name), None)
     if proj is None:
         raise HTTPException(status_code=404, detail=f"project {name!r} not found")
     checks = await asyncio.to_thread(ops.project_preflight_checks, proj, runner.claude_json)
@@ -256,7 +227,7 @@ async def api_project_row(
     """
     if not is_valid_project_name(name):
         raise HTTPException(status_code=422, detail="invalid project name")
-    proj = next((p for p in await _list_projects(engine) if p.name == name), None)
+    proj = next((p for p in await list_projects(engine) if p.name == name), None)
     if proj is None:
         raise HTTPException(status_code=404, detail=f"project {name!r} not found")
     return render(
@@ -501,7 +472,7 @@ async def api_trust_all(runner: RunnerDep) -> list[Project]:
 @router.get("/api/projects/{name}/claude-md")
 async def api_claude_md_get(name: str, engine: EngineDep, runner: RunnerDep) -> ClaudeMdDoc:
     """Return the project's CLAUDE.md, stamped with whether a bridge is running."""
-    path = await _resolve_project_path(name, engine)
+    path = await resolve_project_path(name, engine)
     try:
         doc = await asyncio.to_thread(read_claude_md, path)
     except ClaudeMdError as exc:
@@ -515,7 +486,7 @@ async def api_claude_md_put(
     name: str, body: dict, config: ConfigDep, engine: EngineDep, runner: RunnerDep
 ) -> ClaudeMdDoc:
     """Write the project's CLAUDE.md, honouring the optional stale-hash guard."""
-    path = await _resolve_project_path(name, engine)
+    path = await resolve_project_path(name, engine)
     content = body.get("content")
     if not isinstance(content, str):
         raise HTTPException(status_code=422, detail="body must include a 'content' string")
@@ -529,7 +500,7 @@ async def api_claude_md_put(
             content,
             base_sha256=base_sha,
             state_dir=config.state_dir,
-            user=_SESSION_USER,
+            user=SESSION_USER,
             claude_json=runner.claude_json,
         )
     except ClaudeMdTooLarge as exc:

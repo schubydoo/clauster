@@ -31,17 +31,15 @@ from ... import (
     config_write_subagents,
 )
 
+# Re-exported from :mod:`clauster.auth` (the single source, #1523) so the config-write
+# route modules in this package keep reading the audit actor as ``_base.SESSION_USER``.
+from ...auth import SESSION_USER
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from ...config import ClausterConfig
     from ...runner import SessionRunner
-
-# Single-user actor for the config-write audit trail (single-user in v0.2; multi-user
-# is v0.3). Mirrors ``app._SESSION_USER``, which still exists because ``_authenticate``
-# in app.py stamps that copy on the request user; the config-write routes here use this
-# copy. The two hold the same value and merge when a shared actor constant lands (#1156).
-SESSION_USER = "admin"
 
 
 def resolve_cw_project(

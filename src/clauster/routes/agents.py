@@ -3,9 +3,9 @@
 These four routes drive the agent-view background sessions: list them read-only,
 dispatch a new one, stop one cleanly, and resume an ended one. Every dispatch
 validates the project name before spawning (invariant 2) and mirrors the runner's
-``bypassPermissions`` ceiling via :func:`_enforce_bypass_ceiling`, failing closed so
-the background channel cannot sidestep a project's ``allow_bypass_permissions`` gate
-(invariant 1).
+``bypassPermissions`` ceiling via :func:`clauster.routes._common.enforce_bypass_ceiling`,
+failing closed so the background channel cannot sidestep a project's
+``allow_bypass_permissions`` gate (invariant 1).
 The stop route redacts any ``claude rm`` detail through :func:`clauster.redact.redact_for_disk`
 before it leaves the process on the ``bg-settled`` event (invariant 4).
 """
@@ -13,7 +13,6 @@ before it leaves the process on the ``bg-settled`` event (invariant 4).
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException
 
@@ -22,31 +21,9 @@ from ..dependencies import ConfigDep, RunnerDep
 from ..discovery import is_valid_project_name
 from ..models import BackgroundJob
 from ..redact import redact_for_disk
-
-if TYPE_CHECKING:
-    from ..config import ClausterConfig
+from ._common import enforce_bypass_ceiling
 
 router = APIRouter()
-
-
-def _enforce_bypass_ceiling(
-    config: ClausterConfig, project: str, permission_mode: str | None
-) -> None:
-    """Reject ``bypassPermissions`` when a project's config ceiling forbids it.
-
-    The runner enforces this hard ceiling for the bridge channel
-    (``PermissionModeNotAllowed`` -> 403 on the bridge path). The background-agent
-    channel spawns outside the runner, so it mirrors the gate here or a crafted
-    request could run a session in bypass mode the project's
-    ``allow_bypass_permissions`` ceiling forbids. A twin in ``routes/instances.py``
-    guards the hosted channel the same way; both defer to the single
-    :meth:`ClausterConfig.bypass_denied` decision and share its
-    :meth:`ClausterConfig.bypass_denied_detail` message, so neither the decision nor
-    the wording can diverge. The two thin twins fold into a shared ``routes/`` helper
-    in #1523.
-    """
-    if config.bypass_denied(project, permission_mode):
-        raise HTTPException(status_code=403, detail=config.bypass_denied_detail(project))
 
 
 @router.get("/api/agents")
@@ -124,7 +101,7 @@ async def api_dispatch_agent(body: dict, config: ConfigDep, runner: RunnerDep) -
     # ceiling can't be sidestepped by omitting permission_mode when the default is
     # bypassPermissions. (Also makes bg honor instance_defaults, like the other channels.)
     pm = permission_mode or config.instance_defaults.permission_mode
-    _enforce_bypass_ceiling(config, name, pm)
+    enforce_bypass_ceiling(config, name, pm)
     if prompt is None and rc_name is None:
         # #1033: an un-registered background session has no composer and no
         # cloud surface — dispatched without a prompt it parks at "send a
@@ -133,7 +110,7 @@ async def api_dispatch_agent(body: dict, config: ConfigDep, runner: RunnerDep) -
         # where the session is conversational, so a blank prompt is legitimate
         # there. Gated after the 404/403 checks so existence and the bypass
         # ceiling keep their precedence (same ordering rationale as
-        # _enforce_bypass_ceiling above).
+        # enforce_bypass_ceiling above).
         raise HTTPException(
             status_code=422,
             detail=(

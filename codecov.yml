@@ -129,6 +129,7 @@ component_management:
         # #1156 — list each new routes/*.py module here as its domain PR lands it; the
         # component matcher does not expand globs, so an unlisted module goes uncounted.
         - src/clauster/routes/__init__.py
+        - src/clauster/routes/_common.py # #1523 — shared route helpers (bypass ceiling, project resolve)
         - src/clauster/routes/agents.py
         - src/clauster/routes/dashboard.py
         - src/clauster/routes/instances.py

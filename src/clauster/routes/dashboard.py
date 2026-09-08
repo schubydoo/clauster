@@ -22,7 +22,8 @@ from fastapi.responses import HTMLResponse, Response
 from .. import __version__, config_write_hooks, deps
 from ..config import BYPASS_DESKTOP_HINT, PERMISSION_LABELS
 from ..dependencies import ConfigDep, EngineDep, RenderDep
-from .projects import _list_projects, _pty_supported
+from ._common import list_projects
+from .projects import _pty_supported
 
 if TYPE_CHECKING:
     from ..config import ClausterConfig
@@ -33,7 +34,7 @@ router = APIRouter()
 
 async def _dashboard_context(config: ClausterConfig, engine: ClausterEngine) -> dict:
     """Build the shared template context for the dashboard."""
-    projects = await _list_projects(engine)
+    projects = await list_projects(engine)
     return {
         "projects": projects,
         "version": __version__,

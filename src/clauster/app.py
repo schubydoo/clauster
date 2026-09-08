@@ -69,14 +69,7 @@ def _pty_supported() -> bool:
     return sys.platform != "win32" or _conpty_keeper_available()
 
 
-_SESSION_COOKIE = "clauster_session"
-# Step-up re-auth cookie for the privileged Tier-B "Advanced" config surface (#978):
-# short-lived, distinct from the session cookie, and only ever consulted by the
-# Tier-B config-write routes — never a general access credential.
-_ELEVATION_COOKIE = "clauster_elevation"
-_ELEVATION_MAX_AGE_SECONDS = 600  # 10-minute unlock window; re-prove the password after
 _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
-_SESSION_USER = "admin"  # single-user in v0.2; multi-user is v0.3
 
 # The OpenAPI docs UI + schema — off by default, gated like any other /api/...
 # route when enabled (#302). Kept as a single set so the guard middleware and the
@@ -738,14 +731,14 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         presented = auth.parse_bearer(scope.headers.get("authorization"))
         if presented:
             if auth.verify_token(presented, config.auth.api_token_hash):
-                return _SESSION_USER, False, True
+                return auth.SESSION_USER, False, True
             presented_hash = auth.hash_token(presented)
             if await asyncio.to_thread(api_token_store.is_active_hash, presented_hash):
                 await asyncio.to_thread(api_token_store.touch_last_used, presented_hash)
-                return _SESSION_USER, False, True
+                return auth.SESSION_USER, False, True
         user = auth.read_session(
             _serializer,
-            scope.cookies.get(_SESSION_COOKIE),
+            scope.cookies.get(auth.SESSION_COOKIE),
             config.auth.session_max_age_seconds,
             current_epoch=app.state.session_epoch,
         )
@@ -953,8 +946,8 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         """
         elevated = auth.read_elevation(
             _elevation_serializer,
-            request.cookies.get(_ELEVATION_COOKIE),
-            _ELEVATION_MAX_AGE_SECONDS,
+            request.cookies.get(auth.ELEVATION_COOKIE),
+            auth.ELEVATION_MAX_AGE_SECONDS,
             current_epoch=app.state.session_epoch,
         )
         if elevated is None:
