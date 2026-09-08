@@ -102,7 +102,7 @@ def _pty_supported() -> bool:
 
 
 async def _list_projects(engine: ClausterEngine) -> list[Project]:
-    """Return the discovered projects through the same facade the CLI and app.py use."""
+    """Return the discovered projects through the same facade the CLI uses."""
     # Shared facade (#775): the CLI and this route go through the same
     # discover-then-stamp-bypass path, so the two can't drift.
     return await asyncio.to_thread(engine.list_projects)

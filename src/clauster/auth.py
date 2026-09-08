@@ -1,8 +1,10 @@
 """Authentication primitives for the v0.2 auth foundation (spec §4, D12/D13).
 
-Pure functions + small helpers — deliberately free of any FastAPI/Starlette
-import so the security-sensitive logic is unit-testable in isolation. The
-web wiring (middleware, routes, cookie handling) lives in ``app.py``.
+Mostly pure functions and small helpers, plus the stateful in-process
+:class:`LoginThrottle` brute-force limiter — deliberately free of any
+FastAPI/Starlette import so the security-sensitive logic is unit-testable in
+isolation. The web wiring (middleware, routes, cookie handling) lives in
+``app.py`` and the ``routes/*.py`` modules.
 
 Four trust paths:
   - password login  -> signed-cookie session  (``issue_session`` / ``read_session``)
@@ -530,3 +532,87 @@ def peer_trusted(ip: str | None, trusted_ips: list[str]) -> bool:
         if addr.version == net.version and addr in net:
             return True
     return False
+
+
+class LoginThrottle:
+    """In-process failed-login limiter: a per-key hard lock + a global backoff fallback.
+
+    The per-key window (``max_failures`` within ``window_seconds``) precisely limits a
+    *distinguishable* client — a direct peer IP, or a reverse-proxy-asserted user. But
+    behind a trusted reverse proxy that asserts no user, every login shares the proxy's
+    socket IP, so a per-IP lock would lock **everyone** out (one attacker DoSing all
+    users). For that shared-IP case the caller passes ``shared=True``: the per-key lock
+    is skipped and only the **global backoff** applies — once shared-path failures exceed
+    ``global_ceiling`` in the window, attempts must wait an exponentially-growing interval
+    (surfaced as ``429`` + ``Retry-After``), degrading a flood to a delay rather than a
+    blanket lockout a legitimate user can never get past. The two paths are independent: a
+    shared-proxy flood never 429s a distinguishable direct client, and vice versa.
+
+    In-process only: the counters reset on restart and are **not** shared across workers
+    or replicas. For an internet-exposed deployment a fronting IdP/IAP (or the
+    reverse-proxy auth) is the real control; this is brute-force friction, not an
+    account-security boundary.
+    """
+
+    def __init__(
+        self,
+        max_failures: int = 5,
+        window_seconds: int = 300,
+        *,
+        global_ceiling: int = 20,
+        backoff_cap_seconds: float = 60.0,
+    ) -> None:
+        """Set the per-key threshold/window and the global-backoff ceiling/cap."""
+        self._max = max_failures
+        self._window = window_seconds
+        self._failures: dict[str, list[float]] = {}
+        self._global: list[float] = []
+        self._global_ceiling = global_ceiling
+        self._backoff_cap = backoff_cap_seconds
+
+    def allowed(self, key: str | None, *, shared: bool = False) -> tuple[bool, float]:
+        """Return ``(allowed, retry_after_seconds)`` for a login attempt from ``key``.
+
+        The two paths are independent: a ``shared`` proxy IP is governed only by the
+        global backoff, a distinguishable client only by its per-key window — so a
+        shared-proxy flood never spills over to 429 a direct client (or vice versa).
+        """
+        now = time.monotonic()
+        if shared:
+            # Global backoff: past the ceiling, require an exponentially-growing gap since
+            # the last failure (capped), so a shared-proxy-IP flood can't lock everyone out
+            # but is still throttled to a crawl.
+            self._global = [t for t in self._global if now - t < self._window]
+            over = len(self._global) - self._global_ceiling
+            if over > 0 and self._global:
+                backoff = min(self._backoff_cap, 2.0 ** min(over, 30))
+                wait = backoff - (now - self._global[-1])
+                if wait > 0:
+                    return False, wait
+            return True, 0.0
+        # Per-key hard lock for a distinguishable client.
+        if key:
+            recent = [t for t in self._failures.get(key, []) if now - t < self._window]
+            if recent:
+                self._failures[key] = recent
+            else:
+                # Evict instead of leaving a permanent ``key: []`` — otherwise a
+                # failed-login flood from many distinct IPs leaks one empty entry per IP.
+                self._failures.pop(key, None)
+            if len(recent) >= self._max:
+                return False, float(self._window)
+        return True, 0.0
+
+    def record_failure(self, key: str | None, *, shared: bool = False) -> None:
+        """Record one failed attempt — globally for a shared proxy IP, else per-key."""
+        now = time.monotonic()
+        if shared:
+            self._global = [t for t in self._global if now - t < self._window]
+            self._global.append(now)
+        elif key:
+            self._failures.setdefault(key, []).append(now)
+
+    def reset(self, key: str | None) -> None:
+        """Clear ``key``'s per-key failures (called on a successful login)."""
+        if key is not None:
+            self._failures.pop(key, None)

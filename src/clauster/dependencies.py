@@ -24,9 +24,10 @@ objects, not string forward references. A ``routes/*.py`` module uses
 against that module's globals; a forward reference inside the alias would name a
 type that module never imported. None of :mod:`clauster.config`,
 :mod:`clauster.runner`, :mod:`clauster.hosted`, :mod:`clauster.engine`,
-:mod:`clauster.clone_jobs`, or :mod:`clauster.claustrum_daemon` imports
-:mod:`clauster.app`, so these imports are cycle-free, and ``app`` already imports
-all of them. Do not import :mod:`clauster.app` here.
+:mod:`clauster.clone_jobs`, :mod:`clauster.claustrum_daemon`, :mod:`clauster.auth`,
+or :mod:`clauster.login_shepherd` imports :mod:`clauster.app`, so these imports are
+cycle-free, and ``app`` already imports all of them. Do not import
+:mod:`clauster.app` here.
 """
 
 from __future__ import annotations
@@ -35,15 +36,19 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Annotated
 
+from argon2 import PasswordHasher
 from fastapi import Depends, HTTPException
+from itsdangerous import URLSafeTimedSerializer
 from starlette.requests import HTTPConnection, Request
 from starlette.responses import Response
 
+from .auth import LoginThrottle
 from .claustrum_daemon import ClaustrumDaemon
 from .clone_jobs import CloneJobManager
 from .config import ClausterConfig
 from .engine import ClausterEngine
 from .hosted import HostedManager
+from .login_shepherd import LoginShepherd
 from .login_status import LoginStatusCache
 from .runner import SessionRunner
 
@@ -184,6 +189,73 @@ def get_allowed_origins(conn: HTTPConnection) -> set[str]:
     return conn.app.state.allowed_origins
 
 
+def get_login_serializer(conn: HTTPConnection) -> URLSafeTimedSerializer:
+    """Return the session-cookie serializer ``create_app`` published on ``app.state``.
+
+    ``create_app`` builds one serializer from the app's signing secret and both signs
+    (``/login``) and reads (``_authenticate``, which stays in :mod:`clauster.app`) session
+    cookies with it. The moved ``/login`` route issues a cookie through here so it signs
+    with the exact same instance -- a second serializer built elsewhere would still verify
+    (same secret) but there is one live object to key off. Always published, so an unwired
+    harness raises ``AttributeError`` while resolving the dependency, before the handler.
+    """
+    return conn.app.state.login_serializer
+
+
+def get_elevation_serializer(conn: HTTPConnection) -> URLSafeTimedSerializer:
+    """Return the step-up elevation serializer ``create_app`` published on ``app.state``.
+
+    Distinct from :func:`get_login_serializer` (same secret, different salt) so an
+    elevation token can never be presented as a session cookie or vice versa. The moved
+    ``/api/reauth`` route mints an elevation cookie through here; ``require_elevated`` (which
+    stays in :mod:`clauster.app`) reads it with the same instance. Always published.
+    """
+    return conn.app.state.elevation_serializer
+
+
+def get_login_throttle(conn: HTTPConnection) -> LoginThrottle:
+    """Return the failed-login limiter ``create_app`` published on ``app.state``.
+
+    A single app-scoped :class:`~clauster.auth.LoginThrottle` holds the in-process failure
+    counters, so ``/login`` and ``/api/reauth`` must share the one instance -- a per-request
+    throttle would reset the counters every call and defeat the limit. Always published.
+    """
+    return conn.app.state.login_throttle
+
+
+def get_password_hasher(conn: HTTPConnection) -> PasswordHasher:
+    """Return the argon2 password hasher ``create_app`` published on ``app.state``.
+
+    ``create_app`` builds one hasher; the moved ``/login`` and ``/api/reauth`` routes verify
+    the operator password against it. The instance carries the argon2 cost parameters, so a
+    route uses the same one rather than constructing its own. Always published.
+    """
+    return conn.app.state.password_hasher
+
+
+def get_cookie_secure(conn: HTTPConnection) -> Callable[[Request], bool]:
+    """Return the ``_cookie_secure`` decision closure ``create_app`` published on ``app.state``.
+
+    Returns the closure itself (like :func:`get_render`): ``_cookie_secure`` closes over the
+    auth config and stays in :mod:`clauster.app` because the ``security_headers`` middleware
+    still calls it directly for the HSTS decision. The moved ``/login`` and ``/api/reauth``
+    routes set the cookie ``Secure`` flag from the same closure (``/logout`` only deletes
+    cookies and needs no decision), so the flag and the HSTS header never disagree. Always
+    published.
+    """
+    return conn.app.state.cookie_secure
+
+
+def get_login_shepherd(conn: HTTPConnection) -> LoginShepherd:
+    """Return the dashboard-driven login manager ``create_app`` published on ``app.state``.
+
+    ``create_app`` builds one single-flight :class:`~clauster.login_shepherd.LoginShepherd`
+    (it serializes a single ``claude`` login/setup-token flow behind a lock), so every
+    ``/api/login-shepherd/*`` route drives the same instance. Always published at build time.
+    """
+    return conn.app.state.login_shepherd
+
+
 ConfigDep = Annotated[ClausterConfig, Depends(get_config)]
 HostedDep = Annotated[HostedManager, Depends(get_hosted)]
 RunnerDep = Annotated[SessionRunner, Depends(get_runner)]
@@ -199,3 +271,9 @@ AuthenticateDep = Annotated[
 ]
 RequireElevatedDep = Annotated[Callable[[Request], None], Depends(get_require_elevated)]
 AllowedOriginsDep = Annotated[set[str], Depends(get_allowed_origins)]
+LoginSerializerDep = Annotated[URLSafeTimedSerializer, Depends(get_login_serializer)]
+ElevationSerializerDep = Annotated[URLSafeTimedSerializer, Depends(get_elevation_serializer)]
+LoginThrottleDep = Annotated[LoginThrottle, Depends(get_login_throttle)]
+PasswordHasherDep = Annotated[PasswordHasher, Depends(get_password_hasher)]
+CookieSecureDep = Annotated[Callable[[Request], bool], Depends(get_cookie_secure)]
+LoginShepherdDep = Annotated[LoginShepherd, Depends(get_login_shepherd)]

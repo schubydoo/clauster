@@ -7,14 +7,13 @@ import logging
 import re
 import secrets
 import sys
-import time
 from collections.abc import Callable, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 from jinja2_fragments.fastapi import Jinja2Blocks
@@ -36,16 +35,16 @@ from . import (
     config_write_settings,
     config_write_skills,
     config_write_subagents,
-    deps,
     login_shepherd,
     login_status,
     setup_wizard,
     usage,
 )
+from .auth import LoginThrottle
 from .claustrum_client import ClaustrumError
 from .claustrum_daemon import ClaustrumDaemon
 from .clone_jobs import CloneJobManager
-from .config import BYPASS_DESKTOP_HINT, PERMISSION_LABELS, ClausterConfig
+from .config import ClausterConfig
 from .db.stores import ApiTokenStore
 from .discovery import (
     is_valid_project_name,
@@ -53,11 +52,10 @@ from .discovery import (
 from .engine import ClausterEngine
 from .hosted import HostedManager
 from .models import (
-    Project,
     RemoteControlInstance,
 )
 from .redact import sanitize_line
-from .routes import agents, instances, transcripts, websockets
+from .routes import agents, dashboard, instances, login, transcripts, websockets
 from .routes import ops as ops_routes
 from .routes import projects as projects_routes
 from .routes import usage as usage_routes
@@ -75,6 +73,10 @@ def _pty_supported() -> bool:
     POSIX always (`pty.openpty`); on Windows only when the ConPTY keeper's `pywinpty` (the
     `pty` extra) is installed — otherwise a `launch_mode: pty` request falls back to Server
     Mode, so the picker shouldn't offer it (#914). Mirrors the runner's launch-time gate.
+
+    The live caller moved to ``routes/projects.py`` with the dashboard row (#1156); this
+    copy is retained as the canonical source the ``routes/*`` duplicates assert against,
+    until the config-write domain also moves and they merge.
     """
     return sys.platform != "win32" or _conpty_keeper_available()
 
@@ -389,90 +391,6 @@ def _csp_with_nonce(nonce: str | None) -> str:
     )
 
 
-class LoginThrottle:
-    """In-process failed-login limiter: a per-key hard lock + a global backoff fallback.
-
-    The per-key window (``max_failures`` within ``window_seconds``) precisely limits a
-    *distinguishable* client — a direct peer IP, or a reverse-proxy-asserted user. But
-    behind a trusted reverse proxy that asserts no user, every login shares the proxy's
-    socket IP, so a per-IP lock would lock **everyone** out (one attacker DoSing all
-    users). For that shared-IP case the caller passes ``shared=True``: the per-key lock
-    is skipped and only the **global backoff** applies — once shared-path failures exceed
-    ``global_ceiling`` in the window, attempts must wait an exponentially-growing interval
-    (surfaced as ``429`` + ``Retry-After``), degrading a flood to a delay rather than a
-    blanket lockout a legitimate user can never get past. The two paths are independent: a
-    shared-proxy flood never 429s a distinguishable direct client, and vice versa.
-
-    In-process only: the counters reset on restart and are **not** shared across workers
-    or replicas. For an internet-exposed deployment a fronting IdP/IAP (or the
-    reverse-proxy auth) is the real control; this is brute-force friction, not an
-    account-security boundary.
-    """
-
-    def __init__(
-        self,
-        max_failures: int = 5,
-        window_seconds: int = 300,
-        *,
-        global_ceiling: int = 20,
-        backoff_cap_seconds: float = 60.0,
-    ) -> None:
-        """Set the per-key threshold/window and the global-backoff ceiling/cap."""
-        self._max = max_failures
-        self._window = window_seconds
-        self._failures: dict[str, list[float]] = {}
-        self._global: list[float] = []
-        self._global_ceiling = global_ceiling
-        self._backoff_cap = backoff_cap_seconds
-
-    def allowed(self, key: str | None, *, shared: bool = False) -> tuple[bool, float]:
-        """Return ``(allowed, retry_after_seconds)`` for a login attempt from ``key``.
-
-        The two paths are independent: a ``shared`` proxy IP is governed only by the
-        global backoff, a distinguishable client only by its per-key window — so a
-        shared-proxy flood never spills over to 429 a direct client (or vice versa).
-        """
-        now = time.monotonic()
-        if shared:
-            # Global backoff: past the ceiling, require an exponentially-growing gap since
-            # the last failure (capped), so a shared-proxy-IP flood can't lock everyone out
-            # but is still throttled to a crawl.
-            self._global = [t for t in self._global if now - t < self._window]
-            over = len(self._global) - self._global_ceiling
-            if over > 0 and self._global:
-                backoff = min(self._backoff_cap, 2.0 ** min(over, 30))
-                wait = backoff - (now - self._global[-1])
-                if wait > 0:
-                    return False, wait
-            return True, 0.0
-        # Per-key hard lock for a distinguishable client.
-        if key:
-            recent = [t for t in self._failures.get(key, []) if now - t < self._window]
-            if recent:
-                self._failures[key] = recent
-            else:
-                # Evict instead of leaving a permanent ``key: []`` — otherwise a
-                # failed-login flood from many distinct IPs leaks one empty entry per IP.
-                self._failures.pop(key, None)
-            if len(recent) >= self._max:
-                return False, float(self._window)
-        return True, 0.0
-
-    def record_failure(self, key: str | None, *, shared: bool = False) -> None:
-        """Record one failed attempt — globally for a shared proxy IP, else per-key."""
-        now = time.monotonic()
-        if shared:
-            self._global = [t for t in self._global if now - t < self._window]
-            self._global.append(now)
-        elif key:
-            self._failures.setdefault(key, []).append(now)
-
-    def reset(self, key: str | None) -> None:
-        """Clear ``key``'s per-key failures (called on a successful login)."""
-        if key is not None:
-            self._failures.pop(key, None)
-
-
 _PKG_DIR = Path(__file__).resolve().parent
 _TEMPLATES_DIR = _PKG_DIR / "templates"
 _STATIC_DIR = _PKG_DIR / "static"
@@ -778,6 +696,14 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     # restart doesn't silently un-revoke. Cached on app.state — single uvicorn
     # worker, so the in-memory value is authoritative.
     app.state.session_epoch = auth.read_epoch(config.state_dir)
+    # Published for the moved login/logout/reauth routes (routes/login.py) to read via
+    # dependencies (#1156). The objects stay built here -- _authenticate (stays) reads the
+    # session serializer, require_elevated (stays) reads the elevation serializer, and both
+    # login and reauth must share the single throttle instance and password hasher.
+    app.state.login_serializer = _serializer
+    app.state.elevation_serializer = _elevation_serializer
+    app.state.password_hasher = _hasher
+    app.state.login_throttle = _throttle
 
     async def _authenticate(scope) -> tuple[str | None, bool, bool]:
         """Return (user, via_proxy, via_token) for the request/connection.
@@ -864,46 +790,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             return request.headers.get("x-forwarded-proto", "").lower() == "https"
         return False
 
-    def _throttle_key(request: Request) -> tuple[str | None, bool]:
-        """Return the login-throttle key and whether it is shared across users."""
-        # Returns (key, shared). Behind a trusted reverse proxy every login shares the
-        # proxy's socket IP, so a per-IP limiter becomes global (one attacker locks
-        # everyone out). Key on the proxy-asserted user instead — but ONLY when the
-        # X-Proxy-Auth HMAC validates that user (the same gate _authenticate uses).
-        # The user_header alone is forgeable by any client that can reach a trusted
-        # IP, so trusting it bare would let an attacker mint a fresh per-key login
-        # budget per fabricated username and evade the limiter entirely. When no
-        # HMAC-verified user is present, fall back to the shared proxy IP: mark it
-        # shared=True so the per-key hard lock is skipped and only the global backoff
-        # applies. In header-only forward-auth mode (#367, require_hmac=False) the
-        # user_header is unsigned and therefore forgeable, so we NEVER key on it — the
-        # `require_hmac` gate below makes a per-user key structurally unreachable in that
-        # mode (verify_proxy_hmac would already fail with no secret, but the explicit gate
-        # is defense-in-depth so a future change to the HMAC helper can't reopen the hole).
-        rp = config.auth.reverse_proxy
-        ip = auth.peer_ip(request)
-        if rp.enabled and auth.peer_trusted(ip, rp.trusted_ips):
-            remote_user = request.headers.get(rp.user_header)
-            if (
-                remote_user
-                and rp.require_hmac
-                and auth.verify_proxy_hmac(
-                    rp.shared_secret,
-                    request.headers.get(rp.shared_secret_header),
-                    remote_user,
-                    request.method,
-                    request.url.path,
-                    rp.hmac_window_seconds,
-                )
-            ):
-                # Namespaced so a proxy user can't collide with a raw IP key. This
-                # value only ever keys the rate limiter, never an HTTP response, so
-                # semgrep's flask format-string-response rule is a false positive
-                # on this non-route helper (bare nosemgrep: the line trips nothing
-                # else, and the precise rule id overflows the line-length limit).
-                return f"proxy-user:{remote_user}", False  # nosemgrep
-            return ip, True  # shared proxy IP — global backoff only, no per-key lockout
-        return ip, False
+    # Published for the moved login/logout/reauth routes (routes/login.py) to read via
+    # dependencies.get_cookie_secure. The closure stays here -- the security_headers
+    # middleware also calls it for the HSTS decision, so the cookie Secure flag and the
+    # HSTS header always agree (#1156).
+    app.state.cookie_secure = _cookie_secure
 
     def _is_public(path: str) -> bool:
         """Return whether ``path`` is reachable without an authenticated session."""
@@ -1057,68 +948,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             headers.setdefault("Strict-Transport-Security", "max-age=31536000")
         return response
 
-    # ----- session routes: login, logout, re-auth ------------------------------------------------
-    @app.get("/login", response_class=HTMLResponse)
-    async def login_form(request: Request) -> Response:
-        """Render the login page, redirecting an already-authenticated caller to the dashboard."""
-        if (await _authenticate(request))[0]:
-            return RedirectResponse(f"{_root}/", status_code=303)
-        return _render(request, "login.html", {"error": None})
-
-    @app.post("/login")
-    async def login_submit(request: Request) -> Response:
-        """Verify the submitted password under the login throttle and open a session."""
-        throttle_key, throttle_shared = _throttle_key(request)
-        allowed, retry_after = _throttle.allowed(throttle_key, shared=throttle_shared)
-        if not allowed:
-            resp = _render(
-                request,
-                "login.html",
-                {"error": "Too many attempts — please try again later."},
-                status_code=429,
-            )
-            resp.headers["Retry-After"] = str(max(1, int(retry_after) + 1))
-            return resp
-        form = await request.form()
-        if auth.verify_password(_hasher, config.auth.password_hash, str(form.get("password", ""))):
-            _throttle.reset(throttle_key)
-            resp = RedirectResponse(f"{_root}/", status_code=303)
-            resp.set_cookie(
-                _SESSION_COOKIE,
-                auth.issue_session(_serializer, _SESSION_USER, app.state.session_epoch),
-                max_age=config.auth.session_max_age_seconds,
-                httponly=True,
-                # SameSite=Lax (deliberate UX trade-off): a top-level cross-site GET carries
-                # the session so a bookmark / inbound link to the dashboard stays logged in.
-                # NOT a CSRF hole — every state-changing request is an unsafe method and is
-                # independently gated by the strict Origin allowlist (`_origin_allowed`); going
-                # Strict would log the user out on every inbound navigation for no real gain.
-                samesite="lax",
-                secure=_cookie_secure(request),
-                path=_root or "/",
-            )
-            return resp
-        _throttle.record_failure(throttle_key, shared=throttle_shared)
-        return _render(request, "login.html", {"error": "Incorrect password."}, status_code=401)
-
-    @app.post("/logout")
-    async def logout(request: Request) -> Response:
-        """Bump the session epoch so every issued cookie is revoked, then send back to login."""
-        # Bump the server-side epoch so the cookie we just dropped — and any
-        # copy of it elsewhere — is actually revoked, not merely cleared client
-        # side. Single-user today, so this is "log out everywhere".
-        # Floor the bump against the in-memory epoch so a transient read error
-        # or corrupt session.epoch can never lower it (which would un-revoke).
-        app.state.session_epoch = await asyncio.to_thread(
-            auth.bump_epoch, config.state_dir, app.state.session_epoch
-        )
-        resp = RedirectResponse(f"{_root}/login", status_code=303)
-        resp.delete_cookie(_SESSION_COOKIE, path=_root or "/")
-        # The epoch bump above already revokes any outstanding elevation token (#978);
-        # clear its cookie too so a stale value doesn't linger in the browser.
-        resp.delete_cookie(_ELEVATION_COOKIE, path=_root or "/")
-        return resp
-
+    # ----- step-up elevation gate for the Tier-B config-write surface ------------------------
+    # The login/logout/reauth routes moved to routes/login.py and the dashboard page to
+    # routes/dashboard.py (#1156); it stays because config-write routes still in app.py use it.
     def require_elevated(request: Request) -> None:
         """Fail-closed step-up gate for the privileged Tier-B config surface (#978).
 
@@ -1142,161 +974,6 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     # dependencies.get_require_elevated. The closure stays here -- it binds the
     # elevation serializer and reads the live app.state.session_epoch (#1156).
     app.state.require_elevated = require_elevated
-
-    @app.post("/api/reauth")
-    async def reauth(request: Request) -> Response:
-        """Re-prove the operator password to unlock the Tier-B "Advanced" surface (#978).
-
-        Step-up authentication: the caller is already logged in, but privileged
-        config writes require a fresh password proof. On success, set a short-lived
-        elevation cookie (``_ELEVATION_MAX_AGE_SECONDS``). Shares the login throttle
-        so it can't be brute-forced, and — like login — verifies against a dummy
-        hash when no password is set, so "no password configured" isn't a timing
-        oracle and reauth simply never succeeds (Tier-B stays locked).
-        """
-        throttle_key, throttle_shared = _throttle_key(request)
-        allowed, retry_after = _throttle.allowed(throttle_key, shared=throttle_shared)
-        if not allowed:
-            resp = JSONResponse({"detail": "too many attempts"}, status_code=429)
-            resp.headers["Retry-After"] = str(max(1, int(retry_after) + 1))
-            return resp
-        try:
-            body = await request.json()
-        except (ValueError, TypeError):
-            body = {}
-        password = str(body.get("password", "")) if isinstance(body, dict) else ""
-        if auth.verify_password(_hasher, config.auth.password_hash, password):
-            _throttle.reset(throttle_key)
-            resp = JSONResponse({"elevated": True, "expires_in": _ELEVATION_MAX_AGE_SECONDS})
-            resp.set_cookie(
-                _ELEVATION_COOKIE,
-                auth.issue_elevation(
-                    _elevation_serializer, _SESSION_USER, app.state.session_epoch
-                ),
-                max_age=_ELEVATION_MAX_AGE_SECONDS,
-                httponly=True,
-                samesite="lax",
-                secure=_cookie_secure(request),
-                path=_root or "/",
-            )
-            return resp
-        _throttle.record_failure(throttle_key, shared=throttle_shared)
-        return JSONResponse({"detail": "incorrect password"}, status_code=401)
-
-    async def list_projects() -> list[Project]:
-        """Return the discovered projects through the same facade the CLI uses."""
-        # Shared facade (#775): the CLI and this route go through the same
-        # discover-then-stamp-bypass path, so the two can't drift.
-        return await asyncio.to_thread(engine.list_projects)
-
-    # ----- login status (the ops/environments/app-config routes are in routes/ops.py, #1156) -----
-    @app.get("/api/login-status")
-    async def api_login_status() -> dict:
-        """Return the cached claude-login state for the dashboard badge (#838).
-
-        A deliberately lightweight companion to ``/healthz``: it returns ONLY the
-        three login fields, read straight from the stale-while-revalidate cache
-        (``read()`` returns immediately; the background thread does the actual
-        ``claude auth status`` probe ≤ once per TTL). Unlike ``/healthz`` it never
-        runs ``claude --version`` — so the badge's own poll can hit this every few
-        seconds across many tabs without ever spawning a subprocess on the request
-        path. ``/healthz`` keeps its login fields for external health consumers; this
-        is an additional path for the badge, not a replacement. Auth-gated by the
-        guard middleware like every other ``/api/*`` route.
-        """
-        login = app.state.login_status_cache.read()
-        return {
-            "claude_login_ok": login.logged_in,
-            "claude_login_method": login.method,
-            "claude_login_expires_at": login.expires_at_ms,
-        }
-
-    # ----- login shepherd (#839): dashboard-driven `claude auth login` --------------
-
-    def _require_login_shepherd(mode: object = None) -> None:
-        """Raise 404 unless the shepherd — and, for setup-token, its own opt-in — is enabled."""
-        # Fail-closed invisible-surface gate, same shape as the reaper UI and
-        # config-write: off by default, 404s (not 403) when disabled so a disabled
-        # deployment exposes nothing about the feature's existence.
-        #
-        # `mode` is an optional second check (#846), mirroring config_write's
-        # enabled/allow_user_scope pattern: `setup-token` mints a long-lived
-        # CLAUDE_CODE_OAUTH_TOKEN the operator copies out of the browser, so it
-        # requires BOTH the base `enabled` flag AND the independent
-        # `allow_setup_token` opt-in. When `allow_setup_token` is off, a
-        # `setup-token` request 404s with the SAME detail as the base gate —
-        # invisible-surface, never a distinct 403 that would leak that the mode
-        # exists but is disabled. Runs BEFORE the caller's own body/enum
-        # validation (same ordering `config_write.require_capability` uses), so a
-        # disabled mode 404s even alongside a malformed request. `login` and the
-        # `code`/`status`/`cancel` routes (which call this with no `mode`) need
-        # only the base gate.
-        if not config.login_shepherd.enabled:
-            raise HTTPException(status_code=404, detail="login shepherd is disabled")
-        if mode == "setup-token" and not config.login_shepherd.allow_setup_token:
-            raise HTTPException(status_code=404, detail="login shepherd is disabled")
-
-    @app.post("/api/login-shepherd/start")
-    async def api_login_shepherd_start(body: dict) -> dict:
-        """Start a `claude` login or setup-token flow; 409 when one is already active."""
-        mode = body.get("mode")
-        _require_login_shepherd(mode)
-        if mode not in ("login", "setup-token"):
-            raise HTTPException(status_code=422, detail="mode must be 'login' or 'setup-token'")
-        try:
-            return await asyncio.to_thread(app.state.login_shepherd.start, mode)
-        except login_shepherd.AlreadyActiveError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except login_shepherd.LoginShepherdError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    @app.post("/api/login-shepherd/code")
-    async def api_login_shepherd_code(body: dict) -> dict:
-        """Submit the operator's pasted OAuth code to the active login flow."""
-        _require_login_shepherd()
-        code = body.get("code")
-        if not isinstance(code, str) or not code.strip():
-            raise HTTPException(status_code=422, detail="code must be a non-empty string")
-        try:
-            return await asyncio.to_thread(app.state.login_shepherd.submit_code, code.strip())
-        except login_shepherd.NotActiveError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-    @app.post("/api/login-shepherd/status")
-    async def api_login_shepherd_status() -> dict:
-        """Poll the active flow's outcome, reaping it once it reaches a terminal result."""
-        # Poll the eventual outcome after a `pending: true` submit (a slow verification):
-        # same shape — `pending: true` while still running, else the terminal result. 409
-        # once the flow is gone — the client's cue to stop polling.
-        _require_login_shepherd()
-        try:
-            return await asyncio.to_thread(app.state.login_shepherd.poll)
-        except login_shepherd.NotActiveError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-    @app.get("/api/login-shepherd/state")
-    async def api_login_shepherd_state() -> dict:
-        """Report whether a flow is open, so the UI can rehydrate after a page reload."""
-        # Rehydration read (#1078): the dashboard's login state is per-page-load, so after a
-        # reload the client no longer knows a flow is open and never renders Cancel — while
-        # the server still refuses /start with 409. This lets the component recover that view
-        # on init. Unlike /status it is a GET and never reaps: it cannot race the polling
-        # client for a one-time setup-token result. `{"active": false}` when idle — a 200,
-        # not a 409, because "no flow" is the expected answer here rather than an error.
-        # Behind the same fail-closed gate as every other route in this group.
-        #
-        # Off-loaded like its siblings even though it only reads a dict: `state()` takes
-        # `_flow_lock`, which `start()` holds across a subprocess spawn, so an inline call
-        # could park the event loop behind that spawn.
-        _require_login_shepherd()
-        return await asyncio.to_thread(app.state.login_shepherd.state)
-
-    @app.post("/api/login-shepherd/cancel")
-    async def api_login_shepherd_cancel() -> dict:
-        """Cancel the active login flow, if one is running."""
-        _require_login_shepherd()
-        await asyncio.to_thread(app.state.login_shepherd.cancel)
-        return {"ok": True}
 
     # ----- config-write (Tier-B): MCP, permissions, hooks, CLAUDE.md, subagents, -----------------
     # -----   skills, settings, plugins, marketplaces ---------------------------------------------
@@ -3135,93 +2812,6 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             result["project"] = project
         return result
 
-    async def _dashboard_context() -> dict:
-        """Build the shared template context for the dashboard."""
-        projects = await list_projects()
-        return {
-            "projects": projects,
-            "version": __version__,
-            "projects_root": str(config.projects_root),
-            "auth_enabled": config.auth.enabled,
-            # Whether a PASSWORD is configured — the real prerequisite for the Advanced
-            # step-up (#978). auth.enabled can be true with no password (reverse-proxy /
-            # API-token-only auth), where /api/reauth can never accept a password; gate the
-            # unlock form on this, not on auth_enabled.
-            "auth_password_set": config.auth.password_hash is not None,
-            "reaper_ui_enabled": config.reaper.ui_enabled,
-            "default_spawn_mode": config.instance_defaults.spawn_mode,
-            "default_permission_mode": config.instance_defaults.permission_mode,
-            "default_resume_mode": config.claude.launch_mode,
-            # Canonical permission-mode label map (#685): one server-injected source
-            # of truth ({mode: {short, long, effect}}) drives the launch <select>, the
-            # JS permLabel()/permissionEffect() helpers, and the config editor.
-            "permission_labels": PERMISSION_LABELS,
-            "bypass_desktop_hint": BYPASS_DESKTOP_HINT,
-            # Recognized hook lifecycle events (#958 Part 5): the single server-injected
-            # source of truth for the config editor's Hooks rows <select>, sorted for a
-            # stable order and derived from the backend validator so the two never drift.
-            "hook_events": sorted(config_write_hooks.RECOGNIZED_EVENTS),
-            # Interactive Session (true-resume pty) works on POSIX always and on Windows
-            # via the ConPTY keeper when the `pty` extra (pywinpty) is installed (#914).
-            "pty_supported": _pty_supported(),
-            # Usage badge: mode ("cost"|"tokens"|"off"), the currency code + its
-            # resolved symbol, the static USD->display multiplier, and whether
-            # cache tokens count toward the displayed token total. mode "off"
-            # hides the badge and skips the per-project /usage fetch.
-            "usage_mode": config.usage.mode,
-            "currency": config.usage.currency,
-            "currency_symbol": config.usage.effective_symbol,
-            "fx_rate": config.usage.fx_rate,
-            "token_total_includes_cache": config.usage.token_total_includes_cache,
-            # Live per-bridge metrics: master toggle, disk-part toggle, poll cadence.
-            "metrics_enabled": config.metrics.enabled,
-            "metrics_show_disk": config.metrics.show_disk,
-            "metrics_poll_ms": int(config.metrics.poll_seconds * 1000),
-            # Hosted channel (CL-4c): the live-view panel only renders when the
-            # claustrum daemon is configured; otherwise there's nothing to host.
-            "claustrum_enabled": config.claustrum.enabled,
-            # Live pty-screen view (#534): the per-bridge "Live terminal" button only
-            # renders when the (default-off) tap is enabled; it streams /ws/pty-screen.
-            "pty_screen_enabled": config.claude.pty_screen_enabled,
-            # Optional `pty` extra presence (#904): pyte backs the live-terminal render
-            # and is NOT bundled in the signed binary (LGPL). Detected separately from the
-            # config tap so the control can render enabled-but-greyed with an install hint
-            # when the operator turned the tap on without the extra — no silent no-op.
-            "pty_extra_present": deps.probe(deps.by_key("pyte")),
-            "pty_extra_hint": deps.install_hint(deps.by_key("pyte")),
-            # The hint is always a runnable command now (#904 slice 2b): `pip install
-            # 'clauster[pty]'` off the binary, `clauster deps install pty` on it (pip is bundled).
-            # The template prepends "run" for both, so the greyed control names a real command.
-            "pty_extra_is_command": True,
-            # Browser (Web Notifications) channel (#541): the master switch plus the
-            # per-event toggles the client honours when a polled instance transitions.
-            # The client requests Notification permission only when the channel is on.
-            "browser_notifications_enabled": config.notifications.browser_enabled,
-            "browser_notify_on_crash": config.notifications.notify_on_crash,
-            "browser_notify_on_ready": config.notifications.notify_on_ready,
-            "browser_notify_on_stop": config.notifications.notify_on_stop,
-            # Config-management surface (#773): the navbar trigger + its modal render
-            # only when config-write is enabled — the same invisible-surface invariant
-            # the /api/config-write/* routes enforce (404 when off). allow_user_scope
-            # gates whether the User scope option is offered at all.
-            "config_write_enabled": config.config_write.enabled,
-            "config_write_allow_user_scope": config.config_write.allow_user_scope,
-            # Login shepherd (#839): the maintenance-zone panel only renders when
-            # explicitly enabled — same invisible-surface invariant as the reaper UI
-            # and config-write (the /api/login-shepherd/* routes 404 when off too).
-            # allow_setup_token (#846) is the second, independent opt-in that gates
-            # whether the higher-risk "Create a long-lived token" mode is offered at
-            # all — when off, only the `login` (subscription sign-in) mode renders.
-            "login_shepherd_enabled": config.login_shepherd.enabled,
-            "login_shepherd_allow_setup_token": config.login_shepherd.allow_setup_token,
-        }
-
-    # ----- the dashboard page itself -------------------------------------------------------------
-    @app.get("/", response_class=HTMLResponse)
-    async def dashboard(request: Request) -> Response:
-        """Render the dashboard page."""
-        return _render(request, "dashboard.html", await _dashboard_context())
-
     # Domain routers split out of create_app (#1156). Registered before the v1
     # mirror below so their /api/... routes exist when the mirror walks the table.
     app.include_router(projects_routes.router)
@@ -3231,6 +2821,8 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     app.include_router(instances.router)
     app.include_router(ops_routes.router)
     app.include_router(websockets.router)
+    app.include_router(login.router)
+    app.include_router(dashboard.router)
 
     # Must run LAST: every /api/... route the public v1 surface aliases has to
     # already be registered above (#302).

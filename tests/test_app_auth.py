@@ -8,7 +8,8 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from clauster import auth
-from clauster.app import LoginThrottle, create_app
+from clauster.app import create_app
+from clauster.auth import LoginThrottle
 from clauster.models import InstanceStatus, RemoteControlInstance
 from clauster.runner import SessionRunner
 from test_auth import _proxy_header  # reuse the HMAC header builder
