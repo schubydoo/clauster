@@ -957,8 +957,8 @@ def test_bypass_option_shown_with_ceiling(write_config):
 # ----- shared bypass-ceiling predicate (one decision for every channel) -------
 #
 # #351: the "bypassPermissions requires the per-project ceiling" decision used to be
-# hand-rolled in three places (runner._validate_spawn_options, app._enforce_bypass_ceiling
-# called from the hosted and background-agent routes). They now all call the single
+# hand-rolled in three places (runner._validate_spawn_options and a per-route ceiling
+# check on the hosted and background-agent routes). They now all call the single
 # ClausterConfig.bypass_denied predicate, each keeping its own exception type. These tests
 # lock that decision down directly AND across every spawn entry point, so a new channel
 # (or a default-mode change) cannot diverge from the ceiling through a stale copy.
@@ -1005,7 +1005,7 @@ def test_bypass_denied_unknown_project_denies_bypass(projects_root):
 #
 #   bridge     -> POST /api/instances (default channel)        runner._validate_spawn_options
 #   hosted     -> POST /api/instances {channel: hosted}        app._enforce_bypass_ceiling
-#   background -> POST /api/agents                              app._enforce_bypass_ceiling
+#   background -> POST /api/agents                    routes.agents._enforce_bypass_ceiling
 #
 # These exercise only the REJECT paths, which short-circuit in validation before any process
 # is spawned (the module-docstring contract for app-level tests), so they never touch a real
