@@ -1504,6 +1504,18 @@ class ClausterConfig(BaseModel):
         """
         return permission_mode == "bypassPermissions" and not self.allows_bypass(project_name)
 
+    @staticmethod
+    def bypass_denied_detail(project_name: str) -> str:
+        """Return the operator-facing 403 detail for a denied bypassPermissions request.
+
+        One source for the wording every out-of-runner channel returns (the hosted
+        and background-agent 403s), so the two cannot drift apart.
+        """
+        return (
+            f"bypassPermissions is not enabled for project {project_name!r}. Set "
+            "projects.<name>.allow_bypass_permissions: true in clauster.yml first."
+        )
+
     @field_validator("log_level", mode="before")
     @classmethod
     def _normalize_log_level(cls, v: object) -> object:
