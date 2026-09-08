@@ -1,4 +1,4 @@
-"""Unit tests for ``app.stream_until_disconnect`` (the ghost-WS-task guard).
+"""Unit tests for ``routes.websockets.stream_until_disconnect`` (the ghost-WS-task guard).
 
 A send-only WebSocket handler blocked on an idle event source never observes the
 client's disconnect: the ASGI task lives forever, leaking its subscription and
@@ -14,7 +14,7 @@ import asyncio
 
 import pytest
 
-from clauster.app import stream_until_disconnect
+from clauster.routes.websockets import stream_until_disconnect
 
 
 class _FakeWS:
@@ -100,3 +100,17 @@ async def test_client_chatter_is_ignored_until_disconnect():
     assert sent == [1, 2]  # the stream kept running through the chatter
     ws.push({"type": "websocket.disconnect", "code": 1000})
     await asyncio.wait_for(task, timeout=1.0)
+
+
+def test_ws_route_set_is_pinned():
+    # A new WS route (or a dropped gate on one) must not slip in unnoticed: the
+    # auth/Origin gate parity pins in test_app_auth.py cover exactly these four paths,
+    # so a fifth route added without updating them would otherwise go ungated (#1156).
+    from clauster.routes.websockets import router
+
+    assert {r.path for r in router.routes} == {
+        "/ws/bridge-log/{instance_id}",
+        "/ws/hosted/{instance_id}",
+        "/ws/clone-progress/{job_id}",
+        "/ws/pty-screen/{instance_id}",
+    }

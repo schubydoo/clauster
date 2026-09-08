@@ -135,6 +135,7 @@ component_management:
         - src/clauster/routes/projects.py
         - src/clauster/routes/transcripts.py
         - src/clauster/routes/usage.py
+        - src/clauster/routes/websockets.py
         - src/clauster/auth.py
         - src/clauster/logstream.py
         - src/clauster/usage.py

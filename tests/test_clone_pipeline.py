@@ -445,7 +445,7 @@ def test_clone_ws_abrupt_disconnect_still_unsubscribes(write_config, tmp_path, m
 
     monkeypatch.setattr("clauster.routes.projects.clone_project", fake_clone)
     monkeypatch.setattr("clauster.routes.projects.validate_clone_url", lambda url, cfg: None)
-    monkeypatch.setattr("clauster.app.stream_until_disconnect", _abrupt)
+    monkeypatch.setattr("clauster.routes.websockets.stream_until_disconnect", _abrupt)
 
     with _client(write_config, tmp_path) as client:
         resp = client.post(

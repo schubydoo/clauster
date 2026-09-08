@@ -97,7 +97,7 @@ def test_ws_log_stream_abrupt_disconnect_is_swallowed(runner_config, tmp_path: P
     async def _abrupt(websocket, stream):
         raise starlette.websockets.WebSocketDisconnect(1006)
 
-    monkeypatch.setattr("clauster.app.stream_until_disconnect", _abrupt)
+    monkeypatch.setattr("clauster.routes.websockets.stream_until_disconnect", _abrupt)
     with _client_with(runner_config, inst) as client:
         with client.websocket_connect("/ws/bridge-log/alpha"):
             pass  # the handler hit the disconnect arm; no server error escaped

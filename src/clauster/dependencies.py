@@ -172,6 +172,18 @@ def get_require_elevated(conn: HTTPConnection) -> Callable[[Request], None]:
     return conn.app.state.require_elevated
 
 
+def get_allowed_origins(conn: HTTPConnection) -> set[str]:
+    """Return the built Origin allowlist ``create_app`` published on ``app.state``.
+
+    ``create_app`` computes it once from the auth config via
+    :func:`clauster.auth.build_allowed_origins` and publishes it, so a moved WebSocket
+    gate reads the exact same set the in-app HTTP CSRF gate does -- one source of truth,
+    computed once at build. A plain read like :func:`get_config`: the set is always
+    present in a wired app (empty when nothing is allowlisted, never absent).
+    """
+    return conn.app.state.allowed_origins
+
+
 ConfigDep = Annotated[ClausterConfig, Depends(get_config)]
 HostedDep = Annotated[HostedManager, Depends(get_hosted)]
 RunnerDep = Annotated[SessionRunner, Depends(get_runner)]
@@ -186,3 +198,4 @@ AuthenticateDep = Annotated[
     Depends(get_authenticate),
 ]
 RequireElevatedDep = Annotated[Callable[[Request], None], Depends(get_require_elevated)]
+AllowedOriginsDep = Annotated[set[str], Depends(get_allowed_origins)]
