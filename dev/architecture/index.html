@@ -1576,8 +1576,8 @@
 <h1 id="architecture">Architecture<a class="headerlink" href="#architecture" title="Permanent link">&para;</a></h1>
 <p>Clauster is a FastAPI app whose app factory lives in <code>app.py</code>; the entry point is
 <code>clauster.__main__:main</code> (<code>clauster run</code>). Route handlers are being split by domain
-into <code>routes/*.py</code> <code>APIRouter</code> modules that read their collaborators through the
-typed accessors in <code>dependencies.py</code>. It renders an Alpine.js + Jinja2 +
+into <code>routes/</code> <code>APIRouter</code> modules and subpackages that read their collaborators
+through the typed accessors in <code>dependencies.py</code>. It renders an Alpine.js + Jinja2 +
 Tabler UI from <code>templates/</code> (with <code>jinja2-fragments</code>) and <code>static/</code>.</p>
 <h2 id="module-map">Module map<a class="headerlink" href="#module-map" title="Permanent link">&para;</a></h2>
 <p>Key modules under <code>src/clauster/</code>:</p>
@@ -1599,7 +1599,7 @@ Tabler UI from <code>templates/</code> (with <code>jinja2-fragments</code>) and 
 </tr>
 <tr>
 <td><code>routes/</code></td>
-<td>Per-domain <code>APIRouter</code> modules split from <code>create_app</code> (#1156).</td>
+<td>Per-domain <code>APIRouter</code> modules (and subpackages, e.g. <code>routes/config_write/</code>) split from <code>create_app</code> (#1156).</td>
 </tr>
 <tr>
 <td><code>__main__.py</code></td>
