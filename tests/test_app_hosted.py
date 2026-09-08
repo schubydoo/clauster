@@ -194,7 +194,7 @@ def _app(write_config, *, manager: _StubManager | None = None, daemon: _StubDaem
 
 def test_spawn_hosted_dispatches_to_manager(write_config, projects_root, monkeypatch):
     monkeypatch.setattr(instances_module, "is_trusted", lambda *a, **k: True)
-    monkeypatch.setattr(app_module.claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
+    monkeypatch.setattr(claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
     manager = _StubManager()
     app = _app(write_config, manager=manager, daemon=_StubDaemon())
     with TestClient(app) as client:
@@ -610,7 +610,7 @@ def test_permission_unparked_request_is_409(write_config, projects_root):
 
 def test_resume_routes_hosted_to_manager(write_config, projects_root, monkeypatch):
     monkeypatch.setattr(instances_module, "is_trusted", lambda *a, **k: True)
-    monkeypatch.setattr(app_module.claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
+    monkeypatch.setattr(claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
     manager = _StubManager()
     manager.seed()
     app = _app(write_config, manager=manager, daemon=_StubDaemon())
@@ -635,7 +635,7 @@ def test_resume_hosted_without_daemon_is_503(write_config, projects_root):
 
 def test_resume_hosted_session_error_is_409(write_config, projects_root, monkeypatch):
     monkeypatch.setattr(instances_module, "is_trusted", lambda *a, **k: True)
-    monkeypatch.setattr(app_module.claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
+    monkeypatch.setattr(claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
     manager = _StubManager()
     manager.seed()
     manager.resume_error = HostedSessionError("no captured session uuid to resume from")
@@ -656,7 +656,7 @@ def test_resume_hosted_with_a_degraded_project_is_409_not_404(
     # caller. The dashboard hides Resume on the same condition, so this is the API contract
     # for a client that asks anyway.
     monkeypatch.setattr(instances_module, "is_trusted", lambda *a, **k: True)
-    monkeypatch.setattr(app_module.claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
+    monkeypatch.setattr(claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
     manager = _StubManager()
     manager.seed().project = ""  # what `_degraded_row` leaves behind
     app = _app(write_config, manager=manager, daemon=_StubDaemon())
@@ -670,7 +670,7 @@ def test_resume_hosted_with_a_degraded_project_is_409_not_404(
 
 def test_resume_hosted_daemon_error_is_502(write_config, projects_root, monkeypatch):
     monkeypatch.setattr(instances_module, "is_trusted", lambda *a, **k: True)
-    monkeypatch.setattr(app_module.claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
+    monkeypatch.setattr(claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
     manager = _StubManager()
     manager.seed()
     manager.resume_error = ClaustrumError("daemon went away")
@@ -750,7 +750,7 @@ def test_spawn_hosted_binary_missing_is_503(write_config, projects_root, monkeyp
     def _missing(_binary):
         raise claude_cli.ClaudeNotFound("claude not found on PATH")
 
-    monkeypatch.setattr(app_module.claude_cli, "resolve_binary", _missing)
+    monkeypatch.setattr(claude_cli, "resolve_binary", _missing)
     app = _app(write_config, daemon=_StubDaemon())
     with TestClient(app) as client:
         r = client.post("/api/instances", json={"project": "alpha", "channel": "hosted"})
@@ -759,7 +759,7 @@ def test_spawn_hosted_binary_missing_is_503(write_config, projects_root, monkeyp
 
 def test_spawn_hosted_daemon_error_is_502(write_config, projects_root, monkeypatch):
     monkeypatch.setattr(instances_module, "is_trusted", lambda *a, **k: True)
-    monkeypatch.setattr(app_module.claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
+    monkeypatch.setattr(claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
     manager = _StubManager()
     manager.spawn_error = ClaustrumError("daemon went away")
     app = _app(write_config, manager=manager, daemon=_StubDaemon())
@@ -776,7 +776,7 @@ def test_spawn_hosted_session_error_is_409_not_a_daemon_502(
     # down and sends the operator to the wrong place. `build_hosted_argv` raising on a
     # refused resume session id (#1392) is a second way `start()` can produce this class.
     monkeypatch.setattr(instances_module, "is_trusted", lambda *a, **k: True)
-    monkeypatch.setattr(app_module.claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
+    monkeypatch.setattr(claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
     manager = _StubManager()
     manager.spawn_error = HostedSessionError("refusing an unusable resume session id: int")
     app = _app(write_config, manager=manager, daemon=_StubDaemon())
@@ -934,7 +934,7 @@ class _RaisingDaemon(_LiveFakeDaemon):
 def _live_app(write_config, monkeypatch, tmp_path, *, daemon_cls=_LiveFakeDaemon):
     monkeypatch.setattr(app_module, "ClaustrumDaemon", daemon_cls)
     monkeypatch.setattr(instances_module, "is_trusted", lambda *a, **k: True)
-    monkeypatch.setattr(app_module.claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
+    monkeypatch.setattr(claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
     # Pin state_dir to the test tmp dir — the default is the SHARED ~/.clauster, and a
     # real HostedManager would read/persist hosted_state.json there, leaking state
     # across tests (and touching the live account's state dir). Isolate it.

@@ -372,6 +372,16 @@ def test_projects_route_duplicates_match_app():
     assert projects_routes._pty_supported() == app_mod._pty_supported()
 
 
+def test_ops_route_duplicate_matches_app():
+    # routes/ops.py duplicates _SESSION_USER too -- the actor recorded on every Tier-B
+    # config-write audit line. Guard against drift with the app.py copy until the
+    # config-write domain moves and the copies merge (#1156).
+    from clauster import app as app_mod
+    from clauster.routes import ops as ops_routes
+
+    assert ops_routes._SESSION_USER == app_mod._SESSION_USER
+
+
 def test_card_reflects_project_shape(write_config, tmp_path):
     # Per-project Jinja conditionals render: the CLAUDE.md meta indicator only
     # appears where a CLAUDE.md is present; the Git meta indicator only appears for

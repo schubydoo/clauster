@@ -25,13 +25,16 @@ from clauster.dependencies import (
     ConfigDep,
     HostedDep,
     RunnerDep,
+    get_authenticate,
     get_claustrum_daemon,
     get_clone_jobs,
     get_clone_tasks,
     get_config,
     get_engine,
     get_hosted,
+    get_login_status_cache,
     get_render,
+    get_require_elevated,
     get_runner,
 )
 
@@ -126,3 +129,8 @@ def test_accessors_read_the_real_create_app_state(write_config):
     assert get_claustrum_daemon(conn) is app.state.claustrum_daemon
     # get_render returns the closure create_app published, not an app.state-typed object.
     assert get_render(conn) is app.state.render
+    # #1156 ops domain: the login-status cache and the two published closures
+    # (_authenticate, require_elevated) the moved /healthz + Tier-B routes read.
+    assert get_login_status_cache(conn) is app.state.login_status_cache
+    assert get_authenticate(conn) is app.state.authenticate
+    assert get_require_elevated(conn) is app.state.require_elevated
