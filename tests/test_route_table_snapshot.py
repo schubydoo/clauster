@@ -36,7 +36,7 @@ from pathlib import Path
 from fastapi.routing import APIRoute
 from starlette.routing import Mount, WebSocketRoute
 
-from clauster.app import _UI_ONLY_ROUTES, create_app
+from clauster.app import _UI_ONLY_ROUTES, _iter_api_routes, create_app
 from clauster.config import load_config
 
 _SNAPSHOT = Path(__file__).parent / "route_table_snapshot.json"
@@ -45,17 +45,28 @@ _UPDATE = os.environ.get("CLAUSTER_UPDATE_ROUTE_SNAPSHOT") == "1"
 
 def _route_rows(app) -> list[tuple[tuple[str, ...], str]]:
     rows: list[tuple[tuple[str, ...], str]] = []
-    for route in app.router.routes:
-        if isinstance(route, APIRoute):
-            rows.append((tuple(sorted((route.methods or set()) - {"HEAD"})), route.path))
-        elif isinstance(route, WebSocketRoute):
-            rows.append((("WS",), route.path))
-        elif isinstance(route, Mount):
-            rows.append((("MOUNT",), route.path))
-        else:
-            # Fail loudly on an unrecognized route class (e.g. a plain starlette
-            # Route from app.add_route) rather than dropping it from the guard.
-            rows.append((("UNKNOWN:" + type(route).__name__,), getattr(route, "path", "?")))
+
+    def _walk(routes) -> None:
+        for route in routes:
+            if isinstance(route, APIRoute):
+                rows.append((tuple(sorted((route.methods or set()) - {"HEAD"})), route.path))
+            elif isinstance(route, WebSocketRoute):
+                rows.append((("WS",), route.path))
+            elif isinstance(route, Mount):
+                rows.append((("MOUNT",), route.path))
+            elif getattr(route, "original_router", None) is not None:
+                # FastAPI 0.141 includes a router lazily as an _IncludedRouter wrapper
+                # (#1156); descend into its real routes so a moved route still counts.
+                # No prefix guard here (unlike app._iter_api_routes): _mirror_v1_routes
+                # runs that guard during create_app, so a prefixed include fails at build
+                # before this walk ever sees the app.
+                _walk(route.original_router.routes)
+            else:
+                # Fail loudly on an unrecognized route class (e.g. a plain starlette
+                # Route from app.add_route) rather than dropping it from the guard.
+                rows.append((("UNKNOWN:" + type(route).__name__,), getattr(route, "path", "?")))
+
+    _walk(app.router.routes)
     return rows
 
 
@@ -81,8 +92,7 @@ def test_ui_only_routes_all_resolve(write_config):
     app = create_app(load_config(write_config()))
     registered = {
         (method, route.path)
-        for route in app.router.routes
-        if isinstance(route, APIRoute)
+        for route in _iter_api_routes(app.router.routes)
         for method in (route.methods or set())
     }
     missing = sorted(entry for entry in _UI_ONLY_ROUTES if entry not in registered)

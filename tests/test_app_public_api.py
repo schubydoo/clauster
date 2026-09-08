@@ -42,6 +42,56 @@ def test_mirror_v1_routes_reuses_the_same_endpoint_object():
     assert v1_routes[0].endpoint is get_thing  # same callable, not a copy
 
 
+def test_mirror_v1_routes_finds_a_route_inside_an_included_router():
+    # FastAPI 0.141 includes a router lazily as an _IncludedRouter wrapper (#1156), so
+    # the route is not flattened onto app.router.routes. _mirror_v1_routes must descend
+    # into it, or a v1 target moved into a routes/*.py module would fail the build even
+    # though the route is live. Guards the app.py -> routes/ split pattern.
+    from fastapi import APIRouter
+
+    app = FastAPI()
+    router = APIRouter()
+
+    @router.get("/api/thing")
+    async def get_thing() -> dict:
+        return {"ok": True}
+
+    app.include_router(router)
+    # Guarantee we are actually exercising the wrapper descent on the pinned FastAPI,
+    # not the plain isinstance branch a pre-0.141 flattening include would take.
+    assert any(getattr(r, "original_router", None) is not None for r in app.router.routes), (
+        "FastAPI flattened the include; this test no longer covers the wrapper descent"
+    )
+    _mirror_v1_routes(app, frozenset({("GET", "/api/thing")}))
+    v1_routes = [r for r in app.router.routes if getattr(r, "path", None) == "/api/v1/thing"]
+    assert len(v1_routes) == 1
+    assert v1_routes[0].endpoint is get_thing  # same callable, reached through the wrapper
+
+
+def test_iter_api_routes_rejects_a_prefixed_include():
+    # The refactor convention is full paths + no include prefix, so route.path is the
+    # served URL (#1156). A prefixed include would map a wrong path silently, so the
+    # walk must fail loudly instead.
+    from fastapi import APIRouter
+
+    from clauster.app import _iter_api_routes
+
+    app = FastAPI()
+    router = APIRouter()
+
+    @router.get("/thing")
+    async def get_thing() -> dict:  # pragma: no cover - never called
+        return {"ok": True}
+
+    app.include_router(router, prefix="/api")
+    if not any(getattr(r, "original_router", None) is not None for r in app.router.routes):
+        # Pre-0.141 FastAPI flattens the include; the guard only applies to the lazy
+        # wrapper, and a flattened prefixed route already carries the full path.
+        pytest.skip("FastAPI flattened the include")  # pragma: no cover
+    with pytest.raises(RuntimeError, match=r"declare full paths"):
+        list(_iter_api_routes(app.router.routes))
+
+
 def test_mirror_v1_routes_raises_when_a_target_is_missing():
     app = FastAPI()
 

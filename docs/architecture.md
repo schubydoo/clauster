@@ -1,7 +1,9 @@
 # Architecture
 
 Clauster is a FastAPI app whose app factory lives in `app.py`; the entry point is
-`clauster.__main__:main` (`clauster run`). It renders an Alpine.js + Jinja2 +
+`clauster.__main__:main` (`clauster run`). Route handlers are being split by domain
+into `routes/*.py` `APIRouter` modules that read their collaborators through the
+typed accessors in `dependencies.py`. It renders an Alpine.js + Jinja2 +
 Tabler UI from `templates/` (with `jinja2-fragments`) and `static/`.
 
 ## Module map
@@ -10,7 +12,9 @@ Key modules under `src/clauster/`:
 
 | Module | Responsibility |
 | --- | --- |
-| `app.py` | FastAPI app factory; routes, middleware, cookie/session/WS wiring. |
+| `app.py` | FastAPI app factory; middleware, cookie/session/WS wiring, and the routes not yet split out. |
+| `dependencies.py` | Typed `app.state` accessors (`RunnerDep`, `ConfigDep`, `HostedDep`) for handlers moved into routers. |
+| `routes/` | Per-domain `APIRouter` modules split from `create_app` (#1156). |
 | `__main__.py` | CLI entry point and subcommands (`run`, `hash-password`, `hash-token`, `hash-metrics-token`, `api-token` (`issue`/`list`/`rotate`/`revoke`), `mcp`, `doctor`, `backup`/`restore`/`migrate`, `install-service`, `reap-environments`, `keepers`, `usage`, `config` (with `config reconcile`), `deps` (`list`/`install`/`uninstall` optional extras), and the headless session commands `start`/`stop`/`status`/`sessions`/`projects`/`logs`/`open`). |
 | `runner.py` | `SessionRunner` — spawn / stop / observe **standard** `claude remote-control` bridges. |
 | `pty_keeper.py` | Sidecar that owns a true-resume (**pty**) bridge's PTY. |

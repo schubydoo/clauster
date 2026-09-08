@@ -21,7 +21,14 @@ from starlette.requests import HTTPConnection
 
 from clauster.app import create_app
 from clauster.config import load_config
-from clauster.dependencies import ConfigDep, RunnerDep, get_config, get_runner
+from clauster.dependencies import (
+    ConfigDep,
+    HostedDep,
+    RunnerDep,
+    get_config,
+    get_hosted,
+    get_runner,
+)
 
 
 class _Marker:
@@ -88,8 +95,21 @@ def test_runner_dep_fails_closed_when_runner_attribute_is_absent():
     assert TestClient(app).get("/needs-runner").status_code == 404
 
 
+def test_hosted_dep_fails_closed_when_hosted_is_absent():
+    app = FastAPI()  # never sets app.state.hosted at all
+
+    @app.get("/needs-hosted")
+    def needs_hosted(hosted: HostedDep) -> dict:
+        return {"unreachable": True}
+
+    resp = TestClient(app).get("/needs-hosted")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "hosted channel unavailable"
+
+
 def test_accessors_read_the_real_create_app_state(write_config):
     app = create_app(load_config(write_config()))
     conn = cast(HTTPConnection, _ConnShim(app))
     assert get_config(conn) is app.state.config
     assert get_runner(conn) is app.state.runner
+    assert get_hosted(conn) is app.state.hosted
