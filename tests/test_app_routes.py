@@ -50,7 +50,7 @@ def test_create_project_provision_error_maps_400(write_config, tmp_path, monkeyp
     def boom(*a, **k):
         raise ProvisionError("disk on fire")
 
-    monkeypatch.setattr("clauster.app.create_project", boom)
+    monkeypatch.setattr("clauster.routes.projects.create_project", boom)
     with _client(write_config, tmp_path) as client:
         r = client.post("/api/projects", json={"name": "proj"})
     assert r.status_code == 400
@@ -63,7 +63,7 @@ def test_create_project_git_unavailable_maps_503(write_config, tmp_path, monkeyp
     def boom(*a, **k):
         raise GitUnavailable("git not found")
 
-    monkeypatch.setattr("clauster.app.create_project", boom)
+    monkeypatch.setattr("clauster.routes.projects.create_project", boom)
     with _client(write_config, tmp_path) as client:
         r = client.post("/api/projects", json={"name": "proj"})
     assert r.status_code == 503
@@ -353,8 +353,23 @@ def test_card_renders_known_project(write_config, tmp_path):
     r = _client(write_config, tmp_path).get("/api/projects/alpha/row")
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/html")
+    # The fragment reflects live per-project session state, so it must never be cached
+    # (the load-bearing effect of rendering through the shared renderer, #1156).
+    assert r.headers["cache-control"] == "no-store"
     assert 'data-project="alpha"' in r.text
     assert "Run Claude here" in r.text  # it's a real row, not an empty stub
+
+
+def test_projects_route_duplicates_match_app():
+    # routes/projects.py deliberately duplicates these (a routes/* module cannot import
+    # clauster.app without a cycle). Guard against drift until the config-write domain
+    # moves and the two copies merge (#1156): _SESSION_USER is the CLAUDE.md write-audit
+    # actor written from both paths, and _pty_supported feeds the row's launch picker.
+    from clauster import app as app_mod
+    from clauster.routes import projects as projects_routes
+
+    assert projects_routes._SESSION_USER == app_mod._SESSION_USER
+    assert projects_routes._pty_supported() == app_mod._pty_supported()
 
 
 def test_card_reflects_project_shape(write_config, tmp_path):
@@ -421,7 +436,7 @@ def test_put_claude_md_untrusted_returns_403(write_config, tmp_path, monkeypatch
     def boom(*a, **k):
         raise ClaudeMdNotTrusted("/p is not a trusted directory")
 
-    monkeypatch.setattr("clauster.app.write_claude_md", boom)
+    monkeypatch.setattr("clauster.routes.projects.write_claude_md", boom)
     with _client(write_config, tmp_path) as client:
         r = client.put("/api/projects/alpha/claude-md", json={"content": "x"})
     assert r.status_code == 403
@@ -2445,7 +2460,7 @@ def test_create_project_missing_after_provision_500(write_config, tmp_path, monk
     # app.py 1615->1618: provisioning "succeeded" but the project isn't discoverable
     # afterwards (dir vanished / never landed) — must surface as an explicit 500,
     # never a silent success with a phantom Project body.
-    monkeypatch.setattr("clauster.app.create_project", lambda *a, **k: None)
+    monkeypatch.setattr("clauster.routes.projects.create_project", lambda *a, **k: None)
     with _client(write_config, tmp_path) as client:
         r = client.post("/api/projects", json={"name": "phantom"})
     assert r.status_code == 500

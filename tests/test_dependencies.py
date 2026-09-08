@@ -25,8 +25,12 @@ from clauster.dependencies import (
     ConfigDep,
     HostedDep,
     RunnerDep,
+    get_clone_jobs,
+    get_clone_tasks,
     get_config,
+    get_engine,
     get_hosted,
+    get_render,
     get_runner,
 )
 
@@ -113,3 +117,8 @@ def test_accessors_read_the_real_create_app_state(write_config):
     assert get_config(conn) is app.state.config
     assert get_runner(conn) is app.state.runner
     assert get_hosted(conn) is app.state.hosted
+    assert get_engine(conn) is app.state.engine
+    assert get_clone_jobs(conn) is app.state.clone_jobs
+    assert get_clone_tasks(conn) is app.state.clone_tasks
+    # get_render returns the closure create_app published, not an app.state-typed object.
+    assert get_render(conn) is app.state.render
