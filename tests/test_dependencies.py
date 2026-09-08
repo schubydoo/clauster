@@ -32,9 +32,15 @@ from clauster.dependencies import (
     get_clone_jobs,
     get_clone_tasks,
     get_config,
+    get_cookie_secure,
+    get_elevation_serializer,
     get_engine,
     get_hosted,
+    get_login_serializer,
+    get_login_shepherd,
     get_login_status_cache,
+    get_login_throttle,
+    get_password_hasher,
     get_render,
     get_require_elevated,
     get_runner,
@@ -140,3 +146,12 @@ def test_accessors_read_the_real_create_app_state(write_config):
     # (built once from the auth config) the in-app HTTP CSRF gate uses.
     assert get_allowed_origins(conn) is app.state.allowed_origins
     assert app.state.allowed_origins == auth.build_allowed_origins(app.state.config)
+    # #1156 login domain: the auth serializers/hasher/throttle and the _cookie_secure
+    # closure stay built in create_app (the middleware + _authenticate/require_elevated
+    # closures read them) and are injected into the moved login/logout/reauth routes.
+    assert get_login_serializer(conn) is app.state.login_serializer
+    assert get_elevation_serializer(conn) is app.state.elevation_serializer
+    assert get_login_throttle(conn) is app.state.login_throttle
+    assert get_password_hasher(conn) is app.state.password_hasher
+    assert get_cookie_secure(conn) is app.state.cookie_secure
+    assert get_login_shepherd(conn) is app.state.login_shepherd

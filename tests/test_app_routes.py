@@ -382,6 +382,19 @@ def test_ops_route_duplicate_matches_app():
     assert ops_routes._SESSION_USER == app_mod._SESSION_USER
 
 
+def test_login_route_module_mirrors_app_auth_constants():
+    # routes/login.py mirrors the cookie names, elevation window, and actor that app.py still
+    # owns (_authenticate + require_elevated read the app.py copies). Nothing else pins the two
+    # in sync, and a silent drift in a cookie NAME would lock users out -- so assert equal (#1156).
+    from clauster import app as app_mod
+    from clauster.routes import login as login_mod
+
+    assert login_mod._SESSION_COOKIE == app_mod._SESSION_COOKIE
+    assert login_mod._ELEVATION_COOKIE == app_mod._ELEVATION_COOKIE
+    assert login_mod._ELEVATION_MAX_AGE_SECONDS == app_mod._ELEVATION_MAX_AGE_SECONDS
+    assert login_mod._SESSION_USER == app_mod._SESSION_USER
+
+
 def test_card_reflects_project_shape(write_config, tmp_path):
     # Per-project Jinja conditionals render: the CLAUDE.md meta indicator only
     # appears where a CLAUDE.md is present; the Git meta indicator only appears for
