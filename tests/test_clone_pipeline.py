@@ -61,8 +61,8 @@ def test_clone_streams_progress_then_done(write_config, tmp_path, monkeypatch):
         progress_cb("Receiving objects:  50% (5/10)")
         progress_cb("Receiving objects: 100% (10/10)")
 
-    monkeypatch.setattr("clauster.app.clone_project", fake_clone)
-    monkeypatch.setattr("clauster.app.validate_clone_url", lambda url, cfg: None)
+    monkeypatch.setattr("clauster.routes.projects.clone_project", fake_clone)
+    monkeypatch.setattr("clauster.routes.projects.validate_clone_url", lambda url, cfg: None)
 
     with _client(write_config, tmp_path) as client:
         resp = client.post(
@@ -90,7 +90,7 @@ def test_clone_cancel_streams_cancelled_terminal_frame(write_config, tmp_path, m
     # cancel endpoint reaches through the registered hook; it raises ProvisionError out
     # of the worker (a terminated git exits non-zero -> CloneFailed). Because the job's
     # cancel_requested flag is set, the route reports a clean `cancelled` over the WS.
-    from clauster.app import ProvisionError
+    from clauster.provisioning import ProvisionError
 
     spawned = threading.Event()
     terminated = threading.Event()
@@ -105,8 +105,8 @@ def test_clone_cancel_streams_cancelled_terminal_frame(write_config, tmp_path, m
         assert terminated.wait(timeout=5), "clone never terminated by cancel"
         raise ProvisionError("clone failed: terminated")  # terminated git -> non-zero
 
-    monkeypatch.setattr("clauster.app.clone_project", fake_clone)
-    monkeypatch.setattr("clauster.app.validate_clone_url", lambda url, cfg: None)
+    monkeypatch.setattr("clauster.routes.projects.clone_project", fake_clone)
+    monkeypatch.setattr("clauster.routes.projects.validate_clone_url", lambda url, cfg: None)
 
     with _client(write_config, tmp_path) as client:
         resp = client.post(
@@ -149,8 +149,8 @@ def test_clone_cancel_after_completion_cleans_up_and_reports_cancelled(
         assert terminated.wait(timeout=5), "cancel never reached the terminate hook"
         return target  # success path: git finished before terminate() could stop it
 
-    monkeypatch.setattr("clauster.app.clone_project", fake_clone)
-    monkeypatch.setattr("clauster.app.validate_clone_url", lambda url, cfg: None)
+    monkeypatch.setattr("clauster.routes.projects.clone_project", fake_clone)
+    monkeypatch.setattr("clauster.routes.projects.validate_clone_url", lambda url, cfg: None)
 
     with _client(write_config, tmp_path) as client:
         projects_root = client.app.state.config.projects_root
@@ -174,13 +174,13 @@ def test_clone_cancel_after_completion_cleans_up_and_reports_cancelled(
 
 
 def test_clone_error_streams_terminal_error_frame(write_config, tmp_path, monkeypatch):
-    from clauster.app import ProvisionError
+    from clauster.provisioning import ProvisionError
 
     def fake_clone(root, name, url, *, cfg, shallow, progress_cb, on_proc=None):
         raise ProvisionError("clone failed: remote hung up")
 
-    monkeypatch.setattr("clauster.app.clone_project", fake_clone)
-    monkeypatch.setattr("clauster.app.validate_clone_url", lambda url, cfg: None)
+    monkeypatch.setattr("clauster.routes.projects.clone_project", fake_clone)
+    monkeypatch.setattr("clauster.routes.projects.validate_clone_url", lambda url, cfg: None)
 
     with _client(write_config, tmp_path) as client:
         resp = client.post(
@@ -201,8 +201,8 @@ def test_clone_done_webhook_fires_on_success(write_config, tmp_path, monkeypatch
     def fake_clone(root, name, url, *, cfg, shallow, progress_cb, on_proc=None):
         return None
 
-    monkeypatch.setattr("clauster.app.clone_project", fake_clone)
-    monkeypatch.setattr("clauster.app.validate_clone_url", lambda url, cfg: None)
+    monkeypatch.setattr("clauster.routes.projects.clone_project", fake_clone)
+    monkeypatch.setattr("clauster.routes.projects.validate_clone_url", lambda url, cfg: None)
 
     with _client(write_config, tmp_path, extra=_WEBHOOKS_CLONE_DONE) as client:
         rec = RecordingEmitter()
@@ -227,14 +227,14 @@ def test_clone_done_webhook_fires_on_success(write_config, tmp_path, monkeypatch
 
 
 def test_clone_done_webhook_redacts_error_and_omits_url(write_config, tmp_path, monkeypatch):
-    from clauster.app import ProvisionError
+    from clauster.provisioning import ProvisionError
 
     # A failure detail can echo a session/env id; it must be redacted before egress.
     def fake_clone(root, name, url, *, cfg, shallow, progress_cb, on_proc=None):
         raise ProvisionError("clone failed for session_01ARZ3NDEKTSV4RRFFQ69G5FAV")
 
-    monkeypatch.setattr("clauster.app.clone_project", fake_clone)
-    monkeypatch.setattr("clauster.app.validate_clone_url", lambda url, cfg: None)
+    monkeypatch.setattr("clauster.routes.projects.clone_project", fake_clone)
+    monkeypatch.setattr("clauster.routes.projects.validate_clone_url", lambda url, cfg: None)
 
     with _client(write_config, tmp_path, extra=_WEBHOOKS_CLONE_DONE) as client:
         rec = RecordingEmitter()
@@ -262,8 +262,8 @@ def test_clone_done_webhook_silent_when_event_default_off(write_config, tmp_path
     def fake_clone(root, name, url, *, cfg, shallow, progress_cb, on_proc=None):
         return None
 
-    monkeypatch.setattr("clauster.app.clone_project", fake_clone)
-    monkeypatch.setattr("clauster.app.validate_clone_url", lambda url, cfg: None)
+    monkeypatch.setattr("clauster.routes.projects.clone_project", fake_clone)
+    monkeypatch.setattr("clauster.routes.projects.validate_clone_url", lambda url, cfg: None)
 
     enabled_no_event = "webhooks:\n  enabled: true\n  urls: ['https://hook.test/h']\n"
     with _client(write_config, tmp_path, extra=enabled_no_event) as client:
@@ -301,8 +301,8 @@ def test_clone_active_lists_running_job_and_reattach_streams(write_config, tmp_p
         assert connected.wait(timeout=5), "second watcher never subscribed"
         progress_cb("Receiving objects: 100% (10/10)")
 
-    monkeypatch.setattr("clauster.app.clone_project", fake_clone)
-    monkeypatch.setattr("clauster.app.validate_clone_url", lambda url, cfg: None)
+    monkeypatch.setattr("clauster.routes.projects.clone_project", fake_clone)
+    monkeypatch.setattr("clauster.routes.projects.validate_clone_url", lambda url, cfg: None)
 
     with _client(write_config, tmp_path) as client:
         resp = client.post(
@@ -347,8 +347,8 @@ def test_clone_active_excludes_finished_job(write_config, tmp_path, monkeypatch)
     def fake_clone(root, name, url, *, cfg, shallow, progress_cb, on_proc=None):
         (Path(root) / name).mkdir()  # land the dir so the success path runs
 
-    monkeypatch.setattr("clauster.app.clone_project", fake_clone)
-    monkeypatch.setattr("clauster.app.validate_clone_url", lambda url, cfg: None)
+    monkeypatch.setattr("clauster.routes.projects.clone_project", fake_clone)
+    monkeypatch.setattr("clauster.routes.projects.validate_clone_url", lambda url, cfg: None)
 
     with _client(write_config, tmp_path) as client:
         resp = client.post(
@@ -375,8 +375,8 @@ def test_clone_unexpected_error_streams_error_frame(write_config, tmp_path, monk
     def fake_clone(root, name, url, *, cfg, shallow, progress_cb, on_proc=None):
         raise RuntimeError("worker exploded")
 
-    monkeypatch.setattr("clauster.app.clone_project", fake_clone)
-    monkeypatch.setattr("clauster.app.validate_clone_url", lambda url, cfg: None)
+    monkeypatch.setattr("clauster.routes.projects.clone_project", fake_clone)
+    monkeypatch.setattr("clauster.routes.projects.validate_clone_url", lambda url, cfg: None)
 
     with _client(write_config, tmp_path) as client:
         resp = client.post(
@@ -408,8 +408,8 @@ def test_clone_cancel_with_unexpected_error_reports_cancelled(write_config, tmp_
         assert terminated.wait(timeout=5), "clone never terminated by cancel"
         raise RuntimeError("terminated git died in a way the worker didn't map")
 
-    monkeypatch.setattr("clauster.app.clone_project", fake_clone)
-    monkeypatch.setattr("clauster.app.validate_clone_url", lambda url, cfg: None)
+    monkeypatch.setattr("clauster.routes.projects.clone_project", fake_clone)
+    monkeypatch.setattr("clauster.routes.projects.validate_clone_url", lambda url, cfg: None)
 
     with _client(write_config, tmp_path) as client:
         resp = client.post(
@@ -443,8 +443,8 @@ def test_clone_ws_abrupt_disconnect_still_unsubscribes(write_config, tmp_path, m
     async def _abrupt(websocket, stream):
         raise WebSocketDisconnect(1006)
 
-    monkeypatch.setattr("clauster.app.clone_project", fake_clone)
-    monkeypatch.setattr("clauster.app.validate_clone_url", lambda url, cfg: None)
+    monkeypatch.setattr("clauster.routes.projects.clone_project", fake_clone)
+    monkeypatch.setattr("clauster.routes.projects.validate_clone_url", lambda url, cfg: None)
     monkeypatch.setattr("clauster.app.stream_until_disconnect", _abrupt)
 
     with _client(write_config, tmp_path) as client:
