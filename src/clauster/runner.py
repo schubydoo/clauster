@@ -817,7 +817,7 @@ class SessionRunner:
         Liveness-exact, unlike :meth:`get_instance_for_project`, whose canonical
         pick can transiently be a STARTING standard bridge while a pty session for
         the same project is already RUNNING — a caller that only wants "is
-        something running here?" (``_bridge_running`` in app.py) must not miss it.
+        something running here?" (``_bridge_running`` in ``routes/projects.py``) must not miss it.
         """
         return any(
             inst.project == project_name and inst.status is InstanceStatus.RUNNING

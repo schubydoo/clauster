@@ -91,8 +91,8 @@ def get_runner_or_none(conn: HTTPConnection) -> SessionRunner | None:
     """Return the SessionRunner from ``app.state``, or ``None`` when unwired.
 
     Unlike :func:`get_runner` this does NOT fail closed at dependency resolution: it
-    hands back the raw ``runner | None`` so the moved config-write permissions/hooks
-    routes keep the exact gate order they had as ``create_app`` closures -- the
+    hands back the raw ``runner | None`` so the moved config-write read routes
+    keep the exact gate order they had as ``create_app`` closures -- the
     capability check (404, invisible surface) runs FIRST in the handler body, and only
     the user-scope branch then resolves the user ``settings.json`` via
     :func:`clauster.routes.config_write._base.user_settings_json`, which fail-closes to

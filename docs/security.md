@@ -10,8 +10,8 @@ For what Clauster keeps on disk — and how to purge it — see
 ## Authentication (fail-closed)
 
 The auth foundation lives in `auth.py` as pure, FastAPI-free functions (the web
-wiring — middleware and cookie handling in `app.py`, route handlers in `app.py`
-and the `routes/*.py` modules — sits above it). It offers
+wiring — middleware and cookie handling in `app.py`, route handlers in the
+`routes/*.py` modules — sits above it). It offers
 three trust paths:
 
 - **Password login** → a signed-cookie session (`issue_session` /

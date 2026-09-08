@@ -138,12 +138,18 @@ component_management:
         - src/clauster/routes/transcripts.py
         - src/clauster/routes/usage.py
         - src/clauster/routes/websockets.py
-        - src/clauster/routes/config_write/__init__.py # #1156 — config-write A router aggregator
+        - src/clauster/routes/config_write/__init__.py # #1156 — config-write router aggregator
         - src/clauster/routes/config_write/_base.py # #1156 — shared config-write pipeline helpers
         - src/clauster/routes/config_write/status.py # #1156 — config-write capability status
         - src/clauster/routes/config_write/mcp.py # #1156 — config-write MCP surface
         - src/clauster/routes/config_write/permissions.py # #1156 — config-write permission rules
         - src/clauster/routes/config_write/hooks.py # #1156 — config-write hooks
+        - src/clauster/routes/config_write/claude_md.py # #1156 — config-write CLAUDE.md surface
+        - src/clauster/routes/config_write/subagents.py # #1156 — config-write subagents surface
+        - src/clauster/routes/config_write/skills.py # #1156 — config-write skills surface
+        - src/clauster/routes/config_write/settings.py # #1156 — config-write generic settings
+        - src/clauster/routes/config_write/plugins.py # #1156 — config-write plugins surface
+        - src/clauster/routes/config_write/marketplaces.py # #1156 — config-write marketplaces surface
         - src/clauster/auth.py
         - src/clauster/logstream.py
         - src/clauster/usage.py

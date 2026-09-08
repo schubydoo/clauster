@@ -374,8 +374,8 @@ def test_projects_route_duplicates_match_app():
 
 def test_ops_route_duplicate_matches_app():
     # routes/ops.py duplicates _SESSION_USER too -- the actor recorded on every Tier-B
-    # config-write audit line. Guard against drift with the app.py copy until the
-    # config-write domain moves and the copies merge (#1156).
+    # config-write audit line. Guard against drift with the app.py copy (still read by
+    # _authenticate) until a shared actor constant lands and the copies merge (#1156).
     from clauster import app as app_mod
     from clauster.routes import ops as ops_routes
 
@@ -384,10 +384,10 @@ def test_ops_route_duplicate_matches_app():
 
 def test_config_write_base_actor_matches_app():
     # routes/config_write/_base.py holds SESSION_USER -- the actor stamped on every
-    # config-write audit line by both the moved A handlers and, via the thin wrappers,
-    # the B handlers still in app.py (which use app.py's _SESSION_USER). A drift between
-    # the two would write two different actors into the same audit trail, so pin them
-    # equal until the config-write domain fully moves and the copies merge (#1156).
+    # config-write audit line by the moved config-write handlers (the whole domain now
+    # lives in routes/config_write/). app.py keeps its own _SESSION_USER for _authenticate;
+    # a drift between the two would write two different actors into the same audit trail,
+    # so pin them equal until a shared actor constant lands and the copies merge (#1156).
     from clauster import app as app_mod
     from clauster.routes.config_write import _base
 

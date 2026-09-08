@@ -140,8 +140,9 @@ def test_accessors_read_the_real_create_app_state(write_config):
     conn = cast(HTTPConnection, _ConnShim(app))
     assert get_config(conn) is app.state.config
     assert get_runner(conn) is app.state.runner
-    # #1156 config-write A: the nullable runner accessor the moved permissions/hooks
-    # routes inject reads the same live app.state.runner get_runner does.
+    # #1156 config-write: the nullable runner accessor the moved config-write read routes
+    # (permissions, hooks, claude-md, subagents, skills, settings, plugins, marketplaces)
+    # inject reads the same live app.state.runner get_runner does.
     assert get_runner_or_none(conn) is app.state.runner
     assert get_hosted(conn) is app.state.hosted
     assert get_engine(conn) is app.state.engine
