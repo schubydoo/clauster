@@ -1647,7 +1647,7 @@ Tabler UI from <code>templates/</code> (with <code>jinja2-fragments</code>) and 
 </tr>
 <tr>
 <td><code>auth.py</code></td>
-<td>Auth foundation (fail-closed; pure functions, no FastAPI import).</td>
+<td>Auth foundation (fail-closed; pure functions + the <code>LoginThrottle</code> limiter, no FastAPI import).</td>
 </tr>
 <tr>
 <td><code>config.py</code></td>
