@@ -1614,6 +1614,10 @@ Tabler UI from <code>templates/</code> (with <code>jinja2-fragments</code>) and 
 <td><code>BridgeLaunch</code> — config-only launch/argv helpers for both bridge modes, split from <code>runner.py</code> (#1157); <code>SessionRunner</code> holds one instance and delegates.</td>
 </tr>
 <tr>
+<td><code>bridge_prune.py</code></td>
+<td><code>BridgePrune</code> — filesystem-only bridge-log retention and stale bridge-pointer GC, split from <code>runner.py</code> (#1157); <code>SessionRunner</code> holds one instance and delegates.</td>
+</tr>
+<tr>
 <td><code>pty_keeper.py</code></td>
 <td>Sidecar that owns a true-resume (<strong>pty</strong>) bridge's PTY.</td>
 </tr>
