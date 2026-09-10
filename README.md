@@ -319,7 +319,7 @@ and CI-gated on Linux; macOS / Windows are in the test matrix. Apache-2.0 licens
 <p>
   <a href="https://github.com/schubydoo/clauster/actions/workflows/lint.yml"><img alt="Lint" src="https://github.com/schubydoo/clauster/actions/workflows/lint.yml/badge.svg"></a>
   <a href="https://codecov.io/gh/schubydoo/clauster"><img alt="codecov" src="https://codecov.io/gh/schubydoo/clauster/graph/badge.svg"></a>
-  <a href="https://greptile.com"><img alt="Reviewed by Greptile" src="https://img.shields.io/badge/Greptile-reviewed-7C3AED"></a>
+  <a href="https://www.greptile.com/?utm_source=oss_badge&utm_medium=readme&utm_campaign=greptile_for_open_source"><img alt="Greptile: The War on Bugs" src="https://www.greptile.com/badge.svg"></a>
   <a href="https://scorecard.dev/viewer/?uri=github.com/schubydoo/clauster"><img alt="OpenSSF Scorecard" src="https://api.securityscorecards.dev/projects/github.com/schubydoo/clauster/badge"></a>
   <a href="https://www.bestpractices.dev/projects/13081"><img alt="OpenSSF Best Practices" src="https://www.bestpractices.dev/projects/13081/badge"></a>
   <a href="https://pypi.org/project/clauster/"><img alt="Python versions" src="https://img.shields.io/pypi/pyversions/clauster"></a>
