@@ -526,7 +526,7 @@ _SHAWL_VERSION = "v1.9.0"
 # are the release's checksums.txt asset digests (refreshed by scripts/check_binary_dep_pins.py and
 # fail-closed at install, exactly like Shawl above). Same `# renovate:` customManager pattern.
 # renovate: datasource=github-releases depName=schubydoo/claustrum
-_CLAUSTRUM_VERSION = "v1.10.0"
+_CLAUSTRUM_VERSION = "v1.11.0"
 _CLAUSTRUM_VER_BARE = _CLAUSTRUM_VERSION.removeprefix("v")  # tag "v1.7.1" -> asset infix "1.7.1"
 
 # (platform_marker, GoReleaser OS token, arch_marker, archive ext, sha256 of the archive)
@@ -536,42 +536,42 @@ _CLAUSTRUM_VARIANTS: tuple[tuple[str, str, str, str, str], ...] = (
         "Linux",
         "x86_64",
         "tar.gz",
-        "a2b082ff6b3bd7770d09002cfbad286902dd15c723e43cb70e6ca815e298c558",
+        "d21b5b77e7337f187a9d879c06477e92772f8ed25d481e4371a02586e707e6e9",
     ),
     (
         "linux",
         "Linux",
         "arm64",
         "tar.gz",
-        "9932ed0999a5c0cee3e0efb79615e69f6e70e7694e687ff5ca9038070cfab4fa",
+        "596d0f537bd64565a4b66b986070274c610e4ff1c960708e44e686be302868e7",
     ),
     (
         "darwin",
         "Darwin",
         "x86_64",
         "tar.gz",
-        "b8952475bd0ce07e0ef8d60872b448c23b647ded6e4913f34b0032380384f187",
+        "10f7824de87aef90569cd69c42a876725924ece6d5cadc4f5b0292144af3a101",
     ),
     (
         "darwin",
         "Darwin",
         "arm64",
         "tar.gz",
-        "8d324c79289fe8dc3ae7a2a768f0d8b0523a3495f8f4bca8baa063ead95364cc",
+        "ea0e41cb9bee32699e39315568141bff1bd8bfd5c76e4c464c8183945ed55caa",
     ),
     (
         "win32",
         "Windows",
         "x86_64",
         "zip",
-        "1abb9ccd5c83af836a87a31b0a6f2c2137866ae564e62477d41b73574debe424",
+        "4b3564c080f46abd305485a68831ff6a0659f6a204978682b216255bdf4c9d9d",
     ),
     (
         "win32",
         "Windows",
         "arm64",
         "zip",
-        "b182c769aa9e9cc8e48b5ddf4e64a619360d4eac31d68937068605931169a21d",
+        "f5c8fbea125a68a22f3203b4a05427582e5997ad0cfe6415ab9e9df9b16e92d9",
     ),
 )
 
