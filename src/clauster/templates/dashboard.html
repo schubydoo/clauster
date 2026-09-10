@@ -86,6 +86,12 @@
     .zone-head h2 { font-size: 1.15rem; font-weight: 700; margin: 0; }
     .zone-head .zone-sub { color: var(--tblr-secondary); font-size: .85rem; }
     .zone-head .zone-actions { margin-left: auto; display: flex; align-items: center; gap: .4rem; }
+    /* Tabler 1.5 gave .btn a min-width, so as flex children the action buttons could shrink
+       below their label and clip the text. Keep them at natural width; the search field
+       (max-width capped below) shrinks to absorb the squeeze instead. Child combinator so
+       it hits only the direct-child action buttons, not the .btn-group filter buttons in
+       the Active zone (which keep Tabler's flex:1 1 auto). */
+    .zone-head .zone-actions > .btn { flex-shrink: 0; }
     .proj-search { max-width: 13rem; }
     /* Two zones stacked in a flex column. Active is FIRST in the DOM (not pulled up with
        CSS `order`) so it sits above Projects AND keyboard/screen-reader focus order matches
@@ -218,8 +224,13 @@
        plain gapped flex-wrap container instead so each tab keeps its intrinsic width. */
     .cfg-jump { display: flex; flex-wrap: wrap; gap: .25rem; }
     /* Zero the body's top padding so the sticky nav pins flush to the top (no uncovered
-       padding strip for rows to bleed through); the intro carries the spacing instead. */
-    [data-test="cfg-modal"] .modal-body { padding-top: 0; }
+       padding strip for rows to bleed through); the intro carries the spacing instead.
+       The bottom padding gives the scroll body room below its last control (the Advanced
+       "Save advanced settings" button) so it clears the static modal-footer instead of
+       resting half-behind it — Tabler 1.5's taller btn-sm tipped the last button's click
+       point under the footer, which blocked the click. scroll-padding-bottom keeps
+       programmatic scroll-into-view clear of the footer too. */
+    [data-test="cfg-modal"] .modal-body { padding-top: 0; padding-bottom: 5rem; scroll-padding-bottom: 5rem; }
     [data-test="cfg-modal"] .cfg-intro { padding-top: var(--tblr-modal-padding, 1.5rem); }
 
     /* #431: transcript turn content is plain (redacted) text — preserve its line
