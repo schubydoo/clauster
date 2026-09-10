@@ -95,7 +95,7 @@ jobs:
           permission-contents: read
           permission-security-events: write
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
         with:
           languages: ${{ matrix.language }}
           # Route every CodeQL API call (bundle lookup, feature flags, analysis key,
@@ -106,9 +106,9 @@ jobs:
           # 403/404 to `core.warning`).
           token: ${{ steps.sarif-token.outputs.token || github.token }}
       - name: Autobuild
-        uses: github/codeql-action/autobuild@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        uses: github/codeql-action/autobuild@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
         with:
           # `upload: never` + `output`: write the SARIF to disk instead of uploading via
           # the action (GITHUB_TOKEN-only; codeql-action#2719). The step below posts it
