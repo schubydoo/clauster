@@ -149,7 +149,9 @@ async def test_terminal_event_records_null_cost_when_transcript_read_fails(
     def _boom(*_args, **_kwargs):
         raise OSError("transcripts unreadable")
 
-    monkeypatch.setattr("clauster.runner.aggregate_project_usage_cached", _boom)
+    # _record_event moved to RecordFacade (#1157), so the cost aggregator it calls now
+    # resolves in clauster.record_facade — patch the moved bare name there, not on runner.
+    monkeypatch.setattr("clauster.record_facade.aggregate_project_usage_cached", _boom)
     inst = RemoteControlInstance(
         project="alpha", label="alpha", status=InstanceStatus.STOPPED, resume_mode="standard"
     )
@@ -218,7 +220,9 @@ async def test_terminal_event_records_row_when_project_path_lookup_fails(
     def _boom(_name):
         raise OSError("projects_root vanished")
 
-    monkeypatch.setattr(runner, "_project_path", _boom)
+    # _record_event's cost snapshot calls the project-path lookup injected into RecordFacade
+    # (#1157), not runner._project_path directly — patch the collaborator's injected copy.
+    monkeypatch.setattr(runner._record, "_project_path", _boom)
     inst = RemoteControlInstance(
         project="alpha", label="alpha", status=InstanceStatus.CRASHED, resume_mode="pty"
     )
@@ -241,7 +245,8 @@ async def test_terminal_event_records_row_when_cost_snapshot_raises_non_oserror(
     def _boom(*_args, **_kwargs):
         raise ValueError("malformed transcript")
 
-    monkeypatch.setattr("clauster.runner.aggregate_project_usage_cached", _boom)
+    # _record_event moved to RecordFacade (#1157) — patch the aggregator in its new home.
+    monkeypatch.setattr("clauster.record_facade.aggregate_project_usage_cached", _boom)
     config, _ = runner_config
     _write_transcript(runner._claude_projects_dir, config.projects_root / "alpha")
     inst = RemoteControlInstance(
@@ -328,7 +333,9 @@ async def test_record_event_swallows_prologue_failure(runner_config, caplog, mon
     def _boom() -> bytes:
         raise RuntimeError("secret backend exploded")
 
-    monkeypatch.setattr(runner, "_session_ref_key", _boom)
+    # _record_event moved to RecordFacade (#1157) and calls the collaborator's own
+    # _session_ref_key — patch it there, not the runner's thin delegating method.
+    monkeypatch.setattr(runner._record, "_session_ref_key", _boom)
     inst = RemoteControlInstance(
         project="alpha", label="alpha", status=InstanceStatus.STARTING, resume_mode="standard"
     )
