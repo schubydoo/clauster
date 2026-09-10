@@ -37,6 +37,7 @@ from . import (
     auth,
     bridge_launch,
     bridge_log,
+    bridge_prune,
     code_sessions,
     config,
     inspector,
@@ -47,6 +48,10 @@ from . import (
     redact,
     usage,
 )
+
+# Re-exported so ``from clauster.runner import _STALE_POINTER_TTL_SECONDS`` (used by the
+# tests) still resolves after ``_prune_stale_pointers`` moved to ``bridge_prune`` (#1157).
+from .bridge_prune import _STALE_POINTER_TTL_SECONDS as _STALE_POINTER_TTL_SECONDS
 from .claude_cli import ClaudeNotFound, resolve_binary
 from .config import (
     PERMISSION_MODES,
@@ -277,11 +282,6 @@ _POISON_STOP_TIMEOUT = 5.0
 # — and 5s would not save that either. Kept separate so retuning the grace period can't
 # silently retune the reap.
 _TREE_REAP_WAIT = 2.0
-# #867 L4: nothing else prunes bridge-pointer.json, so a project accumulates a pointer that
-# outlives its (server-reaped) environment. At startup, clear clauster's OWN pointers that
-# are both non-live AND older than this — a live or recently-stopped-resumable session is
-# never touched (its reattach is preserved).
-_STALE_POINTER_TTL_SECONDS = 14 * 24 * 60 * 60
 # Cadence at which the post-spawn startup-watch re-reads the bridge log to detect
 # a (late) environment registration or a stuck-but-alive bridge.
 _STARTUP_WATCH_INTERVAL = 2.0
@@ -554,6 +554,19 @@ class SessionRunner:
         # the trust file, so a HOME-isolated test points it at its tmp dir, not the
         # host's real transcripts.
         self._claude_projects_dir = self._claude_json.parent / ".claude" / "projects"
+        # Filesystem-only prune/log-retention helpers (#1157): applies the bridge-log
+        # retention policy and GCs long-dead bridge-pointers. Like BridgeLaunch it holds
+        # config + paths ONLY — no registry, no locks. `protected` (live instances' log-set
+        # keys) is snapshotted on the loop by the caller and passed to `_prune_logs`; the
+        # pointer GC reads only config/discovery/pointer mtimes. `_log_set_key` stays on the
+        # runner (its non-prune callers still use it) and is injected — see :class:`BridgePrune`.
+        self._prune = bridge_prune.BridgePrune(
+            config=config,
+            log_dir=self._log_dir,
+            claude_json=self._claude_json,
+            claude_projects_dir=self._claude_projects_dir,
+            log_set_key=self._log_set_key,
+        )
         # Persistence of label / intentional_stop / spawn_mode (D14), now DB-backed
         # (#362) behind the same load()/save() dict contract the JSON store had.
         self._persistence = persistence or Persistence(
@@ -2431,74 +2444,13 @@ class SessionRunner:
         ]
 
     def _prune_logs(self, protected: set[str]) -> None:
-        """Apply the ``logs.retention_*`` policy to the bridge-log dir (best-effort).
+        """Apply the bridge-log retention policy (delegates to :class:`BridgePrune`).
 
-        Groups files into per-spawn sets (a ``.log`` and its ``.raw.log`` / ``.stderr.log``
-        / ``.keeper.json`` / ``.keeper.log`` / ``.screen.json`` siblings share a stem) and
-        deletes whole sets that exceed the configured age / count / total-size limits,
-        oldest first. ``protected`` (the set keys of live instances' logs, snapshotted on
-        the event loop by the caller) is never pruned. A ``0`` limit disables that
-        dimension. Runs off the event loop (via ``to_thread``) on each spawn; a transient
-        FS error is logged and never aborts the spawn.
+        ``protected`` is the set of live instances' log-set keys, which the spawn path
+        snapshots from ``_instances`` on the event loop before this runs off-thread — the
+        registry read stays on the runner and is passed down, never held by the collaborator.
         """
-        logs = self._config.logs
-        max_age_days, max_files, max_total_mb = (
-            logs.retention_max_age_days,
-            logs.retention_max_files,
-            logs.retention_max_total_mb,
-        )
-        if not (max_age_days or max_files or max_total_mb):
-            return
-        try:
-            entries = [p for p in self._log_dir.iterdir() if p.is_file()]
-        except OSError as exc:
-            _log.warning("bridge-log retention: could not list %s: %s", self._log_dir, exc)
-            return
-
-        sets: dict[str, list[Path]] = {}
-        for p in entries:
-            sets.setdefault(self._log_set_key(p.name), []).append(p)
-
-        def _stat(paths: list[Path]) -> tuple[float, int]:
-            """Return the newest mtime and total size across one log set, skipping unstattable."""
-            mtime, size = 0.0, 0
-            for p in paths:
-                try:
-                    st = p.stat()
-                except OSError:
-                    continue
-                mtime, size = max(mtime, st.st_mtime), size + st.st_size
-            return mtime, size
-
-        info = {k: _stat(v) for k, v in sets.items()}
-        ordered = sorted(sets, key=lambda k: info[k][0], reverse=True)  # newest first
-        doomed: set[str] = set()
-        if max_age_days:
-            cutoff = time.time() - max_age_days * 86400
-            # A set with no datable file (mtime stays 0.0 — every file failed to stat) is
-            # never age-pruned: we don't delete what we can't date.
-            doomed.update(k for k in ordered if info[k][0] and info[k][0] < cutoff)
-        if max_files:
-            survivors = [k for k in ordered if k not in doomed]
-            doomed.update(survivors[max_files:])
-        if max_total_mb:
-            survivors = [k for k in ordered if k not in doomed]  # newest first
-            total = sum(info[k][1] for k in survivors)
-            for k in reversed(survivors):  # oldest first
-                if total <= max_total_mb * 1024 * 1024:
-                    break
-                doomed.add(k)
-                total -= info[k][1]
-
-        doomed -= protected  # keep live bridges' log sets regardless of age/count/size
-        for k in doomed:
-            for p in sets[k]:
-                try:
-                    p.unlink()
-                except OSError as exc:
-                    _log.debug("bridge-log retention: could not delete %s: %s", p, exc)
-        if doomed:
-            _log.info("bridge-log retention pruned %d log set(s)", len(doomed))
+        self._prune._prune_logs(protected)
 
     def _raw_log_path_for(self, log_path: Path) -> Path:
         """Return the verbatim parse-source the bridge writes its ``--debug-file`` to.
@@ -6315,57 +6267,17 @@ class SessionRunner:
     # ----- lifecycle ------------------------------------------------------
 
     async def _prune_stale_pointers(self) -> None:
-        """GC clauster's own long-dead ``bridge-pointer.json`` files at startup (#867 L4).
+        """GC long-dead ``bridge-pointer.json`` files (delegates to :class:`BridgePrune`).
 
-        Scoped to projects under ``projects_root`` (clauster's own data — never a pointer
-        another tool wrote), and only a pointer that is BOTH non-live AND older than
-        :data:`_STALE_POINTER_TTL_SECONDS`, so a live or recently-stopped-resumable session
-        keeps its reattach. Best-effort: a listing/stat/delete error is logged, never fatal
-        to startup. Runs AFTER :meth:`rediscover` so any live bridge is already adopted.
+        Stays ``async`` and awaits the collaborator's coroutine so the caller in
+        :meth:`start_poll_loop` sees the exact same lifecycle. The pointer GC reads no
+        registry — staleness is decided from config, discovery, and pointer mtimes only.
         """
-        try:
-            projects = await asyncio.to_thread(
-                discover_projects_cached, self._config.projects_root, self._claude_json
-            )
-        except OSError as exc:
-            _log.warning("stale-pointer prune skipped: could not list projects: %s", exc)
-            return
-        cutoff = time.time() - _STALE_POINTER_TTL_SECONDS
-        for proj in projects:
-            try:
-                await asyncio.to_thread(self._prune_one_pointer, proj.path, cutoff)
-            except Exception:
-                # Best-effort hygiene: one project's failure (e.g. a resolve() symlink loop)
-                # must never abort the GC or startup — mirror the poll loop's resilience.
-                _log.exception("stale-pointer prune failed for %s; continuing", proj.path)
+        await self._prune._prune_stale_pointers()
 
     def _prune_one_pointer(self, project_path: Path, cutoff: float) -> None:
-        """Clear one project's pointer if it's non-live and its file mtime predates ``cutoff``."""
-        resolved = project_path.resolve()
-        # Ownership guard: a symlink under projects_root can resolve OUTSIDE it; the canonical
-        # target's pointer is not clauster's to GC, so never prune a path that escapes the root.
-        if not resolved.is_relative_to(self._config.projects_root.resolve()):
-            return
-        path = pointers.pointer_path_for(resolved, self._claude_projects_dir)
-        try:
-            mtime = path.stat().st_mtime
-        except FileNotFoundError:
-            return  # no pointer -> nothing to prune
-        except OSError as exc:
-            _log.warning("could not stat bridge-pointer for %s: %s", resolved, exc)
-            return
-        if mtime >= cutoff:
-            return  # recent enough that a resume may still want it
-        try:
-            # backup=False: a 2-week-dead pointer isn't worth a .bak that would itself linger.
-            if pointers.clear_pointer(
-                resolved, claude_projects_dir=self._claude_projects_dir, backup=False
-            ):
-                _log.info("pruned stale non-live bridge-pointer for %s", resolved)
-        except pointers.PointerStillLive:
-            pass  # became live between the stat and the clear -> leave it
-        except OSError as exc:
-            _log.warning("could not prune bridge-pointer for %s: %s", resolved, exc)
+        """Clear one non-live, aged bridge-pointer (delegates to :class:`BridgePrune`)."""
+        self._prune._prune_one_pointer(project_path, cutoff)
 
     async def start_poll_loop(self) -> None:
         """Rediscover already-running bridges, then start the background poll loop."""

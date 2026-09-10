@@ -104,6 +104,7 @@ component_management:
       paths:
         - src/clauster/runner.py
         - src/clauster/bridge_launch.py # #1157 — config-only launch/argv helpers split from runner
+        - src/clauster/bridge_prune.py # #1157 — filesystem-only prune/log-retention helpers split from runner
         - src/clauster/procutil.py
         - src/clauster/pointers.py
         - src/clauster/code_sessions.py # #867 — pre-spawn anchor-session liveness for bridge pointers
