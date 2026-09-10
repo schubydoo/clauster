@@ -18,6 +18,7 @@ Key modules under `src/clauster/`:
 | `__main__.py` | CLI entry point and subcommands (`run`, `hash-password`, `hash-token`, `hash-metrics-token`, `api-token` (`issue`/`list`/`rotate`/`revoke`), `mcp`, `doctor`, `backup`/`restore`/`migrate`, `install-service`, `reap-environments`, `keepers`, `usage`, `config` (with `config reconcile`), `deps` (`list`/`install`/`uninstall` optional extras), and the headless session commands `start`/`stop`/`status`/`sessions`/`projects`/`logs`/`open`). |
 | `runner.py` | `SessionRunner` — spawn / stop / observe **standard** `claude remote-control` bridges. |
 | `bridge_launch.py` | `BridgeLaunch` — config-only launch/argv helpers for both bridge modes, split from `runner.py` (#1157); `SessionRunner` holds one instance and delegates. |
+| `bridge_prune.py` | `BridgePrune` — filesystem-only bridge-log retention and stale bridge-pointer GC, split from `runner.py` (#1157); `SessionRunner` holds one instance and delegates. |
 | `pty_keeper.py` | Sidecar that owns a true-resume (**pty**) bridge's PTY. |
 | `discovery.py` | Project discovery under `projects_root`; `~/.claude.json` paths. |
 | `provisioning.py` | Project create + clone (with the clone/SSRF guards). |

@@ -3663,7 +3663,10 @@ async def test_prune_stale_pointers_tolerates_discover_error(runner_config, monk
     def _boom(*_a, **_k):
         raise OSError("cannot list")
 
-    monkeypatch.setattr("clauster.runner.discover_projects_cached", _boom)
+    # _prune_stale_pointers moved to BridgePrune (#1157), which resolves the bare
+    # discover_projects_cached name in its OWN module namespace — patch it there, not on
+    # clauster.runner, or this stub would miss and the test pass vacuously.
+    monkeypatch.setattr("clauster.bridge_prune.discover_projects_cached", _boom)
     await runner._prune_stale_pointers()  # logged, not raised
 
 
@@ -3675,7 +3678,10 @@ async def test_prune_stale_pointers_tolerates_per_project_error(runner_config, m
     def _boom(*_a, **_k):
         raise RuntimeError("symlink loop")
 
-    monkeypatch.setattr(runner, "_prune_one_pointer", _boom)
+    # _prune_stale_pointers moved to BridgePrune (#1157) and calls its OWN
+    # _prune_one_pointer, so patch the collaborator (runner._prune), not the runner façade —
+    # a façade-instance patch would not be seen by the collaborator's internal call.
+    monkeypatch.setattr(runner._prune, "_prune_one_pointer", _boom)
     await runner._prune_stale_pointers()  # logged per project, never raised
 
 
