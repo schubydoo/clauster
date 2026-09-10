@@ -31,6 +31,23 @@ def _runner(runner_config, *, notifications: dict | None = None) -> SessionRunne
     return SessionRunner(cfg, claude_json=claude_json)
 
 
+def test_notify_surface_proxies_the_single_record_facade(runner_config):
+    # #1157: the notify/webhook/task-set surface lives on ONE RecordFacade; the runner's
+    # _notifier/_webhooks/_notify_tasks are thin proxies onto it. Guard the load-bearing
+    # single-instance invariant: a second facade (or a diverged set) would let shutdown()
+    # drain one set while the emitters filled another, silently. Also confirm the seam
+    # setters write THROUGH to the collaborator the emitters read.
+    runner = _runner(runner_config)
+    assert runner._notifier is runner._record._notifier
+    assert runner._webhooks is runner._record._webhooks
+    assert runner._notify_tasks is runner._record._notify_tasks
+    rec_notifier, rec_webhooks = _RecordingNotifier(), _RecordingNotifier()
+    runner._notifier = rec_notifier
+    runner._webhooks = rec_webhooks
+    assert runner._record._notifier is rec_notifier  # setter wrote through to the facade
+    assert runner._record._webhooks is rec_webhooks
+
+
 async def test_notify_crash_fires_when_active(runner_config):
     runner = _runner(runner_config, notifications={"enabled": True, "urls": ["slack://x"]})
     rec = _RecordingNotifier()
