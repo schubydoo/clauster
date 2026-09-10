@@ -12,6 +12,7 @@ import psutil
 import pytest
 
 from clauster import procutil
+from clauster.bridge_launch import BridgeLaunch
 from clauster.config import ClausterConfig
 from clauster.db.persistence import Persistence
 from clauster.models import InstanceStatus
@@ -2050,11 +2051,13 @@ async def test_resume_standard_revives_same_instance_identity(runner_config) -> 
 
 def test_pty_argv_carries_worktree_name_when_given() -> None:
     """spawn_mode="worktree" adds `--worktree <name>` to the flag-form argv (#779)."""
-    runner = SessionRunner.__new__(SessionRunner)  # argv builder is pure — no init needed
-    runner._binary = "claude"
-    base = runner._build_pty_bridge_argv(Path("/l.log"), "alpha", "default", resume=False)
+    # Migrated for #1157: the argv builder moved to BridgeLaunch (SessionRunner delegates).
+    # It is pure — reads only self._binary — so build a bare collaborator, no init needed.
+    launch = BridgeLaunch.__new__(BridgeLaunch)
+    launch._binary = "claude"
+    base = launch._build_pty_bridge_argv(Path("/l.log"), "alpha", "default", resume=False)
     assert "--worktree" not in base  # same-dir spawn: no worktree flag
-    wt = runner._build_pty_bridge_argv(
+    wt = launch._build_pty_bridge_argv(
         Path("/l.log"), "alpha", "default", resume=True, worktree_name="clauster-abcd1234"
     )
     i = wt.index("--worktree")

@@ -3405,7 +3405,9 @@ def test_popen_win32_detaches_with_new_process_group(runner_config, monkeypatch,
     runner = _make_runner(runner_config)
     monkeypatch.setattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200, raising=False)
     monkeypatch.setattr(subprocess, "Popen", _fake_popen)
-    monkeypatch.setattr("clauster.runner.resolve_binary", lambda b: b)
+    # Migrated for #1157: _popen moved to BridgeLaunch, so it resolves the bare-name
+    # `resolve_binary` from clauster.bridge_launch's namespace, not clauster.runner's.
+    monkeypatch.setattr("clauster.bridge_launch.resolve_binary", lambda b: b)
     monkeypatch.setattr(sys, "platform", "win32")
     runner._popen(
         runner_config[0].projects_root / "alpha",
