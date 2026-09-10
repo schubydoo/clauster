@@ -11,7 +11,7 @@ permission notices are reproduced below. Pinned versions are tracked in
 
 - Project: <https://tabler.io>
 - Source: <https://github.com/tabler/tabler>
-- Version: 1.4.0
+- Version: 1.5.1
 - Files: `src/clauster/static/vendor/tabler/`
 - License: MIT (also retained verbatim at `src/clauster/static/vendor/tabler/LICENSE`
   and in the `tabler.min.css` banner)
@@ -19,7 +19,7 @@ permission notices are reproduced below. Pinned versions are tracked in
 ```text
 The MIT License (MIT)
 
-Copyright (c) 2018-2025 The Tabler Authors
+Copyright (c) 2018-2026 The Tabler Authors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
