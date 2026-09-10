@@ -3,10 +3,15 @@
 :class:`BridgeLaunch` is the first collaborator extracted from
 :class:`~clauster.runner.SessionRunner` (issue #1157). It builds the two bridge
 argvs and launches the detached bridge / keeper subprocesses. It reads
-configuration and paths ONLY — it owns no bridge registry, no locks, and no
-lifecycle state, so ``SessionRunner`` keeps sole ownership of those. The runner
-holds one instance as ``self._launch`` and delegates the moved methods to it,
-preserving the exact public signatures the tests call directly.
+configuration and paths ONLY — it owns no bridge registry and no locks, so
+``SessionRunner`` keeps sole ownership of those. Its one piece of mutable state
+is ``_log_seq``, a per-instance monotonic counter guaranteeing unique log stems;
+correctness therefore depends on the runner holding EXACTLY ONE ``BridgeLaunch``
+(built once in ``SessionRunner.__init__`` as ``self._launch``). Do not construct a
+second instance per spawn — a fresh counter restarts at 0 and two same-millisecond
+spawns could collide on ``<name>-<ms>-1.log``, which the ``O_EXCL`` pre-create then
+fails. The runner delegates the moved methods to the single instance, preserving
+the exact public signatures the tests call directly.
 
 The two bridge modes stay separate here exactly as they were on the runner and as
 ``AGENTS.md`` requires: :meth:`BridgeLaunch._build_cmd` / :meth:`BridgeLaunch._popen`

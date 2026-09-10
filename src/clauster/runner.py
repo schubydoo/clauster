@@ -2546,7 +2546,12 @@ class SessionRunner:
         permission_mode: PermissionMode,
         sandbox: SandboxMode = "default",
     ) -> list[str]:
-        """Build the `claude remote-control` argv (delegates to :class:`BridgeLaunch`)."""
+        """Build the `claude remote-control` argv (delegates to :class:`BridgeLaunch`).
+
+        To stub argv in a test, patch ``BridgeLaunch._build_cmd`` (the launch path,
+        via ``_popen``, calls the collaborator's copy) — patching this façade method
+        on ``SessionRunner`` does not intercept a spawn and would pass vacuously.
+        """
         return self._launch._build_cmd(log_path, name, spawn_mode, permission_mode, sandbox)
 
     @staticmethod
@@ -2561,7 +2566,11 @@ class SessionRunner:
         return log_path.with_name(log_path.stem + ".stderr.log")
 
     def _bridge_env_overlay(self, extra: dict[str, str] | None = None) -> dict[str, str]:
-        """Build the config-driven env overlay (delegates to :class:`BridgeLaunch`)."""
+        """Build the config-driven env overlay (delegates to :class:`BridgeLaunch`).
+
+        Patch ``BridgeLaunch._bridge_env_overlay`` to intercept it — ``_popen`` calls
+        the collaborator's copy, so patching this façade method passes vacuously.
+        """
         return self._launch._bridge_env_overlay(extra)
 
     def _popen(
@@ -2719,7 +2728,11 @@ class SessionRunner:
         *,
         state_dir: Path,
     ) -> list[str]:
-        """Wrap the bridge argv in a PTY-keeper launcher (delegates to :class:`BridgeLaunch`)."""
+        """Wrap the bridge argv in a PTY-keeper launcher (delegates to :class:`BridgeLaunch`).
+
+        Patch ``BridgeLaunch._keeper_launch_cmd`` to intercept it — ``_popen_keeper``
+        calls the collaborator's copy, so patching this façade method passes vacuously.
+        """
         return bridge_launch.BridgeLaunch._keeper_launch_cmd(
             sidecar, cwd, bridge_argv, screen_sidecar, state_dir=state_dir
         )
