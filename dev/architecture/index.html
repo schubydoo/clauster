@@ -1610,6 +1610,10 @@ Tabler UI from <code>templates/</code> (with <code>jinja2-fragments</code>) and 
 <td><code>SessionRunner</code> — spawn / stop / observe <strong>standard</strong> <code>claude remote-control</code> bridges.</td>
 </tr>
 <tr>
+<td><code>bridge_launch.py</code></td>
+<td><code>BridgeLaunch</code> — config-only launch/argv helpers for both bridge modes, split from <code>runner.py</code> (#1157); <code>SessionRunner</code> holds one instance and delegates.</td>
+</tr>
+<tr>
 <td><code>pty_keeper.py</code></td>
 <td>Sidecar that owns a true-resume (<strong>pty</strong>) bridge's PTY.</td>
 </tr>
