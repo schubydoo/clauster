@@ -86,6 +86,10 @@
     .zone-head h2 { font-size: 1.15rem; font-weight: 700; margin: 0; }
     .zone-head .zone-sub { color: var(--tblr-secondary); font-size: .85rem; }
     .zone-head .zone-actions { margin-left: auto; display: flex; align-items: center; gap: .4rem; }
+    /* Tabler 1.5 gave .btn a min-width, so as flex children the action buttons could shrink
+       below their label and clip the text. Keep them at natural width; the search field
+       (max-width capped below) shrinks to absorb the squeeze instead. */
+    .zone-head .zone-actions .btn { flex-shrink: 0; }
     .proj-search { max-width: 13rem; }
     /* Two zones stacked in a flex column. Active is FIRST in the DOM (not pulled up with
        CSS `order`) so it sits above Projects AND keyboard/screen-reader focus order matches
