@@ -1622,6 +1622,10 @@ Tabler UI from <code>templates/</code> (with <code>jinja2-fragments</code>) and 
 <td><code>RecordFacade</code> — the notify / webhook / session-event surface (the fire-and-forget lifecycle sinks and the <code>_emit_lifecycle</code> chokepoint), split from <code>runner.py</code> (#1157); <code>SessionRunner</code> holds one instance and delegates.</td>
 </tr>
 <tr>
+<td><code>runner_state.py</code></td>
+<td><code>RunnerState</code> — the shared registry / locks / persist-mirror hub (the instance registry, process map, startup-watch tasks, crash tally, metrics cache, persist merge mirror, and the four lifecycle locks), split from <code>runner.py</code> (#1157); <code>SessionRunner</code> holds one instance, re-exposes its dicts as proxy properties, and delegates the persist/lock methods.</td>
+</tr>
+<tr>
 <td><code>pty_keeper.py</code></td>
 <td>Sidecar that owns a true-resume (<strong>pty</strong>) bridge's PTY.</td>
 </tr>
