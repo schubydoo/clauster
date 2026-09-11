@@ -1630,6 +1630,10 @@ Tabler UI from <code>templates/</code> (with <code>jinja2-fragments</code>) and 
 <td><code>Rediscovery</code> — the reattach / adopt / rediscover surface (cold-start reattach of persisted rows, runtime take-over of external bridges, poll-time row adoption), split from <code>runner.py</code> (#1157); built with the <code>RunnerState</code> so every reattach writes the one registry under the same locks, and <code>SessionRunner</code> holds one instance and delegates.</td>
 </tr>
 <tr>
+<td><code>poll_loop.py</code></td>
+<td><code>PollLoop</code> — the poll + metrics background loops (liveness reconcile, <code>claude agents --json</code> cross-check, phantom-card prune, stuck-STARTING promotion, and the server-side metrics sampler), split from <code>runner.py</code> (#1157); built with the <code>RunnerState</code> + <code>RecordFacade</code> so every loop write and lifecycle emission lands on the one registry / record facade. <code>PollLoop</code> owns the two loop tasks; <code>SessionRunner</code> holds one instance, re-exposes the tasks + reconciled-session cache as proxy properties (so <code>shutdown()</code> still cancels + awaits both), and delegates.</td>
+</tr>
+<tr>
 <td><code>field_decode.py</code></td>
 <td>Pure decoders for persisted-row / bridge-pointer / keeper-sidecar fields (the typed, bounded liveness/identity coercions), split from <code>runner.py</code> (#1157) so <code>runner.py</code> and <code>rediscovery.py</code> share one copy without a circular import.</td>
 </tr>
