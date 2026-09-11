@@ -526,7 +526,7 @@ _SHAWL_VERSION = "v1.9.0"
 # are the release's checksums.txt asset digests (refreshed by scripts/check_binary_dep_pins.py and
 # fail-closed at install, exactly like Shawl above). Same `# renovate:` customManager pattern.
 # renovate: datasource=github-releases depName=schubydoo/claustrum
-_CLAUSTRUM_VERSION = "v1.11.0"
+_CLAUSTRUM_VERSION = "v1.11.1"
 _CLAUSTRUM_VER_BARE = _CLAUSTRUM_VERSION.removeprefix("v")  # tag "v1.7.1" -> asset infix "1.7.1"
 
 # (platform_marker, GoReleaser OS token, arch_marker, archive ext, sha256 of the archive)
@@ -536,42 +536,42 @@ _CLAUSTRUM_VARIANTS: tuple[tuple[str, str, str, str, str], ...] = (
         "Linux",
         "x86_64",
         "tar.gz",
-        "d21b5b77e7337f187a9d879c06477e92772f8ed25d481e4371a02586e707e6e9",
+        "b21b437b7a3c98a10d18e0e61cdb9e22261eccf9038836ed57e2fc28fce011fe",
     ),
     (
         "linux",
         "Linux",
         "arm64",
         "tar.gz",
-        "596d0f537bd64565a4b66b986070274c610e4ff1c960708e44e686be302868e7",
+        "3e95cb13c6e4e43df0f3a8e79fae0bc4ee375814bdbb3582b79fe621881f07f8",
     ),
     (
         "darwin",
         "Darwin",
         "x86_64",
         "tar.gz",
-        "10f7824de87aef90569cd69c42a876725924ece6d5cadc4f5b0292144af3a101",
+        "9e50d58948818e44259c4322f395b649a131b7da4d44d3f0f58b23acdcd9f1df",
     ),
     (
         "darwin",
         "Darwin",
         "arm64",
         "tar.gz",
-        "ea0e41cb9bee32699e39315568141bff1bd8bfd5c76e4c464c8183945ed55caa",
+        "d4e9a787f30dc85a519c82f746d2f2396f99f2e64903ff4e2ae00ed0e40e9c21",
     ),
     (
         "win32",
         "Windows",
         "x86_64",
         "zip",
-        "4b3564c080f46abd305485a68831ff6a0659f6a204978682b216255bdf4c9d9d",
+        "1f8c0a940cf6fa6a8d95acaf5ea155652945138292b252779fa2b2211bab622b",
     ),
     (
         "win32",
         "Windows",
         "arm64",
         "zip",
-        "f5c8fbea125a68a22f3203b4a05427582e5997ad0cfe6415ab9e9df9b16e92d9",
+        "e350732e31cd8b04e3cf2a8497fed803c22f00a537ed4d9149c898701c75cdee",
     ),
 )
 
