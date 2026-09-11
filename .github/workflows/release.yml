@@ -170,9 +170,9 @@ jobs:
           persist-credentials: false
           ref: ${{ needs.validate.outputs.sha }} # the exact commit validate froze
       - name: Set up uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
-          version: "0.12.12" # pinned uv (Renovate-tracked); skip the flaky "latest" fetch
+          version: "0.12.13" # pinned uv (Renovate-tracked); skip the flaky "latest" fetch
           # Caching stays OFF even though this job no longer holds the token
           # (zizmor cache-poisoning): a cache restored from a lower-privilege
           # context could taint the artifact the publish job then ships to PyPI.
