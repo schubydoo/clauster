@@ -507,7 +507,7 @@ jobs:
       - name: Install zizmor
         env:
           # renovate: datasource=pypi depName=zizmor
-          ZIZMOR_VERSION: "1.30.0"
+          ZIZMOR_VERSION: "1.30.1"
         # Pinned so a bad PyPI release cannot change what runs under the App token.
         run: uv tool install "zizmor==$ZIZMOR_VERSION"
       - name: Run zizmor
