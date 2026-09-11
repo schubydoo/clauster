@@ -862,13 +862,17 @@ def test_gather_sessions_reads_without_writing(cfg, monkeypatch):
     # rewrote the shared state.json and could fire a crash webhook + notification for a
     # bridge the live service was already tracking.
     from clauster.runner import SessionRunner
+    from clauster.runner_state import RunnerState
 
     persisted: list[str] = []
 
     async def _spy_persist(self, *a, **k):
         persisted.append("persist")
 
-    monkeypatch.setattr(SessionRunner, "_persist", _spy_persist)
+    # The store write now happens in `RunnerState._persist` (rediscover reaches it via
+    # `self._registry._persist`, #1157), NOT the `SessionRunner._persist` delegator — so the
+    # spy has to sit on `RunnerState` or this read-only guard passes vacuously.
+    monkeypatch.setattr(RunnerState, "_persist", _spy_persist)
 
     polls: list[bool] = []
     real_poll = SessionRunner.poll_once
