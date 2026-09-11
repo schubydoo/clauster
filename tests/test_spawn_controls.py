@@ -415,13 +415,16 @@ async def test_resume_default_name_bridge_passes_none_not_project_name(runner_co
     seen: dict = {}
     # Spy on spawn_detailed: that is the seam resume_detailed drives (#1145). Spying on
     # the thin spawn() wrapper would silently observe nothing and leave `seen` empty.
-    real_spawn = runner.spawn_detailed
+    # Since #1157 resume_detailed -> spawn_detailed both live on the SpawnCoordinator, so the
+    # seam is `runner._spawner.spawn_detailed`; patching the runner's façade delegator would
+    # not intercept the coordinator's internal call and would leave `seen` empty.
+    real_spawn = runner._spawner.spawn_detailed
 
     async def _spy(name, **kwargs):
         seen.update(kwargs)
         return await real_spawn(name, **kwargs)
 
-    monkeypatch.setattr(runner, "spawn_detailed", _spy)
+    monkeypatch.setattr(runner._spawner, "spawn_detailed", _spy)
     resumed = await runner.resume(inst.instance_id)
     try:
         # The bare project-name label is forwarded as None (fallback path), not "alpha".
