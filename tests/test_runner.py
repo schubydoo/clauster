@@ -3185,9 +3185,12 @@ async def test_poll_forever_continues_after_unexpected_error(runner_config, monk
     async def _boom():
         raise RuntimeError("unexpected")
 
-    monkeypatch.setattr(runner, "poll_once", _boom)
-    monkeypatch.setattr("clauster.runner.asyncio.sleep", _raise_cancelled)
-    with caplog.at_level(logging.ERROR, logger="clauster.runner"):
+    # #1157: `_poll_forever` lives in PollLoop and calls its OWN `poll_once` + `asyncio.sleep`,
+    # so patch the collaborator's method and the poll_loop module's asyncio, and read the log
+    # under the poll_loop logger.
+    monkeypatch.setattr(runner._poll_loop, "poll_once", _boom)
+    monkeypatch.setattr("clauster.poll_loop.asyncio.sleep", _raise_cancelled)
+    with caplog.at_level(logging.ERROR, logger="clauster.poll_loop"):
         with pytest.raises(asyncio.CancelledError):  # only the sleep's cancel escapes
             await runner._poll_forever()
     # The swallow path must stay observable — a refactor dropping the log is caught here.
@@ -3202,7 +3205,9 @@ async def test_poll_forever_propagates_cancel_from_poll(runner_config, monkeypat
     async def _cancel():
         raise asyncio.CancelledError
 
-    monkeypatch.setattr(runner, "poll_once", _cancel)
+    # #1157: patch PollLoop's own `poll_once` — the delegator's target — so the cancel
+    # actually propagates out of the loop.
+    monkeypatch.setattr(runner._poll_loop, "poll_once", _cancel)
     with pytest.raises(asyncio.CancelledError):
         await runner._poll_forever()
 
@@ -3763,9 +3768,9 @@ async def test_poll_once_observing_reports_a_crash_without_announcing_it(
     runner = _crashing_runner(runner_config, monkeypatch)
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
     emitted: list[str] = []
-    monkeypatch.setattr(
-        SessionRunner, "_emit_lifecycle", lambda self, event, inst: emitted.append(event)
-    )
+    # #1157: the poll path emits through `runner._record._emit_lifecycle` (PollLoop calls the
+    # RecordFacade directly), so patch the collaborator the loop actually reaches.
+    monkeypatch.setattr(runner._record, "_emit_lifecycle", lambda e, i: emitted.append(e))
 
     await runner.poll_once(side_effects=False)
 
@@ -3781,9 +3786,8 @@ async def test_poll_once_default_still_announces_a_crash(runner_config, monkeypa
     runner = _crashing_runner(runner_config, monkeypatch)
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
     emitted: list[str] = []
-    monkeypatch.setattr(
-        SessionRunner, "_emit_lifecycle", lambda self, event, inst: emitted.append(event)
-    )
+    # #1157: patch the collaborator the poll path reaches (see the sibling test above).
+    monkeypatch.setattr(runner._record, "_emit_lifecycle", lambda e, i: emitted.append(e))
 
     await runner.poll_once()
 
