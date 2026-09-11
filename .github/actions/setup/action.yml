@@ -18,13 +18,13 @@ runs:
   using: composite
   steps:
     - name: Set up uv
-      uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
       with:
         # Pin uv so setup-uv skips its "latest" lookup + version-manifest fetch (a per-runner
         # network call that flakes). Renovate's github-actions manager tracks this `version:`
         # input for astral-sh/setup-uv and opens a bump PR — keep the pin in the other workflows
         # (build-binaries, security, release, knope-*, nightly) in step with this one.
-        version: "0.12.12"
+        version: "0.12.13"
         enable-cache: true
     # The version flows through an env var (not inlined into `run:`) so zizmor's
     # template-injection analysis stays quiet; the value is always a hard-coded

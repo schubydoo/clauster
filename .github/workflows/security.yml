@@ -501,9 +501,9 @@ jobs:
           private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
           permission-security-events: write
       - name: Set up uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
-          version: "0.12.12" # pinned uv (Renovate-tracked); skip the flaky "latest" fetch
+          version: "0.12.13" # pinned uv (Renovate-tracked); skip the flaky "latest" fetch
       - name: Install zizmor
         env:
           # renovate: datasource=pypi depName=zizmor
