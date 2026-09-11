@@ -1634,6 +1634,10 @@ Tabler UI from <code>templates/</code> (with <code>jinja2-fragments</code>) and 
 <td><code>PollLoop</code> — the poll + metrics background loops (liveness reconcile, <code>claude agents --json</code> cross-check, phantom-card prune, stuck-STARTING promotion, and the server-side metrics sampler), split from <code>runner.py</code> (#1157); built with the <code>RunnerState</code> + <code>RecordFacade</code> so every loop write and lifecycle emission lands on the one registry / record facade. <code>PollLoop</code> owns the two loop tasks; <code>SessionRunner</code> holds one instance, re-exposes the tasks + reconciled-session cache as proxy properties (so <code>shutdown()</code> still cancels + awaits both), and delegates.</td>
 </tr>
 <tr>
+<td><code>spawn_coordinator.py</code></td>
+<td><code>SpawnCoordinator</code> — the spawn / resume path and the fail-closed pre-spawn gate sequence (trust check → remote-control enable → bridge cap → deferred trust write → subprocess), both bridge launches (standard <code>remote-control</code> and the pty keeper), the readiness waits, and the off-request startup watch, split from <code>runner.py</code> (#1157); built last with the <code>RunnerState</code> + <code>RecordFacade</code> + <code>BridgeLaunch</code> + <code>Rediscovery</code> so the launch, registry writes, and lifecycle emits all go through the one collaborator each. <code>stop</code>/<code>forget</code>/<code>adopt</code> stay on <code>SessionRunner</code> and keep taking the same shared locks; the coordinator holds no locks. <code>SessionRunner</code> holds one instance and delegates the public <code>spawn</code>/<code>spawn_detailed</code>/<code>resume</code>/<code>resume_detailed</code>.</td>
+</tr>
+<tr>
 <td><code>field_decode.py</code></td>
 <td>Pure decoders for persisted-row / bridge-pointer / keeper-sidecar fields (the typed, bounded liveness/identity coercions), split from <code>runner.py</code> (#1157) so <code>runner.py</code> and <code>rediscovery.py</code> share one copy without a circular import.</td>
 </tr>
