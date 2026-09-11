@@ -78,7 +78,7 @@ async def test_persist_tolerates_store_write_failure(runner_config, monkeypatch,
     def _boom(_subset):
         raise OSError("disk full")
 
-    monkeypatch.setattr(runner._state._store, "save", _boom)
+    monkeypatch.setattr(runner._registry._store, "save", _boom)
 
     with caplog.at_level("WARNING"):
         inst = await runner.spawn("alpha")  # spawn persists AFTER launch → save raises → swallowed
@@ -124,16 +124,16 @@ async def test_persist_serializes_concurrent_callers(runner_config, monkeypatch)
         finally:
             in_flight -= 1
 
-    monkeypatch.setattr(runner._state._store, "save", _slow_save)
+    monkeypatch.setattr(runner._registry._store, "save", _slow_save)
 
     # Each persist must compute a *distinct* subset that differs from _last_saved, or
     # the no-change early-return short-circuits before the save. Drive that directly so
     # the test doesn't fight _persist's own _persisted/_last_saved writeback. Patch on
-    # `_state` (the RunnerState collaborator that OWNS `_persist_subset` since #1157): the
+    # `_registry` (the RunnerState collaborator that OWNS `_persist_subset` since #1157): the
     # runner's `_persist_subset` is a thin delegator, but `_persist`'s internal call reaches
     # the collaborator's own method, so the class/instance-level runner patch would be bypassed.
     subsets = iter([{"alpha": {"label": "one"}}, {"beta": {"label": "two"}}])
-    monkeypatch.setattr(runner._state, "_persist_subset", lambda: next(subsets))
+    monkeypatch.setattr(runner._registry, "_persist_subset", lambda: next(subsets))
 
     await asyncio.gather(runner._persist(), runner._persist())
 
@@ -151,21 +151,21 @@ def test_state_hub_proxies_the_single_runner_state(runner_config):
     from clauster.runner_state import RunnerState
 
     runner = _make_runner(runner_config)
-    assert isinstance(runner._state, RunnerState)
-    assert runner._instances is runner._state._instances
-    assert runner._procs is runner._state._procs
-    assert runner._startup_watches is runner._state._startup_watches
-    assert runner._crash_counts is runner._state._crash_counts
-    assert runner._metrics_cache is runner._state._metrics_cache
-    assert runner._persisted is runner._state._persisted
-    assert runner._row_backed is runner._state._row_backed
+    assert isinstance(runner._registry, RunnerState)
+    assert runner._instances is runner._registry._instances
+    assert runner._procs is runner._registry._procs
+    assert runner._startup_watches is runner._registry._startup_watches
+    assert runner._crash_counts is runner._registry._crash_counts
+    assert runner._metrics_cache is runner._registry._metrics_cache
+    assert runner._persisted is runner._registry._persisted
+    assert runner._row_backed is runner._registry._row_backed
 
     fresh_metrics: dict[str, dict] = {"iid": {"procs": 1}}
     runner._metrics_cache = fresh_metrics  # the metrics loop reassigns it wholesale
-    assert runner._state._metrics_cache is fresh_metrics  # setter wrote through
+    assert runner._registry._metrics_cache is fresh_metrics  # setter wrote through
     fresh_persisted = {"iid": {"project_name": "alpha"}}
     runner._persisted = fresh_persisted  # forget's one outside write reassigns the base
-    assert runner._state._persisted is fresh_persisted
+    assert runner._registry._persisted is fresh_persisted
 
 
 async def test_lock_facade_delegators_enter_the_runner_state_managers(runner_config):
@@ -175,7 +175,7 @@ async def test_lock_facade_delegators_enter_the_runner_state_managers(runner_con
     # to end — the store-wide flock and the raw `_flock` no longer have a happy-path caller on
     # the runner (the persist path uses RunnerState's own), so cover them here.
     runner = _make_runner(runner_config)
-    assert runner._spawn_lock_for("alpha") is runner._state._spawn_lock_for("alpha")
+    assert runner._spawn_lock_for("alpha") is runner._registry._spawn_lock_for("alpha")
     async with runner._bridge_flock("alpha"):
         pass
     async with runner._store_flock():
@@ -266,7 +266,7 @@ async def test_forget_clears_pointer_with_relative_projects_root(runner_config, 
     runner = SessionRunner(rel_config, claude_json=claude_json)
     # Seed through the store, not the in-memory cache: forget refreshes its merge
     # base from the DB at entry (#949), so a record must exist there to be found.
-    runner._state._store.save({"iid": {"project_name": "alpha"}})
+    runner._registry._store.save({"iid": {"project_name": "alpha"}})
 
     proj_abs = (rel_config.projects_root / "alpha").resolve()
     pdir = runner._claude_projects_dir / pointers.sanitize_cwd(proj_abs)
@@ -294,7 +294,7 @@ async def test_forget_without_project_name_skips_pointer_clear(runner_config, mo
     # merge base from the store at entry) to hand back the legacy shape directly.
     config, claude_json = runner_config
     runner = SessionRunner(config, claude_json=claude_json)
-    monkeypatch.setattr(runner._state._store, "load_strict", lambda: {"iid": {}})
+    monkeypatch.setattr(runner._registry._store, "load_strict", lambda: {"iid": {}})
     await runner.forget("iid")
     assert "iid" not in runner._persisted
 

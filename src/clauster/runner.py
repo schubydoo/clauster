@@ -539,7 +539,7 @@ class SessionRunner:
         # on the runner (its module-level `_row_*` helpers are shared with the
         # still-on-runner reattach/adopt methods) and is injected — see
         # :class:`RunnerState`.
-        self._state = runner_state.RunnerState(
+        self._registry = runner_state.RunnerState(
             config=config,
             lock_dir=self._lock_dir,
             store=self._persistence.state_store(),
@@ -615,45 +615,45 @@ class SessionRunner:
     # mirror (`_persisted` / `_row_backed` / `_last_saved`) are owned by :class:`RunnerState`
     # (#1157), but the runner is the public façade and its ~60 internal refs + the test seams
     # reach them by these names. Expose each as a thin proxy property forwarding to
-    # ``self._state`` so every reader reaches the collaborator's single copy — no second
+    # ``self._registry`` so every reader reaches the collaborator's single copy — no second
     # registry can exist. Only the two attrs a caller REASSIGNS wholesale get a write-through
     # setter (`_metrics_cache`, refreshed by the metrics loop; `_persisted`, dropped-from by
     # :meth:`forget`); the rest are mutated in place through the getter and stay read-only.
 
     @property
     def _instances(self) -> dict[str, RemoteControlInstance]:
-        """The instance-keyed bridge registry (owned by :attr:`_state`)."""
-        return self._state._instances
+        """The instance-keyed bridge registry (on :attr:`_registry`)."""
+        return self._registry._instances
 
     @property
     def _procs(self) -> dict[str, subprocess.Popen]:
-        """The ``Popen`` handles keyed by instance_id (owned by :attr:`_state`)."""
-        return self._state._procs
+        """The ``Popen`` handles keyed by instance_id (on :attr:`_registry`)."""
+        return self._registry._procs
 
     @property
     def _startup_watches(self) -> dict[str, asyncio.Task]:
-        """The per-spawn startup-watch tasks keyed by instance_id (owned by :attr:`_state`)."""
-        return self._state._startup_watches
+        """The per-spawn startup-watch tasks keyed by instance_id (on :attr:`_registry`)."""
+        return self._registry._startup_watches
 
     @property
     def _crash_counts(self) -> dict[str, int]:
-        """The per-project bridge-crash tally since process start (owned by :attr:`_state`)."""
-        return self._state._crash_counts
+        """The per-project bridge-crash tally since process start (on :attr:`_registry`)."""
+        return self._registry._crash_counts
 
     @property
     def _metrics_cache(self) -> dict[str, dict]:
-        """The per-instance server-side metrics snapshot (owned by :attr:`_state`)."""
-        return self._state._metrics_cache
+        """The per-instance server-side metrics snapshot (on :attr:`_registry`)."""
+        return self._registry._metrics_cache
 
     @_metrics_cache.setter
     def _metrics_cache(self, value: dict[str, dict]) -> None:
         """Replace the metrics cache (the metrics loop reassigns it wholesale)."""
-        self._state._metrics_cache = value
+        self._registry._metrics_cache = value
 
     @property
     def _persisted(self) -> dict[str, dict]:
-        """The persist merge base mirroring the store (owned by :attr:`_state`)."""
-        return self._state._persisted
+        """The persist merge base mirroring the store (on :attr:`_registry`)."""
+        return self._registry._persisted
 
     @_persisted.setter
     def _persisted(self, value: dict[str, dict]) -> None:
@@ -662,17 +662,17 @@ class SessionRunner:
         The sole outside writer is :meth:`forget`, which drops the forgotten id from the
         base; every other mutation stays inside :class:`RunnerState`'s own persist path.
         """
-        self._state._persisted = value
+        self._registry._persisted = value
 
     @property
     def _row_backed(self) -> set[str]:
-        """The persist-ownership set of store-observed instance ids (owned by :attr:`_state`)."""
-        return self._state._row_backed
+        """The persist-ownership set of store-observed instance ids (on :attr:`_registry`)."""
+        return self._registry._row_backed
 
     @property
     def _last_saved(self) -> dict[str, dict] | None:
-        """The last subset written, for the persist no-change dedup (owned by :attr:`_state`)."""
-        return self._state._last_saved
+        """The last subset written, for the persist no-change dedup (on :attr:`_registry`)."""
+        return self._registry._last_saved
 
     def list_instances(self) -> list[RemoteControlInstance]:
         """Return a snapshot list of all managed bridge instances."""
@@ -1252,10 +1252,10 @@ class SessionRunner:
         Patching THIS façade method does NOT intercept a persist and would pass vacuously:
         ``RunnerState._persist`` calls its OWN ``_persist_subset`` (the collaborator owns the
         registry + mirror it reads), so a test that must drive the subset patches
-        ``runner._state._persist_subset``. ``RunnerState`` calls the injected
+        ``runner._registry._persist_subset``. ``RunnerState`` calls the injected
         ``_persisted_liveness`` for each row's liveness pair.
         """
-        return self._state._persist_subset()
+        return self._registry._persist_subset()
 
     async def _refresh_persisted(self) -> bool:
         """Replace the persist merge base with the current store (delegates to RunnerState).
@@ -1264,7 +1264,7 @@ class SessionRunner:
         path and the resume/rediscover paths call it here; a ``False`` return (a DB read
         error kept the old base) makes those callers skip their tick, unchanged by the move.
         """
-        return await self._state._refresh_persisted()
+        return await self._registry._refresh_persisted()
 
     async def _persist(self, *, drop: str | None = None) -> None:
         """Write the persisted subset off-loop when it changed (delegates to :class:`RunnerState`).
@@ -1274,7 +1274,7 @@ class SessionRunner:
         preserved by the move, not by this delegator. ``drop`` is :meth:`forget`'s deletion
         path. Every runner caller (spawn/stop/poll/resume/forget) invokes it through here.
         """
-        await self._state._persist(drop=drop)
+        await self._registry._persist(drop=drop)
 
     # ----- discovery helpers ---------------------------------------------
 
@@ -1521,7 +1521,7 @@ class SessionRunner:
 
         Synchronous (no ``await``) so the get-or-create itself can't race on the loop.
         """
-        return self._state._spawn_lock_for(name)
+        return self._registry._spawn_lock_for(name)
 
     @contextlib.asynccontextmanager
     async def _bridge_flock(self, name: str) -> AsyncIterator[None]:
@@ -1530,7 +1530,7 @@ class SessionRunner:
         The cross-process layer under the in-proc :meth:`_spawn_lock_for`; always taken
         inproc-first, cross-process-second. See :meth:`RunnerState._bridge_flock`.
         """
-        async with self._state._bridge_flock(name):
+        async with self._registry._bridge_flock(name):
             yield
 
     @contextlib.asynccontextmanager
@@ -1540,7 +1540,7 @@ class SessionRunner:
         Always acquired AFTER any per-project flock and never before one, so the two
         levels can't deadlock across processes. See :meth:`RunnerState._store_flock`.
         """
-        async with self._state._store_flock():
+        async with self._registry._store_flock():
             yield
 
     @contextlib.asynccontextmanager
@@ -1550,7 +1550,7 @@ class SessionRunner:
         Exposed for the cross-process flock tests; the live callers are
         :meth:`RunnerState._bridge_flock` / :meth:`RunnerState._store_flock`.
         """
-        async with self._state._flock(target):
+        async with self._registry._flock(target):
             yield
 
     # ----- _spawn_locked's pre-spawn gates, in the order the spawn runs them ---------

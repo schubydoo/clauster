@@ -36,7 +36,7 @@ is the mutable heart of the runner, so its ownership rules are load-bearing:
   ``_metrics_cache`` / ``_persisted`` / ``_row_backed`` / ``_last_saved`` as thin proxy
   properties so every existing caller and test seam reaches this single source of truth.
   Correctness therefore depends on the runner holding EXACTLY ONE ``RunnerState``
-  (built once in ``SessionRunner.__init__`` as ``self._state``).
+  (built once in ``SessionRunner.__init__`` as ``self._registry``).
 - **``_persisted_liveness`` is NOT owned here.** It coerces a row's liveness identity
   with the module-level ``_row_*`` helpers that many still-on-the-runner reattach /
   adopt / rediscover methods also use, so it stays on ``SessionRunner`` and is injected
