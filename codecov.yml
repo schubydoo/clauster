@@ -108,6 +108,7 @@ component_management:
         - src/clauster/record_facade.py # #1157 — notify/webhook/session-event surface split from runner
         - src/clauster/runner_state.py # #1157 — registry/locks/persist-mirror hub split from runner
         - src/clauster/rediscovery.py # #1157 — reattach/adopt/rediscover surface split from runner
+        - src/clauster/poll_loop.py # #1157 — poll + metrics background loops split from runner
         - src/clauster/field_decode.py # #1157 — persisted-row/pointer/sidecar field decoders split from runner
         - src/clauster/procutil.py
         - src/clauster/pointers.py

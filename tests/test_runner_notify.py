@@ -96,7 +96,7 @@ async def test_poll_once_crash_fires_notification(runner_config, monkeypatch):
     )
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
     monkeypatch.setattr("clauster.runner.procutil.reap_if_exited", lambda *a, **k: None)
-    monkeypatch.setattr("clauster.runner.inspector.list_working_sessions", lambda *a, **k: [])
+    monkeypatch.setattr("clauster.poll_loop.inspector.list_working_sessions", lambda *a, **k: [])
 
     await runner.poll_once()
     assert runner._instances["alpha"].status is InstanceStatus.CRASHED
@@ -260,7 +260,7 @@ async def test_webhook_crash_fires_on_poll_once(runner_config, monkeypatch):
     runner._instances[fake.instance_id] = fake
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
     monkeypatch.setattr("clauster.runner.procutil.reap_if_exited", lambda *a, **k: None)
-    monkeypatch.setattr("clauster.runner.inspector.list_working_sessions", lambda *a, **k: [])
+    monkeypatch.setattr("clauster.poll_loop.inspector.list_working_sessions", lambda *a, **k: [])
     await runner.poll_once()
     assert fake.status is InstanceStatus.CRASHED
     await asyncio.gather(*runner._notify_tasks)

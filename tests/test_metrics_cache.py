@@ -244,8 +244,11 @@ async def test_refresh_forever_continues_after_unexpected_error(runner_config, m
     async def _boom():
         raise RuntimeError("unexpected")
 
-    monkeypatch.setattr(runner, "_refresh_metrics_cache", _boom)
-    monkeypatch.setattr("clauster.runner.asyncio.sleep", _raise_cancelled)
+    # #1157: `_metrics_refresh_forever` lives in PollLoop and calls its OWN
+    # `_refresh_metrics_cache` + `asyncio.sleep`, so patch the collaborator's method and the
+    # poll_loop module's asyncio.
+    monkeypatch.setattr(runner._poll_loop, "_refresh_metrics_cache", _boom)
+    monkeypatch.setattr("clauster.poll_loop.asyncio.sleep", _raise_cancelled)
     with pytest.raises(asyncio.CancelledError):  # only the sleep's cancel escapes
         await runner._metrics_refresh_forever()
 
@@ -258,7 +261,9 @@ async def test_refresh_forever_propagates_cancel_from_refresh(runner_config, mon
     async def _cancel():
         raise asyncio.CancelledError
 
-    monkeypatch.setattr(runner, "_refresh_metrics_cache", _cancel)
+    # #1157: patch PollLoop's own `_refresh_metrics_cache` — the delegator's target — so the
+    # cancel actually propagates out of the loop.
+    monkeypatch.setattr(runner._poll_loop, "_refresh_metrics_cache", _cancel)
     with pytest.raises(asyncio.CancelledError):
         await runner._metrics_refresh_forever()
 

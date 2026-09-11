@@ -2168,7 +2168,7 @@ async def test_resync_skips_a_row_whose_project_is_no_longer_discovered(
         "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None, **_kw: pid == 4402
     )
 
-    with caplog.at_level(logging.ERROR, logger="clauster.runner"):
+    with caplog.at_level(logging.ERROR, logger="clauster.poll_loop"):
         await runner.poll_once()
 
     inst = runner.get_instance("iid-gone")
@@ -2759,7 +2759,7 @@ async def test_promotion_skips_an_undiscovered_project(runner_config, monkeypatc
     _stub_connect(monkeypatch)
     inst = _adopted_starting(runner, project="deleted-project")
 
-    with caplog.at_level(logging.ERROR, logger="clauster.runner"):
+    with caplog.at_level(logging.ERROR, logger="clauster.poll_loop"):
         await runner.poll_once()
 
     assert inst.status is InstanceStatus.STARTING
@@ -2776,7 +2776,10 @@ async def test_observation_only_poll_promotes_but_stays_silent(runner_config, mo
     _stub_connect(monkeypatch)
     inst = _adopted_starting(runner)
     emitted: list[str] = []
-    monkeypatch.setattr(SessionRunner, "_emit_lifecycle", lambda self, e, i: emitted.append(e))
+    # #1157: the poll path emits through `runner._record._emit_lifecycle` (PollLoop calls the
+    # RecordFacade directly), so patch the collaborator the loop actually reaches, not the
+    # runner's delegator.
+    monkeypatch.setattr(runner._record, "_emit_lifecycle", lambda e, i: emitted.append(e))
 
     await runner.poll_once(side_effects=False)
 
@@ -2793,7 +2796,9 @@ async def test_promotion_announces_the_transition_once(runner_config, monkeypatc
     _stub_connect(monkeypatch)
     inst = _adopted_starting(runner)
     emitted: list[str] = []
-    monkeypatch.setattr(SessionRunner, "_emit_lifecycle", lambda self, e, i: emitted.append(e))
+    # #1157: the poll path emits through `runner._record._emit_lifecycle` (see the sibling
+    # test above) — patch the collaborator the loop reaches, not the runner's delegator.
+    monkeypatch.setattr(runner._record, "_emit_lifecycle", lambda e, i: emitted.append(e))
 
     await runner.poll_once()
     await runner.poll_once()
@@ -2930,7 +2935,10 @@ async def test_observation_only_poll_stamps_in_memory_but_does_not_write(
     inst = _tick_less_running(runner)
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
     writes: list[object] = []
-    monkeypatch.setattr(SessionRunner, "_persist", lambda self, **kw: _record(writes))
+    # #1157: the poll path persists through `runner._registry._persist` (PollLoop calls the
+    # RunnerState directly), so patch the collaborator the loop reaches to keep this a real
+    # "an observation-only poll must not write" guard rather than a vacuous one.
+    monkeypatch.setattr(runner._registry, "_persist", lambda **kw: _record(writes))
 
     await runner.poll_once(side_effects=False)
 
