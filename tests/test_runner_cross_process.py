@@ -256,7 +256,7 @@ async def test_resume_gate_fails_closed_when_refresh_fails(runner_config, monkey
     def _boom():
         raise OSError("state load failed: locked")
 
-    monkeypatch.setattr(runner._state, "load_strict", _boom)
+    monkeypatch.setattr(runner._state._store, "load_strict", _boom)
     with pytest.raises(SpawnError, match="could not verify"):
         await runner.resume(card.instance_id)
     assert runner.get_instance_for_project("beta") is card  # kept for the retry
@@ -349,7 +349,7 @@ async def test_persist_aborts_on_failed_refresh_instead_of_pruning(runner_config
     def _boom():
         raise OSError("state load failed: locked")
 
-    monkeypatch.setattr(runner._state, "load_strict", _boom)
+    monkeypatch.setattr(runner._state._store, "load_strict", _boom)
     own = _fake_instance("alpha")
     runner._instances[own.instance_id] = own
     await runner._persist()
@@ -370,8 +370,8 @@ async def test_refresh_keeps_previous_base_on_db_read_error(runner_config, monke
     def _boom():
         raise OSError("state load failed: locked")
 
-    monkeypatch.setattr(runner._state, "load_strict", _boom)
-    with caplog.at_level("WARNING", logger="clauster.runner"):
+    monkeypatch.setattr(runner._state._store, "load_strict", _boom)
+    with caplog.at_level("WARNING", logger="clauster.runner_state"):
         await runner._refresh_persisted()
     assert runner._persisted == {"iid-keep": {"project_name": "beta"}}
     assert "could not refresh persisted bridge state" in caplog.text
@@ -386,7 +386,7 @@ async def test_persist_holds_the_store_wide_flock_across_the_save(runner_config,
 
     config, claude_json = runner_config
     runner = SessionRunner(config, claude_json=claude_json)
-    real_save = runner._state.save
+    real_save = runner._state._store.save
     observed = {}
 
     def _save_and_probe(records):
@@ -405,7 +405,7 @@ async def test_persist_holds_the_store_wide_flock_across_the_save(runner_config,
             os.close(fd)
         real_save(records)
 
-    monkeypatch.setattr(runner._state, "save", _save_and_probe)
+    monkeypatch.setattr(runner._state._store, "save", _save_and_probe)
     own = _fake_instance("alpha")
     runner._instances[own.instance_id] = own
     await runner._persist()

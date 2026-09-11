@@ -20,6 +20,7 @@ Key modules under `src/clauster/`:
 | `bridge_launch.py` | `BridgeLaunch` — config-only launch/argv helpers for both bridge modes, split from `runner.py` (#1157); `SessionRunner` holds one instance and delegates. |
 | `bridge_prune.py` | `BridgePrune` — filesystem-only bridge-log retention and stale bridge-pointer GC, split from `runner.py` (#1157); `SessionRunner` holds one instance and delegates. |
 | `record_facade.py` | `RecordFacade` — the notify / webhook / session-event surface (the fire-and-forget lifecycle sinks and the `_emit_lifecycle` chokepoint), split from `runner.py` (#1157); `SessionRunner` holds one instance and delegates. |
+| `runner_state.py` | `RunnerState` — the shared registry / locks / persist-mirror hub (the instance registry, process map, startup-watch tasks, crash tally, metrics cache, persist merge mirror, and the four lifecycle locks), split from `runner.py` (#1157); `SessionRunner` holds one instance, re-exposes its dicts as proxy properties, and delegates the persist/lock methods. |
 | `pty_keeper.py` | Sidecar that owns a true-resume (**pty**) bridge's PTY. |
 | `discovery.py` | Project discovery under `projects_root`; `~/.claude.json` paths. |
 | `provisioning.py` | Project create + clone (with the clone/SSRF guards). |

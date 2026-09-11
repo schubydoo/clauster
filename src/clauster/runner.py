@@ -43,6 +43,7 @@ from . import (
     pty_screen,
     record_facade,
     redact,
+    runner_state,
     usage,
 )
 
@@ -85,6 +86,11 @@ from .models import (
 )
 from .notify import Notifier
 from .recap import ensure_recap_hook_installed
+
+# Re-exported so ``from clauster.runner import _release_flock_if_acquired`` (used by the
+# cross-process flock tests) still resolves after the flock machinery moved to
+# ``runner_state`` (#1157). ``RunnerState._flock`` holds the live caller.
+from .runner_state import _release_flock_if_acquired as _release_flock_if_acquired
 from .trust import ensure_remote_control_enabled, is_trusted, trust_directory
 from .webhooks import WebhookEmitter
 
@@ -288,25 +294,6 @@ _NOTIFY_DRAIN_GRACE = 2.0
 _WORKTREE_NAME_RE = re.compile(r"clauster-[0-9a-f]{8}\Z")
 
 
-def _release_flock_if_acquired(cm) -> Callable[[asyncio.Task], None]:
-    """Build the done-callback that releases a flock a CANCELLED caller still acquired.
-
-    ``_bridge_flock`` acquires the blocking cross-process lock in a worker thread; if
-    the awaiting task is cancelled mid-acquire, the thread finishes anyway and would
-    otherwise hold the lock until GC reclaims the context manager. The callback exits
-    the manager (an ``os.close``, trivially fast on the loop) once the acquisition
-    task lands — and only when it actually succeeded (a failed/cancelled acquire
-    never entered the lock, so exiting it would raise).
-    """
-
-    def _release(task: asyncio.Task) -> None:
-        """Release the flock only once the task finished without cancellation or error."""
-        if not task.cancelled() and task.exception() is None:
-            cm.__exit__(None, None, None)
-
-    return _release
-
-
 def _row_int(value: object) -> int | None:
     """Coerce a persisted-row field to ``int``, or ``None`` if it isn't one (#1088).
 
@@ -501,33 +488,9 @@ class SessionRunner:
             log_dir=self._log_dir,
             stderr_path_for=self._stderr_path_for,
         )
-        # Registry keyed by instance_id (stable UUID, #777). Standard bridges keep
-        # one entry per project; pty sessions may have N entries per project.
-        self._instances: dict[str, RemoteControlInstance] = {}
-        # Per-project bridge-crash tally since process start, exposed as the
-        # clauster_bridge_crashes_total counter (#352) — a crash that resumes between
-        # scrapes still leaves a trace, unlike the current-status gauge.
-        self._crash_counts: dict[str, int] = {}
-        # Popen handles keyed by instance_id (parallel to _instances).
-        self._procs: dict[str, subprocess.Popen] = {}
         self._sessions: list[WorkingSession] = []
         self._poll_task: asyncio.Task | None = None
-        # Server-side metrics snapshot (#354): the metrics task refreshes it off the
-        # request path so /api/projects/{name}/metrics + the batch read + the /metrics
-        # scrape all serve from the last sample at O(1), no per-request thread. Keyed
-        # by instance_id (#778 — a project may run several bridges, so a project key
-        # would clobber); the public readers either serve that per-instance truth
-        # (#1090) or fold it per project.
-        self._metrics_cache: dict[str, dict] = {}
         self._metrics_task: asyncio.Task | None = None
-        # Per-spawn background tasks that watch a STARTING bridge until it either
-        # registers an environment (-> RUNNING) or proves stuck (-> ERROR).
-        # Keyed by instance_id (one watch per spawned instance).
-        self._startup_watches: dict[str, asyncio.Task] = {}
-        # Per-project locks serializing concurrent spawns of the SAME project (see
-        # ``spawn``). Keyed by project name — the per-project standard-singleton check
-        # and pty-warning logic must run serially for the same project.
-        self._spawn_locks: dict[str, asyncio.Lock] = {}
         # Mark remote control as acknowledged once, before the first spawn.
         self._rc_setting_ensured = False
         # Install the resume-recap SessionStart hook once, before the first spawn.
@@ -557,26 +520,31 @@ class SessionRunner:
         self._persistence = persistence or Persistence(
             config.state_dir, backup_before_migrate=config.db.backup_before_migrate
         )
-        self._state = self._persistence.state_store()
         # Append-only session lifecycle / event history (#363). Records spawn/ready/
         # end/crash transitions for the Projects-zone "last used" sort (#298) and the
         # pty resume picker (#303). Best-effort and fail-closed — a lost history row
         # never affects a bridge's lifecycle.
         self._history = self._persistence.session_history_store()
-        self._persisted: dict[str, dict] = self._state.load()
-        # Instance ids whose row this process has OBSERVED in (or saved to) the store —
-        # grown on every base load/refresh and every successful save, never pruned by
-        # a refresh. The persist subset uses it as the ownership signal (#951): a dead
-        # card that is row-backed yet absent from the fresh base was forgotten by
-        # another process and must not be written back; a never-saved instance still
-        # gets its first save. Bounded by the instances this process ever sees.
-        self._row_backed: set[str] = set(self._persisted)
-        self._last_saved: dict[str, dict] | None = None
-        # Serialize concurrent persists (startup-watch / stop / poll loop can interleave
-        # on the event loop). The DB store's per-row prune raises StaleDataError when a
-        # racing writer already removed the row; one lock makes each save atomic (mirrors
-        # :attr:`HostedManager._persist_lock`).
-        self._persist_lock = asyncio.Lock()
+        # Shared registry / locks / persist-mirror hub (#1157): the state core that
+        # spawn / poll / rediscover / adopt / forget / stop all read and write — the
+        # instance-keyed registry (`_instances`), the `Popen` map (`_procs`), the
+        # per-spawn startup-watch tasks (`_startup_watches`), the crash tally
+        # (`_crash_counts`), the metrics cache (`_metrics_cache`), the persist merge
+        # mirror (`_persisted` / `_row_backed` / `_last_saved`) over the DB-backed store,
+        # and the four lifecycle locks (`_spawn_locks`, the per-project + store-wide
+        # flocks, `_persist_lock`) exposed as context managers. Held as the ONE
+        # `RunnerState` so every caller and test seam reaches the same source of truth;
+        # the runner re-exposes each dict/set as a thin proxy property (below) and keeps
+        # thin delegators for the moved persist/lock methods. `_persisted_liveness` stays
+        # on the runner (its module-level `_row_*` helpers are shared with the
+        # still-on-runner reattach/adopt methods) and is injected — see
+        # :class:`RunnerState`.
+        self._state = runner_state.RunnerState(
+            config=config,
+            lock_dir=self._lock_dir,
+            store=self._persistence.state_store(),
+            persisted_liveness=self._persisted_liveness,
+        )
         # Notify / webhook / session-event surface (#1157): owns the fire-and-forget
         # lifecycle sinks — the run-history append, the outbound webhook, and the outbound
         # notification — plus the single `_emit_lifecycle` chokepoint. It OWNS the
@@ -642,6 +610,69 @@ class SessionRunner:
     def _notify_tasks(self) -> set[asyncio.Task]:
         """The fire-and-forget task set (owned by :attr:`_record`) that ``shutdown()`` drains."""
         return self._record._notify_tasks
+
+    # The registry / crash tally / metrics cache / startup-watch tasks and the persist
+    # mirror (`_persisted` / `_row_backed` / `_last_saved`) are owned by :class:`RunnerState`
+    # (#1157), but the runner is the public façade and its ~60 internal refs + the test seams
+    # reach them by these names. Expose each as a thin proxy property forwarding to
+    # ``self._state`` so every reader reaches the collaborator's single copy — no second
+    # registry can exist. Only the two attrs a caller REASSIGNS wholesale get a write-through
+    # setter (`_metrics_cache`, refreshed by the metrics loop; `_persisted`, dropped-from by
+    # :meth:`forget`); the rest are mutated in place through the getter and stay read-only.
+
+    @property
+    def _instances(self) -> dict[str, RemoteControlInstance]:
+        """The instance-keyed bridge registry (owned by :attr:`_state`)."""
+        return self._state._instances
+
+    @property
+    def _procs(self) -> dict[str, subprocess.Popen]:
+        """The ``Popen`` handles keyed by instance_id (owned by :attr:`_state`)."""
+        return self._state._procs
+
+    @property
+    def _startup_watches(self) -> dict[str, asyncio.Task]:
+        """The per-spawn startup-watch tasks keyed by instance_id (owned by :attr:`_state`)."""
+        return self._state._startup_watches
+
+    @property
+    def _crash_counts(self) -> dict[str, int]:
+        """The per-project bridge-crash tally since process start (owned by :attr:`_state`)."""
+        return self._state._crash_counts
+
+    @property
+    def _metrics_cache(self) -> dict[str, dict]:
+        """The per-instance server-side metrics snapshot (owned by :attr:`_state`)."""
+        return self._state._metrics_cache
+
+    @_metrics_cache.setter
+    def _metrics_cache(self, value: dict[str, dict]) -> None:
+        """Replace the metrics cache (the metrics loop reassigns it wholesale)."""
+        self._state._metrics_cache = value
+
+    @property
+    def _persisted(self) -> dict[str, dict]:
+        """The persist merge base mirroring the store (owned by :attr:`_state`)."""
+        return self._state._persisted
+
+    @_persisted.setter
+    def _persisted(self, value: dict[str, dict]) -> None:
+        """Route a persist-mirror reassignment through the collaborator (#1157 invariant).
+
+        The sole outside writer is :meth:`forget`, which drops the forgotten id from the
+        base; every other mutation stays inside :class:`RunnerState`'s own persist path.
+        """
+        self._state._persisted = value
+
+    @property
+    def _row_backed(self) -> set[str]:
+        """The persist-ownership set of store-observed instance ids (owned by :attr:`_state`)."""
+        return self._state._row_backed
+
+    @property
+    def _last_saved(self) -> dict[str, dict] | None:
+        """The last subset written, for the persist no-change dedup (owned by :attr:`_state`)."""
+        return self._state._last_saved
 
     def list_instances(self) -> list[RemoteControlInstance]:
         """Return a snapshot list of all managed bridge instances."""
@@ -1215,157 +1246,35 @@ class SessionRunner:
         }
 
     def _persist_subset(self) -> dict[str, dict]:
-        """Build the record to persist, keyed by instance id.
+        """Build the record to persist, keyed by instance id (delegates to :class:`RunnerState`).
 
-        The previously-persisted map overlaid with the currently-tracked instances — not
-        the live instances alone: the comprehension below also admits a dead card that is
-        not row-backed or is still present in ``_persisted``, and the overlay retains every
-        earlier row (see the comment on the return).
+        Kept on the runner for the tests that read the overlay via ``runner._persist_subset()``.
+        Patching THIS façade method does NOT intercept a persist and would pass vacuously:
+        ``RunnerState._persist`` calls its OWN ``_persist_subset`` (the collaborator owns the
+        registry + mirror it reads), so a test that must drive the subset patches
+        ``runner._state._persist_subset``. ``RunnerState`` calls the injected
+        ``_persisted_liveness`` for each row's liveness pair.
         """
-        live = {
-            inst.instance_id: {
-                "project_name": inst.project,
-                "label": inst.label,
-                "intentional_stop": inst.intentional_stop,
-                "spawn_mode": inst.spawn_mode,
-                "permission_mode": inst.permission_mode,
-                "resume_mode": inst.resume_mode,
-                "sandbox_mode": inst.sandbox_mode,
-                # Only set when the name is NOT derivable from this row's instance_id
-                # (#1241) — a keeper-only reattach that had to mint a fresh id. Persisted
-                # so the recovery survives the next restart: by then the keeper may be
-                # gone, and the row would otherwise be rebuilt with the derived name and
-                # resume into a second worktree. None for every ordinary session.
-                "worktree_name": inst.worktree_name,
-                # Liveness identity (#1088/#1091): without these persisted, a fresh process
-                # cannot tell which rows are live, and `rediscover` could only ever resolve
-                # one instance per project via the (project-keyed) pointer walk. A dead
-                # card's pair is carried from its ROW rather than from the card, which
-                # holds None by design — see `_persisted_liveness` (#1115).
-                **self._persisted_liveness(inst),
-                # Always as a PAIR (#1178), never the pid alone: a keeper pid with a stale
-                # or absent start time is what lets a DIFFERENT live keeper on that pid
-                # answer for this one. All three are set and cleared together on the
-                # instance — the epoch identifies the keeper and the boot-relative ticks
-                # keep that identification from moving with the host clock (#1402).
-                "keeper_pid": inst.keeper_pid,
-                "keeper_proc_start": inst.keeper_proc_start,
-                "keeper_start_ticks": inst.keeper_start_ticks,
-            }
-            for inst in self._instances.values()
-            # #951 rounds 2+3: a dead card (STOPPED/CRASHED/ERROR) whose row this
-            # process KNOWS reached the store (``_row_backed``) but is gone from the
-            # freshly refreshed base was forgotten by another process — the card is
-            # only a view of that row, and writing it back through this overlay would
-            # undo the delete on every later persist. Row-backedness (not status) is
-            # the ownership signal: a NEVER-saved instance (fresh spawn, or a spawn
-            # that failed straight to ERROR) is not in the base either, but it isn't
-            # row-backed, so it still gets its first save. A live STARTING/RUNNING
-            # bridge is ground truth regardless and always persists.
-            if (
-                inst.status in (InstanceStatus.STARTING, InstanceStatus.RUNNING)
-                or inst.instance_id not in self._row_backed
-                or inst.instance_id in self._persisted
-            )
-        }
-        # Overlay live instances onto the previously-persisted map rather than
-        # replacing it: an instance whose bridge isn't currently tracked — its bridge
-        # died while Clauster was down, or rediscover hasn't (re)detected it — keeps
-        # its saved label/modes/intentional_stop instead of being silently wiped on
-        # the next save (which would later resume it with default modes). Live entries
-        # win for tracked instances. An entry whose project directory was removed
-        # lingers harmlessly (discovery is filesystem-based, so it's never consumed)
-        # until state.json is reset.
-        return {**self._persisted, **live}
+        return self._state._persist_subset()
 
     async def _refresh_persisted(self) -> bool:
-        """Replace the persist merge-base with the CURRENT DB state (#949).
+        """Replace the persist merge base with the current store (delegates to RunnerState).
 
-        ``_persisted`` is otherwise a snapshot from construction time, advanced only
-        by this process's own saves — so a second clauster process (web app vs a
-        headless CLI/MCP writer) mutating the shared store leaves it stale, and the
-        next full-replace save here would resurrect rows the other process pruned
-        and prune rows it added. Refreshing before merging keeps every writer's
-        base current.
-
-        Read failures keep the OLD base (:meth:`StateStore.load_strict` raises
-        instead of degrading to ``{}``): replacing a known-good base with an empty
-        one on a transient DB error would turn the next save into a mass prune —
-        a stale cursor is the safe degrade, a data loss is not.
+        The public refresh (takes ``_persist_lock`` then reloads). The poll-loop adoption
+        path and the resume/rediscover paths call it here; a ``False`` return (a DB read
+        error kept the old base) makes those callers skip their tick, unchanged by the move.
         """
-        async with self._persist_lock:
-            return await self._refresh_persisted_locked()
-
-    async def _refresh_persisted_locked(self) -> bool:
-        """Body of :meth:`_refresh_persisted`; caller must hold ``_persist_lock``.
-
-        Returns whether the base was actually refreshed — ``False`` on a DB read
-        error (old base kept). :meth:`_persist` aborts its save on ``False``.
-        """
-        try:
-            loaded = await asyncio.to_thread(self._state.load_strict)
-        except OSError as exc:
-            _log.warning(
-                "could not refresh persisted bridge state (keeping the previous snapshot): %s",
-                exc,
-            )
-            return False
-        self._persisted = loaded
-        # UNION, never replace: an id we saved that is now missing from the store is
-        # exactly the cross-process-deletion signal the persist subset keys on.
-        self._row_backed |= set(loaded)
-        return True
+        return await self._state._refresh_persisted()
 
     async def _persist(self, *, drop: str | None = None) -> None:
-        """Write the persisted subset off-loop, but only when it actually changed.
+        """Write the persisted subset off-loop when it changed (delegates to :class:`RunnerState`).
 
-        Best-effort: the state store is non-authoritative, so a write failure (disk
-        full, revoked perms — surfaced as :class:`OSError` per the store contract)
-        degrades to a stale on-disk record, never a failed spawn/stop or a 500 on the
-        dashboard poll. ``_last_saved`` is left unchanged on failure, which is what makes
-        the next persist retry; ``_persisted`` has already been advanced to the freshly
-        refreshed base by then, and the next attempt re-reads it anyway. Mirrors
-        :meth:`HostedManager._persist`.
-
-        Held under ``_persist_lock`` so interleaving callers can't race the store's
-        per-row prune into a :class:`StaleDataError` (#471) — and, since #949, under
-        the STORE-WIDE cross-process lock (:meth:`_store_flock`) for the whole
-        refresh→merge→save: the save is a FULL-TABLE replace, and the per-project
-        flocks don't exclude a different project's writer in another process, so an
-        unserialized load→save could straddle its save and prune its fresh row.
-
-        The refresh re-loads the merge base from the store so this save can't
-        resurrect a row another clauster process pruned since our snapshot, or prune
-        a row it added. A FAILED refresh aborts the attempt — writing a full replace
-        from a known-stale base is exactly the prune hazard this exists to close; the
-        next persist retries. ``drop`` (:meth:`forget`, the one deletion path)
-        excludes that instance id from the freshly refreshed base so the delete is
-        atomic with the reload — and skips the no-change dedup, which was computed
-        against OUR last write and can't know whether the store still holds the row.
+        The whole refresh→merge→save stays serialized under ``_persist_lock`` + the
+        store-wide flock inside ``RunnerState`` — the persist-serialization invariant is
+        preserved by the move, not by this delegator. ``drop`` is :meth:`forget`'s deletion
+        path. Every runner caller (spawn/stop/poll/resume/forget) invokes it through here.
         """
-        async with self._persist_lock:
-            async with self._store_flock():
-                await self._persist_locked(drop=drop)
-
-    async def _persist_locked(self, *, drop: str | None) -> None:
-        """Body of :meth:`_persist`; caller holds ``_persist_lock`` + the store flock."""
-        if not await self._refresh_persisted_locked():
-            return
-        if drop is not None:
-            self._persisted = {k: v for k, v in self._persisted.items() if k != drop}
-        subset = self._persist_subset()
-        if drop is None and subset == self._last_saved:
-            return
-        try:
-            await asyncio.to_thread(self._state.save, subset)
-        except OSError as exc:
-            _log.warning("could not persist bridge state: %s", exc)
-            return
-        self._last_saved = subset
-        # Keep the merge base in sync with what's on disk so the next overlay builds
-        # on the latest saved state (live modes that changed this round are retained).
-        self._persisted = subset
-        self._row_backed |= set(subset)  # everything just saved is now row-backed
+        await self._state._persist(drop=drop)
 
     # ----- discovery helpers ---------------------------------------------
 
@@ -1600,80 +1509,49 @@ class SessionRunner:
                 trust=trust,
             )
 
+    # The four lifecycle locks are owned by :class:`RunnerState` (#1157). These thin
+    # delegators keep the exact call-site API (a sync lock getter + three async context
+    # managers) so every acquisition site — spawn (`_spawn_locked`), stop, forget, adopt,
+    # resume — keeps taking them in the SAME acyclic order: in-proc `_spawn_lock_for` →
+    # per-project `_bridge_flock` → `_persist_lock` → store-wide `_store_flock`. The move
+    # relocates the state, not a single acquisition.
+
     def _spawn_lock_for(self, name: str) -> asyncio.Lock:
-        """Return the per-project spawn lock, creating it on first use.
+        """Return the per-project spawn lock (delegates to :class:`RunnerState`).
 
         Synchronous (no ``await``) so the get-or-create itself can't race on the loop.
         """
-        lock = self._spawn_locks.get(name)
-        if lock is None:
-            lock = self._spawn_locks[name] = asyncio.Lock()
-        return lock
+        return self._state._spawn_lock_for(name)
 
     @contextlib.asynccontextmanager
     async def _bridge_flock(self, name: str) -> AsyncIterator[None]:
-        """Hold the cross-process per-project bridge-lifecycle lock (#949).
+        """Hold the per-project bridge-lifecycle flock (delegates to :class:`RunnerState`).
 
-        The per-project ``_spawn_lock_for`` is an in-process ``asyncio.Lock`` — it
-        never excludes a SECOND clauster process (the live web app vs a headless
-        CLI ``clauster start``/``stop`` or MCP writer sharing the same config).
-        This layers the deployment-wide ``flock`` (:func:`atomicio.cross_process_lock`,
-        the same primitive the config/CLAUDE.md writers use) under it, keyed by the
-        project directory so both processes derive the same lock file. Ordering is
-        ALWAYS inproc-first, cross-process-second (the atomicio convention), so the
-        two layers can't deadlock; the blocking ``flock`` is entered/exited in a
-        worker thread so a contended lock never stalls the event loop. ``name`` may
-        be a bare instance id on the :meth:`forget` fallback path (record with no
-        resolvable project) — the derived path need not exist, it is only a key.
-
-        On Windows (no ``fcntl``) the flock layer yields without locking — behavior
-        there is unchanged (in-process serialization only), exactly like the config
-        writers; see :func:`atomicio.cross_process_lock`.
+        The cross-process layer under the in-proc :meth:`_spawn_lock_for`; always taken
+        inproc-first, cross-process-second. See :meth:`RunnerState._bridge_flock`.
         """
-        async with self._flock((self._config.projects_root / name).expanduser()):
+        async with self._state._bridge_flock(name):
             yield
 
     @contextlib.asynccontextmanager
     async def _store_flock(self) -> AsyncIterator[None]:
-        """Hold the STORE-WIDE cross-process lock for a read-merge-replace save (#949).
+        """Hold the store-wide flock for a read-merge-replace save (delegates to RunnerState).
 
-        The per-project flock only excludes SAME-project writers, but
-        :meth:`StateStore.save` is a full-table replace — without a store-wide lock,
-        this process's refresh→save could straddle another process's save of a
-        *different* project's row and prune it. Held only across :meth:`_persist`'s
-        refresh+merge+save (milliseconds; the store is small). Ordering: always
-        acquired AFTER any per-project flock (spawn/stop/forget/adopt persist inside
-        their sections) and no holder ever acquires a per-project flock afterwards,
-        so the two levels can't deadlock across processes.
+        Always acquired AFTER any per-project flock and never before one, so the two
+        levels can't deadlock across processes. See :meth:`RunnerState._store_flock`.
         """
-        async with self._flock((self._config.state_dir / "state-store").expanduser()):
+        async with self._state._store_flock():
             yield
 
     @contextlib.asynccontextmanager
     async def _flock(self, target: Path) -> AsyncIterator[None]:
-        """Hold :func:`atomicio.cross_process_lock` on ``target``, event-loop-safely.
+        """Hold :func:`atomicio.cross_process_lock` on ``target`` (delegates to RunnerState).
 
-        The shared acquire behind :meth:`_bridge_flock` / :meth:`_store_flock`: the
-        blocking ``flock`` is entered/exited in a worker thread, and the lock dir is
-        pinned to THIS runner's deployment (``self._lock_dir``) so a later global
-        ``configure_lock_dir`` for a different state dir can't redirect it.
+        Exposed for the cross-process flock tests; the live callers are
+        :meth:`RunnerState._bridge_flock` / :meth:`RunnerState._store_flock`.
         """
-        cm = atomicio.cross_process_lock(target, lock_dir=self._lock_dir)
-        acquire = asyncio.ensure_future(asyncio.to_thread(cm.__enter__))
-        try:
-            await asyncio.shield(acquire)
-        except asyncio.CancelledError:
-            # The worker thread may still complete the blocking flock AFTER this frame
-            # is torn down (a cancelled to_thread doesn't stop the thread). Release the
-            # lock the moment the acquisition lands instead of holding it until GC
-            # reclaims the context manager — a cancelled caller must never pin the
-            # cross-process lock.
-            acquire.add_done_callback(_release_flock_if_acquired(cm))
-            raise
-        try:
+        async with self._state._flock(target):
             yield
-        finally:
-            await asyncio.to_thread(cm.__exit__, None, None, None)
 
     # ----- _spawn_locked's pre-spawn gates, in the order the spawn runs them ---------
     # Extracted from _spawn_locked (#1155) so the gate ordering is legible in one screen:
