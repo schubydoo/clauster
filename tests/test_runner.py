@@ -22,6 +22,7 @@ from clauster.models import (
     RemoteControlInstance,
     WorkingSession,
 )
+from clauster.rediscovery import Rediscovery
 from clauster.runner import (
     _STALE_POINTER_TTL_SECONDS,
     AdoptionUnavailable,
@@ -194,7 +195,7 @@ async def test_rediscover_persist_false_skips_state_write(runner_config, monkeyp
     async def spy_persist():
         calls["n"] += 1
 
-    monkeypatch.setattr(runner, "_persist", spy_persist)
+    monkeypatch.setattr(runner._registry, "_persist", spy_persist)
     await runner.rediscover(persist=False)
     assert calls["n"] == 0  # read-only: no write
     await runner.rediscover()  # the default still persists
@@ -1041,8 +1042,11 @@ def test_reattach_pty_from_sidecar_refuses_a_non_pty_row(runner_config, monkeypa
     config, claude_json = runner_config
     runner = SessionRunner(config, claude_json=claude_json)
     scanned: list[str] = []
+    # Patch the collaborator's copy: `_reattach_pty_from_sidecar` now lives on `Rediscovery`
+    # and scans via `Rediscovery._keeper_sidecars_for`, so a `SessionRunner` patch would never
+    # intercept and this guard would pass vacuously (#1157).
     monkeypatch.setattr(
-        SessionRunner, "_keeper_sidecars_for", lambda self, n: scanned.append(n) or []
+        Rediscovery, "_keeper_sidecars_for", lambda self, n: scanned.append(n) or []
     )
     saved = {"project_name": "alpha", "resume_mode": "standard", "spawn_mode": "same-dir"}
     assert runner._reattach_pty_from_sidecar("alpha", saved) is None

@@ -21,6 +21,8 @@ Key modules under `src/clauster/`:
 | `bridge_prune.py` | `BridgePrune` — filesystem-only bridge-log retention and stale bridge-pointer GC, split from `runner.py` (#1157); `SessionRunner` holds one instance and delegates. |
 | `record_facade.py` | `RecordFacade` — the notify / webhook / session-event surface (the fire-and-forget lifecycle sinks and the `_emit_lifecycle` chokepoint), split from `runner.py` (#1157); `SessionRunner` holds one instance and delegates. |
 | `runner_state.py` | `RunnerState` — the shared registry / locks / persist-mirror hub (the instance registry, process map, startup-watch tasks, crash tally, metrics cache, persist merge mirror, and the four lifecycle locks), split from `runner.py` (#1157); `SessionRunner` holds one instance, re-exposes its dicts as proxy properties, and delegates the persist/lock methods. |
+| `rediscovery.py` | `Rediscovery` — the reattach / adopt / rediscover surface (cold-start reattach of persisted rows, runtime take-over of external bridges, poll-time row adoption), split from `runner.py` (#1157); built with the `RunnerState` so every reattach writes the one registry under the same locks, and `SessionRunner` holds one instance and delegates. |
+| `field_decode.py` | Pure decoders for persisted-row / bridge-pointer / keeper-sidecar fields (the typed, bounded liveness/identity coercions), split from `runner.py` (#1157) so `runner.py` and `rediscovery.py` share one copy without a circular import. |
 | `pty_keeper.py` | Sidecar that owns a true-resume (**pty**) bridge's PTY. |
 | `discovery.py` | Project discovery under `projects_root`; `~/.claude.json` paths. |
 | `provisioning.py` | Project create + clone (with the clone/SSRF guards). |

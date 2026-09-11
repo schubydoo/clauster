@@ -107,6 +107,8 @@ component_management:
         - src/clauster/bridge_prune.py # #1157 — filesystem-only prune/log-retention helpers split from runner
         - src/clauster/record_facade.py # #1157 — notify/webhook/session-event surface split from runner
         - src/clauster/runner_state.py # #1157 — registry/locks/persist-mirror hub split from runner
+        - src/clauster/rediscovery.py # #1157 — reattach/adopt/rediscover surface split from runner
+        - src/clauster/field_decode.py # #1157 — persisted-row/pointer/sidecar field decoders split from runner
         - src/clauster/procutil.py
         - src/clauster/pointers.py
         - src/clauster/code_sessions.py # #867 — pre-spawn anchor-session liveness for bridge pointers
