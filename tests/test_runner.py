@@ -598,7 +598,7 @@ def test_await_ready_cold_start_skips_grace(runner_config, tmp_path):
 
 
 def test_await_ready_healthy_reattach_after_grace(runner_config, tmp_path, monkeypatch):
-    monkeypatch.setattr("clauster.runner._POISON_GRACE", 0.1)
+    monkeypatch.setattr("clauster.spawn_coordinator._POISON_GRACE", 0.1)
     config, claude_json = runner_config
     runner = SessionRunner(config, claude_json=claude_json)
     log = tmp_path / "b.log"
@@ -680,7 +680,7 @@ async def test_spawn_poison_marks_error_and_clears_pointer(runner_config, monkey
     poison = bridge_log.BridgeMarkers(
         environment_id="env_x", poll_loop_started=True, poison_reason="archived"
     )
-    monkeypatch.setattr(runner, "_await_ready", lambda *a, **k: poison)
+    monkeypatch.setattr(runner._spawner, "_await_ready", lambda *a, **k: poison)
     inst = await runner.spawn("alpha")
     assert inst.status is InstanceStatus.ERROR
     assert "archived" in (inst.error_detail or "")
@@ -946,14 +946,14 @@ async def test_concurrent_spawn_launches_one_bridge(runner_config, monkeypatch):
     runner = _make_runner(runner_config)
 
     popen_calls = 0
-    real_popen = runner._popen
+    real_popen = runner._launch._popen
 
     def counting_popen(*args, **kwargs):
         nonlocal popen_calls
         popen_calls += 1
         return real_popen(*args, **kwargs)
 
-    monkeypatch.setattr(runner, "_popen", counting_popen)
+    monkeypatch.setattr(runner._launch, "_popen", counting_popen)
 
     first, second = await asyncio.gather(runner.spawn("alpha"), runner.spawn("alpha"))
 
@@ -1322,8 +1322,8 @@ async def test_watch_startup_alive_unregistered_becomes_error(runner_config, mon
     (e.g. it can't authenticate to the controller) stays alive yet uncontrollable.
     It must never be reported RUNNING — it stays STARTING, then fails to ERROR."""
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "stall")  # alive, never registers
-    monkeypatch.setattr("clauster.runner._READY_TIMEOUT", 0.2)
-    monkeypatch.setattr("clauster.runner._STARTUP_WATCH_INTERVAL", 0.05)
+    monkeypatch.setattr("clauster.spawn_coordinator._READY_TIMEOUT", 0.2)
+    monkeypatch.setattr("clauster.spawn_coordinator._STARTUP_WATCH_INTERVAL", 0.05)
     config, claude_json = runner_config
     config.claude.startup_grace_seconds = 0.3  # tiny grace so the test is fast
     runner = SessionRunner(config, claude_json=claude_json)
@@ -1347,8 +1347,8 @@ async def test_watch_startup_promotes_on_late_registration(runner_config, monkey
     environment, never on liveness alone."""
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "slow")
     monkeypatch.setenv("FAKE_CLAUDE_SLOW", "0.5")  # registers ~0.5s in, after the wait
-    monkeypatch.setattr("clauster.runner._READY_TIMEOUT", 0.2)
-    monkeypatch.setattr("clauster.runner._STARTUP_WATCH_INTERVAL", 0.05)
+    monkeypatch.setattr("clauster.spawn_coordinator._READY_TIMEOUT", 0.2)
+    monkeypatch.setattr("clauster.spawn_coordinator._STARTUP_WATCH_INTERVAL", 0.05)
     config, claude_json = runner_config
     config.claude.startup_grace_seconds = 30
     runner = SessionRunner(config, claude_json=claude_json)
@@ -1370,8 +1370,8 @@ async def test_watch_startup_marks_crashed_if_bridge_dies(runner_config, monkeyp
     """If a STARTING bridge dies before registering, the watch defers to the same
     rule as the poll loop: an unintended same-dir exit is CRASHED."""
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "stall")
-    monkeypatch.setattr("clauster.runner._READY_TIMEOUT", 0.2)
-    monkeypatch.setattr("clauster.runner._STARTUP_WATCH_INTERVAL", 0.05)
+    monkeypatch.setattr("clauster.spawn_coordinator._READY_TIMEOUT", 0.2)
+    monkeypatch.setattr("clauster.spawn_coordinator._STARTUP_WATCH_INTERVAL", 0.05)
     config, claude_json = runner_config
     config.claude.startup_grace_seconds = 30  # long; we kill it well before grace
     runner = SessionRunner(config, claude_json=claude_json)
@@ -1394,7 +1394,7 @@ async def test_startup_watch_done_callback_logs_task_exception(runner_config, mo
     async def _boom(_instance_id: str) -> None:
         raise RuntimeError("watch exploded")
 
-    monkeypatch.setattr(runner, "_watch_startup", _boom)
+    monkeypatch.setattr(runner._spawner, "_watch_startup", _boom)
     with caplog.at_level("WARNING", logger="clauster.runner"):
         runner._start_startup_watch("iid-xyz")
         task = runner._startup_watches["iid-xyz"]
@@ -3273,8 +3273,10 @@ async def test_spawn_ensure_helpers_unchanged_skips_info_logs(runner_config, mon
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
     config, claude_json = runner_config
     config.claude.resume_recap = True
-    monkeypatch.setattr("clauster.runner.ensure_remote_control_enabled", lambda p: False)
-    monkeypatch.setattr("clauster.runner.ensure_recap_hook_installed", lambda p: False)
+    monkeypatch.setattr(
+        "clauster.spawn_coordinator.ensure_remote_control_enabled", lambda p: False
+    )
+    monkeypatch.setattr("clauster.spawn_coordinator.ensure_recap_hook_installed", lambda p: False)
     runner = SessionRunner(config, claude_json=claude_json)
 
     inst = await runner.spawn("alpha")
@@ -3294,8 +3296,8 @@ async def test_spawn_survives_ensure_helper_write_failures(runner_config, monkey
     def _readonly(path):
         raise OSError("read-only filesystem")
 
-    monkeypatch.setattr("clauster.runner.ensure_remote_control_enabled", _readonly)
-    monkeypatch.setattr("clauster.runner.ensure_recap_hook_installed", _readonly)
+    monkeypatch.setattr("clauster.spawn_coordinator.ensure_remote_control_enabled", _readonly)
+    monkeypatch.setattr("clauster.spawn_coordinator.ensure_recap_hook_installed", _readonly)
     runner = SessionRunner(config, claude_json=claude_json)
 
     with caplog.at_level("WARNING", logger="clauster.runner"):
@@ -3322,7 +3324,7 @@ async def test_start_startup_watch_replaces_prior_watch(runner_config, monkeypat
     async def _idle(_instance_id: str) -> None:
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(runner, "_watch_startup", _idle)
+    monkeypatch.setattr(runner._spawner, "_watch_startup", _idle)
     runner._start_startup_watch("iid-1")
     first = runner._startup_watches["iid-1"]
     runner._start_startup_watch("iid-1")
@@ -3339,7 +3341,7 @@ async def test_start_startup_watch_replaces_prior_watch(runner_config, monkeypat
 async def test_watch_startup_returns_when_instance_vanishes(runner_config, monkeypatch):
     # runner.py 1826-1827: the watch wakes to find the instance gone (stopped or
     # forgotten mid-startup) and exits instead of watching a ghost forever.
-    monkeypatch.setattr("clauster.runner._STARTUP_WATCH_INTERVAL", 0.01)
+    monkeypatch.setattr("clauster.spawn_coordinator._STARTUP_WATCH_INTERVAL", 0.01)
     runner = _make_runner(runner_config)
     await asyncio.wait_for(runner._watch_startup("ghost"), timeout=2.0)
 
@@ -3348,7 +3350,7 @@ async def test_watch_startup_returns_when_log_path_missing(runner_config, monkey
     # runner.py 1832-1834: a STARTING instance with a live proc but no debug-log path
     # has nothing to read markers from — the watch defers to the poll loop (returns)
     # rather than spinning or inventing a status.
-    monkeypatch.setattr("clauster.runner._STARTUP_WATCH_INTERVAL", 0.01)
+    monkeypatch.setattr("clauster.spawn_coordinator._STARTUP_WATCH_INTERVAL", 0.01)
     runner = _make_runner(runner_config)
     inst = RemoteControlInstance(project="alpha", label="alpha", status=InstanceStatus.STARTING)
     runner._instances[inst.instance_id] = inst
@@ -3410,7 +3412,7 @@ async def test_shutdown_cancels_pending_startup_watches(runner_config, monkeypat
     async def _done(_instance_id: str) -> None:
         return
 
-    monkeypatch.setattr(runner, "_watch_startup", _idle)
+    monkeypatch.setattr(runner._spawner, "_watch_startup", _idle)
     runner._start_startup_watch("iid-1")
     task = runner._startup_watches["iid-1"]
     # An already-finished watch sits beside the pending one: shutdown must skip

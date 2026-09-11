@@ -54,7 +54,7 @@ async def test_spawn_survives_recap_hook_install_failure(runner_config, monkeypa
     def _boom(*_a, **_k):
         raise OSError("read-only filesystem")
 
-    monkeypatch.setattr("clauster.runner.ensure_recap_hook_installed", _boom)
+    monkeypatch.setattr("clauster.spawn_coordinator.ensure_recap_hook_installed", _boom)
     inst = await runner.spawn("alpha")
     try:
         assert inst.status.name == "RUNNING"

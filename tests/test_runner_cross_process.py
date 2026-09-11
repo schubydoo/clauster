@@ -77,7 +77,7 @@ async def test_spawn_reattaches_live_bridge_of_another_process(runner_config, mo
     def _no_launch(*_a, **_k):
         raise AssertionError("spawn must not launch a second bridge over a live pointer")
 
-    monkeypatch.setattr(runner, "_popen", _no_launch)
+    monkeypatch.setattr(runner._launch, "_popen", _no_launch)
 
     outcome = await runner.spawn_detailed("alpha")
     assert outcome.created is False

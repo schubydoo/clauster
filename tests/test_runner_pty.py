@@ -470,12 +470,12 @@ async def test_spawn_pty_launch_failure_sets_error(runner_config, tmp_path, monk
     async def _spy_persist() -> None:
         persisted.append(True)
 
-    monkeypatch.setattr(runner, "_persist", _spy_persist)
+    monkeypatch.setattr(runner._registry, "_persist", _spy_persist)
 
     def boom(*a, **k):
         raise OSError("openpty: too many open files")
 
-    monkeypatch.setattr(runner, "_popen_keeper", boom)
+    monkeypatch.setattr(runner._launch, "_popen_keeper", boom)
 
     proj = Project(name="alpha", path=runner_config[0].projects_root / "alpha")
     inst = RemoteControlInstance(project="alpha", label="alpha", resume_mode="pty")
@@ -507,8 +507,8 @@ async def test_spawn_pty_screen_sidecar_gated_on_config(
     log_path = tmp_path / "alpha.log"
 
     def _run(runner) -> None:
-        monkeypatch.setattr(runner, "_popen_keeper", _capture)
-        monkeypatch.setattr(runner, "_persist", _noop_persist)
+        monkeypatch.setattr(runner._launch, "_popen_keeper", _capture)
+        monkeypatch.setattr(runner._registry, "_persist", _noop_persist)
         inst = RemoteControlInstance(project="alpha", label="alpha", resume_mode="pty")
         return runner._spawn_pty(inst, proj, "alpha", log_path, "default", resume=False)
 
@@ -934,8 +934,8 @@ async def test_spawn_pty_no_url_does_not_falsely_run(runner_config, monkeypatch)
     # ready-wait DURATION, so cap it instead of polling the real 15s _READY_TIMEOUT —
     # this is the single slowest test in the suite (~15s) and the floor under the
     # parallel run. _await_ready reads these module globals at call time.
-    monkeypatch.setattr("clauster.runner._READY_TIMEOUT", 0.5)
-    monkeypatch.setattr("clauster.runner._READY_POLL_INTERVAL", 0.05)
+    monkeypatch.setattr("clauster.spawn_coordinator._READY_TIMEOUT", 0.5)
+    monkeypatch.setattr("clauster.spawn_coordinator._READY_POLL_INTERVAL", 0.05)
     runner, _ = _pty_runner(runner_config)
     inst = await runner.spawn("alpha")
     try:
@@ -948,8 +948,8 @@ async def test_spawn_pty_no_url_does_not_falsely_run(runner_config, monkeypatch)
 async def test_spawn_pty_promoted_by_startup_watch(runner_config, monkeypatch) -> None:
     """A pty bridge slow to print its URL is promoted to RUNNING by the startup-watch."""
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "pty_slow")
-    monkeypatch.setattr("clauster.runner._READY_TIMEOUT", 0.3)
-    monkeypatch.setattr("clauster.runner._STARTUP_WATCH_INTERVAL", 0.25)
+    monkeypatch.setattr("clauster.spawn_coordinator._READY_TIMEOUT", 0.3)
+    monkeypatch.setattr("clauster.spawn_coordinator._STARTUP_WATCH_INTERVAL", 0.25)
     runner, _ = _pty_runner(runner_config)
     inst = await runner.spawn("alpha")
     try:
@@ -2090,14 +2090,14 @@ async def test_spawn_pty_worktree_passes_flag_and_resume_reuses_name(
     runner, _ = _pty_runner(runner_config)
     seen: list[list[str]] = []
     seen_state_dir: list[Path] = []
-    real = SessionRunner._popen_keeper
+    real = BridgeLaunch._popen_keeper
 
     def _capture(self, cwd, sidecar, bridge_argv, screen_sidecar=None, *, state_dir):
         seen.append(list(bridge_argv))
         seen_state_dir.append(state_dir)
         return real(self, cwd, sidecar, bridge_argv, screen_sidecar, state_dir=state_dir)
 
-    monkeypatch.setattr(SessionRunner, "_popen_keeper", _capture)
+    monkeypatch.setattr(BridgeLaunch, "_popen_keeper", _capture)
     pty = await runner.spawn("alpha", resume_mode="pty", spawn_mode="worktree")
     assert pty.status is InstanceStatus.RUNNING
     # The spawn threads the CONFIG state_dir (not the log dir, #1486) so a `deps install`'d
@@ -2307,13 +2307,13 @@ async def test_resume_keeps_an_explicit_worktree_name(runner_config, monkeypatch
     # resumes into a NEW worktree on its first Resume, which is the harm #1241 describes.
     runner, _ = _pty_runner(runner_config)
     seen: list[list[str]] = []
-    real = SessionRunner._popen_keeper
+    real = BridgeLaunch._popen_keeper
 
     def _capture(self, cwd, sidecar, bridge_argv, screen_sidecar=None, *, state_dir):
         seen.append(list(bridge_argv))
         return real(self, cwd, sidecar, bridge_argv, screen_sidecar, state_dir=state_dir)
 
-    monkeypatch.setattr(SessionRunner, "_popen_keeper", _capture)
+    monkeypatch.setattr(BridgeLaunch, "_popen_keeper", _capture)
     pty = await runner.spawn("alpha", resume_mode="pty", spawn_mode="worktree")
     await runner.stop(pty.instance_id)
     # Stand in for the rediscovered card: same id, but an explicit name that its id does
@@ -2572,10 +2572,10 @@ async def test_spawn_pty_error_surfaces_keeper_error_detail(
         def poll(self):  # noqa: ANN202 — mimic subprocess.Popen.poll
             return 70
 
-    monkeypatch.setattr(runner, "_persist", _noop_persist)
-    monkeypatch.setattr(runner, "_popen_keeper", lambda *a, **k: _DeadProc())
+    monkeypatch.setattr(runner._registry, "_persist", _noop_persist)
+    monkeypatch.setattr(runner._launch, "_popen_keeper", lambda *a, **k: _DeadProc())
     monkeypatch.setattr(
-        runner,
+        runner._spawner,
         "_await_ready_pty",
         lambda sidecar, proc: {"state": "error", "error": "openpty failed: boom"},
     )
@@ -2611,10 +2611,12 @@ async def test_spawn_pty_error_detail_is_redacted(runner_config, tmp_path, monke
             return 73
 
     leaky = "conpty read failed: broke at https://claude.ai/code/session_01LEAKAAAAAAAAAAAAAA"
-    monkeypatch.setattr(runner, "_persist", _noop_persist)
-    monkeypatch.setattr(runner, "_popen_keeper", lambda *a, **k: _DeadProc())
+    monkeypatch.setattr(runner._registry, "_persist", _noop_persist)
+    monkeypatch.setattr(runner._launch, "_popen_keeper", lambda *a, **k: _DeadProc())
     monkeypatch.setattr(
-        runner, "_await_ready_pty", lambda sidecar, proc: {"state": "error", "error": leaky}
+        runner._spawner,
+        "_await_ready_pty",
+        lambda sidecar, proc: {"state": "error", "error": leaky},
     )
     proj = Project(name="alpha", path=runner_config[0].projects_root / "alpha")
     inst = RemoteControlInstance(project="alpha", label="alpha", resume_mode="pty")
@@ -2648,10 +2650,12 @@ async def test_spawn_pty_error_detail_absent_stays_none(
         def poll(self):  # noqa: ANN202 — mimic subprocess.Popen.poll
             return 70
 
-    monkeypatch.setattr(runner, "_persist", _noop_persist)
-    monkeypatch.setattr(runner, "_popen_keeper", lambda *a, **k: _DeadProc())
+    monkeypatch.setattr(runner._registry, "_persist", _noop_persist)
+    monkeypatch.setattr(runner._launch, "_popen_keeper", lambda *a, **k: _DeadProc())
     monkeypatch.setattr(
-        runner, "_await_ready_pty", lambda sidecar, proc: {"state": "error", "error": None}
+        runner._spawner,
+        "_await_ready_pty",
+        lambda sidecar, proc: {"state": "error", "error": None},
     )
     proj = Project(name="alpha", path=runner_config[0].projects_root / "alpha")
     inst = RemoteControlInstance(project="alpha", label="alpha", resume_mode="pty")
