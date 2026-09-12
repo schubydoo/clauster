@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.1 (2026-09-12)
+
+[Compare with 1.2.0](https://github.com/schubydoo/clauster/compare/v1.2.0...v1.2.1)
+
+### Fixes
+
+- Update the vendored Tabler UI assets to 1.5.1 for dark-mode contrast and accessibility fixes. ([#1536](https://github.com/schubydoo/clauster/pull/1536))
+
 ## 1.2.0 (2026-09-05)
 
 [Compare with 1.1.0](https://github.com/schubydoo/clauster/compare/v1.1.0...v1.2.0)
