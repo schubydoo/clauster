@@ -111,11 +111,11 @@ jobs:
       - name: Install OSV-Scanner (pinned release, checksum-verified)
         env:
           # renovate: datasource=github-releases depName=google/osv-scanner
-          OSV_VERSION: "v2.5.1"
+          OSV_VERSION: "v2.6.0"
           # Bump together with OSV_VERSION: sha256 of osv-scanner_linux_amd64 from the release's
           # osv-scanner_SHA256SUMS. Renovate bumps the version; the sha256sum -c below then fails
           # the job until this is updated to match — a deliberate fail-loud, never a silent skip.
-          OSV_SHA256: "f9f25499a2c8cc367b3af45df2ea7eeca7fbccceab9c35079968f4b3652194be"
+          OSV_SHA256: "ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108"
         run: |
           set -euo pipefail
           # Fetch the pinned asset by its public release URL with curl — NO GitHub API, so no
