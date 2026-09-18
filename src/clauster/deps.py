@@ -526,7 +526,7 @@ _SHAWL_VERSION = "v1.9.0"
 # are the release's checksums.txt asset digests (refreshed by scripts/check_binary_dep_pins.py and
 # fail-closed at install, exactly like Shawl above). Same `# renovate:` customManager pattern.
 # renovate: datasource=github-releases depName=schubydoo/claustrum
-_CLAUSTRUM_VERSION = "v1.11.1"
+_CLAUSTRUM_VERSION = "v1.12.0"
 _CLAUSTRUM_VER_BARE = _CLAUSTRUM_VERSION.removeprefix("v")  # tag "v1.7.1" -> asset infix "1.7.1"
 
 # (platform_marker, GoReleaser OS token, arch_marker, archive ext, sha256 of the archive)
@@ -536,42 +536,42 @@ _CLAUSTRUM_VARIANTS: tuple[tuple[str, str, str, str, str], ...] = (
         "Linux",
         "x86_64",
         "tar.gz",
-        "b21b437b7a3c98a10d18e0e61cdb9e22261eccf9038836ed57e2fc28fce011fe",
+        "4052fd20e54fe4e3cf2e576a486f8e16c606302f925bb643d88cb69176d3fb87",
     ),
     (
         "linux",
         "Linux",
         "arm64",
         "tar.gz",
-        "3e95cb13c6e4e43df0f3a8e79fae0bc4ee375814bdbb3582b79fe621881f07f8",
+        "501ca7a4eac3d490da029bca5ebdd811f03dbd665aa15133f93f9775707e788d",
     ),
     (
         "darwin",
         "Darwin",
         "x86_64",
         "tar.gz",
-        "9e50d58948818e44259c4322f395b649a131b7da4d44d3f0f58b23acdcd9f1df",
+        "a91f4aaf4b7731ab73b2fcc2c2aff3631850749992295ca60f421063d2f3352d",
     ),
     (
         "darwin",
         "Darwin",
         "arm64",
         "tar.gz",
-        "d4e9a787f30dc85a519c82f746d2f2396f99f2e64903ff4e2ae00ed0e40e9c21",
+        "bfcac84616b56a138406528106bb2a97cf305464767dd1fa4b5fe9925caf83c7",
     ),
     (
         "win32",
         "Windows",
         "x86_64",
         "zip",
-        "1f8c0a940cf6fa6a8d95acaf5ea155652945138292b252779fa2b2211bab622b",
+        "8e127c84d914008a335a8c2cd4b1c92bae5c42d541742393630aca68f20f9850",
     ),
     (
         "win32",
         "Windows",
         "arm64",
         "zip",
-        "e350732e31cd8b04e3cf2a8497fed803c22f00a537ed4d9149c898701c75cdee",
+        "c822ff02ef9c119cd5b623a671fee35947d02bb8d2a229a5ee754bbee5193564",
     ),
 )
 
