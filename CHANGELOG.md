@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.1 (2026-09-22)
+
+[Compare with 1.2.0](https://github.com/schubydoo/clauster/compare/v1.2.0...v1.2.1)
+
+### Fixes
+
+- Fix the "already served" error on the restart of a stopped standard bridge on claude 2.1.280. ([#1581](https://github.com/schubydoo/clauster/pull/1581))
+- Fix the MCP editor refusing to save a server because a different server has keys that Clauster does not know. ([#1583](https://github.com/schubydoo/clauster/pull/1583))
+- Update the vendored Tabler UI assets to 1.5.1 for dark-mode contrast and accessibility fixes. ([#1536](https://github.com/schubydoo/clauster/pull/1536))
+
 ## 1.2.0 (2026-09-05)
 
 [Compare with 1.1.0](https://github.com/schubydoo/clauster/compare/v1.1.0...v1.2.0)
