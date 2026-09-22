@@ -285,7 +285,7 @@ async def test_forget_clears_pointer_with_relative_projects_root(runner_config, 
         )
     )
     await runner.forget("iid")
-    assert not pointer.exists()
+    assert _anchor_dropped(pointer)
 
 
 async def test_forget_without_project_name_skips_pointer_clear(runner_config, monkeypatch):
@@ -357,6 +357,17 @@ def _write_nonlive_pointer(runner: SessionRunner, project_name: str) -> Path:
     return pointer
 
 
+def _anchor_dropped(pointer: Path) -> bool:
+    """Whether ``clear_pointer`` dropped the session anchor but KEPT the environment (#1580)."""
+    data = json.loads(pointer.read_text())
+    return data["sessionId"] == "" and data["environmentId"] == "env_x"
+
+
+def _anchor_kept(pointer: Path) -> bool:
+    """Whether the pointer still carries its original session anchor (left untouched)."""
+    return pointer.exists() and json.loads(pointer.read_text())["sessionId"] == "session_x"
+
+
 def _pin_health(monkeypatch, health, *, calls: list | None = None) -> None:
     def _fake(*_a, **_k):
         if calls is not None:
@@ -372,7 +383,7 @@ async def test_heal_clears_poisoned_pointer(runner_config, monkeypatch):
     pointer = _write_nonlive_pointer(runner, "alpha")
     _pin_health(monkeypatch, code_sessions.AnchorHealth.POISONED)
     await runner._clear_pointer_if_anchor_poisoned(config.projects_root / "alpha")
-    assert not pointer.exists()  # archived/deleted anchor -> pointer cleared, cold start
+    assert _anchor_dropped(pointer)  # archived/deleted anchor -> pointer cleared, cold start
 
 
 async def test_heal_keeps_healthy_pointer(runner_config, monkeypatch):
@@ -381,7 +392,7 @@ async def test_heal_keeps_healthy_pointer(runner_config, monkeypatch):
     pointer = _write_nonlive_pointer(runner, "alpha")
     _pin_health(monkeypatch, code_sessions.AnchorHealth.HEALTHY)
     await runner._clear_pointer_if_anchor_poisoned(config.projects_root / "alpha")
-    assert pointer.exists()  # reattach as-is
+    assert _anchor_kept(pointer)  # reattach as-is
 
 
 async def test_heal_keeps_pointer_on_unknown(runner_config, monkeypatch):
@@ -390,7 +401,7 @@ async def test_heal_keeps_pointer_on_unknown(runner_config, monkeypatch):
     pointer = _write_nonlive_pointer(runner, "alpha")
     _pin_health(monkeypatch, code_sessions.AnchorHealth.UNKNOWN)
     await runner._clear_pointer_if_anchor_poisoned(config.projects_root / "alpha")
-    assert pointer.exists()  # indeterminate -> never destroy state
+    assert _anchor_kept(pointer)  # indeterminate -> never destroy state
 
 
 async def test_heal_noop_without_pointer(runner_config, monkeypatch):
@@ -410,7 +421,7 @@ async def test_heal_skips_live_pointer(runner_config, monkeypatch):
     calls: list = []
     _pin_health(monkeypatch, code_sessions.AnchorHealth.POISONED, calls=calls)
     await runner._clear_pointer_if_anchor_poisoned(config.projects_root / "alpha")
-    assert pointer.exists() and not calls  # a running anchor is never probed or cleared
+    assert _anchor_kept(pointer) and not calls  # a running anchor is never probed or cleared
 
 
 async def test_heal_tolerates_clear_error(runner_config, monkeypatch):
@@ -470,7 +481,7 @@ async def test_heal_poisoned_reattach_stops_and_clears(runner_config, monkeypatc
     proc = _FakeProc(alive=False, pid=4242)  # already exited -> no wait
     await runner._heal_poisoned_reattach(inst, proc, config.projects_root / "alpha", "archived")
     assert stopped == [4242]
-    assert not pointer.exists()  # stale pointer cleared for a cold restart
+    assert _anchor_dropped(pointer)  # stale pointer cleared for a cold restart
     assert "archived" in (inst.error_detail or "")
 
 
@@ -570,7 +581,7 @@ async def test_heal_survives_a_tree_kill_that_raises(runner_config, monkeypatch)
     proc = _FakeProc(alive=True, pid=4242)
     await runner._heal_poisoned_reattach(inst, proc, config.projects_root / "alpha", "deleted")
     assert proc.killed, "a failed reap must still fall through to kill()"
-    assert not pointer.exists(), "a failed reap must still clear the poisoned pointer"
+    assert _anchor_dropped(pointer), "a failed reap must still clear the poisoned pointer"
 
 
 def test_await_ready_returns_poison_immediately(runner_config, tmp_path):
@@ -684,7 +695,7 @@ async def test_spawn_poison_marks_error_and_clears_pointer(runner_config, monkey
     inst = await runner.spawn("alpha")
     assert inst.status is InstanceStatus.ERROR
     assert "archived" in (inst.error_detail or "")
-    assert not pointer.exists()  # heal cleared the stale pointer for a cold restart
+    assert _anchor_dropped(pointer)  # heal cleared the stale pointer for a cold restart
 
 
 async def test_forget_refuses_running_bridge(runner_config, monkeypatch):
@@ -3571,7 +3582,7 @@ def test_prune_clears_aged_nonlive_pointer(runner_config):
     pointer = _write_nonlive_pointer(runner, "alpha")
     _age(pointer, 20)  # older than the 14-day TTL
     runner._prune_one_pointer(config.projects_root / "alpha", _prune_cutoff())
-    assert not pointer.exists()
+    assert _anchor_dropped(pointer)
 
 
 def test_prune_keeps_recent_pointer(runner_config):
@@ -3579,7 +3590,7 @@ def test_prune_keeps_recent_pointer(runner_config):
     runner = SessionRunner(config, claude_json=claude_json)
     pointer = _write_nonlive_pointer(runner, "alpha")  # fresh mtime
     runner._prune_one_pointer(config.projects_root / "alpha", _prune_cutoff())
-    assert pointer.exists()  # a recent pointer may still back a resume
+    assert _anchor_kept(pointer)  # a recent pointer may still back a resume
 
 
 def test_prune_keeps_live_pointer(runner_config, monkeypatch):
@@ -3589,7 +3600,7 @@ def test_prune_keeps_live_pointer(runner_config, monkeypatch):
     _age(pointer, 20)
     monkeypatch.setattr(pointers, "is_live", lambda ptr: True)  # a live owner
     runner._prune_one_pointer(config.projects_root / "alpha", _prune_cutoff())
-    assert pointer.exists()  # never prune a live bridge's pointer
+    assert _anchor_kept(pointer)  # never prune a live bridge's pointer
 
 
 def test_prune_skips_project_symlinked_outside_root(runner_config, tmp_path_factory):
@@ -3615,7 +3626,7 @@ def test_prune_skips_project_symlinked_outside_root(runner_config, tmp_path_fact
     )
     _age(pointer, 30)
     runner._prune_one_pointer(config.projects_root / "linked", _prune_cutoff())
-    assert pointer.exists()  # escaped projects_root -> left intact
+    assert _anchor_kept(pointer)  # escaped projects_root -> left intact
 
 
 def test_prune_noop_without_pointer(runner_config):
@@ -3710,7 +3721,7 @@ async def test_prune_stale_pointers_scans_projects(runner_config):
     pointer = _write_nonlive_pointer(runner, "alpha")
     _age(pointer, 30)
     await runner._prune_stale_pointers()
-    assert not pointer.exists()  # the startup GC found + pruned it
+    assert _anchor_dropped(pointer)  # the startup GC found + pruned it
 
 
 async def test_prune_stale_pointers_tolerates_discover_error(runner_config, monkeypatch):

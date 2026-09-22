@@ -122,8 +122,9 @@ def test_forget_stopped_bridge_via_api(runner_config, monkeypatch):
 
 
 def test_forget_clears_bridge_pointer(runner_config, monkeypatch):
-    # #867 L1: forgetting a stopped bridge deletes its bridge-pointer.json (+ .bak) so the
-    # next spawn registers a fresh anchor instead of reattaching a possibly-poisoned one.
+    # #867 L1: forgetting a stopped bridge drops its bridge-pointer.json anchor (+ .bak) so
+    # the next spawn registers a fresh anchor instead of reattaching a possibly-poisoned
+    # one. The environment id stays so the restart can reuse it (#1580).
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
     with _client(runner_config) as client:
         spawn = client.post("/api/instances", json={"project": "alpha"})
@@ -149,7 +150,9 @@ def test_forget_clears_bridge_pointer(runner_config, monkeypatch):
 
         forget = client.post(f"/api/instances/{instance_id}/forget")
         assert forget.status_code == 200, forget.text
-        assert not pointer.exists()  # cleared
+        cleared = json.loads(pointer.read_text())
+        assert cleared["sessionId"] == ""  # anchor dropped
+        assert cleared["environmentId"] == "env_x"  # env kept for reuse (#1580)
         assert pointer.with_name(pointer.name + ".bak").exists()  # backed up first
 
 

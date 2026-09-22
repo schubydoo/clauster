@@ -339,7 +339,9 @@ def ensure_private_dir(path: Path) -> None:
 
 
 @contextlib.contextmanager
-def _atomic_temp(target: Path, mode: str, **open_kwargs: Any) -> Iterator[IO[Any]]:
+def _atomic_temp(
+    target: Path, mode: str, *, own_dir: bool = True, **open_kwargs: Any
+) -> Iterator[IO[Any]]:
     """Yield an open temp file that replaces ``target`` when the block exits cleanly.
 
     The shared body of :func:`atomic_write_text` and :func:`atomic_copy_file`: ensure
@@ -347,9 +349,14 @@ def _atomic_temp(target: Path, mode: str, **open_kwargs: Any) -> Iterator[IO[Any
     caller, then ``fsync`` + ``os.replace`` it onto ``target`` and ``fsync`` the
     directory entry. Anything that raises removes the temp and leaves ``target``
     untouched. One copy so the fd-leak guard below is written — and tested — once.
+
+    ``own_dir=False`` skips :func:`ensure_private_dir`, for a directory another program
+    owns (the CLI's pointer directory, #1580): it must already exist, and its mode is
+    left alone.
     """
     directory = target.parent
-    ensure_private_dir(directory)
+    if own_dir:
+        ensure_private_dir(directory)
     # mkstemp creates the file mode 0600 and returns a unique name in `directory`,
     # so os.replace is a same-filesystem rename and concurrent writers don't collide.
     fd, tmp_name = tempfile.mkstemp(dir=directory, prefix=target.name + ".", suffix=".tmp")
@@ -381,19 +388,20 @@ def _atomic_temp(target: Path, mode: str, **open_kwargs: Any) -> Iterator[IO[Any
     fsync_dir(directory)
 
 
-def atomic_write_text(target: Path, text: str) -> None:
+def atomic_write_text(target: Path, text: str, *, own_dir: bool = True) -> None:
     r"""Atomically and durably write ``text`` to ``target`` at mode ``0600``.
 
     Writes a unique temp file in ``target``'s directory, ``fsync``s it, then
     ``os.replace``s it onto ``target`` — a reader never observes a partial file and
     a crash can't leave an empty target. The temp is removed if anything fails
-    before the rename. The directory is ensured present + owner-only first.
+    before the rename. The directory is ensured present + owner-only first, unless
+    ``own_dir=False`` (a directory clauster does not own; see :func:`_atomic_temp`).
 
     ``newline="\n"`` keeps the on-disk bytes identical across OSes (the default would
     translate ``\n`` to ``\r\n`` on Windows, #914). The replace retries over a transient
     Windows sharing violation (:func:`replace_with_retry`).
     """
-    with _atomic_temp(target, "w", encoding="utf-8", newline="\n") as fh:
+    with _atomic_temp(target, "w", own_dir=own_dir, encoding="utf-8", newline="\n") as fh:
         fh.write(text)
 
 
