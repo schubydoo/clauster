@@ -1575,7 +1575,9 @@
 
 <h1 id="architecture">Architecture<a class="headerlink" href="#architecture" title="Permanent link">&para;</a></h1>
 <p>Clauster is a FastAPI app whose app factory lives in <code>app.py</code>; the entry point is
-<code>clauster.__main__:main</code> (<code>clauster run</code>). It renders an Alpine.js + Jinja2 +
+<code>clauster.__main__:main</code> (<code>clauster run</code>). Route handlers are being split by domain
+into <code>routes/</code> <code>APIRouter</code> modules and subpackages that read their collaborators
+through the typed accessors in <code>dependencies.py</code>. It renders an Alpine.js + Jinja2 +
 Tabler UI from <code>templates/</code> (with <code>jinja2-fragments</code>) and <code>static/</code>.</p>
 <h2 id="module-map">Module map<a class="headerlink" href="#module-map" title="Permanent link">&para;</a></h2>
 <p>Key modules under <code>src/clauster/</code>:</p>
@@ -1589,7 +1591,15 @@ Tabler UI from <code>templates/</code> (with <code>jinja2-fragments</code>) and 
 <tbody>
 <tr>
 <td><code>app.py</code></td>
-<td>FastAPI app factory; routes, middleware, cookie/session/WS wiring.</td>
+<td>FastAPI app factory; middleware, the auth/session closures, the <code>v1</code> route mirror, and the static mount. Route handlers all live in <code>routes/</code> (#1156).</td>
+</tr>
+<tr>
+<td><code>dependencies.py</code></td>
+<td>Typed <code>app.state</code> accessors (<code>RunnerDep</code>, <code>ConfigDep</code>, <code>HostedDep</code>) for handlers moved into routers.</td>
+</tr>
+<tr>
+<td><code>routes/</code></td>
+<td>Per-domain <code>APIRouter</code> modules (and subpackages, e.g. <code>routes/config_write/</code>) split from <code>create_app</code> (#1156).</td>
 </tr>
 <tr>
 <td><code>__main__.py</code></td>
@@ -1598,6 +1608,38 @@ Tabler UI from <code>templates/</code> (with <code>jinja2-fragments</code>) and 
 <tr>
 <td><code>runner.py</code></td>
 <td><code>SessionRunner</code> — spawn / stop / observe <strong>standard</strong> <code>claude remote-control</code> bridges.</td>
+</tr>
+<tr>
+<td><code>bridge_launch.py</code></td>
+<td><code>BridgeLaunch</code> — config-only launch/argv helpers for both bridge modes, split from <code>runner.py</code> (#1157); <code>SessionRunner</code> holds one instance and delegates.</td>
+</tr>
+<tr>
+<td><code>bridge_prune.py</code></td>
+<td><code>BridgePrune</code> — filesystem-only bridge-log retention and stale bridge-pointer GC, split from <code>runner.py</code> (#1157); <code>SessionRunner</code> holds one instance and delegates.</td>
+</tr>
+<tr>
+<td><code>record_facade.py</code></td>
+<td><code>RecordFacade</code> — the notify / webhook / session-event surface (the fire-and-forget lifecycle sinks and the <code>_emit_lifecycle</code> chokepoint), split from <code>runner.py</code> (#1157); <code>SessionRunner</code> holds one instance and delegates.</td>
+</tr>
+<tr>
+<td><code>runner_state.py</code></td>
+<td><code>RunnerState</code> — the shared registry / locks / persist-mirror hub (the instance registry, process map, startup-watch tasks, crash tally, metrics cache, persist merge mirror, and the four lifecycle locks), split from <code>runner.py</code> (#1157); <code>SessionRunner</code> holds one instance, re-exposes its dicts as proxy properties, and delegates the persist/lock methods.</td>
+</tr>
+<tr>
+<td><code>rediscovery.py</code></td>
+<td><code>Rediscovery</code> — the reattach / adopt / rediscover surface (cold-start reattach of persisted rows, runtime take-over of external bridges, poll-time row adoption), split from <code>runner.py</code> (#1157); built with the <code>RunnerState</code> so every reattach writes the one registry under the same locks, and <code>SessionRunner</code> holds one instance and delegates.</td>
+</tr>
+<tr>
+<td><code>poll_loop.py</code></td>
+<td><code>PollLoop</code> — the poll + metrics background loops (liveness reconcile, <code>claude agents --json</code> cross-check, phantom-card prune, stuck-STARTING promotion, and the server-side metrics sampler), split from <code>runner.py</code> (#1157); built with the <code>RunnerState</code> + <code>RecordFacade</code> so every loop write and lifecycle emission lands on the one registry / record facade. <code>PollLoop</code> owns the two loop tasks; <code>SessionRunner</code> holds one instance, re-exposes the tasks + reconciled-session cache as proxy properties (so <code>shutdown()</code> still cancels + awaits both), and delegates.</td>
+</tr>
+<tr>
+<td><code>spawn_coordinator.py</code></td>
+<td><code>SpawnCoordinator</code> — the spawn / resume path and the fail-closed pre-spawn gate sequence (trust check → remote-control enable → bridge cap → deferred trust write → subprocess), both bridge launches (standard <code>remote-control</code> and the pty keeper), the readiness waits, and the off-request startup watch, split from <code>runner.py</code> (#1157); built last with the <code>RunnerState</code> + <code>RecordFacade</code> + <code>BridgeLaunch</code> + <code>Rediscovery</code> so the launch, registry writes, and lifecycle emits all go through the one collaborator each. <code>stop</code>/<code>forget</code>/<code>adopt</code> stay on <code>SessionRunner</code> and keep taking the same shared locks; the coordinator holds no locks. <code>SessionRunner</code> holds one instance and delegates the public <code>spawn</code>/<code>spawn_detailed</code>/<code>resume</code>/<code>resume_detailed</code>.</td>
+</tr>
+<tr>
+<td><code>field_decode.py</code></td>
+<td>Pure decoders for persisted-row / bridge-pointer / keeper-sidecar fields (the typed, bounded liveness/identity coercions), split from <code>runner.py</code> (#1157) so <code>runner.py</code> and <code>rediscovery.py</code> share one copy without a circular import.</td>
 </tr>
 <tr>
 <td><code>pty_keeper.py</code></td>
@@ -1637,7 +1679,7 @@ Tabler UI from <code>templates/</code> (with <code>jinja2-fragments</code>) and 
 </tr>
 <tr>
 <td><code>auth.py</code></td>
-<td>Auth foundation (fail-closed; pure functions, no FastAPI import).</td>
+<td>Auth foundation (fail-closed; pure functions + the <code>LoginThrottle</code> limiter, no FastAPI import).</td>
 </tr>
 <tr>
 <td><code>config.py</code></td>
