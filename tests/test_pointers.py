@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -129,19 +130,101 @@ def test_clear_pointer_absent_returns_false(tmp_path: Path):
     assert pointers.clear_pointer(Path("/no/such/project"), claude_projects_dir=tmp_path) is False
 
 
-def test_clear_pointer_removes_nonlive_and_backs_up(tmp_path: Path):
+def _kept_env_only(path: Path) -> bool:
+    """Whether ``path`` now holds only the environment fields, with no session anchor."""
+    return json.loads(path.read_text()) == {
+        "sessionId": "",
+        "environmentId": "env_01RHE7cHW3DawXjGRp5Ae3va",
+        "source": "standalone",
+        "pid": 81750,
+        "procStart": "2590192",
+    }
+
+
+def test_clear_pointer_drops_anchor_keeps_env_and_backs_up(tmp_path: Path):
+    # #1580: since claude 2.1.280 a stopped same-dir bridge keeps its cloud environment,
+    # and a fresh registration for the folder 409s ("already served"). The environment id
+    # must survive so the next start re-registers WITH reuse; only the anchor goes (#671).
     proj = Path("/mnt/nas/projects/alpha")
     path = _write_pointer(tmp_path, proj)
+    original = path.read_bytes()
     assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path) is True
+    assert _kept_env_only(path)
+    assert path.with_name(path.name + ".bak").read_bytes() == original
+    assert pointers.load_pointer(path) is not None  # still a valid pointer to our reader
+    names = {p.name for p in path.parent.iterdir()}
+    assert names == {"bridge-pointer.json", "bridge-pointer.json.bak"}  # no temp left behind
+
+
+def test_clear_pointer_keep_environment_false_removes_it(tmp_path: Path):
+    # The stale-pointer GC opts out: a rewrite would reset the mtime its TTL reads.
+    proj = Path("/mnt/nas/projects/alpha")
+    path = _write_pointer(tmp_path, proj)
+    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path, keep_environment=False)
     assert not path.exists()
     assert path.with_name(path.name + ".bak").exists()
+
+
+def test_clear_pointer_without_env_id_removes_it(tmp_path: Path):
+    # No environment to reuse -> nothing worth keeping; the file goes as before.
+    proj = Path("/mnt/nas/projects/alpha")
+    path = _write_pointer(tmp_path, proj)
+    path.write_text(json.dumps(json.loads(path.read_text()) | {"environmentId": ""}))
+    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path, backup=False) is True
+    assert not path.exists()
+
+
+def test_clear_pointer_drops_session_lists(tmp_path: Path):
+    # The CLI can also reattach from activeSessionIds and the project-thread lists; any of
+    # them may name the archived session, so none survives the rewrite.
+    proj = Path("/mnt/nas/projects/alpha")
+    path = _write_pointer(tmp_path, proj)
+    data = json.loads(path.read_text())
+    data |= {
+        "activeSessionIds": ["session_old"],
+        "activeSessionIdsPersistedAt": 1,
+        "parkedProjectThreadSessionIds": ["session_old"],
+    }
+    path.write_text(json.dumps(data))
+    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path, backup=False) is True
+    assert _kept_env_only(path)
+
+
+def test_clear_pointer_rewrite_failure_leaves_pointer_and_no_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # A failed rename must raise (callers log OSError), keep the original, and not litter.
+    proj = Path("/mnt/nas/projects/alpha")
+    path = _write_pointer(tmp_path, proj)
+    original = path.read_bytes()
+
+    def _boom(src: Path, dst: Path, **_k: object) -> None:
+        raise OSError("rename failed")
+
+    monkeypatch.setattr(pointers.atomicio, "replace_with_retry", _boom)
+    with pytest.raises(OSError, match="rename failed"):
+        pointers.clear_pointer(proj, claude_projects_dir=tmp_path, backup=False)
+    assert path.read_bytes() == original
+    assert [p.name for p in path.parent.iterdir()] == ["bridge-pointer.json"]
+
+
+def test_clear_pointer_leaves_directory_mode_alone(tmp_path: Path):
+    # The pointer directory belongs to the CLI (it also holds transcripts); unlike
+    # atomicio.atomic_write_text, the rewrite must not tighten its mode.
+    if os.name == "nt":
+        pytest.skip("POSIX mode bits")
+    proj = Path("/mnt/nas/projects/alpha")
+    path = _write_pointer(tmp_path, proj)
+    path.parent.chmod(0o755)
+    pointers.clear_pointer(proj, claude_projects_dir=tmp_path, backup=False)
+    assert path.parent.stat().st_mode & 0o777 == 0o755
 
 
 def test_clear_pointer_no_backup_when_disabled(tmp_path: Path):
     proj = Path("/mnt/nas/projects/alpha")
     path = _write_pointer(tmp_path, proj)
     assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path, backup=False) is True
-    assert not path.exists()
+    assert _kept_env_only(path)
     assert not path.with_name(path.name + ".bak").exists()
 
 
@@ -181,10 +264,10 @@ def test_clear_pointer_removes_a_hostile_pointer(tmp_path: Path):
     assert path.with_name(path.name + ".bak").exists()  # recoverable
 
 
-def test_clear_pointer_backup_failure_still_deletes(
+def test_clear_pointer_backup_failure_still_clears(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    # The backup is best-effort: a write failure is logged, and the delete still proceeds.
+    # The backup is best-effort: a write failure is logged, and the clear still proceeds.
     proj = Path("/mnt/nas/projects/alpha")
     path = _write_pointer(tmp_path, proj)
 
@@ -193,5 +276,5 @@ def test_clear_pointer_backup_failure_still_deletes(
 
     monkeypatch.setattr(Path, "write_bytes", _boom)
     assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path) is True
-    assert not path.exists()
+    assert _kept_env_only(path)
     assert not path.with_name(path.name + ".bak").exists()

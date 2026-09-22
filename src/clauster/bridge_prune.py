@@ -190,8 +190,13 @@ class BridgePrune:
             return  # recent enough that a resume may still want it
         try:
             # backup=False: a 2-week-dead pointer isn't worth a .bak that would itself linger.
+            # keep_environment=False: a rewrite would reset the mtime this TTL reads, so the
+            # file would never age out; after 2 weeks the env reuse is not worth keeping.
             if pointers.clear_pointer(
-                resolved, claude_projects_dir=self._claude_projects_dir, backup=False
+                resolved,
+                claude_projects_dir=self._claude_projects_dir,
+                backup=False,
+                keep_environment=False,
             ):
                 _log.info("pruned stale non-live bridge-pointer for %s", resolved)
         except pointers.PointerStillLive:
