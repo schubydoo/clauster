@@ -170,20 +170,24 @@ async def api_config_write_mcp_server(config: ConfigDep, runner: RunnerDep, body
         cli_cwd = _base.resolve_cw_project(config, project, require_exists=True)
     binary = config.claude.binary
 
-    def _direct_write(target_entry: dict, target_op: str) -> None:
+    def _direct_write(target_entry: dict, target_op: str, *, validate: bool = True) -> None:
         """Write one entry with this scope's direct, non-spawning writer."""
         # The #766 direct (non-spawning) writers, one per scope. Used for any entry
-        # that must never reach the CLI's argv, and as the edit-rollback restore.
+        # that must never reach the CLI's argv, and as the edit-rollback restore. Only
+        # the restore passes validate=False: it writes back the on-disk snapshot, which
+        # is stored data (it can carry CLI-only keys), never the operator's input.
         if scope == "user":
             config_write_mcp.write_user_server_entry(
-                runner.claude_json, name, target_entry, op=target_op
+                runner.claude_json, name, target_entry, op=target_op, validate=validate
             )
         elif scope == "local":
             config_write_mcp.write_project_local_server_entry(
-                runner.claude_json, cli_cwd, name, target_entry, op=target_op
+                runner.claude_json, cli_cwd, name, target_entry, op=target_op, validate=validate
             )
         else:
-            config_write_mcp.write_project_server_entry(cli_cwd, name, target_entry, op=target_op)
+            config_write_mcp.write_project_server_entry(
+                cli_cwd, name, target_entry, op=target_op, validate=validate
+            )
 
     def _snapshot_prior() -> dict | None:
         """Read the current entry unredacted, in memory only, to enable an edit rollback."""
@@ -232,7 +236,7 @@ async def api_config_write_mcp_server(config: ConfigDep, runner: RunnerDep, body
                 # cli_edit_server reports "restored" only when that is true.
                 if prior is None:
                     return False
-                _direct_write(prior, "edit")
+                _direct_write(prior, "edit", validate=False)
                 return True
 
             config_write_mcp_cli.cli_edit_server(

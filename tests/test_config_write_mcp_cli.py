@@ -765,6 +765,24 @@ def test_entry_writer_still_rejects_unknown_keys_on_the_edited_entry(
     assert _stored_scope(cj, project_dir, scope) == {"gh": {"command": "old"}}
 
 
+@pytest.mark.parametrize("scope", ["project", "user", "local"])
+def test_entry_writer_validate_false_restores_a_stored_entry_verbatim(
+    tmp_path: Path, scope: str
+) -> None:
+    # The edit-rollback writes back the on-disk snapshot, CLI-only keys included.
+    cj, project_dir = _seed_scope(tmp_path, scope, {})
+    prior = dict(_CLI_ONLY_SIBLING)
+    if scope == "project":
+        mcp.write_project_server_entry(project_dir, "lean-ctx", prior, op="edit", validate=False)
+    elif scope == "user":
+        mcp.write_user_server_entry(cj, "lean-ctx", prior, op="edit", validate=False)
+    else:
+        mcp.write_project_local_server_entry(
+            cj, project_dir, "lean-ctx", prior, op="edit", validate=False
+        )
+    assert _stored_scope(cj, project_dir, scope) == {"lean-ctx": prior}
+
+
 def test_direct_writer_matches_cli_file_state_for_env_entry(tmp_path: Path) -> None:
     # MUST-FIX #1 confirmation: the direct writer yields the same stored mcpServers entry
     # the real `claude mcp add-json` produces for an env-bearing (non-OAuth) server, so
@@ -1008,6 +1026,41 @@ def test_route_server_edit_project_scope_reaches_cli_add(
     record = json.loads(argv_file.read_text())
     assert record["argv"][0] == "add-json"
     assert record["argv"][1] == "srv"
+
+
+def test_route_server_edit_rollback_restores_a_prior_with_cli_only_keys(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    # The CLI edit removes the server, then its re-add fails. The rollback writes back the
+    # on-disk snapshot, which carries keys the allowlist rejects (lean-ctx writes them). That
+    # stored data must be restored, not refused, or the server is simply gone.
+    mcp_json = projects_root / "alpha" / ".mcp.json"
+    prior = dict(_CLI_ONLY_SIBLING)
+    mcp_json.write_text(json.dumps({"mcpServers": {"lean-ctx": prior}}))
+    restored: list[bool] = []
+
+    def _fake_edit(_binary, _cwd, name, _entry, _scope, *, client_secret, restore):
+        data = json.loads(mcp_json.read_text())
+        del data["mcpServers"][name]  # the CLI remove succeeded
+        mcp_json.write_text(json.dumps(data))
+        restored.append(restore())  # ...and the re-add failed
+        raise mcp_cli.McpCliError("re-add failed; the previous definition was restored")
+
+    monkeypatch.setattr(mcp_cli, "cli_edit_server", _fake_edit)
+    with _client(write_config, tmp_path, _ON) as c:
+        c.post(
+            "/api/config-write/mcp/server",
+            json={
+                "scope": "project",
+                "project": "alpha",
+                "confirm": "alpha",
+                "op": "edit",
+                "name": "lean-ctx",
+                "entry": {"command": "lean-ctx2"},
+            },
+        )
+    assert restored == [True]
+    assert json.loads(mcp_json.read_text())["mcpServers"]["lean-ctx"] == prior
 
 
 def test_route_server_remote_client_secret_via_env(

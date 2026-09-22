@@ -370,7 +370,7 @@ def _fold_entry(stored: Any, name: str, entry: dict[str, Any]) -> dict[str, Any]
 
 
 def write_project_server_entry(
-    project_dir: Path, name: str, entry: dict[str, Any], *, op: str
+    project_dir: Path, name: str, entry: dict[str, Any], *, op: str, validate: bool = True
 ) -> None:
     """Merge one server ``entry`` into the project's stored map, fail-closed.
 
@@ -382,13 +382,19 @@ def write_project_server_entry(
     :func:`_fold_entry`) and writes atomically. Every sibling server is kept exactly as
     stored and is not re-validated: the CLI accepts keys this validator does not (lean-ctx
     writes ``autoApprove``/``instructions``), and an entry the operator did not touch must
-    not block the edit of one they did. ``op="add"`` refuses
+    not block the edit of one they did.
+
+    ``validate=False`` is ONLY for the edit-rollback restore, which writes back the
+    verbatim on-disk snapshot from :func:`snapshot_server_entry`. That entry is stored data,
+    not operator input, and it can carry the same CLI-only keys; validating it would lose
+    the server when a CLI re-add fails. ``op="add"`` refuses
     (:class:`ServerExistsError`) to clobber a name that already exists — matching
     ``claude mcp add-json``'s own "already exists" refusal on the CLI path;
     ``op="edit"`` always overwrites (remove+re-add semantics collapsed into one
     merge, since there is no separate value to remove first).
     """
-    cw.validate_candidate({name: entry}, validate_mcp_servers)
+    if validate:
+        cw.validate_candidate({name: entry}, validate_mcp_servers)
     redacted, file_hash = read_project_servers(project_dir)
     if op == "add" and name in redacted:
         raise ServerExistsError(f"MCP server {name!r} already exists in project scope")
@@ -402,10 +408,11 @@ def write_project_server_entry(
 
 
 def write_user_server_entry(
-    claude_json: Path, name: str, entry: dict[str, Any], *, op: str
+    claude_json: Path, name: str, entry: dict[str, Any], *, op: str, validate: bool = True
 ) -> None:
     """User-scope twin of :func:`write_project_server_entry` — see its docstring."""
-    cw.validate_candidate({name: entry}, validate_mcp_servers)
+    if validate:
+        cw.validate_candidate({name: entry}, validate_mcp_servers)
     redacted = read_user_servers(claude_json)
     if op == "add" and name in redacted:
         raise ServerExistsError(f"MCP server {name!r} already exists in user scope")
@@ -413,10 +420,17 @@ def write_user_server_entry(
 
 
 def write_project_local_server_entry(
-    claude_json: Path, project_dir: Path, name: str, entry: dict[str, Any], *, op: str
+    claude_json: Path,
+    project_dir: Path,
+    name: str,
+    entry: dict[str, Any],
+    *,
+    op: str,
+    validate: bool = True,
 ) -> None:
     """Local-scope twin of :func:`write_project_server_entry` — see its docstring."""
-    cw.validate_candidate({name: entry}, validate_mcp_servers)
+    if validate:
+        cw.validate_candidate({name: entry}, validate_mcp_servers)
     redacted = read_project_local_servers(claude_json, project_dir)
     if op == "add" and name in redacted:
         raise ServerExistsError(f"MCP server {name!r} already exists in local scope")
