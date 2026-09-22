@@ -700,6 +700,71 @@ def test_write_project_local_server_entry_add_and_edit(tmp_path: Path) -> None:
     assert mcp.read_project_local_servers(cj, project_dir)["a"]["command"] == "y"
 
 
+# A sibling the CLI accepts but our allowlist does not: lean-ctx writes these two keys.
+_CLI_ONLY_SIBLING = {"command": "lean-ctx", "autoApprove": ["ctx_read"], "instructions": "x"}
+
+
+def _seed_scope(tmp_path: Path, scope: str, servers: dict) -> tuple[Path, Path]:
+    """Store ``servers`` in ``scope``; return ``(claude_json, project_dir)``."""
+    cj = tmp_path / "claude.json"
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    if scope == "project":
+        (project_dir / ".mcp.json").write_text(json.dumps({"mcpServers": servers}))
+    elif scope == "user":
+        cj.write_text(json.dumps({"mcpServers": servers}))
+    else:
+        cj.write_text(json.dumps({"projects": {str(project_dir): {"mcpServers": servers}}}))
+    return cj, project_dir
+
+
+def _stored_scope(cj: Path, project_dir: Path, scope: str) -> dict:
+    """Return the raw (unredacted) stored map for ``scope``."""
+    if scope == "project":
+        return json.loads((project_dir / ".mcp.json").read_text())["mcpServers"]
+    data = json.loads(cj.read_text())
+    if scope == "user":
+        return data["mcpServers"]
+    return data["projects"][str(project_dir)]["mcpServers"]
+
+
+def _write_entry(cj: Path, project_dir: Path, scope: str, name: str, entry: dict, op: str):
+    """Call the scope's single-entry direct writer."""
+    if scope == "project":
+        mcp.write_project_server_entry(project_dir, name, entry, op=op)
+    elif scope == "user":
+        mcp.write_user_server_entry(cj, name, entry, op=op)
+    else:
+        mcp.write_project_local_server_entry(cj, project_dir, name, entry, op=op)
+
+
+@pytest.mark.parametrize("scope", ["project", "user", "local"])
+def test_entry_writer_ignores_a_sibling_with_cli_only_keys(tmp_path: Path, scope: str) -> None:
+    # Editing one server must not 422 on an untouched sibling that carries keys the CLI
+    # accepts but the allowlist does not ("server 'lean-ctx' has unknown keys"). The
+    # sibling is kept byte-for-byte, and its secret-shaped env survives unmasked.
+    lean = {**_CLI_ONLY_SIBLING, "env": {"API_TOKEN": "sk-real"}}
+    cj, project_dir = _seed_scope(
+        tmp_path, scope, {"lean-ctx": lean, "gh": {"command": "old", "env": {"T": "sk-gh"}}}
+    )
+    edited = {"command": "new", "args": ["stdio"], "env": {"T": cw.REDACTION_SENTINEL}}
+    _write_entry(cj, project_dir, scope, "gh", edited, "edit")
+    stored = _stored_scope(cj, project_dir, scope)
+    assert stored["lean-ctx"] == lean
+    assert stored["gh"] == {"command": "new", "args": ["stdio"], "env": {"T": "sk-gh"}}
+
+
+@pytest.mark.parametrize("scope", ["project", "user", "local"])
+def test_entry_writer_still_rejects_unknown_keys_on_the_edited_entry(
+    tmp_path: Path, scope: str
+) -> None:
+    # The allowlist still guards what the operator writes: only siblings are exempt.
+    cj, project_dir = _seed_scope(tmp_path, scope, {"gh": {"command": "old"}})
+    with pytest.raises(cw.InvalidCandidateError, match="unknown keys"):
+        _write_entry(cj, project_dir, scope, "gh", dict(_CLI_ONLY_SIBLING), "edit")
+    assert _stored_scope(cj, project_dir, scope) == {"gh": {"command": "old"}}
+
+
 def test_direct_writer_matches_cli_file_state_for_env_entry(tmp_path: Path) -> None:
     # MUST-FIX #1 confirmation: the direct writer yields the same stored mcpServers entry
     # the real `claude mcp add-json` produces for an env-bearing (non-OAuth) server, so
