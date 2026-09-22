@@ -3582,7 +3582,7 @@ def test_prune_clears_aged_nonlive_pointer(runner_config):
     pointer = _write_nonlive_pointer(runner, "alpha")
     _age(pointer, 20)  # older than the 14-day TTL
     runner._prune_one_pointer(config.projects_root / "alpha", _prune_cutoff())
-    assert not pointer.exists()
+    assert _anchor_dropped(pointer)
 
 
 def test_prune_keeps_recent_pointer(runner_config):
@@ -3721,7 +3721,7 @@ async def test_prune_stale_pointers_scans_projects(runner_config):
     pointer = _write_nonlive_pointer(runner, "alpha")
     _age(pointer, 30)
     await runner._prune_stale_pointers()
-    assert not pointer.exists()  # the startup GC found + pruned it
+    assert _anchor_dropped(pointer)  # the startup GC found + pruned it
 
 
 async def test_prune_stale_pointers_tolerates_discover_error(runner_config, monkeypatch):

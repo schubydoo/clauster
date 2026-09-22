@@ -44,10 +44,10 @@ from .discovery import discover_projects_cached
 
 _log = logging.getLogger("clauster.bridge_prune")
 
-# #867 L4: nothing else prunes bridge-pointer.json, so a project accumulates a pointer that
-# outlives its (server-reaped) environment. At startup, clear clauster's OWN pointers that
-# are both non-live AND older than this — a live or recently-stopped-resumable session is
-# never touched (its reattach is preserved).
+# #867 L4: nothing else prunes bridge-pointer.json, so a project accumulates a session anchor
+# that outlives its session. At startup, clear clauster's OWN pointers that are both
+# non-live AND older than this — a live or recently-stopped-resumable session is never
+# touched (its reattach is preserved). Clearing keeps the environment id (#1580).
 _STALE_POINTER_TTL_SECONDS = 14 * 24 * 60 * 60
 
 
@@ -190,15 +190,13 @@ class BridgePrune:
             return  # recent enough that a resume may still want it
         try:
             # backup=False: a 2-week-dead pointer isn't worth a .bak that would itself linger.
-            # keep_environment=False: a rewrite would reset the mtime this TTL reads, so the
-            # file would never age out; after 2 weeks the env reuse is not worth keeping.
+            # The environment id is kept (#1580): the server can still hold the environment,
+            # and without the id the next start 409s. An already-stripped pointer is a no-op,
+            # so the rewrite happens once and does not keep resetting this TTL's mtime.
             if pointers.clear_pointer(
-                resolved,
-                claude_projects_dir=self._claude_projects_dir,
-                backup=False,
-                keep_environment=False,
+                resolved, claude_projects_dir=self._claude_projects_dir, backup=False
             ):
-                _log.info("pruned stale non-live bridge-pointer for %s", resolved)
+                _log.info("pruned the stale session anchor from bridge-pointer for %s", resolved)
         except pointers.PointerStillLive:
             pass  # became live between the stat and the clear -> leave it
         except OSError as exc:

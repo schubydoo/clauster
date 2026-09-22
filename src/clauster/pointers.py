@@ -110,7 +110,6 @@ def clear_pointer(
     *,
     claude_projects_dir: Path = CLAUDE_PROJECTS_DIR,
     backup: bool = True,
-    keep_environment: bool = True,
 ) -> bool:
     """Back up a project's ``bridge-pointer.json`` and drop its session anchor.
 
@@ -125,21 +124,23 @@ def clear_pointer(
     remote-control``"). Deleting the whole file therefore wedged every restart. The
     pointer is rewritten to the environment fields only, with an empty ``sessionId`` and
     no session lists. The CLI then re-registers WITH ``reuseEnvironmentId`` and creates a
-    fresh initial session. Verified live on 2.1.280 only, including an environment that
-    the ghost reaper had archived: the reuse revives it. An older CLI is assumed to read
-    the empty ``sessionId`` as no anchor, as it already writes one itself. An environment
-    the server has dropped is not fatal either, because the CLI takes the new id it gets
-    back.
+    fresh initial session. Verified live on 2.1.280, including an environment that the
+    ghost reaper had archived: the reuse revives it. The 2.1.276 and 2.1.278 binaries carry
+    the same reuse-on-registration path and write ``sessionId: ""`` pointers themselves, so
+    they read the empty anchor too; older versions were not inspected. An environment the
+    server has dropped is not fatal either, because the CLI takes the new id it gets back.
 
-    ``keep_environment=False`` deletes the whole file instead. The stale-pointer GC uses
-    it: a rewrite resets the mtime its TTL reads, so a kept pointer would never age out.
+    A pointer that is already in that stripped shape is left untouched, with no write and
+    no backup. That keeps the stale-pointer GC from resetting the mtime its TTL reads on
+    every run.
 
     Returns ``True`` when the pointer was rewritten or removed, ``False`` when none
-    existed. Refuses with :class:`PointerStillLive` when the pointer refers to a
-    currently-live bridge — the reattach anchor must never be yanked from under a running
-    process (Stop it first). A malformed pointer (no derivable liveness, no trustworthy
-    environment id) is removed so a corrupt file can't wedge the next start. The backup
-    (``bridge-pointer.json.bak``) is best-effort; the rewrite or delete is not.
+    existed or it was already stripped. Refuses with :class:`PointerStillLive` when the
+    pointer refers to a currently-live bridge — the reattach anchor must never be yanked
+    from under a running process (Stop it first). A malformed pointer (no derivable
+    liveness, no trustworthy environment id) is removed so a corrupt file can't wedge the
+    next start. The backup (``bridge-pointer.json.bak``) is best-effort; the rewrite or
+    delete is not.
     """
     path = pointer_path_for(project_path, claude_projects_dir)
     if not path.exists():
@@ -149,21 +150,28 @@ def clear_pointer(
         raise PointerStillLive(
             f"bridge-pointer for {project_path} refers to a live bridge (pid {pointer.pid})"
         )
+    kept = None
+    if pointer is not None and pointer.environment_id:
+        kept = {
+            "sessionId": "",
+            "environmentId": pointer.environment_id,
+            "source": pointer.source,
+            "pid": pointer.pid,
+            "procStart": pointer.proc_start,
+        }
+        try:
+            if json.loads(path.read_text(encoding="utf-8")) == kept:
+                return False  # already stripped: nothing to clear
+        except (ValueError, OSError, RecursionError):
+            pass  # unreadable now -> fall through and rewrite it
     if backup:
         try:
             path.with_name(path.name + ".bak").write_bytes(path.read_bytes())
         except OSError as exc:  # backup is best-effort — never let it block the delete
             _log.warning("could not back up %s before clearing: %s", path, exc)
-    if not keep_environment or pointer is None or not pointer.environment_id:
+    if kept is None:
         path.unlink()
         return True
-    kept = {
-        "sessionId": "",
-        "environmentId": pointer.environment_id,
-        "source": pointer.source,
-        "pid": pointer.pid,
-        "procStart": pointer.proc_start,
-    }
     # own_dir=False: this directory (which also holds the transcripts) belongs to the CLI,
     # so the write must not tighten its mode the way clauster's own state dirs are.
     atomicio.atomic_write_text(path, json.dumps(kept), own_dir=False)

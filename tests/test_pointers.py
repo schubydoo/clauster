@@ -156,13 +156,41 @@ def test_clear_pointer_drops_anchor_keeps_env_and_backs_up(tmp_path: Path):
     assert names == {"bridge-pointer.json", "bridge-pointer.json.bak"}  # no temp left behind
 
 
-def test_clear_pointer_keep_environment_false_removes_it(tmp_path: Path):
-    # The stale-pointer GC opts out: a rewrite would reset the mtime its TTL reads.
+def test_clear_pointer_already_stripped_is_a_noop(tmp_path: Path):
+    # A second clear must not rewrite: the stale-pointer GC reads the mtime for its TTL.
     proj = Path("/mnt/nas/projects/alpha")
     path = _write_pointer(tmp_path, proj)
-    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path, keep_environment=False)
-    assert not path.exists()
-    assert path.with_name(path.name + ".bak").exists()
+    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path, backup=False) is True
+    before = path.stat().st_mtime_ns
+    content = path.read_bytes()
+    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path) is False
+    assert path.stat().st_mtime_ns == before
+    assert path.read_bytes() == content
+    assert not path.with_name(path.name + ".bak").exists()  # no backup for a no-op
+
+
+def test_clear_pointer_rewrites_when_the_second_read_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # The file can change between load_pointer and the already-stripped check (the CLI
+    # writes it too). An unparseable second read is not "already stripped": rewrite it.
+    proj = Path("/mnt/nas/projects/alpha")
+    path = _write_pointer(tmp_path, proj)
+    parsed = pointers.load_pointer(path)
+    path.write_text("{not json")
+    monkeypatch.setattr(pointers, "load_pointer", lambda _p: parsed)
+    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path, backup=False) is True
+    assert _kept_env_only(path)
+
+
+def test_clear_pointer_strips_a_cli_pointer_with_empty_session_but_lists(tmp_path: Path):
+    # The CLI itself writes sessionId "" beside activeSessionIds; that is NOT stripped yet.
+    proj = Path("/mnt/nas/projects/alpha")
+    path = _write_pointer(tmp_path, proj)
+    data = json.loads(path.read_text()) | {"sessionId": "", "activeSessionIds": ["session_old"]}
+    path.write_text(json.dumps(data))
+    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path, backup=False) is True
+    assert _kept_env_only(path)
 
 
 def test_clear_pointer_without_env_id_removes_it(tmp_path: Path):
