@@ -1531,8 +1531,8 @@ configured value if you changed it.</p>
 <tr>
 <td>Bridge pointer</td>
 <td><code>~/.claude/projects/&lt;sanitized-cwd&gt;/bridge-pointer.json</code></td>
-<td>A pointer <code>claude</code> writes linking a directory to its active session.</td>
-<td>Owned by the <code>claude</code> CLI.</td>
+<td>A pointer <code>claude</code> writes linking a directory to its active session and environment. When Clauster must stop a restart from reattaching an archived session, it rewrites the file to keep only the environment id and the bridge pid, and saves a <code>bridge-pointer.json.bak</code> copy first.</td>
+<td>Owned by the <code>claude</code> CLI. Clauster does not delete a pointer that has an environment id. For a non-live pointer older than 14 days, it removes the session id and keeps the environment id.</td>
 </tr>
 <tr>
 <td>Background-agent state</td>
