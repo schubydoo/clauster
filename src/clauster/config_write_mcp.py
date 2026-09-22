@@ -356,51 +356,91 @@ class ServerNotFoundError(cw.ConfigWriteError):
     """A ``remove``/edit-remove targeted a server name that doesn't exist (→ 404)."""
 
 
+def _fold_entry(stored: Any, name: str, entry: dict[str, Any]) -> dict[str, Any]:
+    """Return the stored map with ``entry`` merged in under ``name``; siblings untouched.
+
+    Runs inside the locked writer, over the map read under the lock. Only ``name`` goes
+    through :func:`~clauster.config_write.merge_redacted` (a ``"********"`` in ``entry``
+    keeps that server's stored secret). Every other server is copied as stored, so a
+    sibling never round-trips through the redacted display copy.
+    """
+    servers = dict(stored) if isinstance(stored, dict) else {}
+    servers[name] = cw.merge_redacted(entry, servers.get(name))
+    return servers
+
+
 def write_project_server_entry(
-    project_dir: Path, name: str, entry: dict[str, Any], *, op: str
+    project_dir: Path, name: str, entry: dict[str, Any], *, op: str, validate: bool = True
 ) -> None:
     """Merge one server ``entry`` into the project's stored map, fail-closed.
 
     The secret-safe twin of :func:`clauster.config_write_mcp_cli.cli_add_server`:
     used when ``entry`` carries a potential inline secret (see
     :func:`clauster.config_write_mcp_cli.entry_needs_direct_write`), which the CLI's
-    ``add-json`` argv cannot carry without exposing it via ``ps``/``/proc``. Reads
-    the current *redacted* map, folds ``entry`` in under ``name`` (every sibling
-    server's masked value round-trips to its real stored secret via
-    :func:`~clauster.config_write.merge_redacted`'s keep-stored rule inside
-    :func:`write_project_servers`), and writes atomically. ``op="add"`` refuses
+    ``add-json`` argv cannot carry without exposing it via ``ps``/``/proc``. Validates
+    ONLY ``{name: entry}`` (→ 422), then folds it into the map read under the lock (see
+    :func:`_fold_entry`) and writes atomically. Every sibling server is kept exactly as
+    stored and is not re-validated: the CLI accepts keys this validator does not (lean-ctx
+    writes ``autoApprove``/``instructions``), and an entry the operator did not touch must
+    not block the edit of one they did.
+
+    ``validate=False`` is ONLY for the edit-rollback restore, which writes back the
+    verbatim on-disk snapshot from :func:`snapshot_server_entry`. That entry is stored data,
+    not operator input, and it can carry the same CLI-only keys; validating it would lose
+    the server when a CLI re-add fails. ``op="add"`` refuses
     (:class:`ServerExistsError`) to clobber a name that already exists — matching
     ``claude mcp add-json``'s own "already exists" refusal on the CLI path;
     ``op="edit"`` always overwrites (remove+re-add semantics collapsed into one
     merge, since there is no separate value to remove first).
     """
+    if validate:
+        cw.validate_candidate({name: entry}, validate_mcp_servers)
     redacted, file_hash = read_project_servers(project_dir)
     if op == "add" and name in redacted:
         raise ServerExistsError(f"MCP server {name!r} already exists in project scope")
-    incoming = {**redacted, name: entry}
-    write_project_servers(project_dir, incoming, expected_hash=file_hash)
+    cw.write_settings_subtree(
+        project_dir / ".mcp.json",
+        MCP_SERVERS_KEY,
+        entry,
+        file_hash,
+        merge=lambda incoming, stored: _fold_entry(stored, name, incoming),
+    )
 
 
 def write_user_server_entry(
-    claude_json: Path, name: str, entry: dict[str, Any], *, op: str
+    claude_json: Path, name: str, entry: dict[str, Any], *, op: str, validate: bool = True
 ) -> None:
     """User-scope twin of :func:`write_project_server_entry` — see its docstring."""
+    if validate:
+        cw.validate_candidate({name: entry}, validate_mcp_servers)
     redacted = read_user_servers(claude_json)
     if op == "add" and name in redacted:
         raise ServerExistsError(f"MCP server {name!r} already exists in user scope")
-    incoming = {**redacted, name: entry}
-    write_user_servers(claude_json, incoming)
+    cw.write_subtree(claude_json, MCP_SERVERS_KEY, lambda stored: _fold_entry(stored, name, entry))
 
 
 def write_project_local_server_entry(
-    claude_json: Path, project_dir: Path, name: str, entry: dict[str, Any], *, op: str
+    claude_json: Path,
+    project_dir: Path,
+    name: str,
+    entry: dict[str, Any],
+    *,
+    op: str,
+    validate: bool = True,
 ) -> None:
     """Local-scope twin of :func:`write_project_server_entry` — see its docstring."""
+    if validate:
+        cw.validate_candidate({name: entry}, validate_mcp_servers)
     redacted = read_project_local_servers(claude_json, project_dir)
     if op == "add" and name in redacted:
         raise ServerExistsError(f"MCP server {name!r} already exists in local scope")
-    incoming = {**redacted, name: entry}
-    write_project_local_servers(claude_json, project_dir, incoming)
+    cw.write_nested_subtree(
+        claude_json,
+        PROJECTS_KEY,
+        str(project_dir),
+        MCP_SERVERS_KEY,
+        lambda stored: _fold_entry(stored, name, entry),
+    )
 
 
 # ---------------------------------------------------------------------------
