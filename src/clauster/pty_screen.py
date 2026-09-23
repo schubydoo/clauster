@@ -457,17 +457,20 @@ def _import_pyte() -> Any:
 #: The ``pyte`` errors :meth:`PtyScreen.feed` absorbs (#1357). Each one is measured to raise
 #: before its handler writes a cell or moves the cursor, after pyte has reset its parser: a CSI
 #: with one parameter too many (``ESC[1;2C``) is a ``TypeError``, and an out-of-range erase
-#: (``ESC[4J``) is an ``UnboundLocalError``. A 200,000-sequence random probe of pyte 0.8.2 raised
-#: no other type. Any other type is not absorbed, because its effect on the screen is unknown.
+#: (``ESC[4J``) is an ``UnboundLocalError``. The list is what was measured, not every type pyte
+#: can raise: an ASCII-only probe of 200,000 sequences found only these two, and the non-ASCII
+#: probe below found a third. Any other type is not absorbed, because its effect on the screen
+#: is unknown.
 #:
 #: ``ValueError`` joined them after a non-ASCII probe (#1355). pyte collects a CSI parameter with
 #: ``str.isdigit`` and converts it with ``int``. 128 code points pass the first and fail the
 #: second: superscripts, subscripts and circled digits (``ESC[₂m``, ``ESC[²J``, ``ESC[1;①H``).
 #: A run of more than 4,300 ASCII digits fails ``int`` too. Two random probes of 200,000 streams
-#: each raised ``ValueError`` 7,104 times, all from that one ``int`` call in the parser
-#: (``streams.py`` line 347), before any handler is dispatched. After each raise the rendered
-#: text, cursor, cell attributes, modes, margins and title were unchanged, pyte had reset its
-#: parser, and the next feed parsed normally.
+#: raised ``ValueError`` 7,104 times in total, and a review probe raised it 189,191 times. Every
+#: one came from that one ``int`` call in the parser (``streams.py`` line 347), before any
+#: handler is dispatched. After each raise the rendered text, cursor, cell attributes, modes,
+#: margins and title were unchanged, pyte had reset its parser, and the next feed parsed
+#: normally.
 _PYTE_INPUT_FAULTS: tuple[type[Exception], ...] = (TypeError, UnboundLocalError, ValueError)
 
 
@@ -599,13 +602,13 @@ class PtyScreen:
 
         Returns None, or the ``pyte`` error that cut this chunk short (#1357).
 
-        ``pyte`` raises on ordinary sequences a real TUI emits: a CSI with one parameter too
-        many (``ESC[1;2C``, a modified cursor key) is a ``TypeError``, and an out-of-range
-        erase (``ESC[4J``) is an ``UnboundLocalError``, and a CSI parameter that is a digit to
+        ``pyte`` raises on ordinary sequences a real TUI emits. A CSI with one parameter too
+        many (``ESC[1;2C``, a modified cursor key) is a ``TypeError``. An out-of-range erase
+        (``ESC[4J``) is an ``UnboundLocalError``. A CSI parameter that is a digit to
         ``str.isdigit`` but not to ``int`` (``ESC[₂m``) is a ``ValueError``. The raise used to
-        escape this method,
-        and the keeper answered it by disabling the screen for the rest of the session. Now
-        the error is caught for this one call and returned, and the screen stays in use.
+        escape this method, and the keeper answered it by disabling the screen for the rest of
+        the session. Now the error is caught for this one call and returned, and the screen
+        stays in use.
 
         What a caught error keeps and what it drops:
 

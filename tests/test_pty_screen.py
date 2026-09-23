@@ -578,14 +578,37 @@ _REJECTED_SEQUENCES = (
     pytest.param("\x1b[₂m".encode(), ValueError, id="csi-subscript-digit"),
     pytest.param("\x1b[²J".encode(), ValueError, id="csi-superscript-digit"),
     pytest.param("\x1b[1;①H".encode(), ValueError, id="csi-circled-digit"),
-    pytest.param(b"\x1b[" + b"1" * 5000 + b"C", ValueError, id="csi-over-long-digit-run"),
+    pytest.param(
+        b"\x1b[" + b"1" * 5000 + b"C",
+        ValueError,
+        id="csi-over-long-digit-run",
+        # The limit is the interpreter's; PYTHONINTMAXSTRDIGITS=0 turns it off.
+        marks=pytest.mark.skipif(
+            not 0 < sys.get_int_max_str_digits() < 5000, reason="no int digit limit below 5000"
+        ),
+    ),
 )
 
 
 def _screen_state(scr: PtyScreen) -> tuple:
     s = scr._screen
-    cells = [[(c.data, c.fg, c.bg, c.bold) for c in s.buffer[y].values()] for y in range(s.lines)]
-    return (list(s.display), s.cursor.x, s.cursor.y, s.cursor.attrs, set(s.mode), cells)
+    # `buffer.get`, not `buffer[y]`: indexing the defaultdict would insert the line it reads.
+    cells = [
+        [(c.data, c.fg, c.bg, c.bold) for c in s.buffer.get(y, {}).values()]
+        for y in range(s.lines)
+    ]
+    return (
+        list(s.display),
+        s.cursor.x,
+        s.cursor.y,
+        s.cursor.attrs,
+        set(s.mode),
+        cells,
+        s.margins,
+        s.title,
+        s.charset,
+        set(s.tabstops),
+    )
 
 
 @pytest.mark.parametrize(("seq", "error"), _REJECTED_SEQUENCES)
@@ -595,9 +618,12 @@ def test_a_rejected_sequence_leaves_the_screen_exactly_as_it_was(seq, error):
     scr = PtyScreen(cols=20, rows=4)
     scr.feed(b"\x1b[31mred\x1b[2;3Hxy\x1b[4h")
     before = _screen_state(scr)
+    parser = scr._stream._parser
     assert isinstance(scr.feed(seq), error)
     assert _screen_state(scr) == before
-    assert scr._stream._taking_plain_text is True  # pyte reset its parser to the idle state
+    # pyte replaced its parser generator (`Stream._send_to_parser`), so the next feed starts
+    # from the idle state rather than inside the rejected sequence.
+    assert scr._stream._parser is not parser
 
 
 @pytest.mark.parametrize(("seq", "error"), _REJECTED_SEQUENCES)
