@@ -544,24 +544,30 @@ def redact_for_disk(text: str) -> str:
 #: caught, and (see :func:`_redact_screen_row`) neither is a secret welded onto the word before.
 _SCREEN_GLUED_ID_RE = re.compile(r"(env|session|cse)_01[A-Za-z0-9]{8,}\b")
 
-#: The UUID and every secret shape with a leading ``\b`` and NO trailing one, plus the real id
-#: shape of :data:`_SCREEN_GLUED_ID_RE` with no trailing ``\b``, for the screen surface only
-#: (#1508). A UUID, key, token or real id welded to the word after it (``<UUID>zz``,
-#: ``session_01<...>_backup``) has no trailing boundary, so the anchored mask never matches it.
-#: It used to mask only when the caller's width-refit trim happened to cut the following word
-#: away, so whether it showed depended on how long the rest of the row rendered. These shapes
-#: are distinctive enough that masking them without the trailing boundary hides no ordinary
-#: word. The plain id core is left out: a look-alike such as ``session_timeout_ms`` must stay
-#: readable.
+#: The UUID and every secret shape with a leading ``\b`` and NO trailing one, for the screen
+#: surface only (#1508). A UUID, key or token welded to the word after it (``<UUID>zz``) has no
+#: trailing boundary, so the anchored mask never matches it. It used to mask only when the
+#: caller's width-refit trim happened to cut the following word away, so whether it showed
+#: depended on how long the rest of the row rendered. These shapes are distinctive enough that
+#: masking them without the trailing boundary hides no ordinary word.
 #:
-#: These ADD to the anchored matches, never replace them. A greedy open-tail match can run
-#: over the start of a second token (``env_01<a>session_01<b>`` reads as one run up to the
-#: ``_``), and only the anchored scan still finds that second token.
+#: These ADD to the anchored matches, never replace them.
 _SCREEN_OPEN_TAIL_RES: tuple[re.Pattern[str], ...] = (
     re.compile(rf"\b{_UUID_CORE}"),
     *(re.compile(rf"\b{core}", flags) for core, flags in _SECRET_CORES),
-    re.compile(r"(env|session|cse)_01[A-Za-z0-9]{8,}"),
 )
+
+#: The real id shape of :data:`_SCREEN_GLUED_ID_RE` with no ``\b`` on either end, the open-tail
+#: id scan (#1508): ``session_01<...>_backup`` has no trailing boundary. The plain id core is
+#: left out: a look-alike such as ``session_timeout_ms`` must stay readable.
+#:
+#: It finds EVERY start, overlapping ones included, through the zero-width lookahead (#1612).
+#: A greedy match runs over the prefix of the next id in a welded chain (``env_01<a>env_01<b>``
+#: reads as ``env_01<a>env`` up to the ``_``), so a plain ``finditer`` resumed after it and
+#: skipped every second id. The anchored fixed point does not catch those when nothing after
+#: the chain gives its last id a trailing ``\b``. The cost stays linear: a match can start only
+#: after a ``_01`` it owns, so no two matches share the run of characters after it.
+_SCREEN_OPEN_TAIL_ID_RE = re.compile(r"(?=((?:env|session|cse)_01[A-Za-z0-9]{8,}))")
 
 #: The UUID shape with NO ``\b`` on either end, for finding a UUID that a greedy core welded
 #: onto (#1496). Reused from the UUID mask's cut-supplied (core-alone) variant rather than
@@ -603,6 +609,10 @@ def _screen_welded_uuid_spans(
     key welded directly to a UUID: the key's open-tail match (:data:`_SCREEN_OPEN_TAIL_RES`)
     ends after its 16th character, where the UUID begins with no boundary before it (#1508).
 
+    A UUID is a fixed-count token too, so a UUID that starts exactly where a UUID this helper
+    masked ends is masked as well. That unwinds a chain of UUIDs welded end to end in one pass,
+    left to right (#1612). Before, the second UUID of such a chain masked and the third showed.
+
     RESIDUE: ``_UUID_CORE_RE.finditer`` is non-overlapping, so a second UUID that overlaps the
     first by its leading hex group keeps its tail visible (two all-hex UUIDs sharing eight
     digits). It is AUTH-gated behind an attacker-influenced bridge escape, and naming the gap
@@ -610,11 +620,14 @@ def _screen_welded_uuid_spans(
     """
     if not greedy_spans:
         return []
-    return [
-        (uuid.start(), uuid.end(), _REDACTED)
-        for uuid in _UUID_CORE_RE.finditer(text)
-        if any(start < uuid.start() <= end for start, end in greedy_spans)
-    ]
+    spans: list[tuple[int, int, str]] = []
+    chained = -1  # the end of the last UUID masked here
+    for uuid in _UUID_CORE_RE.finditer(text):
+        start = uuid.start()
+        if start == chained or any(s < start <= e for s, e in greedy_spans):
+            spans.append((start, uuid.end(), _REDACTED))
+            chained = uuid.end()
+    return spans
 
 
 def _screen_spans(text: str) -> list[tuple[int, int, str]]:
@@ -640,7 +653,9 @@ def _screen_spans(text: str) -> list[tuple[int, int, str]]:
 
 
 def _screen_open_tail_spans(text: str) -> list[tuple[int, int, str]]:
-    """Return the :data:`_SCREEN_OPEN_TAIL_RES` spans in ``text``, and a UUID welded after one.
+    """Return the open-tail spans in ``text``, and a UUID welded after one.
+
+    The spans are :data:`_SCREEN_OPEN_TAIL_RES` and :data:`_SCREEN_OPEN_TAIL_ID_RE`.
 
     These are scanned ONCE over the unmasked text and unioned at render; they never feed a
     fixed point. A greedy open-tail match runs over the prefix of the next token in a welded
@@ -648,12 +663,9 @@ def _screen_open_tail_spans(text: str) -> list[tuple[int, int, str]]:
     masked cells, it would erase the prefixes the anchored fixed point needs to unwind that
     chain from its end, and the chain would show.
     """
-    spans: list[tuple[int, int, str]] = []
-    greedy_spans: list[tuple[int, int]] = []
-    for open_tail in _SCREEN_OPEN_TAIL_RES:
-        matches = [(m.start(), m.end()) for m in open_tail.finditer(text)]
-        spans += [(s, e, _REDACTED) for s, e in matches]
-        greedy_spans += matches
+    greedy_spans = [m.span() for rx in _SCREEN_OPEN_TAIL_RES for m in rx.finditer(text)]
+    greedy_spans += [m.span(1) for m in _SCREEN_OPEN_TAIL_ID_RE.finditer(text)]
+    spans = [(s, e, _REDACTED) for s, e in greedy_spans]
     spans += _screen_welded_uuid_spans(text, greedy_spans)
     return spans
 
@@ -663,12 +675,11 @@ def _fixed_point_coverage(
     ranges: list[tuple[int, int]],
     scan: Callable[[str], list[tuple[int, int, str]]],
     *,
-    max_scans: int | None,
+    max_scans: int,
 ) -> tuple[bytearray, bool]:
     r"""Scan each range of ``text`` to a fixed point; return the coverage and if it settled.
 
-    With ``max_scans`` set, stop after that many scans and report ``False`` if the last one
-    still added coverage.
+    Stop after ``max_scans`` scans and report ``False`` if the last one still added coverage.
     """
     # Iterate the screen scan over each range until nothing new is covered, marking a map fed
     # ONLY by its own coverage, so no other scan can remove a boundary this one relies on. NUL
@@ -676,7 +687,7 @@ def _fixed_point_coverage(
     # neighbours the `\b` a freshly-masked run exposes.
     cov = bytearray(len(text))
     scans = 0
-    while max_scans is None or scans < max_scans:
+    while scans < max_scans:
         scans += 1
         probe = "".join("\x00" if cov[i] else ch for i, ch in enumerate(text))
         added = False
@@ -689,6 +700,43 @@ def _fixed_point_coverage(
         if not added:
             return cov, True
     return cov, False
+
+
+#: The most scans the per-row and hard-run screen fixed points get before they fail closed
+#: (#1612). Ordinary output settles in two or three: one scan per token a freshly masked
+#: neighbour exposes, plus one that finds nothing new. Only a crafted chain of tokens welded
+#: end to end needs more, one scan each: a hard-wrapped 40 x 120 screen of them took about
+#: 250 ms per frame uncapped. :data:`_SEAM_MAX_SCANS` is the same cap for the soft-wrap views.
+_SCREEN_MAX_SCANS = 16
+
+
+def _capped_coverage(
+    text: str,
+    ranges: list[tuple[int, int]],
+    scan: Callable[[str], list[tuple[int, int, str]]],
+    *,
+    max_scans: int,
+) -> bytearray:
+    """Scan each range of ``text`` to its own capped fixed point; fail closed where one is cut.
+
+    A range still adding coverage after ``max_scans`` scans has every non-space character
+    masked. That masks MORE than the uncapped scan would, never less, so the cap only bounds
+    the cost: it cannot reveal a cell the fixed point would have hidden. Each range is
+    independent (the scan sees only its own slice), so capping them one at a time masks
+    exactly what one multi-range fixed point masks, and a crafted range fails closed alone.
+    """
+    cov = bytearray(len(text))
+    for lo, hi in ranges:
+        part, settled = _fixed_point_coverage(
+            text[lo:hi], [(0, hi - lo)], scan, max_scans=max_scans
+        )
+        cov[lo:hi] = part if settled else _fail_closed(text[lo:hi])
+    return cov
+
+
+def _fail_closed(text: str) -> bytearray:
+    """Return the coverage a capped scan falls back to: every non-space character of ``text``."""
+    return bytearray(0 if ch.isspace() else 1 for ch in text)
 
 
 def _render_coverage(text: str, cov: bytearray) -> str:
@@ -739,7 +787,9 @@ def _redact_screen_row(row: str) -> str:
     sequential sub can mask LESS -- a mask inserts a ``<`` that shortens a later match below
     its minimum), and the union runs to a FIXED POINT (a ``<redacted>`` token masking inserts
     is a boundary that can expose a neighbour). It terminates because each pass masks strictly
-    more and a ``<redacted>`` token never matches a core.
+    more and a ``<redacted>`` token never matches a core. It is also BOUNDED: a row still
+    masking after :data:`_SCREEN_MAX_SCANS` passes (a crafted chain of welded tokens needs one
+    pass each) fails closed, with every non-space character masked (#1612).
 
     The TRAILING anchor is a different matter (#1508). A UUID, a secret or a real ``01``-shape
     id welded to the word AFTER it (``<UUID>zz``) is masked by :func:`_screen_open_tail_spans`,
@@ -750,10 +800,12 @@ def _redact_screen_row(row: str) -> str:
 
     RESIDUE on this surface, stated because there is no cut to distinguish it: a SECRET welded
     onto the word before it (secrets keep their leading anchor) and a welded id that lacks the
-    ``01`` shape are not masked. The second includes a look-alike welded to the word after it
-    (``session_ABCDEF_x``). The pty screen's width-refit trim can still happen to cut the
-    ``_x`` away and mask it, so whether such a look-alike shows depends on the row's rendered
-    length; a real ``01``-shape id does not.
+    ``01`` shape are not masked. The first includes a secret welded onto another secret
+    (``ghp_<a>ghp_<b>``, ``AKIA<a>AKIA<b>``): the second one shows. (A welded chain of real
+    ``01``-shape ids, or of UUIDs, is masked whole, #1612.) The second includes a look-alike
+    welded to the word after it (``session_ABCDEF_x``). The pty screen's width-refit trim can
+    still happen to cut the ``_x`` away and mask it, so whether such a look-alike shows depends
+    on the row's rendered length; a real ``01``-shape id does not.
 
     A welded UUID is masked after every greedy core -- an id, a glued id (#1496), the secret
     cores and the fixed-count ``AKIA`` key -- but one welded-UUID
@@ -764,17 +816,19 @@ def _redact_screen_row(row: str) -> str:
     halves into one matchable run the anchored pass catches.
     """
     masked = row
-    while True:
+    for _ in range(_SCREEN_MAX_SCANS):
         again = _apply_spans(masked, _screen_spans(masked))
         if again == masked:
             break
         masked = again
+    else:  # still masking at the cap: a crafted chain, so fail closed (#1612)
+        return _render_coverage(row, _fail_closed(row))
     tail = _screen_open_tail_spans(row)
     if not tail:
         return masked
     # The NUL-probe fixed point covers the same cells as the rewrite loop above: no core can
     # match a character of `<redacted>`, and NUL and `<`/`>` give the same `\b` and `\s` answer.
-    cov, _ = _fixed_point_coverage(row, [(0, len(row))], _screen_spans, max_scans=None)
+    cov = _capped_coverage(row, [(0, len(row))], _screen_spans, max_scans=_SCREEN_MAX_SCANS)
     if all(cov.find(0, s, e) < 0 for s, e, _ in tail):
         return masked  # the open-tail spans add nothing: keep the row exactly as it was
     for s, e, _ in tail:
@@ -952,12 +1006,15 @@ def redact_wrapped_screen_rows(
     masks one welded to the word after it (``<UUID>zz``) whatever the row's rendered length.
     An id look-alike without the ``01`` shape still can (see :func:`_redact_screen_row`).
 
-    The ``seam_cov`` fixed point is BOUNDED, because it runs in the keeper's PTY drain loop and
-    a crafted screen (a long chain of welded ids across soft seams) needs one full scan per id.
-    Each view gets at most :data:`_SEAM_MAX_SCANS` scans. A view that has not settled by then
-    FAILS CLOSED: every non-space character in it is masked. Falling back to the other two
-    maps alone would let a crafted chain switch off the soft-wrap catch for a secret beside it.
-    The two other maps are not bounded here; they are the maps the hard-wrap path always ran.
+    Every fixed point here is BOUNDED, because it runs in the keeper's PTY drain loop and a
+    crafted screen (a long chain of welded ids) needs one full scan per id. Each soft-wrap view
+    gets at most :data:`_SEAM_MAX_SCANS` scans, and each row (``row_cov``) and each hard run
+    (``join_cov``) gets at most :data:`_SCREEN_MAX_SCANS` (#1612). A view, row or run that has
+    not settled by then FAILS CLOSED: every non-space character in it is masked
+    (:func:`_capped_coverage`). Falling back to the other maps alone would let a crafted chain
+    switch off the catch for a secret beside it. A row or run that settles is masked exactly as
+    before the cap, and :func:`_redact_screen_row` fails closed on the same cap, so ``row_cov``
+    still reproduces it.
     """
     seams = max(len(rows) - 1, 0)
     if len(hard_seams) != seams or len(soft_seams) != seams:
@@ -986,8 +1043,8 @@ def redact_wrapped_screen_rows(
             first = k + 1
 
     # Each row on its own edges: reproduces the per-row pass exactly.
-    row_cov, _ = _fixed_point_coverage(joined, bounds, _screen_spans, max_scans=None)
-    join_cov, _ = _fixed_point_coverage(joined, hard_runs, _screen_spans, max_scans=None)
+    row_cov = _capped_coverage(joined, bounds, _screen_spans, max_scans=_SCREEN_MAX_SCANS)
+    join_cov = _capped_coverage(joined, hard_runs, _screen_spans, max_scans=_SCREEN_MAX_SCANS)
 
     # A token welded to the word after it, scanned once and never fed into a fixed point (see
     # `_screen_open_tail_spans`), over each row, each hard run and each soft-wrap view below.
@@ -1005,11 +1062,8 @@ def redact_wrapped_screen_rows(
             views.append(spaced_view)
         for text, cells, cuts in views:
             scan = functools.partial(_screen_seam_spans, cuts=cuts)
-            cov, settled = _fixed_point_coverage(
-                text, [(0, len(text))], scan, max_scans=_SEAM_MAX_SCANS
-            )
-            if not settled:  # fail closed: mask the whole view rather than stop masking
-                cov = bytearray(0 if ch.isspace() else 1 for ch in text)
+            # Fails closed: a view that does not settle is masked whole, rather than stop masking.
+            cov = _capped_coverage(text, [(0, len(text))], scan, max_scans=_SEAM_MAX_SCANS)
             for s, e, _ in _screen_open_tail_spans(text):
                 cov[s:e] = b"\x01" * (e - s)
             for i, cell in enumerate(cells):

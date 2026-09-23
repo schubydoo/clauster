@@ -362,12 +362,15 @@ Three layers:
     deletes the boundary. This bounded scope is for the streamed log and the
     on-disk mirror. A terminal has already discarded the escape on the live
     pty-screen view. So that view also masks a real identifier (the `01` shape)
-    welded onto the word before it, and an id welded to another id. It also masks
-    a UUID that a greedy id or secret token welded onto. A `ghp_` or
+    welded onto the word before it, and every id in a chain of ids welded
+    together. It also masks every UUID in a chain of welded UUIDs, and a UUID
+    that a greedy id or secret token welded onto. A `ghp_` or
     `github_pat_` token has no separator, so it eats the UUID's leading hex
     digits. An ordinary compound name such as `resolve_session_transcript` stays
     readable. A secret welded onto the word before it, and a welded id without
-    the `01` shape, stay visible there. A UUID, a secret, or an `01`-shape
+    the `01` shape, stay visible there. That includes a secret welded onto
+    another secret: in `ghp_<a>ghp_<b>`, the second token shows. A UUID, a
+    secret, or an `01`-shape
     identifier welded to the word after it is masked, for example a UUID
     followed by `zz`. A name that only looks like an identifier, such as
     `session_timeout_ms`, stays readable.
@@ -382,10 +385,11 @@ a margin of 8 columns. Because of that margin, a separate line can be read as a
 wrap when the row above it ends near the right edge. If that row ends in an
 identifier or a secret, the first word of the next line is masked with it.
 
-The check for a token across a Claude TUI wrap has a fixed amount of work per
-screen, so a crafted screen cannot make that check slow. If a screen needs
-more than that, Clauster masks all the text in the wrapped rows. It does not
-skip the check.
+Each check on the live pty-screen view has a fixed amount of work: per row, per
+line that the terminal wrapped, and per line that Claude's TUI wrapped. A
+crafted screen, for example a long chain of identifiers written with no
+separator, cannot make a check slow. If a row or a wrapped line needs more work
+than that, Clauster masks all the text in it. It does not skip the check.
 
 Three gaps remain:
 
