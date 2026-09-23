@@ -60,10 +60,52 @@ FAKE_CLAUDE = (
         ("2.2.0", "2.1.999", True),
         ("2.1", "2.1.0", True),  # missing patch treated as 0
         ("10.0.0", "9.9.9", True),  # numeric, not lexical
+        ("v1.12.0", "v1.12.0", True),  # claustrum's v-prefixed tags
+        ("v1.12.0", "1.11.9", True),
+        ("v1.11.9", "v1.12.0", False),
+        # Pre-release and build metadata follow semver precedence (#1304).
+        ("1.9.0-rc.1", "1.9.0", False),  # a pre-release is below its release
+        ("1.9.0-rc2", "1.9.1", False),  # was (1, 9, 2): digits scavenged from "0-rc2"
+        ("1.9.0", "1.9.0-rc.1", True),
+        ("1.9.0-rc.2", "1.9.0-rc.1", True),
+        ("1.9.0-rc.1", "1.9.0-rc.2", False),
+        ("1.9.0-rc.10", "1.9.0-rc.9", True),  # numeric identifiers compare as numbers
+        ("1.9.0-alpha", "1.9.0-1", True),  # alphanumeric sorts above numeric
+        ("1.9.0-rc", "1.9.0-rc.1", False),  # the shorter identifier list sorts first
+        ("1.9.0+build.5", "1.9.0", True),  # build metadata carries no precedence
+        ("v1.9.0-3-gf0b3a9c", "v1.9.0", False),  # `git describe`: never over-reports
+        ("v1.9.0-3-gf0b3a9c", "v1.8.0", True),
     ],
 )
 def test_version_ge(have, want, expected):
     assert _version_ge(have, want) is expected
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "f0b3a9c00742d1e5a7b86c2f9e3d4a1b0c5e6f78",  # full 40-hex commit SHA
+        "f0b3a9c",  # short SHA
+        "1234567",  # all-digit short SHA: a valid int, but not a version
+        "20260828023803",  # a bare timestamp is the same shape
+        "claustrum-dev",
+        "unknown",
+        "",
+        "v",
+        "2",  # one segment is indistinguishable from an all-digit SHA
+        "2.1.",
+        "2..1",
+        "2.1.²",  # a Unicode digit: `str.isdigit` is True, but `int()` raised
+        "2.1.１５６",  # full-width digits
+        " 2.1.156",
+    ],
+)
+def test_version_ge_never_passes_a_token_that_is_not_a_version(token):
+    # #1304: the old parser kept each segment's digits, so a bare SHA became one enormous
+    # integer that cleared any floor. Unparseable on either side is "cannot confirm".
+    assert _version_ge(token, "0.0.1") is False
+    assert _version_ge("999.0.0", token) is False
+    assert ops_mod._parse_version(token) is None
 
 
 # ----- doctor -----------------------------------------------------------
@@ -131,6 +173,28 @@ def test_doctor_old_claude_fails(write_config, tmp_path):
     assert by["claude"].status == FAIL and ok is False
     # The FAIL message must carry a remediation hint, not just the bare comparison.
     assert "claude update" in by["claude"].detail and "9.9.9" in by["claude"].detail
+
+
+@pytest.mark.parametrize("reported", ["f0b3a9c00742d1e5a7b86c2f9e3d4a1b0c5e6f78", "1234567"])
+def test_doctor_fails_a_claude_version_that_is_not_a_version(
+    write_config, tmp_path, monkeypatch, reported
+):
+    # #1304: a bare SHA used to parse into a huge integer and PASS the floor. It cannot be
+    # compared, so the hard `claude` floor fails, without claiming it is "< required".
+    monkeypatch.setattr(ops_mod.claude_cli, "claude_version", lambda binary: reported)
+    checks, ok = run_doctor(_cfg_file(write_config, tmp_path))
+    claude = {c.name: c for c in checks}["claude"]
+    assert claude.status == FAIL and ok is False
+    assert "cannot compare" in claude.detail and reported in claude.detail
+    assert "< required" not in claude.detail
+
+
+def test_doctor_fails_an_unparseable_min_version(write_config, tmp_path):
+    # The floor side of the same shape: `latest` scavenged to 0, so every claude passed it.
+    checks, ok = run_doctor(_cfg_file(write_config, tmp_path, '  min_version: "latest"\n'))
+    claude = {c.name: c for c in checks}["claude"]
+    assert claude.status == FAIL and ok is False
+    assert "cannot compare" in claude.detail and "'latest'" in claude.detail
 
 
 def test_doctor_invalid_config_fails(tmp_path):
@@ -2107,8 +2171,7 @@ def test_claustrum_embedded_version_none_for_devel_source_build(tmp_path):
     "version",
     [
         # A pseudo-version denotes a COMMIT, not a release — v1.9.0-0.<ts>-<hash> is a
-        # commit BEFORE the v1.9.0 release, and _version_ge's numeric comparison would
-        # read it as clearing a v1.9.0 floor. Not an answer.
+        # commit BEFORE the v1.9.0 release. Not an answer.
         "v1.9.0-0.20260828023803-f0b3a9c00742",
         "v1.9.1-0.20260828023803-f0b3a9c00742",
         "v1.9.0-rc.1",  # any prerelease: same class
@@ -2176,6 +2239,43 @@ def test_check_claustrum_version_keeps_the_old_advisory_without_buildinfo(tmp_pa
     monkeypatch.setattr(ops, "_claustrum_version", lambda binary: "claustrum-dev")
     c = ops._check_claustrum_version(str(plain))
     assert c.status == WARN and "could not confirm" in c.detail
+
+
+_SHA_STAMPS = ["f0b3a9c00742d1e5a7b86c2f9e3d4a1b0c5e6f78", "f0b3a9c", "1234567"]
+
+
+@pytest.mark.parametrize("stamp", _SHA_STAMPS)
+def test_check_claustrum_version_warns_on_a_sha_stamp_without_buildinfo(
+    tmp_path, monkeypatch, stamp
+):
+    # #1304: a local build whose `--version` is a bare commit SHA used to parse into a huge
+    # integer and report OK against any floor. It is now the advisory "could not confirm".
+    from clauster import ops
+
+    plain = tmp_path / "claustrum"
+    plain.write_bytes(b"not a go binary")
+    monkeypatch.setattr(ops, "_claustrum_version", lambda binary: stamp)
+    monkeypatch.setattr(ops.deps, "claustrum_pinned_version", lambda: "v1.7.1")
+    c = ops._check_claustrum_version(str(plain))
+    assert c.status == WARN
+    assert "could not confirm >= v1.7.1" in c.detail and stamp in c.detail
+
+
+@pytest.mark.parametrize("stamp", _SHA_STAMPS)
+def test_check_claustrum_version_routes_a_sha_stamp_to_buildinfo(tmp_path, monkeypatch, stamp):
+    # The fallback now runs for a SHA stamp, since the probe no longer "succeeds" on it.
+    from clauster import ops
+
+    monkeypatch.setattr(ops, "_claustrum_version", lambda binary: stamp)
+    monkeypatch.setattr(ops.deps, "claustrum_pinned_version", lambda: "v1.7.1")
+    below = ops._check_claustrum_version(_go_binary(tmp_path))
+    assert below.status == WARN and "v1.3.1 < required v1.7.1" in below.detail
+    assert f"`--version` reports {stamp}" in below.detail
+
+    monkeypatch.setattr(ops.deps, "claustrum_pinned_version", lambda: "v1.0.0")
+    above = ops._check_claustrum_version(_go_binary(tmp_path))
+    assert above.status == OK and "v1.3.1 available (>= v1.0.0)" in above.detail
+    assert "buildinfo" in above.detail
 
 
 def _managed_shawl(tmp_path):

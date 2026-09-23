@@ -403,6 +403,13 @@ the installer) to reach >= <min_version>``.
 **The fix:** `claude update` (as the same user Clauster runs as), then re-run
 `clauster doctor`.
 
+If the row says `cannot compare claude version ... with min_version ...`
+instead, one of the two values is not a dotted numeric version such as
+`2.1.145`. Doctor fails the row because it cannot confirm the floor. Set
+`claude.min_version` to a version such as `2.1.145`. If `claude --version`
+reports something else, such as a bare commit SHA, reinstall `claude` with the
+installer.
+
 ## An Interactive Session (pty) bridge is wedged
 
 ### The live log tail is silent or frozen
@@ -618,7 +625,7 @@ present in every run:
 | Row | OK means | A warn/fail usually means |
 | --- | --- | --- |
 | `config` | `clauster.yml` found and valid | `no config found: ...` / `config unreadable: ...` / `config is not valid YAML ...` / `invalid config: ...` (the "no config found" section above breaks these down) |
-| `claude` | binary found, version ≥ `min_version` | not on PATH, or too old — see above |
+| `claude` | binary found, version ≥ `min_version` | not on PATH, too old, or a version that cannot be compared — see above |
 | `claude-login` | usable `claude` credentials | not logged in — bridges will spawn then hang |
 | `projects_root` | the directory exists | wrong path in config |
 | `git` | `git` on PATH | create/clone features unavailable |
@@ -653,7 +660,8 @@ added, so read the prefix rather than expecting this page to enumerate them:
   For claustrum the row also reports the **detected version** from `claustrum
   --version` and warns (advisorily — never a doctor failure) when it can't be
   confirmed at or above the release clauster pins. A `go install`-built binary
-  keeps the unstamped `claustrum-dev` sentinel, so when `--version` can't confirm
+  keeps the unstamped `claustrum-dev` sentinel, and a local build can report a
+  bare commit SHA. Neither is a version, so when `--version` can't confirm
   the floor doctor reads the module version Go embeds in every binary and names
   the release outright — `claustrum v1.3.1 < required v1.7.1` rather than a
   can't-tell shrug. That fallback stays quiet unless it is certain: a build info

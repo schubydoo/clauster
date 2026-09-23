@@ -161,7 +161,11 @@ class ClaudeConfig(BaseModel):
         description="The `claude` binary name or path (resolved to an absolute path "
         "before spawning).",
     )
-    min_version: str = Field(default="2.1.145", description="Minimum acceptable `claude` version.")
+    min_version: str = Field(
+        default="2.1.145",
+        description="Minimum acceptable `claude` version, as a dotted numeric version such as "
+        "`2.1.145`. `clauster doctor` fails the `claude` check if it cannot compare this value.",
+    )
     agents_json_poll_interval_seconds: int = Field(
         default=30,
         ge=1,
