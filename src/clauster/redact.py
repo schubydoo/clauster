@@ -703,10 +703,8 @@ def _fixed_point_coverage(
 
 
 #: The most scans the per-row and hard-run screen fixed points get before they fail closed
-#: (#1612). Ordinary output settles in two or three: one scan per token a freshly masked
-#: neighbour exposes, plus one that finds nothing new. Only a crafted chain of tokens welded
-#: end to end needs more, one scan each: a hard-wrapped 40 x 120 screen of them took about
-#: 250 ms per frame uncapped. :data:`_SEAM_MAX_SCANS` is the same cap for the soft-wrap views.
+#: (#1612): the same cap, for the same reason, as :data:`_SEAM_MAX_SCANS` for the soft-wrap
+#: views. Uncapped, a hard-wrapped 40 x 120 chain of welded ids took about 230 ms per frame.
 _SCREEN_MAX_SCANS = 16
 
 
@@ -720,8 +718,9 @@ def _capped_coverage(
     """Scan each range of ``text`` to its own capped fixed point; fail closed where one is cut.
 
     A range still adding coverage after ``max_scans`` scans has every non-space character
-    masked. That masks MORE than the uncapped scan would, never less, so the cap only bounds
-    the cost: it cannot reveal a cell the fixed point would have hidden. Each range is
+    masked, so the cap only bounds the cost: it never leaves visible a non-space character the
+    uncapped scan would have hidden. (Whitespace inside a ``bearer`` match can show; no value
+    class holds a space, so no secret character does.) Each range is
     independent (the scan sees only its own slice), so capping them one at a time masks
     exactly what one multi-range fixed point masks, and a crafted range fails closed alone.
     """
@@ -800,12 +799,14 @@ def _redact_screen_row(row: str) -> str:
 
     RESIDUE on this surface, stated because there is no cut to distinguish it: a SECRET welded
     onto the word before it (secrets keep their leading anchor) and a welded id that lacks the
-    ``01`` shape are not masked. The first includes a secret welded onto another secret
-    (``ghp_<a>ghp_<b>``, ``AKIA<a>AKIA<b>``): the second one shows. (A welded chain of real
-    ``01``-shape ids, or of UUIDs, is masked whole, #1612.) The second includes a look-alike
-    welded to the word after it (``session_ABCDEF_x``). The pty screen's width-refit trim can
-    still happen to cut the ``_x`` away and mask it, so whether such a look-alike shows depends
-    on the row's rendered length; a real ``01``-shape id does not.
+    ``01`` shape are not masked. The second includes a look-alike welded to the word after it
+    (``session_ABCDEF_x``). The pty screen's width-refit trim can still happen to cut the
+    ``_x`` away and mask it, so whether such a look-alike shows depends on the row's rendered
+    length; a real ``01``-shape id does not. The first includes a secret welded onto another
+    secret (``ghp_<a>ghp_<b>``, ``AKIA<a>AKIA<b>``): the second one shows. A UUID welded onto
+    the word before it (``run_<UUID>``, ``agent<UUID>``) is not masked either, nor is a chain
+    of UUIDs after it. A welded chain of real ``01``-shape ids is masked whole, and so is a
+    chain of UUIDs that starts at a word boundary or right after a masked token (#1612).
 
     A welded UUID is masked after every greedy core -- an id, a glued id (#1496), the secret
     cores and the fixed-count ``AKIA`` key -- but one welded-UUID
