@@ -606,6 +606,57 @@ def test_route_plugins_enabled_404_when_disabled(write_config, tmp_path) -> None
         assert c.get("/api/config-write/plugins/enabled").status_code == 404
 
 
+def _break_settings_file(scope: str, projects_root: Path, *, unreadable: bool = False) -> None:
+    """Break the settings file ``scope``'s direct read consults.
+
+    By default write malformed JSON there. With ``unreadable``, put a directory at the
+    file path instead, so ``read_bytes`` raises an ``OSError`` on every OS (no chmod).
+    """
+    if scope == "user":
+        # The isolated HOME's ~/.claude/settings.json, expanded the same way SessionRunner
+        # expands ~/.claude.json (the route derives this path from that file's parent).
+        path = Path("~/.claude/settings.json").expanduser()
+    elif scope == "local":
+        path = projects_root / "alpha" / ".claude" / "settings.local.json"
+    else:
+        path = projects_root / "alpha" / ".claude" / "settings.json"
+    if unreadable:
+        path.mkdir(parents=True, exist_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json", encoding="utf-8")
+
+
+@pytest.mark.parametrize("scope", ["project", "local", "user"])
+def test_route_plugins_enabled_corrupt_settings_is_422(
+    write_config, tmp_path, projects_root, scope: str
+) -> None:
+    # Issue 1528 sweep: a hand-corrupted settings file makes the direct read raise
+    # InvalidCandidateError; the route must map it to a clean 422, never a 500.
+    _break_settings_file(scope, projects_root)
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.get(f"/api/config-write/plugins/enabled?scope={scope}&project=alpha")
+        assert resp.status_code == 422
+
+
+@pytest.mark.parametrize("route", ["plugins/enabled", "marketplaces/declared"])
+@pytest.mark.parametrize("scope", ["project", "local", "user"])
+def test_route_unreadable_settings_is_400(
+    write_config, tmp_path, projects_root, scope: str, route: str
+) -> None:
+    # Issue 1528 follow-up: a settings path that exists but cannot be read (here a
+    # directory) raises a typed ConfigWriteError, mapped to a 400, never an OSError 500.
+    # The detail names only the file, never its absolute path.
+    _break_settings_file(scope, projects_root, unreadable=True)
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.get(f"/api/config-write/{route}?scope={scope}&project=alpha")
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert "unreadable" in detail
+        assert str(projects_root) not in detail
+        assert str(Path.home()) not in detail
+
+
 # --- GET /api/config-write/plugins/{plugin_id} (details, CLI) ----------------------
 
 
@@ -1084,6 +1135,18 @@ def test_route_marketplaces_declared_user_scope_empty_by_default(write_config, t
 def test_route_marketplaces_declared_404_when_disabled(write_config, tmp_path) -> None:
     with _client(write_config, tmp_path, "") as c:
         assert c.get("/api/config-write/marketplaces/declared").status_code == 404
+
+
+@pytest.mark.parametrize("scope", ["project", "local", "user"])
+def test_route_marketplaces_declared_corrupt_settings_is_422(
+    write_config, tmp_path, projects_root, scope: str
+) -> None:
+    # Issue 1528 sweep: same guard as /plugins/enabled -- a corrupt settings file is a
+    # clean 422 from the declared-marketplaces read, never an unhandled 500.
+    _break_settings_file(scope, projects_root)
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.get(f"/api/config-write/marketplaces/declared?scope={scope}&project=alpha")
+        assert resp.status_code == 422
 
 
 # --- POST /api/config-write/marketplaces/action -------------------------------------

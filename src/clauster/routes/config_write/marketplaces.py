@@ -61,14 +61,19 @@ async def api_config_write_marketplaces_declared(
 ) -> dict:
     """Read which marketplaces this scope declares — what the merged list cannot tell you."""
     # Direct (non-spawning) read of the PER-SCOPE `extraKnownMarketplaces`
-    # declaration -- needed to know where a remove/add would land.
+    # declaration -- needed to know where a remove/add would land. A corrupt/
+    # non-object/non-UTF-8 settings file raises InvalidCandidateError; map it to a
+    # clean 422 like every sibling read, never an unhandled 500.
     config_write.require_capability(config, scope)  # type: ignore[arg-type]
     if scope not in ("project", "user", "local"):
         raise HTTPException(status_code=422, detail="scope must be 'project', 'user', or 'local'")
     if scope == "user":
-        declared = await asyncio.to_thread(
-            config_write_plugins.read_user_marketplaces, _base.user_settings_json(runner)
-        )
+        try:
+            declared = await asyncio.to_thread(
+                config_write_plugins.read_user_marketplaces, _base.user_settings_json(runner)
+            )
+        except config_write.ConfigWriteError as exc:
+            raise _base.map_config_write_error(exc) from exc
         return {"scope": "user", "marketplaces": declared}
     project_dir = _base.resolve_cw_project(config, project)
     read_fn = (
@@ -76,7 +81,10 @@ async def api_config_write_marketplaces_declared(
         if scope == "local"
         else config_write_plugins.read_project_marketplaces
     )
-    declared = await asyncio.to_thread(read_fn, project_dir)
+    try:
+        declared = await asyncio.to_thread(read_fn, project_dir)
+    except config_write.ConfigWriteError as exc:
+        raise _base.map_config_write_error(exc) from exc
     return {"scope": scope, "project": project, "marketplaces": declared}
 
 

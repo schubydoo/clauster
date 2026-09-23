@@ -281,9 +281,16 @@ async def api_config_write_mcp_approvals_read(
     # gated exactly like the other config-write surfaces (404 when disabled).
     config_write.require_capability(config, "project")
     project_dir = _base.resolve_cw_project(config, project)
-    approvals = await asyncio.to_thread(
-        config_write_mcp.read_project_approvals, runner.claude_json, project_dir
-    )
+    try:
+        approvals = await asyncio.to_thread(
+            config_write_mcp.read_project_approvals, runner.claude_json, project_dir
+        )
+    except config_write.ConfigWriteError as exc:
+        # A corrupt/non-object/non-UTF-8 ~/.claude.json (the approvals store) raises
+        # InvalidCandidateError (422), and an unreadable one a plain ConfigWriteError
+        # (400); map both like every sibling read, never an unhandled 500. (A malformed
+        # settings file is ignored by this display read.)
+        raise _base.map_config_write_error(exc) from exc
     return {"project": project, **approvals}
 
 

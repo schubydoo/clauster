@@ -11,6 +11,7 @@ under the autouse HOME-isolation fixture — the live account is never touched.
 from __future__ import annotations
 
 import datetime
+import errno
 import json
 import time
 from pathlib import Path
@@ -21,7 +22,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from clauster import config_write as cw
-from clauster import config_write_skills, config_write_subagents
+from clauster import config_write_plugins, config_write_skills, config_write_subagents
 from clauster.app import create_app
 from clauster.config import ClausterConfig, load_config
 
@@ -1260,6 +1261,53 @@ def test_read_nested_subtree_round_trip(tmp_path: Path) -> None:
     assert cw.read_nested_subtree(f, "projects", "/repo/alpha", "mcpServers") == {
         "s": {"command": "x"}
     }
+
+
+# The three display readers that share read_config_bytes (issue 1528).
+_CONFIG_BYTES_READERS = {
+    "nested-subtree": lambda p: cw.read_nested_subtree(p, "projects", "/repo/a", "mcpServers"),
+    "enabled-plugins": config_write_plugins.read_user_enabled_plugins,
+    "declared-marketplaces": config_write_plugins.read_user_marketplaces,
+}
+
+
+@pytest.mark.parametrize("reader", _CONFIG_BYTES_READERS.values(), ids=_CONFIG_BYTES_READERS)
+@pytest.mark.parametrize(
+    "exc",
+    [
+        PermissionError(errno.EACCES, "denied"),
+        IsADirectoryError(errno.EISDIR, "is a directory"),
+        NotADirectoryError(errno.ENOTDIR, "not a directory"),
+    ],
+    ids=["EACCES", "EISDIR", "ENOTDIR"],
+)
+def test_config_bytes_readers_map_path_errors(monkeypatch, tmp_path: Path, reader, exc) -> None:
+    # A path that is not a readable file is a typed ConfigWriteError (-> 400) naming only
+    # the basename. Patched, so ENOTDIR is covered on every OS, not just where it occurs.
+    def _raise(self: Path) -> bytes:
+        raise exc
+
+    monkeypatch.setattr(Path, "read_bytes", _raise)
+    with pytest.raises(cw.ConfigWriteError) as info:
+        reader(tmp_path / "settings.json")
+    assert str(info.value) == "cannot read settings.json: it is unreadable"
+    assert str(tmp_path) not in str(info.value)
+
+
+@pytest.mark.parametrize("reader", _CONFIG_BYTES_READERS.values(), ids=_CONFIG_BYTES_READERS)
+def test_config_bytes_readers_propagate_host_os_errors(
+    monkeypatch, tmp_path: Path, reader
+) -> None:
+    # A host fault (EIO here; EMFILE/ENFILE likewise) says nothing about the path, so it
+    # must NOT be dressed up as a client-side ConfigWriteError: it propagates unchanged.
+    def _raise(self: Path) -> bytes:
+        raise OSError(errno.EIO, "I/O error")
+
+    monkeypatch.setattr(Path, "read_bytes", _raise)
+    with pytest.raises(OSError) as info:
+        reader(tmp_path / "settings.json")
+    assert not isinstance(info.value, cw.ConfigWriteError)
+    assert info.value.errno == errno.EIO
 
 
 # --- gitignore-on-create (idempotent append, never rewritten/reordered) ------------
