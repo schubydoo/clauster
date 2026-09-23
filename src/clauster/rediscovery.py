@@ -1832,7 +1832,8 @@ class Rediscovery:
                 if held.bridge_start_ticks != ptr_ticks:
                     continue
             elif held.bridge_proc_start is not None and not procutil.start_time_is_drift_prone():
-                # Read only here: a card without ticks is a legacy one, so this is rare.
+                # Read only here: where the epoch is conclusive (not Linux), or for a legacy
+                # Linux card without ticks.
                 ptr_epoch = procutil._expected_epoch(ptr.proc_start)
                 if (
                     ptr_epoch is not None
