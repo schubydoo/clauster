@@ -345,9 +345,8 @@ def test_redact_screen_text_masks_a_uuid_welded_onto_any_greedy_core(prefixed):
     # `gh[pousr]_`/`github_pat_` family plus the hyphen-bearing `sk-`/`glpat-`/`xox`/
     # `clauster_pat_` cores and `bearer …`. Whether the core's class excludes `-` (eats only the
     # first hex group, leaking the middle) or includes it (swallows the whole UUID), no fragment
-    # of the UUID may survive (#1496). The fixed-count `AKIA[0-9A-Z]{16}` core is out of scope: it
-    # cannot backtrack, so `AKIA`+16 welded to a UUID leaks both (pre-existing accepted residue,
-    # noted at `docs/security.md`'s bounded-scope warning).
+    # of the UUID may survive (#1496). The fixed-count `AKIA[0-9A-Z]{16}` core has its own test,
+    # `test_redact_screen_row_masks_a_uuid_welded_right_after_an_akia_key` (#1508).
     out = redact.redact_screen_text([prefixed + _UUID_1496])[0]
     assert "-1234-" not in out and "123456789abc" not in out, out
 
@@ -427,9 +426,257 @@ def test_redact_wrapped_rows_masks_a_uuid_a_greedy_secret_ate_across_the_wrap():
     # `frame()` for the pyte + width-refit surface.
     row0 = "ghp_" + "B" * 16 + "12345678-12"
     row1 = "34-1234-1234-123456789abc"
-    out = redact.redact_wrapped_screen_rows([row0, row1])
+    out = redact.redact_wrapped_screen_rows([row0, row1], hard_seams=[True], soft_seams=[False])
     assert "-1234-" not in "".join(out) and "123456789abc" not in "".join(out)
     assert "<redacted>" in out[0]
+
+
+def test_redact_wrapped_rows_joins_a_soft_seam_without_its_layout_whitespace():
+    # #1508, safety invariant 4. A TUI soft wrap leaves padding after the upper row and a hanging
+    # indent before the lower one. The verbatim join keeps that whitespace inside the token, so
+    # only the head masked and the tail leaked. A soft seam rebuilds the logical line.
+    rows = ["⏺ wrap=sk-" + "a" * 20 + "   ", "  " + "a" * 13 + ":end" + "  "]
+    leaked = redact.redact_wrapped_screen_rows(rows, hard_seams=[True], soft_seams=[False])
+    assert "aaaa" in leaked[1]  # positive control: the verbatim join leaks the tail
+    out = redact.redact_wrapped_screen_rows(rows, hard_seams=[False], soft_seams=[True])
+    assert "aaaa" not in "".join(out)
+    assert out[1].startswith("  <redacted>:end")  # the indent and the text after it stay
+
+
+def test_redact_wrapped_rows_soft_seam_masks_a_bearer_wrapped_at_its_space():
+    # #1508: the first repro. The TUI moved the whole value to the next row.
+    out = redact.redact_wrapped_screen_rows(
+        ["weld=bearer    ", "  live0123456789abcdef"], hard_seams=[False], soft_seams=[True]
+    )
+    assert "0123" not in "".join(out) and "live" not in "".join(out)
+
+
+def test_redact_wrapped_rows_soft_seam_masks_a_bearer_whose_value_wraps_again():
+    # #1508: a `bearer` header broken at its space, whose value is then ALSO broken mid-token.
+    # The verbatim join ends the value at the second seam's indent; the plain seam view welds
+    # `Bearer` to its value. Only the spaced view (one space after `bearer`, nothing elsewhere)
+    # reads the header whole.
+    rows = ["Authorization: Bearer   ", "  eyJ" + "A" * 14, "  " + "B" * 10 + " done"]
+    out = redact.redact_wrapped_screen_rows(
+        rows, hard_seams=[False, False], soft_seams=[True, True]
+    )
+    assert "BBBB" not in "".join(out) and "AAAA" not in "".join(out)
+    assert out[2].endswith(" done")
+
+
+def test_redact_wrapped_rows_soft_seam_masks_a_token_starting_at_a_word_break():
+    # #1508: the upper row ends in a word, the TUI broke at the space, and the token that starts
+    # the next row is then broken mid-way. Joined with nothing, `foo` welds onto `sk-` and hides
+    # its `\b`, so the mask is retried starting at the seam (as at a removed escape, #1379).
+    rows = ["key: foo   ", "  sk-" + "A" * 14, "  " + "A" * 8 + " ok"]
+    out = redact.redact_wrapped_screen_rows(
+        rows, hard_seams=[False, False], soft_seams=[True, True]
+    )
+    assert "AAAA" not in "".join(out)
+    assert out[0].startswith("key: foo") and out[2].endswith(" ok")
+
+
+def test_redact_wrapped_rows_soft_seam_masks_a_fixed_token_ending_at_a_seam():
+    # #1508: a UUID split by one soft wrap and ending at the next, where the following row starts
+    # with a word. Joined with nothing, the word takes the UUID's trailing `\b`, so the mask is
+    # retried ending at the seam. The word itself stays readable.
+    uuid = "12345678-1234-1234-1234-123456789abc"
+    rows = ["id " + uuid[:20] + "  ", "  " + uuid[20:], "  next"]
+    out = redact.redact_wrapped_screen_rows(
+        rows, hard_seams=[False, False], soft_seams=[True, True]
+    )
+    assert "123456789abc" not in "".join(out) and "-1234-" not in "".join(out)
+    assert out[2] == "  next"
+
+
+def test_redact_wrapped_rows_rejects_a_seam_count_that_does_not_match():
+    # A missing seam flag must not silently read as False; the caller has a bug.
+    with pytest.raises(ValueError, match="3 rows need 2 seams, got 2 hard and 1 soft"):
+        redact.redact_wrapped_screen_rows(
+            ["a", "b", "c"], hard_seams=[True, True], soft_seams=[True]
+        )
+    with pytest.raises(ValueError, match="3 rows need 2 seams, got 1 hard and 2 soft"):
+        redact.redact_wrapped_screen_rows(
+            ["a", "b", "c"], hard_seams=[True], soft_seams=[True, True]
+        )
+    assert redact.redact_wrapped_screen_rows([], hard_seams=[], soft_seams=[]) == []
+
+
+def test_redact_wrapped_rows_joins_only_the_hard_runs_verbatim():
+    # #1508 review, safety invariant 4. The verbatim join must cover only the rows pyte's own
+    # wrap connects. Joined across the soft seams too, the `bearer` on row 1 takes row 2's
+    # `...ab.bearer` as its value, and the real header on rows 2-3 is never matched.
+    rows = [
+        "  some text here, x bearer abcdefgh     ",
+        "  bearer                                ",
+        "  ijklmnopqrstuvwxyzab.bearer live012345",
+        "KLMNOPQRSTUV done                       ",
+    ]
+    out = redact.redact_wrapped_screen_rows(
+        rows, hard_seams=[False, False, True], soft_seams=[True, True, False]
+    )
+    shown = "".join(out)
+    assert "KLMN" not in shown and "live0123" not in shown
+    assert out[3].rstrip().endswith(" done")
+
+
+def test_redact_wrapped_rows_join_is_the_hard_run_even_when_seam_views_miss():
+    # #1508 review, found by a differential search against a whole-group join. The header
+    # `-bearer live0123456789` spans a hard seam, and only the verbatim join of that hard run
+    # reads it: joined from row 0, the first `bearer` takes row 1 whole as its value, and both
+    # seam views weld or space the rows so that no `bearer` is followed by the value.
+    rows = [
+        "ab.bearer                     ",
+        "Bearerab.bearer-bearer        ",
+        "  live0123456789 Bearerbearer ",
+        "Bearer                        ",
+    ]
+    out = redact.redact_wrapped_screen_rows(
+        rows, hard_seams=[False, True, True], soft_seams=[True, True, False]
+    )
+    assert "live0123" not in "".join(out)
+
+
+def test_redact_wrapped_rows_spaces_a_bearer_the_weld_took_its_boundary_from():
+    # #1508 review. `bearer` stands alone on its row, after an indent the screen shows. In the
+    # welded view it follows the upper row's `abc`, so a `\b`-anchored test for the space would
+    # see `abcbearer` and add none, and the value on the next row would leak. The test takes
+    # no `\b`; the seam retry then reads `bearer live...` from the cut.
+    rows = ["  some words here abc    ", "  bearer                 ", "  live0123456789abcdef   "]
+    out = redact.redact_wrapped_screen_rows(
+        rows, hard_seams=[False, False], soft_seams=[True, True]
+    )
+    assert "live0123" not in "".join(out) and "abcdef" not in "".join(out)
+    assert out[0].startswith("  some words here abc")
+
+
+def test_redact_wrapped_rows_masks_a_uuid_welded_to_a_token_found_at_a_seam():
+    # #1508 review. `ghp_` starts a row after a soft seam, so on the welded logical line only the
+    # seam retry finds it. It is greedy and eats the UUID's leading hex group, so the UUID has to
+    # be looked for after it too (#1496), or its tail leaks.
+    token = "ghp" + "_" + "c5263eadf7e0c0e1"
+    rows = [
+        "  some words here and there :ziqcq",
+        "  " + token + "12345678-f7c9",
+        "  -1523-d2a2-686b9d96c4fb done",
+    ]
+    out = redact.redact_wrapped_screen_rows(
+        rows, hard_seams=[False, False], soft_seams=[True, True]
+    )
+    shown = "".join(out)
+    assert "686b9d" not in shown and "f7c9" not in shown and "c5263e" not in shown
+    assert out[2].rstrip().endswith(" done")
+
+
+_UUID_1508 = "12345678-f7c9-1523-d2a2-686b9d96c4fb"
+
+
+@pytest.mark.parametrize(
+    ("token", "after"),
+    [
+        (_UUID_1508, "zz"),  # the review's input: a UUID welded to word characters
+        ("AKIAIOSFODNN7EXAMPLE", "zz"),  # fixed-count key, a word char after the 16th
+        ("ghp_" + "A" * 16, "_backup"),  # `_` is a word char outside the token's class
+        ("session_01ABCDEFGHJK", "_backup"),  # a real `01`-shape id
+        ("sk-" + "A" * 16, "é"),  # a non-ASCII letter is a word char too
+    ],
+)
+def test_redact_screen_row_masks_a_token_welded_to_the_word_after_it(token, after):
+    # #1508 review, safety invariant 4. With a word character right after it, the token has no
+    # trailing `\b`, so the anchored mask never matched it. It masked only when the pty screen's
+    # width-refit trim happened to cut the following word away, which depends on how long the
+    # rest of the row rendered. The screen surface now masks it without the trailing boundary.
+    row = f"see {token}{after} done"
+    out = redact.redact_screen_text([row])[0]
+    assert token[6:14] not in out, out
+    assert out.startswith("see ") and out.endswith(" done")
+
+
+def test_redact_screen_row_masks_a_uuid_welded_right_after_an_akia_key():
+    # #1508: the fixed-count key used to fail its anchored match on a direct weld, so neither
+    # it nor the UUID after it reached the welded-UUID check. Both mask now.
+    out = redact.redact_screen_text(["key AKIAIOSFODNN7EXAMPLE" + _UUID_1508 + " done"])[0]
+    assert "IOSFODNN" not in out and "686b9d" not in out and "-1523-" not in out, out
+
+
+@pytest.mark.parametrize("word", ["session_timeout_ms", "env_production_db", "cse_worker_pool"])
+def test_redact_screen_row_keeps_an_id_look_alike_with_a_trailing_word(word):
+    # #1508 guard: the open-tail masks leave the plain id core out on purpose. A name that only
+    # looks like an id, followed by `_more`, must stay readable, as it did before.
+    assert redact.redact_screen_text([f"set {word} = 3"]) == [f"set {word} = 3"]
+
+
+def test_redact_screen_row_open_tail_does_not_break_a_welded_id_chain():
+    # #1508 guard. A chain of real ids welded end to end unwinds from its last id, one per
+    # fixed-point scan. A greedy open-tail match reads `env_01<a>env` up to the next `_`; if it
+    # were fed into the fixed point it would erase every other `env` prefix, and those ids
+    # would show. It is unioned at render only.
+    row = "env_01AAAAAAAA" * 12 + " end"
+    out = redact.redact_screen_text([row])[0]
+    assert "AAAA" not in out and out.endswith(" end"), out
+
+
+def test_redact_wrapped_rows_open_tail_covers_every_path():
+    # #1508 review: the welded UUID masks in a hard run, and in a row the soft-wrap view adds
+    # cells to (the union render, where the width-refit trim may never happen).
+    hard = redact.redact_wrapped_screen_rows(
+        ["x " + _UUID_1508[:20], _UUID_1508[20:] + "zz ok"], hard_seams=[True], soft_seams=[False]
+    )
+    assert "686b9d" not in "".join(hard) and "-1523-" not in "".join(hard), hard
+    soft = redact.redact_wrapped_screen_rows(
+        [_UUID_1508 + "zz x sk-ABCDEFGH   ", "  IJKLMNOPQRST done"],
+        hard_seams=[False],
+        soft_seams=[True],
+    )
+    assert "686b9d" not in soft[0] and "ABCDEFGH" not in soft[0], soft
+    assert "IJKL" not in soft[1] and soft[1].endswith(" done"), soft
+
+
+def test_redact_wrapped_rows_seam_view_fails_closed_at_the_scan_cap(monkeypatch):
+    # #1508 review. The soft-wrap fixed point is capped, because it runs in the keeper's drain
+    # loop. A view that has not settled at the cap must mask MORE, never less: every non-space
+    # character of the view. Falling back to the hard-wrap maps would let a crafted chain switch
+    # off the soft-wrap catch for the secret beside it.
+    rows = ["  key sk-ABCDEFGH   ", "  IJKLMNOPQRST done"]
+    uncapped = redact.redact_wrapped_screen_rows(rows, hard_seams=[False], soft_seams=[True])
+    monkeypatch.setattr(redact, "_SEAM_MAX_SCANS", 1)  # the first scan adds, so it cannot settle
+    capped = redact.redact_wrapped_screen_rows(rows, hard_seams=[False], soft_seams=[True])
+    assert "IJKL" not in "".join(capped) and "ABCD" not in "".join(capped)
+    words = lambda out: set(" ".join(out).split())  # noqa: E731 -- a one-line helper
+    assert words(capped) <= words(uncapped)  # the cap never shows a word the full scan hid
+    assert "done" in words(uncapped) and "done" not in words(capped)  # it really failed closed
+
+
+def test_redact_wrapped_rows_bounds_the_soft_wrap_scans(monkeypatch):
+    # #1508 review. The crafted worst case: a 40-row chain of welded ids behind soft seams, one
+    # of them after `bearer` so both seam views run. Uncapped, each view needs one scan per id
+    # (hundreds, about 500 ms). Capped, each view stops at `_SEAM_MAX_SCANS`, and the whole
+    # chain is still masked because the views fail closed.
+    body = ("env_01AAAAAAAA" * 400)[: 118 * 39 - (118 * 39) % 14]
+    rows = ["  " + "z " * 55 + "bearer"] + [
+        "  " + body[i : i + 118] for i in range(0, len(body), 118)
+    ]
+    rows = [r.ljust(120) for r in rows]
+    seams = len(rows) - 1
+    calls = []
+    real = redact._screen_seam_spans
+    monkeypatch.setattr(
+        redact, "_screen_seam_spans", lambda text, cuts: calls.append(1) or real(text, cuts)
+    )
+    out = redact.redact_wrapped_screen_rows(
+        rows, hard_seams=[False] * seams, soft_seams=[True] * seams
+    )
+    assert len(calls) <= 2 * redact._SEAM_MAX_SCANS  # two views, each capped
+    assert "AAAA" not in "".join(out)
+
+
+def test_bearer_is_the_only_whitespace_core():
+    # `_seam_view`'s spaced view keeps a space only after `bearer`, because that is the one core
+    # a wrap at a space can split (#1508). A second core that can match whitespace needs the
+    # same treatment, so adding one fails here.
+    cores = [redact._ID_CORE, redact._UUID_CORE, *(core for core, _ in redact._SECRET_CORES)]
+    spacey = [core for core in cores if r"\s" in core or re.search(r"\s", core)]
+    assert spacey == [r"bearer\s+[A-Za-z0-9._-]{12,}"]
 
 
 def test_sanitize_redacts_secret_split_by_ansi_even_when_strip_disabled():

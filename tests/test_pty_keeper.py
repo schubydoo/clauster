@@ -671,6 +671,38 @@ def test_run_keeper_screen_throttle_skips_within_interval(
     assert "first" in joined and "second" in joined
 
 
+def test_keeper_drain_does_not_run_two_slow_renders_back_to_back(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The flush interval is idle time AFTER a render, so slow renders cannot run back to back.
+
+    #1508 review: the stamp was taken before the render. A render slower than the interval left
+    the next dirty tick already due, so the drain loop rendered again at once and spent its
+    time rendering instead of reading the PTY. The clock here only moves inside a render.
+    """
+    from clauster import pty_keeper
+
+    clock = [100.0]
+    monkeypatch.setattr(pty_keeper.time, "monotonic", lambda: clock[0])
+    renders = []
+
+    def slow_render(path, screen, seq, state):  # noqa: ANN001,ANN202 -- test stub
+        renders.append(clock[0])
+        clock[0] += 0.5  # twice `_SCREEN_FLUSH_INTERVAL`
+        return seq + 1
+
+    monkeypatch.setattr(pty_keeper, "_write_screen_frame", slow_render)
+    drain = pty_keeper._KeeperDrain({}, tmp_path / "k.json", _fresh_screen(), tmp_path / "s.json")
+    drain._url_found = True  # keep the URL-timeout arm out of this test
+    for _ in range(3):
+        drain._dirty = True  # a fresh chunk arrived between ticks
+        drain.tick()
+    assert len(renders) == 1  # stamped before the render, all three ticks rendered
+    clock[0] += pty_keeper._SCREEN_FLUSH_INTERVAL  # idle time passes
+    drain.tick()
+    assert len(renders) == 2
+
+
 def test_make_screen_records_error_on_generic_failure(tmp_path: Path, monkeypatch) -> None:
     """A non-pyte setup failure is recorded as `error` (not raised, not `unavailable`)."""
     from clauster import pty_keeper

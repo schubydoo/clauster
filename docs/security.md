@@ -366,9 +366,34 @@ Three layers:
     a UUID that a greedy id or secret token welded onto. A `ghp_` or
     `github_pat_` token has no separator, so it eats the UUID's leading hex
     digits. An ordinary compound name such as `resolve_session_transcript` stays
-    readable. A welded secret, and a welded id without the `01` shape, stay
-    visible there. The fixed-length `AKIA…` key stays visible together with the
-    UUID it welds to, because it cannot backtrack.
+    readable. A secret welded onto the word before it, and a welded id without
+    the `01` shape, stay visible there. A UUID, a secret, or an `01`-shape
+    identifier welded to the word after it is masked, for example a UUID
+    followed by `zz`. A name that only looks like an identifier, such as
+    `session_timeout_ms`, stays readable.
+
+On the live pty-screen view, a long token can wrap onto the next row, and
+neither half matches a mask alone. Clauster joins the wrapped rows before it
+masks. This covers the terminal's own wrap at the right edge, and a wrap that
+Claude's TUI makes itself: the row stops short of the edge, and the next row
+starts after an indent. Clauster treats two rows as one wrapped line only when
+the first word of the lower row does not fit at the end of the upper row, less
+a margin of 8 columns. Because of that margin, a separate line can be read as a
+wrap when the row above it ends near the right edge. If that row ends in an
+identifier or a secret, the first word of the next line is masked with it.
+
+The check for a token across a Claude TUI wrap has a fixed amount of work per
+screen, so a crafted screen cannot make that check slow. If a screen needs
+more than that, Clauster masks all the text in the wrapped rows. It does not
+skip the check.
+
+Three gaps remain:
+
+- A very short tail under a right margin wider than 8 columns is not joined.
+- A first word of wide (CJK) characters counts as one column per character,
+  so it can seem to fit when it does not.
+- A token that wraps inside one cell of a multi-column table is not at the
+  row edge.
 
 ### Hybrid by default
 

@@ -412,13 +412,15 @@ class _KeeperDrain:
     def tick(self) -> None:
         """Between reads: throttle the live-screen frame and handle the URL timeout."""
         if self._tap is not None and self._dirty:
-            now = time.monotonic()
-            if now - self._last_write >= _SCREEN_FLUSH_INTERVAL:
+            if time.monotonic() - self._last_write >= _SCREEN_FLUSH_INTERVAL:
                 self._seq = _write_screen_frame(
                     self._tap.sidecar, self._tap.screen, self._seq, "live"
                 )
                 self._dirty = False
-                self._last_write = now
+                # Stamped AFTER the render, so the interval is idle time between renders. Stamped
+                # before it, a render slower than the interval let the next tick render again at
+                # once, and the drain spent its time rendering instead of reading the PTY (#1508).
+                self._last_write = time.monotonic()
         if not self._url_found and time.monotonic() > self._deadline:
             # The connect URL never appeared; stop accumulating and promote a still-alive
             # bridge to "ready" (the URL is a deep-link nicety, not a liveness signal — a
