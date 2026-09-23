@@ -506,6 +506,12 @@ def _pyte_classes(pyte: Any) -> tuple[Any, Any]:
     Built on first use, because ``pyte`` is an optional import. Both overrides exist so the
     same bytes render the same screen however the reads split them (#1355).
     """
+    # Bound here, not on each draw, so a pyte without it fails when the screen is built, as
+    # the same helpful error a missing pyte gives, and not at the first non-ASCII read.
+    try:
+        wcwidth = pyte.screens.wcwidth
+    except AttributeError as exc:
+        raise PyteUnavailableError(_pyte_unavailable_message()) from exc
 
     class _Screen(pyte.Screen):
         """A ``pyte.Screen`` whose ``draw`` keeps the text after a character it skips."""
@@ -513,7 +519,7 @@ def _pyte_classes(pyte: Any) -> tuple[Any, Any]:
         def draw(self, data: str) -> None:
             """Draw ``data`` in the pieces :func:`_draw_pieces` splits it into."""
             table = self.g1_charset if self.charset else self.g0_charset
-            for piece in _draw_pieces(data, data.translate(table), pyte.screens.wcwidth):
+            for piece in _draw_pieces(data, data.translate(table), wcwidth):
                 super().draw(piece)
 
     class _ByteStream(pyte.ByteStream):

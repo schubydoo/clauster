@@ -676,6 +676,9 @@ def test_an_unplaceable_character_at_the_edge_still_wraps_like_a_one_byte_read()
     payload = b"abcde\x03f"
     assert _render([payload], cols=5, rows=2) == _render([payload[:6], payload[6:]], 5, 2)
     assert _render([payload], cols=5, rows=2)[0] == ("abcde", "f    ")
+    # Ending on the control isolates the step: only drawing it moves the cursor to the next
+    # row. Stock pyte gives (0, 1) here for one read and for one byte per read alike.
+    assert _render([b"abcde\x03"], cols=5, rows=2)[1:] == (0, 1)
 
 
 @pytest.mark.parametrize("control", [b"\x03", b"\xc2\x93", b"\xde\xa7"])
@@ -715,11 +718,27 @@ def test_charset_switch_is_ignored_so_utf8_always_decodes():
     assert _render([b"\x1b%@\xe4\xb8\x80"])[0][0].startswith("一")
 
 
+def test_a_pyte_without_its_wcwidth_fails_as_pyte_unavailable():
+    # The draw split needs pyte's own `screens.wcwidth`. A pyte without it must fail when
+    # the classes are built, with the error every caller already reports, not mid-stream.
+    import types
+
+    broken = types.ModuleType("pyte")
+    with pytest.raises(PyteUnavailableError):
+        pty_screen._pyte_classes(broken)
+
+
 def test_draw_pieces_splits_only_at_characters_draw_cannot_place():
     wcwidth = __import__("pyte").screens.wcwidth
     assert pty_screen._draw_pieces("plain ascii", "plain ascii", wcwidth) == ["plain ascii"]
-    text = "a\x03b́cާ一"
-    assert pty_screen._draw_pieces(text, text, wcwidth) == ["a", "\x03", "b́c", "ާ", "一"]
+    text = "a\x03b\u0301c\u07a7一x"
+    assert pty_screen._draw_pieces(text, text, wcwidth) == [
+        "a",
+        "\x03",
+        "b\u0301c",
+        "\u07a7",
+        "一x",
+    ]
     assert pty_screen._draw_pieces("\x03", "\x03", wcwidth) == ["\x03"]
     # The test is made on the translated text; the pieces are cut from the original.
     assert pty_screen._draw_pieces("ab", "a\x03", wcwidth) == ["a", "b"]
@@ -735,7 +754,7 @@ def test_render_is_chunk_invariant_on_random_streams():
     alphabet = [
         b"a", b"Z", b" ", b"\x03", b"\x1b", b"[", b"]", b"8", b";", b"1", b"2", b"H", b"m",
         b"\x07", b"\r", b"\n", b"\x08", b"\t", b"\x18", b"\x0e", b"%", b"@", b"G", b"(",
-        b"\xe2", b"\x82", b"\xff", "́".encode(), "ާ".encode(), "‍".encode(),
+        b"\xe2", b"\x82", b"\xff", "\u0301".encode(), "\u07a7".encode(), "\u200d".encode(),
         "\x93".encode(), "\x9b".encode(), "\x9d".encode(), "一".encode(),
     ]  # fmt: skip
     rng = random.Random(1355)  # noqa: S311 — a reproducible test stream, not crypto
@@ -1180,6 +1199,11 @@ def test_external_pyte_path_loads_pyte_on_frozen_binary(monkeypatch, tmp_path):
     sentinel = "EXTERNAL_PYTE_SENTINEL_699"
     (tmp_path / "pyte.py").write_text(
         "EXTERNAL_PYTE_SENTINEL_699 = True\n"
+        "\n"
+        "import types\n"
+        "\n"
+        "# `PtyScreen` binds pyte's `screens.wcwidth` when it builds its classes (#1355).\n"
+        "screens = types.SimpleNamespace(wcwidth=len)\n"
         "\n"
         "class Screen:\n"
         "    def __init__(self, cols, rows):\n"

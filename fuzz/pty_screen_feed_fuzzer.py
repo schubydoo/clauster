@@ -290,8 +290,13 @@ def check(data: bytes, cuts: list[int], cols: int, rows: int, capture_osc8: bool
     # second skip — inputs where a stray opener was swallowed by `_OSC8_RE`'s parameter run —
     # and it went away with the fix in #1356. The rendered readers joined the comparison with
     # the fix in #1355.
-    faulted = chunked["faulted"] or whole["faulted"]
-    for key in _FAULT_INVARIANT_KEYS if faulted else _INVARIANT_KEYS:
+    # Up to the first fault both drives hold the same state, so the first fault lands on the
+    # same byte in both: whether a fault happened at all is itself chunk-invariant.
+    assert chunked["faulted"] == whole["faulted"], (
+        f"chunk-boundary divergence in 'faulted': {len(parts)} chunks gave "
+        f"{chunked['faulted']!r}, one chunk gave {whole['faulted']!r}"
+    )
+    for key in _FAULT_INVARIANT_KEYS if whole["faulted"] else _INVARIANT_KEYS:
         assert chunked[key] == whole[key], (
             f"chunk-boundary divergence in {key!r}: "
             f"{len(parts)} chunks gave {chunked[key]!r}, one chunk gave {whole[key]!r}"
