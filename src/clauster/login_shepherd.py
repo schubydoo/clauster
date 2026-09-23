@@ -337,7 +337,7 @@ class _ConPtyPopen:
         `_teardown`'s stop block calls `terminate()`/`kill()` on a child `poll()` still reports
         alive. A pywinpty raise there (its `WinptyError` is NOT an `OSError`) used to escape the
         block and skip the reader join and `pty_process.close()` — pywinpty's own backstop stop
-        — so the handle, and possibly the child, outlived the flow, and the /status or /submit
+        — so the handle, and possibly the child, outlived the flow, and the /status or /code
         route answered 500 (#1466). So the raise is logged at debug and its cause recorded on
         `self.fault` (first cause wins), and teardown carries on to the join and the close. The
         wait that follows still bounds the stop and escalates to `kill()` on a timeout.
@@ -1092,9 +1092,11 @@ class LoginShepherd:
                 # A FAULTED ConPTY handle reports the synthetic exit above, so the stop block
                 # is skipped — yet if the fault was transient the child may still be alive,
                 # and `pty_process.close()` below would be the only stop. One best-effort
-                # `terminate()`, broadly guarded (the same stale handle can raise again), so a
-                # login process cannot outlive its flow (#1422). Nothing to reap: `_ConPtyPopen`
-                # only calls pywinpty's `wait()` after a clean `isalive()` False, and guards it.
+                # `terminate()`, so a login process cannot outlive its flow (#1422). The
+                # adapter already records a pywinpty fault here instead of raising (#1466); the
+                # guard stays as defense in depth for any other `proc` shape. Nothing to reap:
+                # `_ConPtyPopen` only calls pywinpty's `wait()` after a clean `isalive()` False,
+                # and guards it.
                 try:
                     flow.proc.terminate()
                 except Exception as exc:  # noqa: BLE001 — best effort on a faulted handle

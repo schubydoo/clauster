@@ -2286,6 +2286,27 @@ def test_conpty_popen_terminate_and_kill_record_a_fault_instead_of_raising() -> 
     assert killed_first.fault is not None and "conpty kill failed" in killed_first.fault
 
 
+def test_conpty_popen_stop_holds_the_shared_handle_lock() -> None:
+    # The guard must not move the native call out from under the lock the reader thread
+    # shares: pywinpty handle access stays one-op-at-a-time (see `_ConPtyPopen`).
+    lock = threading.Lock()
+
+    held: list[bool] = []
+
+    class _LockCheckingPty(_StopRaisesConPty):
+        def terminate(self, force=False):
+            # Recorded, not asserted: `_stop` would swallow an AssertionError raised here.
+            held.append(lock.locked())
+            super().terminate(force=force)
+
+    fake = _LockCheckingPty()
+    popen = ls._ConPtyPopen(fake, lock)
+    popen.terminate()
+    popen.kill()
+    assert held == [True, True]  # terminate and kill both ran under the shared lock
+    assert not lock.locked()  # released again on the fault path
+
+
 def test_teardown_joins_and_closes_when_conpty_terminate_and_kill_both_raise(
     shepherd, monkeypatch
 ) -> None:
@@ -2796,12 +2817,13 @@ def test_teardown_skips_the_tree_kill_for_a_conpty_proc(shepherd, monkeypatch) -
 
 
 def test_teardown_clears_the_flow_even_when_terminate_raises(shepherd) -> None:
-    """A pywinpty raise in teardown must not strand the login `active` (#1422).
+    """A raise out of `terminate()` in teardown must not strand the login `active` (#1422).
 
-    `_teardown`'s flow clear is in a `finally`, so a `WinptyError` out of `terminate()` on a
-    stale ConPTY handle still ends the flow. The fault propagates (fail closed, never silently)
-    once the flow is no longer stuck active. Before the finally, the raise skipped the clear and
-    the dashboard login stayed `active` until restart.
+    `_teardown`'s flow clear is in a `finally`, so a fault out of `terminate()` still ends the
+    flow. The fault propagates (fail closed, never silently) once the flow is no longer stuck
+    active. Before the finally, the raise skipped the clear and the dashboard login stayed
+    `active` until restart. The ConPTY adapter itself now records a pywinpty fault instead of
+    raising (#1466), so this stand-in covers any other `proc` whose `terminate()` raises.
     """
 
     class _Proc(_TeardownProc):
@@ -2823,9 +2845,8 @@ def test_teardown_swallows_a_terminate_fault_on_a_faulted_conpty_handle(shepherd
     login_shepherd.py 1063-1064 (Windows ConPTY): a faulted handle reports the synthetic exit,
     so `poll()` is not None and `_teardown` skips the stop-the-child block. It still makes ONE
     best-effort `terminate()` in case the fault was transient and the child is alive — and if
-    that call re-raises on the same stale handle, the guard logs at debug and carries on. Unlike
-    the stop-block terminate above, this fault is swallowed, never propagated, so a transient
-    fault cannot strand the login `active`.
+    that call re-raises on the same stale handle, the guard logs at debug and carries on. This
+    fault is swallowed, never propagated, so a transient fault cannot strand the login `active`.
     """
 
     class _FaultedConPtyProc:
