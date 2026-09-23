@@ -299,6 +299,34 @@ def test_state_bridge_boot_id_round_trips_and_stays_absent_when_unset(persistenc
     assert "bridge_boot_id" not in loaded["iid-legacy"]
 
 
+def test_state_sandbox_mode_survives_a_reopen_and_stays_absent_when_unset(tmp_path):
+    # #1101: the runner writes `sandbox_mode` into every record, but the store had no column
+    # for it and dropped it on save, so a restart rebuilt each STOPPED card as "default". Each
+    # value must survive a fresh Persistence on the same state dir (the restart), and a row
+    # saved without one must stay absent so `_saved_sandbox` reads it as "default".
+    p1 = Persistence(tmp_path)
+    try:
+        p1.state_store().save(
+            {
+                "iid-on": {"project_name": "alpha", "sandbox_mode": "on"},
+                "iid-off": {"project_name": "alpha", "sandbox_mode": "off"},
+                "iid-default": {"project_name": "alpha", "sandbox_mode": "default"},
+                "iid-unset": {"project_name": "alpha"},
+            }
+        )
+    finally:
+        p1.dispose()
+    p2 = Persistence(tmp_path)
+    try:
+        loaded = p2.state_store().load()
+    finally:
+        p2.dispose()
+    assert loaded["iid-on"]["sandbox_mode"] == "on"
+    assert loaded["iid-off"]["sandbox_mode"] == "off"
+    assert loaded["iid-default"]["sandbox_mode"] == "default"
+    assert "sandbox_mode" not in loaded["iid-unset"]
+
+
 # ----- fail-closed read + raising save -----------------------------------
 
 
@@ -979,6 +1007,100 @@ def test_instance_bridge_boot_id_migration_adds_and_drops_nullable_column(tmp_pa
             assert {"bridge_pid", "bridge_proc_start", "bridge_start_ticks"} <= columns
     finally:
         engine.dispose()
+
+
+def _seed_pre_sandbox_row(conn) -> None:
+    """Seed one ``instances`` row in the shape a pre-0014 build wrote (no sandbox column)."""
+    conn.execute(
+        text(
+            "INSERT INTO projects (name, created_at, updated_at) "
+            "VALUES ('alpha', '2026-01-01', '2026-01-01')"
+        )
+    )
+    conn.execute(
+        text(
+            "INSERT INTO instances "
+            "(instance_id, project_name, label, resume_mode, created_at, updated_at) "
+            "VALUES ('iid-old', 'alpha', 'Alpha', 'standard', '2026-01-01', '2026-01-01')"
+        )
+    )
+
+
+def test_instance_sandbox_mode_migration_adds_and_drops_nullable_column(tmp_path):
+    # 0014 adds a nullable sandbox_mode column to instances (#1101). A row that predates it
+    # must survive the upgrade with the column NULL, and downgrading to the parent must drop
+    # the column and keep the row — SQLite has no native ALTER, so this also covers the
+    # batch_alter_table add/drop path, which rebuilds the table in both directions.
+    from alembic import command
+
+    engine = create_db_engine(tmp_path)
+    try:
+        with engine.connect() as conn:
+            cfg = Config(str(bootstrap._ALEMBIC_INI))
+            cfg.set_main_option("script_location", str(bootstrap._MIGRATIONS_DIR))
+            cfg.attributes["connection"] = conn
+            command.upgrade(cfg, "f3a9d1c7b204")  # 0013 — this migration's parent
+            _seed_pre_sandbox_row(conn)
+            command.upgrade(cfg, "9f7e9be8c129")
+            columns = {row[1] for row in conn.execute(text("PRAGMA table_info(instances)")).all()}
+            assert "sandbox_mode" in columns
+            assert conn.execute(
+                text("SELECT instance_id, label, sandbox_mode FROM instances")
+            ).all() == [("iid-old", "Alpha", None)]
+
+            # Pinned by revision id, not "-1": a relative step silently re-aims at whatever
+            # ends up below this migration if the parent ever changes.
+            command.downgrade(cfg, "f3a9d1c7b204")
+            columns = {row[1] for row in conn.execute(text("PRAGMA table_info(instances)")).all()}
+            assert "sandbox_mode" not in columns
+            assert conn.execute(text("SELECT instance_id, label FROM instances")).all() == [
+                ("iid-old", "Alpha")
+            ]
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.real_migration  # defensive: the DB file exists, so the stub runs the real upgrade
+def test_pre_sandbox_row_reads_back_as_default_through_persistence(tmp_path, monkeypatch):
+    # #1101: a database written by a pre-0014 build is upgraded by Persistence on the next
+    # boot. Its existing row must load with `sandbox_mode` absent (NULL dropped by `_present`)
+    # and rebuild as "default" — the value every row fell back to before the column existed —
+    # even with the toggle enabled, while a new value saved afterwards survives a reopen.
+    from alembic import command
+
+    from clauster.rediscovery import Rediscovery
+
+    monkeypatch.setattr("clauster.config.SANDBOX_TOGGLE_ENABLED", True)
+    engine = create_db_engine(tmp_path)
+    try:
+        with engine.connect() as conn:
+            cfg = Config(str(bootstrap._ALEMBIC_INI))
+            cfg.set_main_option("script_location", str(bootstrap._MIGRATIONS_DIR))
+            cfg.attributes["connection"] = conn
+            command.upgrade(cfg, "f3a9d1c7b204")  # stop at 0013, before the column exists
+            _seed_pre_sandbox_row(conn)
+            conn.commit()
+    finally:
+        engine.dispose()
+
+    p1 = Persistence(tmp_path)  # the real upgrade_to_head runs 0014 over the seeded row
+    try:
+        store = p1.state_store()
+        loaded = store.load()
+        assert loaded == {
+            "iid-old": {"project_name": "alpha", "label": "Alpha", "resume_mode": "standard"}
+        }
+        assert Rediscovery._saved_sandbox(loaded["iid-old"]) == "default"
+        store.save({"iid-old": {**loaded["iid-old"], "sandbox_mode": "off"}})
+    finally:
+        p1.dispose()
+    p2 = Persistence(tmp_path)
+    try:
+        reloaded = p2.state_store().load()["iid-old"]
+    finally:
+        p2.dispose()
+    assert reloaded["sandbox_mode"] == "off"
+    assert Rediscovery._saved_sandbox(reloaded) == "off"
 
 
 def test_the_migration_chain_has_exactly_one_head():

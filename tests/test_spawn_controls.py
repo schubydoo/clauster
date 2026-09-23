@@ -528,13 +528,29 @@ async def test_resume_preserves_sandbox_choice_when_enabled(runner_config, monke
         await runner.stop(resumed.instance_id)
 
 
-def test_sandbox_persisted_in_subset(runner_config):
+def test_sandbox_persisted_in_subset(runner_config, monkeypatch):
+    monkeypatch.setattr("clauster.config.SANDBOX_TOGGLE_ENABLED", True)
     runner = _runner(runner_config)
     fake = RemoteControlInstance(project="alpha", label="alpha", sandbox_mode="off")
     runner._instances[fake.instance_id] = fake
     subset = runner._persist_subset()
     record = next(v for v in subset.values() if v.get("project_name") == "alpha")
     assert record["sandbox_mode"] == "off"
+
+
+def test_sandbox_subset_carries_the_stored_value_when_disabled(runner_config):
+    # #1101: while the toggle is disabled the card holds the coerced "default", so the subset
+    # carries the row's stored value instead of the card's. A card with no stored row gets
+    # None, which the store writes as NULL and reads back as "default".
+    runner = _runner(runner_config)
+    stored = RemoteControlInstance(project="alpha", label="alpha", sandbox_mode="default")
+    fresh = RemoteControlInstance(project="alpha", label="alpha", sandbox_mode="default")
+    runner._instances[stored.instance_id] = stored
+    runner._instances[fresh.instance_id] = fresh
+    runner._persisted = {stored.instance_id: {"project_name": "alpha", "sandbox_mode": "on"}}
+    subset = runner._persist_subset()
+    assert subset[stored.instance_id]["sandbox_mode"] == "on"
+    assert subset[fresh.instance_id]["sandbox_mode"] is None
 
 
 def test_stopped_from_persisted_coerces_sandbox_when_disabled(runner_config):
@@ -559,6 +575,59 @@ def test_stopped_from_persisted_restores_sandbox_when_enabled(runner_config, mon
     inst = runner._stopped_from_persisted("alpha")
     assert inst is not None
     assert inst.sandbox_mode == "off"
+
+
+async def test_stored_sandbox_choice_survives_rediscover_while_disabled(
+    runner_config, monkeypatch
+):
+    # #1101 (review): with the toggle disabled, `_saved_sandbox` coerces the card to "default",
+    # and the persist at the end of `rediscover` used to write that over a choice stored while
+    # the toggle was on. The row must keep "on" on disk, while the card, the instance JSON and
+    # a resumed bridge's argv all stay "default" exactly as before.
+    runner = _runner(runner_config)
+    runner.persistence.state_store().save(
+        {"iid-1": {"project_name": "alpha", "label": "alpha", "sandbox_mode": "on"}}
+    )
+    restarted = _runner(runner_config)
+    await restarted.rediscover()  # persists by default
+
+    card = restarted.get_instance("iid-1")
+    assert card is not None
+    assert card.sandbox_mode == "default"
+    assert restarted.persistence.state_store().load()["iid-1"]["sandbox_mode"] == "on"
+
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    resumed = await restarted.resume("iid-1")
+    try:
+        assert resumed.sandbox_mode == "default"
+        argv = json.loads(Path(str(resumed.bridge_debug_log_path) + ".argv.json").read_text())
+        assert "--sandbox" not in argv
+        assert "--no-sandbox" not in argv
+        assert restarted.persistence.state_store().load()["iid-1"]["sandbox_mode"] == "on"
+    finally:
+        await restarted.stop(resumed.instance_id)
+    assert restarted.persistence.state_store().load()["iid-1"]["sandbox_mode"] == "on"
+
+
+async def test_sandbox_choice_survives_a_restart_when_enabled(runner_config, monkeypatch):
+    # #1101: the tests above hand-set `_persisted`, which skipped the store — and the store had
+    # no column, so the value never reached disk. Here the choice goes through the real save,
+    # and a fresh runner on the same state dir (the restart) must rebuild the STOPPED card
+    # with it rather than falling back to "default".
+    monkeypatch.setattr("clauster.config.SANDBOX_TOGGLE_ENABLED", True)
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _runner(runner_config)
+    inst = await runner.spawn("alpha", sandbox="off")
+    await runner.stop(inst.instance_id)
+    await runner.shutdown()
+
+    restarted = _runner(runner_config)
+    assert restarted._persisted[inst.instance_id]["sandbox_mode"] == "off"
+    await restarted.rediscover(persist=False)
+    rebuilt = restarted.get_instance(inst.instance_id)
+    assert rebuilt is not None
+    assert rebuilt.status == InstanceStatus.STOPPED
+    assert rebuilt.sandbox_mode == "off"
 
 
 def test_stopped_from_persisted_defaults_sandbox_when_absent(runner_config):

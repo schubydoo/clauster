@@ -393,10 +393,10 @@ class Rediscovery:
     def _saved_sandbox(saved: dict) -> SandboxMode:
         """Coerce a persisted ``sandbox_mode`` against the allowed set (#780).
 
-        Absent (pre-#780 state.json) or corrupt values fall back to ``"default"`` —
-        the safe no-flag behavior — so a rebuilt STOPPED card offers the same sandbox
-        choice on resume that the original launch used, without failing the model on a
-        hand-edited value.
+        Absent (a row saved before the ``sandbox_mode`` column, #1101) or corrupt values fall
+        back to ``"default"`` — the safe no-flag behavior — so a rebuilt STOPPED card offers
+        the same sandbox choice on resume that the original launch used, without failing the
+        model on a hand-edited value.
 
         While the toggle is DISABLED for 1.0 (#1037), every persisted value coerces to
         ``"default"`` so an existing STOPPED card that recorded ``"on"``/``"off"`` resumes
@@ -434,8 +434,9 @@ class Rediscovery:
             permission_mode=permission_mode,
             resume_mode=resume_mode,
             # Carry the persisted sandbox choice (#780) so a resume of this STOPPED card
-            # re-applies the same --sandbox/--no-sandbox (or neither). pty is out of
-            # scope, so a pty record coerces to "default" harmlessly.
+            # re-applies the same --sandbox/--no-sandbox (or neither). pty is out of scope:
+            # `_saved_sandbox` does not coerce a pty record, but the resume path in
+            # spawn_coordinator sends only "default" to a pty bridge.
             sandbox_mode=self._saved_sandbox(saved),
             # Carried so a Resume of this card lands back in the worktree the session
             # actually ran in, not one derived from an id it was rediscovered under (#1241).
@@ -1467,6 +1468,7 @@ class Rediscovery:
                 spawn_mode=spawn_mode,
                 permission_mode=permission_mode,
                 resume_mode=resume_mode,
+                sandbox_mode=self._saved_sandbox(saved),
                 bridge_proc_start=bridge_proc_start,
                 bridge_start_ticks=bridge_start_ticks,
                 bridge_boot_id=boot_id,
@@ -1617,6 +1619,10 @@ class Rediscovery:
         # and that is exactly the shape #1399's review caught three times. `adopt`'s standard
         # external bridge has no keeper and states so by passing None.
         keeper_start_ticks: int | None,
+        # Keyword-required, no default (#1101): a survivor rebuilt under its persisted
+        # instance_id is saved back over that row, so a caller that let this default would
+        # overwrite the stored choice with "default" on the first persist after a restart.
+        sandbox_mode: SandboxMode,
         bridge_start_ticks: int | None = None,
         bridge_boot_id: str | None = None,
         bridge_debug_log_path: Path | None = None,
@@ -1654,6 +1660,7 @@ class Rediscovery:
             spawn_mode=spawn_mode,
             permission_mode=permission_mode,
             resume_mode=resume_mode,
+            sandbox_mode=sandbox_mode,
             worktree_name=worktree_name,
             keeper_pid=keeper_pid,
             # The keeper pid's start identity travels with it (#1178 / #1402) — a
@@ -1789,6 +1796,9 @@ class Rediscovery:
             spawn_mode=spawn_mode,
             permission_mode=permission_mode,
             resume_mode="standard",
+            # Clauster did not launch this bridge, so it cannot know its sandbox flag, and the
+            # adopted card gets a fresh id rather than any saved row's choice.
+            sandbox_mode="default",
             bridge_proc_start=procutil._expected_epoch(ptr.proc_start),
             bridge_start_ticks=_pointer_start_ticks(ptr.proc_start),
             bridge_boot_id=boot_id,
