@@ -67,6 +67,9 @@ _INSTANCE_FIELDS = (
     "spawn_mode",
     "permission_mode",
     "resume_mode",
+    # The sandbox choice (#780), stored since #1101. ``_present`` drops the NULL for a row from
+    # an older build, and ``_saved_sandbox`` reads that absence as "default".
+    "sandbox_mode",
     # Liveness identity (#1088/#1091) — see the Instance model. ``_present`` drops NULLs, so a
     # row from an older build simply omits these and the reattach path falls back to the
     # pointer/sidecar lookup, exactly as it behaved before the columns existed.

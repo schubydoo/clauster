@@ -561,6 +561,27 @@ def test_stopped_from_persisted_restores_sandbox_when_enabled(runner_config, mon
     assert inst.sandbox_mode == "off"
 
 
+async def test_sandbox_choice_survives_a_restart_when_enabled(runner_config, monkeypatch):
+    # #1101: the tests above hand-set `_persisted`, which skipped the store — and the store had
+    # no column, so the value never reached disk. Here the choice goes through the real save,
+    # and a fresh runner on the same state dir (the restart) must rebuild the STOPPED card
+    # with it rather than falling back to "default".
+    monkeypatch.setattr("clauster.config.SANDBOX_TOGGLE_ENABLED", True)
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _runner(runner_config)
+    inst = await runner.spawn("alpha", sandbox="off")
+    await runner.stop(inst.instance_id)
+    await runner.shutdown()
+
+    restarted = _runner(runner_config)
+    assert restarted._persisted[inst.instance_id]["sandbox_mode"] == "off"
+    await restarted.rediscover(persist=False)
+    rebuilt = restarted.get_instance(inst.instance_id)
+    assert rebuilt is not None
+    assert rebuilt.status == InstanceStatus.STOPPED
+    assert rebuilt.sandbox_mode == "off"
+
+
 def test_stopped_from_persisted_defaults_sandbox_when_absent(runner_config):
     runner = _runner(runner_config)
     runner._persisted = {"iid-1": {"project_name": "alpha", "label": "alpha"}}  # pre-#780
