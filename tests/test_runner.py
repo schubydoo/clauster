@@ -1062,7 +1062,7 @@ def test_reattach_pty_from_sidecar_refuses_a_non_pty_row(runner_config, monkeypa
         Rediscovery, "_keeper_sidecars_for", lambda self, n: scanned.append(n) or []
     )
     saved = {"project_name": "alpha", "resume_mode": "standard", "spawn_mode": "same-dir"}
-    assert runner._reattach_pty_from_sidecar("alpha", saved) == []
+    assert runner._reattach_pty_from_sidecar("alpha", saved, exclude_pids=frozenset()) == []
     assert scanned == []  # returned on the mode guard, before any sidecar was consulted
 
 
@@ -1093,7 +1093,7 @@ def test_reattach_pty_from_sidecar_autogenerates_an_instance_id(runner_config, m
         "intentional_stop": False,
     }
 
-    [inst] = runner._reattach_pty_from_sidecar("alpha", saved)
+    [inst] = runner._reattach_pty_from_sidecar("alpha", saved, exclude_pids=frozenset())
 
     assert inst.status is InstanceStatus.RUNNING
     assert inst.resume_mode == "pty"

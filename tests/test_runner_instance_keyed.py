@@ -829,7 +829,9 @@ def test_reattach_skips_dead_and_stale_sidecars_but_keeps_scanning(runner_config
     )
     monkeypatch.setattr("clauster.runner.procutil.proc_start_pair", lambda pid: (None, None))
 
-    got = runner._reattach_pty_from_sidecar("alpha", _row("alpha", pid=None))
+    got = runner._reattach_pty_from_sidecar(
+        "alpha", _row("alpha", pid=None), exclude_pids=frozenset()
+    )
 
     assert [(i.keeper_pid, i.bridge_pid) for i in got] == [(5001, 4001), (5005, 4005)]
     assert len({i.instance_id for i in got}) == 2
@@ -865,7 +867,9 @@ def test_reattach_adopts_each_pid_at_most_once(
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
     monkeypatch.setattr("clauster.runner.procutil.proc_start_pair", lambda pid: (None, None))
 
-    got = runner._reattach_pty_from_sidecar("alpha", _row("alpha", pid=None))
+    got = runner._reattach_pty_from_sidecar(
+        "alpha", _row("alpha", pid=None), exclude_pids=frozenset()
+    )
 
     assert [(i.keeper_pid, i.bridge_pid, i.url) for i in got] == [(5001, 4001, "https://x/NEW")]
 
@@ -890,7 +894,9 @@ def test_reattach_adopts_a_later_sidecar_when_the_newer_one_fails_its_gates(
     )
     monkeypatch.setattr("clauster.runner.procutil.proc_start_pair", lambda pid: (None, None))
 
-    got = runner._reattach_pty_from_sidecar("alpha", _row("alpha", pid=None))
+    got = runner._reattach_pty_from_sidecar(
+        "alpha", _row("alpha", pid=None), exclude_pids=frozenset()
+    )
 
     assert [(i.keeper_pid, i.url) for i in got] == [(5001, "https://x/OLD")]
 
@@ -912,7 +918,9 @@ def test_reattach_survives_a_live_sidecar_with_junk_string_fields(runner_config,
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
     monkeypatch.setattr("clauster.runner.procutil.proc_start_pair", lambda pid: (None, None))
 
-    got = runner._reattach_pty_from_sidecar("alpha", _row("alpha", pid=None))
+    got = runner._reattach_pty_from_sidecar(
+        "alpha", _row("alpha", pid=None), exclude_pids=frozenset()
+    )
 
     assert [(i.keeper_pid, i.url, i.starter_session_id) for i in got] == [
         (5001, "https://x/NEW", None),
@@ -936,7 +944,8 @@ async def test_second_restart_still_hides_the_pid_less_row_of_a_live_pty_session
             # The stale row of the very session the fresh-id card now drives.
             "iid-pidless": _row("alpha", pid=None, label="session-A"),
             # Restart-1's fresh-id card, persisted WITH the keeper's pids: the row pass
-            # reattaches it directly, so the sidecar leg never runs for this project.
+            # reattaches it directly. No sidecar is written, so the sidecar sweep cards
+            # nothing and `uncorrelated_keepers` stays empty for this project.
             "iid-fresh": _row("alpha", pid=4242, proc_start=222.0, label="session-A"),
         }
     )
@@ -955,6 +964,278 @@ async def test_second_restart_still_hides_the_pid_less_row_of_a_live_pty_session
         "a live managed pty instance must keep the project's pid-less pty rows hidden — "
         "carding one offers a duplicate --continue Resume"
     )
+
+
+def _stub_two_keepers(monkeypatch, *, live_keepers, live_bridges) -> None:
+    """Pin keeper and bridge liveness by pid, and keep real host pids out of the identity."""
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_keeper_process", lambda pid: pid in live_keepers
+    )
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge",
+        lambda pid, proc_start=None, **_kw: pid in live_bridges,
+    )
+    monkeypatch.setattr("clauster.runner.procutil.proc_start_pair", lambda pid: (None, None))
+    monkeypatch.setattr("clauster.runner.pointers.pointer_for_project", lambda path: None)
+
+
+async def test_rediscover_cards_a_second_live_keeper_beside_a_live_row(runner_config, monkeypatch):
+    # Issue 1605, the reproducer. One live row that still records its pids claims the
+    # project (`row_claimed`), so the walk skipped it and never read the sidecars. The
+    # second session's row lost its pids, and its keeper and bridge are live with a ready
+    # sidecar: it got no card and no Stop on every restart. It must come back too.
+    runner = _make_runner(runner_config)
+    _stub_connect(monkeypatch)
+    runner.persistence.state_store().save(
+        {
+            # Ordered first, so a plain first-match lookup would hand the second card THIS
+            # live session's label and modes.
+            "iid-live": _row(
+                "alpha",
+                pid=4001,
+                proc_start=222.0,
+                label="session-A",
+                spawn_mode="session",
+                permission_mode="acceptEdits",
+            ),
+            # An uncarded STANDARD row ahead of the pty one: the uncarded-row lookup must stay
+            # pinned to pty, or it would hand the leg this row and the leg would card nothing.
+            "iid-p-std": _row("alpha", pid=None, resume_mode="standard", label="std"),
+            "iid-pidless": _row(
+                "alpha", pid=None, label="session-B", spawn_mode="same-dir", permission_mode="plan"
+            ),
+        }
+    )
+    _write_keeper_sidecar(
+        runner, 1700000000001, keeper_pid=5001, bridge_pid=4001, connect_url="https://x/A"
+    )
+    _write_keeper_sidecar(
+        runner, 1700000000002, keeper_pid=5002, bridge_pid=4002, connect_url="https://x/B"
+    )
+    _stub_two_keepers(monkeypatch, live_keepers={5001, 5002}, live_bridges={4001, 4002})
+
+    await runner.rediscover()
+
+    live = [i for i in runner.list_instances() if i.status is InstanceStatus.RUNNING]
+    assert sorted((i.keeper_pid, i.bridge_pid) for i in live) == [(5001, 4001), (5002, 4002)]
+    by_bridge = {i.bridge_pid: i for i in live}
+    assert by_bridge[4001].instance_id == "iid-live"  # the row pass keeps its own card
+    second = by_bridge[4002]
+    assert second.instance_id not in ("iid-live", "iid-pidless")  # a fresh id, never a guess
+    assert second.url == "https://x/B"
+    # Label and modes come from an UNCARDED pty row, never from the other live session's.
+    assert (second.label, second.spawn_mode, second.permission_mode) == (
+        "session-B",
+        "same-dir",
+        "plan",
+    )
+    # The pid-less row stays hidden and untouched: nothing says which keeper it owns.
+    assert runner.get_instance("iid-pidless") is None
+    assert runner.persistence.state_store().load()["iid-pidless"].get("bridge_pid") is None
+
+    # A second restart: both rows now reattach by their persisted pids, and the sweep finds
+    # both sidecars already held. Still one card per live keeper, never a third.
+    again = _make_runner(runner_config)
+    await again.rediscover(persist=False)
+    live_again = [i for i in again.list_instances() if i.status is InstanceStatus.RUNNING]
+    assert sorted((i.keeper_pid, i.bridge_pid) for i in live_again) == [
+        (5001, 4001),
+        (5002, 4002),
+    ]
+    assert {i.instance_id for i in live_again} == {"iid-live", second.instance_id}
+    assert again.get_instance("iid-pidless") is None
+
+
+@pytest.mark.parametrize(
+    ("recovered_keeper", "sidecar_keeper", "sidecar_bridge"),
+    [
+        # The row's keeper recovery failed, so its card holds only the bridge pid. A
+        # keeper-only exclusion would card this same tree a second time.
+        (None, 5001, 4001),
+        # The row holds keeper 5001, and a sidecar names that keeper with another bridge.
+        # Synthetic: the real recovery would not return 5001 for a bridge no sidecar names.
+        # It pins the keeper half of the exclusion on its own.
+        (5001, 5001, 4999),
+    ],
+)
+async def test_rediscover_never_cards_a_live_rows_tree_twice(
+    runner_config, monkeypatch, recovered_keeper, sidecar_keeper, sidecar_bridge
+):
+    # `stop()` force-kills the keeper's whole tree, so two cards on one tree means stopping
+    # either one takes the other's session down. The sweep beside a live row must skip a
+    # sidecar when EITHER of its pids is already held by a live card.
+    runner = _make_runner(runner_config)
+    _stub_connect(monkeypatch)
+    runner.persistence.state_store().save(
+        {"iid-live": _row("alpha", pid=4001, proc_start=222.0, label="session-A")}
+    )
+    _write_keeper_sidecar(
+        runner, 1700000000001, keeper_pid=sidecar_keeper, bridge_pid=sidecar_bridge
+    )
+    _stub_two_keepers(monkeypatch, live_keepers={5001}, live_bridges={4001, 4999})
+    monkeypatch.setattr(
+        Rediscovery, "_recover_keeper_pid", lambda self, n, p, s, **_kw: recovered_keeper
+    )
+
+    await runner.rediscover(persist=False)
+
+    [card] = [i for i in runner.list_instances() if i.status is InstanceStatus.RUNNING]
+    assert (card.instance_id, card.keeper_pid, card.bridge_pid) == (
+        "iid-live",
+        recovered_keeper,
+        4001,
+    )
+
+
+@pytest.mark.parametrize(
+    ("live_keepers", "live_bridges", "state"),
+    [
+        ({5001}, {4001, 4002}, "ready"),  # the second keeper died
+        ({5001, 5002}, {4001}, "ready"),  # the second bridge is gone
+        ({5001, 5002}, {4001, 4002}, "starting"),  # the second bridge is still starting
+    ],
+)
+async def test_rediscover_ignores_a_dead_second_sidecar_beside_a_live_row(
+    runner_config, monkeypatch, live_keepers, live_bridges, state
+):
+    # The sweep beside a live row keeps every liveness gate: a dead or not-yet-ready second
+    # sidecar is never carded, so the project keeps exactly its live row.
+    runner = _make_runner(runner_config)
+    _stub_connect(monkeypatch)
+    runner.persistence.state_store().save(
+        {
+            "iid-live": _row("alpha", pid=4001, proc_start=222.0),
+            "iid-pidless": _row("alpha", pid=None),
+        }
+    )
+    _write_keeper_sidecar(runner, 1700000000001, keeper_pid=5001, bridge_pid=4001)
+    _write_keeper_sidecar(runner, 1700000000002, keeper_pid=5002, bridge_pid=4002, state=state)
+    _stub_two_keepers(monkeypatch, live_keepers=live_keepers, live_bridges=live_bridges)
+
+    await runner.rediscover(persist=False)
+
+    [card] = [i for i in runner.list_instances() if i.status is InstanceStatus.RUNNING]
+    assert (card.instance_id, card.keeper_pid, card.bridge_pid) == ("iid-live", 5001, 4001)
+
+
+async def test_rediscover_cards_a_live_keeper_beside_a_card_it_already_holds(
+    runner_config, monkeypatch
+):
+    # The walk's other skip: a project that already holds a STARTING or RUNNING card (here
+    # one this process registered before `rediscover`, with no keeper pid known yet) was
+    # skipped whole. The sweep cards the second keeper and leaves the held tree alone.
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save({"iid-pidless": _row("alpha", pid=None)})
+    held = RemoteControlInstance(
+        project="alpha", label="held", status=InstanceStatus.STARTING, bridge_pid=4001
+    )
+    runner._instances[held.instance_id] = held
+    _write_keeper_sidecar(runner, 1700000000001, keeper_pid=5001, bridge_pid=4001)
+    _write_keeper_sidecar(runner, 1700000000002, keeper_pid=5002, bridge_pid=4002)
+    _stub_two_keepers(monkeypatch, live_keepers={5001, 5002}, live_bridges={4001, 4002})
+
+    await runner.rediscover(persist=False)
+
+    alpha = [i for i in runner.list_instances() if i.project == "alpha"]
+    assert sorted(((i.keeper_pid, i.bridge_pid) for i in alpha), key=lambda t: t[1]) == [
+        (None, 4001),
+        (5002, 4002),
+    ]
+    assert runner.get_instance(held.instance_id) is held
+
+
+async def test_sweep_still_cards_a_keeper_when_every_pty_row_is_already_carded(
+    runner_config, monkeypatch
+):
+    # The fallback of the sweep's lookup. A live row and a dead row cover every pty row of
+    # the project, so no uncarded pty row is left to take a label and modes from. An
+    # uncarded-only lookup would come back empty and the leg would bail, leaving the second
+    # live keeper with no card, the same shape as the walk's MF-1 note.
+    runner = _make_runner(runner_config)
+    _stub_connect(monkeypatch)
+    runner.persistence.state_store().save(
+        {
+            "iid-live": _row("alpha", pid=4001, proc_start=222.0, label="session-A"),
+            "iid-dead": _row("alpha", pid=4003, label="session-dead"),
+        }
+    )
+    _write_keeper_sidecar(runner, 1700000000001, keeper_pid=5001, bridge_pid=4001)
+    _write_keeper_sidecar(runner, 1700000000002, keeper_pid=5002, bridge_pid=4002)
+    _stub_two_keepers(monkeypatch, live_keepers={5001, 5002}, live_bridges={4001, 4002})
+
+    await runner.rediscover(persist=False)
+
+    live = [i for i in runner.list_instances() if i.status is InstanceStatus.RUNNING]
+    assert sorted((i.keeper_pid, i.bridge_pid) for i in live) == [(5001, 4001), (5002, 4002)]
+    assert runner.get_instance("iid-dead").status is InstanceStatus.STOPPED
+    second = next(i for i in live if i.bridge_pid == 4002)
+    assert second.instance_id not in ("iid-live", "iid-dead")
+
+
+@pytest.mark.parametrize(
+    "dead_status", [InstanceStatus.STOPPED, InstanceStatus.CRASHED, InstanceStatus.ERROR]
+)
+async def test_a_dead_cards_stale_pids_never_hide_a_live_keeper(
+    runner_config, monkeypatch, dead_status
+):
+    # `stop()` leaves `keeper_pid`/`bridge_pid` on a dead card. Only STARTING and RUNNING
+    # cards seed the exclusion, so a dead card that still records a live keeper's pids must
+    # not keep that keeper uncarded, which would bring back the issue 1605 leak.
+    runner = _make_runner(runner_config)
+    _stub_connect(monkeypatch)
+    runner.persistence.state_store().save(
+        {
+            "iid-live": _row("alpha", pid=4001, proc_start=222.0),
+            "iid-pidless": _row("alpha", pid=None),
+        }
+    )
+    dead = RemoteControlInstance(
+        project="alpha", label="dead", status=dead_status, keeper_pid=5002, bridge_pid=4002
+    )
+    runner._instances[dead.instance_id] = dead
+    _write_keeper_sidecar(runner, 1700000000001, keeper_pid=5001, bridge_pid=4001)
+    _write_keeper_sidecar(runner, 1700000000002, keeper_pid=5002, bridge_pid=4002)
+    _stub_two_keepers(monkeypatch, live_keepers={5001, 5002}, live_bridges={4001, 4002})
+
+    await runner.rediscover(persist=False)
+
+    live = [i for i in runner.list_instances() if i.status is InstanceStatus.RUNNING]
+    assert sorted((i.keeper_pid, i.bridge_pid) for i in live) == [(5001, 4001), (5002, 4002)]
+    assert dead.instance_id not in {i.instance_id for i in live}
+
+
+async def test_rediscover_cards_a_live_keeper_beside_a_live_pointer_bridge(
+    runner_config, monkeypatch
+):
+    # The walk's pointer branch never read the sidecars either: a project whose standard
+    # bridge publishes a live pointer left its live pty keeper with no card and no Stop.
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save(
+        {"iid-pidless": _row("alpha", pid=None, resume_mode="pty", label="pty-row")}
+    )
+    _write_keeper_sidecar(runner, 1700000000001, keeper_pid=5002, bridge_pid=4002)
+    _stub_two_keepers(monkeypatch, live_keepers={5002}, live_bridges={4002})
+
+    class _ExternalPtr:
+        pid = 9001
+        proc_start = "1000"
+        environment_id = "env_EXTERNAL"
+        session_id = "session_EXTERNAL"
+
+    monkeypatch.setattr(
+        "clauster.runner.pointers.pointer_for_project",
+        lambda p: _ExternalPtr() if p.name == "alpha" else None,
+    )
+    monkeypatch.setattr("clauster.runner.pointers.is_live", lambda ptr: True)
+
+    await runner.rediscover(persist=False)
+
+    live = [i for i in runner.list_instances() if i.status is InstanceStatus.RUNNING]
+    assert sorted(((i.keeper_pid, i.bridge_pid) for i in live), key=lambda t: t[1]) == [
+        (5002, 4002),
+        (None, 9001),
+    ]
+    assert runner.get_instance("iid-pidless") is None
 
 
 async def test_rediscover_rejects_a_recycled_pid(runner_config, monkeypatch):
@@ -1241,7 +1522,9 @@ async def test_pid_less_pty_row_is_not_carded_while_a_live_keeper_is_unclaimed(
 ):
     # The trap the pid-less pass must not fall into. `rediscover`'s pointer walk SKIPS a
     # project that already has a live row, before it ever reads the pointer or the keeper
-    # sidecar — so on that project nothing has looked for a pid-less row's process. A pty
+    # sidecar. The sidecar sweep after the walk (issue 1605) cards a live keeper there, but
+    # it skips one whose bridge pid a card already holds and cannot say which row owns it,
+    # so the pid-less pass still sweeps for an unaccounted keeper. A pty
     # row whose detached keeper is still alive must NOT get a resumable STOPPED card: the
     # Resume would spawn a SECOND keeper on the same `--continue` conversation.
     rows = {
