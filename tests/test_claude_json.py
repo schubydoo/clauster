@@ -126,6 +126,9 @@ def test_update_claude_json_unparseable_leaves_an_existing_backup_alone(tmp_path
         (b"[" * 100_000, "nested too deeply"),
         (b"[]", "the top level is not a JSON object"),
     ],
+    # Explicit ids: pytest puts the test id in PYTEST_CURRENT_TEST, and a 100,000-byte
+    # payload id exceeds the 32,767-character Windows limit for one environment variable.
+    ids=["malformed", "non-utf8", "oversized-int", "deeply-nested", "array-root"],
 )
 def test_unparseable_reason_names_the_failure(tmp_path: Path, content: bytes, reason: str) -> None:
     f = tmp_path / "claude.json"

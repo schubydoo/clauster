@@ -387,12 +387,18 @@ file stays byte-identical.
 
 **Fix:**
 
-1. On the Clauster host, run `python3 -m json.tool ~/.claude.json > /dev/null` as the
-   user that runs Clauster. The command prints the line and column of the first error.
+1. On the Clauster host, run this command as the user that runs Clauster. If the file
+   has a problem, the last line of the output names it. For invalid JSON, that line
+   gives a line and column:
+
+   ```sh
+   python3 -c 'import json, sys; d = json.load(open(sys.argv[1], encoding="utf-8")); sys.exit(None if isinstance(d, dict) else "the top level is not a JSON object")' ~/.claude.json
+   ```
+
 2. Repair the file, or restore it from a copy that you trust. If Clauster wrote the
    file before, `~/.claude.json.bak` holds its content from before the first Clauster
    write. That copy can be old, so compare it with the damaged file before you use it.
-3. Run the command from step 1 again. No output means that the file parses.
+3. Run the command from step 1 again. No output means that Clauster can read the file.
 4. Do the action again.
 
 ## Claude itself is the problem
