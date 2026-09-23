@@ -284,17 +284,17 @@ def test_legacy_session_cookie_name_is_rejected(runner_config):
 
 
 def test_legacy_session_cookie_name_rejected_on_websocket(runner_config):
-    client = _password_client(runner_config)
-    _login(client)
-    token = client.cookies.get(_session_name(client))
-    assert token
-    client.cookies.clear()
-    with pytest.raises(WebSocketDisconnect):
-        with client.websocket_connect(
-            "/ws/bridge-log/ghost",
-            headers={"origin": ORIGIN, "cookie": f"clauster_session={token}"},
-        ):
-            pass
+    with _password_client(runner_config) as client:
+        _login(client)
+        token = client.cookies.get(_session_name(client))
+        assert token
+        client.cookies.clear()
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect(
+                "/ws/bridge-log/ghost",
+                headers={"origin": ORIGIN, "cookie": f"clauster_session={token}"},
+            ):
+                pass
 
 
 def test_logout_clears_the_per_instance_cookies(runner_config):
@@ -792,29 +792,29 @@ def test_all_ws_endpoints_reject_unauthenticated(runner_config, path):
 
 
 def test_ws_rejected_bad_origin(runner_config):
-    client = _password_client(runner_config)
-    _login(client)
-    tok = client.cookies.get(_session_name(client))
-    with pytest.raises(WebSocketDisconnect):
-        with client.websocket_connect(
-            "/ws/bridge-log/alpha",
-            headers={"origin": "http://evil.test", "cookie": f"{_session_name(client)}={tok}"},
-        ):
-            pass
+    with _password_client(runner_config) as client:
+        _login(client)
+        tok = client.cookies.get(_session_name(client))
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect(
+                "/ws/bridge-log/alpha",
+                headers={"origin": "http://evil.test", "cookie": f"{_session_name(client)}={tok}"},
+            ):
+                pass
 
 
 def test_ws_authorized_passes_auth_gate(runner_config):
-    client = _password_client(runner_config)
-    _login(client)
-    tok = client.cookies.get(_session_name(client))
-    # Good origin + valid cookie => auth passes (accept), then closes 1008 for the
-    # nonexistent instance. Reaching accept proves the gate opened.
-    with client.websocket_connect(
-        "/ws/bridge-log/ghost",
-        headers={"origin": ORIGIN, "cookie": f"{_session_name(client)}={tok}"},
-    ) as ws:
-        with pytest.raises(WebSocketDisconnect):
-            ws.receive_text()
+    with _password_client(runner_config) as client:
+        _login(client)
+        tok = client.cookies.get(_session_name(client))
+        # Good origin + valid cookie => auth passes (accept), then closes 1008 for the
+        # nonexistent instance. Reaching accept proves the gate opened.
+        with client.websocket_connect(
+            "/ws/bridge-log/ghost",
+            headers={"origin": ORIGIN, "cookie": f"{_session_name(client)}={tok}"},
+        ) as ws:
+            with pytest.raises(WebSocketDisconnect):
+                ws.receive_text()
 
 
 def test_ws_streams_sanitized_lines(runner_config, tmp_path):
