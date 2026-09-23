@@ -750,8 +750,13 @@ def _redact_screen_row(row: str) -> str:
 
     RESIDUE on this surface, stated because there is no cut to distinguish it: a SECRET welded
     onto the word before it (secrets keep their leading anchor) and a welded id that lacks the
-    ``01`` shape are not masked. A welded UUID is masked after every greedy core -- an id, a
-    glued id (#1496), the secret cores and the fixed-count ``AKIA`` key -- but one welded-UUID
+    ``01`` shape are not masked. The second includes a look-alike welded to the word after it
+    (``session_ABCDEF_x``). The pty screen's width-refit trim can still happen to cut the
+    ``_x`` away and mask it, so whether such a look-alike shows depends on the row's rendered
+    length; a real ``01``-shape id does not.
+
+    A welded UUID is masked after every greedy core -- an id, a glued id (#1496), the secret
+    cores and the fixed-count ``AKIA`` key -- but one welded-UUID
     gap stays, named in :func:`_screen_welded_uuid_spans`: a second UUID overlapping the first
     by its leading hex group.
     All of these need an attacker-influenced escape from Clauster's own bridge, and the endpoint
@@ -767,7 +772,8 @@ def _redact_screen_row(row: str) -> str:
     tail = _screen_open_tail_spans(row)
     if not tail:
         return masked
-    # The fixed point above covers exactly `cov`'s cells; see `redact_wrapped_screen_rows`.
+    # The NUL-probe fixed point covers the same cells as the rewrite loop above: no core can
+    # match a character of `<redacted>`, and NUL and `<`/`>` give the same `\b` and `\s` answer.
     cov, _ = _fixed_point_coverage(row, [(0, len(row))], _screen_spans, max_scans=None)
     if all(cov.find(0, s, e) < 0 for s, e, _ in tail):
         return masked  # the open-tail spans add nothing: keep the row exactly as it was
@@ -942,8 +948,9 @@ def redact_wrapped_screen_rows(
     run from the same two maps as before. A row they add cells to masks a superset of the cells
     it masked before, but the rendered string can differ, so the caller's width-refit trim
     (:meth:`clauster.pty_screen.PtyScreen._fit_redacted_row`) may no longer happen to cut it.
-    No real-id, UUID or secret shape depends on that trim any more, because ``tail_cov`` masks
-    one welded to the word after it (``<UUID>zz``) whatever the row's rendered length.
+    No real ``01``-shape id, UUID or secret depends on that trim any more, because ``tail_cov``
+    masks one welded to the word after it (``<UUID>zz``) whatever the row's rendered length.
+    An id look-alike without the ``01`` shape still can (see :func:`_redact_screen_row`).
 
     The ``seam_cov`` fixed point is BOUNDED, because it runs in the keeper's PTY drain loop and
     a crafted screen (a long chain of welded ids across soft seams) needs one full scan per id.

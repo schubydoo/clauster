@@ -383,7 +383,7 @@ wrap when the row above it ends near the right edge. If that row ends in an
 identifier or a secret, the first word of the next line is masked with it.
 
 The check for a token across a Claude TUI wrap has a fixed amount of work per
-screen, so a crafted screen cannot slow the live view down. If a screen needs
+screen, so a crafted screen cannot make that check slow. If a screen needs
 more than that, Clauster masks all the text in the wrapped rows. It does not
 skip the check.
 

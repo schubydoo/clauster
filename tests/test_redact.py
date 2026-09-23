@@ -345,9 +345,8 @@ def test_redact_screen_text_masks_a_uuid_welded_onto_any_greedy_core(prefixed):
     # `gh[pousr]_`/`github_pat_` family plus the hyphen-bearing `sk-`/`glpat-`/`xox`/
     # `clauster_pat_` cores and `bearer …`. Whether the core's class excludes `-` (eats only the
     # first hex group, leaking the middle) or includes it (swallows the whole UUID), no fragment
-    # of the UUID may survive (#1496). The fixed-count `AKIA[0-9A-Z]{16}` core is out of scope: it
-    # cannot backtrack, so `AKIA`+16 welded to a UUID leaks both (pre-existing accepted residue,
-    # noted at `docs/security.md`'s bounded-scope warning).
+    # of the UUID may survive (#1496). The fixed-count `AKIA[0-9A-Z]{16}` core has its own test,
+    # `test_redact_screen_row_masks_a_uuid_welded_right_after_an_akia_key` (#1508).
     out = redact.redact_screen_text([prefixed + _UUID_1496])[0]
     assert "-1234-" not in out and "123456789abc" not in out, out
 
