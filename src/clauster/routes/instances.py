@@ -17,7 +17,9 @@ and :func:`clauster.routes._common.list_projects`, so the traversal defense
 The hosted spawn path fails closed: it resolves the project first, validates the
 permission mode, mirrors the project's ``allow_bypass_permissions`` ceiling
 (:func:`clauster.routes._common.enforce_bypass_ceiling`), and refuses an untrusted
-workspace with a 409 before any daemon spawn (invariants 1 and 2). That shared helper
+workspace with a 409 before any daemon spawn (invariants 1 and 2). Hosted resume
+re-applies the same ceiling to the row's stored mode against the current config, so a
+ceiling tightened after the spawn is honored (#1524). That shared helper
 defers to the single :meth:`ClausterConfig.bypass_denied` decision and shares its
 :meth:`ClausterConfig.bypass_denied_detail` message, so no channel can diverge.
 """
@@ -238,7 +240,9 @@ async def _resume_hosted(
 ) -> RemoteControlInstance:
     """Resume a lost/ended hosted session by id, respawning with ``--resume <uuid>``.
 
-    ``instance`` is the row the route already fetched. Maps the engine's
+    ``instance`` is the row the route already fetched. Refuses with 403 when the row's
+    stored permission mode is ``bypassPermissions`` and the project's current
+    ``allow_bypass_permissions`` ceiling forbids it. Maps the engine's
     :class:`HostedSessionError` (unknown / still-running / no-uuid / malformed-uuid /
     no-project) to 409 and a daemon spawn failure to 502.
     """
@@ -249,6 +253,13 @@ async def _resume_hosted(
         # operator looking in the wrong place. `_resume_locked` refuses it too, but only
         # a caller that is not this route would ever reach that guard (#1381).
         raise HTTPException(status_code=409, detail=NO_PROJECT_RESUME_DETAIL)
+    # Re-apply the bypass ceiling against the CURRENT config (#1524): `hosted.resume`
+    # respawns with the mode stored on the old row, and the ceiling may have been
+    # tightened since that row was spawned. Same order as `_spawn_hosted` — existence
+    # first so a gone project 404s rather than leaking a 403, then the ceiling, before
+    # any daemon/trust/spawn work.
+    await resolve_project_path(instance.project, engine)
+    enforce_bypass_ceiling(config, instance.project, instance.permission_mode)
     client, path, binary = await _hosted_prereqs(
         instance.project, daemon=daemon, runner=runner, config=config, engine=engine
     )
