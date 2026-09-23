@@ -207,6 +207,44 @@ def test_roster_missing_corrupt_or_wrong_shape(tmp_path: Path, caplog):
     assert supervisor.load_roster_workers(scalar) == {}
 
 
+# Two parse failures that are not a JSONDecodeError: deeply-nested JSON raises
+# RecursionError (not a ValueError at all) and a >4300-digit int literal raises a bare
+# ValueError. Either used to escape these readers and fail the whole /api/agents list.
+_UNPARSEABLE = [
+    pytest.param("[" * 100_000, id="deeply-nested"),
+    pytest.param("1" * 5000, id="oversized-int"),
+]
+
+
+@pytest.mark.parametrize("payload", _UNPARSEABLE)
+def test_roster_unparseable_degrades_with_warning(tmp_path: Path, caplog, payload):
+    roster = tmp_path / "roster.json"
+    roster.write_text(payload, encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="clauster.supervisor"):
+        assert supervisor.load_roster_workers(roster) == {}
+    assert "malformed roster" in caplog.text
+
+
+def test_roster_non_utf8_degrades_with_warning(tmp_path: Path, caplog):
+    # The read is its own try, and UnicodeDecodeError is a ValueError, not an OSError.
+    roster = tmp_path / "roster.json"
+    roster.write_bytes(b"\xff\xfe\x00not utf-8")
+    with caplog.at_level(logging.WARNING, logger="clauster.supervisor"):
+        assert supervisor.load_roster_workers(roster) == {}
+    assert "could not read" in caplog.text
+
+
+@pytest.mark.parametrize("payload", _UNPARSEABLE)
+def test_unparseable_state_json_skipped_others_kept(tmp_path: Path, caplog, payload):
+    jobs = tmp_path / "jobs"
+    _write_job(jobs, "bad", payload)
+    _write_job(jobs, "good", _state())
+    with caplog.at_level(logging.WARNING, logger="clauster.supervisor"):
+        result = supervisor.list_background_jobs(jobs, tmp_path / "r.json")
+    assert [j.id for j in result] == ["good"]
+    assert "skipping background job bad" in caplog.text
+
+
 def test_worker_alive_rejects_garbage_pids():
     assert supervisor.worker_alive(None, "100") is False
     assert supervisor.worker_alive(True, "100") is False

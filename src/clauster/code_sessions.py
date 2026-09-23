@@ -73,7 +73,9 @@ def _is_session_not_found(raw: bytes) -> bool:
     """
     try:
         body = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+    except (ValueError, RecursionError):
+        # ValueError covers JSONDecodeError, non-UTF-8 bytes and a >4300-digit int literal,
+        # which raises a bare ValueError that is not a JSONDecodeError.
         # RecursionError: deeply-nested JSON overflows the recursive scanner and raises
         # RecursionError on every supported interpreter (the message changed from "maximum
         # recursion depth exceeded" on <=3.13 to "Stack overflow" on 3.14+, but not the
@@ -124,7 +126,8 @@ class CodeSessionsClient(_AnthropicHTTPClient):
             return AnchorHealth.UNKNOWN  # auth/beta/transient -> don't destroy the pointer
         try:
             data = json.loads(raw)
-        except (json.JSONDecodeError, UnicodeDecodeError):
+        except (ValueError, RecursionError):
+            # The same int-digit ValueError / RecursionError pair as _is_session_not_found.
             return AnchorHealth.UNKNOWN
         if not isinstance(data, dict):
             return AnchorHealth.UNKNOWN  # a bare null/list/scalar 2xx body -> indeterminate

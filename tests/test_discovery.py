@@ -121,6 +121,18 @@ def test_load_trusted_paths_non_dict_json_returns_empty(tmp_path):
         assert _load_trusted_paths(claude_json) == set()
 
 
+def test_load_trusted_paths_oversized_int_returns_empty(tmp_path):
+    # A >4300-digit int literal raises a bare ValueError, which is not a JSONDecodeError,
+    # so it escaped the never-raise contract. It degrades to "nothing trusted" too: the
+    # deny direction, never a widened trust set.
+    from clauster.discovery import _load_trusted_paths
+
+    claude_json = tmp_path / ".claude.json"
+    trusted = '{"projects": {"/p": {"hasTrustDialogAccepted": true}}, "n": '
+    claude_json.write_text(trusted + "1" * 5000 + "}", encoding="utf-8")
+    assert _load_trusted_paths(claude_json) == set()
+
+
 # ----- discovery cache (TTL + mtime invalidation) -----------------------
 
 

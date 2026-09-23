@@ -98,12 +98,16 @@ def load_roster_workers(roster_json: Path | None = None) -> dict[str, dict]:
         raw = roster_json.read_text(encoding="utf-8")
     except FileNotFoundError:
         return {}
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
+        # UnicodeDecodeError is a ValueError, not an OSError: a non-UTF-8 roster fails here.
         _log.warning("could not read %s: %s", roster_json, exc)
         return {}
     try:
         data = json.loads(raw)
-    except json.JSONDecodeError as exc:
+    except (ValueError, RecursionError) as exc:
+        # Not just JSONDecodeError: a >4300-digit int literal raises a bare ValueError, and
+        # deeply-nested JSON overflows the recursive scanner with RecursionError (not a
+        # ValueError). Both used to escape and fail the whole /api/agents listing.
         _log.warning("malformed roster %s: %s", roster_json, exc)
         return {}
     workers = data.get("workers") if isinstance(data, dict) else None
@@ -190,7 +194,9 @@ def list_background_jobs(
             data = json.loads(state_file.read_text(encoding="utf-8"))
         except FileNotFoundError:
             continue  # half-created or just-reaped job dir — not an error
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError, RecursionError) as exc:
+            # ValueError covers JSONDecodeError, a non-UTF-8 file and the int-digit limit;
+            # RecursionError is deeply-nested JSON. One bad job must not hide the others.
             _log.warning("skipping background job %s: unreadable state.json (%s)", entry.name, exc)
             continue
         if not isinstance(data, dict):

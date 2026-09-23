@@ -80,6 +80,29 @@ def test_parse_agents_json_recursion_error_converts_to_jsondecode(monkeypatch):
         raise AssertionError("expected JSONDecodeError from the RecursionError handler")
 
 
+def test_parse_agents_json_oversized_int_converts_to_jsondecode():
+    # A >4300-digit int literal raises a bare ValueError, not a JSONDecodeError, so it
+    # slipped past the poll loop's cross-check handler (which catches JSONDecodeError).
+    # It must reach callers as the same strict-parse failure as any other bad payload.
+    try:
+        inspector.parse_agents_json('[{"pid": ' + "1" * 5000 + "}]")
+    except json.JSONDecodeError as exc:
+        assert "too long" in str(exc)
+    else:
+        raise AssertionError("expected JSONDecodeError on an oversized int literal")
+
+
+def test_parse_agents_json_plain_decode_error_passes_through_unchanged():
+    # A real JSONDecodeError keeps its own message and position; only the bare ValueError
+    # and RecursionError are rewrapped.
+    try:
+        inspector.parse_agents_json("[1, 2")
+    except json.JSONDecodeError as exc:
+        assert exc.pos == 5 and "too long" not in str(exc)
+    else:
+        raise AssertionError("expected JSONDecodeError on truncated JSON")
+
+
 def test_reconcile_attributes_by_resolved_cwd(tmp_path: Path):
     proj = tmp_path / "alpha"
     proj.mkdir()

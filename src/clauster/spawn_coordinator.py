@@ -608,9 +608,11 @@ class SpawnCoordinator:
                         "bridge gets its prior conversation recapped into context",
                         self._settings_json,
                     )
-            except OSError as exc:
+            except (OSError, RecursionError) as exc:
                 # Best-effort, same as the remote-control flag: a failure here only
                 # means a restart won't be recapped, not that the bridge can't run.
+                # RecursionError is a deeply-nested settings.json, which the installer's
+                # own ValueError arm does not catch. Caught here, the file is left as is.
                 _log.warning(
                     "could not install resume-recap hook in %s: %s", self._settings_json, exc
                 )

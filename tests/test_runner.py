@@ -3219,6 +3219,23 @@ def test_read_sidecar_non_utf8_returns_none(tmp_path):
     assert SessionRunner._read_sidecar(sidecar) is None
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # Deeply-nested JSON raises RecursionError, which is not a ValueError at all.
+        pytest.param("[" * 100_000, id="deeply-nested"),
+        # A >4300-digit int literal raises a bare ValueError, not a JSONDecodeError.
+        pytest.param("1" * 5000, id="oversized-int"),
+    ],
+)
+def test_read_sidecar_unparseable_returns_none(tmp_path, payload):
+    # The sidecar is read inside rediscover and readiness polling; either escaping here
+    # took the caller down instead of skipping one unreadable sidecar.
+    sidecar = tmp_path / "x.keeper.json"
+    sidecar.write_text(payload, encoding="utf-8")
+    assert SessionRunner._read_sidecar(sidecar) is None
+
+
 async def test_poll_forever_continues_after_unexpected_error(runner_config, monkeypatch, caplog):
     # An unexpected error from poll_once is caught by the loop and never propagated, so
     # crash-detection/reconciliation survives a one-off failure; the loop reaches its
@@ -3348,6 +3365,30 @@ async def test_spawn_survives_ensure_helper_write_failures(runner_config, monkey
     assert inst.status is InstanceStatus.RUNNING  # the spawn was not failed over it
     assert any("could not pre-enable remote control" in r.message for r in caplog.records)
     assert any("could not install resume-recap hook" in r.message for r in caplog.records)
+    await runner.stop(inst.instance_id)
+
+
+async def test_spawn_survives_a_deeply_nested_settings_json(runner_config, monkeypatch, caplog):
+    # The real installer, on a real file: json.loads raises RecursionError, which is not a
+    # ValueError, so it escaped the installer's own handler and the best-effort caller's
+    # `except OSError` and failed the spawn. Now it warns, the spawn runs, and the file
+    # is left byte-identical rather than rewritten.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, claude_json = runner_config
+    config.claude.resume_recap = True
+    monkeypatch.setattr(
+        "clauster.spawn_coordinator.ensure_remote_control_enabled", lambda p: False
+    )
+    settings = claude_json.parent / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text("[" * 100_000, encoding="utf-8")
+    runner = SessionRunner(config, claude_json=claude_json)
+
+    with caplog.at_level("WARNING", logger="clauster.runner"):
+        inst = await runner.spawn("alpha")
+    assert inst.status is InstanceStatus.RUNNING
+    assert any("could not install resume-recap hook" in r.message for r in caplog.records)
+    assert settings.read_text(encoding="utf-8") == "[" * 100_000
     await runner.stop(inst.instance_id)
 
 

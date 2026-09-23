@@ -117,6 +117,22 @@ def test_iter_keepers_tolerates_corrupt_sidecar(tmp_path):
     assert info.project == "bad" and info.keeper_pid is None and info.alive is False
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # Deeply-nested JSON raises RecursionError, which is not a ValueError at all.
+        pytest.param("[" * 100_000, id="deeply-nested"),
+        # A >4300-digit int literal raises a bare ValueError, not a JSONDecodeError.
+        pytest.param('{"keeper_pid": ' + "1" * 5000 + "}", id="oversized-int"),
+    ],
+)
+def test_iter_keepers_tolerates_unparseable_sidecar(tmp_path, payload):
+    # Either one used to escape _read_sidecar and abort the whole keeper listing.
+    (tmp_path / "bad-1700000000000-0.keeper.json").write_text(payload, encoding="utf-8")
+    [info] = pty_keeper.iter_keepers(tmp_path)
+    assert info.project == "bad" and info.keeper_pid is None and info.alive is False
+
+
 @pytest.mark.parametrize("bad", [True, False])
 def test_iter_keepers_rejects_bool_pids(tmp_path, bad):
     # bool is an int subclass; a corrupt sidecar must not resolve True → PID 1 or

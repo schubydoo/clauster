@@ -240,6 +240,22 @@ def test_cli_list_plugins_rejects_invalid_json(tmp_path: Path) -> None:
         plugins.cli_list_plugins(str(FAKE_CLAUDE), tmp_path, run=run)
 
 
+# Two parse failures that are not a JSONDecodeError: deeply-nested JSON raises
+# RecursionError (not a ValueError at all) and a >4300-digit int literal raises a bare
+# ValueError. Each escaped as a raw exception (a 500) instead of a PluginCliError.
+_UNPARSEABLE = [
+    pytest.param("[" * 100_000, id="deeply-nested"),
+    pytest.param("1" * 5000, id="oversized-int"),
+]
+
+
+@pytest.mark.parametrize("payload", _UNPARSEABLE)
+def test_cli_list_plugins_rejects_unparseable_json(tmp_path: Path, payload: str) -> None:
+    run, _calls = _fake_run(rc=0, stdout=payload)
+    with pytest.raises(plugins.PluginCliError, match="invalid JSON"):
+        plugins.cli_list_plugins(str(FAKE_CLAUDE), tmp_path, run=run)
+
+
 def test_cli_plugin_details_returns_stdout(tmp_path: Path) -> None:
     run, calls = _fake_run(rc=0, stdout="hello 0.0.1\n  test plugin\n")
     out = plugins.cli_plugin_details(str(FAKE_CLAUDE), tmp_path, "hello", run=run)
@@ -348,6 +364,13 @@ def test_cli_list_marketplaces_rejects_non_list_json(tmp_path: Path) -> None:
 def test_cli_list_marketplaces_rejects_invalid_json(tmp_path: Path) -> None:
     run, _calls = _fake_run(rc=0, stdout="not json{{")
     with pytest.raises(plugins.PluginCliError):
+        plugins.cli_list_marketplaces(str(FAKE_CLAUDE), tmp_path, run=run)
+
+
+@pytest.mark.parametrize("payload", _UNPARSEABLE)
+def test_cli_list_marketplaces_rejects_unparseable_json(tmp_path: Path, payload: str) -> None:
+    run, _calls = _fake_run(rc=0, stdout=payload)
+    with pytest.raises(plugins.PluginCliError, match="invalid JSON"):
         plugins.cli_list_marketplaces(str(FAKE_CLAUDE), tmp_path, run=run)
 
 

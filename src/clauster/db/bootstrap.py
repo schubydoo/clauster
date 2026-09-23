@@ -49,6 +49,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..hosted_state import HostedStateStore as JsonHostedStateStore
+from ..state import CorruptStateFile, KeyedJsonStore
 from ..state import StateStore as JsonStateStore
 from .models import HostedSession, Instance
 from .stores import HostedStateStore, StateStore
@@ -218,13 +219,15 @@ def import_legacy_json(state_dir: Path, session_factory: sessionmaker[Session]) 
                 # Already migrated or in use — never re-import on top of live rows.
                 # The transaction is an empty no-op; it commits nothing on block exit.
                 return False
-            raw_instances = JsonStateStore(state_dir).load() if state_path.exists() else {}
+            raw_instances = _load_legacy(JsonStateStore(state_dir)) if state_path.exists() else {}
             # Legacy JSON is keyed by project name; convert to instance_id-keyed shape.
             instance_records = {
                 _project_instance_id(project_name): {**fields, "project_name": project_name}
                 for project_name, fields in raw_instances.items()
             }
-            hosted_records = JsonHostedStateStore(state_dir).load() if hosted_path.exists() else {}
+            hosted_records = (
+                _load_legacy(JsonHostedStateStore(state_dir)) if hosted_path.exists() else {}
+            )
             StateStore._sync(session, instance_records)
             HostedStateStore._sync(session, hosted_records)
     except (SQLAlchemyError, OSError) as exc:
@@ -244,6 +247,23 @@ def import_legacy_json(state_dir: Path, session_factory: sessionmaker[Session]) 
             len(hosted_records),
         )
     return imported
+
+
+def _load_legacy(store: KeyedJsonStore) -> dict[str, dict]:
+    """Read one legacy store for the import: degrade a corrupt file, raise an unreadable one.
+
+    ``store.load()`` degrades both to ``{}``, but they are not the same failure. A corrupt
+    file was read, and its bytes are kept as ``.corrupt.bak``, so retiring it loses
+    nothing. An unreadable one (permissions, IO) was never read, so retiring it would
+    rename away records nobody imported. Its ``OSError`` therefore propagates to the
+    import's own handler, which leaves both files in place for the next boot.
+    """
+    try:
+        return store.load_strict()
+    except CorruptStateFile as exc:
+        # The same warning and one-time copy ``load()`` gives, from this single read.
+        store._discard(str(exc))
+        return {}
 
 
 def _retire(path: Path) -> None:

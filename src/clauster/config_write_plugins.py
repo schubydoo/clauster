@@ -407,7 +407,10 @@ def cli_list_plugins(
     _raise_for_failure("list", "", proc)
     try:
         data = json.loads(proc.stdout or "[]")
-    except json.JSONDecodeError as exc:
+    except (ValueError, RecursionError) as exc:
+        # Not just JSONDecodeError: a >4300-digit int literal raises a bare ValueError and
+        # deeply-nested output raises RecursionError. Either escaped as a 500 instead of
+        # the PluginCliError this reader promises.
         raise PluginCliError(f"claude plugin list returned invalid JSON: {exc}") from exc
     if not isinstance(data, list):
         raise PluginCliError("claude plugin list returned a non-list JSON value")
@@ -506,7 +509,8 @@ def cli_list_marketplaces(
     _raise_for_failure("marketplace-list", "", proc)
     try:
         data = json.loads(proc.stdout or "[]")
-    except json.JSONDecodeError as exc:
+    except (ValueError, RecursionError) as exc:
+        # The same int-digit ValueError / RecursionError pair as cli_list_plugins.
         raise PluginCliError(
             f"claude plugin marketplace list returned invalid JSON: {exc}"
         ) from exc

@@ -2093,9 +2093,11 @@ class SessionRunner:
         try:
             data = json.loads(sidecar.read_text(encoding="utf-8"))
             return data if isinstance(data, dict) else None
-        except (FileNotFoundError, OSError, json.JSONDecodeError, UnicodeDecodeError):
+        except (OSError, ValueError, RecursionError):
             # UnicodeDecodeError (a ValueError) for a non-UTF-8 sidecar must still
-            # honor the invalid -> None contract, not break readiness polling.
+            # honor the invalid -> None contract, not break readiness polling. So must
+            # the int-digit-limit ValueError (not a JSONDecodeError) and RecursionError
+            # from deeply-nested JSON (not a ValueError at all).
             return None
 
     def _recover_keeper_pid(

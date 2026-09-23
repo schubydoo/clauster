@@ -73,6 +73,33 @@ def test_extract_turns_tolerates_malformed_lines(tmp_path: Path) -> None:
     assert hook.extract_turns(str(t)) == [("user", "ok")]
 
 
+@pytest.mark.parametrize(
+    "bad_line",
+    [
+        # Deeply-nested JSON raises RecursionError, which is not a ValueError at all.
+        pytest.param("[" * 100_000, id="deeply-nested"),
+        # A >4300-digit int literal raises a bare ValueError (already skipped; pinned here).
+        pytest.param("1" * 5000, id="oversized-int"),
+    ],
+)
+def test_extract_turns_skips_an_unparseable_line_keeps_the_rest(
+    tmp_path: Path, bad_line: str
+) -> None:
+    # One such line used to raise out of the loop, and main()'s catch-all then dropped
+    # the whole recap rather than this one line.
+    t = tmp_path / "s.jsonl"
+    t.write_text(
+        json.dumps({"type": "user", "message": {"content": "before"}})
+        + "\n"
+        + bad_line
+        + "\n"
+        + json.dumps({"type": "assistant", "message": {"content": "after"}})
+        + "\n",
+        encoding="utf-8",
+    )
+    assert hook.extract_turns(str(t)) == [("user", "before"), ("assistant", "after")]
+
+
 def test_extract_turns_missing_file_returns_empty(tmp_path: Path) -> None:
     assert hook.extract_turns(str(tmp_path / "nope.jsonl")) == []
 

@@ -128,6 +128,32 @@ def test_load_credentials_non_utf8_claude_json(tmp_path):
         load_credentials(cred, cj)
 
 
+# Two parse failures that are not a JSONDecodeError: deeply-nested JSON raises
+# RecursionError (not a ValueError at all) and a >4300-digit int literal raises a bare
+# ValueError. Each used to escape the one CredentialsError / API-error type callers guard.
+_UNPARSEABLE = [
+    pytest.param("[" * 100_000, id="deeply-nested"),
+    pytest.param("1" * 5000, id="oversized-int"),
+]
+
+
+@pytest.mark.parametrize("payload", _UNPARSEABLE)
+def test_load_credentials_unparseable_credentials_file(tmp_path, payload):
+    _, cj = _write_creds(tmp_path)
+    bad_cred = tmp_path / "bad.json"
+    bad_cred.write_text(payload, encoding="utf-8")
+    with pytest.raises(CredentialsError, match="not valid JSON"):
+        load_credentials(bad_cred, cj)
+
+
+@pytest.mark.parametrize("payload", _UNPARSEABLE)
+def test_load_credentials_unparseable_claude_json(tmp_path, payload):
+    cred, cj = _write_creds(tmp_path)
+    cj.write_text(payload, encoding="utf-8")
+    with pytest.raises(CredentialsError, match="not valid JSON"):
+        load_credentials(cred, cj)
+
+
 def test_load_credentials_non_utf8_credentials_file(tmp_path):
     # Symmetric to the above: the FIRST read (credentials.json) being non-UTF-8
     # must also surface as CredentialsError rather than a raw UnicodeDecodeError.
@@ -331,6 +357,13 @@ def test_client_list_pagination_hits_page_ceiling(monkeypatch, caplog):
 def test_client_request_non_json_body_raises():
     # A 2xx with a non-JSON body surfaces as an API error, not a bare JSONDecodeError.
     client, _ = _client([(200, b"<html>502 Bad Gateway</html>")])
+    with pytest.raises(EnvironmentsAPIError, match="non-JSON"):
+        client.list_environments()
+
+
+@pytest.mark.parametrize("payload", _UNPARSEABLE)
+def test_client_request_unparseable_body_raises_api_error(payload):
+    client, _ = _client([(200, payload.encode())])
     with pytest.raises(EnvironmentsAPIError, match="non-JSON"):
         client.list_environments()
 

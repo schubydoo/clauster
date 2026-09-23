@@ -964,6 +964,14 @@ def test_read_screen_sidecar_malformed_json_returns_none(tmp_path: Path):
     assert pty_screen.read_screen_sidecar(p) is None
 
 
+def test_read_screen_sidecar_deeply_nested_returns_none(tmp_path: Path):
+    # Deeply-nested JSON raises RecursionError, which is not a ValueError, so it escaped
+    # the (OSError, ValueError) handler and tore down the live screen stream.
+    p = tmp_path / "x.screen.json"
+    p.write_text("[" * 100_000, encoding="utf-8")
+    assert pty_screen.read_screen_sidecar(p) is None
+
+
 def test_read_screen_sidecar_non_object_returns_none(tmp_path: Path):
     # A valid-JSON but non-object payload (e.g. a bare list) is rejected like malformed input.
     p = tmp_path / "x.screen.json"
