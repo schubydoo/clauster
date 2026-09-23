@@ -19,7 +19,14 @@ import pytest
 
 from clauster.models import InstanceStatus, RemoteControlInstance
 from clauster.rediscovery import Rediscovery
-from clauster.runner import InstanceStillLive, SessionRunner, _row_float, _row_int
+from clauster.runner import (
+    BridgeHeldByAnotherProject,
+    InstanceStillLive,
+    SessionRunner,
+    SpawnError,
+    _row_float,
+    _row_int,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -194,6 +201,347 @@ async def test_walk_does_not_consume_another_cards_instance_id(runner_config, mo
     assert len(running) == 1, f"expected one RUNNING external bridge, got {running}"
     assert running[0].instance_id not in ("iid-a", "iid-b")
     assert running[0].bridge_pid == 9001
+
+
+def _pidless_standard_rows_and_external_pointer(runner, monkeypatch) -> None:
+    """Seed two pid-less standard rows on alpha and a live pointer bridge nothing spawned."""
+    runner.persistence.state_store().save(
+        {
+            "iid-a": _row("alpha", pid=None, resume_mode="standard", label="session-A"),
+            "iid-b": _row("alpha", pid=None, resume_mode="standard", label="session-B"),
+        }
+    )
+
+    class _ExternalPtr:
+        pid = 9001
+        proc_start = "1000"
+        environment_id = "env_EXTERNAL"
+        session_id = "session_EXTERNAL"
+
+    monkeypatch.setattr("clauster.runner.pointers.pointer_for_project", lambda p: _ExternalPtr())
+    monkeypatch.setattr("clauster.runner.pointers.is_live", lambda ptr: True)
+
+
+async def test_pointer_walk_never_adopts_a_pidless_row(runner_config, monkeypatch):
+    # #1302. The rows the walk could adopt are exactly the pid-LESS ones (the row pass has
+    # carded every row with a pid), and nothing persisted ties a pointer to one of them.
+    # First-match handed session-A's id to a bridge Clauster never started: session-A's
+    # STOPPED card vanished and its record took the stranger's pids on the next persist.
+    runner = _make_runner(runner_config)
+    _pidless_standard_rows_and_external_pointer(runner, monkeypatch)
+
+    await runner.rediscover()
+
+    by_id = {i.instance_id: i for i in runner.list_instances() if i.project == "alpha"}
+    running = [i for i in by_id.values() if i.status is InstanceStatus.RUNNING]
+    assert len(running) == 1, f"expected one RUNNING external bridge, got {running}"
+    assert running[0].instance_id not in ("iid-a", "iid-b"), "a pid-less row was adopted"
+    assert (running[0].bridge_pid, running[0].environment_id) == (9001, "env_EXTERNAL")
+    # Both stopped sessions keep their own cards, with their own labels.
+    for iid, label in (("iid-a", "session-A"), ("iid-b", "session-B")):
+        assert by_id[iid].status is InstanceStatus.STOPPED, f"{iid} lost its STOPPED card"
+        assert by_id[iid].label == label
+        assert by_id[iid].bridge_pid is None
+    # And on disk: neither record took the stranger's pids; the bridge got a row of its own.
+    stored = runner.persistence.state_store().load()
+    for iid, label in (("iid-a", "session-A"), ("iid-b", "session-B")):
+        assert "bridge_pid" not in stored[iid], f"{iid} was overwritten: {stored[iid]}"
+        assert stored[iid]["label"] == label
+    assert stored[running[0].instance_id]["bridge_pid"] == 9001
+
+    # One restart later the bridge's own row reattaches it by its pids, under the same id,
+    # and the two stopped sessions still keep their cards.
+    fresh_id = running[0].instance_id
+    _stub_connect(monkeypatch)
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None, **_kw: pid == 9001
+    )
+    again = _make_runner(runner_config)
+    await again.rediscover(persist=False)
+    by_id = {i.instance_id: i for i in again.list_instances() if i.project == "alpha"}
+    assert by_id[fresh_id].status is InstanceStatus.RUNNING
+    assert by_id[fresh_id].bridge_pid == 9001
+    assert {by_id["iid-a"].status, by_id["iid-b"].status} == {InstanceStatus.STOPPED}
+    assert len(by_id) == 3, f"expected the bridge plus two stopped cards, got {sorted(by_id)}"
+
+
+async def test_start_on_a_pidless_card_returns_the_live_pointer_bridge(runner_config, monkeypatch):
+    # Why carding the pid-less rows STOPPED beside a live pointer bridge is safe (#1302): a
+    # Start on one of them hits the one-standard-bridge-per-project cap and hands back the
+    # live bridge instead of launching a second one on the same folder.
+    runner = _make_runner(runner_config)
+    _pidless_standard_rows_and_external_pointer(runner, monkeypatch)
+    await runner.rediscover(persist=False)
+    [live] = [
+        i
+        for i in runner.list_instances()
+        if i.project == "alpha" and i.status is InstanceStatus.RUNNING
+    ]
+
+    outcome = await runner.resume_detailed("iid-a")
+
+    assert outcome.created is False
+    assert outcome.instance is live
+    assert runner.get_instance("iid-a").status is InstanceStatus.STOPPED
+
+
+async def test_pointer_card_id_is_stable_across_headless_runs(runner_config, monkeypatch):
+    # #1302 review. The headless CLI rediscovers with persist=False, so a random id would
+    # change on every `clauster status`, and the id it printed could never reach
+    # `clauster stop`. The id is derived from the pointer, so every run agrees.
+    ids = []
+    for _ in range(2):
+        runner = _make_runner(runner_config)
+        _pidless_standard_rows_and_external_pointer(runner, monkeypatch)
+        await runner.rediscover(persist=False)
+        [live] = [
+            i
+            for i in runner.list_instances()
+            if i.project == "alpha" and i.status is InstanceStatus.RUNNING
+        ]
+        ids.append(live.instance_id)
+        assert runner.resolve_bridge_id(ids[0]) == ids[0]
+    assert ids[0] == ids[1]
+    assert ids[0] not in ("iid-a", "iid-b")
+
+
+async def test_pointer_card_never_replaces_a_card_that_holds_its_derived_id(
+    runner_config, monkeypatch
+):
+    # The derived id can key a card only if the row pass judged this very (pid, procStart)
+    # dead while the pointer reads live. The pointer card then takes a random id, and the
+    # row keeps its STOPPED card, rather than one silently replacing the other.
+    from clauster import pointers
+    from clauster.rediscovery import _pointer_instance_id
+
+    ptr = pointers.BridgePointer(
+        pid=9001, proc_start="1000", source="t", environment_id="env_X", session_id="s_X"
+    )
+    derived = _pointer_instance_id("alpha", ptr)
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save(
+        {derived: _row("alpha", pid=9001, resume_mode="standard", label="old")}
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    monkeypatch.setattr(
+        "clauster.runner.pointers.pointer_for_project",
+        lambda p: ptr if p.name == "alpha" else None,
+    )
+    monkeypatch.setattr("clauster.runner.pointers.is_live", lambda ptr: True)
+
+    await runner.rediscover(persist=False)
+
+    alpha = [i for i in runner.list_instances() if i.project == "alpha"]
+    assert runner.get_instance(derived).status is InstanceStatus.STOPPED
+    assert runner.get_instance(derived).label == "old"
+    [live] = [i for i in alpha if i.status is InstanceStatus.RUNNING]
+    assert live.instance_id != derived
+    assert live.bridge_pid == 9001
+
+
+async def test_pointer_card_takes_label_and_modes_from_an_unclaimed_row(
+    runner_config, monkeypatch
+):
+    # Pins `unclaimed_only` on the pointer leg: the label and modes come from a row no card
+    # holds yet, as before #1302, not from a dead row the row pass has already carded.
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save(
+        {
+            "iid-dead": _row("alpha", pid=5002, resume_mode="standard", label="dead-row"),
+            "iid-pidless": _row("alpha", pid=None, resume_mode="standard", label="pidless"),
+        }
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+
+    class _ExternalPtr:
+        pid = 9001
+        proc_start = "1000"
+        environment_id = "env_EXTERNAL"
+        session_id = "session_EXTERNAL"
+
+    monkeypatch.setattr(
+        "clauster.runner.pointers.pointer_for_project",
+        lambda p: _ExternalPtr() if p.name == "alpha" else None,
+    )
+    monkeypatch.setattr("clauster.runner.pointers.is_live", lambda ptr: True)
+
+    await runner.rediscover(persist=False)
+
+    [live] = [
+        i
+        for i in runner.list_instances()
+        if i.project == "alpha" and i.status is InstanceStatus.RUNNING
+    ]
+    assert live.label == "pidless"
+
+
+async def test_start_never_cards_a_second_bridge_on_a_pty_moded_pointer_card(
+    runner_config, monkeypatch
+):
+    # #1302 review. The pointer card takes its modes from the first unclaimed row, so a pty
+    # row ordered first makes it a "pty" card, which the one-standard-per-project cap does
+    # not see. A Start on the stopped standard row then reached `_reattach_external_standard`,
+    # which registered a SECOND running card on the same pid: stopping either one would kill
+    # the process under the other. It must hand back the card that already holds the pid.
+    config, _ = runner_config
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save(
+        {
+            # A dead row the row pass cards first, so the held-pid scan also walks past a
+            # card that does not hold the pid.
+            "iid-dead": _row("alpha", pid=5002, resume_mode="standard", label="dead-row"),
+            "iid-p": _row("alpha", pid=None, resume_mode="pty", label="pty-row"),
+            "iid-s": _row("alpha", pid=None, resume_mode="standard", label="std-row"),
+        }
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+
+    class _ExternalPtr:
+        pid = 9001
+        proc_start = "1000"
+        environment_id = "env_EXTERNAL"
+        session_id = "session_EXTERNAL"
+
+    monkeypatch.setattr(
+        "clauster.runner.pointers.pointer_for_project",
+        lambda p: _ExternalPtr() if p.name == "alpha" else None,
+    )
+    monkeypatch.setattr("clauster.runner.pointers.is_live", lambda ptr: True)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_standard_bridge", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "clauster.runner.procutil.proc_cwd",
+        lambda pid: (config.projects_root / "alpha").resolve(),
+    )
+
+    def _no_launch(*_a, **_k):
+        raise AssertionError("a Start must not launch a second bridge over a live pointer")
+
+    monkeypatch.setattr(runner._launch, "_popen", _no_launch)
+    await runner.rediscover(persist=False)
+    [card] = [i for i in runner.list_instances() if i.bridge_pid == 9001]
+    assert card.resume_mode == "pty"  # the precondition this test exists for
+    assert runner.get_instance("iid-s").status is InstanceStatus.STOPPED
+    # A stopped card that still records pid 9001 (`stop()` leaves it) goes FIRST in the
+    # registry, so a scan that ignored the status would hand it back.
+    stale = RemoteControlInstance(
+        project="alpha", label="stale", status=InstanceStatus.STOPPED, bridge_pid=9001
+    )
+    rest = dict(runner._instances)
+    runner._instances.clear()
+    runner._instances[stale.instance_id] = stale
+    runner._instances.update(rest)
+
+    outcome = await runner.resume_detailed("iid-s")
+
+    assert outcome.created is False
+    assert outcome.instance is card
+    holders = [
+        i
+        for i in runner.list_instances()
+        if i.bridge_pid == 9001 and i.status is InstanceStatus.RUNNING
+    ]
+    assert holders == [card], f"two cards drive pid 9001: {holders}"
+
+
+def _held_card(**kw) -> RemoteControlInstance:
+    fields = {"project": "alpha", "label": "alpha", "status": InstanceStatus.RUNNING}
+    return RemoteControlInstance(**{**fields, "bridge_pid": 9001, **kw})
+
+
+@pytest.mark.parametrize(
+    ("card_fields", "drift_prone", "hit"),
+    [
+        ({"bridge_start_ticks": 1000}, False, True),  # exact ticks
+        ({"bridge_start_ticks": 999}, False, False),  # same pid, earlier process
+        ({"bridge_start_ticks": 999}, True, False),  # ticks do not drift: still conclusive
+        ({"bridge_proc_start": 501.0}, False, True),  # no ticks: epoch within tolerance
+        ({"bridge_proc_start": 600.0}, False, False),  # no ticks: epoch far, conclusive
+        # No ticks, epoch far, but the epoch drifts on this platform: inconclusive, so the
+        # bare pid decides rather than risk a second card on one process.
+        ({"bridge_proc_start": 600.0}, True, True),
+        ({}, False, True),  # nothing comparable: the bare pid still refuses a second card
+        ({"bridge_start_ticks": 1000, "status": InstanceStatus.STOPPED}, False, False),
+        ({"bridge_start_ticks": 1000, "bridge_pid": 9002}, False, False),
+    ],
+)
+def test_live_card_for_pointer_matches_the_pid_and_start_pair(
+    runner_config, monkeypatch, card_fields, drift_prone, hit
+):
+    # #1302 review: the held-card scan in `_reattach_external_standard` must match the
+    # process, not a recycled pid on a card whose bridge died before the poll noticed.
+    from clauster import pointers
+
+    monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", lambda j: 500.0)
+    monkeypatch.setattr("clauster.procutil.start_time_is_drift_prone", lambda: drift_prone)
+    runner = _make_runner(runner_config)
+    card = _held_card(**card_fields)
+    runner._instances[card.instance_id] = card
+    ptr = pointers.BridgePointer(
+        pid=9001, proc_start="1000", source="t", environment_id="env_X", session_id="s_X"
+    )
+
+    got = runner._rediscovery._live_card_for_pointer(ptr)
+
+    assert (got is card) is hit
+
+
+async def test_external_reattach_refuses_a_bridge_another_projects_card_holds(
+    runner_config, monkeypatch
+):
+    # A `sanitize_cwd` collision can leave project beta's card holding the bridge whose cwd
+    # is alpha's folder. Neither handing beta's card to alpha's Start nor carding the process
+    # a second time is safe, so the take-over refuses. The route-level 409 is asserted in
+    # tests/test_app_instances.py.
+    config, _ = runner_config
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", lambda j: 500.0)
+    foreign = _held_card(project="beta", label="beta", bridge_start_ticks=1000)
+    runner._instances[foreign.instance_id] = foreign
+
+    class _Ptr:
+        pid = 9001
+        proc_start = "1000"
+        environment_id = "env_X"
+        session_id = "s_X"
+
+    monkeypatch.setattr(
+        "clauster.runner.pointers.pointer_for_project",
+        lambda p: _Ptr() if p.name == "alpha" else None,
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_standard_bridge", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "clauster.runner.procutil.proc_cwd",
+        lambda pid: (config.projects_root / "alpha").resolve(),
+    )
+
+    def _no_launch(*_a, **_k):
+        raise AssertionError("the take-over must refuse, not launch")
+
+    monkeypatch.setattr(runner._launch, "_popen", _no_launch)
+
+    with pytest.raises(BridgeHeldByAnotherProject, match="project 'beta'") as exc:
+        await runner.spawn_detailed("alpha")
+    # Both families, so every caller maps it: adopt catches the one, spawn the other.
+    assert isinstance(exc.value, InstanceStillLive)
+    assert isinstance(exc.value, SpawnError)
+    assert [i for i in runner.list_instances() if i.bridge_pid == 9001] == [foreign]
+
+
+def test_pointer_instance_id_is_stable_and_per_project():
+    # The derived id must repeat for one bridge (headless runs agree) and differ per project,
+    # so two projects sharing one pointer file (a `sanitize_cwd` collision) never share an id.
+    from clauster import pointers
+    from clauster.rediscovery import _pointer_instance_id
+
+    ptr = pointers.BridgePointer(
+        pid=9001, proc_start="1000", source="t", environment_id="env_X", session_id="s_X"
+    )
+    other = pointers.BridgePointer(
+        pid=9002, proc_start="1000", source="t", environment_id="env_X", session_id="s_X"
+    )
+    assert _pointer_instance_id("alpha", ptr) == _pointer_instance_id("alpha", ptr)
+    assert _pointer_instance_id("alpha", ptr) != _pointer_instance_id("beta", ptr)
+    assert _pointer_instance_id("alpha", ptr) != _pointer_instance_id("alpha", other)
 
 
 async def test_stopped_row_does_not_hide_a_live_detached_keeper(runner_config, monkeypatch):
@@ -1475,8 +1823,9 @@ async def test_pointer_walk_reattach_records_the_keeper_start_time_too(runner_co
 
     await runner.rediscover(persist=False)
 
-    inst = runner.get_instance("iid-pty")
-    assert inst is not None
+    # Under a fresh id since #1302: the pid-less row is not this bridge's identity.
+    [inst] = [i for i in runner.list_instances() if i.project == "alpha" and i.bridge_pid == 6001]
+    assert inst.instance_id != "iid-pty"
     assert (inst.keeper_pid, inst.keeper_proc_start, inst.keeper_start_ticks) == (
         6666,
         888.0,

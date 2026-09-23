@@ -34,6 +34,7 @@ import asyncio
 import logging
 import re
 import time
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import cast
@@ -58,7 +59,13 @@ from .field_decode import (
     _sidecar_notice,
     _ticks_on_exact_match,
 )
-from .models import BridgePointer, InstanceStatus, Project, RemoteControlInstance
+from .models import (
+    BridgePointer,
+    InstanceStatus,
+    Project,
+    RemoteControlInstance,
+    new_instance_id,
+)
 from .runner_state import RunnerState
 
 _log = logging.getLogger("clauster.rediscovery")
@@ -76,6 +83,25 @@ _PROC_START_TOLERANCE = 2.0
 # segment, an absolute path, a flag-looking token) is not a name we could have produced,
 # and falls back to the derived value instead of reaching a subprocess.
 _WORKTREE_NAME_RE = re.compile(r"clauster-[0-9a-f]{8}\Z")
+
+
+def _pointer_instance_id(project: str, ptr: BridgePointer) -> str:
+    """Derive a pointer-found bridge's instance id from the pointer's own identity (#1302).
+
+    The pointer leg of :meth:`Rediscovery.rediscover` must not take a persisted row's id,
+    but a random id would change on every headless ``persist=False`` run, so an id printed
+    by ``clauster status`` could never be passed to ``clauster stop``. The environment id,
+    pid and ``procStart`` name ONE bridge process, so the same bridge gets the same id on
+    every run, and the service persists that id. The project name is in the key because two
+    projects can share one pointer file (a ``sanitize_cwd`` collision). The pointer leg then
+    cards the bridge under each of them, as it did before #1302, and one derived id for both
+    would make the second card silently replace the first in the registry. That double card
+    is a known gap of the leg, which has no cwd check. ``uuid5`` keeps it an RFC 4122 id, the
+    shape the worktree
+    naming (``_pty_worktree_name``) expects. The namespace matches ``db/bootstrap.py``.
+    """
+    key = f"clauster.pointer-bridge.{project}.{ptr.environment_id}.{ptr.pid}.{ptr.proc_start}"
+    return str(uuid.uuid5(uuid.NAMESPACE_DNS, key))
 
 
 class Rediscovery:
@@ -307,15 +333,15 @@ class Rediscovery:
 
         Since issue 777 ``_persisted`` is keyed by ``instance_id``; the project name lives
         in the ``"project_name"`` field of each value dict.  Returns ``None`` when no match.
-        Used by :meth:`_stopped_from_persisted` and :meth:`_reattach_pty_from_sidecar` to
-        look up a persisted record by project without assuming a project-keyed dict.
+        Used by :meth:`_stopped_from_persisted`, the pointer and keeper-sidecar legs of
+        :meth:`rediscover`, and :meth:`_reattach_external_standard` to look up a persisted
+        record by project without assuming a project-keyed dict.
 
-        ``unclaimed_only`` skips records already materialized in ``self._registry._instances``. The
-        pointer walk needs that: it resolves by PROJECT and adopts the id it finds, but
-        since #1088 the row pass may already have inserted cards for several of that
-        project's rows. First-match would then hand the walk an id that is somebody else's
-        card, and the live bridge's fields would be written over a different session's
-        record — losing it, because the next ``_persist`` rewrites that row too.
+        ``unclaimed_only`` skips records already materialized in ``self._registry._instances``.
+        The pointer walk passes it. It once adopted the id it found here, and an id that was
+        already another session's card then had that session's record overwritten (#1088
+        SF-4). Since #1302 the walk mints a fresh id and takes only the label and modes from
+        this lookup, so the flag now only keeps those sourced from the same rows as before.
 
         ``resume_mode`` narrows to rows of that mode. The keeper-sidecar leg needs it,
         because first-match over a project's rows is arbitrary in MODE as well as identity: a
@@ -632,7 +658,7 @@ class Rediscovery:
         ``saved`` still supplies the label and modes (it is the same shape of first match,
         but those are cosmetic and mode-pinned by the caller, not an identity), so the cost
         is one extra card for the project rather than a lost session — the trade the pointer
-        leg makes for an ambiguous project too.
+        leg makes too (#1302).
         """
         if not saved:
             return []
@@ -1393,8 +1419,8 @@ class Rediscovery:
                 # first UNCLAIMED pty row's id, picked before the glob had found *whose*
                 # keeper this is — see `_reattach_pty_from_sidecar` for why no row reachable
                 # at this point can be correlated to it. The reattach mints a fresh id: one
-                # extra card for the project, the same trade the pointer leg below makes for
-                # an ambiguous project, instead of overwriting a resumable record (#1088 SF-4).
+                # extra card for the project, the same trade the pointer leg below makes
+                # (#1302), instead of overwriting a resumable record (#1088 SF-4).
                 modes_hit = self._persisted_for_project(proj.name, resume_mode="pty")
                 persisted_saved = modes_hit[1] if modes_hit is not None else {}
                 reattached = await asyncio.to_thread(
@@ -1434,24 +1460,41 @@ class Rediscovery:
                 continue
             # Overlay the few fields the pointer-walk can't recover; a bridge
             # found alive is by definition NOT intentionally stopped.
-            # `unclaimed_only` because this attaches the LIVE bridge under the id it is
-            # handed, so a claimed one would overwrite a different session's record
-            # irrecoverably (#1088 SF-4). Unlike the pty leg above, this one still ADOPTS
-            # that unclaimed id rather than minting a fresh one — the same
-            # picked-before-we-know-whose class #1108 describes, deliberately left alone
-            # here because that issue scopes to the keeper-sidecar leg and changing the
-            # pointer leg would drop the row association every standard reattach relies on.
             #
-            # Deliberately NOT also pinned to `resume_mode="standard"`, unlike the pty leg.
-            # A pointer means the live bridge is standard, so the mirror mismatch is real —
-            # but a mode-less pre-#1088 row coerces to the host's CONFIGURED default, so on
-            # a `launch_mode: pty` host that filter would reject a standard bridge's own
-            # legacy row and mint a fresh id, losing the association it was meant to keep.
-            # The pty leg has no such exposure: a keeper sidecar only exists for a bridge
-            # Clauster spawned in pty mode, and those rows always record their mode.
+            # The live bridge never takes a persisted row's instance_id (#1302), as the pty
+            # leg above never does (#1108). This leg used to adopt the first unclaimed row's
+            # id. Every row still unclaimed here is pid-LESS (the row pass has carded every
+            # row that carries a pid), and neither such a row nor anything else Clauster
+            # persists holds a key the pointer also holds: the row stores no environment id,
+            # session id or log path. So the adopted row was a guess, and most often it was
+            # wrong: a current-build Clauster bridge keeps its pids and is reattached by the
+            # row pass, so the bridge reaching this leg is usually one Clauster never
+            # started. Adopting wrote that stranger's pids over a stopped session's record
+            # and took its STOPPED card away. Now the pid-less rows stay untouched and the
+            # pass below decides their cards. A pid-less standard row gets a STOPPED card:
+            # the live card holds `ptr.pid`, so the pointer sweep there reads it as
+            # accounted for, and a Start on the stopped card cannot launch a second bridge
+            # on this folder (the cap, or `_reattach_external_standard`'s held-card check).
+            # A pid-less pty row stays hidden while this card is a live pty card (the
+            # any-live-pty block there). The accepted cost: a bridge that a pre-#1088 build
+            # spawned (its row carries no pids) comes back as this card PLUS its old row,
+            # carded STOPPED on a standard host and hidden on a `launch_mode: pty` host.
+            #
+            # The id is derived from the pointer's own identity (`_pointer_instance_id`), so
+            # a headless `clauster status` (persist=False) prints the same id on every run
+            # and `clauster stop <id>` can find it, and the service persists that same id.
+            #
+            # `saved` supplies only the label and the modes, which are not an identity (the
+            # same trade the pty leg makes). `unclaimed_only` keeps them sourced from the
+            # same rows as before #1302. The row's sandbox choice and worktree name are
+            # facts of THAT row's session, so they are not carried onto this card.
+            #
+            # Deliberately NOT pinned to `resume_mode="standard"`, unlike the pty leg: a
+            # mode-less pre-#1088 row coerces to the host's CONFIGURED default, so on a
+            # `launch_mode: pty` host that filter would skip a standard bridge's own legacy
+            # row and lose its label and modes.
             persisted_hit = self._persisted_for_project(proj.name, unclaimed_only=True)
             saved = persisted_hit[1] if persisted_hit is not None else {}
-            persisted_iid = persisted_hit[0] if persisted_hit is not None else None
             spawn_mode, permission_mode, resume_mode = self._saved_modes(saved)
             # _expected_epoch (not bare int()) so an unparseable procStart degrades to
             # None (cmdline-only liveness) instead of raising ValueError out of startup.
@@ -1485,14 +1528,21 @@ class Rediscovery:
             # The pointer's bridge is live NOW (this survivor loop only runs for a live
             # pointer), so the current boot is its boot (#1401). Read off-thread.
             boot_id = await asyncio.to_thread(procutil.proc_boot_id)
+            derived_iid = _pointer_instance_id(proj.name, ptr)
             instance = self._instance_from_pointer(
                 proj.name,
                 ptr,
+                # Never over a card this sweep already holds. The derived id can key one
+                # only if the row pass judged this same (pid, procStart) dead while the
+                # pointer reads live; a random id then keeps both, rather than guessing.
+                instance_id=(None if derived_iid in self._registry._instances else derived_iid),
                 label=saved.get("label") or proj.name,
                 spawn_mode=spawn_mode,
                 permission_mode=permission_mode,
                 resume_mode=resume_mode,
-                sandbox_mode=self._saved_sandbox(saved),
+                # Not `saved`'s choice: that row is not this bridge (see above), and nothing
+                # here tells which sandbox flag this bridge was launched with.
+                sandbox_mode="default",
                 bridge_proc_start=bridge_proc_start,
                 bridge_start_ticks=bridge_start_ticks,
                 bridge_boot_id=boot_id,
@@ -1503,8 +1553,6 @@ class Rediscovery:
                 bridge_raw_log_path=(
                     self._raw_log_path_for(log_path) if log_path is not None else None
                 ),
-                instance_id=persisted_iid,
-                worktree_name=self._recovered_worktree_name(saved.get("worktree_name")),
             )
             self._registry._instances[instance.instance_id] = instance
         # Third pass (#1115): rows carrying NO pid at all. The two passes above resolve at
@@ -1643,16 +1691,15 @@ class Rediscovery:
         # and that is exactly the shape #1399's review caught three times. `adopt`'s standard
         # external bridge has no keeper and states so by passing None.
         keeper_start_ticks: int | None,
-        # Keyword-required, no default (#1101): a survivor rebuilt under its persisted
-        # instance_id is saved back over that row, so a caller that let this default would
-        # overwrite the stored choice with "default" on the first persist after a restart.
+        # Keyword-required, no default (#1101), so each caller states the choice it means.
         sandbox_mode: SandboxMode,
+        # Keyword-required, no default (#1302): None mints a random id. Never a persisted
+        # row's id, because nothing ties a pointer to a row.
+        instance_id: str | None,
         bridge_start_ticks: int | None = None,
         bridge_boot_id: str | None = None,
         bridge_debug_log_path: Path | None = None,
         bridge_raw_log_path: Path | None = None,
-        instance_id: str | None = None,
-        worktree_name: str | None = None,
     ) -> RemoteControlInstance:
         """Build a RUNNING managed instance from a live Anthropic-written pointer.
 
@@ -1668,24 +1715,18 @@ class Rediscovery:
         recovered set); they stay None for :meth:`adopt`, whose external bridge Clauster
         never spawned and has no log of (#584).
 
-        ``instance_id`` — when supplied (re-discovered survivor whose id was persisted),
-        the returned instance carries the same stable UUID so the registry key is
-        consistent across restarts.  When ``None`` a fresh UUID is minted (adopt path,
-        or a rediscovered bridge with no prior persisted record).
-
-        ``worktree_name`` carries a row's EXPLICIT pty worktree name through (#1241) — set
-        only for a session an earlier keeper-only reattach had to card under a fresh id,
-        where the name is no longer derivable from that id. ``None`` (the normal case, and
-        always for :meth:`adopt`'s external standard bridge) leaves it derived.
+        ``instance_id`` is never a persisted row's id (#1302), because neither caller can tie
+        the pointer to a row. :meth:`rediscover` passes one derived from the pointer
+        (:func:`_pointer_instance_id`); :meth:`adopt` passes ``None`` for a random one.
         """
-        kwargs: dict = dict(
+        return RemoteControlInstance(
+            instance_id=instance_id if instance_id is not None else new_instance_id(),
             project=name,
             label=label,
             spawn_mode=spawn_mode,
             permission_mode=permission_mode,
             resume_mode=resume_mode,
             sandbox_mode=sandbox_mode,
-            worktree_name=worktree_name,
             keeper_pid=keeper_pid,
             # The keeper pid's start identity travels with it (#1178 / #1402) — a
             # pointer-walk survivor must regain the full PID-reuse defense, not the
@@ -1713,9 +1754,6 @@ class Rediscovery:
             starter_session_id=ptr.session_id,
             url=f"https://claude.ai/code?environment={ptr.environment_id}",
         )
-        if instance_id is not None:
-            kwargs["instance_id"] = instance_id
-        return RemoteControlInstance(**kwargs)
 
     async def adopt(self, name: str) -> RemoteControlInstance:
         """Take over a live *standard* external bridge as a managed instance (#330).
@@ -1770,6 +1808,41 @@ class Rediscovery:
                 )
             return instance
 
+    def _live_card_for_pointer(self, ptr: BridgePointer) -> RemoteControlInstance | None:
+        """Return the STARTING/RUNNING card whose bridge is the pointer's process, or None.
+
+        Matched on the (pid, start) pair, never the bare pid (#1302 review): a card whose
+        bridge died before the poll loop marked it CRASHED can hold a pid that a new bridge
+        now reuses, and handing that dead card back would leave the live bridge unmanaged.
+        Exact ticks when both sides carry them. Otherwise the epoch rejects a card only
+        outside ``_PROC_START_TOLERANCE`` AND on a platform whose epoch does not drift
+        (:func:`procutil.start_time_is_drift_prone`): here a false "not held" cards one
+        process twice, which costs more than a false "held", so an inconclusive epoch falls
+        back to the bare pid, as does a start that is unknown on either side. A STOPPED card
+        is skipped because ``stop()`` leaves its ``bridge_pid`` in place.
+        """
+        ptr_ticks = _pointer_start_ticks(ptr.proc_start)
+        for held in self._registry._instances.values():
+            if held.bridge_pid != ptr.pid or held.status not in (
+                InstanceStatus.STARTING,
+                InstanceStatus.RUNNING,
+            ):
+                continue
+            if held.bridge_start_ticks is not None and ptr_ticks is not None:
+                if held.bridge_start_ticks != ptr_ticks:
+                    continue
+            elif held.bridge_proc_start is not None and not procutil.start_time_is_drift_prone():
+                # Read only here: where the epoch is conclusive (not Linux), or for a legacy
+                # Linux card without ticks.
+                ptr_epoch = procutil._expected_epoch(ptr.proc_start)
+                if (
+                    ptr_epoch is not None
+                    and abs(held.bridge_proc_start - ptr_epoch) > _PROC_START_TOLERANCE
+                ):
+                    continue
+            return held
+        return None
+
     async def _reattach_external_standard(self, proj: Project) -> RemoteControlInstance | None:
         """Reattach a live standard bridge this process didn't spawn; ``None`` if there is none.
 
@@ -1785,7 +1858,10 @@ class Rediscovery:
         pid). A hit is synthesized into a
         managed RUNNING instance (fresh ``instance_id``, ``resume_mode`` pinned
         ``"standard"`` from the positive cmdline gate rather than a possibly-stale
-        persisted value), registered, and persisted.
+        persisted value), registered, and persisted. A bridge that a STARTING or RUNNING
+        card of this project already holds returns that card instead, and nothing new is
+        registered. If another project's card holds it, ``BridgeHeldByAnotherProject`` is
+        raised.
 
         Caller must hold the per-project spawn lock and the cross-process bridge lock;
         the persisted-record read wants a fresh merge base (see the callers' preceding
@@ -1813,6 +1889,28 @@ class Rediscovery:
         # The external bridge is live at this project's cwd right now, so the current boot is
         # its boot (#1401). Read off-thread, like the rediscover survivor path.
         boot_id = await asyncio.to_thread(procutil.proc_boot_id)
+        # Hand back the card that already drives this bridge rather than register a second
+        # one on the same process: stopping either would kill the process under the other.
+        # The rediscover pointer leg can card this bridge as "pty" (its modes come from a
+        # row), which the caller's one-standard-per-project cap does not see (#1302 review).
+        # After the last await, so nothing can card the process between this check and the
+        # insert below.
+        held = self._live_card_for_pointer(ptr)
+        if held is not None:
+            if held.project != proj.name:
+                # Another project's card holds a bridge whose cwd is THIS project's folder (a
+                # `sanitize_cwd` collision the rediscover pointer leg does not attribute).
+                # Neither handing back that foreign card nor carding the process twice is
+                # safe, so refuse. The error is both an InstanceStillLive and a SpawnError,
+                # so the adopt route and the spawn/resume routes each map it to 409.
+                # Deferred import: see `adopt`.
+                from .runner import BridgeHeldByAnotherProject
+
+                raise BridgeHeldByAnotherProject(
+                    f"the live bridge in {proj.name!r} (pid {ptr.pid}) is already managed "
+                    f"as a card of project {held.project!r}"
+                )
+            return held
         instance = self._instance_from_pointer(
             proj.name,
             ptr,
@@ -1823,6 +1921,7 @@ class Rediscovery:
             # Clauster did not launch this bridge, so it cannot know its sandbox flag, and the
             # adopted card gets a fresh id rather than any saved row's choice.
             sandbox_mode="default",
+            instance_id=None,
             bridge_proc_start=procutil._expected_epoch(ptr.proc_start),
             bridge_start_ticks=_pointer_start_ticks(ptr.proc_start),
             bridge_boot_id=boot_id,

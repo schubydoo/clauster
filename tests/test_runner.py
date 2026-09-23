@@ -2843,19 +2843,24 @@ async def test_rediscover_overlays_persisted_state(runner_config, monkeypatch):
     monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", lambda j: 12345.0)
 
     await runner.rediscover()
-    insts = {i.project: i for i in runner.list_instances()}
+    insts = runner.list_instances()
 
-    assert set(insts) == {"alpha"}  # no phantom from a persisted-but-dead entry
-    assert insts["alpha"].label == "my-alpha"  # persisted label overlaid
-    assert insts["alpha"].intentional_stop is False  # a live bridge is not "stopped"
+    assert {i.project for i in insts} == {"alpha"}  # no phantom from a persisted-but-dead entry
+    [live] = [i for i in insts if i.status is InstanceStatus.RUNNING]
+    assert live.label == "my-alpha"  # persisted label overlaid
+    assert live.intentional_stop is False  # a live bridge is not "stopped"
+    # The live bridge gets a fresh id and the pid-less row keeps its own card (#1302).
+    assert live.instance_id != _IID_ALPHA
+    assert runner.get_instance(_IID_ALPHA).status is InstanceStatus.STOPPED
 
 
-async def test_rediscover_pointer_survivor_keeps_its_saved_sandbox_choice(
+async def test_rediscover_pointer_survivor_leaves_the_rows_sandbox_choice_alone(
     runner_config, monkeypatch
 ):
-    # #1101: a pointer-walk survivor is rebuilt under its persisted instance_id and saved back
-    # over that row. Built without the row's sandbox choice, it would carry "default", and the
-    # persist at the end of `rediscover` would overwrite the stored "on" on disk.
+    # #1101: a pointer-walk survivor used to be rebuilt under its persisted instance_id and
+    # saved back over that row, so a survivor built with "default" overwrote the stored "on".
+    # Since #1302 the survivor gets a fresh id and "default" (the row is not its identity),
+    # and the pid-less row keeps its own STOPPED card with its stored choice, on disk too.
     monkeypatch.setattr("clauster.config.SANDBOX_TOGGLE_ENABLED", True)
     config, claude_json = runner_config
     _db_save(
@@ -2876,9 +2881,12 @@ async def test_rediscover_pointer_survivor_keeps_its_saved_sandbox_choice(
 
     await runner.rediscover()
 
-    survivor = runner.get_instance(_IID_ALPHA)
-    assert survivor is not None
-    assert survivor.sandbox_mode == "on"
+    [survivor] = [i for i in runner.list_instances() if i.status is InstanceStatus.RUNNING]
+    assert survivor.instance_id != _IID_ALPHA
+    assert survivor.sandbox_mode == "default"
+    stopped = runner.get_instance(_IID_ALPHA)
+    assert stopped.status is InstanceStatus.STOPPED
+    assert stopped.sandbox_mode == "on"
     assert runner.persistence.state_store().load()[_IID_ALPHA]["sandbox_mode"] == "on"
 
 

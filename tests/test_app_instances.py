@@ -44,6 +44,66 @@ def test_tracked_sessions_empty_initially(runner_config):
         assert resp.json() == {}
 
 
+def test_bridge_held_by_another_project_is_a_409_on_start_resume_and_adopt(
+    runner_config, monkeypatch
+):
+    """A live bridge another project's card holds is refused with 409, never a 500 (#1302).
+
+    The external take-over raises ``BridgeHeldByAnotherProject`` when a card of project beta
+    holds the bridge whose cwd is alpha's folder (a ``sanitize_cwd`` collision). The start
+    and resume routes map only the SpawnError family and the adopt route only
+    InstanceStillLive, so the error must be both.
+    """
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+
+    async def _no_poll() -> None:
+        return None
+
+    # The poll loop and the request-time status reconcile would both judge the injected card
+    # against a pid that is not running here, and mark it CRASHED.
+    monkeypatch.setattr(runner, "poll_once", _no_poll)
+    monkeypatch.setattr("clauster.procutil.is_live_bridge", lambda *a, **k: True)
+    monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", lambda j: 500.0)
+    # The rediscover pointer leg reads `pointers.is_live`; keep it out of this test.
+    monkeypatch.setattr("clauster.pointers.is_live", lambda ptr: False)
+    monkeypatch.setattr(
+        "clauster.pointers.pointer_for_project",
+        lambda path: _FakePtr() if path.name == "alpha" else None,
+    )
+    monkeypatch.setattr("clauster.procutil.is_live_standard_bridge", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "clauster.procutil.proc_cwd", lambda pid: (config.projects_root / "alpha").resolve()
+    )
+
+    def _no_launch(*_a, **_k):
+        raise AssertionError("the take-over must refuse, not launch")
+
+    monkeypatch.setattr(runner._launch, "_popen", _no_launch)
+    with TestClient(create_app(config, runner=runner)) as client:
+        foreign = RemoteControlInstance(
+            project="beta",
+            label="beta",
+            status=InstanceStatus.RUNNING,
+            bridge_pid=4242,
+            bridge_start_ticks=1000,
+        )
+        runner._instances[foreign.instance_id] = foreign
+        stopped = RemoteControlInstance(
+            project="alpha", label="alpha", status=InstanceStatus.STOPPED
+        )
+        runner._instances[stopped.instance_id] = stopped
+
+        start = client.post("/api/instances", json={"project": "alpha"})
+        resume = client.post(f"/api/instances/{stopped.instance_id}/resume")
+        del runner._instances[stopped.instance_id]  # adopt refuses any managed project
+        adopt = client.post("/api/projects/alpha/adopt")
+
+    for resp in (start, resume, adopt):
+        assert resp.status_code == 409, resp.text
+        assert "project 'beta'" in resp.json()["detail"]
+
+
 def test_tracked_sessions_endpoint_groups_by_instance(runner_config, monkeypatch):
     """/api/sessions/tracked returns each bridge's live sessions, keyed by instance (#570)."""
     from pathlib import Path
