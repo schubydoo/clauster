@@ -1029,7 +1029,7 @@ def test_redact_wrapped_rows_masks_inside_each_row_without_reflow():
 
     row0 = "session_01ABCDEFGHIJ" + " " * 20  # 40 wide; the id masks to a shorter <redacted>
     row1 = "K" * 40  # unrelated full-width content swept into the same group
-    out = redact.redact_wrapped_screen_rows([row0, row1], soft_seams=[False])
+    out = redact.redact_wrapped_screen_rows([row0, row1], hard_seams=[True], soft_seams=[False])
     assert out[1] == row1  # row1 verbatim -- not reflowed by row0's shorter mask
     assert "<redacted>" in out[0] and "session_01" not in out[0]
 
@@ -1042,7 +1042,9 @@ def test_redact_wrapped_rows_unions_welded_secret_tokens():
     from clauster import redact
 
     out = redact.redact_wrapped_screen_rows(
-        ["ghp_ABCDEFGHIJKLMNOPQRST", "sk-ABCDEFGHIJKLMNOPQRSTB", "l4zR"], soft_seams=[False, False]
+        ["ghp_ABCDEFGHIJKLMNOPQRST", "sk-ABCDEFGHIJKLMNOPQRSTB", "l4zR"],
+        hard_seams=[True, True],
+        soft_seams=[False, False],
     )
     # The shared body appears in BOTH secrets; it must survive in neither row (sequential
     # application leaves the sk- tail, the union masks it).

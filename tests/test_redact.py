@@ -427,7 +427,7 @@ def test_redact_wrapped_rows_masks_a_uuid_a_greedy_secret_ate_across_the_wrap():
     # `frame()` for the pyte + width-refit surface.
     row0 = "ghp_" + "B" * 16 + "12345678-12"
     row1 = "34-1234-1234-123456789abc"
-    out = redact.redact_wrapped_screen_rows([row0, row1], soft_seams=[False])
+    out = redact.redact_wrapped_screen_rows([row0, row1], hard_seams=[True], soft_seams=[False])
     assert "-1234-" not in "".join(out) and "123456789abc" not in "".join(out)
     assert "<redacted>" in out[0]
 
@@ -437,9 +437,9 @@ def test_redact_wrapped_rows_joins_a_soft_seam_without_its_layout_whitespace():
     # indent before the lower one. The verbatim join keeps that whitespace inside the token, so
     # only the head masked and the tail leaked. A soft seam rebuilds the logical line.
     rows = ["⏺ wrap=sk-" + "a" * 20 + "   ", "  " + "a" * 13 + ":end" + "  "]
-    leaked = redact.redact_wrapped_screen_rows(rows, soft_seams=[False])
+    leaked = redact.redact_wrapped_screen_rows(rows, hard_seams=[True], soft_seams=[False])
     assert "aaaa" in leaked[1]  # positive control: the verbatim join leaks the tail
-    out = redact.redact_wrapped_screen_rows(rows, soft_seams=[True])
+    out = redact.redact_wrapped_screen_rows(rows, hard_seams=[False], soft_seams=[True])
     assert "aaaa" not in "".join(out)
     assert out[1].startswith("  <redacted>:end")  # the indent and the text after it stay
 
@@ -447,7 +447,7 @@ def test_redact_wrapped_rows_joins_a_soft_seam_without_its_layout_whitespace():
 def test_redact_wrapped_rows_soft_seam_masks_a_bearer_wrapped_at_its_space():
     # #1508: the first repro. The TUI moved the whole value to the next row.
     out = redact.redact_wrapped_screen_rows(
-        ["weld=bearer    ", "  live0123456789abcdef"], soft_seams=[True]
+        ["weld=bearer    ", "  live0123456789abcdef"], hard_seams=[False], soft_seams=[True]
     )
     assert "0123" not in "".join(out) and "live" not in "".join(out)
 
@@ -458,7 +458,9 @@ def test_redact_wrapped_rows_soft_seam_masks_a_bearer_whose_value_wraps_again():
     # `Bearer` to its value. Only the spaced view (one space after `bearer`, nothing elsewhere)
     # reads the header whole.
     rows = ["Authorization: Bearer   ", "  eyJ" + "A" * 14, "  " + "B" * 10 + " done"]
-    out = redact.redact_wrapped_screen_rows(rows, soft_seams=[True, True])
+    out = redact.redact_wrapped_screen_rows(
+        rows, hard_seams=[False, False], soft_seams=[True, True]
+    )
     assert "BBBB" not in "".join(out) and "AAAA" not in "".join(out)
     assert out[2].endswith(" done")
 
@@ -468,7 +470,9 @@ def test_redact_wrapped_rows_soft_seam_masks_a_token_starting_at_a_word_break():
     # the next row is then broken mid-way. Joined with nothing, `foo` welds onto `sk-` and hides
     # its `\b`, so the mask is retried starting at the seam (as at a removed escape, #1379).
     rows = ["key: foo   ", "  sk-" + "A" * 14, "  " + "A" * 8 + " ok"]
-    out = redact.redact_wrapped_screen_rows(rows, soft_seams=[True, True])
+    out = redact.redact_wrapped_screen_rows(
+        rows, hard_seams=[False, False], soft_seams=[True, True]
+    )
     assert "AAAA" not in "".join(out)
     assert out[0].startswith("key: foo") and out[2].endswith(" ok")
 
@@ -479,16 +483,90 @@ def test_redact_wrapped_rows_soft_seam_masks_a_fixed_token_ending_at_a_seam():
     # retried ending at the seam. The word itself stays readable.
     uuid = "12345678-1234-1234-1234-123456789abc"
     rows = ["id " + uuid[:20] + "  ", "  " + uuid[20:], "  next"]
-    out = redact.redact_wrapped_screen_rows(rows, soft_seams=[True, True])
+    out = redact.redact_wrapped_screen_rows(
+        rows, hard_seams=[False, False], soft_seams=[True, True]
+    )
     assert "123456789abc" not in "".join(out) and "-1234-" not in "".join(out)
     assert out[2] == "  next"
 
 
 def test_redact_wrapped_rows_rejects_a_seam_count_that_does_not_match():
-    # A missing seam flag must not silently read as "hard"; the caller has a bug.
-    with pytest.raises(ValueError, match="3 rows need 2 seams"):
-        redact.redact_wrapped_screen_rows(["a", "b", "c"], soft_seams=[True])
-    assert redact.redact_wrapped_screen_rows([], soft_seams=[]) == []
+    # A missing seam flag must not silently read as False; the caller has a bug.
+    with pytest.raises(ValueError, match="3 rows need 2 seams, got 2 hard and 1 soft"):
+        redact.redact_wrapped_screen_rows(
+            ["a", "b", "c"], hard_seams=[True, True], soft_seams=[True]
+        )
+    with pytest.raises(ValueError, match="3 rows need 2 seams, got 1 hard and 2 soft"):
+        redact.redact_wrapped_screen_rows(
+            ["a", "b", "c"], hard_seams=[True], soft_seams=[True, True]
+        )
+    assert redact.redact_wrapped_screen_rows([], hard_seams=[], soft_seams=[]) == []
+
+
+def test_redact_wrapped_rows_joins_only_the_hard_runs_verbatim():
+    # #1508 review, safety invariant 4. The verbatim join must cover only the rows pyte's own
+    # wrap connects. Joined across the soft seams too, the `bearer` on row 1 takes row 2's
+    # `...ab.bearer` as its value, and the real header on rows 2-3 is never matched.
+    rows = [
+        "  some text here, x bearer abcdefgh     ",
+        "  bearer                                ",
+        "  ijklmnopqrstuvwxyzab.bearer live012345",
+        "KLMNOPQRSTUV done                       ",
+    ]
+    out = redact.redact_wrapped_screen_rows(
+        rows, hard_seams=[False, False, True], soft_seams=[True, True, False]
+    )
+    shown = "".join(out)
+    assert "KLMN" not in shown and "live0123" not in shown
+    assert out[3].rstrip().endswith(" done")
+
+
+def test_redact_wrapped_rows_join_is_the_hard_run_even_when_seam_views_miss():
+    # #1508 review, found by a differential search against a whole-group join. The header
+    # `-bearer live0123456789` spans a hard seam, and only the verbatim join of that hard run
+    # reads it: joined from row 0, the first `bearer` takes row 1 whole as its value, and both
+    # seam views weld or space the rows so that no `bearer` is followed by the value.
+    rows = [
+        "ab.bearer                     ",
+        "Bearerab.bearer-bearer        ",
+        "  live0123456789 Bearerbearer ",
+        "Bearer                        ",
+    ]
+    out = redact.redact_wrapped_screen_rows(
+        rows, hard_seams=[False, True, True], soft_seams=[True, True, False]
+    )
+    assert "live0123" not in "".join(out)
+
+
+def test_redact_wrapped_rows_spaces_a_bearer_the_weld_took_its_boundary_from():
+    # #1508 review. `bearer` stands alone on its row, after an indent the screen shows. In the
+    # welded view it follows the upper row's `abc`, so a `\b`-anchored test for the space would
+    # see `abcbearer` and add none, and the value on the next row would leak. The test takes
+    # no `\b`; the seam retry then reads `bearer live...` from the cut.
+    rows = ["  some words here abc    ", "  bearer                 ", "  live0123456789abcdef   "]
+    out = redact.redact_wrapped_screen_rows(
+        rows, hard_seams=[False, False], soft_seams=[True, True]
+    )
+    assert "live0123" not in "".join(out) and "abcdef" not in "".join(out)
+    assert out[0].startswith("  some words here abc")
+
+
+def test_redact_wrapped_rows_masks_a_uuid_welded_to_a_token_found_at_a_seam():
+    # #1508 review. `ghp_` starts a row after a soft seam, so on the welded logical line only the
+    # seam retry finds it. It is greedy and eats the UUID's leading hex group, so the UUID has to
+    # be looked for after it too (#1496), or its tail leaks.
+    token = "ghp" + "_" + "c5263eadf7e0c0e1"
+    rows = [
+        "  some words here and there :ziqcq",
+        "  " + token + "12345678-f7c9",
+        "  -1523-d2a2-686b9d96c4fb done",
+    ]
+    out = redact.redact_wrapped_screen_rows(
+        rows, hard_seams=[False, False], soft_seams=[True, True]
+    )
+    shown = "".join(out)
+    assert "686b9d" not in shown and "f7c9" not in shown and "c5263e" not in shown
+    assert out[2].rstrip().endswith(" done")
 
 
 def test_bearer_is_the_only_whitespace_core():

@@ -189,8 +189,11 @@ def _soft_wraps(row: str, below: str) -> bool:
     wraps only when the next word does not fit, so that is the test: the first word of
     ``below``, placed one space after the text of ``row``, must pass the right edge less
     :data:`_SOFT_WRAP_SLACK`. A row that ends mid-screen and a next row whose first word would
-    have fitted there are separate lines, and are never joined. A row filled to the edge always
-    passes, because nothing more fits on it.
+    have fitted there are separate lines, and are never joined. A row filled to the edge
+    passes whenever the lower row is not blank and starts after an indent, because nothing
+    more fits on it. The slack is also a cost: a separate line whose upper row ends inside
+    it, in an id or secret, gets its first word masked with that token. That is the safe
+    direction on this surface.
 
     The right edge is ``len(row)``, not the column count. pyte pads each ``display`` row to the
     full width, but a wide (CJK) character fills two cells and adds one character, so a row
@@ -847,6 +850,7 @@ class PtyScreen:
         total_rows = len(display)
         while i < total_rows:
             start = i
+            hard_seams: list[bool] = []
             soft_seams: list[bool] = []
             while i < total_rows - 1:
                 row = display[i]
@@ -861,6 +865,7 @@ class PtyScreen:
                 soft = _soft_wraps(row, display[i + 1])
                 if not (hard or soft):
                     break
+                hard_seams.append(hard)
                 soft_seams.append(soft)
                 i += 1
             group = display[start : i + 1]
@@ -868,10 +873,10 @@ class PtyScreen:
             if len(group) == 1:
                 out.append(self._fit_redacted_row(redact_screen_text(group)[0]))
             else:
-                out.extend(
-                    self._fit_redacted_row(r)
-                    for r in redact.redact_wrapped_screen_rows(group, soft_seams=soft_seams)
+                redacted = redact.redact_wrapped_screen_rows(
+                    group, hard_seams=hard_seams, soft_seams=soft_seams
                 )
+                out.extend(self._fit_redacted_row(r) for r in redacted)
         return out
 
     def frame(self) -> dict[str, Any]:

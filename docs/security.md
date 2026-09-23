@@ -375,10 +375,17 @@ neither half matches a mask alone. Clauster joins the wrapped rows before it
 masks. This covers the terminal's own wrap at the right edge, and a wrap that
 Claude's TUI makes itself: the row stops short of the edge, and the next row
 starts after an indent. Clauster treats two rows as one wrapped line only when
-the first word of the lower row does not fit at the end of the upper row. Two
-gaps remain. A very short tail under a wide right margin is not joined, and a
-token that wraps inside one cell of a multi-column table is not at the row
-edge.
+the first word of the lower row does not fit at the end of the upper row, less
+a margin of 8 columns. Because of that margin, a separate line can be read as a
+wrap when the row above it ends near the right edge. If that row ends in an
+identifier or a secret, the first word of the next line is masked with it.
+Three gaps remain:
+
+- A very short tail under a right margin wider than 8 columns is not joined.
+- A first word of wide (CJK) characters counts as one column per character,
+  so it can seem to fit when it does not.
+- A token that wraps inside one cell of a multi-column table is not at the
+  row edge.
 
 ### Hybrid by default
 

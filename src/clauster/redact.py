@@ -704,7 +704,12 @@ def redact_screen_text(rows: list[str]) -> list[str]:
 #: one a soft wrap at a SPACE can split between its keyword and its value. A seam whose left
 #: side ends in this word keeps one space in :func:`_seam_view`'s ``spaced`` view.
 #: ``test_bearer_is_the_only_whitespace_core`` fails if a second such core is added.
-_SCREEN_BEARER_SEAM_RE = re.compile(r"\bbearer\Z", re.IGNORECASE)
+#:
+#: No leading ``\b``: the text before the word may be a welded neighbour row, so a boundary
+#: the screen shows (the row's own indent) can be missing here. A space inserted after a
+#: ``bearer`` that was only the tail of a longer word costs nothing, because the plain view
+#: still reads that seam with no space.
+_SCREEN_BEARER_SEAM_RE = re.compile(r"bearer\Z", re.IGNORECASE)
 
 
 def _screen_seam_spans(text: str, cuts: tuple[int, ...]) -> list[tuple[int, int, str]]:
@@ -717,11 +722,20 @@ def _screen_seam_spans(text: str, cuts: tuple[int, ...]) -> list[tuple[int, int,
     of a removed escape (#1379): the masks are retried starting at each seam
     (:func:`_cut_spans`) and ending at each seam (:func:`_trailing_cut_spans`), and every
     span is unioned. A union can only mask more.
+
+    An id or secret found at a seam is a greedy match too, so it is passed to
+    :func:`_screen_welded_uuid_spans` with the anchored ones: a UUID welded onto it loses its
+    leading hex group exactly as it does after an anchored match (#1496).
     """
     spans = _screen_spans(text)
-    for _anchored, opened, closed, _keeps_prefix, single_run in _MASKS:
-        spans += _cut_spans(text, cuts, opened, closed, False, single_run)
-        spans += _trailing_cut_spans(text, cuts, opened, False)
+    greedy_spans: list[tuple[int, int]] = []
+    for anchored, opened, closed, _keeps_prefix, single_run in _MASKS:
+        found = _cut_spans(text, cuts, opened, closed, False, single_run)
+        found += _trailing_cut_spans(text, cuts, opened, False)
+        spans += found
+        if anchored is _ID_RE or anchored in _SECRET_RES:
+            greedy_spans += [(s, e) for s, e, _ in found]
+    spans += _screen_welded_uuid_spans(text, greedy_spans)
     return spans
 
 
@@ -737,10 +751,9 @@ def _seam_view(
     verbatim join of ``rows``, or ``-1`` for an inserted separator. ``cuts`` are the offsets in
     ``text`` where a soft seam joined.
 
-    With ``spaced`` set, a soft seam whose upper side ends in the word ``bearer`` keeps one
-    space, so a ``bearer`` header the terminal wrapped at its internal space still matches with
-    a value that ALSO wraps mid-token further on. Every other seam joins with nothing in both
-    views.
+    With ``spaced`` set, a soft seam whose upper side ends in ``bearer`` keeps one space, so a
+    ``bearer`` header the terminal wrapped at its internal space still matches with a value
+    that ALSO wraps mid-token further on. Every other seam joins with nothing in both views.
     """
     text = ""
     cells: list[int] = []
@@ -755,15 +768,16 @@ def _seam_view(
         cells.extend(range(offset + start, offset + end))
         offset += len(row)
         if soft_below:
-            # The last seven characters: `bearer` plus the one before it, for the `\b`.
-            if spaced and _SCREEN_BEARER_SEAM_RE.search(text[-7:]):
+            if spaced and _SCREEN_BEARER_SEAM_RE.search(text[-6:]):
                 text += " "
                 cells.append(-1)
             cuts.append(len(text))
     return text, cells, tuple(cuts)
 
 
-def redact_wrapped_screen_rows(rows: list[str], *, soft_seams: list[bool]) -> list[str]:
+def redact_wrapped_screen_rows(
+    rows: list[str], *, hard_seams: list[bool], soft_seams: list[bool]
+) -> list[str]:
     r"""Redact a wrapped run of screen rows, returning one redacted row per input row.
 
     pyte fills a hard-wrapped row edge-to-edge and continues the text on the next row, so a
@@ -781,8 +795,8 @@ def redact_wrapped_screen_rows(rows: list[str], *, soft_seams: list[bool]) -> li
       ``row_cov`` alone. This reproduces :func:`_redact_screen_row` per row exactly, so by
       construction it can never mask LESS than the per-row pass -- including a token welded at the
       row's edge, and one a neighbour's mask exposes.
-    * ``join_cov`` scans the whole joined line to a fixed point, over a probe built from
-      ``join_cov`` alone. This is the SPLIT-token catch the wrap needs.
+    * ``join_cov`` scans each hard-wrapped run of rows, joined, to a fixed point, over a probe
+      built from ``join_cov`` alone. This is the SPLIT-token catch the wrap needs.
 
     Each scan uses a LENGTH-PRESERVING probe (a masked cell reads as NUL: it matches no core and
     gives its neighbours the ``\b`` a freshly-masked run exposes). Because neither map feeds the
@@ -796,18 +810,24 @@ def redact_wrapped_screen_rows(rows: list[str], *, soft_seams: list[bool]) -> li
     wrap-aware path existed. That is the safe direction: on this surface, not leaking beats
     keeping a look-alike readable (safety invariant 4).
 
-    ``soft_seams[k]`` is True when the seam between ``rows[k]`` and ``rows[k + 1]`` can be a
-    SOFT wrap: the program in the terminal (Claude's TUI) broke the line itself, so the upper
-    row can stop short of the edge and the lower row can start after a hanging indent (#1508).
-    The verbatim join puts that whitespace inside a token the wrap split, and ``join_cov`` then
-    cannot match it. So each soft seam adds a third and a fourth map, ``seam_cov``, from the
-    two :func:`_seam_view` views (the logical line with the layout whitespace removed), scanned
-    with each seam as a possible boundary (:func:`_screen_seam_spans`). They are independent
-    fixed points too, and join the union at render. A group with no soft seam adds nothing,
-    so it renders exactly as before.
+    Each seam between ``rows[k]`` and ``rows[k + 1]`` carries two flags, and at least one is
+    normally set. ``hard_seams[k]`` is True when pyte wrapped the row itself (the caller's
+    edge-to-edge test); ``join_cov`` joins only the runs of rows these seams connect.
+    ``soft_seams[k]`` is True when the seam can be a SOFT wrap: the program in the terminal
+    (Claude's TUI) broke the line itself, so the upper row can stop short of the edge and the
+    lower row can start after a hanging indent (#1508). A verbatim join puts that whitespace
+    inside a token the wrap split, so it cannot match. When any seam is soft, a third map,
+    ``seam_cov``, is built from the :func:`_seam_view` views of the logical line (the layout
+    whitespace removed), each scanned to its own fixed point with every soft seam as a possible
+    boundary (:func:`_screen_seam_spans`). It joins the union at render. With no soft seam the
+    result is exactly what the hard-wrap path gave before.
     """
-    if len(soft_seams) != max(len(rows) - 1, 0):
-        raise ValueError(f"{len(rows)} rows need {len(rows) - 1} seams, got {len(soft_seams)}")
+    seams = max(len(rows) - 1, 0)
+    if len(hard_seams) != seams or len(soft_seams) != seams:
+        raise ValueError(
+            f"{len(rows)} rows need {seams} seams, got {len(hard_seams)} hard"
+            f" and {len(soft_seams)} soft"
+        )
     joined = "".join(rows)
     n = len(joined)
     bounds: list[tuple[int, int]] = []
@@ -840,10 +860,21 @@ def redact_wrapped_screen_rows(rows: list[str], *, soft_seams: list[bool]) -> li
                 break
         return cov
 
+    # Each run of rows the hard seams join, as one line: catches a token pyte's wrap SPLIT. The
+    # runs are exactly the groups a caller made before soft seams existed, so this map is the
+    # one those groups got. A whole-group verbatim join would NOT be: a `bearer` on an earlier
+    # row could then take a later row's `bearer` as its value and hide that header (#1508).
+    hard_runs: list[tuple[int, int]] = []
+    first = 0
+    for k in range(len(rows)):
+        if k == len(rows) - 1 or not hard_seams[k]:
+            if k > first:  # a single row is already `row_cov`
+                hard_runs.append((bounds[first][0], bounds[k][1]))
+            first = k + 1
+
     # Each row on its own edges: reproduces the per-row pass exactly.
     row_cov = fixed_point(joined, bounds, _screen_spans)
-    # The whole joined line: catches a token the wrap SPLIT.
-    join_cov = fixed_point(joined, [(0, n)], _screen_spans)
+    join_cov = fixed_point(joined, hard_runs, _screen_spans)
 
     # The logical line across a soft wrap (#1508), projected back onto the same cells.
     seam_cov = bytearray(n)
