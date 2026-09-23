@@ -576,10 +576,11 @@ class SpawnCoordinator:
         """Pre-write the two claude-side settings a bridge start depends on, once per runner.
 
         Both are BEST-EFFORT by design and neither may fail the spawn — but neither is
-        silent either: an :class:`OSError` is logged at WARNING and the ``_ensured`` latch
+        silent either: an :class:`OSError`, or a settings file too deeply nested (or holding
+        too long an integer) to parse, is logged at WARNING and the ``_ensured`` latch
         still flips, so each write is attempted exactly once per runner (the latches are
         instance state, so a second :class:`~clauster.runner.SessionRunner` in the same
-        process retries).
+        process retries). A parse failure raises before any write, so the file is untouched.
         """
         if self._config.claude.auto_enable_remote_control and not self._rc_setting_ensured:
             try:
@@ -590,10 +591,14 @@ class SpawnCoordinator:
                         "interactive enable prompt",
                         self._claude_json,
                     )
-            except OSError as exc:
+            except (OSError, ValueError, RecursionError) as exc:
                 # Best-effort: if we can't write the flag the bridge may hang on the
                 # prompt, but the startup-watch surfaces that honestly as ERROR rather
-                # than a false RUNNING — so don't fail the spawn over it.
+                # than a false RUNNING — so don't fail the spawn over it. ValueError and
+                # RecursionError are a ~/.claude.json that _read_claude_json lets escape on
+                # purpose (non-UTF-8, a >4300-digit int, deep nesting), so that the update
+                # never overwrites a file it could not parse. The trust check still reads
+                # that file fail-closed.
                 _log.warning(
                     "could not pre-enable remote control in %s: %s", self._claude_json, exc
                 )

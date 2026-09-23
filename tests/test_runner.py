@@ -3392,6 +3392,35 @@ async def test_spawn_survives_a_deeply_nested_settings_json(runner_config, monke
     await runner.stop(inst.instance_id)
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # Deeply-nested JSON raises RecursionError, which is not a ValueError at all.
+        pytest.param("[" * 100_000, id="deeply-nested"),
+        # A >4300-digit int literal raises a bare ValueError, not a JSONDecodeError.
+        pytest.param('{"n": ' + "1" * 5000 + "}", id="oversized-int"),
+    ],
+)
+async def test_remote_control_pre_enable_degrades_on_unparseable_claude_json(
+    runner_config, caplog, payload
+):
+    # The real ensure_remote_control_enabled, on a real ~/.claude.json it cannot parse.
+    # _read_claude_json lets both errors escape on purpose, so it never rewrites a file it
+    # could not read; the best-effort arm caught only OSError, so they escaped the spawn
+    # too. Now the arm warns and latches, and the file is left byte-identical.
+    config, claude_json = runner_config
+    config.claude.auto_enable_remote_control = True
+    config.claude.resume_recap = False
+    claude_json.write_text(payload, encoding="utf-8")
+    runner = SessionRunner(config, claude_json=claude_json)
+
+    with caplog.at_level("WARNING", logger="clauster.runner"):
+        await runner._spawner._ensure_claude_side_settings()
+    assert runner._rc_setting_ensured is True
+    assert any("could not pre-enable remote control" in r.message for r in caplog.records)
+    assert claude_json.read_text(encoding="utf-8") == payload
+
+
 def test_read_markers_vanished_log_returns_empty(tmp_path):
     # runner.py 1686-1687: a bridge log that vanished (rotation/cleanup race) parses
     # to empty markers instead of raising — readiness polling must survive it.
