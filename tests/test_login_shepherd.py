@@ -2367,6 +2367,29 @@ def test_pump_conpty_survives_a_screen_feed_error() -> None:
     assert "hello" in flow.snapshot()
 
 
+def test_pump_conpty_logs_a_rejected_sequence_and_keeps_the_screen(caplog) -> None:  # noqa: ANN001
+    # #1357: pyte rejects `ESC[1;2C`. `PtyScreen.feed` returns the fault instead of raising
+    # it, so the reader must still log it (it logged the raise before) and the screen must
+    # keep rendering the chunks after it.
+    scr = ls.PtyScreen()
+
+    class _Pty:
+        def __init__(self):
+            self._chunks = ["\x1b[1;2C", "after the fault\r\n"]
+
+        def read(self, _n):
+            return self._chunks.pop(0) if self._chunks else ""
+
+        def isalive(self):
+            return bool(self._chunks)
+
+    flow = ls._Flow(mode="setup-token", proc=object(), screen=scr, pty_process=_Pty())  # type: ignore[arg-type]
+    with caplog.at_level(logging.DEBUG, logger=ls._log.name):
+        ls._pump_conpty(flow)
+    assert "conpty screen feed failed" in caplog.text and "positional argument" in caplog.text
+    assert "after the fault" in "\n".join(scr.frame()["rows"])
+
+
 def test_pump_conpty_noop_when_unpaired() -> None:
     flow = ls._Flow(mode="setup-token", proc=object())  # type: ignore[arg-type]
     ls._pump_conpty(flow)  # pty_process/screen both None -> immediate no-op

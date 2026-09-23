@@ -186,11 +186,11 @@ def _drive(
     raises", it is **"the screen is still sound afterwards"**: every property in
     :func:`check` is asserted on a screen that has already survived whatever ``feed`` did.
 
-    That ``feed`` raises at all stays worth reporting, and is — as an open finding on the
-    PR that introduced this harness — because of what the guard costs. ``pty_keeper``'s
-    handler disables *both* screen consumers for the rest of the session, so one ordinary
-    escape sequence silently ends the live terminal view and the pyte connect-URL scrape
-    until the bridge restarts. Two distinct pyte defects reach it, neither exotic:
+    ``pyte`` itself raises on ordinary sequences. ``PtyScreen.feed`` catches that raise and
+    RETURNS it (#1357), so the screen stays in use; before that, ``pty_keeper``'s handler
+    disabled *both* screen consumers for the rest of the session. A returned fault is recorded
+    is not recorded in ``fed_cleanly``, which now means "nothing RAISED out of ``feed``"; see
+    :func:`check` for why. Two distinct pyte defects reach it, neither exotic:
 
     * **CSI arity** — ``\\x1b[1;2C`` (a modified cursor key any real terminal emits) raises
       ``TypeError``; the same mismatch fires for ``A``/``B``/``D``/``G``/``H``/``@``/``L``/
@@ -225,6 +225,8 @@ def _drive(
     fed_cleanly = True
     for chunk in data_chunks:
         try:
+            # A returned fault (a sequence pyte rejected, #1357) is NOT a raise: the OSC 8
+            # scan still ran on the chunk, so the drive stays comparable. See `check`.
             screen.feed(chunk)
         except Exception:  # noqa: BLE001 — mirrors the production guard; see the docstring
             fed_cleanly = False
@@ -278,11 +280,11 @@ def check(data: bytes, cuts: list[int], cols: int, rows: int, capture_osc8: bool
     if not (chunked["read_cleanly"] and whole["read_cleanly"]):
         return  # the pyte `display` IndexError — see _drive's docstring
 
-    # One skip, tied to a reported defect and no wider than its mechanism: a drive whose
-    # feed raised left the screen mid-sequence by design, and where the boundary fell
-    # decides how much got in — so the two runs are not comparable. Note this is not only
-    # about the rendered screen: `feed` runs `_stream.feed` BEFORE `_scan_osc8`, so a pyte
-    # raise also costs that chunk's OSC 8 scan (see `_drive`). There was a second skip —
+    # One skip, no wider than its mechanism: a drive where something RAISED out of `feed` may
+    # have skipped that chunk's `_scan_osc8`, and where the boundary fell decides how much got
+    # in — so the two runs are not comparable. A sequence pyte rejects no longer counts:
+    # `PtyScreen.feed` catches it and still runs the OSC 8 scan on the raw chunk (#1357), so
+    # those inputs, once skipped here, are now asserted. There was a second skip —
     # inputs where a stray opener was swallowed by `_OSC8_RE`'s parameter run — and it went
     # away with the fix in #1356; see the module docstring.
     if chunked["fed_cleanly"] and whole["fed_cleanly"]:

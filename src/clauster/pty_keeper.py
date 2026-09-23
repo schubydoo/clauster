@@ -267,6 +267,10 @@ class _KeeperDrain:
         # stays just as dead (the raw-bytes regex rarely survives a fragmented stream, which
         # is why the screen exists). One-way on purpose — a disabled screen never comes back.
         self._screen_feed_failed = False
+        # Set by :meth:`feed` the first time pyte rejects an escape sequence (#1357). The
+        # screen stays in use, so this only limits the report to once per session: a TUI that
+        # emits the sequence on every redraw would otherwise fill `<sidecar>.log`.
+        self._screen_sequence_fault_reported = False
         self._deadline = time.monotonic() + _URL_TIMEOUT
 
     def _scan_session_id(self) -> str | None:
@@ -333,10 +337,26 @@ class _KeeperDrain:
         """Feed one drained chunk into the pyte screen + the connect-URL scrape."""
         if self._screen is not None:
             try:
-                self._screen.feed(chunk)
+                fault = self._screen.feed(chunk)
                 self._dirty = True
+                if fault is not None and not self._screen_sequence_fault_reported:
+                    # pyte rejected an escape sequence in this chunk (#1357). The screen
+                    # dropped the rest of the chunk and stays in use, so both consumers keep
+                    # working. Reported once per session: a fault is never a silent skip,
+                    # but it repeats at redraw cadence. Like the render-fault line, it goes to
+                    # the on-disk keeper log only and never into a streamed frame.
+                    self._screen_sequence_fault_reported = True
+                    print(
+                        f"clauster.pty_keeper: the terminal emulator rejected an escape "
+                        f"sequence and skipped the rest of that chunk; the screen stays in "
+                        f"use (reported once per session): {type(fault).__name__}: {fault}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
             except Exception as exc:  # noqa: BLE001 — best-effort, never kill the bridge
-                # A feed failure disables both screen consumers for the rest of the session:
+                # `PtyScreen.feed` absorbs pyte's own input faults (above), so this arm is
+                # left for a defect in the screen wrapper itself. Such a failure disables both
+                # screen consumers for the rest of the session:
                 # the live view (if any) reports a terminal `error`, and URL extraction falls
                 # back to the raw-bytes regex below. The bridge is unaffected.
                 if self._tap is not None:

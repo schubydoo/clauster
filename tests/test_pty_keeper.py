@@ -733,6 +733,84 @@ def test_keeper_drain_feed_failure_without_tap_disables_screen(tmp_path: Path) -
     assert not (tmp_path / "k.json").exists()  # no sidecar write on a non-URL chunk
 
 
+# --- a sequence pyte rejects keeps the screen (#1357) -----------------------------------
+#
+# `pyte` raises on ordinary sequences (a modified cursor key is a `TypeError`, an
+# out-of-range erase an `UnboundLocalError`). The keeper used to answer that by disabling BOTH
+# screen consumers for the rest of the session. `PtyScreen.feed` now absorbs the fault and
+# returns it, and the drain logs it once and keeps both consumers.
+_REJECTED_SEQUENCE = b"\x1b[1;2C"
+
+
+def test_keeper_drain_keeps_both_screen_consumers_after_a_rejected_sequence(
+    tmp_path: Path, capsys
+) -> None:  # noqa: ANN001
+    from clauster import pty_keeper
+
+    sidecar = tmp_path / "k.json"
+    screen_sidecar = tmp_path / "k.screen.json"
+    base: dict[str, object] = {"state": "starting", "note": None}
+    drain = pty_keeper._KeeperDrain(base, sidecar, _fresh_screen(), screen_sidecar)
+
+    drain.feed(_REJECTED_SEQUENCE)
+
+    assert drain._screen is not None and drain._tap is not None  # nothing disabled
+    assert drain._screen_feed_failed is False  # so no "screen could not be read" note later
+    # Consumer 1, the live view: the next tick publishes a live frame, not an error status.
+    drain.tick()
+    frame = _read(screen_sidecar)
+    assert frame["state"] == "live" and frame["screen"] is not None
+    # Consumer 2, the connect-URL scrape. Positive control first: the raw leg cannot read this
+    # URL, so only the screen can produce the id below.
+    assert pty_keeper._RE_CONNECT_URL.search(_KEEPER_URL_SCREEN_ONLY) is None
+    drain.feed(_KEEPER_URL_SCREEN_ONLY)
+    assert base["session_id"] == "session_01FAULTAAAAAAAAAAAAAA"
+    err = capsys.readouterr().err
+    assert "rejected an escape sequence" in err and "TypeError" in err
+    assert "failed and was disabled" not in err
+
+
+def test_keeper_drain_reports_a_rejected_sequence_once_per_session(tmp_path: Path, capsys) -> None:  # noqa: ANN001
+    """A TUI can emit the sequence on every redraw, so the log line must not repeat.
+
+    Unlike the render-fault latch, a clean chunk in between does not re-arm it: the screen is
+    healthy throughout, so a second report would say nothing new.
+    """
+    from clauster import pty_keeper
+
+    drain = pty_keeper._KeeperDrain({}, tmp_path / "k.json", _fresh_screen(), None)
+    for chunk in (_REJECTED_SEQUENCE, b"ordinary output\r\n", b"\x1b[4J", _REJECTED_SEQUENCE):
+        drain.feed(chunk)
+
+    assert drain._screen is not None
+    assert capsys.readouterr().err.count("rejected an escape sequence") == 1
+
+
+def test_run_keeper_conpty_keeps_the_screen_through_a_rejected_sequence(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """End to end through the ConPTY backend, which builds a screen for every keeper.
+
+    The fake emits the rejected sequence as its own chunk and then a URL only the screen can
+    reassemble. Before the fix the first chunk disabled the screen, so the id was never found
+    and the live view ended on an `error` status.
+    """
+    from clauster import pty_keeper
+
+    fake = _fake_conpty(
+        chunks=[_REJECTED_SEQUENCE.decode(), _KEEPER_URL_SCREEN_ONLY.decode()], exit_code=0
+    )
+    monkeypatch.setattr(pty_keeper, "_load_pty_process", lambda: fake)
+    sidecar = tmp_path / "b.keeper.json"
+    screen = tmp_path / "b.screen.json"
+
+    assert pty_keeper._run_keeper_conpty(["claude"], sidecar, None, screen) == 0
+
+    assert _read(sidecar)["session_id"] == "session_01FAULTAAAAAAAAAAAAAA"
+    final = _read(screen)
+    assert final["state"] == "exited" and final["screen"] is not None
+
+
 # --- pyte render fault on the keeper's connect-URL scrape (#1376) ----------------------
 #
 # `pyte`'s `Screen.display` raises `IndexError` when a double-width character is left

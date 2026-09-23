@@ -1148,9 +1148,11 @@ def _pump_pty(flow: _Flow) -> None:  # pragma: skip-on-win — POSIX pty reader 
         if not chunk:
             break
         try:
-            screen.feed(chunk)
+            fault = screen.feed(chunk)
         except Exception as exc:  # noqa: BLE001 — a render hiccup must never kill the reader
-            _log.debug("login_shepherd: pty screen feed failed for %s: %s", flow.mode, exc)
+            fault = exc
+        if fault is not None:  # a rejected sequence (#1357) or a wrapper defect; screen kept
+            _log.debug("login_shepherd: pty screen feed failed for %s: %s", flow.mode, fault)
         flow.append(chunk.decode("utf-8", errors="replace"))
 
 
@@ -1200,9 +1202,11 @@ def _pump_conpty(flow: _Flow) -> None:
             time.sleep(_POLL_INTERVAL_SECONDS)  # alive but idle; yield before re-polling
             continue
         try:
-            screen.feed(data.encode("utf-8", "replace"))
+            fault = screen.feed(data.encode("utf-8", "replace"))
         except Exception as exc:  # noqa: BLE001 — a render hiccup must never kill the reader
-            _log.debug("login_shepherd: conpty screen feed failed for %s: %s", flow.mode, exc)
+            fault = exc
+        if fault is not None:  # a rejected sequence (#1357) or a wrapper defect; screen kept
+            _log.debug("login_shepherd: conpty screen feed failed for %s: %s", flow.mode, fault)
         flow.append(data)
 
 
