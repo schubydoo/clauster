@@ -2190,6 +2190,13 @@ in the configuration reference for the field.</p>
 <p>A bridge can never be spawned with <code>--permission-mode bypassPermissions</code> unless
 the project sets <code>allow_bypass_permissions: true</code> in <code>clauster.yml</code> (the hard
 ceiling). The dashboard's per-session typed-confirm is the second layer.</p>
+<p>Clauster checks the ceiling again when you resume a stopped bridge or a hosted
+session. It checks the mode that the session was started with against the current
+configuration, so a session started in bypass mode gets a 403 on resume after you
+remove <code>allow_bypass_permissions: true</code>. Clauster reads <code>clauster.yml</code> only at
+startup, so a changed ceiling takes effect after a restart. The check does not stop
+a session that is still running: a session keeps the mode it was started with until
+you stop it.</p>
 <p>The <code>inherit</code> permission mode (<strong>No forced mode</strong> in the launch picker) cannot itself
 <em>request</em> <code>bypassPermissions</code>, and Clauster refuses to write that value into any
 <code>settings.json</code> it manages. <strong>But the caveat is structural:</strong> because no
