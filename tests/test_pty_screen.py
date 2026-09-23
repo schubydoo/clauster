@@ -573,7 +573,57 @@ _REJECTED_SEQUENCES = (
     pytest.param(b"\x1b[5;4X", TypeError, id="csi-arity-erase-characters"),
     pytest.param(b"\x1b[4J", UnboundLocalError, id="erase-in-display-out-of-range"),
     pytest.param(b"\x1b[4K", UnboundLocalError, id="erase-in-line-out-of-range"),
+    # A parameter `str.isdigit` accepts and `int` rejects (#1355): subscript two, superscript
+    # two, circled one, and a digit run past Python's 4,300-digit `int` limit.
+    pytest.param("\x1b[₂m".encode(), ValueError, id="csi-subscript-digit"),
+    pytest.param("\x1b[²J".encode(), ValueError, id="csi-superscript-digit"),
+    pytest.param("\x1b[1;①H".encode(), ValueError, id="csi-circled-digit"),
+    pytest.param(
+        b"\x1b[" + b"1" * 5000 + b"C",
+        ValueError,
+        id="csi-over-long-digit-run",
+        # The limit is the interpreter's; PYTHONINTMAXSTRDIGITS=0 turns it off.
+        marks=pytest.mark.skipif(
+            not 0 < sys.get_int_max_str_digits() < 5000, reason="no int digit limit below 5000"
+        ),
+    ),
 )
+
+
+def _screen_state(scr: PtyScreen) -> tuple:
+    s = scr._screen
+    # `buffer.get`, not `buffer[y]`: indexing the defaultdict would insert the line it reads.
+    cells = [
+        [(c.data, c.fg, c.bg, c.bold) for c in s.buffer.get(y, {}).values()]
+        for y in range(s.lines)
+    ]
+    return (
+        list(s.display),
+        s.cursor.x,
+        s.cursor.y,
+        s.cursor.attrs,
+        set(s.mode),
+        cells,
+        s.margins,
+        s.title,
+        s.charset,
+        set(s.tabstops),
+    )
+
+
+@pytest.mark.parametrize(("seq", "error"), _REJECTED_SEQUENCES)
+def test_a_rejected_sequence_leaves_the_screen_exactly_as_it_was(seq, error):
+    # The fact that makes absorbing the fault safe: pyte raised before anything was drawn,
+    # moved or restyled. Colour, a cursor move and a mode are set first so a change shows.
+    scr = PtyScreen(cols=20, rows=4)
+    scr.feed(b"\x1b[31mred\x1b[2;3Hxy\x1b[4h")
+    before = _screen_state(scr)
+    parser = scr._stream._parser
+    assert isinstance(scr.feed(seq), error)
+    assert _screen_state(scr) == before
+    # pyte replaced its parser generator (`Stream._send_to_parser`), so the next feed starts
+    # from the idle state rather than inside the rejected sequence.
+    assert scr._stream._parser is not parser
 
 
 @pytest.mark.parametrize(("seq", "error"), _REJECTED_SEQUENCES)
@@ -624,6 +674,162 @@ def test_osc8_capture_still_runs_on_a_chunk_pyte_rejected():
     scr = PtyScreen(cols=100, rows=6, capture_osc8=True)
     assert scr.feed(b"\x1b[1;2C" + _osc8(_OSC8_AUTH, label="Open link")) is not None
     assert scr.find_authorize_url() == _OSC8_AUTH
+
+
+# --- the same bytes render the same screen at any chunking (#1355) -----------------------
+#
+# pyte's `Screen.draw` gets the text of one read and stops at the first character it cannot
+# place, so the text after it in THAT read was lost, and whether it was lost depended on where
+# the read ended. These are the shapes from the issue and the fuzz harness.
+_CHUNK_SHAPES = (
+    pytest.param(b"see \x03here", id="c0-control"),
+    pytest.param(b"see \xc2\x93here", id="c1-control"),
+    pytest.param(b"see \xde\xa7here", id="zero-width-non-combining"),
+    pytest.param(b"see \xe2\x80\x8dhere", id="zero-width-joiner"),
+    pytest.param(b"cafe\xcc\x81 ok", id="combining-mark"),
+    pytest.param(b"wide \xe4\xb8\x80\x03here", id="wide-char-then-control"),
+    pytest.param(b"\x1b[31mred\x1b[0m \x07bell \x1b]0;title\x07after", id="escapes"),
+    pytest.param(b"\x1b%@\xe4\xb8\x80 \x1b%G\xe4\xb8\x80", id="charset-switch"),
+)
+
+
+def _render(chunks: list[bytes], cols: int = 12, rows: int = 4) -> tuple:
+    scr = PtyScreen(cols=cols, rows=rows)
+    for chunk in chunks:
+        assert scr.feed(chunk) is None
+    return tuple(scr._screen.display), scr._screen.cursor.x, scr._screen.cursor.y
+
+
+def _every_split(payload: bytes) -> list[list[bytes]]:
+    return [[payload[:i], payload[i:]] for i in range(1, len(payload))] + [
+        [payload[i : i + 1] for i in range(len(payload))]
+    ]
+
+
+@pytest.mark.parametrize("payload", _CHUNK_SHAPES)
+def test_render_is_the_same_at_every_chunk_boundary(payload):
+    # Narrow enough that "here" wraps, so draw's end-of-line handling is inside the comparison.
+    whole = _render([payload])
+    for chunks in _every_split(payload):
+        assert _render(chunks) == whole, chunks
+
+
+def test_text_after_an_unplaceable_character_is_kept():
+    # The concrete loss: stock pyte rendered only "see " for this single read.
+    assert _render([b"see \x03here"], cols=20)[0][0].rstrip() == "see here"
+    assert _render([b"see \xc2\x93here"], cols=20)[0][0].rstrip() == "see here"
+
+
+def test_an_unplaceable_character_at_the_edge_still_wraps_like_a_one_byte_read():
+    # pyte wraps the cursor for a character at the right margin before it decides the
+    # character cannot be placed. The lone draw call for that character keeps that step.
+    payload = b"abcde\x03f"
+    assert _render([payload], cols=5, rows=2) == _render([payload[:6], payload[6:]], 5, 2)
+    assert _render([payload], cols=5, rows=2)[0] == ("abcde", "f    ")
+    # Ending on the control isolates the step: only drawing it moves the cursor to the next
+    # row. Stock pyte gives (0, 1) here for one read and for one byte per read alike.
+    assert _render([b"abcde\x03"], cols=5, rows=2)[1:] == (0, 1)
+
+
+@pytest.mark.parametrize("control", [b"\x03", b"\xc2\x93", b"\xde\xa7"])
+def test_authorize_url_after_a_control_is_found_at_every_chunk_boundary(control):
+    url = "https://claude.com/cai/oauth/authorize?client_id=abc&state=xyz"
+    payload = b"see " + control + url.encode() + b"\r\n"
+    for chunks in [[payload], *_every_split(payload)]:
+        scr = PtyScreen(cols=200, rows=6, capture_osc8=True)
+        for chunk in chunks:
+            scr.feed(chunk)
+        assert scr.find_authorize_url() == url, chunks
+
+
+def test_connect_url_after_a_control_is_found_in_one_read():
+    scr = PtyScreen(cols=100, rows=4)
+    scr.feed(b"\x03https://claude.ai/code/session_01ABCDEFGHIJKLMNOP\r\n")
+    assert scr.find_session_id() == "session_01ABCDEFGHIJKLMNOP"
+
+
+def test_text_the_fix_now_renders_is_still_redacted():
+    # Invariant 4. The id after the control used to be dropped from a single read. It now
+    # renders, so the frame must mask it, at every chunking.
+    payload = b"id \x03session_01ABCDEFGHIJKLMNOP cse_01JABCDEFGHJKMNPQ end"
+    for chunks in [[payload], *_every_split(payload)]:
+        scr = PtyScreen(cols=80, rows=2)
+        for chunk in chunks:
+            scr.feed(chunk)
+        row = scr.frame()["rows"][0]
+        assert not _BARE_ID_RE.search(row), (chunks, row)
+        assert row.startswith("id <redacted> <redacted> end"), (chunks, row)
+
+
+def test_charset_switch_is_ignored_so_utf8_always_decodes():
+    # A stock stream switched to Latin-1 at the NEXT read after `ESC % @`, so the character
+    # after it decoded as UTF-8 or as three Latin-1 characters depending on the chunking.
+    assert _render([b"\x1b%@", b"\xe4\xb8\x80"])[0][0].startswith("一")
+    assert _render([b"\x1b%@\xe4\xb8\x80"])[0][0].startswith("一")
+
+
+def test_a_pyte_without_its_wcwidth_fails_as_pyte_unavailable():
+    # The draw split needs pyte's own `screens.wcwidth`. A pyte without it must fail when
+    # the classes are built, with the error every caller already reports, not mid-stream.
+    import types
+
+    broken = types.ModuleType("pyte")
+    with pytest.raises(PyteUnavailableError):
+        pty_screen._pyte_classes(broken)
+
+
+def test_draw_pieces_splits_only_at_characters_draw_cannot_place():
+    wcwidth = __import__("pyte").screens.wcwidth
+    assert pty_screen._draw_pieces("plain ascii", "plain ascii", wcwidth) == ["plain ascii"]
+    text = "a\x03b\u0301c\u07a7一x"
+    assert pty_screen._draw_pieces(text, text, wcwidth) == [
+        "a",
+        "\x03",
+        "b\u0301c",
+        "\u07a7",
+        "一x",
+    ]
+    assert pty_screen._draw_pieces("\x03", "\x03", wcwidth) == ["\x03"]
+    # The test is made on the translated text; the pieces are cut from the original.
+    assert pty_screen._draw_pieces("ab", "a\x03", wcwidth) == ["a", "b"]
+
+
+def test_render_is_chunk_invariant_on_random_streams():
+    # A seeded differential over the byte classes that reach `draw` and the parser. A feed
+    # that returns a fault is excluded: pyte drops the rest of that read, which is the one
+    # documented chunk dependence left (#1357). So is the half-overwritten wide character
+    # whose `display` read raises in pyte, which the fuzz harness also skips.
+    import random
+
+    alphabet = [
+        b"a", b"Z", b" ", b"\x03", b"\x1b", b"[", b"]", b"8", b";", b"1", b"2", b"H", b"m",
+        b"\x07", b"\r", b"\n", b"\x08", b"\t", b"\x18", b"\x0e", b"%", b"@", b"G", b"(",
+        b"\xe2", b"\x82", b"\xff", "\u0301".encode(), "\u07a7".encode(), "\u200d".encode(),
+        "\x93".encode(), "\x9b".encode(), "\x9d".encode(), "一".encode(),
+    ]  # fmt: skip
+    rng = random.Random(1355)  # noqa: S311 — a reproducible test stream, not crypto
+
+    def render(chunks: list[bytes]) -> tuple | None:
+        scr = PtyScreen(cols=7, rows=3)
+        if any(scr.feed(chunk) is not None for chunk in chunks):
+            return None
+        try:
+            return tuple(scr._screen.display), scr._screen.cursor.x, scr._screen.cursor.y
+        except IndexError:
+            return None
+
+    compared = 0
+    for _ in range(3000):
+        data = b"".join(rng.choice(alphabet) for _ in range(rng.randint(2, 30)))
+        cuts = sorted(rng.sample(range(1, len(data)), min(rng.randint(1, 5), len(data) - 1)))
+        offsets = [0, *cuts, len(data)]
+        chunks = [data[a:b] for a, b in zip(offsets, offsets[1:], strict=False)]
+        whole, split = render([data]), render(chunks)
+        if whole is None or split is None:
+            continue
+        compared += 1
+        assert whole == split, chunks
+    assert compared > 2000  # the exclusions above must not hollow the check out
 
 
 def test_default_geometry_is_120x40():
@@ -1043,6 +1249,11 @@ def test_external_pyte_path_loads_pyte_on_frozen_binary(monkeypatch, tmp_path):
     sentinel = "EXTERNAL_PYTE_SENTINEL_699"
     (tmp_path / "pyte.py").write_text(
         "EXTERNAL_PYTE_SENTINEL_699 = True\n"
+        "\n"
+        "import types\n"
+        "\n"
+        "# `PtyScreen` binds pyte's `screens.wcwidth` when it builds its classes (#1355).\n"
+        "screens = types.SimpleNamespace(wcwidth=len)\n"
         "\n"
         "class Screen:\n"
         "    def __init__(self, cols, rows):\n"

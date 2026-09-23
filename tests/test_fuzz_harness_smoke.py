@@ -687,6 +687,28 @@ def test_pty_screen_feed_invariance_oracle_fires_on_a_broken_carry(
         harness.check(rejected, rejected_mid, 80, 24, True)
 
 
+def test_pty_screen_feed_invariance_oracle_fires_on_a_chunk_dependent_render(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Undo the #1355 draw split; the harness must notice the rendered screen diverge.
+
+    The rendered readers joined ``_INVARIANT_KEYS`` with the fix, so this is the proof that
+    comparing them can fail: with stock pyte's ``draw`` back, a read that holds a C0 control
+    and the text after it loses that text, and a split read keeps it.
+    """
+    pty_screen = pytest.importorskip("clauster.pty_screen")
+    pytest.importorskip("pyte")
+
+    harness = _load("pty_screen_feed_fuzzer.py")
+    stream = b"see \x03https://claude.com/cai/oauth/authorize?client_id=abc\r\n"
+    mid = [5 * 256 // len(stream) + 1]  # a cut just after the control character
+    harness.check(stream, mid, 80, 24, True)  # fixed: passes
+
+    monkeypatch.setattr(pty_screen, "_draw_pieces", lambda data, shown, wcwidth: [data])
+    with pytest.raises(AssertionError, match="^chunk-boundary divergence in 'screen'"):
+        harness.check(stream, mid, 80, 24, True)
+
+
 def test_pty_screen_feed_harness_crashes_on_a_defect_in_clausters_own_scan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -756,14 +778,18 @@ def test_pty_screen_feed_absorbs_the_escape_sequences_pyte_rejects() -> None:
     ``PtyScreen.feed`` catches the raise and returns it, so the screen stays in use (#1357).
     Before that the ``pty_keeper`` handler disabled the live view AND the pyte connect-URL
     scrape for the rest of the session. The raw ``pyte`` half is pinned so a ``pyte`` upgrade
-    that fixes either defect fails ``just check``. That is the prompt to revisit the absorption
-    in ``PtyScreen.feed``, instead of leaving it guarding nothing.
+    that fixes any of the defects fails ``just check``. That is the prompt to revisit the
+    absorption in ``PtyScreen.feed``, instead of leaving it guarding nothing.
     """
     pty_screen = pytest.importorskip("clauster.pty_screen")
     pyte = pytest.importorskip("pyte")
 
-    for seq, error in ((b"\x1b[1;2C", TypeError), (b"\x1b[4J", UnboundLocalError)):
-        with pytest.raises(error):  # CSI arity (a modified cursor key); out-of-range erase
+    for seq, error in (
+        (b"\x1b[1;2C", TypeError),  # CSI arity (a modified cursor key)
+        (b"\x1b[4J", UnboundLocalError),  # out-of-range erase
+        (b"\x1b[\xe2\x82\x82m", ValueError),  # U+2082: `isdigit` but not `int` (#1355)
+    ):
+        with pytest.raises(error):
             pyte.ByteStream(pyte.Screen(80, 24)).feed(seq)
         assert isinstance(pty_screen.PtyScreen(cols=80, rows=24).feed(seq), error)
 
@@ -885,19 +911,26 @@ def test_yaml_tags_are_inside_the_frontmatter_contract() -> None:
         harness.check(text)  # asserted on now, not skipped
 
 
-def test_pyte_render_is_still_chunk_dependent() -> None:
-    """PIN: pyte drops the rest of a read after a character it cannot place.
+def test_pyte_render_is_still_chunk_dependent_and_pty_screen_is_not() -> None:
+    """PIN: stock pyte drops the rest of a read after a character it cannot place (#1355).
 
-    ``pty_screen_feed_fuzzer`` asserts chunk-boundary invariance only over the OSC 8
-    reassembly (``_INVARIANT_KEYS``), because the pyte-rendered readers are not invariant.
-    That carve-out is the widest in the harness, so the three triggers behind it are pinned
-    here — if pyte fixes any of them, this fails and the reader set should be widened.
+    ``PtyScreen`` renders through the ``pty_screen._pyte_classes`` overrides, which make the
+    same bytes render the same screen at any chunking, and ``pty_screen_feed_fuzzer`` now
+    compares the rendered readers too. The stock half is pinned so a ``pyte`` release that
+    fixes ``Screen.draw`` upstream fails here, which tells the reader the override can go.
 
-    Not cosmetic: the last case is an authorize URL that a single-read delivery loses
-    entirely and a split delivery finds.
+    Not cosmetic: the last case is an authorize URL that a single-read delivery lost
+    entirely and a split delivery found.
     """
     pty_screen = pytest.importorskip("clauster.pty_screen")
-    pytest.importorskip("pyte")
+    pyte = pytest.importorskip("pyte")
+
+    def stock(chunks: list[bytes]) -> str:
+        screen = pyte.Screen(80, 6)
+        stream = pyte.ByteStream(screen)
+        for chunk in chunks:
+            stream.feed(chunk)
+        return screen.display[0].rstrip()
 
     def render(chunks: list[bytes]) -> str:
         screen = pty_screen.PtyScreen(cols=80, rows=6, capture_osc8=True)
@@ -908,11 +941,11 @@ def test_pyte_render_is_still_chunk_dependent() -> None:
     for label, payload in (
         ("C0 control", b"\x03."),
         ("C1 control", b"\xc2\x93."),
-        ("combining mark", b"\xde\xa7A"),
+        ("zero-width non-combining mark", b"\xde\xa7A"),
     ):
-        whole = render([payload])
-        split = render([payload[:-1], payload[-1:]])
-        assert whole != split, f"{label}: pyte is now chunk-invariant — widen _INVARIANT_KEYS"
+        split = [payload[:-1], payload[-1:]]
+        assert stock([payload]) != stock(split), f"{label}: pyte is now chunk-invariant"
+        assert render([payload]) == render(split) == stock(split), label
 
     url = b"https://claude.com/cai/oauth/authorize?client_id=abc"
     payload = b"see \x03" + url + b"\r\n"
@@ -923,7 +956,7 @@ def test_pyte_render_is_still_chunk_dependent() -> None:
             screen.feed(chunk)
         return screen.find_authorize_url()
 
-    assert authorize([payload]) is None, "the single-read loss is fixed — widen the harness"
+    assert authorize([payload]) == url.decode()  # one read: found since #1355
     assert authorize([payload[i : i + 1] for i in range(len(payload))]) == url.decode()
 
 

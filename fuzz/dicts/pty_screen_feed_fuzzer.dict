@@ -66,8 +66,8 @@
 "\x08"
 "\x09"
 
-# the control and combining shapes pyte renders chunk-dependently (see the module
-# docstring): kept so the corpus retains them for the properties still asserted on them
+# the control and zero-width shapes stock pyte renders chunk-dependently (see the module
+# docstring): kept so the corpus keeps driving the draw split that fixed them (#1355)
 "\x03"
 "\xc2\x93"
 "\xde\xa7"
