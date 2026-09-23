@@ -29,6 +29,7 @@ import cycle.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import json
 import os
@@ -36,7 +37,7 @@ import re
 import sys
 import threading
 import unicodedata
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -513,6 +514,10 @@ def _import_pyte() -> Any:
 #: handler is dispatched. After each raise the rendered text, cursor, cell attributes, modes,
 #: margins and title were unchanged, pyte had reset its parser, and the next feed parsed
 #: normally.
+#:
+#: ``AssertionError`` is deliberately not here. pyte raised it for origin mode with no scroll
+#: margins set, which is a state pyte cannot handle, not a rejected input, so
+#: :func:`_pyte_classes` fixes the state instead (#1607).
 _PYTE_INPUT_FAULTS: tuple[type[Exception], ...] = (TypeError, UnboundLocalError, ValueError)
 
 
@@ -557,24 +562,67 @@ def _draw_pieces(data: str, shown: str, wcwidth: Any) -> list[str]:
 def _pyte_classes(pyte: Any) -> tuple[Any, Any]:
     """Return the ``Screen`` and ``ByteStream`` subclasses :class:`PtyScreen` renders with.
 
-    Built on first use, because ``pyte`` is an optional import. Both overrides exist so the
-    same bytes render the same screen however the reads split them (#1355).
+    Built on first use, because ``pyte`` is an optional import. The ``draw`` and charset
+    overrides exist so the same bytes render the same screen however the reads split them
+    (#1355). The origin-mode overrides keep a sequence a real terminal accepts from raising
+    (#1607).
     """
-    # Bound here, not on each draw, so a pyte without it fails when the screen is built, as
+    # Bound here, not on each draw, so a pyte without them fails when the screen is built, as
     # the same helpful error a missing pyte gives, and not at the first non-ASCII read.
     try:
         wcwidth = pyte.screens.wcwidth
+        margins_class = pyte.screens.Margins
+        origin_mode = pyte.modes.DECOM
     except AttributeError as exc:
         raise PyteUnavailableError(_pyte_unavailable_message()) from exc
 
     class _Screen(pyte.Screen):
-        """A ``pyte.Screen`` whose ``draw`` keeps the text after a character it skips."""
+        """A ``pyte.Screen`` that keeps text after a skipped character and allows origin mode.
+
+        Origin mode (DECOM, ``ESC[?6h``) makes line numbers count from the top scroll margin.
+        pyte stores "no margins set" as ``margins = None``, and two handlers read
+        ``self.margins.top`` under origin mode without a check: ``cursor_to_line`` (VPA,
+        ``ESC[3d``) and ``report_device_status`` (the cursor report, ``ESC[6n``). Each one
+        asserts that margins are set, so it raises ``AssertionError``, and under
+        ``python -O`` the assert is gone and it raises ``AttributeError`` (#1607). A real
+        terminal has no such state: with no margins set, the scroll region is the full
+        screen. These two handlers run with the full-screen margins in place for the call,
+        and ``None`` is put back after it. Every other handler in pyte 0.8.2 that reads
+        margins already treats ``None`` as the full screen.
+        """
 
         def draw(self, data: str) -> None:
             """Draw ``data`` in the pieces :func:`_draw_pieces` splits it into."""
             table = self.g1_charset if self.charset else self.g0_charset
             for piece in _draw_pieces(data, data.translate(table), wcwidth):
                 super().draw(piece)
+
+        def cursor_to_line(self, *args: Any, **kwargs: Any) -> None:
+            """Move to a line, counting from the full screen in origin mode with no margins."""
+            with self._full_screen_origin():
+                super().cursor_to_line(*args, **kwargs)
+
+        def report_device_status(self, *args: Any, **kwargs: Any) -> None:
+            """Report status, counting from the full screen in origin mode with no margins."""
+            with self._full_screen_origin():
+                super().report_device_status(*args, **kwargs)
+
+        @contextlib.contextmanager
+        def _full_screen_origin(self) -> Iterator[None]:
+            """Set the full-screen margins for one call if origin mode is on with none set.
+
+            Does nothing when margins are set or origin mode is off, so pyte runs unchanged.
+            ``None`` is put back even when the call raises (an arity ``TypeError``), so a
+            later ``ESC[r`` and every other margin reader see the state pyte left.
+            """
+            if self.margins is not None or origin_mode not in self.mode:
+                yield
+                return
+            self.margins = margins_class(0, self.lines - 1)
+            try:
+                yield
+            finally:
+                self.margins = None
 
     class _ByteStream(pyte.ByteStream):
         """A ``pyte.ByteStream`` that stays in UTF-8.
