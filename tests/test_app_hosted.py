@@ -498,6 +498,35 @@ def test_hosted_resume_gate_says_the_same_thing_in_all_five_places(
     assert "It cannot be resumed: it has neither a project nor a usable conversation" in body
 
 
+def test_hosted_ended_banner_is_built_from_the_row_on_every_render(
+    write_config, projects_root, monkeypatch
+):
+    """The View panel's ended banner follows the latest poll instead of latching (#1467).
+
+    It used to be computed once when the session ended and stored on the view, so an open
+    panel kept "Use Resume above" after the row's Resume button was gone. The browser E2E
+    `test_hosted_ended_banner_rereads_the_latest_snapshot` drives the behaviour; these pins
+    keep the shape in the required suite, which has no JS runner.
+    """
+    monkeypatch.setattr(app_module, "ClaustrumDaemon", _NoopDaemon)
+    config = load_config(write_config("claustrum:\n  enabled: true\n"))
+    app = create_app(config)
+    app.state.hosted = _StubManager()
+    with TestClient(app) as client:
+        body = client.get("/").text
+    # The banner renders from `h`, the row the panel sits under, on every render.
+    assert 'data-test="hosted-ended-reason" x-text="hostedEndedText(h)"' in body
+    # No stored sentence is left to latch: the view keeps only the frame's own text.
+    assert "endedReason" not in body
+    assert "if (fallback) v.endedFallback = fallback;" in body
+    # The Resume hint carries the status half of the Resume button's `x-if` as well, so a
+    # row that still reads "running" (a frame that beat the poll) is not told to Resume.
+    assert (
+        'if (["crashed", "stopped", "error"].includes(h.status)) {\n'
+        '            resume = " Use Resume above to continue it.";'
+    ) in body
+
+
 def test_hosted_status_badge_colors_match_bridge(write_config, projects_root, monkeypatch):
     # #430: the hosted badge map must speak the same colour-to-meaning language as
     # the bridge STATUS_BADGE in the shared Active list. The three divergent

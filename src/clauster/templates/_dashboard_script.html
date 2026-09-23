@@ -4943,7 +4943,7 @@
         const view = { open: true, ws: null, token, lastSeq: after, events: prev ? prev.events : [],
                        nextKey: prev ? (prev.nextKey || 0) : 0,
                        input: prev ? prev.input : "", sending: false, connLost: false,
-                       ended: false, endedReason: "", attempts: prev ? prev.attempts : 0 };
+                       ended: false, endedFallback: "", attempts: prev ? prev.attempts : 0 };
         this.hostedView[id] = view;
         const self = this;
         // Resolve the LIVE view as the reactive proxy (or null if retired). Return the proxy
@@ -4975,7 +4975,7 @@
           // The 4s /api/hosted poll keeps `hosted` fresh, so this converges.
           const h = self.hosted.find((x) => x.claustrum_process_id === id);
           if (!h || !["running", "starting"].includes(h.status)) {
-            self._markHostedEnded(id, h);
+            self._markHostedEnded(id);
             return;
           }
           // Cap consecutive failed reconnects: if the snapshot still reads "running" but the socket
@@ -4985,7 +4985,7 @@
           // Give-up surfaces via _markHostedEnded (the "no longer live" banner) — the hosted analog of
           // the bridge-log tail's give-up `lost` banner.
           if (w.attempts >= MAX_LOG_RECONNECTS) {
-            self._markHostedEnded(id, h);
+            self._markHostedEnded(id);
             return;
           }
           w.attempts += 1;
@@ -5000,16 +5000,25 @@
         v.open = false;  // before close(), so the onclose handler sees it as intentional
         if (v.ws) { try { v.ws.close(); } catch (e) {} }
       },
-      // Surface a terminal hosted session in the live view: explain why it ended (with the
-      // server's error_detail when present) and stop the reconnect loop. Resume (when the
-      // session kept BOTH the uuid and the project) stays the recovery path, shown on the
-      // row above.
-      _markHostedEnded(id, h, fallback) {
+      // Surface a terminal hosted session in the live view and stop the reconnect loop.
+      // Only the streamed frame's own text is kept here, because the snapshot does not
+      // carry it; a later frame replaces it, and a call without one leaves it alone. The
+      // banner's sentence is NOT stored: `hostedEndedText` builds it from the latest
+      // snapshot row on every render (#1467). Storing it latched whatever the poll said
+      // at the moment the session ended, so an open panel kept "Use Resume above" after
+      // the row's Resume button was gone.
+      _markHostedEnded(id, fallback) {
         const v = this.hostedView[id];
         if (!v) return;
         v.ended = true;
         v.connLost = false;
-        if (!v.endedReason) v.endedReason = this._hostedEndedReason(h, fallback);
+        if (fallback) v.endedFallback = fallback;
+      },
+      // The View panel's ended banner. `h` is the row the panel renders under, so it is
+      // always the latest /api/hosted snapshot and the text follows every poll.
+      hostedEndedText(h) {
+        const v = this.hostedView[h.claustrum_process_id];
+        return this._hostedEndedReason(h, v ? v.endedFallback : "");
       },
       // Lead with whatever best explains the end: the snapshot's status phrasing, else a
       // streamed exit/lost frame's text (`fallback`), else a generic line. Either way we
@@ -5039,7 +5048,12 @@
         // the halves are salvaged independently, so "neither" is a real state.
         let resume = "";
         if (h && h.claude_session_uuid_usable && h.project) {
-          resume = " Use Resume above to continue it.";
+          // The status half of the row's `x-if` too: a terminal frame can beat the poll, and
+          // a reconnect give-up can fire on a stale "running" row. Neither renders Resume, so
+          // this names it only once the snapshot reports an ended status (#1467).
+          if (["crashed", "stopped", "error"].includes(h.status)) {
+            resume = " Use Resume above to continue it.";
+          }
         } else if (h && h.project) {
           // No follow-up action named, for the reason the chip gives (dashboard.html): on an
           // orphan row this sentence lands beside one telling the operator to Kill, and two
@@ -5064,13 +5078,14 @@
         if (typeof e.event_seq === "number") { v.lastSeq = e.event_seq; v.connLost = false; }
         // A terminal frame means the session is over: gate the composer and stop the
         // reconnect loop (its renderable marker/error item still gets pushed below).
-        // Route through _markHostedEnded with the snapshot row so error_detail + the
-        // Resume hint survive a frame that beats the poll; the frame text is the fallback.
+        // The frame text is only the fallback: the banner re-reads the snapshot row on
+        // every render, so error_detail + the Resume hint still arrive with the next poll
+        // when this frame beats it.
         if (e.type === "exit" || e.type === "lost") {
           const fallback = e.type === "lost"
             ? "Stream lost — " + (e.reason || "the daemon connection dropped.")
             : "Session ended" + (e.exit_code != null ? " (exit " + e.exit_code + ")." : ".");
-          this._markHostedEnded(id, this.hosted.find((x) => x.claustrum_process_id === id), fallback);
+          this._markHostedEnded(id, fallback);
         }
         // A resolution flips the matching parked-permission item; it adds no new line.
         if (e.type === "control_resolved") {

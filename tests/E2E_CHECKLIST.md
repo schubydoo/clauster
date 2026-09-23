@@ -201,6 +201,12 @@ These are off by default. Set the flag, restart, hard-refresh, then verify.
         bridge is not silently resumed as pty, nor vice-versa).
       - With the flag unset (default `standard`), bridges use the subcommand server and
         Resume produces a fresh, empty-context session (no conversation resume).
+- [ ] **Hosted View panel, ended banner** — set `claustrum.enabled: true`. Open **View** on
+      an ended hosted row. The banner explains why the session ended and names **Resume**
+      only while the row shows a Resume button. It follows every poll, so it never keeps a
+      stale "Use Resume above" (#1467). **`[auto]`** (`test_hosted_view_e2e.py`, with the
+      `/api/hosted` snapshot driven from the page). A real daemon-backed session stays
+      manual.
 
 ## When adding a new gated/config feature
 
