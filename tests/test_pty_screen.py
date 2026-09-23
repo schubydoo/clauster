@@ -879,6 +879,10 @@ def test_a_pyte_without_its_wcwidth_fails_as_pyte_unavailable():
     no_margins.modes = types.SimpleNamespace(DECOM=192)  # type: ignore[attr-defined]
     with pytest.raises(PyteUnavailableError):
         pty_screen._pyte_classes(no_margins)
+    no_modes = types.ModuleType("pyte")
+    no_modes.screens = types.SimpleNamespace(wcwidth=len, Margins=tuple)  # type: ignore[attr-defined]
+    with pytest.raises(PyteUnavailableError):
+        pty_screen._pyte_classes(no_modes)
 
 
 def test_draw_pieces_splits_only_at_characters_draw_cannot_place():

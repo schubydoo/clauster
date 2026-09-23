@@ -808,7 +808,7 @@ def test_pty_screen_feed_fixes_origin_mode_with_no_margins_instead_of_absorbing_
     pyte = pytest.importorskip("pyte")
 
     for seq in (b"\x1b[?6h\x1b[3d", b"\x1b[?6h\x1b[6n"):
-        with pytest.raises(AssertionError):
+        with pytest.raises((AssertionError, AttributeError)):  # AttributeError under -O
             pyte.ByteStream(pyte.Screen(80, 24)).feed(seq)
         assert pty_screen.PtyScreen(cols=80, rows=24).feed(seq) is None
     harness = _load("pty_screen_feed_fuzzer.py")
