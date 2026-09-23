@@ -188,8 +188,9 @@ def _redact(text: str, pasted_secrets: Iterable[str] = ()) -> str:
 
 
 #: Exit code :meth:`_ConPtyPopen.poll` / :meth:`_ConPtyPopen.wait` report when ``isalive()``
-#: FAULTS (not merely returns False): a non-zero, non-None value so the flow finalizes as a
-#: failure and the caller never re-enters pywinpty on a handle that just refused to answer.
+#: FAULTS (not merely returns False), or when the reaping ``wait()`` after a clean "dead"
+#: raises (#1466): a non-zero, non-None value so the flow finalizes as a failure and the
+#: caller never re-enters pywinpty on a handle that just refused to answer.
 #: Out of band on purpose: ``1`` is what a real ``claude`` failure reports, and the operator
 #: message is built from the number, so a handle fault must not read as a login failure.
 #: ``73`` is the same "no exit status available" convention :mod:`~clauster.pty_keeper` uses
@@ -259,10 +260,11 @@ class _ConPtyPopen:
         """Wrap the live pywinpty `PtyProcess`, serializing handle access behind `lock`."""
         self._proc = proc
         self._lock = lock or threading.Lock()
-        #: The fault text from the first `isalive()` fault `poll`/`wait` saw, else None. The
-        #: synthetic :data:`_CONPTY_FAULT_EXIT` says only THAT the handle faulted; this says
-        #: WHY, so `_finalize_exited` can put the cause in the operator message and `_teardown`
-        #: can tell a faulted handle from a cleanly-exited child (#1422).
+        #: The fault text from the first `isalive()` or reaping-`wait()` fault `poll`/`wait`
+        #: saw, else None. The synthetic :data:`_CONPTY_FAULT_EXIT` says only THAT the handle
+        #: faulted; this says WHY, so `_finalize_exited` can put the cause in the operator
+        #: message and `_teardown` can tell a faulted handle from a cleanly-exited child
+        #: (#1422, #1466).
         self.fault: str | None = None
 
     def poll(self) -> int | None:
@@ -278,9 +280,7 @@ class _ConPtyPopen:
                 # flow finalizes as a failure rather than stranding (#1422).
                 self.fault = self.fault or error
                 return _CONPTY_FAULT_EXIT
-            # Cleanly dead → `wait()` returns the cached status at once without blocking. It
-            # may return None on some pywinpty builds → coerce to 0.
-            return self._proc.wait() or 0
+            return self._reap_exited()
 
     def wait(self, timeout: float | None = None) -> int:
         """Block until the process exits (or raise `subprocess.TimeoutExpired`).
@@ -299,10 +299,29 @@ class _ConPtyPopen:
                     self.fault = self.fault or error
                     return _CONPTY_FAULT_EXIT
                 if not alive:
-                    return self._proc.wait() or 0
+                    return self._reap_exited()
             if deadline is not None and time.monotonic() >= deadline:
                 raise subprocess.TimeoutExpired(cmd="claude setup-token", timeout=timeout or 0)
             time.sleep(_POLL_INTERVAL_SECONDS)
+
+    def _reap_exited(self) -> int:
+        """Return the exit status of a child `isalive()` just reported dead; call under the lock.
+
+        Cleanly dead → pywinpty's `wait()` returns the cached status at once without blocking.
+        It may return None on some pywinpty builds → coerce to 0. It can also raise on a handle
+        pywinpty can no longer query (its `WinptyError` is NOT an `OSError`). Unguarded, that
+        raise escaped `LoginShepherd.poll` and left the login flow `active` until the operator
+        cancelled (#1466). So a raise is read the way an `isalive()` fault is: record the cause
+        on `self.fault` and report :data:`_CONPTY_FAULT_EXIT`, so the flow finalizes as a named
+        failure instead of stranding (invariant 1). Mirrors `pty_keeper._run_keeper_conpty`,
+        which guards the same reaping `wait()`.
+        """
+        try:
+            return self._proc.wait() or 0
+        except Exception as exc:  # noqa: BLE001 — any pywinpty fault → a named synthetic exit
+            _log.debug("login_shepherd: conpty wait failed: %s", exc)
+            self.fault = self.fault or f"conpty wait failed: {exc}"
+            return _CONPTY_FAULT_EXIT
 
     def terminate(self) -> None:
         """Signal the process to terminate (graceful)."""

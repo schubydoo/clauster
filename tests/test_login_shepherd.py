@@ -2122,6 +2122,82 @@ def test_conpty_handle_fault_names_the_cause_and_still_stops_the_child(
     assert faulting.terminated == [False]  # one best-effort graceful stop, no kill escalation
 
 
+class _WaitRaisesProc:
+    """pywinpty stand-in that is cleanly dead (`isalive()` False) but whose `wait()` raises.
+
+    The reaping `wait()` after a clean "dead" is a separate site from the `isalive()` fault
+    above: pywinpty can raise its own WinptyError (NOT an OSError) there too (#1466).
+    """
+
+    def __init__(self):
+        self.terminated: list[bool] = []
+        self.wait_calls = 0
+
+    def isalive(self):
+        return False
+
+    def wait(self):
+        self.wait_calls += 1
+        raise RuntimeError("WinptyError: cannot read the exit status of a stale handle")
+
+    def terminate(self, force=False):
+        self.terminated.append(force)
+
+
+def test_conpty_popen_poll_reads_a_wait_fault_as_a_synthetic_exit() -> None:
+    # Unguarded, the raise escaped `poll()` and so `LoginShepherd.poll` (#1466). It now reports
+    # the out-of-band fault exit and keeps the cause for the operator message.
+    proc = _WaitRaisesProc()
+    popen = ls._ConPtyPopen(proc)
+    assert popen.poll() == ls._CONPTY_FAULT_EXIT
+    assert proc.wait_calls == 1
+    assert popen.fault is not None and "conpty wait failed" in popen.fault
+    assert "stale handle" in popen.fault
+
+
+def test_conpty_popen_wait_reads_a_wait_fault_as_a_synthetic_exit() -> None:
+    # Same site under `wait()` (what `_teardown` and `submit_code` use): the synthetic exit,
+    # returned at once, rather than the raise.
+    popen = ls._ConPtyPopen(_WaitRaisesProc())
+    assert popen.wait(timeout=5) == ls._CONPTY_FAULT_EXIT
+    assert popen.fault is not None and "conpty wait failed" in popen.fault
+
+
+def test_conpty_popen_keeps_the_first_fault_over_a_later_wait_fault() -> None:
+    # `fault` names the FIRST cause: an earlier `isalive()` fault is not overwritten by a
+    # later reaping-`wait()` fault on the same handle.
+    popen = ls._ConPtyPopen(_IsaliveRaisesProc())
+    assert popen.poll() == ls._CONPTY_FAULT_EXIT
+    popen._proc = _WaitRaisesProc()  # noqa: SLF001 - internals test
+    assert popen.poll() == ls._CONPTY_FAULT_EXIT
+    assert popen.fault is not None and "conpty liveness check failed" in popen.fault
+
+
+def test_conpty_wait_fault_ends_the_login_flow_instead_of_stranding_it(
+    shepherd, monkeypatch
+) -> None:
+    # The #1466 strand, end to end: the child exits cleanly (`isalive()` False) but pywinpty's
+    # reaping `wait()` raises. `LoginShepherd.poll` must return a terminal, named failure and
+    # clear the flow, not raise with the flow still `active` until the operator cancels.
+    fake = _make_fake_conpty()
+    _use_conpty(monkeypatch, fake)
+    shepherd.start("setup-token")
+    flow = shepherd._flow  # noqa: SLF001 - internals test
+    flow.pty_process._alive = False  # noqa: SLF001 - fake internals: let the reader finish
+    faulting = _WaitRaisesProc()
+    flow.proc._proc = faulting  # noqa: SLF001 - internals test
+
+    result = shepherd.poll()
+
+    assert result["ok"] is False
+    assert "pending" not in result  # terminal, not "still verifying"
+    assert "lost its terminal handle" in result["message"]
+    assert "conpty wait failed" in result["message"]
+    assert f"exited with code {ls._CONPTY_FAULT_EXIT}" not in result["message"]
+    assert not shepherd.is_active()  # the flow is cleared, not stranded active
+    assert faulting.terminated == [False]  # `_teardown`'s one best-effort stop on a fault
+
+
 # --- _spawn_conpty + full start/submit flow -----------------------------------------
 
 
