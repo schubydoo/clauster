@@ -370,6 +370,16 @@ Three layers:
     visible there. The fixed-length `AKIA…` key stays visible together with the
     UUID it welds to, because it cannot backtrack.
 
+On the live pty-screen view, a long token can wrap onto the next row, and
+neither half matches a mask alone. Clauster joins the wrapped rows before it
+masks. This covers the terminal's own wrap at the right edge, and a wrap that
+Claude's TUI makes itself: the row stops short of the edge, and the next row
+starts after an indent. Clauster treats two rows as one wrapped line only when
+the first word of the lower row does not fit at the end of the upper row. Two
+gaps remain. A very short tail under a wide right margin is not joined, and a
+token that wraps inside one cell of a multi-column table is not at the row
+edge.
+
 ### Hybrid by default
 
 Redaction is **hybrid** by default: the on-disk log keeps IDs verbatim (for local

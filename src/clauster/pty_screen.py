@@ -175,6 +175,45 @@ _OSC8_MAX_CARRY = 4096
 _OSC8_MAX_URLS = 64
 
 
+#: How far short of the right edge a row can stop and still count as a soft wrap (#1508). A
+#: TUI can wrap its text inside a right margin: a Claude frame measured 2026-09-23 broke a word
+#: mid-way at column 113 of 120, with its continuation indented. See :func:`_soft_wraps`.
+_SOFT_WRAP_SLACK = 8
+
+
+def _soft_wraps(row: str, below: str) -> bool:
+    """Report whether ``below`` can be the program's own soft wrap of ``row`` (#1508).
+
+    Claude's TUI wraps a long line itself. The upper row can stop short of the right edge, and
+    the lower row starts after a hanging indent, so pyte never marks it as a wrap. A program
+    wraps only when the next word does not fit, so that is the test: the first word of
+    ``below``, placed one space after the text of ``row``, must pass the right edge less
+    :data:`_SOFT_WRAP_SLACK`. A row that ends mid-screen and a next row whose first word would
+    have fitted there are separate lines, and are never joined. A row filled to the edge always
+    passes, because nothing more fits on it.
+
+    The right edge is ``len(row)``, not the column count. pyte pads each ``display`` row to the
+    full width, but a wide (CJK) character fills two cells and adds one character, so a row
+    that holds one is shorter than the column count by that many characters.
+
+    A seam with no whitespace on either side (pyte's own edge-to-edge wrap onto column 0) is
+    not a soft wrap: there is no layout whitespace to remove, and the verbatim join already
+    reads the logical line.
+
+    RESIDUE: under a right margin wider than the slack, a continuation whose first word is
+    shorter than the difference is not joined, so those few characters of a split token can
+    still show. A first word of wide characters is counted one per character, so it reads as
+    shorter than it is. A token split inside a multi-column table cell is not at the row edge.
+    """
+    end = len(row.rstrip())
+    words = below.split(maxsplit=1)
+    if not end or not words:
+        return False
+    if end == len(row) and not below[0].isspace():
+        return False
+    return end + 1 + len(words[0]) > len(row) - _SOFT_WRAP_SLACK
+
+
 def _unwrap_display(display: list[str]) -> str:
     r"""Reassemble ``display`` rows into text, joining hard-wrapped continuation lines.
 
@@ -795,24 +834,34 @@ class PtyScreen:
         weld forms. An unwrapped single row takes the plain per-row path
         (:meth:`_fit_redacted_row`), whose width-refit belt (#1359) still guards a trailing-welded
         id there. Each returned row is fit to the fixed width.
+
+        A row ALSO continues into the next when the program in the terminal soft-wrapped it
+        (:func:`_soft_wraps`, #1508): Claude's TUI breaks a long line itself, short of the edge
+        and with a hanging indent on the continuation, and a verbatim join keeps that whitespace
+        inside the split token. Such a seam is passed as soft, so the redactor also rebuilds the
+        logical line without the layout whitespace. That view CAN weld two lines, so the width
+        test in :func:`_soft_wraps` is what keeps two separate lines from being read as one.
         """
         out: list[str] = []
         i = 0
         total_rows = len(display)
         while i < total_rows:
             start = i
-            # A row continues into the next when it is filled edge-to-edge: a non-space last cell
-            # (a hard wrap), or a single trailing space after content (a wrap AT a space, e.g. a
-            # `bearer ` header whose value went to the next row). A padded line-end has several
-            # trailing spaces, so it does not continue.
-            while (
-                i < total_rows - 1
-                and display[i]
-                and (
-                    not display[i][-1].isspace()
-                    or (len(display[i]) >= 2 and not display[i][-2].isspace())
+            soft_seams: list[bool] = []
+            while i < total_rows - 1:
+                row = display[i]
+                # A row continues into the next when it is filled edge-to-edge: a non-space last
+                # cell (a hard wrap), or a single trailing space after content (a wrap AT a
+                # space, e.g. a `bearer ` header whose value went to the next row). A padded
+                # line-end has several trailing spaces, so it does not continue, unless the
+                # program soft-wrapped it.
+                hard = bool(row) and (
+                    not row[-1].isspace() or (len(row) >= 2 and not row[-2].isspace())
                 )
-            ):
+                soft = _soft_wraps(row, display[i + 1])
+                if not (hard or soft):
+                    break
+                soft_seams.append(soft)
                 i += 1
             group = display[start : i + 1]
             i += 1
@@ -820,7 +869,8 @@ class PtyScreen:
                 out.append(self._fit_redacted_row(redact_screen_text(group)[0]))
             else:
                 out.extend(
-                    self._fit_redacted_row(r) for r in redact.redact_wrapped_screen_rows(group)
+                    self._fit_redacted_row(r)
+                    for r in redact.redact_wrapped_screen_rows(group, soft_seams=soft_seams)
                 )
         return out
 

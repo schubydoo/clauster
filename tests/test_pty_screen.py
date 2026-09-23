@@ -1029,7 +1029,7 @@ def test_redact_wrapped_rows_masks_inside_each_row_without_reflow():
 
     row0 = "session_01ABCDEFGHIJ" + " " * 20  # 40 wide; the id masks to a shorter <redacted>
     row1 = "K" * 40  # unrelated full-width content swept into the same group
-    out = redact.redact_wrapped_screen_rows([row0, row1])
+    out = redact.redact_wrapped_screen_rows([row0, row1], soft_seams=[False])
     assert out[1] == row1  # row1 verbatim -- not reflowed by row0's shorter mask
     assert "<redacted>" in out[0] and "session_01" not in out[0]
 
@@ -1042,7 +1042,7 @@ def test_redact_wrapped_rows_unions_welded_secret_tokens():
     from clauster import redact
 
     out = redact.redact_wrapped_screen_rows(
-        ["ghp_ABCDEFGHIJKLMNOPQRST", "sk-ABCDEFGHIJKLMNOPQRSTB", "l4zR"]
+        ["ghp_ABCDEFGHIJKLMNOPQRST", "sk-ABCDEFGHIJKLMNOPQRSTB", "l4zR"], soft_seams=[False, False]
     )
     # The shared body appears in BOTH secrets; it must survive in neither row (sequential
     # application leaves the sk- tail, the union masks it).
@@ -1114,6 +1114,167 @@ def test_frame_masks_a_wrapped_look_alike_the_safe_direction():
     joined = "".join(scr.frame()["rows"])
     assert "session_transcript" not in joined  # the look-alike fragment is masked (safe)
     assert "<redacted>" in joined
+
+
+# --- #1508: a secret Claude's TUI soft-wraps with a hanging indent -------------------------
+
+
+def _tui_wrap(text: str, width: int, *, words: bool) -> list[str]:
+    """Break ``text`` into lines of at most ``width`` the way a TUI does (#1508).
+
+    ``words=False`` breaks every ``width`` characters, mid-token. ``words=True`` moves a word
+    that does not fit to the next line, and breaks a word longer than a line mid-way after
+    filling the current one (``wrap-ansi``'s ``hard`` mode, which Ink uses).
+    """
+    if not words:
+        return [text[i : i + width] for i in range(0, len(text), width)]
+    lines = [""]
+    for word in text.split(" "):
+        joined = f"{lines[-1]} {word}" if lines[-1] else word
+        if len(joined) <= width:
+            lines[-1] = joined
+            continue
+        if len(word) <= width:
+            lines.append(word)
+            continue
+        head = f"{lines[-1]} " if lines[-1] else ""
+        if len(head) >= width:
+            lines.append("")
+            head = ""
+        lines[-1] = head + word[: width - len(head)]
+        word = word[width - len(head) :]
+        while word:
+            lines.append(word[:width])
+            word = word[width:]
+    return lines
+
+
+def _tui_screen(text: str, *, cols: int, margin: int, indent: int, words: bool):
+    """Render ``text`` as Claude's TUI lays out a message: a marker, then a hanging indent.
+
+    The text box is ``cols - margin - indent`` wide, so a wrapped row stops ``margin`` short of
+    the right edge and each continuation starts ``indent`` columns in. Rows are written with an
+    explicit CR LF, as the TUI does, so pyte never sees an edge-to-edge wrap of its own.
+    Returns the ``PtyScreen`` and the rows written.
+    """
+    lines = _tui_wrap(text, cols - margin - indent, words=words)
+    rows = ["⏺" + " " * (indent - 1) + lines[0]] + [" " * indent + line for line in lines[1:]]
+    scr = PtyScreen(cols=cols, rows=30)
+    scr.feed("\r\n".join(rows).encode())
+    return scr, rows
+
+
+# The two repro strings from the issue, as `printf`/`python3 -c` print them, and the part of
+# each that is the secret. `:end` follows the `sk-` token and is not part of it.
+_SOFT_WRAP_REPROS = [
+    ("weld=bearer live0123456789abcdef", "live0123456789abcdef"),
+    ("wrap=sk-" + "a" * 140 + ":end", "sk-" + "a" * 140),
+]
+
+
+def _secret_fragments(secret: str) -> set[str]:
+    """Every three-character slice of ``secret``: any one left in a frame is a leak."""
+    return {secret[i : i + 3] for i in range(len(secret) - 2)}
+
+
+@pytest.mark.parametrize(("text", "secret"), _SOFT_WRAP_REPROS)
+@pytest.mark.parametrize("cols", [40, 80, 120])
+def test_frame_masks_a_secret_the_tui_soft_wraps_with_a_hanging_indent(text, secret, cols):
+    # #1508, safety invariant 4. Claude's TUI wraps a long line itself: the upper row can stop
+    # short of the edge, and the continuation starts after a hanging indent, so pyte never marks
+    # a wrap and a verbatim join keeps the indent inside the token. Neither row fragment matches,
+    # and the tail reached the browser raw. Across widths, right margins (0, and the 7 measured
+    # on a real Claude frame), indents, both break styles and several start columns, no three
+    # characters of the secret may survive. Reverting `_soft_wraps` to `return False` fails this.
+    leaks = []
+    for margin in (0, 2, 7):
+        for indent in (2, 5, 10):
+            for words in (False, True):
+                for pad in (0, 3, 7, 11):
+                    line = f"{'x' * pad} {text}" if pad else text
+                    scr, rows = _tui_screen(
+                        line, cols=cols, margin=margin, indent=indent, words=words
+                    )
+                    shown = "\n".join(scr.frame()["rows"])
+                    left = sorted(f for f in _secret_fragments(secret) if f in shown)
+                    if left:
+                        leaks.append((margin, indent, words, pad, left[:3], rows))
+    assert not leaks, leaks[:3]
+
+
+def test_frame_soft_wrap_mask_keeps_the_layout():
+    # #1508: masking the logical line must not move any text. Every row keeps its hanging indent,
+    # a row with no mask is byte-identical to the rendered screen, and the frame stays exactly
+    # cols x rows.
+    scr, rows = _tui_screen(
+        "wrap=sk-" + "a" * 140 + ":end", cols=80, margin=7, indent=5, words=True
+    )
+    display = list(scr._screen.display)
+    frame = scr.frame()
+    assert len(frame["rows"]) == 30 and all(len(row) == 80 for row in frame["rows"])
+    for shown, rendered in zip(frame["rows"], display, strict=True):
+        if "<redacted>" in shown:
+            indent = len(rendered) - len(rendered.lstrip())
+            assert shown[:indent] == rendered[:indent]  # the hanging indent is not shifted
+        else:
+            assert shown == rendered
+    assert frame["rows"][len(rows) - 1].strip().endswith(":end")  # text after the token stays
+
+
+def test_frame_still_masks_a_secret_that_does_not_wrap():
+    # #1508 guard: a secret wholly on one TUI row still masks, and the next line stays readable.
+    scr = PtyScreen(cols=80, rows=4)
+    scr.feed("⏺ token sk-ABCDEFGHIJKLMNOPQRSTUV set\r\n  done".encode())
+    rows = scr.frame()["rows"]
+    assert "ABCDEFGH" not in rows[0] and "<redacted>" in rows[0]
+    assert rows[1].rstrip() == "  done"
+
+
+@pytest.mark.parametrize(
+    ("upper", "lower"),
+    [
+        # A complete id ends a short row. Joined, the id would swallow `Connected`.
+        ("⏺ id: session_01ABCDEFGHJK", "  Connected to the bridge"),
+        # A complete secret ends a row near the edge, but `ok` would have fitted after it.
+        ("⏺ " + "x" * 70 + " sk-ABCDEFGHIJKLMNOPQRST", "  ok"),
+        # A secret-shaped head ends a short row. Joined with the next row it would be a whole
+        # `sk-` token, and both rows would be masked.
+        ("⏺ prefix sk-ABCDEFGHIJ", "  KLMNOPQRSTUVWX tail"),
+    ],
+)
+def test_frame_does_not_join_separate_lines_that_line_up(upper, lower):
+    # #1508 guard. Two lines the program wrote separately are not a soft wrap when the first word
+    # of the lower one would have fitted on the upper one. Joining them anyway would build a
+    # false logical line and mask real text on the lower row.
+    scr = PtyScreen(cols=120, rows=4)
+    scr.feed(f"{upper}\r\n{lower}".encode())
+    rows = scr.frame()["rows"]
+    assert rows[1].rstrip() == lower
+
+
+def test_soft_wraps_needs_the_next_word_not_to_fit():
+    # #1508: the soft-wrap test in isolation, at 40 columns (slack 8, so the edge is column 32).
+    pad = " " * 40
+    assert pty_screen._soft_wraps(("a" * 30 + pad)[:40], ("  bcd" + pad)[:40])
+    assert not pty_screen._soft_wraps(("a" * 20 + pad)[:40], ("  bcd" + pad)[:40])
+    assert not pty_screen._soft_wraps(pad, ("  bcd" + pad)[:40])  # a blank upper row
+    assert not pty_screen._soft_wraps(("a" * 30 + pad)[:40], pad)  # a blank lower row
+    # pyte's own edge-to-edge wrap onto column 0 has no layout whitespace: not a soft wrap.
+    assert not pty_screen._soft_wraps("a" * 40, ("bcd" + pad)[:40])
+    # A full row whose continuation is indented is one (Claude wraps at the edge too).
+    assert pty_screen._soft_wraps("a" * 40, ("  bcd" + pad)[:40])
+
+
+def test_frame_masks_a_soft_wrapped_secret_after_wide_characters():
+    # #1508: a wide (CJK) character fills two cells but is one character of the row string, so
+    # the row is shorter than `cols`. The soft-wrap edge is the row's own length. The upper row
+    # ends at cell 26 of 40, so the 12-character tail cannot fit after it, and this is a wrap.
+    # Counted in characters against `cols`, the row would look eight cells shorter and the
+    # tail would seem to fit, so the rows would not join and the tail would leak.
+    scr = PtyScreen(cols=40, rows=4)
+    scr.feed(("⏺ " + "漢" * 8 + " sk-ABCD\r\n  EFGHIJKLMNOP").encode())
+    shown = "".join(scr.frame()["rows"])
+    assert "EFGH" not in shown and "ABCD" not in shown
 
 
 def test_no_control_bytes_ever_reach_rows():
