@@ -460,7 +460,7 @@
                       <span x-text="hostedStopping[h.claustrum_process_id] ? 'Killing…' : 'Kill'">Kill</span>
                     </button>
                   </template>
-                  <button type="button" class="btn btn-sm btn-ghost-secondary" @click="toggleHosted(h.claustrum_process_id)"
+                  <button type="button" class="btn btn-sm btn-ghost-secondary" data-test="hosted-view-toggle" @click="toggleHosted(h.claustrum_process_id)"
                           x-text="(hostedView[h.claustrum_process_id] && hostedView[h.claustrum_process_id].open) ? 'Hide' : 'View'">View</button>
                   <button type="button" class="btn btn-sm btn-outline-danger" x-show="['running', 'starting'].includes(h.status)"
                           :disabled="!!hostedStopping[h.claustrum_process_id]" @click="stopHosted(h)">
@@ -483,8 +483,10 @@
                        x-show="hostedView[h.claustrum_process_id].connLost && !hostedView[h.claustrum_process_id].ended" x-cloak>
                     Live link dropped — reconnecting…
                   </div>
+                  {# Built from `h` on every render, not stored at the moment the session ended,
+                     so the reason and the Resume hint follow the latest poll (#1467). #}
                   <div class="alert alert-secondary py-1 px-2 mb-2" x-show="hostedView[h.claustrum_process_id].ended" x-cloak
-                       x-text="hostedView[h.claustrum_process_id].endedReason || 'This session has ended — it is no longer live.'"></div>
+                       data-test="hosted-ended-reason" x-text="hostedEndedText(h)"></div>
                   <div class="border rounded p-2 hosted-stream" :id="'hosted-stream-' + h.claustrum_process_id">
                     <template x-for="it in hostedView[h.claustrum_process_id].events" :key="it._key">
                       <div class="mb-1">

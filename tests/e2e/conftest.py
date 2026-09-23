@@ -247,6 +247,22 @@ def reaper_server(tmp_path_factory: pytest.TempPathFactory, projects_tree: Path)
         yield server.url
 
 
+@pytest.fixture(scope="module")
+def hosted_server(tmp_path_factory: pytest.TempPathFactory, projects_tree: Path) -> Iterator[str]:
+    """A loopback clauster with the claustrum hosted channel enabled but no daemon.
+
+    ``claustrum.enabled: true`` renders the hosted rows and their View panel. The binary
+    points at a path that does not exist, so the daemon fails closed at startup (bridges
+    and startup are unaffected) and ``/ws/hosted/<id>`` closes every socket as unknown.
+    The tests stub the ``/api/hosted`` poll in the page to drive the snapshot rows.
+    """
+    tmp = tmp_path_factory.mktemp("e2e-hosted")
+    missing = (tmp / "no-claustrum").as_posix()
+    extra = f"claustrum:\n  enabled: true\n  binary: {missing}\n"
+    for server in _start_server(tmp, projects_tree, extra=extra):
+        yield server.url
+
+
 @pytest.fixture
 def bypass_server(
     tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
