@@ -734,11 +734,15 @@ def read_nested_subtree(
     reads as ``None`` — a missing local config is simply empty. A file that exists but is
     unparseable (non-UTF-8, malformed JSON, or not a JSON object) raises
     :class:`InvalidCandidateError` (→ 422): we never treat an unreadable config as empty.
+    A file that exists but cannot be read (EACCES, a directory at the path) raises a
+    plain :class:`ConfigWriteError` (→ 400) naming only the file, never an ``OSError``.
     """
     try:
         raw = claude_json.read_bytes()
     except FileNotFoundError:
         raw = b""
+    except OSError:
+        raise ConfigWriteError(f"cannot read {claude_json.name}: it is unreadable") from None
     data = load_settings_json_obj(raw)
     outer = data.get(outer_key)
     if not isinstance(outer, dict):

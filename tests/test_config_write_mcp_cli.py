@@ -1603,6 +1603,29 @@ def test_route_approvals_read_corrupt_claude_json_is_422(
         assert resp.status_code == 422
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "/api/config-write/mcp/approvals?project=alpha",
+        "/api/config-write/mcp?scope=local&project=alpha",
+    ],
+    ids=["approvals", "local-servers"],
+)
+def test_route_read_unreadable_claude_json_is_400(
+    write_config, tmp_path, projects_root, url: str
+) -> None:
+    # Issue 1528 follow-up: a ~/.claude.json that exists but cannot be read (here a
+    # directory at the path, which fails read_bytes on every OS) makes read_nested_subtree
+    # raise a typed ConfigWriteError -> 400, never an OSError that escapes as a 500. The
+    # detail names only the file, never its absolute path.
+    (Path(os.environ["HOME"]) / ".claude.json").mkdir()
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.get(url)
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert detail == "cannot read .claude.json: it is unreadable"
+
+
 def test_route_approvals_read_corrupt_settings_file_still_200(
     write_config, tmp_path, projects_root
 ) -> None:
