@@ -434,8 +434,9 @@ class Rediscovery:
             permission_mode=permission_mode,
             resume_mode=resume_mode,
             # Carry the persisted sandbox choice (#780) so a resume of this STOPPED card
-            # re-applies the same --sandbox/--no-sandbox (or neither). pty is out of
-            # scope, so a pty record coerces to "default" harmlessly.
+            # re-applies the same --sandbox/--no-sandbox (or neither). pty is out of scope:
+            # `_saved_sandbox` does not coerce a pty record, but the resume path in
+            # spawn_coordinator sends only "default" to a pty bridge.
             sandbox_mode=self._saved_sandbox(saved),
             # Carried so a Resume of this card lands back in the worktree the session
             # actually ran in, not one derived from an id it was rediscovered under (#1241).

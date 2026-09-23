@@ -1060,7 +1060,7 @@ def test_instance_sandbox_mode_migration_adds_and_drops_nullable_column(tmp_path
         engine.dispose()
 
 
-@pytest.mark.real_migration  # Persistence must run 0014 itself; the template copy would not
+@pytest.mark.real_migration  # defensive: the DB file exists, so the stub runs the real upgrade
 def test_pre_sandbox_row_reads_back_as_default_through_persistence(tmp_path, monkeypatch):
     # #1101: a database written by a pre-0014 build is upgraded by Persistence on the next
     # boot. Its existing row must load with `sandbox_mode` absent (NULL dropped by `_present`)
