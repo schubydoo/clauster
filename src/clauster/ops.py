@@ -10,6 +10,7 @@ import contextlib
 import json
 import ntpath
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -52,24 +53,64 @@ class Check:
     detail: str
 
 
+# A comparable version: an optional ``v``, dotted ASCII-digit segments, then semver's optional
+# ``-pre.release`` and ``+build`` suffixes. See :func:`_parse_version` for the segment count.
+_VERSION_RE = re.compile(
+    r"v?(?P<core>[0-9]+(?:\.[0-9]+)*)"
+    r"(?:-(?P<pre>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+)
+
+_PreKey = tuple[int, tuple[tuple[int, int, str], ...]]
+_ParsedVersion = tuple[tuple[int, ...], _PreKey]
+
+
+def _parse_version(v: str, *, floor: bool) -> _ParsedVersion | None:
+    """Return ``(core ints, pre-release sort key)`` for a version token, or ``None``.
+
+    ``None`` means the token is not version-shaped — a git SHA, ``claustrum-dev``, an empty
+    string — and so cannot be compared at all. The pre-release key follows semver precedence:
+    a release sorts above any of its pre-releases, numeric identifiers compare as numbers and
+    sort below alphanumeric ones, and a shorter identifier list sorts first.
+
+    ``floor`` says which side the token is. A floor is operator-written config, so a single
+    segment (``2`` meaning 2.0.0) is accepted. A *reported* version must have at least
+    MAJOR.MINOR: an all-digit short SHA like ``1234567`` from ``--version`` is otherwise a
+    valid integer that clears any floor (#1304).
+    """
+    m = _VERSION_RE.fullmatch(v)
+    if m is None or (not floor and "." not in m["core"]):
+        return None
+    core = tuple(int(p) for p in m["core"].split("."))
+    if m["pre"] is None:
+        return core, (1, ())
+    idents = tuple((0, int(i), "") if i.isdigit() else (1, 0, i) for i in m["pre"].split("."))
+    return core, (0, idents)
+
+
+def _parsed_ge(have: _ParsedVersion, want: _ParsedVersion) -> bool:
+    """Return whether parsed ``have`` is at or above parsed ``want``.
+
+    Cores compare numerically with a missing part read as 0 (``2.1`` == ``2.1.0``), and a
+    pre-release ranks below its release.
+    """
+    (a_core, a_pre), (b_core, b_pre) = have, want
+    n = max(len(a_core), len(b_core))
+    a_core += (0,) * (n - len(a_core))
+    b_core += (0,) * (n - len(b_core))
+    return (a_core, a_pre) >= (b_core, b_pre)
+
+
 def _version_ge(have: str, want: str) -> bool:
-    """Compare dotted versions numerically (2.1.156 >= 2.1.145). Missing/odd parts -> 0."""
+    """Return whether reported version ``have`` is at or above floor ``want`` (2.1.156 >= 2.1.145).
 
-    def parse(v: str) -> tuple[int, ...]:
-        """Split a dotted version into an int tuple, keeping each segment's digits.
-
-        ``v1`` -> 1 (the leading letter is dropped, which is what lets a ``v1.7.1``-shaped
-        token compare against a bare floor); a segment with no digits at all becomes 0.
-        """
-        parts = []
-        for seg in v.split("."):
-            digits = "".join(c for c in seg if c.isdigit())
-            parts.append(int(digits) if digits else 0)
-        return tuple(parts)
-
-    a, b = parse(have), parse(want)
-    n = max(len(a), len(b))
-    return a + (0,) * (n - len(a)) >= b + (0,) * (n - len(b))
+    A token that is not version-shaped on either side answers ``False``: "cannot confirm",
+    never a pass (#1304). It used to scavenge the digits out of every segment, so a bare commit
+    SHA became one enormous integer that cleared any floor. A caller that must tell "too old"
+    from "unparseable" parses with :func:`_parse_version` and compares with :func:`_parsed_ge`.
+    """
+    a, b = _parse_version(have, floor=False), _parse_version(want, floor=True)
+    return a is not None and b is not None and _parsed_ge(a, b)
 
 
 def run_doctor(
@@ -192,7 +233,27 @@ def run_doctor(
     # claude binary + version
     try:
         version = claude_cli.claude_version(config.claude.binary)
-        if _version_ge(version, config.claude.min_version):
+        floor = config.claude.min_version
+        have_v = _parse_version(version, floor=False)
+        floor_v = _parse_version(floor, floor=True)
+        if have_v is None or floor_v is None:
+            # Unparseable on either side is "cannot confirm", which for this hard floor is a
+            # FAIL — never the "< required" line below (it would claim an ordering) and never
+            # an OK (a bare SHA used to parse into a huge integer and pass, #1304). Name the
+            # side that failed: the fixes differ (reinstall claude vs. edit clauster.yml).
+            bad = []
+            if have_v is None:
+                bad.append(
+                    f"`claude --version` reported {version!r}, which is not a dotted numeric "
+                    f"version — reinstall claude via the installer"
+                )
+            if floor_v is None:
+                bad.append(
+                    f"min_version {floor!r} is not a numeric version — set "
+                    f"claude.min_version to a version such as 2.1.145"
+                )
+            checks.append(Check("claude", FAIL, "cannot compare: " + "; ".join(bad)))
+        elif _parsed_ge(have_v, floor_v):
             checks.append(Check("claude", OK, f"{version} (>= {config.claude.min_version})"))
         else:
             checks.append(
@@ -487,8 +548,8 @@ def _claustrum_embedded_version(binary: str) -> str | None:
     at some other Go program reports unknown, not that program's version), and the version must
     be a plain **release** ``vX.Y.Z`` — nothing else. A source build records ``(devel)``, and a
     commit build records a *pseudo-version* (``v1.9.0-0.<timestamp>-<hash>`` denotes a commit
-    **before** the v1.9.0 release), which ``_version_ge``'s numeric comparison would read as
-    clearing a ``v1.9.0`` floor. Neither is an answer; both fall back to the honest advisory.
+    **before** the v1.9.0 release). Neither names a release, so neither is an answer; both fall
+    back to the honest advisory.
     """
     main = _go_main_module(binary)
     if main is None:
@@ -535,10 +596,11 @@ def _check_claustrum_version(resolved: str) -> Check:
     hard floor would flag the common ``go install …@latest`` / local dev build.
 
     When ``--version`` can't confirm the floor — the unstamped ``claustrum-dev`` sentinel every
-    ``go install`` build carries, an unparseable token, or a probe that failed — the embedded Go
-    module version is consulted (#1087). That turns "unstamped/dev **or** older build" from one
-    indistinguishable shrug into a definite statement of which release is installed. If it too
-    yields nothing, the original advisory stands.
+    ``go install`` build carries, an unparseable token such as a bare commit SHA (#1304), or a
+    probe that failed — the embedded Go module version is consulted (#1087). That turns
+    "unstamped/dev **or** older build" from one indistinguishable shrug into a definite
+    statement of which release is installed. If it too yields nothing, the original advisory
+    stands.
     """
     floor = deps.claustrum_pinned_version()
     version, probe_error = "", ""

@@ -64,7 +64,7 @@ It prints one line per check and exits non-zero if any check **fails**. Checks:
 | Check | What it verifies | Failure vs warning |
 | --- | --- | --- |
 | `config` | `clauster.yml` loads and passes the fail-closed validators. | **FAIL** if missing/invalid. |
-| `claude` | The `claude` binary is present and `>= claude.min_version`. | **FAIL** if absent, too old, or the probe errors. |
+| `claude` | The `claude` binary is present and `>= claude.min_version`. | **FAIL** if absent, too old, or the probe errors, or if the reported version or `min_version` is not a numeric version (for example a bare commit SHA), because doctor cannot confirm the floor. |
 | `claude-login` | The runtime user's `claude` CLI has usable credentials (a spawned bridge inherits the operator's login). | **WARN** — `ANTHROPIC_API_KEY` is a valid alternative; a missing/expired token is recoverable with `claude`. |
 | `projects_root` | `projects_root` exists and is a directory. | **FAIL** if not. |
 | `state_dir` | `state_dir` is writable (or creatable under an existing ancestor). | **FAIL** if not writable. |
