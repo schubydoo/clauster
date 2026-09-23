@@ -1466,6 +1466,8 @@ def _client(
     enabled: bool,
     auth_enabled: bool = False,
     allow_setup_token: bool = False,
+    conpty_fake: object | None = None,
+    raise_server_exceptions: bool = True,
 ) -> TestClient:
     (tmp_path / "projects").mkdir(exist_ok=True)
     cfg = _cfg(
@@ -1474,7 +1476,11 @@ def _client(
         tmp_path=tmp_path,
         allow_setup_token=allow_setup_token,
     )
-    return TestClient(create_app(cfg))
+    app = create_app(cfg)
+    if conpty_fake is not None:
+        # Inject an in-progress ConPTY flow driven by a fake pywinpty handle.
+        app.state.login_shepherd._flow = _conpty_flow(conpty_fake)  # noqa: SLF001 - internals test
+    return TestClient(app, raise_server_exceptions=raise_server_exceptions)
 
 
 def test_flag_defaults_false(tmp_path: Path) -> None:
@@ -2349,13 +2355,6 @@ def test_teardown_joins_and_closes_when_conpty_terminate_raises_but_the_child_di
     assert not shepherd.is_active()
 
 
-def _app_with_conpty_flow(tmp_path: Path, fake):
-    (tmp_path / "projects").mkdir(exist_ok=True)
-    app = create_app(_cfg(login_shepherd_enabled=True, auth_enabled=False, tmp_path=tmp_path))
-    app.state.login_shepherd._flow = _conpty_flow(fake)  # noqa: SLF001 - internals test
-    return app
-
-
 def test_status_route_answers_when_the_conpty_terminate_raises(tmp_path: Path) -> None:
     # The route shape of the terminate fault: a transient `isalive()` fault makes /status
     # finalize (synthetic exit), then `_teardown`'s own poll sees the child alive and its
@@ -2364,8 +2363,7 @@ def test_status_route_answers_when_the_conpty_terminate_raises(tmp_path: Path) -
     fake = _StopRaisesConPty(
         alive_script=[RuntimeError("WinptyError: transient"), True], alive_after=False
     )
-    app = _app_with_conpty_flow(tmp_path, fake)
-    with TestClient(app, raise_server_exceptions=False) as c:
+    with _client(tmp_path, enabled=True, conpty_fake=fake, raise_server_exceptions=False) as c:
         resp = c.post("/api/login-shepherd/status")
         assert resp.status_code == 200
         body = resp.json()
@@ -2381,8 +2379,7 @@ def test_code_route_answers_when_the_conpty_terminate_raises(tmp_path: Path) -> 
     # then `_teardown`'s poll sees the child alive and `terminate()` raises. 200, not 500.
     fault = RuntimeError("WinptyError: transient")
     fake = _StopRaisesConPty(alive_script=[fault, fault, True], alive_after=False)
-    app = _app_with_conpty_flow(tmp_path, fake)
-    with TestClient(app, raise_server_exceptions=False) as c:
+    with _client(tmp_path, enabled=True, conpty_fake=fake, raise_server_exceptions=False) as c:
         resp = c.post("/api/login-shepherd/code", json={"code": "the-code"})
         assert resp.status_code == 200
         body = resp.json()
