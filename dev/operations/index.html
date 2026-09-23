@@ -1839,7 +1839,7 @@ panel uses, from the CLI:</p>
 <tr>
 <td><code>claude</code></td>
 <td>The <code>claude</code> binary is present and <code>&gt;= claude.min_version</code>.</td>
-<td><strong>FAIL</strong> if absent, too old, or the probe errors.</td>
+<td><strong>FAIL</strong> if absent, too old, or the probe errors, or if the reported version or <code>min_version</code> is not a numeric version (for example a bare commit SHA), because doctor cannot confirm the floor.</td>
 </tr>
 <tr>
 <td><code>claude-login</code></td>

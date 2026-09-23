@@ -2730,6 +2730,17 @@ minutes is also reclaimed automatically by the next sign-in attempt.</p>
 the installer) to reach &gt;= &lt;min_version&gt;</code>.</p>
 <p><strong>The fix:</strong> <code>claude update</code> (as the same user Clauster runs as), then re-run
 <code>clauster doctor</code>.</p>
+<p>If the row starts with <code>cannot compare:</code> instead, doctor cannot confirm the
+floor, so it fails the row. The message names the value that is not a
+version:</p>
+<ul>
+<li><code>min_version '&lt;value&gt;' is not a numeric version</code>: set
+  <code>claude.min_version</code> in <code>clauster.yml</code> to a version such as <code>2.1.145</code>. A
+  single number such as <code>2</code> is also accepted and means <code>2.0.0</code>.</li>
+<li><code>`claude --version` reported '&lt;value&gt;'</code>: the installed <code>claude</code> printed
+  something that is not a version, for example a bare commit SHA. Reinstall
+  <code>claude</code> with the installer.</li>
+</ul>
 <h2 id="an-interactive-session-pty-bridge-is-wedged">An Interactive Session (pty) bridge is wedged<a class="headerlink" href="#an-interactive-session-pty-bridge-is-wedged" title="Permanent link">&para;</a></h2>
 <h3 id="the-live-log-tail-is-silent-or-frozen">The live log tail is silent or frozen<a class="headerlink" href="#the-live-log-tail-is-silent-or-frozen" title="Permanent link">&para;</a></h3>
 <p><strong>What you see:</strong> the dashboard's live log view stops updating.</p>
@@ -2904,7 +2915,7 @@ present in every run:</p>
 <tr>
 <td><code>claude</code></td>
 <td>binary found, version ≥ <code>min_version</code></td>
-<td>not on PATH, or too old — see above</td>
+<td>not on PATH, too old, or a version that cannot be compared — see above</td>
 </tr>
 <tr>
 <td><code>claude-login</code></td>
@@ -2981,7 +2992,8 @@ added, so read the prefix rather than expecting this page to enumerate them:</p>
   For claustrum the row also reports the <strong>detected version</strong> from <code>claustrum
   --version</code> and warns (advisorily — never a doctor failure) when it can't be
   confirmed at or above the release clauster pins. A <code>go install</code>-built binary
-  keeps the unstamped <code>claustrum-dev</code> sentinel, so when <code>--version</code> can't confirm
+  keeps the unstamped <code>claustrum-dev</code> sentinel, and a local build can report a
+  bare commit SHA. Neither is a version, so when <code>--version</code> can't confirm
   the floor doctor reads the module version Go embeds in every binary and names
   the release outright — <code>claustrum v1.3.1 &lt; required v1.7.1</code> rather than a
   can't-tell shrug. That fallback stays quiet unless it is certain: a build info
