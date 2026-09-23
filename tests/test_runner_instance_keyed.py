@@ -346,6 +346,232 @@ async def test_keeper_reattach_does_not_card_itself_under_a_pid_less_rows_id(
     assert runner.get_instance("iid-pidless") is None
 
 
+def _write_keeper_sidecar(runner, stem_ms: int, **fields) -> None:
+    """Write one ``ready`` keeper sidecar for project ``alpha``; a larger ``stem_ms`` is newer."""
+    runner._log_dir.mkdir(parents=True, exist_ok=True)
+    (runner._log_dir / f"alpha-{stem_ms}-0.keeper.json").write_text(
+        json.dumps({"bridge_proc_start": 222.0, "state": "ready", **fields})
+    )
+
+
+async def test_rediscover_reattaches_every_live_keeper_of_a_project(runner_config, monkeypatch):
+    # #1307. Two live pty sessions on ONE project, both of whose rows went pid-less. The
+    # sidecar leg returned after the FIRST ready sidecar, so the second live keeper got no
+    # card and no Stop, and the uncorrelated-keeper block kept its row hidden too, until the
+    # next restart. Every live keeper must come back, each as itself.
+    runner = _make_runner(runner_config)
+    _stub_connect(monkeypatch)
+    runner.persistence.state_store().save(
+        {
+            "iid-pidless-a": _row("alpha", pid=None, label="session-A"),
+            "iid-pidless-b": _row("alpha", pid=None, label="session-B"),
+        }
+    )
+    _write_keeper_sidecar(
+        runner,
+        1700000000002,
+        keeper_pid=5556,
+        bridge_pid=4243,
+        connect_url="https://claude.ai/code/NEWER",
+        session_id="session_NEWER",
+        worktree_name="clauster-0000000b",
+        note="note for the newer session",
+    )
+    _write_keeper_sidecar(
+        runner,
+        1700000000001,
+        keeper_pid=5555,
+        bridge_pid=4242,
+        connect_url="https://claude.ai/code/OLDER",
+        session_id="session_OLDER",
+        worktree_name="clauster-0000000a",
+        note="note for the older session",
+    )
+    # Each session's own bridge log, so the tail each card binds to is checkable too. With
+    # the default config the parse-source IS the public log (`_raw_log_path_for`).
+    newer_log = runner._log_dir / "alpha-1700000000002-0.log"
+    older_log = runner._log_dir / "alpha-1700000000001-0.log"
+    newer_log.write_text("")
+    older_log.write_text("")
+    live_bridges = {4242, 4243}
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge",
+        lambda pid, proc_start=None, **_kw: pid in live_bridges,
+    )
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_keeper_process", lambda pid: pid in (5555, 5556)
+    )
+    # The keeper start identity is read off the REAL pid otherwise; pin it so a host process
+    # that happens to hold 5555 cannot leak into the assertion.
+    monkeypatch.setattr("clauster.runner.procutil.proc_start_pair", lambda pid: (None, None))
+    monkeypatch.setattr("clauster.runner.pointers.pointer_for_project", lambda path: None)
+
+    await runner.rediscover()
+
+    live = [i for i in runner.list_instances() if i.status is InstanceStatus.RUNNING]
+    by_pids = {(i.keeper_pid, i.bridge_pid): i for i in live}
+    assert set(by_pids) == {(5556, 4243), (5555, 4242)}, (
+        f"every live keeper must be re-managed, got {sorted(by_pids)}"
+    )
+    assert len(live) == 2, "a keeper was adopted twice"
+    # Each card carries ITS OWN sidecar's facts, never a sibling's.
+    newer, older = by_pids[(5556, 4243)], by_pids[(5555, 4242)]
+    assert (newer.url, newer.starter_session_id, newer.worktree_name) == (
+        "https://claude.ai/code/NEWER",
+        "session_NEWER",
+        "clauster-0000000b",
+    )
+    assert (older.url, older.starter_session_id, older.worktree_name) == (
+        "https://claude.ai/code/OLDER",
+        "session_OLDER",
+        "clauster-0000000a",
+    )
+    assert (newer.notice, newer.bridge_debug_log_path, newer.bridge_raw_log_path) == (
+        "note for the newer session",
+        newer_log,
+        newer_log,
+    )
+    assert (older.notice, older.bridge_debug_log_path, older.bridge_raw_log_path) == (
+        "note for the older session",
+        older_log,
+        older_log,
+    )
+    assert newer.instance_id != older.instance_id
+    assert {newer.instance_id, older.instance_id}.isdisjoint({"iid-pidless-a", "iid-pidless-b"})
+    # The pid-less rows stay hidden (the #1108 block), and neither is overwritten.
+    assert runner.get_instance("iid-pidless-a") is None
+    assert runner.get_instance("iid-pidless-b") is None
+    rows = runner.persistence.state_store().load()
+    assert rows["iid-pidless-a"].get("bridge_pid") is None
+    assert rows["iid-pidless-b"].get("bridge_pid") is None
+
+    # A second restart: both fresh-id rows now reattach by their persisted pids through the
+    # row pass. Still exactly one card per live keeper, and the pid-less rows stay hidden.
+    again = _make_runner(runner_config)
+    await again.rediscover(persist=False)
+    live_again = [i for i in again.list_instances() if i.status is InstanceStatus.RUNNING]
+    assert sorted((i.keeper_pid, i.bridge_pid) for i in live_again) == [
+        (5555, 4242),
+        (5556, 4243),
+    ]
+    assert {i.instance_id for i in live_again} == {newer.instance_id, older.instance_id}
+    assert again.get_instance("iid-pidless-a") is None
+    assert again.get_instance("iid-pidless-b") is None
+
+
+def test_reattach_skips_dead_and_stale_sidecars_but_keeps_scanning(runner_config, monkeypatch):
+    # The counterexamples around the loop. Newest-first: a live keeper, a sidecar whose
+    # keeper died, one whose keeper pid was recycled but whose bridge is gone, a sidecar
+    # still mid-startup, and an older live keeper. Only the two live ones come back, in
+    # sidecar order; a dead or stale sidecar never stops the scan and is never carded.
+    runner = _make_runner(runner_config)
+    _write_keeper_sidecar(runner, 1700000000005, keeper_pid=5001, bridge_pid=4001)
+    _write_keeper_sidecar(runner, 1700000000004, keeper_pid=5002, bridge_pid=4002)  # keeper died
+    _write_keeper_sidecar(runner, 1700000000003, keeper_pid=5003, bridge_pid=4003)  # bridge gone
+    _write_keeper_sidecar(
+        runner, 1700000000002, keeper_pid=5004, bridge_pid=4004, state="starting"
+    )
+    _write_keeper_sidecar(runner, 1700000000001, keeper_pid=5005, bridge_pid=4005)
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_keeper_process", lambda pid: pid in (5001, 5003, 5004, 5005)
+    )
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge",
+        lambda pid, proc_start=None, **_kw: pid in (4001, 4002, 4004, 4005),
+    )
+    monkeypatch.setattr("clauster.runner.procutil.proc_start_pair", lambda pid: (None, None))
+
+    got = runner._reattach_pty_from_sidecar("alpha", _row("alpha", pid=None))
+
+    assert [(i.keeper_pid, i.bridge_pid) for i in got] == [(5001, 4001), (5005, 4005)]
+    assert len({i.instance_id for i in got}) == 2
+
+
+@pytest.mark.parametrize(
+    ("older_keeper", "older_bridge"),
+    [
+        (5001, 4001),  # an exact duplicate of the newer sidecar
+        (5001, 4999),  # the same keeper, a different bridge
+        (5999, 4001),  # the same bridge, a different keeper
+        (4001, 4998),  # the newer BRIDGE pid named as this sidecar's keeper
+    ],
+)
+def test_reattach_adopts_each_pid_at_most_once(
+    runner_config, monkeypatch, older_keeper, older_bridge
+):
+    # Two sidecars that both pass every gate for the same process. Carding both would put
+    # two RUNNING cards on one process tree, and stopping either would force-kill the
+    # keeper the other one drives. The newest sidecar wins, and the older one is skipped.
+    runner = _make_runner(runner_config)
+    _write_keeper_sidecar(
+        runner, 1700000000002, keeper_pid=5001, bridge_pid=4001, connect_url="https://x/NEW"
+    )
+    _write_keeper_sidecar(
+        runner,
+        1700000000001,
+        keeper_pid=older_keeper,
+        bridge_pid=older_bridge,
+        connect_url="https://x/OLD",
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda pid: True)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    monkeypatch.setattr("clauster.runner.procutil.proc_start_pair", lambda pid: (None, None))
+
+    got = runner._reattach_pty_from_sidecar("alpha", _row("alpha", pid=None))
+
+    assert [(i.keeper_pid, i.bridge_pid, i.url) for i in got] == [(5001, 4001, "https://x/NEW")]
+
+
+def test_reattach_adopts_a_later_sidecar_when_the_newer_one_fails_its_gates(
+    runner_config, monkeypatch
+):
+    # The dedup set only records pids that were actually CARDED. A newer sidecar that names
+    # the same pids but fails the liveness gates must not shadow the older, valid one.
+    runner = _make_runner(runner_config)
+    _write_keeper_sidecar(
+        runner, 1700000000002, keeper_pid=5001, bridge_pid=4001, bridge_proc_start=999.0
+    )
+    _write_keeper_sidecar(
+        runner, 1700000000001, keeper_pid=5001, bridge_pid=4001, connect_url="https://x/OLD"
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda pid: True)
+    # Only the older sidecar's recorded proc-start matches the live bridge.
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge",
+        lambda pid, proc_start=None, **_kw: proc_start == 222.0,
+    )
+    monkeypatch.setattr("clauster.runner.procutil.proc_start_pair", lambda pid: (None, None))
+
+    got = runner._reattach_pty_from_sidecar("alpha", _row("alpha", pid=None))
+
+    assert [(i.keeper_pid, i.url) for i in got] == [(5001, "https://x/OLD")]
+
+
+def test_reattach_survives_a_live_sidecar_with_junk_string_fields(runner_config, monkeypatch):
+    # Every live sidecar now reaches the instance constructor, not only the newest. A
+    # hand-edited or corrupt one whose `session_id` / `connect_url` is not a string raised
+    # pydantic's ValidationError out of the worker thread and took `rediscover` (and the app
+    # lifespan) down with it. Decoded like the other sidecar fields instead: junk -> None,
+    # so the live keeper is still carded and the valid sibling still comes back.
+    runner = _make_runner(runner_config)
+    _write_keeper_sidecar(
+        runner, 1700000000002, keeper_pid=5001, bridge_pid=4001, connect_url="https://x/NEW"
+    )
+    _write_keeper_sidecar(
+        runner, 1700000000001, keeper_pid=5002, bridge_pid=4002, session_id=7, connect_url=["x"]
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda pid: True)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    monkeypatch.setattr("clauster.runner.procutil.proc_start_pair", lambda pid: (None, None))
+
+    got = runner._reattach_pty_from_sidecar("alpha", _row("alpha", pid=None))
+
+    assert [(i.keeper_pid, i.url, i.starter_session_id) for i in got] == [
+        (5001, "https://x/NEW", None),
+        (5002, None, None),
+    ]
+
+
 async def test_second_restart_still_hides_the_pid_less_row_of_a_live_pty_session(
     runner_config, monkeypatch
 ):

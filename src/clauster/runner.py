@@ -2924,8 +2924,8 @@ class SessionRunner:
         """Reattach surviving + persisted bridges at startup (delegates to ``Rediscovery``)."""
         await self._rediscovery.rediscover(persist=persist)
 
-    def _reattach_pty_from_sidecar(self, name: str, saved: dict) -> RemoteControlInstance | None:
-        """Reattach a live keeper with no row to correlate (delegates to :class:`Rediscovery`)."""
+    def _reattach_pty_from_sidecar(self, name: str, saved: dict) -> list[RemoteControlInstance]:
+        """Reattach every live keeper with no row to correlate (delegates to ``Rediscovery``)."""
         return self._rediscovery._reattach_pty_from_sidecar(name, saved)
 
     def _has_unclaimed_live_keeper(self, name: str, held_keepers: set[int]) -> bool:

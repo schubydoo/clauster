@@ -583,8 +583,8 @@ class Rediscovery:
                 return True
         return False
 
-    def _reattach_pty_from_sidecar(self, name: str, saved: dict) -> RemoteControlInstance | None:
-        """Reattach a self-spawned pty bridge from its keeper sidecar after a restart.
+    def _reattach_pty_from_sidecar(self, name: str, saved: dict) -> list[RemoteControlInstance]:
+        """Reattach every self-spawned pty bridge of *name* from its keeper sidecar.
 
         A pty (flag-form ``claude --remote-control``) bridge writes no Anthropic
         ``bridge-pointer.json``, so the pointer-walk in :meth:`rediscover` can't see
@@ -592,13 +592,23 @@ class Rediscovery:
         keeper/bridge pids in the sidecar. Without this, rediscover falls through to
         ``_stopped_from_persisted`` and the card reads STOPPED while a live keeper
         leaks: uncontrollable (Stop/observe gone), and a Resume would spawn a *second*
-        keeper. Glob the sidecars newest-first and, when one names a still-live keeper
-        (``is_keeper_process`` — cmdline-gated against PID reuse) holding a ready, live
-        bridge (pid + proc-start matched), rebuild it as a managed RUNNING instance so
-        stop()/poll_once own it again.
+        keeper. Glob the sidecars newest-first and, for EACH one that names a still-live
+        keeper (``is_keeper_process`` — cmdline-gated against PID reuse) holding a ready,
+        live bridge (pid + proc-start matched), rebuild it as a managed RUNNING instance
+        so stop()/poll_once own it again.
 
-        Returns ``None`` when nothing is reattachable (no persisted record, not pty, or
-        no live keeper) — rediscover then resurrects the STOPPED card as before. Only a
+        Every qualifying sidecar is reattached, not only the first (#1307). A project can
+        hold several live pty sessions at once, and returning after the first left the
+        others' keepers unmanaged — no card, no Stop — while their pid-less rows stayed
+        hidden behind the uncorrelated-keeper block until the next restart. Each sidecar
+        gets its own instance with its own pids, log, URL and worktree name. A keeper or
+        bridge pid is adopted at most ONCE per sweep: two sidecars that both pass the
+        gates for the same pid would otherwise yield two cards driving one process tree,
+        and stopping either would force-kill the other's keeper. Newest-first order means
+        the most recent sidecar wins that tie.
+
+        Returns an empty list when nothing is reattachable (no persisted record, not pty,
+        or no live keeper) — rediscover then resurrects the STOPPED card as before. Only a
         sidecar in the ``"ready"`` state reattaches; a bridge still mid-startup falls
         back to STOPPED (the orphan-keeper sweep can reap a genuinely stuck one).
 
@@ -625,10 +635,14 @@ class Rediscovery:
         leg makes for an ambiguous project too.
         """
         if not saved:
-            return None
+            return []
         spawn_mode, permission_mode, resume_mode = self._saved_modes(saved)
         if resume_mode != "pty":
-            return None
+            return []
+        reattached: list[RemoteControlInstance] = []
+        # Every keeper AND bridge pid already bound to a card this sweep, in one set: any
+        # overlap, whichever half, means two cards would drive the same process.
+        claimed_pids: set[int] = set()
         for sidecar in sorted(self._keeper_sidecars_for(name), reverse=True):
             info = self._read_sidecar(sidecar)
             if not info or info.get("state") != "ready":
@@ -646,6 +660,8 @@ class Rediscovery:
                 and bridge_pid > 0
             ):
                 continue
+            if keeper_pid in claimed_pids or bridge_pid in claimed_pids:
+                continue  # a newer sidecar already carded this process — see the docstring
             ps = info.get("bridge_proc_start")
             bridge_proc_start = (
                 float(ps) if isinstance(ps, (int, float)) and not isinstance(ps, bool) else None
@@ -695,7 +711,8 @@ class Rediscovery:
             keeper_proc_start, keeper_start_ticks = procutil.proc_start_pair(keeper_pid)
             # No `instance_id=`: the model mints a fresh one. See the identity paragraph
             # above — nothing here can say which row owns this keeper (#1108).
-            return RemoteControlInstance(
+            claimed_pids.update((keeper_pid, bridge_pid))
+            instance = RemoteControlInstance(
                 project=name,
                 label=saved.get("label") or name,
                 spawn_mode=spawn_mode,
@@ -724,8 +741,11 @@ class Rediscovery:
                 bridge_proc_start=bridge_proc_start,
                 bridge_debug_log_path=log_path,
                 bridge_raw_log_path=tail_source,
-                starter_session_id=info.get("session_id") or None,
-                url=info.get("connect_url") or None,
+                # `_row_str`, not `or None`: every live sidecar now reaches this constructor
+                # (#1307), so one hand-edited file holding a non-string here would raise
+                # pydantic's ValidationError out of `rediscover` and take the lifespan down.
+                starter_session_id=_row_str(info.get("session_id")),
+                url=_row_str(info.get("connect_url")),
                 # Carried across the restart with the URL it explains (#1390). This leg
                 # reattaches a `ready` sidecar, which is exactly the state the keeper
                 # promotes a screen-fault session into with `connect_url: null` — so
@@ -739,7 +759,8 @@ class Rediscovery:
                 # worktree-mode session; `_pty_worktree_name` gates on spawn_mode anyway.
                 worktree_name=self._recovered_worktree_name(info.get("worktree_name")),
             )
-        return None
+            reattached.append(instance)
+        return reattached
 
     async def _adopt_rows_from_store(self) -> None:
         """Adopt live instances another process created, so they stop reading EXTERNAL (#1091).
@@ -1335,8 +1356,8 @@ class Rediscovery:
         await self._registry._refresh_persisted()
         discovered = self._discovered()
         row_claimed, row_stopped = await self._reattach_rows_with_pids(discovered)
-        # Projects whose live keeper the sidecar leg re-managed under a FRESH id because no
-        # row could be correlated to it (#1108). Consumed by the pid-less pass below.
+        # Projects whose live keepers the sidecar leg re-managed, each under a FRESH id because
+        # no row could be correlated to it (#1108). Consumed by the pid-less pass below.
         uncorrelated_keepers: set[str] = set()
         for proj in discovered.values():
             if proj.name in row_claimed:
@@ -1381,16 +1402,19 @@ class Rediscovery:
                     proj.name,
                     persisted_saved,
                 )
-                if reattached is not None:
-                    self._registry._instances[reattached.instance_id] = reattached
-                    # The keeper is managed again, but under an id of its own — so this
-                    # project's pid-less pty rows are still UNRESOLVED: one of them may be
-                    # the session this keeper is holding. The pid-less pass below would
-                    # otherwise card them STOPPED (its sweep now sees the keeper as
-                    # "accounted for", held by the card just inserted) and offer a Resume
+                if reattached:
+                    # EVERY live keeper of the project, not only the newest (#1307).
+                    for inst in reattached:
+                        self._registry._instances[inst.instance_id] = inst
+                    # Each keeper is managed again, but under an id of its own — so this
+                    # project's pid-less pty rows are still UNRESOLVED: any of them may be
+                    # a session one of these keepers is holding. The pid-less pass below would
+                    # otherwise card them STOPPED (its sweep now sees the keepers as
+                    # "accounted for", held by the cards just inserted) and offer a Resume
                     # that spawns a SECOND keeper on the same `--continue` conversation.
                     # Block them here instead: a hidden card is recoverable on the next
-                    # start, a duplicate bridge is not (#1108).
+                    # start, a duplicate bridge is not (#1108). The any-live-pty block in the
+                    # pid-less pass covers this too; this stays as the explicit statement.
                     uncorrelated_keepers.add(proj.name)
                 elif proj.name not in row_stopped and (
                     (stopped := self._stopped_from_persisted(proj.name)) is not None

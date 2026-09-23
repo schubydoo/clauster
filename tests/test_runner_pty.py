@@ -2216,9 +2216,8 @@ async def test_keeper_only_reattach_keeps_the_original_worktree_identity(
         "clauster.runner.procutil.is_live_bridge", lambda pid, start=None, **k: pid == 8888
     )
 
-    inst = runner._reattach_pty_from_sidecar("alpha", saved)
+    [inst] = runner._reattach_pty_from_sidecar("alpha", saved)
 
-    assert inst is not None
     assert inst.worktree_name == "clauster-0a1b2c3d"
     assert SessionRunner._pty_worktree_name(inst) == "clauster-0a1b2c3d"
     assert inst.instance_id[:8] != "0a1b2c3d", "the fresh id must not accidentally derive it"
@@ -2263,11 +2262,10 @@ def test_keeper_reattach_carries_the_sidecar_note_onto_the_card(
         "clauster.runner.procutil.is_live_bridge", lambda pid, start=None, **k: pid == 8888
     )
 
-    inst = runner._reattach_pty_from_sidecar(
+    [inst] = runner._reattach_pty_from_sidecar(
         "alpha", {"project_name": "alpha", "label": "alpha", "resume_mode": "pty"}
     )
 
-    assert inst is not None
     assert inst.status is InstanceStatus.RUNNING  # the note never downgrades the row
     assert inst.url is None
     assert inst.notice == note  # `None` arm is the positive control: no note, no chip
@@ -2292,9 +2290,8 @@ async def test_pty_sidecar_reattach_stamps_the_current_boot_id(runner_config, mo
     )
     monkeypatch.setattr("clauster.runner.procutil.proc_boot_id", lambda: "live-boot-uuid")
 
-    inst = runner._reattach_pty_from_sidecar("alpha", saved)
+    [inst] = runner._reattach_pty_from_sidecar("alpha", saved)
 
-    assert inst is not None
     assert inst.bridge_boot_id == "live-boot-uuid", (
         "the reattached row must carry the live boot id"
     )
