@@ -674,10 +674,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#sessions-cookies" class="md-nav__link">
+  <a href="#sessions-and-cookies" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Sessions &amp; cookies
+        Sessions and cookies
       
     </span>
   </a>
@@ -1638,10 +1638,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#sessions-cookies" class="md-nav__link">
+  <a href="#sessions-and-cookies" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Sessions &amp; cookies
+        Sessions and cookies
       
     </span>
   </a>
@@ -1931,13 +1931,22 @@ durable lockout. For an internet-exposed deployment, put Clauster behind a
 fronting <strong>IdP / IAP</strong> (or use the reverse-proxy auth) as the real access
 control — see <a href="../networking/">Networking</a>.</p>
 </div>
-<h3 id="sessions-cookies">Sessions &amp; cookies<a class="headerlink" href="#sessions-cookies" title="Permanent link">&para;</a></h3>
+<h3 id="sessions-and-cookies">Sessions and cookies<a class="headerlink" href="#sessions-and-cookies" title="Permanent link">&para;</a></h3>
 <ul>
 <li>Sessions are <strong>signed cookies</strong> (<code>itsdangerous</code>) with server-side revocation —
   "log out everywhere" bumps a persistent session epoch; cookies issued before
   the bump are rejected even if they have not yet expired. (The signing secret
   itself is constant across logouts.)</li>
 <li><code>session_max_age_seconds</code> defaults to 7 days.</li>
+<li>Each instance names its cookies after a short hash of its resolved <code>state_dir</code>,
+  for example <code>clauster_session_1a2b3c4d5e6f</code>. Browsers scope cookies by host
+  name, not by port. The per-instance name lets two instances on one host, at
+  different ports, keep separate sessions. A cookie under any other name,
+  including the old <code>clauster_session</code>, is ignored.</li>
+<li>Two instances with the same <code>state_dir</code> path still share one cookie name. Two
+  containers from the Clauster image hit this, because each one uses the same path
+  inside its container. If you run two containers under one host name, give each
+  one a different <code>state_dir</code>, or serve each one on its own host name.</li>
 <li><code>cookie_secure</code> controls the <code>Secure</code> flag: <code>auto</code> sets it only over https (or
   behind a trusted proxy reporting <code>X-Forwarded-Proto=https</code>); <code>always</code> forces
   it; <code>never</code> disables it.</li>
