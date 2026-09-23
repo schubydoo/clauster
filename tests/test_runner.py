@@ -2854,7 +2854,7 @@ async def test_rediscover_overlays_persisted_state(runner_config, monkeypatch):
     assert runner.get_instance(_IID_ALPHA).status is InstanceStatus.STOPPED
 
 
-async def test_rediscover_pointer_survivor_keeps_its_saved_sandbox_choice(
+async def test_rediscover_pointer_survivor_leaves_the_rows_sandbox_choice_alone(
     runner_config, monkeypatch
 ):
     # #1101: a pointer-walk survivor used to be rebuilt under its persisted instance_id and
