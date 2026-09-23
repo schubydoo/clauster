@@ -2063,7 +2063,7 @@ nested under <code>auth</code>).</p>
 <td><code>resume_recap</code></td>
 <td>bool</td>
 <td><code>false</code></td>
-<td>Install a <code>SessionStart</code> hook in the runtime user's <code>~/.claude/settings.json</code> that recaps the most recent prior transcript for the cwd into a restarted (standard-mode) bridge. Opt-in: edits the user's Claude settings and injects prior turns.</td>
+<td>Install a <code>SessionStart</code> hook in the runtime user's <code>~/.claude/settings.json</code> that recaps the most recent prior transcript for the cwd into a restarted (standard-mode) bridge. Opt-in: edits the user's Claude settings and injects prior turns. A <code>settings.json</code> that cannot be read, or that holds content other than a JSON object, is never rewritten: the hook is skipped with a warning and the bridge still starts. A missing or empty file gets the hook.</td>
 </tr>
 <tr>
 <td><code>resume_recap_max_chars</code></td>

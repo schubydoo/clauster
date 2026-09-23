@@ -2260,9 +2260,14 @@ all, malformed JSON syntax, and JSON that parses but is not an object or whose
 record map is not one. All five now import no records, log a warning naming
 the failure, and leave a one-time byte-exact copy beside the file as
 <code>state.json.corrupt.bak</code>. The original is still renamed
-<code>state.json.imported</code>. Only a file Clauster cannot <em>read</em> at all (permissions,
-IO) is logged without a copy, because there is nothing to copy. The same applies
-to <code>hosted_state.json</code>, which keeps its own <code>hosted_state.json.corrupt.bak</code>.</p>
+<code>state.json.imported</code>. The same applies to <code>hosted_state.json</code>, which keeps its
+own <code>hosted_state.json.corrupt.bak</code>.</p>
+<p>A file that Clauster cannot <em>read</em> at all (permissions, IO) is different. It
+gets no copy, because there is nothing to copy. The import logs a warning,
+imports nothing from either file, and renames neither. The next start tries the
+import again, so fix the permissions and restart before you create new state.
+If the other file is corrupt and the same start already copied it to
+<code>.corrupt.bak</code>, that copy stays, and later starts do not take it again.</p>
 <p><code>clauster migrate</code> treats the same file differently. That command re-saves what
 it reads, so it reads strictly. It writes nothing, prints the reason, and exits
 1 on a <code>state.json</code> it cannot read or cannot understand. It takes no
