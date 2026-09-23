@@ -988,8 +988,12 @@ async def test_rediscover_cards_a_second_live_keeper_beside_a_live_row(runner_co
     _stub_connect(monkeypatch)
     runner.persistence.state_store().save(
         {
-            "iid-live": _row("alpha", pid=4001, proc_start=222.0, label="session-A"),
-            "iid-pidless": _row("alpha", pid=None, label="session-B"),
+            # Ordered first, so a plain first-match lookup would hand the second card THIS
+            # live session's label and modes.
+            "iid-live": _row(
+                "alpha", pid=4001, proc_start=222.0, label="session-A", spawn_mode="session"
+            ),
+            "iid-pidless": _row("alpha", pid=None, label="session-B", spawn_mode="same-dir"),
         }
     )
     _write_keeper_sidecar(
@@ -1009,6 +1013,8 @@ async def test_rediscover_cards_a_second_live_keeper_beside_a_live_row(runner_co
     second = by_bridge[4002]
     assert second.instance_id not in ("iid-live", "iid-pidless")  # a fresh id, never a guess
     assert second.url == "https://x/B"
+    # Label and modes come from an UNCARDED pty row, never from the other live session's.
+    assert (second.label, second.spawn_mode) == ("session-B", "same-dir")
     # The pid-less row stays hidden and untouched: nothing says which keeper it owns.
     assert runner.get_instance("iid-pidless") is None
     assert runner.persistence.state_store().load()["iid-pidless"].get("bridge_pid") is None
@@ -1033,6 +1039,8 @@ async def test_rediscover_cards_a_second_live_keeper_beside_a_live_row(runner_co
         # keeper-only exclusion would card this same tree a second time.
         (None, 5001, 4001),
         # The row holds keeper 5001, and a sidecar names that keeper with another bridge.
+        # Synthetic: the real recovery would not return 5001 for a bridge no sidecar names.
+        # It pins the keeper half of the exclusion on its own.
         (5001, 5001, 4999),
     ],
 )
@@ -1120,6 +1128,38 @@ async def test_rediscover_cards_a_live_keeper_beside_a_card_it_already_holds(
         (5002, 4002),
     ]
     assert runner.get_instance(held.instance_id) is held
+
+
+@pytest.mark.parametrize(
+    "dead_status", [InstanceStatus.STOPPED, InstanceStatus.CRASHED, InstanceStatus.ERROR]
+)
+async def test_a_dead_cards_stale_pids_never_hide_a_live_keeper(
+    runner_config, monkeypatch, dead_status
+):
+    # `stop()` leaves `keeper_pid`/`bridge_pid` on a dead card. Only STARTING and RUNNING
+    # cards seed the exclusion, so a dead card that still records a live keeper's pids must
+    # not keep that keeper uncarded, which would bring back the issue 1605 leak.
+    runner = _make_runner(runner_config)
+    _stub_connect(monkeypatch)
+    runner.persistence.state_store().save(
+        {
+            "iid-live": _row("alpha", pid=4001, proc_start=222.0),
+            "iid-pidless": _row("alpha", pid=None),
+        }
+    )
+    dead = RemoteControlInstance(
+        project="alpha", label="dead", status=dead_status, keeper_pid=5002, bridge_pid=4002
+    )
+    runner._instances[dead.instance_id] = dead
+    _write_keeper_sidecar(runner, 1700000000001, keeper_pid=5001, bridge_pid=4001)
+    _write_keeper_sidecar(runner, 1700000000002, keeper_pid=5002, bridge_pid=4002)
+    _stub_two_keepers(monkeypatch, live_keepers={5001, 5002}, live_bridges={4001, 4002})
+
+    await runner.rediscover(persist=False)
+
+    live = [i for i in runner.list_instances() if i.status is InstanceStatus.RUNNING]
+    assert sorted((i.keeper_pid, i.bridge_pid) for i in live) == [(5001, 4001), (5002, 4002)]
+    assert dead.instance_id not in {i.instance_id for i in live}
 
 
 async def test_rediscover_cards_a_live_keeper_beside_a_live_pointer_bridge(
@@ -1440,7 +1480,9 @@ async def test_pid_less_pty_row_is_not_carded_while_a_live_keeper_is_unclaimed(
 ):
     # The trap the pid-less pass must not fall into. `rediscover`'s pointer walk SKIPS a
     # project that already has a live row, before it ever reads the pointer or the keeper
-    # sidecar — so on that project nothing has looked for a pid-less row's process. A pty
+    # sidecar. The sidecar sweep after the walk (issue 1605) cards a live keeper there but
+    # cannot skip every one (a held bridge pid) or say which row owns it, so the pid-less
+    # pass still sweeps for an unaccounted keeper. A pty
     # row whose detached keeper is still alive must NOT get a resumable STOPPED card: the
     # Resume would spawn a SECOND keeper on the same `--continue` conversation.
     rows = {

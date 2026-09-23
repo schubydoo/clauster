@@ -556,7 +556,10 @@ class Rediscovery:
         leg. On such a project a pid-less pty row can still own a live detached keeper,
         and carding it STOPPED would offer a Resume that spawns a **second** keeper on
         the same ``--continue`` conversation — the exact leak
-        :meth:`_reattach_pty_from_sidecar` exists to prevent.
+        :meth:`_reattach_pty_from_sidecar` exists to prevent. The sidecar sweep after the
+        walk now cards such keepers on those projects too (issue 1605), so this is a
+        backstop: it still answers True for a live keeper the sweep skipped, for example one
+        whose bridge pid a card with ``keeper_pid=None`` already holds.
 
         Answers only "is one still unaccounted for", never "which row owns it": nothing
         here correlates a keeper to a ROW (that is #1108). So the caller does what the
@@ -666,7 +669,8 @@ class Rediscovery:
         EITHER of its pids is already held.
 
         Returns an empty list when nothing is reattachable (no persisted record, not pty,
-        or no live keeper) — rediscover then resurrects the STOPPED card as before. Only a
+        or no live keeper) — at the walk's call, rediscover then resurrects the STOPPED card
+        as before. Only a
         sidecar in the ``"ready"`` state reattaches; a bridge still mid-startup falls
         back to STOPPED (the orphan-keeper sweep can reap a genuinely stuck one).
 
@@ -1398,7 +1402,11 @@ class Rediscovery:
         first-match row. Then the original **project-keyed** pointer walk runs for whatever
         it did not claim: rows written before the pids existed (so an upgrade never declares
         a surviving bridge dead) and live bridges with no persisted row at all, which is
-        still the only way to discover an externally-started one at startup.
+        still the only way to discover an externally-started one at startup. The second pass
+        ends with a keeper-sidecar sweep of every project the walk did not sweep itself (a
+        live row, a live card, or a live pointer made it skip the sidecars), so a second live
+        pty keeper beside them is carded too, with every already-held pid excluded (issue
+        1605).
 
         Finally a per-ROW pass cards whatever pid-less rows remain (#1115). Without it the
         project-keyed walk was the only thing that ever saw them, so a project surfaced ONE
@@ -1607,8 +1615,14 @@ class Rediscovery:
             if proj.name in sidecar_swept:
                 continue
             # The same pty-pinned lookup as the walk's leg: label and modes only, never an id.
+            # An UNCARDED pty row first: here the project's first pty row is often the live
+            # row of ANOTHER session, whose spawn and permission modes would then describe
+            # the wrong session on the new card. Any pty row after that, as the walk does.
             # No pty row -> nothing to take them from -> skip, as the leg itself would.
-            if (modes_hit := self._persisted_for_project(proj.name, resume_mode="pty")) is None:
+            modes_hit = self._persisted_for_project(
+                proj.name, unclaimed_only=True, resume_mode="pty"
+            ) or self._persisted_for_project(proj.name, resume_mode="pty")
+            if modes_hit is None:
                 continue
             reattached = await asyncio.to_thread(
                 self._reattach_pty_from_sidecar,
@@ -1620,10 +1634,13 @@ class Rediscovery:
                 self._registry._instances[inst.instance_id] = inst
             if reattached:
                 # Fresh ids again, so no pid-less row of this project is resolved by them.
+                # The any-live-pty block in the pid-less pass covers this too; this stays as
+                # the explicit statement, as in the walk.
                 uncorrelated_keepers.add(proj.name)
-        # Third pass (#1115): rows carrying NO pid at all. The two passes above resolve at
+        # Third pass (#1115): rows carrying NO pid at all. The passes above resolve at
         # most ONE such row per project between them — the row pass skips them (no pair to
-        # judge) and the pointer walk is project-keyed — so every other pid-less row of a
+        # judge), the pointer walk is project-keyed, and the sidecar legs mint fresh ids
+        # instead of claiming a row — so every other pid-less row of a
         # project stayed invisible while its record sat in the DB. On the dogfood that was
         # 16 of 17 rows, because the pre-fix ratchet had already erased their pids; no
         # backfill can restore those (the processes are long gone), so carding them here is
@@ -1638,10 +1655,9 @@ class Rediscovery:
         # `_reattach_rows_with_pids` claims a project when ANY row of it proves live, before
         # it even reads that row's mode — so one live pty row makes the walk skip the
         # project, and a pid-less STANDARD row there can still own the live pointer bridge
-        # nobody looked for. Carding either
-        # live shape STOPPED offers a Resume that spawns a duplicate: a second keeper on the
-        # same `--continue` conversation, or a second bridge that overwrites the pointer of
-        # the running one and orphans it.
+        # nobody looked for. Carding either live shape STOPPED offers a Resume that spawns a
+        # duplicate: a second keeper on the same `--continue` conversation, or a second
+        # bridge that overwrites the pointer of the running one and orphans it.
         #
         # So sweep BOTH discovery mechanisms for the projects that still have uncarded
         # pid-less rows — keeper sidecars for pty rows, the Anthropic pointer for the rest —
