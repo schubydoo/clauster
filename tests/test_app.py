@@ -956,9 +956,13 @@ def test_metrics_chip_explanation_reaches_keyboard_touch_and_screen_readers(writ
 
     # The hidden text lives INSIDE that row, under the id the row points at, and renders
     # the same sentence the mouse tooltip shows.
-    desc = row[row.index('data-test="metrics-desc"') :].split("</span>", 1)[0]
-    desc_tag = row[row.rindex("<span", 0, row.index('data-test="metrics-desc"')) :].split(">")[0]
-    assert 'class="visually-hidden"' in desc_tag
+    def opening_tag(marker: str) -> str:
+        # The WHOLE opening tag, so an attribute placed before `data-test` is checked too.
+        at = row.index(marker)
+        return row[row.rindex("<span", 0, at) : row.index(">", at) + 1]
+
+    desc = opening_tag('data-test="metrics-desc"')
+    assert 'class="visually-hidden"' in desc
     assert f":id=\"'{described.group(1)}' + i.rk\"" in desc
     assert 'x-text="metricsTitle(i.rk)"' in desc
     # Hidden with the utility class, not x-show/aria-hidden: display:none or aria-hidden
@@ -966,7 +970,7 @@ def test_metrics_chip_explanation_reaches_keyboard_touch_and_screen_readers(writ
     assert "x-show" not in desc and "aria-hidden" not in desc
 
     # No new tab stop: neither the chip nor its description is focusable.
-    chip = row[row.index('data-test="metrics-chip"') :].split("</span>", 1)[0]
+    chip = opening_tag('data-test="metrics-chip"')
     for part in (chip, desc, row_tag):
         assert "tabindex" not in part
     assert ':title="metricsTitle(i.rk)"' in chip  # the mouse tooltip stays

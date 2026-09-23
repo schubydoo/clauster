@@ -105,6 +105,8 @@ _METRICS_A11Y = (
     "    text: desc ? desc.textContent : '',"
     "    title: chip.getAttribute('title'),"
     "    width: box ? box.width : -1,"
+    "    rendered: !!desc && getComputedStyle(desc).display !== 'none'"
+    "      && !desc.closest('[aria-hidden=\"true\"]'),"
     "    stopTags: stops.map(e => e.tagName),"
     "    chipOrDescIsStop: stops.includes(chip) || stops.includes(desc),"
     "  };"
@@ -131,6 +133,7 @@ def test_metrics_chip_is_described_without_a_tab_stop(
     assert got["text"].startswith("Live usage of the bridge process tree"), got
     assert got["text"] == got["title"], got  # same sentence the mouse tooltip shows
     assert got["width"] <= 1, got  # visually hidden, not on screen
+    assert got["rendered"], got  # ...but still in the reading order a screen reader walks
     assert not got["chipOrDescIsStop"], got  # no new tab stop
     assert set(got["stopTags"]) <= {"A", "BUTTON"}, got  # only the row's real controls
 
