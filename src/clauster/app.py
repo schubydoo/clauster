@@ -665,8 +665,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     # Step-up elevation (#978): same secret, distinct salt — an elevation token can
     # never be presented as a session cookie or vice versa (see make_elevation_serializer).
     _elevation_serializer = auth.make_elevation_serializer(_signing_secret)
-    # Per-instance cookie names (#1121): computed once, after load_or_create_secret has
-    # created state_dir, so every read and write in this process uses the same names.
+    # Per-instance cookie names (#1121), computed once so every read and write in this
+    # process uses the same names. state_dir already exists here on every path, including
+    # an env-provided CLAUSTER_SESSION_SECRET(_FILE) where load_or_create_secret creates
+    # nothing: configure_lock_dir at the top of create_app made <state_dir>/locks with its
+    # parents. So resolve() sees an existing path, the one a later restart sees too.
     _cookie_names = auth.cookie_names(config.state_dir)
     _hasher = auth.make_hasher()
     _allowed_origins = auth.build_allowed_origins(config)

@@ -86,6 +86,11 @@ def cookie_names(state_dir: Path) -> CookieNames:
     return CookieNames(session=f"clauster_session_{tag}", elevation=f"clauster_elevation_{tag}")
 
 
+# The pre-#1121 unsuffixed names. Never READ (a cookie under them authenticates nothing);
+# ``/logout`` only deletes them. One-release transition: remove after the next release.
+LEGACY_COOKIE_NAMES = ("clauster_session", "clauster_elevation")
+
+
 # ----- session secret -----------------------------------------------------
 
 

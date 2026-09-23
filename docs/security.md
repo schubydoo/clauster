@@ -105,7 +105,7 @@ Failed logins are rate-limited in two layers, returning **`429` with a
     fronting **IdP / IAP** (or use the reverse-proxy auth) as the real access
     control — see [Networking](networking.md).
 
-### Sessions & cookies
+### Sessions and cookies
 
 - Sessions are **signed cookies** (`itsdangerous`) with server-side revocation —
   "log out everywhere" bumps a persistent session epoch; cookies issued before

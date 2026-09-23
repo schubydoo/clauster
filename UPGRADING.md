@@ -36,7 +36,7 @@ scope cookies by host name and ignore the port. Two instances on one host
 therefore shared one cookie, and a login on one instance logged you out of the
 other. The login cookie and the step-up cookie now carry a short hash of the
 resolved `state_dir` in their names. For the details, see [sessions and
-cookies](docs/security.md#sessions-cookies).
+cookies](docs/security.md#sessions-and-cookies).
 
 Clauster does not read the old `clauster_session` cookie. After the upgrade, each
 browser shows the login page one time. Log in again. The old cookie authenticates

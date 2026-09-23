@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -303,7 +304,49 @@ def test_logout_clears_the_per_instance_cookies(runner_config):
     resp = client.post("/logout", headers={"origin": ORIGIN}, follow_redirects=False)
     names = auth.cookie_names(config.state_dir)
     cleared = {h.split("=", 1)[0] for h in resp.headers.get_list("set-cookie")}
-    assert cleared == {names.session, names.elevation}
+    # The per-instance names, plus the pre-#1121 names (one-release transition).
+    assert cleared == {names.session, names.elevation, "clauster_session", "clauster_elevation"}
+    root = config.root_path or "/"
+    assert all(f"Path={root}" in h for h in resp.headers.get_list("set-cookie"))
+
+
+def test_login_leaves_legacy_cookie_alone(runner_config):
+    # Deleting the legacy cookie on login would evict an un-upgraded instance on the same
+    # host (the #1121 bug), so only logout clears it.
+    client = _password_client(runner_config)
+    client.cookies.set("clauster_session", "belongs-to-another-instance")
+    resp = client.post(
+        "/login", data={"password": PASSWORD}, headers={"origin": ORIGIN}, follow_redirects=False
+    )
+    assert resp.status_code == 303
+    assert all(not h.startswith("clauster_session=") for h in resp.headers.get_list("set-cookie"))
+    assert client.cookies.get("clauster_session") == "belongs-to-another-instance"
+
+
+def test_cookie_names_computed_on_existing_state_dir_with_env_secret(
+    runner_config, tmp_path, monkeypatch
+):
+    # An env-provided secret makes load_or_create_secret skip creating state_dir; create_app
+    # still has it on disk (configure_lock_dir) before naming the cookies, so resolve() sees
+    # the real directory. The runner is built over its own state_dir first, so this pins
+    # create_app's ordering rather than riding on the runner's DB engine creating the dir.
+    monkeypatch.setenv("CLAUSTER_SESSION_SECRET", "x" * 32)
+    runner_cfg, claude_json = runner_config
+    runner = SessionRunner(runner_cfg, claude_json=claude_json)
+    fresh = tmp_path / "fresh-state"
+    config = runner_cfg.model_copy(update={"state_dir": fresh})
+    assert not fresh.exists()
+    seen: list[bool] = []
+    real = auth.cookie_names
+
+    def _spy(state_dir):
+        seen.append(Path(state_dir).expanduser().is_dir())
+        return real(state_dir)
+
+    monkeypatch.setattr(auth, "cookie_names", _spy)
+    app = create_app(config, runner=runner)
+    assert seen == [True]
+    assert app.state.cookie_names == real(fresh)
 
 
 def test_two_instances_on_one_host_keep_separate_sessions(runner_config, tmp_path):

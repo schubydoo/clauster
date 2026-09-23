@@ -190,6 +190,13 @@ async def logout(request: Request, config: ConfigDep, cookie_names: CookieNamesD
     # The epoch bump above already revokes any outstanding elevation token (#978);
     # clear its cookie too so a stale value doesn't linger in the browser.
     resp.delete_cookie(cookie_names.elevation, path=config.root_path or "/")
+    # One-release transition (#1121): also clear the pre-#1121 unsuffixed cookies, so an
+    # upgraded browser does not keep a legacy token that a rolled-back build would accept.
+    # Logout only, not login: on login it would evict an un-upgraded instance on the same
+    # host, the very bug #1121 fixes. Logout is an explicit "sign me out" and has already
+    # bumped the epoch, which revokes a legacy token issued by this instance anyway.
+    for legacy in auth.LEGACY_COOKIE_NAMES:
+        resp.delete_cookie(legacy, path=config.root_path or "/")
     return resp
 
 
