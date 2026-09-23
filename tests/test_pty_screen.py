@@ -1287,6 +1287,24 @@ def test_frame_renders_a_row_the_soft_wrap_adds_nothing_to_as_before():
     assert "more text below" in shown
 
 
+def test_frame_masks_a_trailing_welded_uuid_in_a_union_rendered_row():
+    # #1508 review, safety invariant 4: the review's input through the UNION render. Row 0 has
+    # the UUID welded to `zz`, and it also ends in the head of a secret that soft-wraps into
+    # row 1, so the soft-wrap view adds cells to row 0 and the row is rendered from the union
+    # map. That render can be short enough to skip the width-refit trim, so the UUID must mask
+    # on its own, without a trailing boundary.
+    uuid = "12345678-f7c9-1523-d2a2-686b9d96c4fb"
+    upper = "bearer env_abcdefgh " * 3 + uuid + "zz x sk-ABCDEFGH"
+    assert len(upper) == 112
+    scr = PtyScreen(cols=120, rows=3)
+    scr.feed(f"{upper}\r\n  IJKLMNOPQRST done".encode())
+    rows = scr.frame()["rows"]
+    shown = "".join(rows)
+    assert "686b9d96c4fb" not in shown and "-1523-" not in shown
+    assert "ABCDEFGH" not in shown and "IJKL" not in shown
+    assert rows[1].rstrip().endswith(" done")
+
+
 def test_soft_wraps_needs_the_next_word_not_to_fit():
     # #1508: the soft-wrap test in isolation, at 40 columns (slack 8, so the edge is column 32).
     pad = " " * 40

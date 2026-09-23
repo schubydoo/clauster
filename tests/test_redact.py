@@ -569,6 +569,108 @@ def test_redact_wrapped_rows_masks_a_uuid_welded_to_a_token_found_at_a_seam():
     assert out[2].rstrip().endswith(" done")
 
 
+_UUID_1508 = "12345678-f7c9-1523-d2a2-686b9d96c4fb"
+
+
+@pytest.mark.parametrize(
+    ("token", "after"),
+    [
+        (_UUID_1508, "zz"),  # the review's input: a UUID welded to word characters
+        ("AKIAIOSFODNN7EXAMPLE", "zz"),  # fixed-count key, a word char after the 16th
+        ("ghp_" + "A" * 16, "_backup"),  # `_` is a word char outside the token's class
+        ("session_01ABCDEFGHJK", "_backup"),  # a real `01`-shape id
+        ("sk-" + "A" * 16, "é"),  # a non-ASCII letter is a word char too
+    ],
+)
+def test_redact_screen_row_masks_a_token_welded_to_the_word_after_it(token, after):
+    # #1508 review, safety invariant 4. With a word character right after it, the token has no
+    # trailing `\b`, so the anchored mask never matched it. It masked only when the pty screen's
+    # width-refit trim happened to cut the following word away, which depends on how long the
+    # rest of the row rendered. The screen surface now masks it without the trailing boundary.
+    row = f"see {token}{after} done"
+    out = redact.redact_screen_text([row])[0]
+    assert token[6:14] not in out, out
+    assert out.startswith("see ") and out.endswith(" done")
+
+
+def test_redact_screen_row_masks_a_uuid_welded_right_after_an_akia_key():
+    # #1508: the fixed-count key used to fail its anchored match on a direct weld, so neither
+    # it nor the UUID after it reached the welded-UUID check. Both mask now.
+    out = redact.redact_screen_text(["key AKIAIOSFODNN7EXAMPLE" + _UUID_1508 + " done"])[0]
+    assert "IOSFODNN" not in out and "686b9d" not in out and "-1523-" not in out, out
+
+
+@pytest.mark.parametrize("word", ["session_timeout_ms", "env_production_db", "cse_worker_pool"])
+def test_redact_screen_row_keeps_an_id_look_alike_with_a_trailing_word(word):
+    # #1508 guard: the open-tail masks leave the plain id core out on purpose. A name that only
+    # looks like an id, followed by `_more`, must stay readable, as it did before.
+    assert redact.redact_screen_text([f"set {word} = 3"]) == [f"set {word} = 3"]
+
+
+def test_redact_screen_row_open_tail_does_not_break_a_welded_id_chain():
+    # #1508 guard. A chain of real ids welded end to end unwinds from its last id, one per
+    # fixed-point scan. A greedy open-tail match reads `env_01<a>env` up to the next `_`; if it
+    # were fed into the fixed point it would erase every other `env` prefix, and those ids
+    # would show. It is unioned at render only.
+    row = "env_01AAAAAAAA" * 12 + " end"
+    out = redact.redact_screen_text([row])[0]
+    assert "AAAA" not in out and out.endswith(" end"), out
+
+
+def test_redact_wrapped_rows_open_tail_covers_every_path():
+    # #1508 review: the welded UUID masks in a hard run, and in a row the soft-wrap view adds
+    # cells to (the union render, where the width-refit trim may never happen).
+    hard = redact.redact_wrapped_screen_rows(
+        ["x " + _UUID_1508[:20], _UUID_1508[20:] + "zz ok"], hard_seams=[True], soft_seams=[False]
+    )
+    assert "686b9d" not in "".join(hard) and "-1523-" not in "".join(hard), hard
+    soft = redact.redact_wrapped_screen_rows(
+        [_UUID_1508 + "zz x sk-ABCDEFGH   ", "  IJKLMNOPQRST done"],
+        hard_seams=[False],
+        soft_seams=[True],
+    )
+    assert "686b9d" not in soft[0] and "ABCDEFGH" not in soft[0], soft
+    assert "IJKL" not in soft[1] and soft[1].endswith(" done"), soft
+
+
+def test_redact_wrapped_rows_seam_view_fails_closed_at_the_scan_cap(monkeypatch):
+    # #1508 review. The soft-wrap fixed point is capped, because it runs in the keeper's drain
+    # loop. A view that has not settled at the cap must mask MORE, never less: every non-space
+    # character of the view. Falling back to the hard-wrap maps would let a crafted chain switch
+    # off the soft-wrap catch for the secret beside it.
+    rows = ["  key sk-ABCDEFGH   ", "  IJKLMNOPQRST done"]
+    uncapped = redact.redact_wrapped_screen_rows(rows, hard_seams=[False], soft_seams=[True])
+    monkeypatch.setattr(redact, "_SEAM_MAX_SCANS", 1)  # the first scan adds, so it cannot settle
+    capped = redact.redact_wrapped_screen_rows(rows, hard_seams=[False], soft_seams=[True])
+    assert "IJKL" not in "".join(capped) and "ABCD" not in "".join(capped)
+    words = lambda out: set(" ".join(out).split())  # noqa: E731 -- a one-line helper
+    assert words(capped) <= words(uncapped)  # the cap never shows a word the full scan hid
+    assert "done" in words(uncapped) and "done" not in words(capped)  # it really failed closed
+
+
+def test_redact_wrapped_rows_bounds_the_soft_wrap_scans(monkeypatch):
+    # #1508 review. The crafted worst case: a 40-row chain of welded ids behind soft seams, one
+    # of them after `bearer` so both seam views run. Uncapped, each view needs one scan per id
+    # (hundreds, about 500 ms). Capped, each view stops at `_SEAM_MAX_SCANS`, and the whole
+    # chain is still masked because the views fail closed.
+    body = ("env_01AAAAAAAA" * 400)[: 118 * 39 - (118 * 39) % 14]
+    rows = ["  " + "z " * 55 + "bearer"] + [
+        "  " + body[i : i + 118] for i in range(0, len(body), 118)
+    ]
+    rows = [r.ljust(120) for r in rows]
+    seams = len(rows) - 1
+    calls = []
+    real = redact._screen_seam_spans
+    monkeypatch.setattr(
+        redact, "_screen_seam_spans", lambda text, cuts: calls.append(1) or real(text, cuts)
+    )
+    out = redact.redact_wrapped_screen_rows(
+        rows, hard_seams=[False] * seams, soft_seams=[True] * seams
+    )
+    assert len(calls) <= 2 * redact._SEAM_MAX_SCANS  # two views, each capped
+    assert "AAAA" not in "".join(out)
+
+
 def test_bearer_is_the_only_whitespace_core():
     # `_seam_view`'s spaced view keeps a space only after `bearer`, because that is the one core
     # a wrap at a space can split (#1508). A second core that can match whitespace needs the
