@@ -934,6 +934,51 @@ def test_dashboard_shows_the_reason_a_connect_link_is_not_coming(write_config):
     assert page.count('x-text="connectStatusText(i.rk)"') == 1  # still exactly one region
 
 
+def test_metrics_chip_explanation_reaches_keyboard_touch_and_screen_readers(write_config):
+    # #1306: the metrics chip explained itself only through `title` on a non-focusable
+    # span, which a keyboard, touch, or screen-reader user never meets. The explanation
+    # now also ships as visually hidden text that the ROW names with aria-describedby,
+    # plus a one-line legend in the help panel. Nothing here may add a tab stop.
+    page = _client(write_config).get("/").text
+
+    # The running row: the only element carrying the spawn-mode binding.
+    row_open = page.index(':data-spawn-mode="i.spawn_mode"')
+    row_start = page.rindex("<div", 0, row_open)
+    row_tag = page[row_start : page.index(">", row_open) + 1]
+    row = page[row_start : page.index("</template>", row_start)]
+
+    # The row names the description only while the chip shows. A directly referenced
+    # node counts even when empty or hidden, so an unconditional id would describe a
+    # stopped row with a stale sentence.
+    described = re.search(
+        r':aria-describedby="metricsLabel\(i\.rk\) \? \(\'([\w-]+)\' \+ i\.rk\) : null"', row_tag
+    )
+    assert described, row_tag
+
+    # The hidden text lives INSIDE that row, under the id the row points at, and renders
+    # the same sentence the mouse tooltip shows.
+    desc = row[row.index('data-test="metrics-desc"') :].split("</span>", 1)[0]
+    desc_tag = row[row.rindex("<span", 0, row.index('data-test="metrics-desc"')) :].split(">")[0]
+    assert 'class="visually-hidden"' in desc_tag
+    assert f":id=\"'{described.group(1)}' + i.rk\"" in desc
+    assert 'x-text="metricsTitle(i.rk)"' in desc
+    # Hidden with the utility class, not x-show/aria-hidden: display:none or aria-hidden
+    # would take it out of the reading order a screen reader walks.
+    assert "x-show" not in desc and "aria-hidden" not in desc
+
+    # No new tab stop: neither the chip nor its description is focusable.
+    chip = row[row.index('data-test="metrics-chip"') :].split("</span>", 1)[0]
+    for part in (chip, desc, row_tag):
+        assert "tabindex" not in part
+    assert ':title="metricsTitle(i.rk)"' in chip  # the mouse tooltip stays
+    assert page.count('data-test="metrics-desc"') == 1
+
+    # Touch and sighted keyboard users: a legend in the help panel, on the page itself.
+    legend = page[page.index('data-test="help-metrics-legend"') :].split("</li>", 1)[0]
+    assert "% CPU · MB" in legend
+    assert "metrics.normalize_cpu" in legend  # names what makes CPU% a host share
+
+
 def test_dashboard_restart_note_says_sessions_survive(write_config):
     # #663: the config-save note previously WARNED 'N session(s) running — a restart will
     # end them', contradicting the actual shutdown (runner.shutdown() leaves bridges

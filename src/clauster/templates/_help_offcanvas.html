@@ -66,6 +66,13 @@
     <ul class="text-secondary">
       <li><strong>Active sessions</strong> — what's running for you right now. Use the
         <em>Stop</em> / <em>Resume</em> controls on each row.</li>
+      {# The metrics chip's legend (#1306): its row tooltip never fires on touch or for
+         a keyboard user, so this is where they learn what the figures mean. #}
+      <li data-test="help-metrics-legend"><strong>Usage figures</strong> — a running row's
+        <code>% CPU · MB</code> is the live usage of that session's bridge processes: CPU is
+        summed across cores (so it can pass 100%) unless <code>metrics.normalize_cpu</code> makes
+        it a share of the whole host, memory is summed RSS, and ⬇ / ⬆ are disk read and write
+        rates.</li>
       <li><strong>Projects</strong> — every discovered project. Launch a new session, create
         or clone a project, and open a project's read-only transcript here.</li>
     </ul>

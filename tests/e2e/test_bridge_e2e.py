@@ -88,6 +88,57 @@ def test_trust_on_start_starts_then_stops_bridge(
     browser.expect_role_visible("button", "Resume")
 
 
+# Reads the running row's metrics chip, the description the row points at, and every
+# element in the row a Tab press can reach.
+_METRICS_A11Y = (
+    "(() => {"
+    "  const chip = document.querySelector('[data-test=\"metrics-chip\"]');"
+    "  const row = chip.closest('.sess-row');"
+    "  const id = row.getAttribute('aria-describedby');"
+    "  const desc = id ? document.getElementById(id) : null;"
+    "  const box = desc ? desc.getBoundingClientRect() : null;"
+    "  const stops = [...row.querySelectorAll('*')]"
+    "    .filter(e => e.tabIndex >= 0 && e.offsetParent !== null);"
+    "  return {"
+    "    id: id,"
+    "    inRow: !!desc && row.contains(desc),"
+    "    text: desc ? desc.textContent : '',"
+    "    title: chip.getAttribute('title'),"
+    "    width: box ? box.width : -1,"
+    "    stopTags: stops.map(e => e.tagName),"
+    "    chipOrDescIsStop: stops.includes(chip) || stops.includes(desc),"
+    "  };"
+    "})()"
+)
+
+
+def test_metrics_chip_is_described_without_a_tab_stop(
+    browser: AgentBrowser, bridge_server: Server
+) -> None:
+    """The metrics chip's explanation reaches assistive tech, adds no tab stop, and has a
+    visible legend in the help panel for touch users (#1306)."""
+    browser.goto(bridge_server.url)
+    browser.expect_visible('[data-project="gamma"]')
+    open_desktop_launch(browser, "gamma")
+    trust_and_start(browser, "gamma")
+    browser.expect_visible(STOP_BUTTON, timeout_ms=STATUS_TIMEOUT)
+    # The chip shows on the metrics poll (4 s), after the row reaches Running.
+    browser.expect_visible('[data-test="metrics-chip"]', timeout_ms=STATUS_TIMEOUT)
+
+    got = browser.eval_json(_METRICS_A11Y)
+    assert got["id"], got  # the running row names a description
+    assert got["inRow"], got  # ...and it is THIS row's own hidden text
+    assert got["text"].startswith("Live usage of the bridge process tree"), got
+    assert got["text"] == got["title"], got  # same sentence the mouse tooltip shows
+    assert got["width"] <= 1, got  # visually hidden, not on screen
+    assert not got["chipOrDescIsStop"], got  # no new tab stop
+    assert set(got["stopTags"]) <= {"A", "BUTTON"}, got  # only the row's real controls
+
+    # Touch and sighted keyboard users: the legend is visible in the help panel.
+    browser.click('[data-test="help-trigger"]')
+    browser.expect_visible('[data-test="help-metrics-legend"]')
+
+
 def test_spawn_options_pass_through_to_bridge_argv(
     browser: AgentBrowser, bridge_server: Server
 ) -> None:
