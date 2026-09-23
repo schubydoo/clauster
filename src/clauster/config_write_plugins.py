@@ -531,16 +531,11 @@ def _read_enabled_plugins(path: Path) -> dict[str, bool]:
     Filtered to ``str`` -> ``bool`` entries (hence the declared return type); a
     non-dict value yields ``{}``. Direct file read (no spawn) — mirrors the MCP
     surface's "file read for display" doctrine. No secret ever lives in this map
-    (plugin ids only), so unlike the MCP server maps this needs no redaction. A file
-    that exists but cannot be read raises :class:`~clauster.config_write.ConfigWriteError`.
+    (plugin ids only), so unlike the MCP server maps this needs no redaction. A path
+    that is not a readable file raises :class:`~clauster.config_write.ConfigWriteError`
+    (see :func:`~clauster.config_write.read_config_bytes`).
     """
-    try:
-        raw = path.read_bytes()
-    except FileNotFoundError:
-        raw = b""
-    except OSError:
-        raise cw.ConfigWriteError(f"cannot read {path.name}: it is unreadable") from None
-    data = cw.load_settings_json_obj(raw)
+    data = cw.load_settings_json_obj(cw.read_config_bytes(path))
     enabled = data.get(ENABLED_PLUGINS_KEY)
     if not isinstance(enabled, dict):
         return {}
@@ -577,16 +572,11 @@ def _read_declared_marketplaces(path: Path) -> dict[str, Any]:
     settings.json names which marketplace), as distinct from
     :func:`cli_list_marketplaces`'s CLI-merged, cwd-independent pool view (which
     also carries resolved ``installLocation`` the declaration alone doesn't have).
-    A file that exists but cannot be read raises
-    :class:`~clauster.config_write.ConfigWriteError`.
+    A path that is not a readable file raises
+    :class:`~clauster.config_write.ConfigWriteError` (see
+    :func:`~clauster.config_write.read_config_bytes`).
     """
-    try:
-        raw = path.read_bytes()
-    except FileNotFoundError:
-        raw = b""
-    except OSError:
-        raise cw.ConfigWriteError(f"cannot read {path.name}: it is unreadable") from None
-    data = cw.load_settings_json_obj(raw)
+    data = cw.load_settings_json_obj(cw.read_config_bytes(path))
     marketplaces = data.get(EXTRA_MARKETPLACES_KEY)
     return marketplaces if isinstance(marketplaces, dict) else {}
 

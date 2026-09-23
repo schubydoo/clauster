@@ -721,6 +721,28 @@ def write_subtree(claude_json: Path, subtree_key: str, mutate: Callable[[Any], A
     update_claude_json(claude_json, _apply)
 
 
+#: The ``OSError`` subclasses that mean "this config path is not a readable file": a
+#: permission denial, or a directory at (or a file above) the path. Reading a directory
+#: raises ``IsADirectoryError`` on POSIX and ``PermissionError`` on Windows.
+UNREADABLE_PATH_ERRORS = (PermissionError, IsADirectoryError, NotADirectoryError)
+
+
+def read_config_bytes(path: Path) -> bytes:
+    """Return the bytes of the config file at ``path``, or ``b""`` if it does not exist.
+
+    A path that exists but is not a readable file (:data:`UNREADABLE_PATH_ERRORS`) raises
+    a plain :class:`ConfigWriteError` (→ 400) naming only the file's basename, so the
+    absolute path never reaches a response. Any other ``OSError`` (EIO, EMFILE, ...) is a
+    host fault, not a property of the path, so it propagates unchanged.
+    """
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return b""
+    except UNREADABLE_PATH_ERRORS:
+        raise ConfigWriteError(f"cannot read {path.name}: it is unreadable") from None
+
+
 def read_nested_subtree(
     claude_json: Path, outer_key: str, inner_key: str, subtree_key: str
 ) -> Any:
@@ -734,16 +756,10 @@ def read_nested_subtree(
     reads as ``None`` — a missing local config is simply empty. A file that exists but is
     unparseable (non-UTF-8, malformed JSON, or not a JSON object) raises
     :class:`InvalidCandidateError` (→ 422): we never treat an unreadable config as empty.
-    A file that exists but cannot be read (EACCES, a directory at the path) raises a
-    plain :class:`ConfigWriteError` (→ 400) naming only the file, never an ``OSError``.
+    A path that is not a readable file (EACCES, a directory at the path) raises a plain
+    :class:`ConfigWriteError` (→ 400) via :func:`read_config_bytes`.
     """
-    try:
-        raw = claude_json.read_bytes()
-    except FileNotFoundError:
-        raw = b""
-    except OSError:
-        raise ConfigWriteError(f"cannot read {claude_json.name}: it is unreadable") from None
-    data = load_settings_json_obj(raw)
+    data = load_settings_json_obj(read_config_bytes(claude_json))
     outer = data.get(outer_key)
     if not isinstance(outer, dict):
         return None
