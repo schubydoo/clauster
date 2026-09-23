@@ -1363,6 +1363,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#claudejson-exists-but-is-not-a-valid-json-object" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        "~/.claude.json exists but is not a valid JSON object"
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -2131,6 +2142,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#claudejson-exists-but-is-not-a-valid-json-object" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        "~/.claude.json exists but is not a valid JSON object"
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -2699,6 +2721,39 @@ still inherits from a trusted ancestor).</p>
 <p><strong>Fix:</strong> launch it once via <strong>Trust &amp; start</strong> (which trusts, then spawns), or click
 <strong>Trust all</strong> on the dashboard to grant every discovered project its own key at once.</p>
 <p><strong>Mechanism:</strong> <a href="../security/#workspace-trust">Security — workspace trust</a>.</p>
+<h3 id="claudejson-exists-but-is-not-a-valid-json-object">"~/.claude.json exists but is not a valid JSON object"<a class="headerlink" href="#claudejson-exists-but-is-not-a-valid-json-object" title="Permanent link">&para;</a></h3>
+<p><strong>What you see:</strong> <strong>Trust</strong>, <strong>Trust all</strong>, <strong>Trust &amp; start</strong>, <code>clauster start --trust</code>
+or a background-session dispatch fails with this message:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>could not update trust state: /home/you/.claude.json exists but is not a valid JSON
+<a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a>object (invalid JSON at line 1 column 58). Clauster did not change it. Repair the file
+<a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a>or restore it from a backup, then try again.
+</code></pre></div>
+<p>A config-write save of an MCP server to user or local scope fails with the same text.
+A start without Trust fails with <code>directory not trusted</code>, because Clauster reads a file
+it cannot parse as "nothing is trusted".</p>
+<p><strong>Cause:</strong> the <code>~/.claude.json</code> of the user that runs Clauster exists but does not
+parse. For example, a crash in the middle of a write can truncate it. The text in
+parentheses names the failure. It gives a line and column for invalid JSON, or says
+<code>it is not UTF-8 text</code>, <code>it is nested too deeply to parse</code>, or <code>the top level is not a
+JSON object</code>. An empty file also fails. The message never quotes the file content.</p>
+<p>Clauster does not write a file that it cannot parse. A write would keep only the keys
+that Clauster sets, and remove your other projects, trust grants and account data. The
+file stays byte-identical.</p>
+<p><strong>Fix:</strong></p>
+<ol>
+<li>On the Clauster host, run this command as the user that runs Clauster. If the file
+   has a problem, the last line of the output names it. For invalid JSON, that line
+   gives a line and column:</li>
+</ol>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a>python3<span class="w"> </span>-c<span class="w"> </span><span class="s1">'import json, sys; d = json.load(open(sys.argv[1], encoding="utf-8")); sys.exit(None if isinstance(d, dict) else "the top level is not a JSON object")'</span><span class="w"> </span>~/.claude.json
+</code></pre></div>
+<ol>
+<li>Repair the file, or restore it from a copy that you trust. If Clauster wrote the
+   file before, <code>~/.claude.json.bak</code> holds its content from before the first Clauster
+   write. That copy can be old, so compare it with the damaged file before you use it.</li>
+<li>Run the command from step 1 again. No output means that Clauster can read the file.</li>
+<li>Do the action again.</li>
+</ol>
 <h2 id="claude-itself-is-the-problem">Claude itself is the problem<a class="headerlink" href="#claude-itself-is-the-problem" title="Permanent link">&para;</a></h2>
 <h3 id="not-logged-in-access-token-has-expired-re-authenticate-with-claude">"not logged in" / "access token has expired; re-authenticate with <code>claude</code>"<a class="headerlink" href="#not-logged-in-access-token-has-expired-re-authenticate-with-claude" title="Permanent link">&para;</a></h3>
 <p><strong>What you see:</strong> <code>doctor</code> warns on the <code>claude-login</code> row —
@@ -2746,7 +2801,7 @@ version:</p>
 <p><strong>What you see:</strong> the dashboard's live log view stops updating.</p>
 <p><strong>Most likely cause:</strong> the WebSocket stream died, not the bridge. Check
 whether the on-disk log is still growing:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>tail<span class="w"> </span>-f<span class="w"> </span>~/.clauster/logs/&lt;label&gt;-*.log
+<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>tail<span class="w"> </span>-f<span class="w"> </span>~/.clauster/logs/&lt;label&gt;-*.log
 </code></pre></div>
 <p>If it grows, the bridge is fine — reload the dashboard to reconnect the
 stream. If it is silent too, treat it as a wedged bridge: stop and resume it
@@ -2758,9 +2813,9 @@ its keeper) still running with no project card that controls it.</p>
 survive a <code>systemctl restart</code> under the shipped unit's <code>KillMode=process</code>;
 normally Clauster reattaches to them at startup. One that was orphaned
 instead is cleaned up with:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a>clauster<span class="w"> </span>keepers<span class="w">                      </span><span class="c1"># list orphaned pty keepers (no project card)</span>
-<a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a>clauster<span class="w"> </span>keepers<span class="w"> </span>--kill<span class="w"> </span>&lt;pid&gt;<span class="w">         </span><span class="c1"># stop one by its keeper PID</span>
-<a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a>clauster<span class="w"> </span>keepers<span class="w"> </span>--kill<span class="w"> </span>&lt;pid&gt;<span class="w"> </span>--force<span class="w"> </span><span class="c1"># stop a keeper still on a project card (recovery path)</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a>clauster<span class="w"> </span>keepers<span class="w">                      </span><span class="c1"># list orphaned pty keepers (no project card)</span>
+<a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a>clauster<span class="w"> </span>keepers<span class="w"> </span>--kill<span class="w"> </span>&lt;pid&gt;<span class="w">         </span><span class="c1"># stop one by its keeper PID</span>
+<a id="__codelineno-16-3" name="__codelineno-16-3" href="#__codelineno-16-3"></a>clauster<span class="w"> </span>keepers<span class="w"> </span>--kill<span class="w"> </span>&lt;pid&gt;<span class="w"> </span>--force<span class="w"> </span><span class="c1"># stop a keeper still on a project card (recovery path)</span>
 </code></pre></div>
 <p><strong>Mechanism:</strong> <a href="../reference/cli/#clauster-keepers-stop-an-orphaned-pty-keeper"><code>clauster keepers</code></a>
 · <a href="../operations/#restart">the <code>KillMode</code> / restart caveat</a>.</p>
@@ -2809,7 +2864,7 @@ bridge's log, and Clauster lifts it onto the card. The exact fault is also
 logged on a line that begins with <code>clauster.pty_keeper:</code>. The three faults log
 <code>screen could not be rendered</code>, <code>rejected an escape sequence</code> (once for each
 error type), and <code>failed and was disabled</code>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>grep<span class="w"> </span>clauster.pty_keeper<span class="w"> </span>~/.clauster/logs/&lt;label&gt;-*.keeper.log
+<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a>grep<span class="w"> </span>clauster.pty_keeper<span class="w"> </span>~/.clauster/logs/&lt;label&gt;-*.keeper.log
 </code></pre></div>
 <h2 id="everything-looks-fine-but-the-session-never-responds">Everything looks fine but the session never responds<a class="headerlink" href="#everything-looks-fine-but-the-session-never-responds" title="Permanent link">&para;</a></h2>
 <h3 id="hosted-direct-session-cannot-connect-to-claustrum">Hosted / Direct Session: "cannot connect to claustrum"<a class="headerlink" href="#hosted-direct-session-cannot-connect-to-claustrum" title="Permanent link">&para;</a></h3>
@@ -2818,9 +2873,9 @@ error type), and <code>failed and was disabled</code>:</p>
 API returns <code>hosted channel unavailable: claustrum daemon not connected</code>.</p>
 <p><strong>Most likely cause:</strong> the claustrum daemon is not running (or not installed —
 it is an optional dependency), or its socket path is wrong.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:7621/healthz<span class="w">      </span><span class="c1"># the claustrum block names the reason</span>
-<a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a>clauster<span class="w"> </span>deps<span class="w"> </span>list<span class="w">                         </span><span class="c1"># is claustrum installed?</span>
-<a id="__codelineno-16-3" name="__codelineno-16-3" href="#__codelineno-16-3"></a>tail<span class="w"> </span>~/.clauster/claustrum/daemon.log<span class="w">      </span><span class="c1"># what did the daemon last say?</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:7621/healthz<span class="w">      </span><span class="c1"># the claustrum block names the reason</span>
+<a id="__codelineno-18-2" name="__codelineno-18-2" href="#__codelineno-18-2"></a>clauster<span class="w"> </span>deps<span class="w"> </span>list<span class="w">                         </span><span class="c1"># is claustrum installed?</span>
+<a id="__codelineno-18-3" name="__codelineno-18-3" href="#__codelineno-18-3"></a>tail<span class="w"> </span>~/.clauster/claustrum/daemon.log<span class="w">      </span><span class="c1"># what did the daemon last say?</span>
 </code></pre></div>
 <p>Start with <code>/healthz</code>: its <code>claustrum</code> block carries an <code>error</code> describing why
 the last start attempt failed — including the commonest case, the binary not
@@ -2866,11 +2921,11 @@ Before that the server logged at <code>info</code> in every deployment.</p>
 </blockquote>
 <p>Set <code>log_level</code> (default <code>info</code>) to raise the server's own verbosity — it
 covers Clauster's loggers and uvicorn's alike:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a><span class="nt">log_level</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">debug</span><span class="w">   </span><span class="c1"># debug | info | warning | error</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a><span class="nt">log_level</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">debug</span><span class="w">   </span><span class="c1"># debug | info | warning | error</span>
 </code></pre></div>
 <p>For a one-shot run, or in a container or unit file, use the env override
 instead of editing the config:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a><span class="nv">CLAUSTER_LOG_LEVEL</span><span class="o">=</span>debug<span class="w"> </span>clauster<span class="w"> </span>run<span class="w"> </span>-c<span class="w"> </span>clauster.yml
+<div class="highlight"><pre><span></span><code><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a><span class="nv">CLAUSTER_LOG_LEVEL</span><span class="o">=</span>debug<span class="w"> </span>clauster<span class="w"> </span>run<span class="w"> </span>-c<span class="w"> </span>clauster.yml
 </code></pre></div>
 <p>Either way the level is read <strong>once at startup</strong>, so restart Clauster after
 changing it. What <code>debug</code> mostly adds is <strong>uvicorn's own</strong> debug records —
