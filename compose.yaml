@@ -18,7 +18,7 @@
 
 services:
   clauster:
-    image: ghcr.io/schubydoo/clauster:latest@sha256:997281e1776db761a0166c32fefae5215d74f1e146cbd4a09346c8bcaead69f9
+    image: ghcr.io/schubydoo/clauster:latest@sha256:599a4a49bee47e28afcf9bb486394522c6dd5cd5ab05c7d9db3cd776a1bff1b1
     container_name: clauster
     restart: unless-stopped
     ports:
