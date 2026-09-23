@@ -65,7 +65,16 @@
     <h3 class="h4 mt-4">The dashboard zones</h3>
     <ul class="text-secondary">
       <li><strong>Active sessions</strong> — what's running for you right now. Use the
-        <em>Stop</em> / <em>Resume</em> controls on each row.</li>
+        <em>Stop</em> / <em>Resume</em> controls on each row.
+        {# The metrics chip's legend (#1306): its row tooltip never fires on touch or for
+           a keyboard user, so this is where they learn what the figures mean. #}
+        <ul>
+          <li data-test="help-metrics-legend"><strong>Usage figures</strong> — when enabled, a
+            running row's <code>% CPU · MB</code> is the live usage of that session's bridge
+            processes: CPU is summed across cores (so it can pass 100%) unless
+            <code>metrics.normalize_cpu</code> makes it a share of the whole host, memory is
+            summed RSS, and ⬇ / ⬆, when shown, are disk read and write rates.</li>
+        </ul></li>
       <li><strong>Projects</strong> — every discovered project. Launch a new session, create
         or clone a project, and open a project's read-only transcript here.</li>
     </ul>
