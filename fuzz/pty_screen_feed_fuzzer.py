@@ -177,20 +177,15 @@ def _drive(
 ) -> dict:
     """Feed the chunks into a fresh screen and read every scanner off it.
 
-    An exception from ``feed`` is caught and recorded rather than raised, and that is
-    **mirroring the production call sites, not hiding a crash**: both
-    ``pty_keeper._KeeperDrain.feed`` and ``login_shepherd._pump_pty`` already wrap
-    ``screen.feed`` in exactly this broad ``except Exception`` ("a render hiccup must
-    never kill the reader"). A harness that crashed here would be reporting a deliberately
-    guarded path as unguarded — so the contract worth fuzzing is not "``feed`` never
-    raises", it is **"the screen is still sound afterwards"**: every property in
-    :func:`check` is asserted on a screen that has already survived whatever ``feed`` did.
-
-    That ``feed`` raises at all stays worth reporting, and is — as an open finding on the
-    PR that introduced this harness — because of what the guard costs. ``pty_keeper``'s
-    handler disables *both* screen consumers for the rest of the session, so one ordinary
-    escape sequence silently ends the live terminal view and the pyte connect-URL scrape
-    until the bridge restarts. Two distinct pyte defects reach it, neither exotic:
+    ``feed`` is NOT guarded here. ``pyte`` itself raises on ordinary sequences, but
+    ``PtyScreen.feed`` catches that raise and RETURNS it (#1357), so the screen stays in use
+    and the OSC 8 scan still runs on the chunk. Before that, ``pty_keeper``'s handler disabled
+    *both* screen consumers for the rest of the session, and this harness caught the raise to
+    mirror it. What can still raise out of ``feed`` is clauster's own code (``_scan_osc8``), and
+    a raise there is a real defect, so it crashes the fuzzer instead of skipping an assertion.
+    The contract fuzzed is **"the screen is still sound afterwards"**: every property in
+    :func:`check` is asserted on a screen that has already absorbed whatever pyte rejected.
+    Two distinct pyte defects reach that absorption, neither exotic:
 
     * **CSI arity** — ``\\x1b[1;2C`` (a modified cursor key any real terminal emits) raises
       ``TypeError``; the same mismatch fires for ``A``/``B``/``D``/``G``/``H``/``@``/``L``/
@@ -201,10 +196,10 @@ def _drive(
     Both are pinned in ``tests/test_fuzz_harness_smoke.py``, so a pyte upgrade that fixes
     either one fails ``just check`` rather than passing unnoticed.
 
-    ⚠️ **The readers are guarded too, and like ``feed`` that guard now mirrors a production
-    one.** Every reader below goes through ``pyte``'s ``Screen.display``, and a wide
-    (double-width) character left half-overwritten makes it raise ``IndexError: string index
-    out of range``. Minimal reproducer, 13 bytes::
+    ⚠️ **The readers ARE guarded, and that guard mirrors a production one.** Every reader
+    below goes through ``pyte``'s ``Screen.display``, and a wide (double-width) character left
+    half-overwritten makes it raise ``IndexError: string index out of range``. Minimal
+    reproducer, 13 bytes::
 
         PtyScreen(cols=40, rows=6).feed(b"\\x1bH\\xad\\x80\\xe6\\x80\\xa0\\x1b[H\\xad\\x80\\xae")
         screen.find_authorize_url()          # -> IndexError
@@ -222,15 +217,12 @@ def _drive(
     to narrow this.
     """
     screen = pty_screen.PtyScreen(cols=cols, rows=rows, capture_osc8=capture_osc8)
-    fed_cleanly = True
     for chunk in data_chunks:
-        try:
-            screen.feed(chunk)
-        except Exception:  # noqa: BLE001 — mirrors the production guard; see the docstring
-            fed_cleanly = False
+        # A returned fault (a sequence pyte rejected, #1357) is ignored: the OSC 8 scan still
+        # ran on the chunk, so the drive stays comparable. A raise is a defect; see above.
+        screen.feed(chunk)
     try:
         readings = {
-            "fed_cleanly": fed_cleanly,
             "read_cleanly": True,
             "authorize": screen.find_authorize_url(),
             "token": screen.find_oauth_token(),
@@ -257,7 +249,7 @@ def _drive(
         # ONLY the pyte `display` defect documented above. Deliberately not `Exception`:
         # a crash in `redact_screen_text` would otherwise be absorbed as "read not
         # clean" and silently skip the leak assertion that exists to catch it.
-        return {"fed_cleanly": fed_cleanly, "read_cleanly": False}
+        return {"read_cleanly": False}
 
 
 def check(data: bytes, cuts: list[int], cols: int, rows: int, capture_osc8: bool) -> None:
@@ -278,19 +270,17 @@ def check(data: bytes, cuts: list[int], cols: int, rows: int, capture_osc8: bool
     if not (chunked["read_cleanly"] and whole["read_cleanly"]):
         return  # the pyte `display` IndexError — see _drive's docstring
 
-    # One skip, tied to a reported defect and no wider than its mechanism: a drive whose
-    # feed raised left the screen mid-sequence by design, and where the boundary fell
-    # decides how much got in — so the two runs are not comparable. Note this is not only
-    # about the rendered screen: `feed` runs `_stream.feed` BEFORE `_scan_osc8`, so a pyte
-    # raise also costs that chunk's OSC 8 scan (see `_drive`). There was a second skip —
-    # inputs where a stray opener was swallowed by `_OSC8_RE`'s parameter run — and it went
-    # away with the fix in #1356; see the module docstring.
-    if chunked["fed_cleanly"] and whole["fed_cleanly"]:
-        for key in _INVARIANT_KEYS:
-            assert chunked[key] == whole[key], (
-                f"chunk-boundary divergence in {key!r}: "
-                f"{len(parts)} chunks gave {chunked[key]!r}, one chunk gave {whole[key]!r}"
-            )
+    # Asserted on every input that reads cleanly. Inputs where `feed` raised on a sequence
+    # pyte rejects used to be skipped here, because the raise also cost that chunk's OSC 8
+    # scan. `PtyScreen.feed` now catches it and still runs the scan (#1357), so those inputs
+    # are asserted too. There was a second skip — inputs where a stray opener was swallowed by
+    # `_OSC8_RE`'s parameter run — and it went away with the fix in #1356; see the module
+    # docstring.
+    for key in _INVARIANT_KEYS:
+        assert chunked[key] == whole[key], (
+            f"chunk-boundary divergence in {key!r}: "
+            f"{len(parts)} chunks gave {chunked[key]!r}, one chunk gave {whole[key]!r}"
+        )
 
     frame = chunked["frame"]
     assert len(frame["rows"]) == rows, f"row count {len(frame['rows'])} != {rows}"

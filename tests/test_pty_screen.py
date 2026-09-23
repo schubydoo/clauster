@@ -562,6 +562,70 @@ def test_feed_is_incremental():
     assert scr.frame()["rows"][0].startswith("abcd")
 
 
+# --- sequences pyte rejects (#1357) ------------------------------------------------------
+#
+# Ordinary sequences a real TUI emits make pyte raise: a CSI with one parameter too many
+# (a modified cursor key) and an out-of-range erase. These are the reproducers from the issue
+# plus two siblings the fuzz harness names. `feed` must absorb them, keep the screen, and keep
+# parsing later chunks.
+_REJECTED_SEQUENCES = (
+    pytest.param(b"\x1b[1;2C", TypeError, id="csi-arity-cursor-forward"),
+    pytest.param(b"\x1b[5;4X", TypeError, id="csi-arity-erase-characters"),
+    pytest.param(b"\x1b[4J", UnboundLocalError, id="erase-in-display-out-of-range"),
+    pytest.param(b"\x1b[4K", UnboundLocalError, id="erase-in-line-out-of-range"),
+)
+
+
+@pytest.mark.parametrize(("seq", "error"), _REJECTED_SEQUENCES)
+def test_feed_returns_the_fault_and_keeps_parsing_after_a_rejected_sequence(seq, error):
+    scr = PtyScreen(cols=20, rows=3)
+    assert scr.feed(b"abc") is None  # a clean chunk reports no fault
+
+    fault = scr.feed(seq + b"LOST")
+
+    assert isinstance(fault, error)  # returned, not raised
+    # pyte reset its own parser before re-raising, so the next chunk parses normally: plain
+    # text, a split UTF-8 character, and a cursor move all land where they should. This pins
+    # the pyte behaviour the fix relies on (`Stream._send_to_parser`).
+    scr.feed(b"def\xe4\xb8")
+    scr.feed(b"\x80\x1b[2;1Hrow2")
+    rows = scr.frame()["rows"]
+    assert rows[0].startswith("abcdef一")  # the screen before the fault is kept
+    assert "LOST" not in rows[0]  # the rest of the faulting chunk is dropped
+    assert rows[1].startswith("row2")
+
+
+def test_rejected_sequence_does_not_clear_the_prefix_a_mask_needs():
+    # Invariant 4. Every mask in `redact` is anchored on a prefix, so a fault handler that
+    # CLEARED the screen would drop the prefix of a token that is part-drawn, and the rest of
+    # the token would render with nothing to match. The kept screen welds the rest onto its
+    # prefix, and the whole id is masked.
+    head, tail = b"url session_01AB", b"CDEFGHIJKLMN end"
+    scr = PtyScreen(cols=60, rows=2)
+    scr.feed(head)
+    assert isinstance(scr.feed(b"\x1b[4J"), UnboundLocalError)
+    scr.feed(tail)
+    row = scr.frame()["rows"][0]
+    assert "session_" not in row and "01AB" not in row and "CDEFGHIJKLMN" not in row
+    assert "<redacted>" in row and "end" in row
+
+    # Control: the hazard the kept screen avoids is real. Clear the screen at the same point
+    # and the rest of the id renders with no prefix, so no mask matches it.
+    cleared = PtyScreen(cols=60, rows=2)
+    cleared.feed(head)
+    cleared._screen.reset()
+    cleared.feed(tail)
+    assert cleared.frame()["rows"][0].startswith("CDEFGHIJKLMN end")
+
+
+def test_osc8_capture_still_runs_on_a_chunk_pyte_rejected():
+    # The OSC 8 scan reads the raw bytes, so a hyperlink in the same chunk as a rejected
+    # sequence is still captured, even though pyte drew nothing after the fault.
+    scr = PtyScreen(cols=100, rows=6, capture_osc8=True)
+    assert scr.feed(b"\x1b[1;2C" + _osc8(_OSC8_AUTH, label="Open link")) is not None
+    assert scr.find_authorize_url() == _OSC8_AUTH
+
+
 def test_default_geometry_is_120x40():
     frame = PtyScreen().frame()
     assert frame["cols"] == pty_screen.SCREEN_COLS == 120
@@ -1111,3 +1175,21 @@ def test_external_pyte_path_malformed_module_fails_closed(monkeypatch, tmp_path)
         sys.modules.pop("pyte", None)
         if had_pyte:
             sys.modules["pyte"] = prior_pyte
+
+
+def test_feed_does_not_absorb_an_unmeasured_error_type(monkeypatch):
+    """Only the measured pyte faults are absorbed; any other type still raises (#1357).
+
+    Its effect on the screen is unknown, so the keeper's disable-and-fallback branch must see
+    it rather than keep publishing a screen that may be wrong.
+    """
+    from clauster.pty_screen import PtyScreen
+
+    scr = PtyScreen(40, 10)
+
+    def boom(_data: bytes) -> None:
+        raise KeyError("unmeasured")
+
+    monkeypatch.setattr(scr._stream, "feed", boom)
+    with pytest.raises(KeyError):
+        scr.feed(b"x")

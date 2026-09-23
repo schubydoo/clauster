@@ -733,6 +733,138 @@ def test_keeper_drain_feed_failure_without_tap_disables_screen(tmp_path: Path) -
     assert not (tmp_path / "k.json").exists()  # no sidecar write on a non-URL chunk
 
 
+# --- a sequence pyte rejects keeps the screen (#1357) -----------------------------------
+#
+# `pyte` raises on ordinary sequences (a modified cursor key is a `TypeError`, an
+# out-of-range erase an `UnboundLocalError`). The keeper used to answer that by disabling BOTH
+# screen consumers for the rest of the session. `PtyScreen.feed` now absorbs the fault and
+# returns it, and the drain logs it once and keeps both consumers.
+_REJECTED_SEQUENCE = b"\x1b[1;2C"
+
+
+def test_keeper_drain_keeps_both_screen_consumers_after_a_rejected_sequence(
+    tmp_path: Path, capsys
+) -> None:  # noqa: ANN001
+    from clauster import pty_keeper
+
+    sidecar = tmp_path / "k.json"
+    screen_sidecar = tmp_path / "k.screen.json"
+    base: dict[str, object] = {"state": "starting", "note": None}
+    drain = pty_keeper._KeeperDrain(base, sidecar, _fresh_screen(), screen_sidecar)
+
+    drain.feed(_REJECTED_SEQUENCE)
+
+    assert drain._screen is not None and drain._tap is not None  # nothing disabled
+    assert drain._screen_feed_failed is False  # so no "screen could not be read" note later
+    # Consumer 1, the live view: the next tick publishes a live frame, not an error status.
+    drain.tick()
+    frame = _read(screen_sidecar)
+    assert frame["state"] == "live" and frame["screen"] is not None
+    # Consumer 2, the connect-URL scrape. Positive control first: the raw leg cannot read this
+    # URL, so only the screen can produce the id below.
+    assert pty_keeper._RE_CONNECT_URL.search(_KEEPER_URL_SCREEN_ONLY) is None
+    drain.feed(_KEEPER_URL_SCREEN_ONLY)
+    assert base["session_id"] == "session_01FAULTAAAAAAAAAAAAAA"
+    err = capsys.readouterr().err
+    assert "rejected an escape sequence" in err and "TypeError" in err
+    assert "failed and was disabled" not in err
+
+
+def test_keeper_drain_reports_each_rejected_sequence_type_once(tmp_path: Path, capsys) -> None:  # noqa: ANN001
+    """A TUI can emit the sequence on every redraw, so the log line must not repeat.
+
+    Unlike the render-fault latch, a clean chunk in between does not re-arm it: the screen is
+    healthy throughout, so a second report of the same error would say nothing new. A
+    different error type is a different defect, so it gets its own line.
+    """
+    from clauster import pty_keeper
+
+    drain = pty_keeper._KeeperDrain({}, tmp_path / "k.json", _fresh_screen(), None)
+    for chunk in (
+        _REJECTED_SEQUENCE,  # TypeError: reported
+        b"ordinary output\r\n",
+        _REJECTED_SEQUENCE,  # TypeError again: not reported
+        b"\x1b[4J",  # UnboundLocalError: reported
+        b"\x1b[4K",  # UnboundLocalError again: not reported
+        _REJECTED_SEQUENCE,
+    ):
+        drain.feed(chunk)
+
+    assert drain._screen is not None
+    err = capsys.readouterr().err
+    assert err.count("rejected an escape sequence") == 2
+    assert err.count("TypeError") == 1 and err.count("UnboundLocalError") == 1
+
+
+def test_keeper_drain_notes_a_rejected_sequence_that_ate_the_connect_url(
+    tmp_path: Path,
+) -> None:
+    """Fault and URL in ONE chunk: pyte drops the URL, so the deadline must say why.
+
+    The URL is the cursor-fragmented shape, so the raw leg cannot read it either (positive
+    control below). Without the latch the row promotes to `ready` with no link and no note.
+    """
+    from clauster import pty_keeper
+
+    chunk = _REJECTED_SEQUENCE + _KEEPER_URL_SCREEN_ONLY
+    assert pty_keeper._RE_CONNECT_URL.search(chunk) is None  # only the screen could read it
+
+    sidecar = tmp_path / "k.json"
+    base: dict[str, object] = {"state": "starting", "note": None}
+    drain = pty_keeper._KeeperDrain(base, sidecar, _fresh_screen(), None)
+    drain.feed(chunk)
+    assert "session_id" not in base  # pyte dropped the rest of the chunk, URL included
+    drain._deadline = time.monotonic() - 1
+    drain.tick()
+
+    assert base["state"] == "ready"
+    # The screen stayed readable, so the note says output was skipped, not that the screen
+    # could not be read.
+    assert base["note"] == pty_keeper._SEQUENCE_FAULT_NOTE
+    assert _read(sidecar)["note"] == pty_keeper._SEQUENCE_FAULT_NOTE
+
+
+def test_keeper_drain_no_note_for_a_rejected_sequence_after_the_url(tmp_path: Path) -> None:
+    """Control: once the URL is found, a later fault cannot have hidden it, so no note."""
+    from clauster import pty_keeper
+
+    base: dict[str, object] = {"state": "starting", "note": None}
+    drain = pty_keeper._KeeperDrain(base, tmp_path / "k.json", _fresh_screen(), None)
+    drain.feed(_KEEPER_URL_SCREEN_ONLY)
+    assert base["session_id"] == "session_01FAULTAAAAAAAAAAAAAA"
+    drain.feed(_REJECTED_SEQUENCE)
+    drain._deadline = time.monotonic() - 1
+    drain.tick()
+
+    assert drain._screen_sequence_fault is False
+    assert base["note"] is None
+
+
+def test_run_keeper_conpty_keeps_the_screen_through_a_rejected_sequence(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """End to end through the ConPTY backend, which builds a screen for every keeper.
+
+    The fake emits the rejected sequence as its own chunk and then a URL only the screen can
+    reassemble. Before the fix the first chunk disabled the screen, so the id was never found
+    and the live view ended on an `error` status.
+    """
+    from clauster import pty_keeper
+
+    fake = _fake_conpty(
+        chunks=[_REJECTED_SEQUENCE.decode(), _KEEPER_URL_SCREEN_ONLY.decode()], exit_code=0
+    )
+    monkeypatch.setattr(pty_keeper, "_load_pty_process", lambda: fake)
+    sidecar = tmp_path / "b.keeper.json"
+    screen = tmp_path / "b.screen.json"
+
+    assert pty_keeper._run_keeper_conpty(["claude"], sidecar, None, screen) == 0
+
+    assert _read(sidecar)["session_id"] == "session_01FAULTAAAAAAAAAAAAAA"
+    final = _read(screen)
+    assert final["state"] == "exited" and final["screen"] is not None
+
+
 # --- pyte render fault on the keeper's connect-URL scrape (#1376) ----------------------
 #
 # `pyte`'s `Screen.display` raises `IndexError` when a double-width character is left

@@ -451,6 +451,14 @@ def _import_pyte() -> Any:
     return pyte
 
 
+#: The ``pyte`` errors :meth:`PtyScreen.feed` absorbs (#1357). Each one is measured to raise
+#: before its handler writes a cell or moves the cursor, after pyte has reset its parser: a CSI
+#: with one parameter too many (``ESC[1;2C``) is a ``TypeError``, and an out-of-range erase
+#: (``ESC[4J``) is an ``UnboundLocalError``. A 200,000-sequence random probe of pyte 0.8.2 raised
+#: no other type. Any other type is not absorbed, because its effect on the screen is unknown.
+_PYTE_INPUT_FAULTS: tuple[type[Exception], ...] = (TypeError, UnboundLocalError)
+
+
 class PtyScreen:
     """A pyte-backed terminal emulator that renders raw pty bytes into redacted cells.
 
@@ -499,12 +507,54 @@ class PtyScreen:
         self._osc8_urls: list[str] = []
         self._osc8_seen: set[str] = set()
 
-    def feed(self, data: bytes) -> None:
-        """Feed a chunk of raw pty bytes into the emulator (escape sequences consumed here)."""
+    def feed(self, data: bytes) -> Exception | None:
+        """Feed a chunk of raw pty bytes into the emulator (escape sequences consumed here).
+
+        Returns None, or the ``pyte`` error that cut this chunk short (#1357).
+
+        ``pyte`` raises on ordinary sequences a real TUI emits: a CSI with one parameter too
+        many (``ESC[1;2C``, a modified cursor key) is a ``TypeError``, and an out-of-range
+        erase (``ESC[4J``) is an ``UnboundLocalError``. The raise used to escape this method,
+        and the keeper answered it by disabling the screen for the rest of the session. Now
+        the error is caught for this one call and returned, and the screen stays in use.
+
+        What a caught error keeps and what it drops:
+
+        * pyte resets its own parser state before it re-raises (``Stream._send_to_parser``),
+          so the next ``feed`` parses from a clean state. The tests pin this, so a ``pyte``
+          upgrade that stops doing it fails the suite.
+        * The rendered screen is KEPT: buffer, cursor, modes. Every raise measured in pyte
+          0.8.2 happens before the handler writes any cell or moves the cursor (an
+          out-of-range erase marks its line dirty first, which changes nothing visible), so
+          the screen is the one a terminal that ignored the sequence would show. Keeping it is
+          also the redaction-safe choice (invariant 4). Every mask in :mod:`redact` is
+          anchored on a prefix (``session_``, ``sk-``, ``bearer``). A cleared screen would
+          drop the prefix of a token that is part-drawn, and the rest of the token would then
+          render with no prefix to match. A kept screen leaves the prefix in place.
+        * The rest of THIS chunk after the bad sequence is dropped, because pyte does not
+          report where in the chunk it stopped. The next chunk feeds normally. Buffering
+          across chunk boundaries is a separate issue (#1355).
+
+        Only the error types in :data:`_PYTE_INPUT_FAULTS` are absorbed, because only those
+        are measured to leave the parser reset and the screen unchanged. Any other type still
+        raises, so the keeper's disable-and-fallback branch handles a failure whose effect on
+        the screen is unknown.
+
+        The OSC 8 scan reads the raw bytes, so it still runs on a chunk pyte rejected with an
+        absorbed error. A type that is not absorbed raises before the scan, and the keeper then
+        falls back to the raw-bytes URL regex. The
+        caller owns the reporting, because this class does no I/O: the keeper logs the first
+        fault once per session.
+        """
+        fault: Exception | None = None
         with self._lock:
-            self._stream.feed(data)
+            try:
+                self._stream.feed(data)
+            except _PYTE_INPUT_FAULTS as exc:
+                fault = exc
             if self._capture_osc8:
                 self._scan_osc8(data)
+        return fault
 
     def _scan_osc8(self, data: bytes) -> None:
         """Record OSC 8 hyperlink URIs from ``data`` (caller holds ``self._lock``).

@@ -667,6 +667,12 @@ def test_pty_screen_feed_invariance_oracle_fires_on_a_broken_carry(
     stream = b"\x1b]8;;" + url + b"\x07label\x1b]8;;\x07"
     mid = [len(stream) // 2 * 256 // len(stream)]
     harness.check(stream, mid, 80, 24, True)  # unbroken: passes
+    # The same stream behind a sequence pyte rejects. `PtyScreen.feed` absorbs that fault and
+    # still scans the chunk (#1357), so the harness no longer skips such inputs. Before the
+    # fix `feed` raised, the harness marked the drive unclean, and `check` asserted nothing.
+    rejected = b"\x1b[1;2C" + stream
+    rejected_mid = [len(rejected) // 2 * 256 // len(rejected)]
+    harness.check(rejected, rejected_mid, 80, 24, True)  # unbroken: passes
 
     def _no_carry(self, data: bytes) -> None:
         for found in pty_screen.extract_osc8_hyperlinks(data):
@@ -677,6 +683,30 @@ def test_pty_screen_feed_invariance_oracle_fires_on_a_broken_carry(
     monkeypatch.setattr(pty_screen.PtyScreen, "_scan_osc8", _no_carry)
     with pytest.raises(AssertionError, match="^chunk-boundary divergence in 'retained'"):
         harness.check(stream, mid, 80, 24, True)
+    with pytest.raises(AssertionError, match="^chunk-boundary divergence in 'retained'"):
+        harness.check(rejected, rejected_mid, 80, 24, True)
+
+
+def test_pty_screen_feed_harness_crashes_on_a_defect_in_clausters_own_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raise out of ``PtyScreen.feed`` is now clauster's own defect, so it must crash.
+
+    ``PtyScreen.feed`` absorbs what pyte rejects (#1357), which leaves ``_scan_osc8`` as the
+    only code that can raise out of it. The harness used to catch every raise from ``feed``
+    and skip the invariance assertion, which would hide a defect there.
+    """
+    pty_screen = pytest.importorskip("clauster.pty_screen")
+    pytest.importorskip("pyte")
+
+    harness = _load("pty_screen_feed_fuzzer.py")
+
+    def _broken_scan(self, data: bytes) -> None:
+        raise RuntimeError("scan defect")
+
+    monkeypatch.setattr(pty_screen.PtyScreen, "_scan_osc8", _broken_scan)
+    with pytest.raises(RuntimeError, match="scan defect"):
+        harness.check(b"\x1b]8;;https://claude.com/x\x07label", [], 80, 24, True)
 
 
 def test_pty_screen_feed_leak_oracle_fires_on_a_broken_redactor(
@@ -720,23 +750,22 @@ def test_pty_screen_feed_glued_leak_oracle_fires_where_the_bare_oracle_cannot(
         harness.check(row, [], 80, 24, False)
 
 
-def test_pty_screen_feed_raises_on_ordinary_escape_sequences() -> None:
-    """PIN: ``PtyScreen.feed`` raises on sequences a real terminal emits.
+def test_pty_screen_feed_absorbs_the_escape_sequences_pyte_rejects() -> None:
+    """PIN: ``pyte`` raises on sequences a real terminal emits, and ``PtyScreen.feed`` absorbs it.
 
-    ``pty_screen_feed_fuzzer`` catches these because both production call sites already do
-    ("a render hiccup must never kill the reader") — but the guard is not free: the
-    ``pty_keeper`` handler disables the live view AND the pyte connect-URL scrape for the
-    rest of the session. Reported as an open finding; pinned here so a ``pyte`` upgrade
-    that fixes either defect fails ``just check`` and prompts narrowing the harness's
-    ``except`` rather than leaving it swallowing nothing.
+    ``PtyScreen.feed`` catches the raise and returns it, so the screen stays in use (#1357).
+    Before that the ``pty_keeper`` handler disabled the live view AND the pyte connect-URL
+    scrape for the rest of the session. The raw ``pyte`` half is pinned so a ``pyte`` upgrade
+    that fixes either defect fails ``just check``. That is the prompt to revisit the absorption
+    in ``PtyScreen.feed``, instead of leaving it guarding nothing.
     """
     pty_screen = pytest.importorskip("clauster.pty_screen")
-    pytest.importorskip("pyte")
+    pyte = pytest.importorskip("pyte")
 
-    with pytest.raises(TypeError):  # CSI arity: a modified cursor key
-        pty_screen.PtyScreen(cols=80, rows=24).feed(b"\x1b[1;2C")
-    with pytest.raises(UnboundLocalError):  # out-of-range erase-in-display
-        pty_screen.PtyScreen(cols=80, rows=24).feed(b"\x1b[4J")
+    for seq, error in ((b"\x1b[1;2C", TypeError), (b"\x1b[4J", UnboundLocalError)):
+        with pytest.raises(error):  # CSI arity (a modified cursor key); out-of-range erase
+            pyte.ByteStream(pyte.Screen(80, 24)).feed(seq)
+        assert isinstance(pty_screen.PtyScreen(cols=80, rows=24).feed(seq), error)
 
 
 def test_pty_screen_display_readers_raise_on_a_half_overwritten_wide_char() -> None:

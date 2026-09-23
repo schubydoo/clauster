@@ -461,12 +461,20 @@ would be.
 live log tail works, and Stop and the live terminal all behave normally.
 
 **Cause:** the keeper reads the connect link off a terminal screen it rebuilds
-from the bridge's output. Two faults stop it. The first is a rare byte sequence, a
-double-width character left half-overwritten, that makes one frame fail to
-render. The keeper then skips the bad chunk and retries on the next one, which
-normally succeeds within the 30-second capture window. The second is a failure
-that disables the screen emulator for the rest of the session. This message
-means capture never succeeded.
+from the bridge's output. Three faults stop it:
+
+1. A rare byte sequence, a double-width character left half-overwritten, makes
+   one frame fail to render. The keeper skips the bad chunk and retries on the
+   next one, which normally succeeds within the 30-second capture window.
+2. The screen emulator rejects an escape sequence before the link is found. The
+   emulator skips the rest of that chunk. If the link was in that chunk and the
+   bridge does not print it again, the link is lost. The screen and the live
+   terminal keep working.
+3. A failure disables the screen emulator for the rest of the session.
+
+This message means capture never succeeded. If fault 2 is the only fault, the
+card instead says "Connect link unavailable — part of this session's output was
+skipped by the terminal emulator." The cause and the fix are the same.
 
 **Where it happens:** Windows always, and Linux or macOS only with
 `claude.pty_screen_enabled: true`. The keeper builds that screen unconditionally
@@ -480,7 +488,9 @@ Stop the card and start a new session. Nothing needs repairing on the host.
 
 **Mechanism:** the keeper writes the reason into its sidecar next to the
 bridge's log, and Clauster lifts it onto the card. The exact fault is also
-logged, one line beginning `clauster.pty_keeper:`:
+logged on a line that begins with `clauster.pty_keeper:`. The three faults log
+`screen could not be rendered`, `rejected an escape sequence` (once for each
+error type), and `failed and was disabled`:
 
 ```sh
 grep clauster.pty_keeper ~/.clauster/logs/<label>-*.keeper.log
