@@ -213,10 +213,23 @@ class CapacityExceeded(SpawnError):
 class InstanceStillLive(RuntimeError):
     """Raised when a lifecycle op is refused because the instance is still live.
 
-    Two raise sites: forget() on a bridge that is STARTING/RUNNING or still has a live
-    bridge/keeper pid, and adopt() on a project that is already managed in ANY status.
+    Raised by forget() on a bridge that is STARTING/RUNNING or still has a live
+    bridge/keeper pid, and by adopt() on a project that is already managed in ANY status.
     Not a SpawnError: these are lifecycle ops, not spawns, and the caller maps this to
-    409 (Stop it first) rather than the 4xx the spawn errors map to.
+    409 (Stop it first) rather than the 4xx the spawn errors map to. The one subclass that
+    is also a SpawnError is :class:`BridgeHeldByAnotherProject`.
+    """
+
+
+class BridgeHeldByAnotherProject(InstanceStillLive, SpawnError):
+    """A live bridge in this project's folder is already managed as another project's card.
+
+    Raised by the external-bridge take-over that both adopt() and the standard spawn path
+    run (#1302). Two projects whose paths differ only in punctuation share one pointer file,
+    and a card of the other one can hold this folder's bridge. Handing that card back, or
+    carding the process a second time, is unsafe. It subclasses both bases so the adopt
+    route (which catches InstanceStillLive) and the spawn and resume routes (which catch
+    SpawnError) each answer 409, and the CLI's ``start`` reports it rather than crashing.
     """
 
 

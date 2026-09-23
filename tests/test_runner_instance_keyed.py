@@ -19,7 +19,14 @@ import pytest
 
 from clauster.models import InstanceStatus, RemoteControlInstance
 from clauster.rediscovery import Rediscovery
-from clauster.runner import InstanceStillLive, SessionRunner, _row_float, _row_int
+from clauster.runner import (
+    BridgeHeldByAnotherProject,
+    InstanceStillLive,
+    SessionRunner,
+    SpawnError,
+    _row_float,
+    _row_int,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -442,25 +449,30 @@ def _held_card(**kw) -> RemoteControlInstance:
 
 
 @pytest.mark.parametrize(
-    ("card_fields", "hit"),
+    ("card_fields", "drift_prone", "hit"),
     [
-        ({"bridge_start_ticks": 1000}, True),  # exact ticks
-        ({"bridge_start_ticks": 999}, False),  # same pid, earlier process
-        ({"bridge_proc_start": 501.0}, True),  # no ticks: epoch within tolerance
-        ({"bridge_proc_start": 600.0}, False),  # no ticks: epoch far off
-        ({}, True),  # nothing comparable: the bare pid still refuses a second card
-        ({"bridge_start_ticks": 1000, "status": InstanceStatus.STOPPED}, False),
-        ({"bridge_start_ticks": 1000, "bridge_pid": 9002}, False),
+        ({"bridge_start_ticks": 1000}, False, True),  # exact ticks
+        ({"bridge_start_ticks": 999}, False, False),  # same pid, earlier process
+        ({"bridge_start_ticks": 999}, True, False),  # ticks do not drift: still conclusive
+        ({"bridge_proc_start": 501.0}, False, True),  # no ticks: epoch within tolerance
+        ({"bridge_proc_start": 600.0}, False, False),  # no ticks: epoch far, conclusive
+        # No ticks, epoch far, but the epoch drifts on this platform: inconclusive, so the
+        # bare pid decides rather than risk a second card on one process.
+        ({"bridge_proc_start": 600.0}, True, True),
+        ({}, False, True),  # nothing comparable: the bare pid still refuses a second card
+        ({"bridge_start_ticks": 1000, "status": InstanceStatus.STOPPED}, False, False),
+        ({"bridge_start_ticks": 1000, "bridge_pid": 9002}, False, False),
     ],
 )
 def test_live_card_for_pointer_matches_the_pid_and_start_pair(
-    runner_config, monkeypatch, card_fields, hit
+    runner_config, monkeypatch, card_fields, drift_prone, hit
 ):
-    # #1302 review: the held-pid scan in `_reattach_external_standard` must match the
+    # #1302 review: the held-card scan in `_reattach_external_standard` must match the
     # process, not a recycled pid on a card whose bridge died before the poll noticed.
     from clauster import pointers
 
     monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", lambda j: 500.0)
+    monkeypatch.setattr("clauster.procutil.start_time_is_drift_prone", lambda: drift_prone)
     runner = _make_runner(runner_config)
     card = _held_card(**card_fields)
     runner._instances[card.instance_id] = card
@@ -478,7 +490,8 @@ async def test_external_reattach_refuses_a_bridge_another_projects_card_holds(
 ):
     # A `sanitize_cwd` collision can leave project beta's card holding the bridge whose cwd
     # is alpha's folder. Neither handing beta's card to alpha's Start nor carding the process
-    # a second time is safe, so the take-over refuses (409) instead.
+    # a second time is safe, so the take-over refuses. The route-level 409 is asserted in
+    # tests/test_app_instances.py.
     config, _ = runner_config
     runner = _make_runner(runner_config)
     monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", lambda j: 500.0)
@@ -506,9 +519,29 @@ async def test_external_reattach_refuses_a_bridge_another_projects_card_holds(
 
     monkeypatch.setattr(runner._launch, "_popen", _no_launch)
 
-    with pytest.raises(InstanceStillLive, match="project 'beta'"):
+    with pytest.raises(BridgeHeldByAnotherProject, match="project 'beta'") as exc:
         await runner.spawn_detailed("alpha")
+    # Both families, so every caller maps it: adopt catches the one, spawn the other.
+    assert isinstance(exc.value, InstanceStillLive)
+    assert isinstance(exc.value, SpawnError)
     assert [i for i in runner.list_instances() if i.bridge_pid == 9001] == [foreign]
+
+
+def test_pointer_instance_id_is_stable_and_per_project():
+    # The derived id must repeat for one bridge (headless runs agree) and differ per project,
+    # so two projects sharing one pointer file (a `sanitize_cwd` collision) never share an id.
+    from clauster import pointers
+    from clauster.rediscovery import _pointer_instance_id
+
+    ptr = pointers.BridgePointer(
+        pid=9001, proc_start="1000", source="t", environment_id="env_X", session_id="s_X"
+    )
+    other = pointers.BridgePointer(
+        pid=9002, proc_start="1000", source="t", environment_id="env_X", session_id="s_X"
+    )
+    assert _pointer_instance_id("alpha", ptr) == _pointer_instance_id("alpha", ptr)
+    assert _pointer_instance_id("alpha", ptr) != _pointer_instance_id("beta", ptr)
+    assert _pointer_instance_id("alpha", ptr) != _pointer_instance_id("alpha", other)
 
 
 async def test_stopped_row_does_not_hide_a_live_detached_keeper(runner_config, monkeypatch):

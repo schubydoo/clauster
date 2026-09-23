@@ -1474,7 +1474,7 @@ class Rediscovery:
             # pass below decides their cards. A pid-less standard row gets a STOPPED card:
             # the live card holds `ptr.pid`, so the pointer sweep there reads it as
             # accounted for, and a Start on the stopped card cannot launch a second bridge
-            # on this folder (the cap, or `_reattach_external_standard`'s held-pid check).
+            # on this folder (the cap, or `_reattach_external_standard`'s held-card check).
             # A pid-less pty row stays hidden while this card is a live pty card (the
             # any-live-pty block there). The accepted cost: a bridge that a pre-#1088 build
             # spawned (its row carries no pids) comes back as this card PLUS its old row,
@@ -1814,13 +1814,14 @@ class Rediscovery:
         Matched on the (pid, start) pair, never the bare pid (#1302 review): a card whose
         bridge died before the poll loop marked it CRASHED can hold a pid that a new bridge
         now reuses, and handing that dead card back would leave the live bridge unmanaged.
-        Exact ticks when both sides carry them, else the epoch within
-        ``_PROC_START_TOLERANCE``. With neither comparable, the bare pid decides, so an
-        unknown start still never cards one process twice. A STOPPED card is skipped
-        because ``stop()`` leaves its ``bridge_pid`` in place.
+        Exact ticks when both sides carry them. Otherwise the epoch rejects a card only
+        outside ``_PROC_START_TOLERANCE`` AND on a platform whose epoch does not drift
+        (:func:`procutil.start_time_is_drift_prone`): here a false "not held" cards one
+        process twice, which costs more than a false "held", so an inconclusive epoch falls
+        back to the bare pid, as does a start that is unknown on either side. A STOPPED card
+        is skipped because ``stop()`` leaves its ``bridge_pid`` in place.
         """
         ptr_ticks = _pointer_start_ticks(ptr.proc_start)
-        ptr_epoch = procutil._expected_epoch(ptr.proc_start)
         for held in self._registry._instances.values():
             if held.bridge_pid != ptr.pid or held.status not in (
                 InstanceStatus.STARTING,
@@ -1830,12 +1831,14 @@ class Rediscovery:
             if held.bridge_start_ticks is not None and ptr_ticks is not None:
                 if held.bridge_start_ticks != ptr_ticks:
                     continue
-            elif (
-                held.bridge_proc_start is not None
-                and ptr_epoch is not None
-                and abs(held.bridge_proc_start - ptr_epoch) > _PROC_START_TOLERANCE
-            ):
-                continue
+            elif held.bridge_proc_start is not None and not procutil.start_time_is_drift_prone():
+                # Read only here: a card without ticks is a legacy one, so this is rare.
+                ptr_epoch = procutil._expected_epoch(ptr.proc_start)
+                if (
+                    ptr_epoch is not None
+                    and abs(held.bridge_proc_start - ptr_epoch) > _PROC_START_TOLERANCE
+                ):
+                    continue
             return held
         return None
 
@@ -1856,7 +1859,8 @@ class Rediscovery:
         ``"standard"`` from the positive cmdline gate rather than a possibly-stale
         persisted value), registered, and persisted. A bridge that a STARTING or RUNNING
         card of this project already holds returns that card instead, and nothing new is
-        registered. If another project's card holds it, :class:`InstanceStillLive` is raised.
+        registered. If another project's card holds it, ``BridgeHeldByAnotherProject`` is
+        raised.
 
         Caller must hold the per-project spawn lock and the cross-process bridge lock;
         the persisted-record read wants a fresh merge base (see the callers' preceding
@@ -1896,10 +1900,12 @@ class Rediscovery:
                 # Another project's card holds a bridge whose cwd is THIS project's folder (a
                 # `sanitize_cwd` collision the rediscover pointer leg does not attribute).
                 # Neither handing back that foreign card nor carding the process twice is
-                # safe, so refuse. Deferred import: see `adopt`.
-                from .runner import InstanceStillLive
+                # safe, so refuse. The error is both an InstanceStillLive and a SpawnError,
+                # so the adopt route and the spawn/resume routes each map it to 409.
+                # Deferred import: see `adopt`.
+                from .runner import BridgeHeldByAnotherProject
 
-                raise InstanceStillLive(
+                raise BridgeHeldByAnotherProject(
                     f"the live bridge in {proj.name!r} (pid {ptr.pid}) is already managed "
                     f"as a card of project {held.project!r}"
                 )
