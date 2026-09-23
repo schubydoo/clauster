@@ -38,7 +38,7 @@ def _elevate(client: TestClient) -> None:
     res = client.post("/api/reauth", json={"password": PASSWORD}, headers={"origin": ORIGIN})
     assert res.status_code == 200, res.text
     assert res.json()["elevated"] is True
-    assert client.cookies.get("clauster_elevation")
+    assert client.cookies.get(client.app.state.cookie_names.elevation)
 
 
 # ----- POST /api/reauth ----------------------------------------------------
@@ -56,7 +56,7 @@ def test_reauth_wrong_password_rejected(write_config, tmp_path):
     _login(client)
     res = client.post("/api/reauth", json={"password": "nope"}, headers={"origin": ORIGIN})
     assert res.status_code == 401
-    assert client.cookies.get("clauster_elevation") is None
+    assert client.cookies.get(client.app.state.cookie_names.elevation) is None
 
 
 def test_reauth_correct_sets_elevation_cookie(write_config, tmp_path):
@@ -67,7 +67,7 @@ def test_reauth_correct_sets_elevation_cookie(write_config, tmp_path):
     body = res.json()
     assert body["elevated"] is True
     assert body["expires_in"] == 600
-    assert client.cookies.get("clauster_elevation")
+    assert client.cookies.get(client.app.state.cookie_names.elevation)
 
 
 def test_reauth_throttled_after_repeated_failures(write_config, tmp_path):
@@ -96,6 +96,20 @@ def test_advanced_get_404_when_config_write_disabled(write_config, tmp_path):
 def test_advanced_get_403_without_elevation(write_config, tmp_path):
     client, _ = _advanced_client(write_config, tmp_path)
     _login(client)  # authed but NOT stepped up
+    res = client.get("/api/config/advanced")
+    assert res.status_code == 403
+    assert res.json()["detail"] == "reauth_required"
+
+
+def test_advanced_get_403_for_legacy_elevation_cookie_name(write_config, tmp_path):
+    # #1121: a valid elevation token under the pre-#1121 name never unlocks Tier-B.
+    client, _ = _advanced_client(write_config, tmp_path)
+    _elevate(client)
+    name = client.app.state.cookie_names.elevation
+    token = client.cookies.get(name)
+    assert client.get("/api/config/advanced").status_code == 200  # positive control
+    client.cookies.delete(name)
+    client.cookies.set("clauster_elevation", token)
     res = client.get("/api/config/advanced")
     assert res.status_code == 403
     assert res.json()["detail"] == "reauth_required"

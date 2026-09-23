@@ -27,6 +27,7 @@ import os
 import secrets
 import time
 from pathlib import Path
+from typing import NamedTuple
 from urllib.parse import urlsplit
 
 from argon2 import PasswordHasher
@@ -45,17 +46,44 @@ _ELEVATION_SALT = "clauster-elevation"
 # configured — defends against a "no password set" oracle.
 _DUMMY_HASH = PasswordHasher().hash("clauster-dummy-do-not-use")
 
-# Session/elevation cookie names, the elevation unlock window, and the single-user actor.
-# These are the single source (#1523): ``app.py``'s ``_authenticate`` and ``require_elevated``
-# read the cookies, ``routes/login.py`` sets and clears them, and the config-write routes stamp
-# the audit actor -- so the on-the-wire cookie names and the actor cannot drift across modules.
-SESSION_COOKIE = "clauster_session"
-# Step-up re-auth cookie for the privileged Tier-B "Advanced" config surface (#978):
-# short-lived, distinct from the session cookie, and only ever consulted by the
-# Tier-B config-write routes — never a general access credential.
-ELEVATION_COOKIE = "clauster_elevation"
+# The elevation unlock window and the single-user actor. These are the single source
+# (#1523): the config-write routes stamp the audit actor from here, so it cannot drift
+# across modules. The cookie NAMES are per-instance -- see :func:`cookie_names`.
 ELEVATION_MAX_AGE_SECONDS = 600  # 10-minute unlock window; re-prove the password after
 SESSION_USER = "admin"  # single-user in v0.2; multi-user is v0.3
+
+
+# ----- cookie names ---------------------------------------------------------
+
+
+class CookieNames(NamedTuple):
+    """The per-instance session and step-up elevation cookie names."""
+
+    session: str
+    # Step-up re-auth cookie for the privileged Tier-B "Advanced" config surface (#978):
+    # short-lived, distinct from the session cookie, and only ever consulted by the
+    # Tier-B config-write routes — never a general access credential.
+    elevation: str
+
+
+def cookie_names(state_dir: Path) -> CookieNames:
+    """Return this instance's cookie names, suffixed with a short hash of ``state_dir``.
+
+    Browsers scope cookies by domain and path, never by port (#1121). Two instances on
+    one host at different ports would otherwise share one ``clauster_session`` cookie,
+    and a login on one evicted the other's session. ``state_dir`` is already the
+    per-instance axis (database, ``session.secret``, epoch), so its resolved path names
+    the cookies. The name is stable across restarts of the same deployment.
+
+    This is the single source for both names (#1523): ``create_app`` calls it once and
+    publishes the result, ``_authenticate`` and ``require_elevated`` read the cookies by
+    it, and ``routes/login.py`` sets and clears them by it. A cookie under any other
+    name, including the pre-#1121 unsuffixed ``clauster_session``, is never read, so it
+    authenticates nothing.
+    """
+    resolved = Path(state_dir).expanduser().resolve()
+    tag = hashlib.sha256(os.fsencode(resolved)).hexdigest()[:12]
+    return CookieNames(session=f"clauster_session_{tag}", elevation=f"clauster_elevation_{tag}")
 
 
 # ----- session secret -----------------------------------------------------

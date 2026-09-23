@@ -42,7 +42,7 @@ from itsdangerous import URLSafeTimedSerializer
 from starlette.requests import HTTPConnection, Request
 from starlette.responses import Response
 
-from .auth import LoginThrottle
+from .auth import CookieNames, LoginThrottle
 from .claustrum_daemon import ClaustrumDaemon
 from .clone_jobs import CloneJobManager
 from .config import ClausterConfig
@@ -229,6 +229,18 @@ def get_elevation_serializer(conn: HTTPConnection) -> URLSafeTimedSerializer:
     return conn.app.state.elevation_serializer
 
 
+def get_cookie_names(conn: HTTPConnection) -> CookieNames:
+    """Return this instance's session and elevation cookie names from ``app.state``.
+
+    ``create_app`` computes them once with :func:`clauster.auth.cookie_names` (a hash of
+    ``state_dir``, #1121), and ``_authenticate`` / ``require_elevated`` read the cookies by
+    the same object. The moved ``/login``, ``/logout`` and ``/api/reauth`` routes set and
+    clear the cookies through here, so a write and a read can never use different names.
+    Always published.
+    """
+    return conn.app.state.cookie_names
+
+
 def get_login_throttle(conn: HTTPConnection) -> LoginThrottle:
     """Return the failed-login limiter ``create_app`` published on ``app.state``.
 
@@ -290,6 +302,7 @@ RequireElevatedDep = Annotated[Callable[[Request], None], Depends(get_require_el
 AllowedOriginsDep = Annotated[set[str], Depends(get_allowed_origins)]
 LoginSerializerDep = Annotated[URLSafeTimedSerializer, Depends(get_login_serializer)]
 ElevationSerializerDep = Annotated[URLSafeTimedSerializer, Depends(get_elevation_serializer)]
+CookieNamesDep = Annotated[CookieNames, Depends(get_cookie_names)]
 LoginThrottleDep = Annotated[LoginThrottle, Depends(get_login_throttle)]
 PasswordHasherDep = Annotated[PasswordHasher, Depends(get_password_hasher)]
 CookieSecureDep = Annotated[Callable[[Request], bool], Depends(get_cookie_secure)]

@@ -31,6 +31,7 @@ from .. import auth, login_shepherd
 from ..dependencies import (
     AuthenticateDep,
     ConfigDep,
+    CookieNamesDep,
     CookieSecureDep,
     ElevationSerializerDep,
     LoginSerializerDep,
@@ -135,6 +136,7 @@ async def login_submit(
     throttle: LoginThrottleDep,
     hasher: PasswordHasherDep,
     serializer: LoginSerializerDep,
+    cookie_names: CookieNamesDep,
     cookie_secure: CookieSecureDep,
 ) -> Response:
     """Verify the submitted password under the login throttle and open a session."""
@@ -154,7 +156,7 @@ async def login_submit(
         throttle.reset(throttle_key)
         resp = RedirectResponse(f"{config.root_path}/", status_code=303)
         resp.set_cookie(
-            auth.SESSION_COOKIE,
+            cookie_names.session,
             auth.issue_session(serializer, auth.SESSION_USER, request.app.state.session_epoch),
             max_age=config.auth.session_max_age_seconds,
             httponly=True,
@@ -173,7 +175,7 @@ async def login_submit(
 
 
 @router.post("/logout")
-async def logout(request: Request, config: ConfigDep) -> Response:
+async def logout(request: Request, config: ConfigDep, cookie_names: CookieNamesDep) -> Response:
     """Bump the session epoch so every issued cookie is revoked, then send back to login."""
     # Bump the server-side epoch so the cookie we just dropped — and any
     # copy of it elsewhere — is actually revoked, not merely cleared client
@@ -184,10 +186,10 @@ async def logout(request: Request, config: ConfigDep) -> Response:
         auth.bump_epoch, config.state_dir, request.app.state.session_epoch
     )
     resp = RedirectResponse(f"{config.root_path}/login", status_code=303)
-    resp.delete_cookie(auth.SESSION_COOKIE, path=config.root_path or "/")
+    resp.delete_cookie(cookie_names.session, path=config.root_path or "/")
     # The epoch bump above already revokes any outstanding elevation token (#978);
     # clear its cookie too so a stale value doesn't linger in the browser.
-    resp.delete_cookie(auth.ELEVATION_COOKIE, path=config.root_path or "/")
+    resp.delete_cookie(cookie_names.elevation, path=config.root_path or "/")
     return resp
 
 
@@ -198,6 +200,7 @@ async def reauth(
     throttle: LoginThrottleDep,
     hasher: PasswordHasherDep,
     elevation_serializer: ElevationSerializerDep,
+    cookie_names: CookieNamesDep,
     cookie_secure: CookieSecureDep,
 ) -> Response:
     """Re-prove the operator password to unlock the Tier-B "Advanced" surface (#978).
@@ -224,7 +227,7 @@ async def reauth(
         throttle.reset(throttle_key)
         resp = JSONResponse({"elevated": True, "expires_in": auth.ELEVATION_MAX_AGE_SECONDS})
         resp.set_cookie(
-            auth.ELEVATION_COOKIE,
+            cookie_names.elevation,
             auth.issue_elevation(
                 elevation_serializer, auth.SESSION_USER, request.app.state.session_epoch
             ),
