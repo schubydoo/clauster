@@ -23,7 +23,7 @@ import clauster.routes.instances as instances_module
 from clauster import claude_cli
 from clauster.app import create_app
 from clauster.claustrum_client import ClaustrumClient, ClaustrumError
-from clauster.config import load_config
+from clauster.config import PERMISSION_MODES, ClausterConfig, load_config
 from clauster.hosted import HostedSessionError
 from clauster.models import InstanceStatus, RemoteControlInstance
 
@@ -181,8 +181,14 @@ class _StubDaemon:
         pass
 
 
-def _app(write_config, *, manager: _StubManager | None = None, daemon: _StubDaemon | None = None):
-    config = load_config(write_config(""))
+def _app(
+    write_config,
+    *,
+    manager: _StubManager | None = None,
+    daemon: _StubDaemon | None = None,
+    extra_config: str = "",
+):
+    config = load_config(write_config(extra_config))
     app = create_app(config)
     app.state.hosted = manager if manager is not None else _StubManager()
     app.state.claustrum_daemon = daemon
@@ -678,6 +684,70 @@ def test_resume_hosted_daemon_error_is_502(write_config, projects_root, monkeypa
     with TestClient(app) as client:
         r = client.post(f"/api/instances/{_HID}/resume")
     assert r.status_code == 502
+
+
+# #1524. Resume respawns with the mode stored on the old row, so the project's bypass
+# ceiling must be re-applied against the CURRENT config. The config is loaded once at app
+# build, so "tightened after the spawn" is a row persisted in bypass mode, restored into an
+# app whose config no longer allows bypass for that project.
+_BYPASS_CEILING = "projects:\n  alpha:\n    allow_bypass_permissions: true\n"
+
+
+def _resume_bypass_row(write_config, monkeypatch, *, extra_config: str, project: str = "alpha"):
+    monkeypatch.setattr(instances_module, "is_trusted", lambda *a, **k: True)
+    monkeypatch.setattr(claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
+    manager = _StubManager()
+    row = manager.seed()
+    row.project = project
+    row.permission_mode = "bypassPermissions"
+    app = _app(write_config, manager=manager, daemon=_StubDaemon(), extra_config=extra_config)
+    with TestClient(app) as client:
+        r = client.post(f"/api/instances/{_HID}/resume")
+    return r, manager
+
+
+def test_resume_hosted_bypass_row_after_ceiling_tightened_is_403(
+    write_config, projects_root, monkeypatch
+):
+    r, manager = _resume_bypass_row(write_config, monkeypatch, extra_config="")
+    assert r.status_code == 403
+    # The same wording the spawn path returns — one shared source, no drift.
+    assert r.json() == {"detail": ClausterConfig.bypass_denied_detail("alpha")}
+    assert manager.resumed == []  # refused before the engine respawns anything
+    assert _HID in manager.instances  # the dead row stays put, still forgettable
+
+
+def test_resume_hosted_bypass_row_with_ceiling_resumes(write_config, projects_root, monkeypatch):
+    # Positive control: the ceiling is the only thing the 403 above depends on.
+    r, manager = _resume_bypass_row(write_config, monkeypatch, extra_config=_BYPASS_CEILING)
+    assert r.status_code == 200
+    assert manager.resumed[0]["id"] == _HID
+
+
+def test_resume_hosted_bypass_row_for_a_gone_project_is_404_not_403(
+    write_config, projects_root, monkeypatch
+):
+    # Same order as the spawn path: existence first, so a project that no longer exists
+    # 404s instead of leaking a 403 from the ceiling (which denies an unknown project).
+    r, manager = _resume_bypass_row(write_config, monkeypatch, extra_config="", project="gone")
+    assert r.status_code == 404
+    assert manager.resumed == []
+
+
+@pytest.mark.parametrize("mode", [m for m in PERMISSION_MODES if m != "bypassPermissions"])
+def test_resume_hosted_non_bypass_row_ignores_the_ceiling(
+    write_config, projects_root, monkeypatch, mode
+):
+    # The ceiling gates bypass only: every other stored mode resumes with no ceiling set.
+    monkeypatch.setattr(instances_module, "is_trusted", lambda *a, **k: True)
+    monkeypatch.setattr(claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
+    manager = _StubManager()
+    manager.seed().permission_mode = mode
+    app = _app(write_config, manager=manager, daemon=_StubDaemon())
+    with TestClient(app) as client:
+        r = client.post(f"/api/instances/{_HID}/resume")
+    assert r.status_code == 200
+    assert manager.resumed[0]["id"] == _HID
 
 
 # -- stop dispatch ---------------------------------------------------------
