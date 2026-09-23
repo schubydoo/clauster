@@ -2,4 +2,4 @@
 default: minor
 ---
 
-Fix a login on one instance logging you out of another instance on the same host (every browser logs in once more after the upgrade).
+Name the login cookie per instance, so two instances on one host keep separate logins (every browser logs in once more after the upgrade).
