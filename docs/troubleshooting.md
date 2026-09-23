@@ -142,7 +142,7 @@ or via two hostnames). Try a private-browsing window directly against the
 Clauster port; if that works, the proxy layer is eating the cookie.
 
 **Mechanism:** [Behind a reverse proxy](networking.md#behind-a-reverse-proxy)
-· [Security — sessions & cookies](security.md#sessions-cookies).
+· [Security — sessions and cookies](security.md#sessions-and-cookies).
 
 ### "password_required but no password_hash set"
 

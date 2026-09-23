@@ -15,7 +15,7 @@ schema_version: 1
 projects_root: ~/code        # required — dir whose subfolders are your projects (must exist, be readable)
 host: 127.0.0.1              # a non-loopback bind REQUIRES enforced auth (see auth:)
 port: 7621
-state_dir: ~/.clauster       # DB, logs, pid/socket files
+state_dir: ~/.clauster       # DB, logs, pid/socket files; its path also names the login cookie
 log_format: text             # text | json
 log_level: info              # debug | info | warning | error (also CLAUSTER_LOG_LEVEL; debug is for
                              # diagnosis — high volume, and a fuller record of server activity)

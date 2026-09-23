@@ -665,6 +665,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     # Step-up elevation (#978): same secret, distinct salt — an elevation token can
     # never be presented as a session cookie or vice versa (see make_elevation_serializer).
     _elevation_serializer = auth.make_elevation_serializer(_signing_secret)
+    # Per-instance cookie names (#1121), computed once so every read and write in this
+    # process uses the same names. state_dir already exists here on every path, including
+    # an env-provided CLAUSTER_SESSION_SECRET(_FILE) where load_or_create_secret creates
+    # nothing: configure_lock_dir at the top of create_app made <state_dir>/locks with its
+    # parents. So resolve() sees an existing path, the one a later restart sees too.
+    _cookie_names = auth.cookie_names(config.state_dir)
     _hasher = auth.make_hasher()
     _allowed_origins = auth.build_allowed_origins(config)
     # Published for the moved WebSocket gate (routes/websockets.py) to read via
@@ -683,6 +689,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     # login and reauth must share the single throttle instance and password hasher.
     app.state.login_serializer = _serializer
     app.state.elevation_serializer = _elevation_serializer
+    app.state.cookie_names = _cookie_names
     app.state.password_hasher = _hasher
     app.state.login_throttle = _throttle
 
@@ -738,7 +745,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 return auth.SESSION_USER, False, True
         user = auth.read_session(
             _serializer,
-            scope.cookies.get(auth.SESSION_COOKIE),
+            scope.cookies.get(_cookie_names.session),
             config.auth.session_max_age_seconds,
             current_epoch=app.state.session_epoch,
         )
@@ -946,7 +953,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         """
         elevated = auth.read_elevation(
             _elevation_serializer,
-            request.cookies.get(auth.ELEVATION_COOKIE),
+            request.cookies.get(_cookie_names.elevation),
             auth.ELEVATION_MAX_AGE_SECONDS,
             current_epoch=app.state.session_epoch,
         )

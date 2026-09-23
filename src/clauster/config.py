@@ -1408,7 +1408,8 @@ class ClausterConfig(BaseModel):
     state_dir: Path = Field(
         default=Path("~/.clauster"),
         description="Where `clauster.db` and runtime state live (`state.json` is a "
-        "legacy import source). `~` is expanded.",
+        "legacy import source). `~` is expanded. A hash of the resolved path names the "
+        "login cookie, so a new path logs every browser out once.",
     )
     root_path: str = Field(
         default="",

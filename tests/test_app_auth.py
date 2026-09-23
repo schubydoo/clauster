@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import re
 import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -26,6 +28,11 @@ def _password_client(runner_config) -> TestClient:
     config.auth.password_hash = _PW_HASH
     config.auth.allowed_origins = [ORIGIN]
     return TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
+
+
+def _session_name(client: TestClient) -> str:
+    """Return the per-instance session cookie name (#1121) of the client's app."""
+    return client.app.state.cookie_names.session
 
 
 def _login(client: TestClient) -> None:
@@ -118,7 +125,7 @@ def test_public_paths_reachable_unauthenticated(runner_config):
 def test_login_correct_then_authed(runner_config):
     client = _password_client(runner_config)
     _login(client)
-    assert client.cookies.get("clauster_session")
+    assert client.cookies.get(_session_name(client))
     assert client.get("/api/instances").status_code == 200
     # healthz now returns full detail to the authed session
     body = _healthz_after_probe(client)
@@ -139,7 +146,7 @@ def test_login_wrong_password_rejected(runner_config):
         follow_redirects=False,
     )
     assert resp.status_code == 401
-    assert not client.cookies.get("clauster_session")
+    assert not client.cookies.get(_session_name(client))
 
 
 def test_logout_clears_session(runner_config):
@@ -155,10 +162,13 @@ def test_logout_revokes_captured_cookie(runner_config):
     # captured value explicitly and expect 401.
     client = _password_client(runner_config)
     _login(client)
-    captured = client.cookies.get("clauster_session")
+    captured = client.cookies.get(_session_name(client))
+    assert captured  # a real value, so the replay below is not vacuous
     assert client.get("/api/instances").status_code == 200  # valid before logout
     client.post("/logout", headers={"origin": ORIGIN}, follow_redirects=False)
-    replay = client.get("/api/instances", headers={"cookie": f"clauster_session={captured}"})
+    replay = client.get(
+        "/api/instances", headers={"cookie": f"{_session_name(client)}={captured}"}
+    )
     assert replay.status_code == 401  # epoch bumped -> captured cookie revoked
 
 
@@ -190,13 +200,171 @@ def test_epoch_persists_across_restart(runner_config):
     app1 = create_app(config, runner=SessionRunner(config, claude_json=claude_json))
     c1 = TestClient(app1)
     _login(c1)
-    captured = c1.cookies.get("clauster_session")
+    captured = c1.cookies.get(_session_name(c1))
+    assert captured  # a real value, so the replay below is not vacuous
     c1.post("/logout", headers={"origin": ORIGIN}, follow_redirects=False)
     # "restart": a fresh app over the same state_dir
     app2 = create_app(config, runner=SessionRunner(config, claude_json=claude_json))
     c2 = TestClient(app2)
-    replay = c2.get("/api/instances", headers={"cookie": f"clauster_session={captured}"})
+    replay = c2.get("/api/instances", headers={"cookie": f"{_session_name(c2)}={captured}"})
     assert replay.status_code == 401
+
+
+# ----- per-instance cookie names (#1121) -----------------------------------
+
+
+def test_cookie_names_are_hashed_from_state_dir(tmp_path):
+    names = auth.cookie_names(tmp_path / "a")
+    assert re.fullmatch(r"clauster_session_[0-9a-f]{12}", names.session)
+    assert re.fullmatch(r"clauster_elevation_[0-9a-f]{12}", names.elevation)
+    # One tag per instance, shared by both cookies.
+    assert names.session.rsplit("_", 1)[1] == names.elevation.rsplit("_", 1)[1]
+
+
+def test_cookie_names_differ_per_state_dir(tmp_path):
+    a = auth.cookie_names(tmp_path / "a")
+    b = auth.cookie_names(tmp_path / "b")
+    assert a.session != b.session
+    assert a.elevation != b.elevation
+
+
+def test_cookie_names_use_the_resolved_state_dir(tmp_path):
+    # Two spellings of one directory are one instance, so they name the same cookie.
+    (tmp_path / "a").mkdir()
+    (tmp_path / "x").mkdir()
+    assert auth.cookie_names(tmp_path / "x" / ".." / "a") == auth.cookie_names(tmp_path / "a")
+
+
+def test_cookie_names_stable_across_restart(runner_config):
+    # A restart over the same state_dir keeps the name, so a live session survives it.
+    config, claude_json = runner_config
+    config.auth.enabled = True
+    config.auth.password_required = True
+    config.auth.password_hash = _PW_HASH
+    config.auth.allowed_origins = [ORIGIN]
+    app1 = create_app(config, runner=SessionRunner(config, claude_json=claude_json))
+    c1 = TestClient(app1)
+    _login(c1)
+    token = c1.cookies.get(_session_name(c1))
+    assert token
+    app2 = create_app(config, runner=SessionRunner(config, claude_json=claude_json))
+    assert app2.state.cookie_names == app1.state.cookie_names
+    # Pinned to the helper, not only to app.state, so both apps cannot agree on a wrong name.
+    assert app2.state.cookie_names == auth.cookie_names(config.state_dir)
+    c2 = TestClient(app2)
+    resp = c2.get("/api/instances", headers={"cookie": f"{_session_name(c2)}={token}"})
+    assert resp.status_code == 200
+
+
+def test_login_sets_per_instance_cookie_not_legacy_name(runner_config):
+    client = _password_client(runner_config)
+    config, _ = runner_config
+    resp = client.post(
+        "/login", data={"password": PASSWORD}, headers={"origin": ORIGIN}, follow_redirects=False
+    )
+    assert resp.status_code == 303
+    set_cookie = resp.headers.get_list("set-cookie")
+    assert len(set_cookie) == 1
+    assert set_cookie[0].startswith(auth.cookie_names(config.state_dir).session + "=")
+    assert client.cookies.get("clauster_session") is None
+
+
+def test_legacy_session_cookie_name_is_rejected(runner_config):
+    # A cookie under the pre-#1121 name authenticates nothing, even with a valid token.
+    client = _password_client(runner_config)
+    _login(client)
+    token = client.cookies.get(_session_name(client))
+    assert token
+    client.cookies.clear()
+    legacy = client.get("/api/instances", headers={"cookie": f"clauster_session={token}"})
+    assert legacy.status_code == 401
+    # Positive control: the same token under this instance's name is accepted.
+    current = client.get("/api/instances", headers={"cookie": f"{_session_name(client)}={token}"})
+    assert current.status_code == 200
+
+
+def test_legacy_session_cookie_name_rejected_on_websocket(runner_config):
+    with _password_client(runner_config) as client:
+        _login(client)
+        token = client.cookies.get(_session_name(client))
+        assert token
+        client.cookies.clear()
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect(
+                "/ws/bridge-log/ghost",
+                headers={"origin": ORIGIN, "cookie": f"clauster_session={token}"},
+            ):
+                pass
+
+
+def test_logout_clears_the_per_instance_cookies(runner_config):
+    client = _password_client(runner_config)
+    config, _ = runner_config
+    _login(client)
+    resp = client.post("/logout", headers={"origin": ORIGIN}, follow_redirects=False)
+    names = auth.cookie_names(config.state_dir)
+    cleared = {h.split("=", 1)[0] for h in resp.headers.get_list("set-cookie")}
+    # The per-instance names, plus the pre-#1121 names (one-release transition).
+    assert cleared == {names.session, names.elevation, "clauster_session", "clauster_elevation"}
+    root = config.root_path or "/"
+    assert all(f"Path={root}" in h for h in resp.headers.get_list("set-cookie"))
+
+
+def test_login_leaves_legacy_cookie_alone(runner_config):
+    # Deleting the legacy cookie on login would evict an un-upgraded instance on the same
+    # host (the #1121 bug), so only logout clears it.
+    client = _password_client(runner_config)
+    client.cookies.set("clauster_session", "belongs-to-another-instance")
+    resp = client.post(
+        "/login", data={"password": PASSWORD}, headers={"origin": ORIGIN}, follow_redirects=False
+    )
+    assert resp.status_code == 303
+    assert all(not h.startswith("clauster_session=") for h in resp.headers.get_list("set-cookie"))
+    assert client.cookies.get("clauster_session") == "belongs-to-another-instance"
+
+
+def test_cookie_names_computed_on_existing_state_dir_with_env_secret(
+    runner_config, tmp_path, monkeypatch
+):
+    # An env-provided secret makes load_or_create_secret skip creating state_dir; create_app
+    # still has it on disk (configure_lock_dir) before naming the cookies, so resolve() sees
+    # the real directory. The runner is built over its own state_dir first, so this pins
+    # create_app's ordering rather than riding on the runner's DB engine creating the dir.
+    monkeypatch.setenv("CLAUSTER_SESSION_SECRET", "x" * 32)
+    runner_cfg, claude_json = runner_config
+    runner = SessionRunner(runner_cfg, claude_json=claude_json)
+    fresh = tmp_path / "fresh-state"
+    config = runner_cfg.model_copy(update={"state_dir": fresh})
+    assert not fresh.exists()
+    seen: list[bool] = []
+    real = auth.cookie_names
+
+    def _spy(state_dir):
+        seen.append(Path(state_dir).expanduser().is_dir())
+        return real(state_dir)
+
+    monkeypatch.setattr(auth, "cookie_names", _spy)
+    app = create_app(config, runner=runner)
+    assert seen == [True]
+    assert app.state.cookie_names == real(fresh)
+
+
+def test_two_instances_on_one_host_keep_separate_sessions(runner_config, tmp_path):
+    # #1121 reproduction: two instances on one host share one browser cookie jar, because
+    # cookies ignore the port. Logging into B must not evict A's session.
+    client_a = _password_client(runner_config)
+    config_a, claude_json = runner_config
+    config_b = config_a.model_copy(update={"state_dir": tmp_path / "state-b"})
+    client_b = TestClient(
+        create_app(config_b, runner=SessionRunner(config_b, claude_json=claude_json))
+    )
+    assert _session_name(client_a) != _session_name(client_b)
+    _login(client_a)
+    client_b.cookies.update(client_a.cookies)  # one browser jar for both instances
+    _login(client_b)
+    client_a.cookies.update(client_b.cookies)
+    assert client_a.get("/api/instances").status_code == 200
+    assert client_b.get("/api/instances").status_code == 200
 
 
 def test_login_throttled_after_repeated_failures(runner_config):
@@ -624,29 +792,29 @@ def test_all_ws_endpoints_reject_unauthenticated(runner_config, path):
 
 
 def test_ws_rejected_bad_origin(runner_config):
-    client = _password_client(runner_config)
-    _login(client)
-    tok = client.cookies.get("clauster_session")
-    with pytest.raises(WebSocketDisconnect):
-        with client.websocket_connect(
-            "/ws/bridge-log/alpha",
-            headers={"origin": "http://evil.test", "cookie": f"clauster_session={tok}"},
-        ):
-            pass
+    with _password_client(runner_config) as client:
+        _login(client)
+        tok = client.cookies.get(_session_name(client))
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect(
+                "/ws/bridge-log/alpha",
+                headers={"origin": "http://evil.test", "cookie": f"{_session_name(client)}={tok}"},
+            ):
+                pass
 
 
 def test_ws_authorized_passes_auth_gate(runner_config):
-    client = _password_client(runner_config)
-    _login(client)
-    tok = client.cookies.get("clauster_session")
-    # Good origin + valid cookie => auth passes (accept), then closes 1008 for the
-    # nonexistent instance. Reaching accept proves the gate opened.
-    with client.websocket_connect(
-        "/ws/bridge-log/ghost",
-        headers={"origin": ORIGIN, "cookie": f"clauster_session={tok}"},
-    ) as ws:
-        with pytest.raises(WebSocketDisconnect):
-            ws.receive_text()
+    with _password_client(runner_config) as client:
+        _login(client)
+        tok = client.cookies.get(_session_name(client))
+        # Good origin + valid cookie => auth passes (accept), then closes 1008 for the
+        # nonexistent instance. Reaching accept proves the gate opened.
+        with client.websocket_connect(
+            "/ws/bridge-log/ghost",
+            headers={"origin": ORIGIN, "cookie": f"{_session_name(client)}={tok}"},
+        ) as ws:
+            with pytest.raises(WebSocketDisconnect):
+                ws.receive_text()
 
 
 def test_ws_streams_sanitized_lines(runner_config, tmp_path):

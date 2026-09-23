@@ -29,6 +29,21 @@ run a database migration by hand. (The separate `clauster migrate` command is a
 *legacy* helper that only upgrades an older flat-file `state.json`; on a 0.12+
 deployment it has nothing to do.)
 
+## After 1.2.1: every browser logs in once more
+
+Up to 1.2.1, every instance named its login cookie `clauster_session`. Browsers
+scope cookies by host name and ignore the port. Two instances on one host
+therefore shared one cookie, and a login on one instance logged you out of the
+other. The login cookie and the step-up cookie now carry a short hash of the
+resolved `state_dir` in their names. For the details, see [sessions and
+cookies](docs/security.md#sessions-and-cookies).
+
+Clauster does not read the old `clauster_session` cookie. After the upgrade, each
+browser shows the login page one time. Log in again. The old cookie authenticates
+nothing and expires at its original max age (7 days by default). If a script sends
+a saved `clauster_session` cookie, change it to use an [API
+token](docs/public-api.md#named-api-tokens-clauster-api-token) instead.
+
 ## After 1.0.2: leftover `<file>.lock` sidecars are left in place
 
 1.0.2 and earlier took the JSON write lock on a `<file>.lock` beside the target, so

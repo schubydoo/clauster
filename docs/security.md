@@ -105,13 +105,22 @@ Failed logins are rate-limited in two layers, returning **`429` with a
     fronting **IdP / IAP** (or use the reverse-proxy auth) as the real access
     control — see [Networking](networking.md).
 
-### Sessions & cookies
+### Sessions and cookies
 
 - Sessions are **signed cookies** (`itsdangerous`) with server-side revocation —
   "log out everywhere" bumps a persistent session epoch; cookies issued before
   the bump are rejected even if they have not yet expired. (The signing secret
   itself is constant across logouts.)
 - `session_max_age_seconds` defaults to 7 days.
+- Each instance names its cookies after a short hash of its resolved `state_dir`,
+  for example `clauster_session_1a2b3c4d5e6f`. Browsers scope cookies by host
+  name, not by port. The per-instance name lets two instances on one host, at
+  different ports, keep separate sessions. A cookie under any other name,
+  including the old `clauster_session`, is ignored.
+- Two instances with the same `state_dir` path still share one cookie name. Two
+  containers from the Clauster image hit this, because each one uses the same path
+  inside its container. If you run two containers under one host name, give each
+  one a different `state_dir`, or serve each one on its own host name.
 - `cookie_secure` controls the `Secure` flag: `auto` sets it only over https (or
   behind a trusted proxy reporting `X-Forwarded-Proto=https`); `always` forces
   it; `never` disables it.
