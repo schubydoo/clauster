@@ -676,6 +676,103 @@ def test_osc8_capture_still_runs_on_a_chunk_pyte_rejected():
     assert scr.find_authorize_url() == _OSC8_AUTH
 
 
+# --- origin mode with no scroll margins (#1607) ------------------------------------------
+#
+# Origin mode (DECOM, `ESC[?6h`) counts lines from the top scroll margin. With no margins set,
+# a real terminal's scroll region is the full screen. pyte stores that as `margins = None`,
+# and two handlers read `margins.top` under origin mode without a check: VPA (`ESC[<n>d`)
+# and the cursor report (`ESC[6n`). They raised AssertionError (AttributeError under
+# `python -O`), which is not an absorbed fault, so the keeper disabled the screen.
+_NO_MARGINS_ORIGIN = (
+    pytest.param(b"\x1b[?6h", id="origin-on"),
+    pytest.param(b"\x1b[2;5r\x1b[r\x1b[?6h", id="margins-cleared-then-origin-on"),
+    pytest.param(b"\x1b[?6h\x1b[2;5r\x1b[r", id="origin-on-then-margins-cleared"),
+    pytest.param(b"\x1b[?6h\x1b7\x1b[?6l\x1b8", id="origin-restored-by-restore-cursor"),
+)
+
+
+def _reports(scr: PtyScreen) -> list[str]:
+    # pyte's `write_process_input` is a no-op; capture what `report_device_status` answers.
+    sent: list[str] = []
+    scr._screen.write_process_input = sent.append
+    return sent
+
+
+def test_origin_mode_line_position_lands_on_the_full_screen_row():
+    # The reproducer from the issue. A real terminal puts the cursor on row 3 of the screen.
+    scr = PtyScreen(cols=20, rows=6)
+    assert scr.feed(b"\x1b[?6h\x1b[3d") is None
+    assert (scr._screen.cursor.x, scr._screen.cursor.y) == (0, 2)
+    assert scr._screen.margins is None  # the stand-in margins do not outlive the call
+    assert scr.feed(b"here") is None
+    assert scr.frame()["rows"][2].startswith("here")
+
+
+@pytest.mark.parametrize("prefix", _NO_MARGINS_ORIGIN)
+def test_origin_mode_with_no_margins_counts_from_the_full_screen(prefix):
+    scr = PtyScreen(cols=20, rows=6)
+    sent = _reports(scr)
+    assert scr.feed(prefix) is None
+    assert __import__("pyte").modes.DECOM in scr._screen.mode
+    assert scr._screen.margins is None
+    # VPA, then the cursor report, then VPA past the bottom, which clamps to the last row.
+    assert scr.feed(b"\x1b[4d\x1b[6n\x1b[99d\x1b[6n\x1b[d\x1b[6n") is None
+    assert sent == ["\x1b[4;1R", "\x1b[6;1R", "\x1b[1;1R"]
+    assert scr._screen.cursor.y == 0
+    assert scr._screen.margins is None
+
+
+def test_origin_mode_with_margins_set_is_left_to_pyte():
+    # With margins set the override does nothing: VPA counts from the top margin and the
+    # report subtracts it, exactly as stock pyte does.
+    pyte = __import__("pyte")
+    seq = b"\x1b[3;5r\x1b[?6h\x1b[2d\x1b[6n"
+    scr = PtyScreen(cols=20, rows=6)
+    sent = _reports(scr)
+    assert scr.feed(seq) is None
+    stock = pyte.Screen(20, 6)
+    stock_sent: list[str] = []
+    stock.write_process_input = stock_sent.append
+    pyte.ByteStream(stock).feed(seq)
+    assert scr._screen.cursor.y == stock.cursor.y == 3
+    assert sent == stock_sent == ["\x1b[2;1R"]
+    assert scr._screen.margins == stock.margins
+
+
+def test_origin_mode_arity_fault_still_absorbed_and_margins_put_back():
+    # A VPA with one parameter too many still raises pyte's TypeError inside the override.
+    # It is absorbed as before, and the stand-in margins are removed on the way out.
+    scr = PtyScreen(cols=20, rows=6)
+    scr.feed(b"\x1b[?6h\x1b[2;3H")
+    before = _screen_state(scr)
+    assert isinstance(scr.feed(b"\x1b[1;2d"), TypeError)
+    assert _screen_state(scr) == before
+    assert scr._screen.margins is None
+    assert scr.feed(b"\x1b[5d") is None and scr._screen.cursor.y == 4
+
+
+def test_origin_mode_line_position_does_not_raise_under_python_O(tmp_path):
+    # Under `-O` pyte's assert is stripped and the same input raised AttributeError instead.
+    # A subprocess is the only way to run the module with asserts off.
+    import subprocess
+
+    script = (
+        "from clauster.pty_screen import PtyScreen\n"
+        "scr = PtyScreen(cols=20, rows=6)\n"
+        "fault = scr.feed(b'\\x1b[?6h\\x1b[3d\\x1b[6n')\n"
+        "print(__debug__, fault, scr._screen.cursor.y)\n"
+    )
+    out = subprocess.run(  # noqa: S603 — the test's own interpreter, a fixed argv
+        [sys.executable, "-O", "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+        cwd=tmp_path,
+    )
+    assert out.stdout.split() == ["False", "None", "2"]
+
+
 # --- the same bytes render the same screen at any chunking (#1355) -----------------------
 #
 # pyte's `Screen.draw` gets the text of one read and stops at the first character it cannot
@@ -776,6 +873,16 @@ def test_a_pyte_without_its_wcwidth_fails_as_pyte_unavailable():
     broken = types.ModuleType("pyte")
     with pytest.raises(PyteUnavailableError):
         pty_screen._pyte_classes(broken)
+    # The same for the names the origin-mode overrides bind (#1607).
+    no_margins = types.ModuleType("pyte")
+    no_margins.screens = types.SimpleNamespace(wcwidth=len)  # type: ignore[attr-defined]
+    no_margins.modes = types.SimpleNamespace(DECOM=192)  # type: ignore[attr-defined]
+    with pytest.raises(PyteUnavailableError):
+        pty_screen._pyte_classes(no_margins)
+    no_modes = types.ModuleType("pyte")
+    no_modes.screens = types.SimpleNamespace(wcwidth=len, Margins=tuple)  # type: ignore[attr-defined]
+    with pytest.raises(PyteUnavailableError):
+        pty_screen._pyte_classes(no_modes)
 
 
 def test_draw_pieces_splits_only_at_characters_draw_cannot_place():
@@ -1466,8 +1573,10 @@ def test_external_pyte_path_loads_pyte_on_frozen_binary(monkeypatch, tmp_path):
         "\n"
         "import types\n"
         "\n"
-        "# `PtyScreen` binds pyte's `screens.wcwidth` when it builds its classes (#1355).\n"
-        "screens = types.SimpleNamespace(wcwidth=len)\n"
+        "# `PtyScreen` binds pyte's `screens.wcwidth` (#1355), `screens.Margins` and\n"
+        "# `modes.DECOM` (#1607) when it builds its classes.\n"
+        "screens = types.SimpleNamespace(wcwidth=len, Margins=tuple)\n"
+        "modes = types.SimpleNamespace(DECOM=192)\n"
         "\n"
         "class Screen:\n"
         "    def __init__(self, cols, rows):\n"

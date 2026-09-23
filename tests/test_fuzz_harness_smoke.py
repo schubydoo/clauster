@@ -794,6 +794,27 @@ def test_pty_screen_feed_absorbs_the_escape_sequences_pyte_rejects() -> None:
         assert isinstance(pty_screen.PtyScreen(cols=80, rows=24).feed(seq), error)
 
 
+def test_pty_screen_feed_fixes_origin_mode_with_no_margins_instead_of_absorbing_it() -> None:
+    """PIN: stock ``pyte`` raises on origin mode with no margins, and ``PtyScreen`` does not.
+
+    ``ESC[?6h`` then VPA or a cursor report reads ``margins.top`` while ``margins`` is
+    ``None``. That is a state defect, not a rejected input, so ``pty_screen._pyte_classes``
+    treats the missing margins as the full screen and ``feed`` returns no fault at all (#1607).
+    Before that the ``AssertionError`` escaped ``feed`` and crashed this harness's ``_drive``.
+    The stock half is pinned so a ``pyte`` release that fixes it upstream fails here, which
+    tells the reader the override can go.
+    """
+    pty_screen = pytest.importorskip("clauster.pty_screen")
+    pyte = pytest.importorskip("pyte")
+
+    for seq in (b"\x1b[?6h\x1b[3d", b"\x1b[?6h\x1b[6n"):
+        with pytest.raises((AssertionError, AttributeError)):  # AttributeError under -O
+            pyte.ByteStream(pyte.Screen(80, 24)).feed(seq)
+        assert pty_screen.PtyScreen(cols=80, rows=24).feed(seq) is None
+    harness = _load("pty_screen_feed_fuzzer.py")
+    harness.check(b"\x1b[?6h\x1b[3dA\x1b[6n", [128], 80, 24, False)
+
+
 def test_pty_screen_display_readers_raise_on_a_half_overwritten_wide_char() -> None:
     """PIN: the screen READERS still raise — the guard is at the caller, not in ``pyte``.
 

@@ -53,6 +53,14 @@
 "\x1b[6n"
 "\x1b[999C"
 
+# origin mode, scroll margins and line position: with origin mode on and no margins set,
+# stock pyte raised on VPA and the cursor report (#1607)
+"\x1b[?6h"
+"\x1b[?6l"
+"\x1b[2;5r"
+"\x1b[r"
+"\x1b[3d"
+
 # other string-introducers pyte tracks state through
 "\x1b]0;"
 "\x1bP"
