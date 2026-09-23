@@ -770,20 +770,72 @@ def test_keeper_drain_keeps_both_screen_consumers_after_a_rejected_sequence(
     assert "failed and was disabled" not in err
 
 
-def test_keeper_drain_reports_a_rejected_sequence_once_per_session(tmp_path: Path, capsys) -> None:  # noqa: ANN001
+def test_keeper_drain_reports_each_rejected_sequence_type_once(tmp_path: Path, capsys) -> None:  # noqa: ANN001
     """A TUI can emit the sequence on every redraw, so the log line must not repeat.
 
     Unlike the render-fault latch, a clean chunk in between does not re-arm it: the screen is
-    healthy throughout, so a second report would say nothing new.
+    healthy throughout, so a second report of the same error would say nothing new. A
+    different error type is a different defect, so it gets its own line.
     """
     from clauster import pty_keeper
 
     drain = pty_keeper._KeeperDrain({}, tmp_path / "k.json", _fresh_screen(), None)
-    for chunk in (_REJECTED_SEQUENCE, b"ordinary output\r\n", b"\x1b[4J", _REJECTED_SEQUENCE):
+    for chunk in (
+        _REJECTED_SEQUENCE,  # TypeError: reported
+        b"ordinary output\r\n",
+        _REJECTED_SEQUENCE,  # TypeError again: not reported
+        b"\x1b[4J",  # UnboundLocalError: reported
+        b"\x1b[4K",  # UnboundLocalError again: not reported
+        _REJECTED_SEQUENCE,
+    ):
         drain.feed(chunk)
 
     assert drain._screen is not None
-    assert capsys.readouterr().err.count("rejected an escape sequence") == 1
+    err = capsys.readouterr().err
+    assert err.count("rejected an escape sequence") == 2
+    assert err.count("TypeError") == 1 and err.count("UnboundLocalError") == 1
+
+
+def test_keeper_drain_notes_a_rejected_sequence_that_ate_the_connect_url(
+    tmp_path: Path,
+) -> None:
+    """Fault and URL in ONE chunk: pyte drops the URL, so the deadline must say why.
+
+    The URL is the cursor-fragmented shape, so the raw leg cannot read it either (positive
+    control below). Without the latch the row promotes to `ready` with no link and no note.
+    """
+    from clauster import pty_keeper
+
+    chunk = _REJECTED_SEQUENCE + _KEEPER_URL_SCREEN_ONLY
+    assert pty_keeper._RE_CONNECT_URL.search(chunk) is None  # only the screen could read it
+
+    sidecar = tmp_path / "k.json"
+    base: dict[str, object] = {"state": "starting", "note": None}
+    drain = pty_keeper._KeeperDrain(base, sidecar, _fresh_screen(), None)
+    drain.feed(chunk)
+    assert "session_id" not in base  # pyte dropped the rest of the chunk, URL included
+    drain._deadline = time.monotonic() - 1
+    drain.tick()
+
+    assert base["state"] == "ready"
+    assert base["note"] == pty_keeper._SCREEN_FAULT_NOTE
+    assert _read(sidecar)["note"] == pty_keeper._SCREEN_FAULT_NOTE
+
+
+def test_keeper_drain_no_note_for_a_rejected_sequence_after_the_url(tmp_path: Path) -> None:
+    """Control: once the URL is found, a later fault cannot have hidden it, so no note."""
+    from clauster import pty_keeper
+
+    base: dict[str, object] = {"state": "starting", "note": None}
+    drain = pty_keeper._KeeperDrain(base, tmp_path / "k.json", _fresh_screen(), None)
+    drain.feed(_KEEPER_URL_SCREEN_ONLY)
+    assert base["session_id"] == "session_01FAULTAAAAAAAAAAAAAA"
+    drain.feed(_REJECTED_SEQUENCE)
+    drain._deadline = time.monotonic() - 1
+    drain.tick()
+
+    assert drain._screen_sequence_fault is False
+    assert base["note"] is None
 
 
 def test_run_keeper_conpty_keeps_the_screen_through_a_rejected_sequence(

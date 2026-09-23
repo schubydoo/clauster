@@ -516,8 +516,9 @@ class PtyScreen:
           so the next ``feed`` parses from a clean state. The tests pin this, so a ``pyte``
           upgrade that stops doing it fails the suite.
         * The rendered screen is KEPT: buffer, cursor, modes. Every raise measured in pyte
-          0.8.2 happens when the handler is called, before it changes the screen, so the
-          screen is the one a terminal that ignored the sequence would show. Keeping it is
+          0.8.2 happens before the handler writes any cell or moves the cursor (an
+          out-of-range erase marks its line dirty first, which changes nothing visible), so
+          the screen is the one a terminal that ignored the sequence would show. Keeping it is
           also the redaction-safe choice (invariant 4). Every mask in :mod:`redact` is
           anchored on a prefix (``session_``, ``sk-``, ``bearer``). A cleared screen would
           drop the prefix of a token that is part-drawn, and the rest of the token would then

@@ -69,10 +69,11 @@ _URL_TIMEOUT = 30.0
 #: the runner reads it only for an ERROR row. This bridge is running fine — the note is an
 #: advisory carried alongside a healthy `ready` row.
 #:
-#: "could not be read" covers BOTH screen faults this drain absorbs — a per-frame render
-#: fault (`_scan_session_id`) and an emulator that was disabled outright by a `screen.feed`
-#: failure (`feed`) — because they are the same fact to an operator and neither is
-#: actionable beyond "the link is gone". The distinction is in `<sidecar>.log`.
+#: "could not be read" covers all three screen faults this drain absorbs — a per-frame render
+#: fault (`_scan_session_id`), an emulator that was disabled outright by a `screen.feed`
+#: failure (`feed`), and a sequence pyte rejected before the URL was found, which dropped the
+#: rest of that chunk (`feed`, #1357) — because they are the same fact to an operator and none
+#: is actionable beyond "the link is gone". The distinction is in `<sidecar>.log`.
 #:
 #: Fixed text, never interpolated: the exception's own message adds nothing an operator can
 #: act on, and keeping the string constant means nothing from the screen can ride out here
@@ -267,10 +268,16 @@ class _KeeperDrain:
         # stays just as dead (the raw-bytes regex rarely survives a fragmented stream, which
         # is why the screen exists). One-way on purpose — a disabled screen never comes back.
         self._screen_feed_failed = False
-        # Set by :meth:`feed` the first time pyte rejects an escape sequence (#1357). The
-        # screen stays in use, so this only limits the report to once per session: a TUI that
-        # emits the sequence on every redraw would otherwise fill `<sidecar>.log`.
-        self._screen_sequence_fault_reported = False
+        # The exception types :meth:`feed` has already reported for a sequence pyte rejected
+        # (#1357). The screen stays in use, so this only limits the report to once per type
+        # per session: a TUI that emits the sequence on every redraw would otherwise fill
+        # `<sidecar>.log`, while a different defect still gets its own line.
+        self._screen_sequence_faults_reported: set[str] = set()
+        # Latched by :meth:`feed` when pyte rejects a sequence before the URL is found. The
+        # rest of that chunk was dropped, and it may have held the connect URL, so the URL
+        # deadline treats this like the two latches above. One-way, like `_screen_feed_failed`:
+        # the dropped bytes do not come back.
+        self._screen_sequence_fault = False
         self._deadline = time.monotonic() + _URL_TIMEOUT
 
     def _scan_session_id(self) -> str | None:
@@ -322,11 +329,9 @@ class _KeeperDrain:
         except IndexError as exc:
             if not self._screen_scan_failed:
                 self._screen_scan_failed = True
-                print(
-                    f"clauster.pty_keeper: screen could not be rendered for the connect-URL "
-                    f"scrape, retrying on later output: {type(exc).__name__}: {exc}",
-                    file=sys.stderr,
-                    flush=True,
+                _report_keeper_fault(
+                    f"screen could not be rendered for the connect-URL scrape, retrying on "
+                    f"later output: {type(exc).__name__}: {exc}"
                 )
             return None
         # A clean render, whether or not it found a URL — the next fault is a new one.
@@ -339,20 +344,24 @@ class _KeeperDrain:
             try:
                 fault = self._screen.feed(chunk)
                 self._dirty = True
-                if fault is not None and not self._screen_sequence_fault_reported:
+                if fault is not None:
                     # pyte rejected an escape sequence in this chunk (#1357). The screen
                     # dropped the rest of the chunk and stays in use, so both consumers keep
-                    # working. Reported once per session: a fault is never a silent skip,
-                    # but it repeats at redraw cadence. Like the render-fault line, it goes to
+                    # working. Before the URL is found, the dropped bytes may have held it,
+                    # so latch that for the URL deadline in :meth:`tick`.
+                    if not self._url_found:
+                        self._screen_sequence_fault = True
+                    # Reported once per exception type: a fault is never a silent skip, but
+                    # it repeats at redraw cadence. Like the render-fault line, it goes to
                     # the on-disk keeper log only and never into a streamed frame.
-                    self._screen_sequence_fault_reported = True
-                    print(
-                        f"clauster.pty_keeper: the terminal emulator rejected an escape "
-                        f"sequence and skipped the rest of that chunk; the screen stays in "
-                        f"use (reported once per session): {type(fault).__name__}: {fault}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
+                    kind = type(fault).__name__
+                    if kind not in self._screen_sequence_faults_reported:
+                        self._screen_sequence_faults_reported.add(kind)
+                        _report_keeper_fault(
+                            f"the terminal emulator rejected an escape sequence and skipped "
+                            f"the rest of that chunk; the screen stays in use (reported once "
+                            f"per error type): {kind}: {fault}"
+                        )
             except Exception as exc:  # noqa: BLE001 — best-effort, never kill the bridge
                 # `PtyScreen.feed` absorbs pyte's own input faults (above), so this arm is
                 # left for a defect in the screen wrapper itself. Such a failure disables both
@@ -408,7 +417,7 @@ class _KeeperDrain:
             # `--continue` resume or a newer claude build may never re-print it).
             self._url_found = True
             self._buf = bytearray()
-            if self._screen_scan_failed or self._screen_feed_failed:
+            if self._screen_scan_failed or self._screen_feed_failed or self._screen_sequence_fault:
                 # A screen fault still in force at the deadline is WHY there is no URL, so
                 # record it as an advisory the runner lifts onto the card (#1390) — otherwise
                 # the row promotes to `ready` with `connect_url: null` and the operator's
@@ -418,7 +427,10 @@ class _KeeperDrain:
                 # render latch on any clean render, so it means "the last scrape of the
                 # window could not read the screen", while a feed failure disabled the
                 # emulator for good and no later scrape can re-raise to keep the first latch
-                # set. Either alone would miss half the fault space.
+                # set. Either alone would miss half the fault space. The third latch is a
+                # sequence pyte rejected before the URL was found (#1357): the screen stays
+                # readable, but the rest of that chunk was dropped, and the URL may have been
+                # in it.
                 #
                 # The claim is "the screen could not be read", which is what the latches
                 # actually witness — not "and that is provably the only reason". A bridge

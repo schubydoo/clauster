@@ -669,7 +669,7 @@ def test_pty_screen_feed_invariance_oracle_fires_on_a_broken_carry(
     harness.check(stream, mid, 80, 24, True)  # unbroken: passes
     # The same stream behind a sequence pyte rejects. `PtyScreen.feed` absorbs that fault and
     # still scans the chunk (#1357), so the harness no longer skips such inputs. Before the
-    # fix `feed` raised, the drive was marked unclean, and `check` asserted nothing.
+    # fix `feed` raised, the harness marked the drive unclean, and `check` asserted nothing.
     rejected = b"\x1b[1;2C" + stream
     rejected_mid = [len(rejected) // 2 * 256 // len(rejected)]
     harness.check(rejected, rejected_mid, 80, 24, True)  # unbroken: passes
@@ -685,6 +685,28 @@ def test_pty_screen_feed_invariance_oracle_fires_on_a_broken_carry(
         harness.check(stream, mid, 80, 24, True)
     with pytest.raises(AssertionError, match="^chunk-boundary divergence in 'retained'"):
         harness.check(rejected, rejected_mid, 80, 24, True)
+
+
+def test_pty_screen_feed_harness_crashes_on_a_defect_in_clausters_own_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raise out of ``PtyScreen.feed`` is now clauster's own defect, so it must crash.
+
+    ``PtyScreen.feed`` absorbs what pyte rejects (#1357), which leaves ``_scan_osc8`` as the
+    only code that can raise out of it. The harness used to catch every raise from ``feed``
+    and skip the invariance assertion, which would hide a defect there.
+    """
+    pty_screen = pytest.importorskip("clauster.pty_screen")
+    pytest.importorskip("pyte")
+
+    harness = _load("pty_screen_feed_fuzzer.py")
+
+    def _broken_scan(self, data: bytes) -> None:
+        raise RuntimeError("scan defect")
+
+    monkeypatch.setattr(pty_screen.PtyScreen, "_scan_osc8", _broken_scan)
+    with pytest.raises(RuntimeError, match="scan defect"):
+        harness.check(b"\x1b]8;;https://claude.com/x\x07label", [], 80, 24, True)
 
 
 def test_pty_screen_feed_leak_oracle_fires_on_a_broken_redactor(
@@ -735,7 +757,7 @@ def test_pty_screen_feed_absorbs_the_escape_sequences_pyte_rejects() -> None:
     Before that the ``pty_keeper`` handler disabled the live view AND the pyte connect-URL
     scrape for the rest of the session. The raw ``pyte`` half is pinned so a ``pyte`` upgrade
     that fixes either defect fails ``just check``. That is the prompt to revisit the absorption
-    and the harness's ``fed_cleanly`` bookkeeping, instead of leaving both guarding nothing.
+    in ``PtyScreen.feed``, instead of leaving it guarding nothing.
     """
     pty_screen = pytest.importorskip("clauster.pty_screen")
     pyte = pytest.importorskip("pyte")
