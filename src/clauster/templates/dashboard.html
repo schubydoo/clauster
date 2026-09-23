@@ -781,8 +781,7 @@
           <!-- desktop (claude.ai / Desktop bridge) sessions -->
           <template x-for="i in activeBridges()" :key="i.rk">
             {# aria-describedby names the metrics chip's explanation only while the chip
-               shows (#1306): a directly referenced node counts even when it is empty or
-               hidden, so an unconditional id would describe a stopped row. #}
+               shows (#1306), so a row with no chip carries no reference to empty text. #}
             <div class="list-group-item sess-row" :class="bridgeRailClass(i.rk)"
                  :data-resume-mode="i.resume_mode" :data-spawn-mode="i.spawn_mode"
                  :aria-describedby="metricsLabel(i.rk) ? ('metrics-desc-' + i.rk) : null"
@@ -797,11 +796,12 @@
                       x-show="metricsLabel(i.rk)"
                       :title="metricsTitle(i.rk)" x-text="metricsLabel(i.rk)"></span>
                 {# The chip's explanation was a `title` only: mouse-only, on a phone-first
-                   dashboard (#1306). This copy reaches a screen reader, both in reading
-                   order right after the chip and as the row's description. It adds NO tab
-                   stop: a focusable chip on every row would shift the keyboard order of the
-                   whole dashboard. Touch and sighted keyboard users get the one-line legend
-                   in the help panel instead. #}
+                   dashboard (#1306). A screen reader reads this copy in reading order, right
+                   after the chip; the row's aria-describedby also exposes it to tools that
+                   show descriptions (the row never takes focus). It adds NO tab stop: a
+                   focusable chip on every row would shift the keyboard order of the whole
+                   dashboard. Touch and sighted keyboard users get the one-line legend in
+                   the help panel instead. #}
                 <span class="visually-hidden" data-test="metrics-desc"
                       :id="'metrics-desc-' + i.rk" x-text="metricsTitle(i.rk)"></span>
                 {# The `claude` release this bridge's PROCESS is running (#1275) — instance-

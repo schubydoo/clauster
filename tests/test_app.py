@@ -947,9 +947,8 @@ def test_metrics_chip_explanation_reaches_keyboard_touch_and_screen_readers(writ
     row_tag = page[row_start : page.index(">", row_open) + 1]
     row = page[row_start : page.index("</template>", row_start)]
 
-    # The row names the description only while the chip shows. A directly referenced
-    # node counts even when empty or hidden, so an unconditional id would describe a
-    # stopped row with a stale sentence.
+    # The row names the description only while the chip shows, so a row with no chip
+    # carries no reference to empty text.
     described = re.search(
         r':aria-describedby="metricsLabel\(i\.rk\) \? \(\'([\w-]+)\' \+ i\.rk\) : null"', row_tag
     )
