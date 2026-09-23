@@ -573,7 +573,31 @@ _REJECTED_SEQUENCES = (
     pytest.param(b"\x1b[5;4X", TypeError, id="csi-arity-erase-characters"),
     pytest.param(b"\x1b[4J", UnboundLocalError, id="erase-in-display-out-of-range"),
     pytest.param(b"\x1b[4K", UnboundLocalError, id="erase-in-line-out-of-range"),
+    # A parameter `str.isdigit` accepts and `int` rejects (#1355): subscript two, superscript
+    # two, circled one, and a digit run past Python's 4,300-digit `int` limit.
+    pytest.param("\x1b[₂m".encode(), ValueError, id="csi-subscript-digit"),
+    pytest.param("\x1b[²J".encode(), ValueError, id="csi-superscript-digit"),
+    pytest.param("\x1b[1;①H".encode(), ValueError, id="csi-circled-digit"),
+    pytest.param(b"\x1b[" + b"1" * 5000 + b"C", ValueError, id="csi-over-long-digit-run"),
 )
+
+
+def _screen_state(scr: PtyScreen) -> tuple:
+    s = scr._screen
+    cells = [[(c.data, c.fg, c.bg, c.bold) for c in s.buffer[y].values()] for y in range(s.lines)]
+    return (list(s.display), s.cursor.x, s.cursor.y, s.cursor.attrs, set(s.mode), cells)
+
+
+@pytest.mark.parametrize(("seq", "error"), _REJECTED_SEQUENCES)
+def test_a_rejected_sequence_leaves_the_screen_exactly_as_it_was(seq, error):
+    # The fact that makes absorbing the fault safe: pyte raised before anything was drawn,
+    # moved or restyled. Colour, a cursor move and a mode are set first so a change shows.
+    scr = PtyScreen(cols=20, rows=4)
+    scr.feed(b"\x1b[31mred\x1b[2;3Hxy\x1b[4h")
+    before = _screen_state(scr)
+    assert isinstance(scr.feed(seq), error)
+    assert _screen_state(scr) == before
+    assert scr._stream._taking_plain_text is True  # pyte reset its parser to the idle state
 
 
 @pytest.mark.parametrize(("seq", "error"), _REJECTED_SEQUENCES)

@@ -778,14 +778,18 @@ def test_pty_screen_feed_absorbs_the_escape_sequences_pyte_rejects() -> None:
     ``PtyScreen.feed`` catches the raise and returns it, so the screen stays in use (#1357).
     Before that the ``pty_keeper`` handler disabled the live view AND the pyte connect-URL
     scrape for the rest of the session. The raw ``pyte`` half is pinned so a ``pyte`` upgrade
-    that fixes either defect fails ``just check``. That is the prompt to revisit the absorption
-    in ``PtyScreen.feed``, instead of leaving it guarding nothing.
+    that fixes any of the defects fails ``just check``. That is the prompt to revisit the
+    absorption in ``PtyScreen.feed``, instead of leaving it guarding nothing.
     """
     pty_screen = pytest.importorskip("clauster.pty_screen")
     pyte = pytest.importorskip("pyte")
 
-    for seq, error in ((b"\x1b[1;2C", TypeError), (b"\x1b[4J", UnboundLocalError)):
-        with pytest.raises(error):  # CSI arity (a modified cursor key); out-of-range erase
+    for seq, error in (
+        (b"\x1b[1;2C", TypeError),  # CSI arity (a modified cursor key)
+        (b"\x1b[4J", UnboundLocalError),  # out-of-range erase
+        (b"\x1b[\xe2\x82\x82m", ValueError),  # U+2082: `isdigit` but not `int` (#1355)
+    ):
+        with pytest.raises(error):
             pyte.ByteStream(pyte.Screen(80, 24)).feed(seq)
         assert isinstance(pty_screen.PtyScreen(cols=80, rows=24).feed(seq), error)
 

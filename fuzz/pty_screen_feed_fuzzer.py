@@ -188,16 +188,20 @@ def _drive(
     a raise there is a real defect, so it crashes the fuzzer instead of skipping an assertion.
     The contract fuzzed is **"the screen is still sound afterwards"**: every property in
     :func:`check` is asserted on a screen that has already absorbed whatever pyte rejected.
-    Two distinct pyte defects reach that absorption, neither exotic:
+    Three distinct pyte defects reach that absorption:
 
     * **CSI arity** — ``\\x1b[1;2C`` (a modified cursor key any real terminal emits) raises
       ``TypeError``; the same mismatch fires for ``A``/``B``/``D``/``G``/``H``/``@``/``L``/
       ``P``/``X``.
     * **Out-of-range erase** — ``\\x1b[4J`` raises ``UnboundLocalError``; likewise
       ``\\x1b[5J``, ``\\x1b[9J`` and ``\\x1b[4K``.
+    * **A CSI digit ``int`` rejects** — ``\\x1b[\\xe2\\x82\\x82m`` (``U+2082``, subscript two)
+      raises ``ValueError``: pyte collects the parameter with ``str.isdigit`` and converts it
+      with ``int``. Superscripts, circled digits and a run of more than 4,300 ASCII digits do
+      the same (#1355).
 
-    Both are pinned in ``tests/test_fuzz_harness_smoke.py``, so a pyte upgrade that fixes
-    either one fails ``just check`` rather than passing unnoticed.
+    All three are pinned in ``tests/test_fuzz_harness_smoke.py``, so a pyte upgrade that
+    fixes any of them fails ``just check`` rather than passing unnoticed.
 
     ⚠️ **The readers ARE guarded, and that guard mirrors a production one.** Every reader
     below goes through ``pyte``'s ``Screen.display``, and a wide (double-width) character left
