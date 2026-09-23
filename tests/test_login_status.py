@@ -8,10 +8,14 @@ file lives under tmp_path — never the real ``~/.claude``.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import threading
 from pathlib import Path
 
+import pytest
+
+from clauster import login_status
 from clauster.login_status import LoginStatus, LoginStatusCache, check_login_status
 
 # These tests spawn the fake stub as a real subprocess (check_login_status). On
@@ -162,6 +166,38 @@ def test_malformed_json_fails_closed(tmp_path, monkeypatch):
     result = check_login_status(str(FAKE_CLAUDE), _claude_json(tmp_path))
     assert result.logged_in is False
     assert "non-JSON" in result.reason
+
+
+# Two parse failures that are not a JSONDecodeError: deeply-nested JSON raises
+# RecursionError (not a ValueError at all) and a >4300-digit int literal raises a bare
+# ValueError. Both escaped a function documented never to raise.
+_UNPARSEABLE = [
+    pytest.param("[" * 100_000, id="deeply-nested"),
+    pytest.param("1" * 5000, id="oversized-int"),
+]
+
+
+@pytest.mark.parametrize("payload", _UNPARSEABLE)
+def test_unparseable_auth_status_fails_closed(tmp_path, monkeypatch, payload):
+    # Fed through a patched subprocess.run, not the stub's env var: a 100 KB variable
+    # is past the Windows environment-block limit.
+    def _fake_run(argv, **_kwargs):
+        return subprocess.CompletedProcess(argv, 0, stdout=payload, stderr="")
+
+    monkeypatch.setattr(login_status.subprocess, "run", _fake_run)
+    result = check_login_status(str(FAKE_CLAUDE), _claude_json(tmp_path))
+    assert result.logged_in is False
+    assert "non-JSON" in result.reason
+
+
+@pytest.mark.parametrize("payload", _UNPARSEABLE)
+def test_oauth_expiry_ignores_unparseable_creds(tmp_path, monkeypatch, payload):
+    claude_json = _claude_json(tmp_path)
+    _write_creds(claude_json, payload)
+    _set_auth(monkeypatch, stdout='{"loggedIn": true, "authMethod": "claude.ai"}')
+    result = check_login_status(str(FAKE_CLAUDE), claude_json)
+    assert result.logged_in is True
+    assert result.expires_at_ms is None
 
 
 def test_non_object_json_fails_closed(tmp_path, monkeypatch):

@@ -102,14 +102,25 @@ class KeyedJsonStore:
         one, taking a separate one-time ``.bak`` first. Unknown fields are dropped.
         """
         try:
-            return self.load_strict()
-        except CorruptStateFile as exc:
-            self._discard(str(exc))
-            return {}
+            return self.load_or_raise_unreadable()
         except OSError as exc:
             # Unreadable (permissions, IO), not unusable: there is no copy to take, and
             # it is the arm actually worth diagnosing, so it must not pass silently.
             self._LOG.warning("could not read %s: %s", self._path, _describe(exc))
+            return {}
+
+    def load_or_raise_unreadable(self) -> dict[str, dict]:
+        """Like :meth:`load`, but let an unreadable file's ``OSError`` propagate.
+
+        A corrupt file still degrades to ``{}``, with the warning and the one-time
+        ``.corrupt.bak``. An unreadable one (permissions, IO) raises instead, because it
+        was never read: ``db.bootstrap.import_legacy_json`` must not retire a file whose
+        records it never saw.
+        """
+        try:
+            return self.load_strict()
+        except CorruptStateFile as exc:
+            self._discard(str(exc))
             return {}
 
     def load_strict(self) -> dict[str, dict]:

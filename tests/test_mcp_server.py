@@ -713,6 +713,37 @@ def test_serve_invalid_json_line_yields_parse_error(cfg):
     assert json.loads(writer.lines[0])["error"]["code"] == mcp_server._PARSE_ERROR
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        # Deeply-nested JSON raises RecursionError, which is not a ValueError at all.
+        pytest.param(b"[" * 100_000, id="deeply-nested"),
+        # A >4300-digit int literal raises a bare ValueError, not a JSONDecodeError.
+        pytest.param(b"1" * 5000, id="oversized-int"),
+        # json.loads on bytes decodes them first: invalid UTF-8 is a UnicodeDecodeError.
+        pytest.param(b"\x80abc", id="non-utf8"),
+    ],
+)
+def test_serve_unparseable_line_yields_parse_error_and_keeps_serving(cfg, line):
+    # Each used to escape the JSONDecodeError-only handler and end the stdio server; the
+    # follow-up request proves the loop survived.
+    ping = json.dumps({"jsonrpc": "2.0", "id": 7, "method": "ping"}).encode()
+    writer = _CollectingWriter()
+
+    async def _drive():
+        # The production line cap, so the 100 KB line reaches json.loads instead of
+        # tripping the default 64 KiB StreamReader limit ("message too large").
+        reader = asyncio.StreamReader(limit=mcp_server._MAX_LINE_BYTES)
+        reader.feed_data(line + b"\n" + ping + b"\n")
+        reader.feed_eof()
+        await mcp_server.serve(cfg, reader, writer)
+
+    asyncio.run(_drive())
+    first = json.loads(writer.lines[0])
+    assert first["error"] == {"code": mcp_server._PARSE_ERROR, "message": "invalid JSON"}
+    assert json.loads(writer.lines[1])["id"] == 7
+
+
 def test_serve_non_object_message_is_invalid_request(cfg):
     writer = _CollectingWriter()
 

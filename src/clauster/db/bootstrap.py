@@ -218,13 +218,23 @@ def import_legacy_json(state_dir: Path, session_factory: sessionmaker[Session]) 
                 # Already migrated or in use — never re-import on top of live rows.
                 # The transaction is an empty no-op; it commits nothing on block exit.
                 return False
-            raw_instances = JsonStateStore(state_dir).load() if state_path.exists() else {}
+            # load() would degrade an UNREADABLE file to {} too, and the retire below would
+            # then rename away records nobody read. load_or_raise_unreadable still degrades a
+            # corrupt file (warning + .corrupt.bak) but raises the OSError into the handler
+            # below, which leaves both files in place for the next boot.
+            raw_instances = (
+                JsonStateStore(state_dir).load_or_raise_unreadable() if state_path.exists() else {}
+            )
             # Legacy JSON is keyed by project name; convert to instance_id-keyed shape.
             instance_records = {
                 _project_instance_id(project_name): {**fields, "project_name": project_name}
                 for project_name, fields in raw_instances.items()
             }
-            hosted_records = JsonHostedStateStore(state_dir).load() if hosted_path.exists() else {}
+            hosted_records = (
+                JsonHostedStateStore(state_dir).load_or_raise_unreadable()
+                if hosted_path.exists()
+                else {}
+            )
             StateStore._sync(session, instance_records)
             HostedStateStore._sync(session, hosted_records)
     except (SQLAlchemyError, OSError) as exc:

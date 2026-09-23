@@ -202,6 +202,22 @@ def test_missing_file_is_empty_not_unreadable(tmp_path):
     assert StateStore(tmp_path).load_strict() == {}
 
 
+def test_load_or_raise_unreadable_degrades_corrupt_but_raises_unreadable(tmp_path, monkeypatch):
+    # The legacy import's read: a corrupt file degrades exactly as load() does (warning +
+    # one-time .corrupt.bak), while an unreadable one raises, because it was never read.
+    (tmp_path / "state.json").write_text("[" * 100_000, encoding="utf-8")
+    assert StateStore(tmp_path).load_or_raise_unreadable() == {}
+    assert (tmp_path / "state.json.corrupt.bak").is_file()
+
+    def boom(*_args, **_kwargs):
+        raise OSError("simulated: EIO")
+
+    monkeypatch.setattr(Path, "read_text", boom)
+    with pytest.raises(OSError, match="simulated: EIO"):
+        StateStore(tmp_path).load_or_raise_unreadable()
+    assert StateStore(tmp_path).load() == {}  # load() still degrades the same read
+
+
 def test_corrupt_copy_failure_is_logged_not_silent(tmp_path, caplog, monkeypatch):
     # The copy is best-effort -- it must never block the load or abort a caller's
     # transaction -- but a failure to keep the only copy is exactly the kind of loss

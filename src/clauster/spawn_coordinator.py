@@ -576,10 +576,17 @@ class SpawnCoordinator:
         """Pre-write the two claude-side settings a bridge start depends on, once per runner.
 
         Both are BEST-EFFORT by design and neither may fail the spawn — but neither is
-        silent either: an :class:`OSError` is logged at WARNING and the ``_ensured`` latch
-        still flips, so each write is attempted exactly once per runner (the latches are
-        instance state, so a second :class:`~clauster.runner.SessionRunner` in the same
-        process retries).
+        silent either: an :class:`OSError`, ``ValueError`` or ``RecursionError`` is logged
+        at WARNING and the ``_ensured`` latch still flips, so each write is attempted exactly
+        once per runner (the latches are instance state, so a second
+        :class:`~clauster.runner.SessionRunner` in the same process retries).
+
+        Where each helper raises matters, because neither file is ours. The recap installer
+        raises before any write on a ``settings.json`` it cannot read or parse, so the file
+        is left byte-identical. The remote-control writer raises before any write on a
+        ``~/.claude.json`` holding non-UTF-8 bytes, a >4300-digit int or deep nesting. It
+        still reads malformed JSON *syntax* there as an empty file, a separate existing
+        behavior of :func:`clauster.claude_json._read_claude_json`.
         """
         if self._config.claude.auto_enable_remote_control and not self._rc_setting_ensured:
             try:
@@ -590,10 +597,14 @@ class SpawnCoordinator:
                         "interactive enable prompt",
                         self._claude_json,
                     )
-            except OSError as exc:
+            except (OSError, ValueError, RecursionError) as exc:
                 # Best-effort: if we can't write the flag the bridge may hang on the
                 # prompt, but the startup-watch surfaces that honestly as ERROR rather
-                # than a false RUNNING — so don't fail the spawn over it.
+                # than a false RUNNING — so don't fail the spawn over it. ValueError and
+                # RecursionError are a ~/.claude.json that _read_claude_json lets escape on
+                # purpose (non-UTF-8, a >4300-digit int, deep nesting), so that the update
+                # never overwrites a file it could not parse. The trust check still reads
+                # that file fail-closed.
                 _log.warning(
                     "could not pre-enable remote control in %s: %s", self._claude_json, exc
                 )
@@ -608,9 +619,11 @@ class SpawnCoordinator:
                         "bridge gets its prior conversation recapped into context",
                         self._settings_json,
                     )
-            except OSError as exc:
+            except (OSError, ValueError, RecursionError) as exc:
                 # Best-effort, same as the remote-control flag: a failure here only
                 # means a restart won't be recapped, not that the bridge can't run.
+                # ValueError / RecursionError are a settings.json the installer refused to
+                # write over because it could not parse it; the file is left as is.
                 _log.warning(
                     "could not install resume-recap hook in %s: %s", self._settings_json, exc
                 )

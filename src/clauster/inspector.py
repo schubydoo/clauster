@@ -78,6 +78,12 @@ def parse_agents_json(stdout: str) -> list[WorkingSession]:
         # failure so callers already handling JSONDecodeError (e.g. the runner's best-effort
         # cross-check, runner.py) degrade uniformly instead of a stray RecursionError.
         raise json.JSONDecodeError("Exceeded maximum recursion depth", text, 0) from exc
+    except json.JSONDecodeError:
+        raise
+    except ValueError as exc:
+        # A >4300-digit int literal raises a bare ValueError that is not a JSONDecodeError,
+        # so it slipped past the poll loop's cross-check handler. Convert it the same way.
+        raise json.JSONDecodeError("Integer literal too long to parse", text, 0) from exc
     if isinstance(data, list):
         items = data
     elif isinstance(data, dict):

@@ -798,7 +798,10 @@ async def serve(config: ClausterConfig, reader: asyncio.StreamReader, writer: IO
             continue
         try:
             message = json.loads(stripped)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
+            # ValueError covers JSONDecodeError, non-UTF-8 bytes and a >4300-digit int
+            # literal; RecursionError is a deeply-nested line. Each is a parse error, and
+            # any of them escaping here would end the whole stdio server.
             if not _write(writer, _error(None, _PARSE_ERROR, "invalid JSON")):
                 return
             continue

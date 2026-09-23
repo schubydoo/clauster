@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from clauster import code_sessions
 from clauster.code_sessions import AnchorHealth, CodeSessionsClient, code_session_id_for
 from clauster.environments import Credentials
@@ -81,6 +83,26 @@ def test_is_session_not_found_tolerates_deeply_nested_body():
     deep = b"[" * 100_000
     assert code_sessions._is_session_not_found(deep) is False
     c = CodeSessionsClient(CREDS, transport=_transport(404, deep))
+    assert c.anchor_health("cse_x") is AnchorHealth.UNKNOWN
+
+
+# Two parse failures that are not a JSONDecodeError: deeply-nested JSON raises
+# RecursionError (not a ValueError at all) and a >4300-digit int literal raises a bare
+# ValueError. Both must read as "indeterminate", never raise.
+_UNPARSEABLE = [
+    pytest.param(b"[" * 100_000, id="deeply-nested"),
+    pytest.param(b"1" * 5000, id="oversized-int"),
+]
+
+
+@pytest.mark.parametrize("body", _UNPARSEABLE)
+def test_is_session_not_found_tolerates_unparseable_body(body):
+    assert code_sessions._is_session_not_found(body) is False
+
+
+@pytest.mark.parametrize("body", _UNPARSEABLE)
+def test_anchor_health_unparseable_2xx_body_is_unknown(body):
+    c = CodeSessionsClient(CREDS, transport=_transport(200, body))
     assert c.anchor_health("cse_x") is AnchorHealth.UNKNOWN
 
 

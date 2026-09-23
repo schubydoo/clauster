@@ -783,6 +783,41 @@ def test_import_of_a_corrupt_legacy_file_commits_and_keeps_a_copy(tmp_path, capl
         engine.dispose()
 
 
+def test_import_leaves_an_unreadable_legacy_file_in_place_and_retries(tmp_path, caplog):
+    # An unreadable file is not a corrupt one: nothing was read, so there is no copy and
+    # nothing was imported. KeyedJsonStore.load() degrades it to {} all the same, and the
+    # import used to commit that and rename the file to *.imported, which hid records it
+    # never read. Now the read error fails the import: neither file is retired, nothing is
+    # half-imported, and the next boot tries again.
+    _seed_json(tmp_path)
+    (tmp_path / "state.json").unlink()
+    # read_text on a directory raises IsADirectoryError on POSIX and PermissionError on
+    # Windows, both OSError, with no chmod (which Windows and root both ignore).
+    (tmp_path / "state.json").mkdir()
+    engine = create_db_engine(tmp_path)
+    upgrade_to_head(engine, tmp_path)
+    factory = make_session_factory(engine)
+    try:
+        with caplog.at_level("WARNING", logger="clauster"):
+            assert import_legacy_json(tmp_path, factory) is False
+        assert (tmp_path / "state.json").is_dir()
+        assert (tmp_path / "hosted_state.json").is_file()
+        assert not list(tmp_path.glob("*.imported"))
+        assert not list(tmp_path.glob("*.corrupt.bak"))
+        assert "legacy JSON import failed; leaving JSON in place" in caplog.text
+        with factory() as session:
+            assert bootstrap._schema_is_empty(session) is True
+
+        # Once the file is readable again, the next boot imports both.
+        (tmp_path / "state.json").rmdir()
+        _seed_json(tmp_path)
+        assert import_legacy_json(tmp_path, factory) is True
+    finally:
+        engine.dispose()
+    assert (tmp_path / "state.json.imported").is_file()
+    assert (tmp_path / "hosted_state.json.imported").is_file()
+
+
 # ----- packaged migration env: standalone + offline paths ----------------
 
 

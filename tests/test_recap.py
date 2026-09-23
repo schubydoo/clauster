@@ -73,6 +73,33 @@ def test_extract_turns_tolerates_malformed_lines(tmp_path: Path) -> None:
     assert hook.extract_turns(str(t)) == [("user", "ok")]
 
 
+@pytest.mark.parametrize(
+    "bad_line",
+    [
+        # Deeply-nested JSON raises RecursionError, which is not a ValueError at all.
+        pytest.param("[" * 100_000, id="deeply-nested"),
+        # A >4300-digit int literal raises a bare ValueError (already skipped; pinned here).
+        pytest.param("1" * 5000, id="oversized-int"),
+    ],
+)
+def test_extract_turns_skips_an_unparseable_line_keeps_the_rest(
+    tmp_path: Path, bad_line: str
+) -> None:
+    # One such line used to raise out of the loop, and main()'s catch-all then dropped
+    # the whole recap rather than this one line.
+    t = tmp_path / "s.jsonl"
+    t.write_text(
+        json.dumps({"type": "user", "message": {"content": "before"}})
+        + "\n"
+        + bad_line
+        + "\n"
+        + json.dumps({"type": "assistant", "message": {"content": "after"}})
+        + "\n",
+        encoding="utf-8",
+    )
+    assert hook.extract_turns(str(t)) == [("user", "before"), ("assistant", "after")]
+
+
 def test_extract_turns_missing_file_returns_empty(tmp_path: Path) -> None:
     assert hook.extract_turns(str(tmp_path / "nope.jsonl")) == []
 
@@ -255,6 +282,17 @@ def test_main_injects_additional_context_when_enabled(monkeypatch, prior_project
     assert "FOXTROT" in payload["hookSpecificOutput"]["additionalContext"]
 
 
+def test_main_noop_on_deeply_nested_payload(monkeypatch) -> None:
+    # RecursionError is not a ValueError: main() now returns on it itself, instead of
+    # relying on the entry point's catch-all.
+    monkeypatch.setenv(hook.ENV_FLAG, "1")
+    monkeypatch.setattr("sys.stdin", io.StringIO("[" * 100_000))
+    out = io.StringIO()
+    monkeypatch.setattr("sys.stdout", out)
+    hook.main()
+    assert out.getvalue() == ""
+
+
 def test_main_noop_without_env_flag(monkeypatch, prior_project) -> None:
     _prior, cur = prior_project
     out = _run_main(
@@ -352,9 +390,34 @@ def test_installer_preserves_existing_hooks(tmp_path: Path) -> None:
     assert any("resume_recap.py" in c for c in commands)  # added
 
 
-def test_installer_recovers_from_malformed_settings(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("content", "error"),
+    [
+        pytest.param(b"not valid json {{{", ValueError, id="malformed"),
+        pytest.param(b"\xff\xfe\x00not utf-8", ValueError, id="non-utf8"),
+        pytest.param(b'{"n": ' + b"1" * 5000 + b"}", ValueError, id="oversized-int"),
+        pytest.param(b"[" * 100_000, RecursionError, id="deeply-nested"),
+        pytest.param(json.dumps(["not", "an", "object"]).encode(), ValueError, id="non-object"),
+    ],
+)
+def test_installer_never_writes_over_an_unparseable_settings_file(
+    tmp_path: Path, content: bytes, error: type[Exception]
+) -> None:
+    # settings.json is the user's file. Degrading any of these to {} used to replace the
+    # whole file with just the hook block, dropping every other setting. Now the installer
+    # raises before any write and the file is byte-identical.
     settings = tmp_path / "settings.json"
-    settings.write_text("not valid json {{{")
+    settings.write_bytes(content)
+    with pytest.raises(error):
+        ensure_recap_hook_installed(settings)
+    assert settings.read_bytes() == content
+    assert [p.name for p in tmp_path.iterdir()] == ["settings.json"]
+
+
+def test_installer_treats_an_empty_settings_file_as_empty(tmp_path: Path) -> None:
+    # An empty (or whitespace-only) file holds nothing to lose, so it starts from {}.
+    settings = tmp_path / "settings.json"
+    settings.write_text("  \n", encoding="utf-8")
     assert ensure_recap_hook_installed(settings) is True
     data = json.loads(settings.read_text())
     assert data["hooks"]["SessionStart"][0]["hooks"][0]["command"]
@@ -398,16 +461,6 @@ def test_hook_command_quotes_interpreter_and_script() -> None:
     script = Path("/x/resume_recap.py")
     cmd = hook_command(python="/usr/bin/python3", script=script)
     assert cmd == f'"/usr/bin/python3" "{script}"'
-
-
-def test_installer_recovers_from_non_dict_json_settings(tmp_path: Path) -> None:
-    # Valid JSON, but the top level is a list (not an object). The loaded value is
-    # ignored and we start from {} rather than crashing on a non-dict settings.json.
-    settings = tmp_path / "settings.json"
-    settings.write_text(json.dumps(["not", "an", "object"]))
-    assert ensure_recap_hook_installed(settings) is True
-    data = json.loads(settings.read_text())
-    assert data["hooks"]["SessionStart"][0]["hooks"][0]["command"]
 
 
 def test_installer_cleans_up_temp_file_when_atomic_write_fails(

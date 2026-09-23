@@ -3219,6 +3219,23 @@ def test_read_sidecar_non_utf8_returns_none(tmp_path):
     assert SessionRunner._read_sidecar(sidecar) is None
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # Deeply-nested JSON raises RecursionError, which is not a ValueError at all.
+        pytest.param("[" * 100_000, id="deeply-nested"),
+        # A >4300-digit int literal raises a bare ValueError, not a JSONDecodeError.
+        pytest.param("1" * 5000, id="oversized-int"),
+    ],
+)
+def test_read_sidecar_unparseable_returns_none(tmp_path, payload):
+    # The sidecar is read inside rediscover and readiness polling; either escaping here
+    # took the caller down instead of skipping one unreadable sidecar.
+    sidecar = tmp_path / "x.keeper.json"
+    sidecar.write_text(payload, encoding="utf-8")
+    assert SessionRunner._read_sidecar(sidecar) is None
+
+
 async def test_poll_forever_continues_after_unexpected_error(runner_config, monkeypatch, caplog):
     # An unexpected error from poll_once is caught by the loop and never propagated, so
     # crash-detection/reconciliation survives a one-off failure; the loop reaches its
@@ -3349,6 +3366,73 @@ async def test_spawn_survives_ensure_helper_write_failures(runner_config, monkey
     assert any("could not pre-enable remote control" in r.message for r in caplog.records)
     assert any("could not install resume-recap hook" in r.message for r in caplog.records)
     await runner.stop(inst.instance_id)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        # RecursionError, which is not a ValueError at all.
+        pytest.param(b"[" * 100_000, id="deeply-nested"),
+        # A bare ValueError, not a JSONDecodeError.
+        pytest.param(b'{"n": ' + b"1" * 5000 + b"}", id="oversized-int"),
+        pytest.param(b"not valid json {{{", id="malformed"),
+        pytest.param(b"\xff\xfe\x00not utf-8", id="non-utf8"),
+    ],
+)
+async def test_spawn_survives_an_unparseable_settings_json_and_leaves_it_intact(
+    runner_config, monkeypatch, caplog, content
+):
+    # The real installer, on a real file. A deeply-nested file used to fail the spawn,
+    # and the other three were replaced by just the hook block, which dropped every other
+    # user setting. Now the installer refuses to write, the best-effort arm warns, the
+    # spawn runs, and the user's file is byte-identical.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, claude_json = runner_config
+    config.claude.resume_recap = True
+    monkeypatch.setattr(
+        "clauster.spawn_coordinator.ensure_remote_control_enabled", lambda p: False
+    )
+    settings = claude_json.parent / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_bytes(content)
+    runner = SessionRunner(config, claude_json=claude_json)
+
+    with caplog.at_level("WARNING", logger="clauster.spawn_coordinator"):
+        inst = await runner.spawn("alpha")
+    assert inst.status is InstanceStatus.RUNNING
+    assert any("could not install resume-recap hook" in r.message for r in caplog.records)
+    assert settings.read_bytes() == content
+    assert runner._recap_hook_ensured is True
+    await runner.stop(inst.instance_id)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # Deeply-nested JSON raises RecursionError, which is not a ValueError at all.
+        pytest.param("[" * 100_000, id="deeply-nested"),
+        # A >4300-digit int literal raises a bare ValueError, not a JSONDecodeError.
+        pytest.param('{"n": ' + "1" * 5000 + "}", id="oversized-int"),
+    ],
+)
+async def test_remote_control_pre_enable_degrades_on_unparseable_claude_json(
+    runner_config, caplog, payload
+):
+    # The real ensure_remote_control_enabled, on a real ~/.claude.json it cannot parse.
+    # _read_claude_json lets both errors escape on purpose, so it never rewrites a file it
+    # could not read; the best-effort arm caught only OSError, so they escaped the spawn
+    # too. Now the arm warns and latches, and the file is left byte-identical.
+    config, claude_json = runner_config
+    config.claude.auto_enable_remote_control = True
+    config.claude.resume_recap = False
+    claude_json.write_text(payload, encoding="utf-8")
+    runner = SessionRunner(config, claude_json=claude_json)
+
+    with caplog.at_level("WARNING", logger="clauster.spawn_coordinator"):
+        await runner._spawner._ensure_claude_side_settings()
+    assert runner._rc_setting_ensured is True
+    assert any("could not pre-enable remote control" in r.message for r in caplog.records)
+    assert claude_json.read_text(encoding="utf-8") == payload
 
 
 def test_read_markers_vanished_log_returns_empty(tmp_path):

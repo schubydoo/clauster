@@ -89,7 +89,9 @@ def extract_turns(transcript_path: str) -> list[tuple[str, str]]:
                 continue
             try:
                 row = json.loads(line)
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, RecursionError):
+                # RecursionError (a deeply-nested line) is not a ValueError. Without it one
+                # such line reached the entry point's catch-all and dropped the whole recap.
                 continue
             role = row.get("type")
             if role not in ("user", "assistant"):
@@ -207,7 +209,9 @@ def main() -> None:
     raw = sys.stdin.read()
     try:
         payload = json.loads(raw) if raw.strip() else {}
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
+        # RecursionError (a deeply-nested payload) is not a ValueError; handled here like
+        # any other bad payload rather than left to the entry point's catch-all.
         return
     if not isinstance(payload, dict):
         return

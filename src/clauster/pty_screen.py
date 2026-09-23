@@ -369,7 +369,8 @@ def read_screen_sidecar(path: Path) -> dict[str, Any] | None:
     """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
+        # RecursionError (deeply-nested JSON) is not a ValueError; it must map to None too.
         return None
     return data if isinstance(data, dict) else None
 

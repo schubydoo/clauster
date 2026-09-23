@@ -951,7 +951,9 @@ def _read_sidecar(path: Path) -> dict:
     """Read a keeper sidecar, tolerating absent / mid-write / invalid files (-> {})."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, json.JSONDecodeError, UnicodeDecodeError):
+    except (OSError, ValueError, RecursionError):
+        # ValueError covers JSONDecodeError, a non-UTF-8 file and a >4300-digit int literal;
+        # RecursionError is deeply-nested JSON, which is not a ValueError.
         return {}
     return data if isinstance(data, dict) else {}
 

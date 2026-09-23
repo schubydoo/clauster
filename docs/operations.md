@@ -439,9 +439,15 @@ database (see Routine backup, above). The workspace-trust writes to
 > record map is not one. All five now import no records, log a warning naming
 > the failure, and leave a one-time byte-exact copy beside the file as
 > `state.json.corrupt.bak`. The original is still renamed
-> `state.json.imported`. Only a file Clauster cannot *read* at all (permissions,
-> IO) is logged without a copy, because there is nothing to copy. The same applies
-> to `hosted_state.json`, which keeps its own `hosted_state.json.corrupt.bak`.
+> `state.json.imported`. The same applies to `hosted_state.json`, which keeps its
+> own `hosted_state.json.corrupt.bak`.
+>
+> A file that Clauster cannot *read* at all (permissions, IO) is different. It
+> gets no copy, because there is nothing to copy. The import logs a warning,
+> imports nothing from either file, and renames neither. The next start tries the
+> import again, so fix the permissions and restart before you create new state.
+> If the other file is corrupt and the same start already copied it to
+> `.corrupt.bak`, that copy stays, and later starts do not take it again.
 >
 > `clauster migrate` treats the same file differently. That command re-saves what
 > it reads, so it reads strictly. It writes nothing, prints the reason, and exits

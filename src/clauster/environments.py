@@ -101,7 +101,10 @@ def load_credentials(
         parsed = json.loads(cred_file.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, UnicodeDecodeError) as exc:
         raise CredentialsError(f"could not read {cred_file}: {exc}") from exc
-    except json.JSONDecodeError as exc:
+    except (ValueError, RecursionError) as exc:
+        # Not just JSONDecodeError: a >4300-digit int literal raises a bare ValueError and
+        # deeply-nested JSON raises RecursionError (not a ValueError). Either escaped the
+        # one type every caller guards on.
         raise CredentialsError(f"{cred_file} is not valid JSON: {exc}") from exc
     # Type-check the ROOT before `.get`. Valid JSON is not necessarily an object — a file
     # holding `"str"`, `[]` or `null` parses fine and then raises AttributeError from
@@ -126,7 +129,8 @@ def load_credentials(
         parsed_json = json.loads(json_file.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, UnicodeDecodeError) as exc:
         raise CredentialsError(f"could not read {json_file}: {exc}") from exc
-    except json.JSONDecodeError as exc:
+    except (ValueError, RecursionError) as exc:
+        # The same int-digit ValueError / RecursionError pair as the credentials file above.
         raise CredentialsError(f"{json_file} is not valid JSON: {exc}") from exc
     # Same root type-check as the credentials file above — this second read had the identical
     # unguarded `.get` chain, so the AttributeError simply moved one file over.
@@ -246,9 +250,11 @@ class EnvironmentsClient(_AnthropicHTTPClient):
             return {}
         try:
             return json.loads(raw)
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        except (ValueError, RecursionError) as exc:
             # A 2xx with a non-JSON body (proxy error page, truncated response) must
             # not crash the reaper with a bare decode error — surface it as an API error.
+            # ValueError covers JSONDecodeError, non-UTF-8 bytes and the int-digit limit;
+            # RecursionError is a deeply-nested body, which is not a ValueError.
             raise EnvironmentsAPIError(status, f"non-JSON response body: {exc}") from exc
 
     def list_environments(self, *, limit: int = 100) -> list[Environment]:

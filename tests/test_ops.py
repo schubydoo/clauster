@@ -1007,6 +1007,21 @@ def test_login_malformed_json_warns(tmp_path, monkeypatch):
     assert c.status == WARN and "not valid JSON" in c.detail
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # Deeply-nested JSON raises RecursionError, which is not a ValueError at all.
+        pytest.param("[" * 100_000, id="deeply-nested"),
+        # A >4300-digit int literal raises a bare ValueError, not a JSONDecodeError.
+        pytest.param("1" * 5000, id="oversized-int"),
+    ],
+)
+def test_login_unparseable_json_warns_not_crashes(tmp_path, monkeypatch, payload):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    c = _check_claude_login(_creds(tmp_path, payload))
+    assert c.status == WARN and "not valid JSON" in c.detail
+
+
 @pytest.mark.parametrize("payload", ["null", "123", "[]", '"x"'])
 def test_login_non_object_json_does_not_crash(tmp_path, monkeypatch, payload):
     # Valid JSON that isn't an object must WARN, never raise AttributeError (CodeRabbit).

@@ -112,7 +112,9 @@ def _oauth_expires_at_ms(claude_json: Path) -> int | None:
     creds_path = claude_json.parent / ".claude" / ".credentials.json"
     try:
         data = json.loads(creds_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+    except (OSError, ValueError, RecursionError):
+        # ValueError covers JSONDecodeError, a non-UTF-8 file and a >4300-digit int literal;
+        # RecursionError (deeply-nested JSON) is not a ValueError. Each reads as "no expiry".
         return None
     oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
     oauth = oauth if isinstance(oauth, dict) else {}
@@ -159,7 +161,9 @@ def check_login_status(binary: str, claude_json: Path) -> LoginStatus:
 
     try:
         data = json.loads(proc.stdout)
-    except json.JSONDecodeError as exc:
+    except (ValueError, RecursionError) as exc:
+        # The int-digit ValueError and RecursionError are not JSONDecodeError, and this
+        # function promises never to raise: both fail closed to logged-out like bad JSON.
         return LoginStatus(False, None, None, f"`claude auth status` returned non-JSON: {exc}")
     if not isinstance(data, dict):
         return LoginStatus(False, None, None, "`claude auth status` returned non-object JSON")
