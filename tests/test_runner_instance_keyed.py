@@ -196,6 +196,88 @@ async def test_walk_does_not_consume_another_cards_instance_id(runner_config, mo
     assert running[0].bridge_pid == 9001
 
 
+def _pidless_standard_rows_and_external_pointer(runner, monkeypatch) -> None:
+    """Seed two pid-less standard rows on alpha and a live pointer bridge nothing spawned."""
+    runner.persistence.state_store().save(
+        {
+            "iid-a": _row("alpha", pid=None, resume_mode="standard", label="session-A"),
+            "iid-b": _row("alpha", pid=None, resume_mode="standard", label="session-B"),
+        }
+    )
+
+    class _ExternalPtr:
+        pid = 9001
+        proc_start = "1000"
+        environment_id = "env_EXTERNAL"
+        session_id = "session_EXTERNAL"
+
+    monkeypatch.setattr("clauster.runner.pointers.pointer_for_project", lambda p: _ExternalPtr())
+    monkeypatch.setattr("clauster.runner.pointers.is_live", lambda ptr: True)
+
+
+async def test_pointer_walk_never_adopts_a_pidless_row(runner_config, monkeypatch):
+    # #1302. The rows the walk could adopt are exactly the pid-LESS ones (the row pass has
+    # carded every row with a pid), and nothing persisted ties a pointer to one of them.
+    # First-match handed session-A's id to a bridge Clauster never started: session-A's
+    # STOPPED card vanished and its record took the stranger's pids on the next persist.
+    runner = _make_runner(runner_config)
+    _pidless_standard_rows_and_external_pointer(runner, monkeypatch)
+
+    await runner.rediscover()
+
+    by_id = {i.instance_id: i for i in runner.list_instances() if i.project == "alpha"}
+    running = [i for i in by_id.values() if i.status is InstanceStatus.RUNNING]
+    assert len(running) == 1, f"expected one RUNNING external bridge, got {running}"
+    assert running[0].instance_id not in ("iid-a", "iid-b"), "a pid-less row was adopted"
+    assert (running[0].bridge_pid, running[0].environment_id) == (9001, "env_EXTERNAL")
+    # Both stopped sessions keep their own cards, with their own labels.
+    for iid, label in (("iid-a", "session-A"), ("iid-b", "session-B")):
+        assert by_id[iid].status is InstanceStatus.STOPPED, f"{iid} lost its STOPPED card"
+        assert by_id[iid].label == label
+        assert by_id[iid].bridge_pid is None
+    # And on disk: neither record took the stranger's pids; the bridge got a row of its own.
+    stored = runner.persistence.state_store().load()
+    for iid, label in (("iid-a", "session-A"), ("iid-b", "session-B")):
+        assert "bridge_pid" not in stored[iid], f"{iid} was overwritten: {stored[iid]}"
+        assert stored[iid]["label"] == label
+    assert stored[running[0].instance_id]["bridge_pid"] == 9001
+
+    # One restart later the bridge's own row reattaches it by its pids, under the same id,
+    # and the two stopped sessions still keep their cards.
+    fresh_id = running[0].instance_id
+    _stub_connect(monkeypatch)
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None, **_kw: pid == 9001
+    )
+    again = _make_runner(runner_config)
+    await again.rediscover(persist=False)
+    by_id = {i.instance_id: i for i in again.list_instances() if i.project == "alpha"}
+    assert by_id[fresh_id].status is InstanceStatus.RUNNING
+    assert by_id[fresh_id].bridge_pid == 9001
+    assert {by_id["iid-a"].status, by_id["iid-b"].status} == {InstanceStatus.STOPPED}
+    assert len(by_id) == 3, f"expected the bridge plus two stopped cards, got {sorted(by_id)}"
+
+
+async def test_start_on_a_pidless_card_returns_the_live_pointer_bridge(runner_config, monkeypatch):
+    # Why carding the pid-less rows STOPPED beside a live pointer bridge is safe (#1302): a
+    # Start on one of them hits the one-standard-bridge-per-project cap and hands back the
+    # live bridge instead of launching a second one on the same folder.
+    runner = _make_runner(runner_config)
+    _pidless_standard_rows_and_external_pointer(runner, monkeypatch)
+    await runner.rediscover(persist=False)
+    [live] = [
+        i
+        for i in runner.list_instances()
+        if i.project == "alpha" and i.status is InstanceStatus.RUNNING
+    ]
+
+    outcome = await runner.resume_detailed("iid-a")
+
+    assert outcome.created is False
+    assert outcome.instance is live
+    assert runner.get_instance("iid-a").status is InstanceStatus.STOPPED
+
+
 async def test_stopped_row_does_not_hide_a_live_detached_keeper(runner_config, monkeypatch):
     # The pty half of the same defect: with no Anthropic pointer, the walk's keeper-sidecar
     # leg is what re-manages a detached keeper that outlived the restart. Blocked by the same
@@ -1475,8 +1557,9 @@ async def test_pointer_walk_reattach_records_the_keeper_start_time_too(runner_co
 
     await runner.rediscover(persist=False)
 
-    inst = runner.get_instance("iid-pty")
-    assert inst is not None
+    # Under a fresh id since #1302: the pid-less row is not this bridge's identity.
+    [inst] = [i for i in runner.list_instances() if i.project == "alpha" and i.bridge_pid == 6001]
+    assert inst.instance_id != "iid-pty"
     assert (inst.keeper_pid, inst.keeper_proc_start, inst.keeper_start_ticks) == (
         6666,
         888.0,
