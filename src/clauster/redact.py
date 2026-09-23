@@ -827,8 +827,10 @@ def redact_wrapped_screen_rows(
     same two maps as before. A row it adds cells to masks a superset of the cells it masked
     before, but the rendered string can differ, so the caller's width-refit trim
     (:meth:`clauster.pty_screen.PtyScreen._fit_redacted_row`) may no longer happen to cut it.
-    RESIDUE: a welded token (the residue named in :func:`_redact_screen_row`) that such a trim
-    used to expose, and so mask, at the new row edge can then show.
+    RESIDUE: a token welded to the word AFTER it (a UUID followed by ``zz``) has no trailing
+    ``\b`` and is not masked on its own. A trim that happened to cut that word away used to
+    expose the token at the new row edge, and the re-redaction masked it. Such a row can now
+    fit without a trim, and the token then shows.
     """
     seams = max(len(rows) - 1, 0)
     if len(hard_seams) != seams or len(soft_seams) != seams:
