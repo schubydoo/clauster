@@ -342,6 +342,8 @@ class Rediscovery:
         already another session's card then had that session's record overwritten (#1088
         SF-4). Since #1302 the walk mints a fresh id and takes only the label and modes from
         this lookup, so the flag now only keeps those sourced from the same rows as before.
+        The sidecar sweep after the walk passes it too (issue 1605), to prefer an uncarded
+        row's label and modes over the row of another live session.
 
         ``resume_mode`` narrows to rows of that mode. The keeper-sidecar leg needs it,
         because first-match over a project's rows is arbitrary in MODE as well as identity: a
@@ -670,9 +672,9 @@ class Rediscovery:
 
         Returns an empty list when nothing is reattachable (no persisted record, not pty,
         or no live keeper) — at the walk's call, rediscover then resurrects the STOPPED card
-        as before. Only a
-        sidecar in the ``"ready"`` state reattaches; a bridge still mid-startup falls
-        back to STOPPED (the orphan-keeper sweep can reap a genuinely stuck one).
+        as before. Only a sidecar in the ``"ready"`` state reattaches; a bridge still
+        mid-startup falls back to STOPPED (the orphan-keeper sweep can reap a genuinely stuck
+        one).
 
         The sweep reads only sidecars whose stem anchors to THIS project
         (:meth:`_keeper_sidecars_for`), so a sibling ``app-staging`` keeper can never be
@@ -1403,8 +1405,9 @@ class Rediscovery:
         it did not claim: rows written before the pids existed (so an upgrade never declares
         a surviving bridge dead) and live bridges with no persisted row at all, which is
         still the only way to discover an externally-started one at startup. The second pass
-        ends with a keeper-sidecar sweep of every project the walk did not sweep itself (a
-        live row, a live card, or a live pointer made it skip the sidecars), so a second live
+        ends with a keeper-sidecar sweep of every project with a pty row that the walk did
+        not sweep itself (a live row, a live card, or a live pointer made it skip the
+        sidecars), so a second live
         pty keeper beside them is carded too, with every already-held pid excluded (issue
         1605).
 
@@ -1617,7 +1620,9 @@ class Rediscovery:
             # The same pty-pinned lookup as the walk's leg: label and modes only, never an id.
             # An UNCARDED pty row first: here the project's first pty row is often the live
             # row of ANOTHER session, whose spawn and permission modes would then describe
-            # the wrong session on the new card. Any pty row after that, as the walk does.
+            # the wrong session on the new card. Any pty row after that, as the walk does: an
+            # unclaimed-only lookup alone would come back empty when every pty row is carded
+            # and disable the leg outright (the walk's MF-1 note above).
             # No pty row -> nothing to take them from -> skip, as the leg itself would.
             modes_hit = self._persisted_for_project(
                 proj.name, unclaimed_only=True, resume_mode="pty"
