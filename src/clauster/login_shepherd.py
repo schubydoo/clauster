@@ -189,8 +189,8 @@ def _redact(text: str, pasted_secrets: Iterable[str] = ()) -> str:
 
 #: Exit code :meth:`_ConPtyPopen.poll` / :meth:`_ConPtyPopen.wait` report when ``isalive()``
 #: FAULTS (not merely returns False), or when the reaping ``wait()`` after a clean "dead"
-#: raises (#1466): a non-zero, non-None value so the flow finalizes as a failure and the
-#: caller never re-enters pywinpty on a handle that just refused to answer.
+#: raises (#1466): a non-zero, non-None value so the flow finalizes as a failure and a
+#: faulted ``isalive()`` is never handed on to pywinpty's no-timeout ``wait()``.
 #: Out of band on purpose: ``1`` is what a real ``claude`` failure reports, and the operator
 #: message is built from the number, so a handle fault must not read as a login failure.
 #: ``73`` is the same "no exit status available" convention :mod:`~clauster.pty_keeper` uses
@@ -985,8 +985,8 @@ class LoginShepherd:
                 # read as a login failure (#1422). Name the cause, which only the debug log
                 # held before, so the operator can tell a stale handle from a refused code.
                 message = (
-                    f"claude {flow.mode} lost its terminal handle before it reported an exit "
-                    f"({fault}); treated as a failed {flow.mode}. "
+                    f"claude {flow.mode} lost its terminal handle before Clauster could read "
+                    f"its exit status ({fault}); treated as a failed {flow.mode}. "
                     f"Captured output:\n{_redact(output, flow.pasted_secrets)}"
                 )
             else:
@@ -1029,8 +1029,9 @@ class LoginShepherd:
         stale ConPTY can raise a pywinpty-specific error, not just `OSError`.
         """
         # The flow clear runs in `finally` (below) so it happens even if a step here raises:
-        # a pywinpty `terminate()`/`wait()` on a stale ConPTY handle raises its own
-        # `WinptyError`, and without this an escape skipped the clear and stranded the login
+        # a pywinpty `terminate()`/`kill()` on a stale ConPTY handle raises its own
+        # `WinptyError` (the adapter's `poll`/`wait` turn a handle fault into the synthetic exit
+        # instead, #1466), and without this an escape skipped the clear and stranded the login
         # `active` until restart (#1422). The fault still propagates once the flow is no longer
         # stuck active, so a teardown fault is never silent (fail closed, visibly).
         try:
@@ -1075,8 +1076,8 @@ class LoginShepherd:
                 # is skipped — yet if the fault was transient the child may still be alive,
                 # and `pty_process.close()` below would be the only stop. One best-effort
                 # `terminate()`, broadly guarded (the same stale handle can raise again), so a
-                # login process cannot outlive its flow (#1422). Nothing to reap: `wait()` on
-                # that handle is exactly the re-entry `_ConPtyPopen` refuses.
+                # login process cannot outlive its flow (#1422). Nothing to reap: `_ConPtyPopen`
+                # only calls pywinpty's `wait()` after a clean `isalive()` False, and guards it.
                 try:
                     flow.proc.terminate()
                 except Exception as exc:  # noqa: BLE001 — best effort on a faulted handle
