@@ -188,8 +188,8 @@ def _drive(
 
     ``pyte`` itself raises on ordinary sequences. ``PtyScreen.feed`` catches that raise and
     RETURNS it (#1357), so the screen stays in use; before that, ``pty_keeper``'s handler
-    disabled *both* screen consumers for the rest of the session. A returned fault is recorded
-    is not recorded in ``fed_cleanly``, which now means "nothing RAISED out of ``feed``"; see
+    disabled *both* screen consumers for the rest of the session. A returned fault is not
+    recorded in ``fed_cleanly``, which now means "nothing RAISED out of ``feed``"; see
     :func:`check` for why. Two distinct pyte defects reach it, neither exotic:
 
     * **CSI arity** — ``\\x1b[1;2C`` (a modified cursor key any real terminal emits) raises
