@@ -145,6 +145,16 @@ def test_create_empty_project_inserts_row_in_place(
         "page navigated during project creation — the window sentinel was wiped"
     )
 
+    # A clean add also closes the New-project form, which sits above the grid. The row
+    # is in the DOM and measurable at once, but the page's x-show override hides the
+    # form only on the NEXT animation frame, and that collapse moves the new row up by
+    # the form's height. Wait for it before clicking: agent-browser aims at the button's
+    # current position, and its mousemove waits for the pending frame, so the form
+    # collapses between aiming and the mousedown. The mousedown then lands on whatever
+    # now sits there and the popover never opens. On a CPU-starved CI runner that frame
+    # is often still pending when the row is seen.
+    browser.expect_hidden("#np-name", timeout_ms=STATUS_TIMEOUT)
+
     # The inserted row is fully interactive without a refresh: it has its own launch
     # popover, which opens on click.
     browser.click('[data-project="delta"] [data-test="run-launch"]')
