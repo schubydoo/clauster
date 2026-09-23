@@ -818,8 +818,10 @@ def test_keeper_drain_notes_a_rejected_sequence_that_ate_the_connect_url(
     drain.tick()
 
     assert base["state"] == "ready"
-    assert base["note"] == pty_keeper._SCREEN_FAULT_NOTE
-    assert _read(sidecar)["note"] == pty_keeper._SCREEN_FAULT_NOTE
+    # The screen stayed readable, so the note says output was skipped, not that the screen
+    # could not be read.
+    assert base["note"] == pty_keeper._SEQUENCE_FAULT_NOTE
+    assert _read(sidecar)["note"] == pty_keeper._SEQUENCE_FAULT_NOTE
 
 
 def test_keeper_drain_no_note_for_a_rejected_sequence_after_the_url(tmp_path: Path) -> None:

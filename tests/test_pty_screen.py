@@ -1175,3 +1175,21 @@ def test_external_pyte_path_malformed_module_fails_closed(monkeypatch, tmp_path)
         sys.modules.pop("pyte", None)
         if had_pyte:
             sys.modules["pyte"] = prior_pyte
+
+
+def test_feed_does_not_absorb_an_unmeasured_error_type(monkeypatch):
+    """Only the measured pyte faults are absorbed; any other type still raises (#1357).
+
+    Its effect on the screen is unknown, so the keeper's disable-and-fallback branch must see
+    it rather than keep publishing a screen that may be wrong.
+    """
+    from clauster.pty_screen import PtyScreen
+
+    scr = PtyScreen(40, 10)
+
+    def boom(_data: bytes) -> None:
+        raise KeyError("unmeasured")
+
+    monkeypatch.setattr(scr._stream, "feed", boom)
+    with pytest.raises(KeyError):
+        scr.feed(b"x")

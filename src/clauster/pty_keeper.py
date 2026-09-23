@@ -80,6 +80,14 @@ _URL_TIMEOUT = 30.0
 #: (invariant 4). It is rendered verbatim on the card, so it is written to be read there.
 _SCREEN_FAULT_NOTE = "Connect link unavailable — this session's screen could not be read."
 
+#: The advisory when the only fault before the deadline is a sequence pyte rejected (#1357).
+#: The screen stayed readable, so "could not be read" would over-claim: the fact is that part
+#: of the output was skipped, and the link may have been in it. Fixed text, like the note above.
+_SEQUENCE_FAULT_NOTE = (
+    "Connect link unavailable — part of this session's output was skipped by the terminal "
+    "emulator."
+)
+
 
 def _worktree_from_argv(bridge_argv: list[str]) -> str | None:
     """Return the ``--worktree <name>`` the bridge was launched with, or ``None`` (#1241).
@@ -447,7 +455,11 @@ class _KeeperDrain:
                 # Reaching the card also needs `claude.startup_grace_seconds` (default 60)
                 # to exceed `_URL_TIMEOUT`; under a shorter configured grace the startup
                 # watch marks the row ERROR before this note is ever written.
-                self._base["note"] = _SCREEN_FAULT_NOTE
+                self._base["note"] = (
+                    _SCREEN_FAULT_NOTE
+                    if self._screen_scan_failed or self._screen_feed_failed
+                    else _SEQUENCE_FAULT_NOTE
+                )
             if self._base.get("state") == "starting":  # pragma: no branch
                 self._base["state"] = "ready"
                 _write_sidecar(self._sidecar, self._base)

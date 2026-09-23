@@ -472,7 +472,9 @@ from the bridge's output. Three faults stop it:
    terminal keep working.
 3. A failure disables the screen emulator for the rest of the session.
 
-This message means capture never succeeded.
+This message means capture never succeeded. If fault 2 is the only fault, the
+card instead says "Connect link unavailable — part of this session's output was
+skipped by the terminal emulator." The cause and the fix are the same.
 
 **Where it happens:** Windows always, and Linux or macOS only with
 `claude.pty_screen_enabled: true`. The keeper builds that screen unconditionally

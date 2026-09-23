@@ -451,6 +451,14 @@ def _import_pyte() -> Any:
     return pyte
 
 
+#: The ``pyte`` errors :meth:`PtyScreen.feed` absorbs (#1357). Each one is measured to raise
+#: before its handler writes a cell or moves the cursor, after pyte has reset its parser: a CSI
+#: with one parameter too many (``ESC[1;2C``) is a ``TypeError``, and an out-of-range erase
+#: (``ESC[4J``) is an ``UnboundLocalError``. A 200,000-sequence random probe of pyte 0.8.2 raised
+#: no other type. Any other type is not absorbed, because its effect on the screen is unknown.
+_PYTE_INPUT_FAULTS: tuple[type[Exception], ...] = (TypeError, UnboundLocalError)
+
+
 class PtyScreen:
     """A pyte-backed terminal emulator that renders raw pty bytes into redacted cells.
 
@@ -527,7 +535,14 @@ class PtyScreen:
           report where in the chunk it stopped. The next chunk feeds normally. Buffering
           across chunk boundaries is a separate issue (#1355).
 
-        The OSC 8 scan reads the raw bytes, so it still runs on a chunk pyte rejected. The
+        Only the error types in :data:`_PYTE_INPUT_FAULTS` are absorbed, because only those
+        are measured to leave the parser reset and the screen unchanged. Any other type still
+        raises, so the keeper's disable-and-fallback branch handles a failure whose effect on
+        the screen is unknown.
+
+        The OSC 8 scan reads the raw bytes, so it still runs on a chunk pyte rejected with an
+        absorbed error. A type that is not absorbed raises before the scan, and the keeper then
+        falls back to the raw-bytes URL regex. The
         caller owns the reporting, because this class does no I/O: the keeper logs the first
         fault once per session.
         """
@@ -535,7 +550,7 @@ class PtyScreen:
         with self._lock:
             try:
                 self._stream.feed(data)
-            except Exception as exc:  # noqa: BLE001 — pyte raises arbitrary types on bad input
+            except _PYTE_INPUT_FAULTS as exc:
                 fault = exc
             if self._capture_osc8:
                 self._scan_osc8(data)
