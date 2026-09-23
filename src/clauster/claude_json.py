@@ -81,26 +81,59 @@ def _locked(claude_json: Path) -> Iterator[None]:
         yield
 
 
+class ClaudeJsonUnparseable(ValueError):
+    """``~/.claude.json`` exists but is not a JSON object, so Clauster will not write it.
+
+    Raised before any write, so the file stays byte-identical: the file is Claude's, not
+    ours, and a write would have replaced it with only the keys the caller touches. A
+    ``ValueError`` so a caller that already treats a bad ``~/.claude.json`` as a
+    ``ValueError`` keeps doing so. The message names the path and the reason, never the
+    file's content.
+    """
+
+    def __init__(self, path: Path, reason: str) -> None:
+        """Build the operator-facing message from ``path`` and a content-free ``reason``."""
+        super().__init__(
+            f"{path} exists but is not a valid JSON object ({reason}). Clauster did not "
+            "change it. Repair the file or restore it from a backup, then try again."
+        )
+
+
 def _read_claude_json(claude_json: Path) -> tuple[str | None, dict]:
     """Return ``(raw_text, parsed_dict)`` for ``claude_json``.
 
-    ``raw_text`` is the verbatim on-disk content (for the one-time backup) or
-    ``None`` when the file is missing or holds unparseable JSON — the backup is
-    skipped in those cases. A read error (``PermissionError``) and a non-UTF-8 file
-    propagate on purpose; see the comment below. The parsed value is always a dict
-    (a valid-JSON non-object root is coerced to ``{}``).
+    ``raw_text`` is the verbatim on-disk content (for the one-time backup), or ``None``
+    when the file is missing. Only a missing file starts from empty state (no backup).
+    A file that exists but is not a JSON object raises :class:`ClaudeJsonUnparseable`:
+    undecodable bytes, malformed or truncated JSON, a >4300-digit int literal, nesting
+    too deep for the parser, or a valid-JSON non-object root. A read error
+    (``PermissionError``) propagates unchanged. Either way the caller writes nothing.
     """
     try:
         raw = claude_json.read_text(encoding="utf-8")
-        data = json.loads(raw)
-    except (FileNotFoundError, json.JSONDecodeError):
-        # Missing file or unparseable JSON → start from empty state (no backup).
-        # A broader OSError (e.g. PermissionError on a file that *does* exist) is
-        # deliberately NOT caught: swallowing it would treat a readable-but-failing
-        # file as empty and then replace it with only the keys we touch, silently
-        # dropping every other Claude setting. Let it propagate to the caller.
+    except FileNotFoundError:
         return None, {}
-    return raw, data if isinstance(data, dict) else {}
+    except UnicodeDecodeError as exc:
+        # A broader OSError (e.g. PermissionError on a file that *does* exist) is
+        # deliberately NOT caught: it propagates as itself.
+        raise ClaudeJsonUnparseable(claude_json, "it is not UTF-8 text") from exc
+    # Degrading any of these to {} used to replace the whole file with only the keys the
+    # caller touched, and skip the backup: every other project, trust grant and account
+    # key was lost (#1600).
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        reason = f"invalid JSON at line {exc.lineno} column {exc.colno}"
+        raise ClaudeJsonUnparseable(claude_json, reason) from exc
+    except ValueError as exc:
+        # Not a JSONDecodeError: the int-digit limit raises a bare ValueError.
+        raise ClaudeJsonUnparseable(claude_json, "it holds a value that cannot be parsed") from exc
+    except RecursionError as exc:
+        # Deep nesting overflows the recursive scanner; RecursionError is not a ValueError.
+        raise ClaudeJsonUnparseable(claude_json, "it is nested too deeply to parse") from exc
+    if not isinstance(data, dict):
+        raise ClaudeJsonUnparseable(claude_json, "the top level is not a JSON object")
+    return raw, data
 
 
 def _atomic_write_claude_json(claude_json: Path, raw: str | None, data: dict) -> None:
@@ -120,9 +153,11 @@ def update_claude_json(claude_json: Path, mutate: Callable[[dict], object]) -> b
     preserved by the atomic replace). It may signal "nothing to write" by returning
     ``False`` (e.g. an idempotent flag already set) — the write is then skipped and
     this returns ``False``. Any other return value (including ``None``) is treated
-    as "changed" and the atomic write proceeds, returning ``True``. Read errors
-    other than missing/corrupt (e.g. ``PermissionError``) propagate, never silently
-    emptying the file.
+    as "changed" and the atomic write proceeds, returning ``True``. Only a missing file
+    starts from empty. A file that exists but is not a JSON object raises
+    :class:`ClaudeJsonUnparseable`, and a read error (e.g. ``PermissionError``)
+    propagates. Both raise before ``mutate`` runs and before any write, so the file is
+    never silently emptied.
     """
     with _locked(claude_json):
         raw, data = _read_claude_json(claude_json)

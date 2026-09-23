@@ -438,6 +438,30 @@ def test_trust_all_endpoint_trusts_every_untrusted_project(runner_config, tmp_pa
         assert all(p["trust_state"] == "trusted" for p in resp.json())
 
 
+_TRUNCATED = b'{"projects": {"/keep": {"hasTrustDialogAccepted": true}}, "oauthAccount": {"t'
+
+
+@pytest.mark.parametrize("path", ["/api/projects/alpha/trust", "/api/projects/trust-all"])
+def test_trust_endpoints_unparseable_claude_json_return_409_and_leave_it(
+    runner_config, tmp_path, path
+):
+    # #1600: Trust on a truncated ~/.claude.json used to replace the file with one
+    # `projects` entry and no backup. Now the route answers 409 with the reason and the
+    # file is byte-identical.
+    config, _ = runner_config
+    broken = tmp_path / "broken.json"
+    broken.write_bytes(_TRUNCATED)
+    runner = SessionRunner(config, claude_json=broken)
+    with TestClient(create_app(config, runner=runner)) as client:
+        resp = client.post(path)
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail.startswith("could not update trust state: ")
+    assert "not a valid JSON object" in detail and "Clauster did not change it" in detail
+    assert broken.read_bytes() == _TRUNCATED
+    assert not broken.with_suffix(".json.bak").exists()
+
+
 def test_trust_all_endpoint_write_failure_returns_500(runner_config, tmp_path, monkeypatch):
     # A write failure surfaces as 500 rather than silently trusting a partial set.
     config, _ = runner_config

@@ -15,6 +15,7 @@ import psutil
 import pytest
 
 from clauster import bridge_log, code_sessions, inspector, pointers, procutil
+from clauster.claude_json import ClaudeJsonUnparseable
 from clauster.db.persistence import Persistence
 from clauster.models import (
     Attribution,
@@ -31,6 +32,7 @@ from clauster.runner import (
     InvalidSpawnOption,
     NotTrusted,
     SessionRunner,
+    SpawnError,
     UnknownProject,
 )
 from clauster.trust import is_trusted
@@ -1228,6 +1230,65 @@ async def test_spawn_trust_true_capacity_full_does_not_trust(runner_config, tmp_
         await runner.spawn("alpha", trust=True)
 
     assert not is_trusted(proj.path, empty_trust)  # cap rejection → no trust side effect
+
+
+_TRUNCATED_CLAUDE_JSON = b'{"projects": {"/keep": {"hasTrustDialogAccepted": true}}, "oauthAcc'
+
+
+async def test_spawn_trust_true_unparseable_claude_json_fails_and_leaves_it_intact(
+    runner_config, tmp_path, monkeypatch, caplog
+):
+    # #1600: a --trust spawn on a truncated ~/.claude.json used to rewrite it with only the
+    # trust entry and the remote-control flags. Both writers now refuse: the best-effort
+    # remote-control arm warns, the trust write fails the spawn with the reason, and the
+    # file is byte-identical. SpawnError, not NotTrusted, whose CLI hint says "pass --trust".
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, _ = runner_config
+    config.claude.auto_enable_remote_control = True
+    config.claude.resume_recap = False
+    broken = tmp_path / "broken.json"
+    broken.write_bytes(_TRUNCATED_CLAUDE_JSON)
+    runner = SessionRunner(config, claude_json=broken)
+
+    with (
+        caplog.at_level("WARNING", logger="clauster.spawn_coordinator"),
+        pytest.raises(SpawnError, match="could not trust .*not a valid JSON object") as info,
+    ):
+        await runner.spawn("alpha", trust=True)
+
+    assert not isinstance(info.value, NotTrusted)
+    assert broken.read_bytes() == _TRUNCATED_CLAUDE_JSON
+    assert any("could not pre-enable remote control" in r.message for r in caplog.records)
+    assert runner.list_instances() == []  # nothing launched
+
+
+async def test_spawn_without_trust_unparseable_claude_json_is_not_trusted(
+    runner_config, tmp_path, monkeypatch
+):
+    # Without --trust the gate reads the unparseable file as "nothing trusted" and fails
+    # closed before either writer runs.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, _ = runner_config
+    broken = tmp_path / "broken.json"
+    broken.write_bytes(_TRUNCATED_CLAUDE_JSON)
+    runner = SessionRunner(config, claude_json=broken)
+
+    with pytest.raises(NotTrusted):
+        await runner.spawn("alpha")
+
+    assert broken.read_bytes() == _TRUNCATED_CLAUDE_JSON
+
+
+async def test_trust_all_projects_unparseable_claude_json_writes_nothing(runner_config, tmp_path):
+    config, _ = runner_config
+    broken = tmp_path / "broken.json"
+    broken.write_bytes(_TRUNCATED_CLAUDE_JSON)
+    runner = SessionRunner(config, claude_json=broken)
+
+    with pytest.raises(ClaudeJsonUnparseable):
+        await runner.trust_all_projects()
+
+    assert broken.read_bytes() == _TRUNCATED_CLAUDE_JSON
 
 
 async def test_max_bridges_counts_this_projects_own_live_bridge_on_the_other_axis(

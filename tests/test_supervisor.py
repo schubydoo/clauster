@@ -470,6 +470,25 @@ def _raise_not_found(_binary):
     raise ClaudeNotFound("nope")
 
 
+def test_dispatch_unparseable_claude_json_raises_without_spawning(tmp_path, monkeypatch):
+    # #1600: the real trust writer, on a truncated ~/.claude.json. It refuses to write, the
+    # dispatch fails with the reason, the file is byte-identical and nothing is spawned.
+    monkeypatch.setattr(supervisor, "resolve_binary", lambda b: "/abs/claude")
+    spawned: list = []
+    monkeypatch.setattr(supervisor.subprocess, "run", lambda *a, **k: spawned.append(a))
+    cj = tmp_path / "claude.json"
+    content = b'{"projects": {"/keep": {"hasTrustDialogAccepted": true}}, "oauth'
+    cj.write_bytes(content)
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+
+    with pytest.raises(supervisor.DispatchError, match="could not trust .*not a valid JSON"):
+        supervisor.dispatch_background_job(cwd, prompt="hi", claude_json=cj)
+
+    assert cj.read_bytes() == content
+    assert spawned == []
+
+
 def test_dispatch_trusts_before_spawning_subprocess(tmp_path, monkeypatch):
     # Ordering invariant (regression guard): the detached `claude --bg` cannot
     # answer the one-time trust dialog, so the cwd MUST be trusted BEFORE the

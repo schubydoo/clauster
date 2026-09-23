@@ -1275,3 +1275,48 @@ def test_route_local_read_corrupt_claude_json_is_422(
     (Path(os.environ["HOME"]) / ".claude.json").write_text("{not json", encoding="utf-8")
     with _client(write_config, tmp_path, _ON) as c:
         assert c.get("/api/config-write/mcp?scope=local&project=alpha").status_code == 422
+
+
+# --- #1600: a ~/.claude.json that does not parse is never rewritten -------------------
+
+_TRUNCATED_CJ = b'{"projects": {"/keep": {"hasTrustDialogAccepted": true}}, "oauthAcc'
+
+
+@pytest.mark.parametrize(
+    "write",
+    [
+        pytest.param(lambda cj, d: mcp.write_user_servers(cj, {"s": {"command": "x"}}), id="user"),
+        pytest.param(
+            lambda cj, d: mcp.write_project_local_servers(cj, d, {"s": {"command": "x"}}),
+            id="local",
+        ),
+        pytest.param(lambda cj, d: mcp.write_project_approvals(cj, d, ["s"], []), id="approvals"),
+    ],
+)
+def test_claude_json_writers_refuse_an_unparseable_file(tmp_path: Path, write) -> None:
+    # Each writer reaches the shared transaction without reading the file first. It used to
+    # parse the truncated file as {} and replace it with only its own subtree.
+    cj, project_dir = _approvals_project(tmp_path)
+    cj.write_bytes(_TRUNCATED_CJ)
+    with pytest.raises(cw.InvalidCandidateError, match="not a valid JSON object"):
+        write(cj, project_dir)
+    assert cj.read_bytes() == _TRUNCATED_CJ
+
+
+def test_route_user_write_unparseable_claude_json_is_422_and_unchanged(
+    write_config, tmp_path
+) -> None:
+    isolated = Path(os.environ["HOME"]) / ".claude.json"
+    isolated.write_bytes(_TRUNCATED_CJ)
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(
+            "/api/config-write/mcp",
+            json={
+                "scope": "user",
+                "confirm": cw.USER_SCOPE_TOKEN,
+                "servers": {"s": {"command": "x"}},
+            },
+        )
+    assert resp.status_code == 422, resp.text
+    assert "Clauster did not change it" in resp.json()["detail"]
+    assert isolated.read_bytes() == _TRUNCATED_CJ

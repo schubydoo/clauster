@@ -514,8 +514,11 @@ to start):
 4. **For `~/.claude.json`** (workspace trust / remote-control acknowledgement):
    the trust writer keeps a one-time `~/.claude.json.bak` taken before its first
    modification. If that file is damaged, the `.bak` is the recovery source.
-   Because the `claude` CLI writes the same file, prefer letting `claude` rewrite
-   it (re-accept trust from the dashboard) over hand-editing.
+   Clauster does not write a `~/.claude.json` that does not parse, so repair or
+   restore it first
+   ([how](troubleshooting.md#claudejson-exists-but-is-not-a-valid-json-object)).
+   Then re-accept trust from the dashboard rather than hand-editing trust keys,
+   because the `claude` CLI writes the same file.
 5. **Run `clauster doctor`** to confirm `config`, `state_dir`, and `claude-login`
    are green before resuming normal operation.
 

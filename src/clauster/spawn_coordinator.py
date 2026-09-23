@@ -74,6 +74,7 @@ from typing import TYPE_CHECKING, cast
 from . import bridge_log, config, pointers, procutil, redact, usage
 from .bridge_launch import BridgeLaunch
 from .claude_cli import ClaudeNotFound, resolve_binary
+from .claude_json import ClaudeJsonUnparseable
 from .config import (
     ClausterConfig,
     PermissionMode,
@@ -583,10 +584,10 @@ class SpawnCoordinator:
 
         Where each helper raises matters, because neither file is ours. The recap installer
         raises before any write on a ``settings.json`` it cannot read or parse, so the file
-        is left byte-identical. The remote-control writer raises before any write on a
-        ``~/.claude.json`` holding non-UTF-8 bytes, a >4300-digit int or deep nesting. It
-        still reads malformed JSON *syntax* there as an empty file, a separate existing
-        behavior of :func:`clauster.claude_json._read_claude_json`.
+        is left byte-identical. The remote-control writer raises
+        :class:`~clauster.claude_json.ClaudeJsonUnparseable` (a ``ValueError``) before any
+        write on a ``~/.claude.json`` that exists but does not parse, so that file is left
+        byte-identical too (#1600).
         """
         if self._config.claude.auto_enable_remote_control and not self._rc_setting_ensured:
             try:
@@ -600,11 +601,12 @@ class SpawnCoordinator:
             except (OSError, ValueError, RecursionError) as exc:
                 # Best-effort: if we can't write the flag the bridge may hang on the
                 # prompt, but the startup-watch surfaces that honestly as ERROR rather
-                # than a false RUNNING — so don't fail the spawn over it. ValueError and
-                # RecursionError are a ~/.claude.json that _read_claude_json lets escape on
-                # purpose (non-UTF-8, a >4300-digit int, deep nesting), so that the update
-                # never overwrites a file it could not parse. The trust check still reads
-                # that file fail-closed.
+                # than a false RUNNING — so don't fail the spawn over it.
+                # ClaudeJsonUnparseable (a ValueError): the file exists but does not parse,
+                # so the writer refused it and left it byte-identical (#1600). The spawn
+                # still fails closed: the trust gate reads that file as "nothing trusted",
+                # and a --trust spawn's trust write raises SpawnError in _spawn_locked.
+                # RecursionError stays in the tuple as a safety net for any other raise.
                 _log.warning(
                     "could not pre-enable remote control in %s: %s", self._claude_json, exc
                 )
@@ -677,7 +679,7 @@ class SpawnCoordinator:
 
         The body of :meth:`spawn_detailed`, split out so the locking lives in the caller.
         """
-        from .runner import NotTrusted, SpawnOutcome, _normalize_custom_name
+        from .runner import NotTrusted, SpawnError, SpawnOutcome, _normalize_custom_name
 
         proj = self._resolve_project(name)
         # Refresh the persist merge-base under the locks (#949): the persisted-record
@@ -771,7 +773,13 @@ class SpawnCoordinator:
         # this keeps the grant by design — trust is a standalone, persistent operator
         # authorization, exactly as trust_project writes it, independent of any bridge.
         if trust:
-            await asyncio.to_thread(trust_directory, proj.path, self._claude_json)
+            try:
+                await asyncio.to_thread(trust_directory, proj.path, self._claude_json)
+            except ClaudeJsonUnparseable as exc:
+                # The file was left unchanged; fail the spawn with the reason (→ 409). A
+                # plain SpawnError, not NotTrusted: the CLI answers NotTrusted with "pass
+                # --trust", which this caller already did.
+                raise SpawnError(f"could not trust {proj.path}: {exc}") from exc
             invalidate_discovery_cache()
 
         # Prune old bridge-log sets per the retention policy before creating this
