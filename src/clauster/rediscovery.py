@@ -93,8 +93,11 @@ def _pointer_instance_id(project: str, ptr: BridgePointer) -> str:
     by ``clauster status`` could never be passed to ``clauster stop``. The environment id,
     pid and ``procStart`` name ONE bridge process, so the same bridge gets the same id on
     every run, and the service persists that id. The project name is in the key because two
-    projects can share one pointer file (a ``sanitize_cwd`` collision), and each project's
-    card must keep its own id. ``uuid5`` keeps it an RFC 4122 id, the shape the worktree
+    projects can share one pointer file (a ``sanitize_cwd`` collision). The pointer leg then
+    cards the bridge under each of them, as it did before #1302, and one derived id for both
+    would make the second card silently replace the first in the registry. That double card
+    is a known gap of the leg, which has no cwd check. ``uuid5`` keeps it an RFC 4122 id, the
+    shape the worktree
     naming (``_pty_worktree_name``) expects. The namespace matches ``db/bootstrap.py``.
     """
     key = f"clauster.pointer-bridge.{project}.{ptr.environment_id}.{ptr.pid}.{ptr.proc_start}"
@@ -1805,6 +1808,37 @@ class Rediscovery:
                 )
             return instance
 
+    def _live_card_for_pointer(self, ptr: BridgePointer) -> RemoteControlInstance | None:
+        """Return the STARTING/RUNNING card whose bridge is the pointer's process, or None.
+
+        Matched on the (pid, start) pair, never the bare pid (#1302 review): a card whose
+        bridge died before the poll loop marked it CRASHED can hold a pid that a new bridge
+        now reuses, and handing that dead card back would leave the live bridge unmanaged.
+        Exact ticks when both sides carry them, else the epoch within
+        ``_PROC_START_TOLERANCE``. With neither comparable, the bare pid decides, so an
+        unknown start still never cards one process twice. A STOPPED card is skipped
+        because ``stop()`` leaves its ``bridge_pid`` in place.
+        """
+        ptr_ticks = _pointer_start_ticks(ptr.proc_start)
+        ptr_epoch = procutil._expected_epoch(ptr.proc_start)
+        for held in self._registry._instances.values():
+            if held.bridge_pid != ptr.pid or held.status not in (
+                InstanceStatus.STARTING,
+                InstanceStatus.RUNNING,
+            ):
+                continue
+            if held.bridge_start_ticks is not None and ptr_ticks is not None:
+                if held.bridge_start_ticks != ptr_ticks:
+                    continue
+            elif (
+                held.bridge_proc_start is not None
+                and ptr_epoch is not None
+                and abs(held.bridge_proc_start - ptr_epoch) > _PROC_START_TOLERANCE
+            ):
+                continue
+            return held
+        return None
+
     async def _reattach_external_standard(self, proj: Project) -> RemoteControlInstance | None:
         """Reattach a live standard bridge this process didn't spawn; ``None`` if there is none.
 
@@ -1821,7 +1855,8 @@ class Rediscovery:
         managed RUNNING instance (fresh ``instance_id``, ``resume_mode`` pinned
         ``"standard"`` from the positive cmdline gate rather than a possibly-stale
         persisted value), registered, and persisted. A bridge that a STARTING or RUNNING
-        card already holds returns that card instead, and nothing new is registered.
+        card of this project already holds returns that card instead, and nothing new is
+        registered. If another project's card holds it, :class:`InstanceStillLive` is raised.
 
         Caller must hold the per-project spawn lock and the cross-process bridge lock;
         the persisted-record read wants a fresh merge base (see the callers' preceding
@@ -1843,22 +1878,32 @@ class Rediscovery:
         cwd = await asyncio.to_thread(procutil.proc_cwd, ptr.pid)
         if cwd is None or cwd.resolve() != proj.path.resolve():
             return None
-        # Hand back the card that already drives this bridge rather than register a second
-        # one on the same pid: stopping either would kill the process under the other. The
-        # rediscover pointer leg can card this bridge as "pty" (its modes come from a row),
-        # which the caller's one-standard-per-project cap does not see (#1302 review).
-        for held in self._registry._instances.values():
-            if held.bridge_pid == ptr.pid and held.status in (
-                InstanceStatus.STARTING,
-                InstanceStatus.RUNNING,
-            ):
-                return held
         persisted_hit = self._persisted_for_project(proj.name)
         saved = persisted_hit[1] if persisted_hit is not None else {}
         spawn_mode, permission_mode, _resume_mode = self._saved_modes(saved)
         # The external bridge is live at this project's cwd right now, so the current boot is
         # its boot (#1401). Read off-thread, like the rediscover survivor path.
         boot_id = await asyncio.to_thread(procutil.proc_boot_id)
+        # Hand back the card that already drives this bridge rather than register a second
+        # one on the same process: stopping either would kill the process under the other.
+        # The rediscover pointer leg can card this bridge as "pty" (its modes come from a
+        # row), which the caller's one-standard-per-project cap does not see (#1302 review).
+        # After the last await, so nothing can card the process between this check and the
+        # insert below.
+        held = self._live_card_for_pointer(ptr)
+        if held is not None:
+            if held.project != proj.name:
+                # Another project's card holds a bridge whose cwd is THIS project's folder (a
+                # `sanitize_cwd` collision the rediscover pointer leg does not attribute).
+                # Neither handing back that foreign card nor carding the process twice is
+                # safe, so refuse. Deferred import: see `adopt`.
+                from .runner import InstanceStillLive
+
+                raise InstanceStillLive(
+                    f"the live bridge in {proj.name!r} (pid {ptr.pid}) is already managed "
+                    f"as a card of project {held.project!r}"
+                )
+            return held
         instance = self._instance_from_pointer(
             proj.name,
             ptr,
