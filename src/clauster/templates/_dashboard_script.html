@@ -752,7 +752,11 @@
       // --- Zone 2 split: a live-only main list + a collapsed "Recent / resumable" group ---
       // so the Active zone (fixed at the top) only ever shows what's genuinely running.
       liveHosted() { return this.hosted.filter((h) => ["running", "starting", "stopping"].includes(h.status)); },
-      endedHosted() { return this.hosted.filter((h) => ["stopped", "crashed", "error"].includes(h.status)); },
+      endedHosted() { return this.hosted.filter((h) => this._hostedIsEnded(h)); },
+      // One ended-status list for the Recent group and the View panel's Resume wording. The
+      // row's Resume `x-if` keeps the same list inline, where the test that pins every
+      // mirror of the Resume gate reads it.
+      _hostedIsEnded(h) { return ["stopped", "crashed", "error"].includes(h.status); },
       // A detached session is "live" while its worker process runs or it's actively
       // working/blocked; once ended there's no process to Stop — only Forget (remove the record).
       agentLive(j) { return j.worker_alive || ["working", "blocked"].includes(j.state); },
@@ -5032,9 +5036,15 @@
           interrupted: "Session interrupted.",
           exited: "Session ended.",
         };
-        const base = (h && phrasing[h.status]) || fallback ||
-          (h ? "This session is no longer live." : "This session is no longer available.");
-        const detail = h && h.error_detail ? " " + h.error_detail : "";
+        // `h` is always a row: `hostedEndedText` is the only caller, and the panel renders
+        // under its row, so there is no "row gone" wording to fall back to.
+        const base = phrasing[h.status] || fallback || "This session is no longer live.";
+        const detail = h.error_detail ? " " + h.error_detail : "";
+        // Nothing about Resume, either way, until the snapshot reports an ended status: that
+        // is the status half of the Resume button's `x-if`. A terminal frame can beat the
+        // poll, and a reconnect give-up can fire on a stale "running" row; neither renders
+        // Resume, and "cannot be resumed" is premature for a row that has not ended (#1467).
+        if (!this._hostedIsEnded(h)) return base + detail;
         // Both halves of the Resume gate, matching the row's `x-if` (#1381). Pointing at a
         // Resume button that is not rendered is worse than the 409 the button used to
         // produce, so a project-less row is told WHY instead — this panel is the one place
@@ -5046,24 +5056,19 @@
         // usable uuid used to fall through both branches and explain nothing, which is the
         // "fails opaquely" failure the row chip exists to prevent. Four branches, not three:
         // the halves are salvaged independently, so "neither" is a real state.
-        let resume = "";
-        if (h && h.claude_session_uuid_usable && h.project) {
-          // The status half of the row's `x-if` too: a terminal frame can beat the poll, and
-          // a reconnect give-up can fire on a stale "running" row. Neither renders Resume, so
-          // this names it only once the snapshot reports an ended status (#1467).
-          if (["crashed", "stopped", "error"].includes(h.status)) {
-            resume = " Use Resume above to continue it.";
-          }
-        } else if (h && h.project) {
+        let resume;
+        if (h.claude_session_uuid_usable && h.project) {
+          resume = " Use Resume above to continue it.";
+        } else if (h.project) {
           // No follow-up action named, for the reason the chip gives (dashboard.html): on an
           // orphan row this sentence lands beside one telling the operator to Kill, and two
           // consecutive sentences naming different actions is worse than naming none.
           resume = " It cannot be resumed: it has no usable conversation id (none was saved," +
             " or the saved one is kept in a shape Resume cannot use).";
-        } else if (h && h.claude_session_uuid_usable) {
+        } else if (h.claude_session_uuid_usable) {
           resume = " It cannot be resumed: its project is unknown, so there is nowhere to" +
             " respawn it. Start a new session in the right project instead.";
-        } else if (h) {
+        } else {
           // Both halves at once. `_degraded_row` salvages per FIELD, so one tampered record
           // drops the uuid and the project independently -- falling to the project-only
           // wording here would have the operator repair one field and hit the same wall.

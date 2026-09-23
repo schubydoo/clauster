@@ -118,6 +118,12 @@ def test_hosted_ended_banner_rereads_the_latest_snapshot(
     browser.expect_text(_REASON, "This session is no longer live.", timeout_ms=_SETTLE_TIMEOUT_MS)
     assert _RESUME_HINT not in browser.get_text(_REASON)
     assert _resume_buttons(browser) == 0
+    # ...and a row that has not ended is not told it "cannot be resumed" either, even when
+    # it has lost its uuid. The error_detail marks the re-render so the check is not vacuous.
+    _set_rows(browser, _row(status="starting", claude_session_uuid=None, error_detail="warming"))
+    browser.expect_text(_REASON, "warming", timeout_ms=_SETTLE_TIMEOUT_MS)
+    assert "cannot be resumed" not in browser.get_text(_REASON)
+    _set_rows(browser, _row(status="running"))
 
     # 5. Two terminal frames with different text while the row still reads running: the
     # banner leads with the LATEST frame, since the snapshot has no phrasing to offer yet.

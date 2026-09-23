@@ -519,12 +519,20 @@ def test_hosted_ended_banner_is_built_from_the_row_on_every_render(
     # No stored sentence is left to latch: the view keeps only the frame's own text.
     assert "endedReason" not in body
     assert "if (fallback) v.endedFallback = fallback;" in body
-    # The Resume hint carries the status half of the Resume button's `x-if` as well, so a
-    # row that still reads "running" (a frame that beat the poll) is not told to Resume.
-    assert (
-        'if (["crashed", "stopped", "error"].includes(h.status)) {\n'
-        '            resume = " Use Resume above to continue it.";'
-    ) in body
+    # The Resume wording carries the status half of the Resume button's `x-if` as well, so
+    # a row that still reads "running" (a frame that beat the poll) is neither told to
+    # Resume nor told it cannot be resumed. The early return precedes every Resume branch.
+    reason = body.split("_hostedEndedReason(h, fallback) {", 1)[1].split("_renderHostedEvent(", 1)[
+        0
+    ]
+    gate = "if (!this._hostedIsEnded(h)) return base + detail;"
+    assert gate in reason
+    assert reason.index(gate) < reason.index("let resume;")
+    # The Recent group and the banner share the one ended-status list.
+    assert '_hostedIsEnded(h) { return ["stopped", "crashed", "error"].includes(h.status); }' in (
+        body
+    )
+    assert "endedHosted() { return this.hosted.filter((h) => this._hostedIsEnded(h)); }" in body
 
 
 def test_hosted_status_badge_colors_match_bridge(write_config, projects_root, monkeypatch):
