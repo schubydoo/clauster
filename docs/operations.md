@@ -446,6 +446,8 @@ database (see Routine backup, above). The workspace-trust writes to
 > gets no copy, because there is nothing to copy. The import logs a warning,
 > imports nothing from either file, and renames neither. The next start tries the
 > import again, so fix the permissions and restart before you create new state.
+> If the other file is corrupt and the same start already copied it to
+> `.corrupt.bak`, that copy stays, and later starts do not take it again.
 >
 > `clauster migrate` treats the same file differently. That command re-saves what
 > it reads, so it reads strictly. It writes nothing, prints the reason, and exits

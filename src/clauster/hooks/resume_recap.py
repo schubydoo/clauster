@@ -209,7 +209,9 @@ def main() -> None:
     raw = sys.stdin.read()
     try:
         payload = json.loads(raw) if raw.strip() else {}
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
+        # RecursionError (a deeply-nested payload) is not a ValueError; handled here like
+        # any other bad payload rather than left to the entry point's catch-all.
         return
     if not isinstance(payload, dict):
         return

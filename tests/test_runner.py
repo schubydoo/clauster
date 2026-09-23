@@ -3368,11 +3368,24 @@ async def test_spawn_survives_ensure_helper_write_failures(runner_config, monkey
     await runner.stop(inst.instance_id)
 
 
-async def test_spawn_survives_a_deeply_nested_settings_json(runner_config, monkeypatch, caplog):
-    # The real installer, on a real file: json.loads raises RecursionError, which is not a
-    # ValueError, so it escaped the installer's own handler and the best-effort caller's
-    # `except OSError` and failed the spawn. Now it warns, the spawn runs, and the file
-    # is left byte-identical rather than rewritten.
+@pytest.mark.parametrize(
+    "content",
+    [
+        # RecursionError, which is not a ValueError at all.
+        pytest.param(b"[" * 100_000, id="deeply-nested"),
+        # A bare ValueError, not a JSONDecodeError.
+        pytest.param(b'{"n": ' + b"1" * 5000 + b"}", id="oversized-int"),
+        pytest.param(b"not valid json {{{", id="malformed"),
+        pytest.param(b"\xff\xfe\x00not utf-8", id="non-utf8"),
+    ],
+)
+async def test_spawn_survives_an_unparseable_settings_json_and_leaves_it_intact(
+    runner_config, monkeypatch, caplog, content
+):
+    # The real installer, on a real file. A deeply-nested file used to fail the spawn,
+    # and the other three were replaced by just the hook block, which dropped every other
+    # user setting. Now the installer refuses to write, the best-effort arm warns, the
+    # spawn runs, and the user's file is byte-identical.
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
     config, claude_json = runner_config
     config.claude.resume_recap = True
@@ -3381,14 +3394,15 @@ async def test_spawn_survives_a_deeply_nested_settings_json(runner_config, monke
     )
     settings = claude_json.parent / ".claude" / "settings.json"
     settings.parent.mkdir(parents=True, exist_ok=True)
-    settings.write_text("[" * 100_000, encoding="utf-8")
+    settings.write_bytes(content)
     runner = SessionRunner(config, claude_json=claude_json)
 
-    with caplog.at_level("WARNING", logger="clauster.runner"):
+    with caplog.at_level("WARNING", logger="clauster.spawn_coordinator"):
         inst = await runner.spawn("alpha")
     assert inst.status is InstanceStatus.RUNNING
     assert any("could not install resume-recap hook" in r.message for r in caplog.records)
-    assert settings.read_text(encoding="utf-8") == "[" * 100_000
+    assert settings.read_bytes() == content
+    assert runner._recap_hook_ensured is True
     await runner.stop(inst.instance_id)
 
 
@@ -3414,7 +3428,7 @@ async def test_remote_control_pre_enable_degrades_on_unparseable_claude_json(
     claude_json.write_text(payload, encoding="utf-8")
     runner = SessionRunner(config, claude_json=claude_json)
 
-    with caplog.at_level("WARNING", logger="clauster.runner"):
+    with caplog.at_level("WARNING", logger="clauster.spawn_coordinator"):
         await runner._spawner._ensure_claude_side_settings()
     assert runner._rc_setting_ensured is True
     assert any("could not pre-enable remote control" in r.message for r in caplog.records)

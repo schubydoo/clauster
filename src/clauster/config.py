@@ -192,7 +192,9 @@ class ClaudeConfig(BaseModel):
         description="Install a `SessionStart` hook in the runtime user's "
         "`~/.claude/settings.json` that recaps the most recent prior transcript for the "
         "cwd into a restarted (standard-mode) bridge. Opt-in: edits the user's Claude "
-        "settings and injects prior turns.",
+        "settings and injects prior turns. A `settings.json` that cannot be read, or that "
+        "holds content other than a JSON object, is never rewritten: the hook is skipped "
+        "with a warning and the bridge still starts. A missing or empty file gets the hook.",
     )
     resume_recap_max_chars: int = Field(
         default=8000,

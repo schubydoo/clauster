@@ -576,11 +576,17 @@ class SpawnCoordinator:
         """Pre-write the two claude-side settings a bridge start depends on, once per runner.
 
         Both are BEST-EFFORT by design and neither may fail the spawn — but neither is
-        silent either: an :class:`OSError`, or a settings file too deeply nested (or holding
-        too long an integer) to parse, is logged at WARNING and the ``_ensured`` latch
-        still flips, so each write is attempted exactly once per runner (the latches are
-        instance state, so a second :class:`~clauster.runner.SessionRunner` in the same
-        process retries). A parse failure raises before any write, so the file is untouched.
+        silent either: an :class:`OSError`, ``ValueError`` or ``RecursionError`` is logged
+        at WARNING and the ``_ensured`` latch still flips, so each write is attempted exactly
+        once per runner (the latches are instance state, so a second
+        :class:`~clauster.runner.SessionRunner` in the same process retries).
+
+        Where each helper raises matters, because neither file is ours. The recap installer
+        raises before any write on a ``settings.json`` it cannot read or parse, so the file
+        is left byte-identical. The remote-control writer raises before any write on a
+        ``~/.claude.json`` holding non-UTF-8 bytes, a >4300-digit int or deep nesting. It
+        still reads malformed JSON *syntax* there as an empty file, a separate existing
+        behavior of :func:`clauster.claude_json._read_claude_json`.
         """
         if self._config.claude.auto_enable_remote_control and not self._rc_setting_ensured:
             try:
@@ -613,11 +619,11 @@ class SpawnCoordinator:
                         "bridge gets its prior conversation recapped into context",
                         self._settings_json,
                     )
-            except (OSError, RecursionError) as exc:
+            except (OSError, ValueError, RecursionError) as exc:
                 # Best-effort, same as the remote-control flag: a failure here only
                 # means a restart won't be recapped, not that the bridge can't run.
-                # RecursionError is a deeply-nested settings.json, which the installer's
-                # own ValueError arm does not catch. Caught here, the file is left as is.
+                # ValueError / RecursionError are a settings.json the installer refused to
+                # write over because it could not parse it; the file is left as is.
                 _log.warning(
                     "could not install resume-recap hook in %s: %s", self._settings_json, exc
                 )

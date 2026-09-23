@@ -98,19 +98,26 @@ def ensure_recap_hook_installed(
     filename, or the frozen binary's :data:`RECAP_SUBCOMMAND`) so a changed interpreter,
     moved venv, or pip↔binary switch rewrites the command in place rather than
     duplicating. Unrelated SessionStart hooks (context-mode, the user's own) are preserved.
+
+    ``settings.json`` is the user's file, not ours, so this never writes over one it could
+    not read. A missing or empty file starts from ``{}``. Every other failure raises before
+    any write and leaves the file byte-identical: an ``OSError`` from the read, and a
+    ``ValueError`` or ``RecursionError`` for content that is not a JSON object (undecodable
+    bytes, malformed JSON, a >4300-digit int literal, deep nesting, a non-object top level).
     """
     script = script or HOOK_SCRIPT
     command = command or hook_command(script=script)
     settings_path = Path(settings_path).expanduser()
 
-    data: dict = {}
-    if settings_path.is_file():
-        try:
-            loaded = json.loads(settings_path.read_text(encoding="utf-8") or "{}")
-            if isinstance(loaded, dict):
-                data = loaded
-        except (ValueError, OSError):
-            data = {}
+    try:
+        raw = settings_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raw = ""
+    # Degrading any of these to {} used to replace the whole file with just the hook block,
+    # dropping every other setting the user had.
+    data = json.loads(raw) if raw.strip() else {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{settings_path} is not a JSON object")
 
     hooks = data.get("hooks")
     if not isinstance(hooks, dict):
