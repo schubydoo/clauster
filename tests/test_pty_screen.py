@@ -1254,6 +1254,39 @@ def test_frame_does_not_join_separate_lines_that_line_up(upper, lower):
     assert rows[1].rstrip() == lower
 
 
+def test_frame_joins_only_pyte_hard_runs_verbatim():
+    # #1508 review, safety invariant 4, through `frame()`. Rows 1-3 soft-wrap into each other
+    # and row 3 hard-wraps (pyte) into row 4. Joined verbatim as one group, the lone `bearer` on
+    # row 2 takes row 3's `...ab.bearer` as its value, so the real header on rows 3-4 is never
+    # read. Two parts of the fix each close this input: the verbatim join covers only rows 3-4,
+    # and the spaced seam view reads row 2's `bearer` without a `\b`. The unit tests in
+    # `tests/test_redact.py` pin each one alone; this pins the end-to-end result.
+    scr = PtyScreen(cols=40, rows=6)
+    lines = [
+        "  some text here, x bearer abcdefgh",
+        "  bearer",
+        "  ijklmnopqrstuvwxyzab.bearer live012345KLMNOPQRSTUV done",
+    ]
+    scr.feed("\r\n".join(lines).encode())
+    shown = "".join(scr.frame()["rows"])
+    assert "KLMN" not in shown and "live0123" not in shown
+
+
+def test_frame_renders_a_row_the_soft_wrap_adds_nothing_to_as_before():
+    # #1508 review, safety invariant 4. Row 0 now soft-wraps into row 1, but no token crosses
+    # the seam. Rendered from the union map it would merge the overlapping `bearer`/`env_` masks
+    # into fewer tokens and fit the width untrimmed. Rendered alone, as before, it grows past
+    # the width, and the trim-and-re-redact (#1359) masks the UUID the trim leaves at the edge.
+    uuid = "12345678-f7c9-1523-d2a2-686b9d96c4fb"
+    row = "bearer env_abcdefgh " * 4 + uuid + "zz"  # 118 cells: the UUID is welded to `zz`
+    assert len(row) == 118
+    scr = PtyScreen(cols=120, rows=3)
+    scr.feed(f"{row}\r\n  more text below".encode())
+    shown = "".join(scr.frame()["rows"])
+    assert "686b9d96c4fb" not in shown
+    assert "more text below" in shown
+
+
 def test_soft_wraps_needs_the_next_word_not_to_fit():
     # #1508: the soft-wrap test in isolation, at 40 columns (slack 8, so the edge is column 32).
     pad = " " * 40

@@ -821,6 +821,14 @@ def redact_wrapped_screen_rows(
     whitespace removed), each scanned to its own fixed point with every soft seam as a possible
     boundary (:func:`_screen_seam_spans`). It joins the union at render. With no soft seam the
     result is exactly what the hard-wrap path gave before.
+
+    A row the soft-wrap map adds no cell to renders byte for byte as before: a row no hard seam
+    touches as :func:`_redact_screen_row` renders it alone, and a row in a hard run from the
+    same two maps as before. A row it adds cells to masks a superset of the cells it masked
+    before, but the rendered string can differ, so the caller's width-refit trim
+    (:meth:`clauster.pty_screen.PtyScreen._fit_redacted_row`) may no longer happen to cut it.
+    RESIDUE: a welded token (the residue named in :func:`_redact_screen_row`) that such a trim
+    used to expose, and so mask, at the new row edge can then show.
     """
     seams = max(len(rows) - 1, 0)
     if len(hard_seams) != seams or len(soft_seams) != seams:
@@ -891,7 +899,16 @@ def redact_wrapped_screen_rows(
                     seam_cov[cell] = 1
 
     out: list[str] = []
-    for lo, hi in bounds:
+    for k, (lo, hi) in enumerate(bounds):
+        extra = any(seam_cov[i] and not (row_cov[i] or join_cov[i]) for i in range(lo, hi))
+        if not extra and not (k and hard_seams[k - 1]) and not (k < seams and hard_seams[k]):
+            # A row no hard seam touches was rendered alone before soft seams existed. Unless the
+            # soft-wrap map masks more of it, render it exactly that way, token for token: the
+            # union render below can merge overlapping masks into fewer tokens, and a shorter
+            # row skips the caller's width-refit trim, whose re-redaction can mask a welded
+            # token at the new edge.
+            out.append(_redact_screen_row(rows[k]))
+            continue
         runs: list[tuple[int, int, str]] = []
         i = lo
         while i < hi:
