@@ -53,7 +53,7 @@ import subprocess
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
-from . import atomicio
+from . import atomicio, config
 from .config import ClausterConfig
 from .db.stores import StateStore
 from .models import InstanceStatus, RemoteControlInstance
@@ -162,7 +162,15 @@ class RunnerState:
                 "spawn_mode": inst.spawn_mode,
                 "permission_mode": inst.permission_mode,
                 "resume_mode": inst.resume_mode,
-                "sandbox_mode": inst.sandbox_mode,
+                # While the toggle is disabled (#1037) every card holds the coerced
+                # "default", so writing it would overwrite a choice stored while the toggle
+                # was on (#1101). Carry the stored value instead: `_persisted` was just
+                # refreshed from the store, and a new row gets NULL, read back as "default".
+                "sandbox_mode": (
+                    inst.sandbox_mode
+                    if config.SANDBOX_TOGGLE_ENABLED
+                    else self._persisted.get(inst.instance_id, {}).get("sandbox_mode")
+                ),
                 # Only set when the name is NOT derivable from this row's instance_id
                 # (#1241) — a keeper-only reattach that had to mint a fresh id. Persisted
                 # so the recovery survives the next restart: by then the keeper may be
