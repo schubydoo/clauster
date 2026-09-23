@@ -35,36 +35,35 @@ between chunks, so a hyperlink separated from its opener by more than that is
 the carry bound would report that documented bound as a crash. The cap sits below it, so
 inside this harness the invariance genuinely holds.
 
-⚠️ **Invariance is asserted over the OSC 8 reassembly only — the part clauster owns — and
-deliberately NOT over the pyte-rendered screen, because that one does not hold.** The
-first runs of this harness established that ``pyte`` itself is not chunk-invariant, with
-three separate triggers found in under four minutes:
+**Invariance is asserted over the OSC 8 reassembly AND the pyte-rendered screen** — the
+rendered rows, the cursor, and every reader built on them (:data:`_INVARIANT_KEYS`). The
+rendered half used to be excluded. The first runs of this harness found that ``pyte`` itself
+is not chunk-invariant, with three triggers found in under four minutes:
 
 * an unhandled **C0** control (``\\x01``–``\\x06``, ``\\x10``–``\\x1a``, ``\\x1c``–``\\x1f``):
   ``b"\\x03."`` fed whole renders an empty screen, split renders ``.``;
 * an unhandled **C1** control (``U+0080``–``U+009F`` except ``CSI``/``OSC``), which arrives
   as two UTF-8 bytes: ``b"\\xc2\\x930"``, same shape;
-* a **combining mark**: ``b"\\xde\\xa7A"`` (``U+07A7`` + ``A``) fed whole loses the ``A``.
+* a zero-width character that is not a **combining mark**: ``b"\\xde\\xa7A"`` (``U+07A7`` +
+  ``A``) fed whole loses the ``A``.
 
-The cause is common to all three — pyte matches a run of printable text in bulk and
-discards the remainder of the run rather than skipping the one character it cannot place —
-so an exclusion list would have to grow to most of the input space, and the fix belongs
-upstream, not in an exclusion here.
+The cause is common to all three. ``pyte``'s ``Screen.draw`` gets the run of text in one
+read and stops at the first character it cannot place, so the rest of the run is lost.
+Feeding ``b"see \\x03https://claude.com/cai/oauth/authorize?client_id=..."`` in a single
+read made ``find_authorize_url()`` return ``None``, while the same bytes delivered one at a
+time returned the URL. #1355 fixed it in clauster: ``pty_screen._pyte_classes`` gives each
+such character its own ``draw`` call. The same fix stops a stock stream's ``ESC % @`` charset
+switch, whose effect also depended on where the read ended. A stock ``pyte`` is still
+chunk-dependent, and ``tests/test_fuzz_harness_smoke.py`` pins that, so a ``pyte`` release
+that fixes it upstream tells the reader the override can go.
 
-This is **not** cosmetic, which is why it is reported as an open finding on the PR that
-introduced this harness rather than written off. Feeding
-``b"see \\x03https://claude.com/cai/oauth/authorize?client_id=..."`` in a single read makes
-``find_authorize_url()`` return ``None``, while the same bytes delivered one at a time
-return the URL — an operator who is never shown a login link, on a machine where the read
-happened to land wrong. The same input shape loses ``pty_keeper``'s ``session_…`` connect-
-URL scrape. ``tests/test_fuzz_harness_smoke.py`` pins all three triggers *and* the
-authorize-URL loss, so a ``pyte`` upgrade that fixes any of them fails ``just check`` and
-sends the reader back here to widen the oracle, instead of leaving a carve-out nobody
-revisits.
+⚠️ One carve-out is left. When ``feed`` returns a fault (a sequence pyte rejected, #1357),
+``pyte`` has dropped the rest of that read, so which bytes were dropped depends on the
+chunking. For such an input only the OSC 8 reassembly is compared; the rendered readers are
+not. The other properties below are still asserted on it.
 
-What remains asserted is the seam the review comment was actually about — ``_scan_osc8``'s
-carry across chunk boundaries, which is clauster's own code and runs on the raw bytes
-before pyte sees them. It is asserted on every input.
+The OSC 8 reassembly — ``_scan_osc8``'s carry across chunk boundaries, the seam the review
+comment was about — is compared on every input.
 
 That "every" is recent. This harness's first runs found a chunk dependence that *was*
 clauster's rather than pyte's: ``_OSC8_RE``'s parameter run was ``[^;]*``, which excludes
@@ -155,10 +154,14 @@ _GEOMETRIES = ((40, 6), (80, 24), (pty_screen.SCREEN_COLS, pty_screen.SCREEN_ROW
 #: module docstring were minimised by hand rather than found at that density.
 _MAX_CUTS = 8
 
-#: The readers compared across chunkings. ``retained`` — the OSC 8 URIs ``_scan_osc8``
-#: reassembled — is clauster's own code and is invariant; the pyte-rendered readers are
-#: not, and the module docstring says why they are absent rather than merely omitted.
-_INVARIANT_KEYS = ("retained",)
+#: The readers compared across chunkings. ``retained`` is the OSC 8 URIs ``_scan_osc8``
+#: reassembled, compared on every input. The rest are the pyte-rendered screen and the
+#: readers built on it, compared on every input where no ``feed`` returned a fault; the module
+#: docstring says why a faulted input is the one exception.
+_INVARIANT_KEYS = ("retained", "screen", "authorize", "token", "session")
+
+#: The keys still compared when a ``feed`` returned a fault: only the raw-byte reassembly.
+_FAULT_INVARIANT_KEYS = ("retained",)
 
 
 def _cut_points(cuts: list[int], length: int) -> list[int]:
@@ -217,13 +220,23 @@ def _drive(
     to narrow this.
     """
     screen = pty_screen.PtyScreen(cols=cols, rows=rows, capture_osc8=capture_osc8)
+    faulted = False
     for chunk in data_chunks:
-        # A returned fault (a sequence pyte rejected, #1357) is ignored: the OSC 8 scan still
-        # ran on the chunk, so the drive stays comparable. A raise is a defect; see above.
-        screen.feed(chunk)
+        # A returned fault (a sequence pyte rejected, #1357) is recorded: the OSC 8 scan still
+        # ran on the chunk, but pyte dropped the rest of it, so the rendered readers are not
+        # comparable across chunkings. A raise is a defect; see above.
+        if screen.feed(chunk) is not None:
+            faulted = True
     try:
         readings = {
             "read_cleanly": True,
+            "faulted": faulted,
+            # The rendered screen itself, which every other rendered reader is built on.
+            "screen": (
+                list(screen._screen.display),
+                screen._screen.cursor.x,
+                screen._screen.cursor.y,
+            ),
             "authorize": screen.find_authorize_url(),
             "token": screen.find_oauth_token(),
             "session": screen.find_session_id(),
@@ -273,10 +286,12 @@ def check(data: bytes, cuts: list[int], cols: int, rows: int, capture_osc8: bool
     # Asserted on every input that reads cleanly. Inputs where `feed` raised on a sequence
     # pyte rejects used to be skipped here, because the raise also cost that chunk's OSC 8
     # scan. `PtyScreen.feed` now catches it and still runs the scan (#1357), so those inputs
-    # are asserted too. There was a second skip — inputs where a stray opener was swallowed by
-    # `_OSC8_RE`'s parameter run — and it went away with the fix in #1356; see the module
-    # docstring.
-    for key in _INVARIANT_KEYS:
+    # are asserted too, over the OSC 8 reassembly only (see the module docstring). There was a
+    # second skip — inputs where a stray opener was swallowed by `_OSC8_RE`'s parameter run —
+    # and it went away with the fix in #1356. The rendered readers joined the comparison with
+    # the fix in #1355.
+    faulted = chunked["faulted"] or whole["faulted"]
+    for key in _FAULT_INVARIANT_KEYS if faulted else _INVARIANT_KEYS:
         assert chunked[key] == whole[key], (
             f"chunk-boundary divergence in {key!r}: "
             f"{len(parts)} chunks gave {chunked[key]!r}, one chunk gave {whole[key]!r}"

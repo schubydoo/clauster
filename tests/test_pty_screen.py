@@ -626,6 +626,143 @@ def test_osc8_capture_still_runs_on_a_chunk_pyte_rejected():
     assert scr.find_authorize_url() == _OSC8_AUTH
 
 
+# --- the same bytes render the same screen at any chunking (#1355) -----------------------
+#
+# pyte's `Screen.draw` gets the text of one read and stops at the first character it cannot
+# place, so the text after it in THAT read was lost, and whether it was lost depended on where
+# the read ended. These are the shapes from the issue and the fuzz harness.
+_CHUNK_SHAPES = (
+    pytest.param(b"see \x03here", id="c0-control"),
+    pytest.param(b"see \xc2\x93here", id="c1-control"),
+    pytest.param(b"see \xde\xa7here", id="zero-width-non-combining"),
+    pytest.param(b"see \xe2\x80\x8dhere", id="zero-width-joiner"),
+    pytest.param(b"cafe\xcc\x81 ok", id="combining-mark"),
+    pytest.param(b"wide \xe4\xb8\x80\x03here", id="wide-char-then-control"),
+    pytest.param(b"\x1b[31mred\x1b[0m \x07bell \x1b]0;title\x07after", id="escapes"),
+    pytest.param(b"\x1b%@\xe4\xb8\x80 \x1b%G\xe4\xb8\x80", id="charset-switch"),
+)
+
+
+def _render(chunks: list[bytes], cols: int = 12, rows: int = 4) -> tuple:
+    scr = PtyScreen(cols=cols, rows=rows)
+    for chunk in chunks:
+        assert scr.feed(chunk) is None
+    return tuple(scr._screen.display), scr._screen.cursor.x, scr._screen.cursor.y
+
+
+def _every_split(payload: bytes) -> list[list[bytes]]:
+    return [[payload[:i], payload[i:]] for i in range(1, len(payload))] + [
+        [payload[i : i + 1] for i in range(len(payload))]
+    ]
+
+
+@pytest.mark.parametrize("payload", _CHUNK_SHAPES)
+def test_render_is_the_same_at_every_chunk_boundary(payload):
+    # Narrow enough that "here" wraps, so draw's end-of-line handling is inside the comparison.
+    whole = _render([payload])
+    for chunks in _every_split(payload):
+        assert _render(chunks) == whole, chunks
+
+
+def test_text_after_an_unplaceable_character_is_kept():
+    # The concrete loss: stock pyte rendered only "see " for this single read.
+    assert _render([b"see \x03here"], cols=20)[0][0].rstrip() == "see here"
+    assert _render([b"see \xc2\x93here"], cols=20)[0][0].rstrip() == "see here"
+
+
+def test_an_unplaceable_character_at_the_edge_still_wraps_like_a_one_byte_read():
+    # pyte wraps the cursor for a character at the right margin before it decides the
+    # character cannot be placed. The lone draw call for that character keeps that step.
+    payload = b"abcde\x03f"
+    assert _render([payload], cols=5, rows=2) == _render([payload[:6], payload[6:]], 5, 2)
+    assert _render([payload], cols=5, rows=2)[0] == ("abcde", "f    ")
+
+
+@pytest.mark.parametrize("control", [b"\x03", b"\xc2\x93", b"\xde\xa7"])
+def test_authorize_url_after_a_control_is_found_at_every_chunk_boundary(control):
+    url = "https://claude.com/cai/oauth/authorize?client_id=abc&state=xyz"
+    payload = b"see " + control + url.encode() + b"\r\n"
+    for chunks in [[payload], *_every_split(payload)]:
+        scr = PtyScreen(cols=200, rows=6, capture_osc8=True)
+        for chunk in chunks:
+            scr.feed(chunk)
+        assert scr.find_authorize_url() == url, chunks
+
+
+def test_connect_url_after_a_control_is_found_in_one_read():
+    scr = PtyScreen(cols=100, rows=4)
+    scr.feed(b"\x03https://claude.ai/code/session_01ABCDEFGHIJKLMNOP\r\n")
+    assert scr.find_session_id() == "session_01ABCDEFGHIJKLMNOP"
+
+
+def test_text_the_fix_now_renders_is_still_redacted():
+    # Invariant 4. The id after the control used to be dropped from a single read. It now
+    # renders, so the frame must mask it, at every chunking.
+    payload = b"id \x03session_01ABCDEFGHIJKLMNOP cse_01JABCDEFGHJKMNPQ end"
+    for chunks in [[payload], *_every_split(payload)]:
+        scr = PtyScreen(cols=80, rows=2)
+        for chunk in chunks:
+            scr.feed(chunk)
+        row = scr.frame()["rows"][0]
+        assert not _BARE_ID_RE.search(row), (chunks, row)
+        assert row.startswith("id <redacted> <redacted> end"), (chunks, row)
+
+
+def test_charset_switch_is_ignored_so_utf8_always_decodes():
+    # A stock stream switched to Latin-1 at the NEXT read after `ESC % @`, so the character
+    # after it decoded as UTF-8 or as three Latin-1 characters depending on the chunking.
+    assert _render([b"\x1b%@", b"\xe4\xb8\x80"])[0][0].startswith("一")
+    assert _render([b"\x1b%@\xe4\xb8\x80"])[0][0].startswith("一")
+
+
+def test_draw_pieces_splits_only_at_characters_draw_cannot_place():
+    wcwidth = __import__("pyte").screens.wcwidth
+    assert pty_screen._draw_pieces("plain ascii", "plain ascii", wcwidth) == ["plain ascii"]
+    text = "a\x03b́cާ一"
+    assert pty_screen._draw_pieces(text, text, wcwidth) == ["a", "\x03", "b́c", "ާ", "一"]
+    assert pty_screen._draw_pieces("\x03", "\x03", wcwidth) == ["\x03"]
+    # The test is made on the translated text; the pieces are cut from the original.
+    assert pty_screen._draw_pieces("ab", "a\x03", wcwidth) == ["a", "b"]
+
+
+def test_render_is_chunk_invariant_on_random_streams():
+    # A seeded differential over the byte classes that reach `draw` and the parser. A feed
+    # that returns a fault is excluded: pyte drops the rest of that read, which is the one
+    # documented chunk dependence left (#1357). So is the half-overwritten wide character
+    # whose `display` read raises in pyte, which the fuzz harness also skips.
+    import random
+
+    alphabet = [
+        b"a", b"Z", b" ", b"\x03", b"\x1b", b"[", b"]", b"8", b";", b"1", b"2", b"H", b"m",
+        b"\x07", b"\r", b"\n", b"\x08", b"\t", b"\x18", b"\x0e", b"%", b"@", b"G", b"(",
+        b"\xe2", b"\x82", b"\xff", "́".encode(), "ާ".encode(), "‍".encode(),
+        "\x93".encode(), "\x9b".encode(), "\x9d".encode(), "一".encode(),
+    ]  # fmt: skip
+    rng = random.Random(1355)  # noqa: S311 — a reproducible test stream, not crypto
+
+    def render(chunks: list[bytes]) -> tuple | None:
+        scr = PtyScreen(cols=7, rows=3)
+        if any(scr.feed(chunk) is not None for chunk in chunks):
+            return None
+        try:
+            return tuple(scr._screen.display), scr._screen.cursor.x, scr._screen.cursor.y
+        except IndexError:
+            return None
+
+    compared = 0
+    for _ in range(3000):
+        data = b"".join(rng.choice(alphabet) for _ in range(rng.randint(2, 30)))
+        cuts = sorted(rng.sample(range(1, len(data)), min(rng.randint(1, 5), len(data) - 1)))
+        offsets = [0, *cuts, len(data)]
+        chunks = [data[a:b] for a, b in zip(offsets, offsets[1:], strict=False)]
+        whole, split = render([data]), render(chunks)
+        if whole is None or split is None:
+            continue
+        compared += 1
+        assert whole == split, chunks
+    assert compared > 2000  # the exclusions above must not hollow the check out
+
+
 def test_default_geometry_is_120x40():
     frame = PtyScreen().frame()
     assert frame["cols"] == pty_screen.SCREEN_COLS == 120

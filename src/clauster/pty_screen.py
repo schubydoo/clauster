@@ -29,11 +29,13 @@ import cycle.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
 import sys
 import threading
+import unicodedata
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -460,6 +462,75 @@ def _import_pyte() -> Any:
 _PYTE_INPUT_FAULTS: tuple[type[Exception], ...] = (TypeError, UnboundLocalError)
 
 
+def _draw_pieces(data: str, shown: str, wcwidth: Any) -> list[str]:
+    r"""Split a run of text so pyte's ``Screen.draw`` never discards part of it (#1355).
+
+    ``Screen.draw`` walks its argument one character at a time and stops at the first
+    character it cannot place: a C0 or C1 control that the parser passes through as text
+    (``\x03``, ``U+0093``), or a zero-width character that is not a combining mark
+    (``U+07A7``, ``U+200D``). The rest of the argument is thrown away. The argument is the
+    run of text in ONE read, so what was thrown away depended on where the read ended:
+    ``b"see \x03" + url`` in one read lost the URL, and the same bytes in two reads kept it.
+
+    Each such character goes to ``draw`` alone, and the text between them goes as one run.
+    The only state ``draw`` carries from one character to the next is the cursor, so this
+    renders exactly what pyte renders when the bytes arrive one per read, which is the same
+    at every chunking. The lone call still runs ``draw``'s end-of-line wrap for that
+    character, as a one-byte read would.
+
+    ``shown`` is ``data`` after the screen's charset translation, which is one character
+    for one character, so an index into ``shown`` is an index into ``data``. The test is
+    made on ``shown`` because that is what ``draw`` measures. ``wcwidth`` is pyte's own.
+    """
+    if shown.isascii() and shown.isprintable():  # printable ASCII is always width 1
+        return [data]
+    pieces: list[str] = []
+    start = 0
+    for index, char in enumerate(shown):
+        width = wcwidth(char)
+        if width in (1, 2) or (width == 0 and unicodedata.combining(char)):
+            continue
+        if start < index:
+            pieces.append(data[start:index])
+        pieces.append(data[index])
+        start = index + 1
+    if start < len(data):
+        pieces.append(data[start:])
+    return pieces
+
+
+@functools.cache
+def _pyte_classes(pyte: Any) -> tuple[Any, Any]:
+    """Return the ``Screen`` and ``ByteStream`` subclasses :class:`PtyScreen` renders with.
+
+    Built on first use, because ``pyte`` is an optional import. Both overrides exist so the
+    same bytes render the same screen however the reads split them (#1355).
+    """
+
+    class _Screen(pyte.Screen):
+        """A ``pyte.Screen`` whose ``draw`` keeps the text after a character it skips."""
+
+        def draw(self, data: str) -> None:
+            """Draw ``data`` in the pieces :func:`_draw_pieces` splits it into."""
+            table = self.g1_charset if self.charset else self.g0_charset
+            for piece in _draw_pieces(data, data.translate(table), pyte.screens.wcwidth):
+                super().draw(piece)
+
+    class _ByteStream(pyte.ByteStream):
+        """A ``pyte.ByteStream`` that stays in UTF-8.
+
+        ``ESC % @`` switches a stock stream to Latin-1 and ``ESC % G`` switches it back.
+        The stream decodes a whole read before it parses it, so the switch took effect at
+        the next read, and the bytes after it decoded one way or the other depending on
+        where that read ended. A ``claude`` TUI writes UTF-8 only, so the switch is ignored.
+        """
+
+        def select_other_charset(self, code: str) -> None:
+            """Ignore a charset switch; the stream always decodes UTF-8."""
+
+    return _Screen, _ByteStream
+
+
 class PtyScreen:
     """A pyte-backed terminal emulator that renders raw pty bytes into redacted cells.
 
@@ -490,11 +561,11 @@ class PtyScreen:
         screen leaves it off (default): it never reads :meth:`find_authorize_url`, so capturing
         would be dead weight that also accumulates every TUI hyperlink for the bridge lifetime.
         """
-        pyte = _import_pyte()
+        screen_class, stream_class = _pyte_classes(_import_pyte())
         self.cols = cols
         self.rows = rows
-        self._screen = pyte.Screen(cols, rows)
-        self._stream = pyte.ByteStream(self._screen)
+        self._screen = screen_class(cols, rows)
+        self._stream = stream_class(self._screen)
         # Serializes feed (mutate) against every reader below — pyte is not reentrant and
         # this screen is fed and scanned from different threads. No reader calls feed or
         # another reader, so a plain (non-reentrant) Lock cannot self-deadlock.
@@ -533,8 +604,10 @@ class PtyScreen:
           drop the prefix of a token that is part-drawn, and the rest of the token would then
           render with no prefix to match. A kept screen leaves the prefix in place.
         * The rest of THIS chunk after the bad sequence is dropped, because pyte does not
-          report where in the chunk it stopped. The next chunk feeds normally. Buffering
-          across chunk boundaries is a separate issue (#1355).
+          report where in the chunk it stopped. The next chunk feeds normally. This is the
+          one place the rendered screen still depends on where a read ended: without a
+          fault, the same bytes render the same screen at any chunking (#1355, see
+          :func:`_pyte_classes`).
 
         Only the error types in :data:`_PYTE_INPUT_FAULTS` are absorbed, because only those
         are measured to leave the parser reset and the screen unchanged. Any other type still
