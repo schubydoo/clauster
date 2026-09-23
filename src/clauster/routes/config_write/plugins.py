@@ -64,14 +64,18 @@ async def api_config_write_plugins_enabled(
 ) -> dict:
     """Read the plugin enable/disable map straight from the settings file, no CLI spawn."""
     # Mirrors the MCP surface's "file read for display" doctrine; no secret ever
-    # lives here.
+    # lives here. A corrupt/non-object/non-UTF-8 settings file raises
+    # InvalidCandidateError; map it to a clean 422 like every sibling read, never a 500.
     config_write.require_capability(config, scope)  # type: ignore[arg-type]
     if scope not in ("project", "user", "local"):
         raise HTTPException(status_code=422, detail="scope must be 'project', 'user', or 'local'")
     if scope == "user":
-        enabled = await asyncio.to_thread(
-            config_write_plugins.read_user_enabled_plugins, _base.user_settings_json(runner)
-        )
+        try:
+            enabled = await asyncio.to_thread(
+                config_write_plugins.read_user_enabled_plugins, _base.user_settings_json(runner)
+            )
+        except config_write.ConfigWriteError as exc:
+            raise _base.map_config_write_error(exc) from exc
         return {"scope": "user", "enabled": enabled}
     project_dir = _base.resolve_cw_project(config, project)
     read_fn = (
@@ -79,7 +83,10 @@ async def api_config_write_plugins_enabled(
         if scope == "local"
         else config_write_plugins.read_project_enabled_plugins
     )
-    enabled = await asyncio.to_thread(read_fn, project_dir)
+    try:
+        enabled = await asyncio.to_thread(read_fn, project_dir)
+    except config_write.ConfigWriteError as exc:
+        raise _base.map_config_write_error(exc) from exc
     return {"scope": scope, "project": project, "enabled": enabled}
 
 

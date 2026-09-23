@@ -606,6 +606,31 @@ def test_route_plugins_enabled_404_when_disabled(write_config, tmp_path) -> None
         assert c.get("/api/config-write/plugins/enabled").status_code == 404
 
 
+def _corrupt_settings_file(scope: str, projects_root: Path) -> None:
+    """Write a malformed settings file at the path ``scope``'s direct read consults."""
+    if scope == "user":
+        # The isolated HOME, resolved exactly as SessionRunner resolves ~/.claude.json.
+        path = Path("~/.claude/settings.json").expanduser()
+    elif scope == "local":
+        path = projects_root / "alpha" / ".claude" / "settings.local.json"
+    else:
+        path = projects_root / "alpha" / ".claude" / "settings.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json", encoding="utf-8")
+
+
+@pytest.mark.parametrize("scope", ["project", "local", "user"])
+def test_route_plugins_enabled_corrupt_settings_is_422(
+    write_config, tmp_path, projects_root, scope: str
+) -> None:
+    # Issue 1528 sweep: a hand-corrupted settings file makes the direct read raise
+    # InvalidCandidateError; the route must map it to a clean 422, never a 500.
+    _corrupt_settings_file(scope, projects_root)
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.get(f"/api/config-write/plugins/enabled?scope={scope}&project=alpha")
+        assert resp.status_code == 422
+
+
 # --- GET /api/config-write/plugins/{plugin_id} (details, CLI) ----------------------
 
 
@@ -1084,6 +1109,18 @@ def test_route_marketplaces_declared_user_scope_empty_by_default(write_config, t
 def test_route_marketplaces_declared_404_when_disabled(write_config, tmp_path) -> None:
     with _client(write_config, tmp_path, "") as c:
         assert c.get("/api/config-write/marketplaces/declared").status_code == 404
+
+
+@pytest.mark.parametrize("scope", ["project", "local", "user"])
+def test_route_marketplaces_declared_corrupt_settings_is_422(
+    write_config, tmp_path, projects_root, scope: str
+) -> None:
+    # Issue 1528 sweep: same guard as /plugins/enabled -- a corrupt settings file is a
+    # clean 422 from the declared-marketplaces read, never an unhandled 500.
+    _corrupt_settings_file(scope, projects_root)
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.get(f"/api/config-write/marketplaces/declared?scope={scope}&project=alpha")
+        assert resp.status_code == 422
 
 
 # --- POST /api/config-write/marketplaces/action -------------------------------------

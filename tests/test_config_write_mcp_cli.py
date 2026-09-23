@@ -1586,6 +1586,38 @@ def test_route_approvals_read_missing_project_is_422(
         assert c.get("/api/config-write/mcp/approvals?project=").status_code == 422
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [b"{not json", b"\xff\xfe not utf-8", b"[1, 2]"],
+    ids=["malformed-json", "non-utf8", "non-object"],
+)
+def test_route_approvals_read_corrupt_claude_json_is_422(
+    write_config, tmp_path, projects_root, raw: bytes
+) -> None:
+    # Issue 1528: a hand-corrupted ~/.claude.json (the approvals store) makes
+    # read_project_approvals raise InvalidCandidateError. The GET route must map it to a
+    # clean 422 like every sibling config-write read, never let it escape as a 500.
+    (Path(os.environ["HOME"]) / ".claude.json").write_bytes(raw)
+    with _client(write_config, tmp_path, _PROJECT_ONLY) as c:
+        resp = c.get("/api/config-write/mcp/approvals?project=alpha")
+        assert resp.status_code == 422
+
+
+def test_route_approvals_read_corrupt_settings_file_still_200(
+    write_config, tmp_path, projects_root
+) -> None:
+    # The boundary of the 1528 guard: a malformed SETTINGS file is deliberately ignored by
+    # the display read (it contributes no approvals), so the route stays a 200 rather than
+    # failing the whole panel. Only the ~/.claude.json store is fatal (422, above).
+    settings = projects_root / "alpha" / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text("{not json", encoding="utf-8")
+    with _client(write_config, tmp_path, _PROJECT_ONLY) as c:
+        resp = c.get("/api/config-write/mcp/approvals?project=alpha")
+        assert resp.status_code == 200
+        assert resp.json() == {"project": "alpha", "enabled": [], "disabled": [], "locked": []}
+
+
 # --- reset-project-choices route ----------------------------------------------------
 
 
