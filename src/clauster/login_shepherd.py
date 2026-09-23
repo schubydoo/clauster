@@ -324,14 +324,31 @@ class _ConPtyPopen:
             return _CONPTY_FAULT_EXIT
 
     def terminate(self) -> None:
-        """Signal the process to terminate (graceful)."""
-        with self._lock:
-            self._proc.terminate()
+        """Signal the process to terminate (graceful); a pywinpty fault is recorded, not raised."""
+        self._stop(force=False)
 
     def kill(self) -> None:
-        """Force-kill the process (pywinpty's `terminate(force=True)`)."""
+        """Force-kill the process (pywinpty's `terminate(force=True)`); a fault is recorded."""
+        self._stop(force=True)
+
+    def _stop(self, *, force: bool) -> None:
+        """Call pywinpty's `terminate(force=force)`, turning a raise into a recorded fault.
+
+        `_teardown`'s stop block calls `terminate()`/`kill()` on a child `poll()` still reports
+        alive. A pywinpty raise there (its `WinptyError` is NOT an `OSError`) used to escape the
+        block and skip the reader join and `pty_process.close()` — pywinpty's own backstop stop
+        — so the handle, and possibly the child, outlived the flow, and the /status or /submit
+        route answered 500 (#1466). So the raise is logged at debug and its cause recorded on
+        `self.fault` (first cause wins), and teardown carries on to the join and the close. The
+        wait that follows still bounds the stop and escalates to `kill()` on a timeout.
+        """
         with self._lock:
-            self._proc.terminate(force=True)
+            try:
+                self._proc.terminate(force=force)
+            except Exception as exc:  # noqa: BLE001 — any pywinpty fault → recorded, never raised
+                verb = "kill" if force else "terminate"
+                _log.debug("login_shepherd: conpty %s failed: %s", verb, exc)
+                self.fault = self.fault or f"conpty {verb} failed: {exc}"
 
 
 @dataclass
@@ -1029,11 +1046,11 @@ class LoginShepherd:
         stale ConPTY can raise a pywinpty-specific error, not just `OSError`.
         """
         # The flow clear runs in `finally` (below) so it happens even if a step here raises:
-        # a pywinpty `terminate()`/`kill()` on a stale ConPTY handle raises its own
-        # `WinptyError` (the adapter's `poll`/`wait` turn a handle fault into the synthetic exit
-        # instead, #1466), and without this an escape skipped the clear and stranded the login
-        # `active` until restart (#1422). The fault still propagates once the flow is no longer
-        # stuck active, so a teardown fault is never silent (fail closed, visibly).
+        # a pywinpty call on a stale ConPTY handle raises its own `WinptyError`, and without this
+        # an escape skipped the clear and stranded the login `active` until restart (#1422). The
+        # ConPTY adapter now records those faults on `fault` instead of raising (#1466), so the
+        # join and the close below still run. Any other fault still propagates once the flow is
+        # no longer stuck active, so a teardown fault is never silent (fail closed, visibly).
         try:
             # Stop the child FIRST — see the docstring: this is what unblocks a PTY reader.
             if flow.proc.poll() is None:

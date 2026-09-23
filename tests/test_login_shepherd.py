@@ -2198,6 +2198,181 @@ def test_conpty_wait_fault_ends_the_login_flow_instead_of_stranding_it(
     assert faulting.terminated == [False]  # `_teardown`'s one best-effort stop on a fault
 
 
+class _StopRaisesConPty:
+    """pywinpty stand-in whose `terminate(force=...)` always raises a WinptyError-like fault.
+
+    `isalive()` follows `alive_script` (a bool, or an Exception instance to raise), then
+    reports `alive_after` once the script is used up. `close()` is recorded so a test can
+    prove `_teardown` still reached it after the stop faulted (#1466).
+    """
+
+    def __init__(self, alive_script=(), alive_after=True):
+        self._script = list(alive_script)
+        self._alive_after = alive_after
+        self.stop_attempts: list[bool] = []
+        self.writes: list[str] = []
+        self.closed = False
+
+    def isalive(self):
+        if self._script:
+            step = self._script.pop(0)
+            if isinstance(step, Exception):
+                raise step
+            return step
+        return self._alive_after
+
+    def wait(self):
+        return 0
+
+    def terminate(self, force=False):
+        self.stop_attempts.append(force)
+        raise RuntimeError(f"WinptyError: terminate(force={force}) on a stale ConPTY handle")
+
+    def read(self, size=1024):
+        return ""
+
+    def write(self, s):
+        self.writes.append(s)
+        return len(s)
+
+    def close(self):
+        self.closed = True
+
+
+class _JoinRecorder:
+    """Reader-thread stand-in that records `join()` calls."""
+
+    def __init__(self):
+        self.joins: list[float | None] = []
+
+    def join(self, timeout=None):
+        self.joins.append(timeout)
+
+
+class _SteppingClock:
+    """`time` stand-in for `login_shepherd`: each `monotonic()` call advances 1s, `sleep` is free.
+
+    Lets `_teardown`'s two `wait(timeout=5)` calls time out at once instead of in 10s.
+    """
+
+    def __init__(self):
+        self._now = 1000.0
+
+    def monotonic(self):
+        self._now += 1.0
+        return self._now
+
+    def sleep(self, _seconds):
+        return None
+
+
+def _conpty_flow(fake) -> ls._Flow:
+    return ls._Flow(mode="setup-token", proc=ls._ConPtyPopen(fake), pty_process=fake)
+
+
+def test_conpty_popen_terminate_and_kill_record_a_fault_instead_of_raising() -> None:
+    # Unguarded, pywinpty's raise escaped `terminate()`/`kill()` (#1466). Now each records the
+    # first cause on `fault` and returns.
+    fake = _StopRaisesConPty()
+    popen = ls._ConPtyPopen(fake)
+    popen.terminate()
+    assert popen.fault is not None and "conpty terminate failed" in popen.fault
+    popen.kill()
+    assert fake.stop_attempts == [False, True]
+    assert "conpty terminate failed" in popen.fault  # the first cause wins
+
+    killed_first = ls._ConPtyPopen(_StopRaisesConPty())
+    killed_first.kill()
+    assert killed_first.fault is not None and "conpty kill failed" in killed_first.fault
+
+
+def test_teardown_joins_and_closes_when_conpty_terminate_and_kill_both_raise(
+    shepherd, monkeypatch
+) -> None:
+    # A still-alive child whose handle refuses both stops: `terminate()` raises, the bounded
+    # wait times out, `kill()` raises too, and the second wait times out. Unguarded, the first
+    # raise skipped the reader join and `pty_process.close()` (pywinpty's backstop stop), so the
+    # handle and the child outlived the flow (#1466). Both must still run, and nothing raises.
+    monkeypatch.setattr(ls, "time", _SteppingClock())
+    fake = _StopRaisesConPty(alive_after=True)
+    flow = _conpty_flow(fake)
+    reader = _JoinRecorder()
+    flow.reader_thread = reader  # type: ignore[assignment]
+    shepherd._flow = flow  # noqa: SLF001 - internals test
+
+    shepherd._teardown(flow)  # noqa: SLF001 - must not raise
+
+    assert fake.stop_attempts == [False, True]  # terminate, then the kill escalation
+    assert reader.joins == [5]  # the reader join still ran
+    assert fake.closed is True  # and so did pywinpty's close (the backstop stop)
+    assert flow.proc.fault is not None and "conpty terminate failed" in flow.proc.fault
+    assert not shepherd.is_active()
+
+
+def test_teardown_joins_and_closes_when_conpty_terminate_raises_but_the_child_dies(
+    shepherd,
+) -> None:
+    # `terminate()` raises, but the child is gone by the bounded wait: no kill escalation, and
+    # the join and the close still run.
+    fake = _StopRaisesConPty(alive_script=[True], alive_after=False)
+    flow = _conpty_flow(fake)
+    reader = _JoinRecorder()
+    flow.reader_thread = reader  # type: ignore[assignment]
+    shepherd._flow = flow  # noqa: SLF001 - internals test
+
+    shepherd._teardown(flow)  # noqa: SLF001 - must not raise
+
+    assert fake.stop_attempts == [False]
+    assert reader.joins == [5]
+    assert fake.closed is True
+    assert not shepherd.is_active()
+
+
+def _app_with_conpty_flow(tmp_path: Path, fake):
+    (tmp_path / "projects").mkdir(exist_ok=True)
+    app = create_app(_cfg(login_shepherd_enabled=True, auth_enabled=False, tmp_path=tmp_path))
+    app.state.login_shepherd._flow = _conpty_flow(fake)  # noqa: SLF001 - internals test
+    return app
+
+
+def test_status_route_answers_when_the_conpty_terminate_raises(tmp_path: Path) -> None:
+    # The route shape of the terminate fault: a transient `isalive()` fault makes /status
+    # finalize (synthetic exit), then `_teardown`'s own poll sees the child alive and its
+    # `terminate()` raises. Unguarded, that surfaced as a 500 (#1466). It must answer 200 with
+    # the terminal, named result, and the flow must be cleared and its handle closed.
+    fake = _StopRaisesConPty(
+        alive_script=[RuntimeError("WinptyError: transient"), True], alive_after=False
+    )
+    app = _app_with_conpty_flow(tmp_path, fake)
+    with TestClient(app, raise_server_exceptions=False) as c:
+        resp = c.post("/api/login-shepherd/status")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is False and "pending" not in body
+        assert "conpty liveness check failed" in body["message"]
+        assert c.post("/api/login-shepherd/status").status_code == 409  # flow cleared
+    assert fake.stop_attempts == [False]
+    assert fake.closed is True
+
+
+def test_code_route_answers_when_the_conpty_terminate_raises(tmp_path: Path) -> None:
+    # Same fault through /code: `_wait_for` and `submit_code` each see the transient fault,
+    # then `_teardown`'s poll sees the child alive and `terminate()` raises. 200, not 500.
+    fault = RuntimeError("WinptyError: transient")
+    fake = _StopRaisesConPty(alive_script=[fault, fault, True], alive_after=False)
+    app = _app_with_conpty_flow(tmp_path, fake)
+    with TestClient(app, raise_server_exceptions=False) as c:
+        resp = c.post("/api/login-shepherd/code", json={"code": "the-code"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is False and "pending" not in body
+        assert "conpty liveness check failed" in body["message"]
+        assert c.post("/api/login-shepherd/status").status_code == 409  # flow cleared
+    assert fake.writes == ["the-code\n"]
+    assert fake.stop_attempts == [False]
+    assert fake.closed is True
+
+
 # --- _spawn_conpty + full start/submit flow -----------------------------------------
 
 
