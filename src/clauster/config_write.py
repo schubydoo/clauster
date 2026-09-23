@@ -62,7 +62,7 @@ from typing import Any, Literal
 import yaml
 from fastapi import HTTPException
 
-from .claude_json import locked_replace_json_file, update_claude_json
+from .claude_json import ClaudeJsonUnparseable, locked_replace_json_file, update_claude_json
 from .config import ClausterConfig
 from .discovery import is_valid_project_name
 
@@ -702,6 +702,20 @@ def merge_redacted(incoming: Any, stored: Any) -> Any:
     return incoming
 
 
+def update_claude_json_or_invalid(claude_json: Path, apply: Callable[[dict], object]) -> None:
+    """Run :func:`~clauster.claude_json.update_claude_json`, mapping an unparseable file to 422.
+
+    The config-write entry to the shared ``~/.claude.json`` transaction. A file that
+    exists but is not a JSON object is left unchanged and surfaces as
+    :class:`InvalidCandidateError` (→ 422), the same error :func:`read_nested_subtree`
+    raises for it, instead of escaping the routes' ``ConfigWriteError`` guard as a 500.
+    """
+    try:
+        update_claude_json(claude_json, apply)
+    except ClaudeJsonUnparseable as exc:
+        raise InvalidCandidateError(str(exc)) from exc
+
+
 def write_subtree(claude_json: Path, subtree_key: str, mutate: Callable[[Any], Any]) -> None:
     """Locked read → set **only** ``subtree_key`` → atomic replace of ``claude_json``.
 
@@ -711,14 +725,16 @@ def write_subtree(claude_json: Path, subtree_key: str, mutate: Callable[[Any], A
     whole-file browser blob over the top, which would wipe the operator's trust grants
     and tokens. Runs through the shared
     :func:`~clauster.claude_json.update_claude_json` transaction (``flock`` + one-time
-    ``.bak`` + mode-preserving atomic replace) — the same machinery ``trust`` uses.
+    ``.bak`` + mode-preserving atomic replace) — the same machinery ``trust`` uses. An
+    existing ``claude_json`` that is not a JSON object raises
+    :class:`InvalidCandidateError` (→ 422) and is left unchanged.
     """
 
     def _apply(data: dict) -> None:
         """Replace the top-level subtree with whatever ``mutate`` returns for it."""
         data[subtree_key] = mutate(data.get(subtree_key))
 
-    update_claude_json(claude_json, _apply)
+    update_claude_json_or_invalid(claude_json, _apply)
 
 
 #: The ``OSError`` subclasses that mean "this config path is not a readable file": a
@@ -787,7 +803,7 @@ def write_nested_subtree(
     top-level key — is preserved verbatim by the atomic replace. Runs through the same
     :func:`~clauster.claude_json.update_claude_json` transaction (``flock`` + one-time
     ``.bak`` + mode-preserving atomic replace) the flat :func:`write_subtree` and
-    :mod:`clauster.trust` use.
+    :mod:`clauster.trust` use, with the same 422 for an unparseable file.
     """
 
     def _apply(data: dict) -> None:
@@ -802,7 +818,7 @@ def write_nested_subtree(
         inner[subtree_key] = mutate(inner.get(subtree_key))
         outer[inner_key] = inner
 
-    update_claude_json(claude_json, _apply)
+    update_claude_json_or_invalid(claude_json, _apply)
 
 
 def capability_status(config: ClausterConfig) -> dict[str, bool]:

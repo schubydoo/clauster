@@ -1355,7 +1355,8 @@ class SessionRunner:
         ``hasTrustDialogAccepted`` key to each discovered project that is not already
         trusted — the operator's "trust all discovered projects" action — then re-reads
         so the returned list reflects the new state. Idempotent: an already-trusted
-        project is skipped. Any ``OSError`` propagates (the route maps it to 500) rather
+        project is skipped. Any ``OSError`` (the route maps it to 500) or
+        :class:`~clauster.claude_json.ClaudeJsonUnparseable` (→ 409) propagates rather
         than silently trusting a partial set.
         """
         untrusted = [

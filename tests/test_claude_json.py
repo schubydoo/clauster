@@ -65,13 +65,86 @@ def test_update_claude_json_takes_backup_once(tmp_path: Path) -> None:
     assert json.loads(backup.read_text(encoding="utf-8")) == {"a": 1}  # first snapshot only
 
 
-def test_update_claude_json_non_dict_root_coerced(tmp_path: Path) -> None:
+# Each is a ~/.claude.json that exists but is not a JSON object. The sentinel stands in
+# for a token: it must never reach the error message.
+_SECRET = "SENTINEL-oauth-token-0123"
+UNPARSEABLE = [
+    pytest.param(b'{"oauthAccount": {"token": "' + _SECRET.encode() + b'"', id="truncated"),
+    pytest.param(b'{"projects": {,}, "token": "' + _SECRET.encode() + b'"}', id="malformed"),
+    pytest.param(b"", id="empty"),
+    pytest.param(b'{"token": "' + _SECRET.encode() + b'\xff\xfe"}', id="non-utf8"),
+    # A >4300-digit int literal raises a bare ValueError, not a JSONDecodeError.
+    pytest.param(b'{"n": ' + b"1" * 5000 + b"}", id="oversized-int"),
+    # Deep nesting raises RecursionError, which is not a ValueError at all.
+    pytest.param(b"[" * 100_000, id="deeply-nested"),
+    pytest.param(b'["not", "a", "dict"]', id="array-root"),
+    pytest.param(b'"' + _SECRET.encode() + b'"', id="string-root"),
+    pytest.param(b"5", id="number-root"),
+    pytest.param(b"null", id="null-root"),
+]
+
+
+@pytest.mark.parametrize("content", UNPARSEABLE)
+def test_update_claude_json_refuses_an_unparseable_file(tmp_path: Path, content: bytes) -> None:
+    # #1600: this used to parse as {} and replace the file with only the touched keys,
+    # with no backup. Now it raises before mutate and before any write.
     f = tmp_path / "claude.json"
-    f.write_text(json.dumps(["not", "a", "dict"]), encoding="utf-8")
+    f.write_bytes(content)
+    calls: list[dict] = []
 
-    cj.update_claude_json(f, lambda data: data.__setitem__("k", 1))
+    with pytest.raises(cj.ClaudeJsonUnparseable) as info:
+        cj.update_claude_json(f, lambda data: calls.append(data))
 
-    assert json.loads(f.read_text(encoding="utf-8")) == {"k": 1}
+    assert f.read_bytes() == content  # byte-identical
+    assert calls == []  # mutate never ran
+    assert not f.with_suffix(f.suffix + ".bak").exists()  # nothing written beside it
+    assert list(tmp_path.glob("claude.json.*.tmp")) == []
+    message = str(info.value)
+    assert str(f) in message and "Clauster did not change it" in message
+    assert _SECRET not in message  # the reason never quotes the file's content
+    assert isinstance(info.value, ValueError)  # callers catching ValueError still do
+
+
+def test_update_claude_json_unparseable_leaves_an_existing_backup_alone(tmp_path: Path) -> None:
+    f = tmp_path / "claude.json"
+    f.write_bytes(b"{truncated")
+    backup = f.with_suffix(f.suffix + ".bak")
+    backup.write_bytes(b'{"older": true}')
+
+    with pytest.raises(cj.ClaudeJsonUnparseable):
+        cj.update_claude_json(f, lambda data: data.__setitem__("k", 1))
+
+    assert backup.read_bytes() == b'{"older": true}'
+
+
+@pytest.mark.parametrize(
+    ("content", "reason"),
+    [
+        (b'{"a": 1,\n  "b": }', "invalid JSON at line 2 column 8"),
+        (b"\xff", "not UTF-8 text"),
+        (b'{"n": ' + b"1" * 5000 + b"}", "a value that cannot be parsed"),
+        (b"[" * 100_000, "nested too deeply"),
+        (b"[]", "the top level is not a JSON object"),
+    ],
+    # Explicit ids: pytest puts the test id in PYTEST_CURRENT_TEST, and a 100,000-byte
+    # payload id exceeds the 32,767-character Windows limit for one environment variable.
+    ids=["malformed", "non-utf8", "oversized-int", "deeply-nested", "array-root"],
+)
+def test_unparseable_reason_names_the_failure(tmp_path: Path, content: bytes, reason: str) -> None:
+    f = tmp_path / "claude.json"
+    f.write_bytes(content)
+    with pytest.raises(cj.ClaudeJsonUnparseable, match=reason):
+        cj.update_claude_json(f, lambda data: None)
+
+
+def test_update_claude_json_valid_object_still_writes(tmp_path: Path) -> None:
+    # Positive control for the refusal above: the same call on a parseable object writes.
+    f = tmp_path / "claude.json"
+    f.write_bytes(b'{"keep": 1}')
+
+    assert cj.update_claude_json(f, lambda data: data.__setitem__("k", 1)) is True
+
+    assert json.loads(f.read_text(encoding="utf-8")) == {"keep": 1, "k": 1}
 
 
 def test_update_claude_json_unreadable_propagates_not_clobbered(

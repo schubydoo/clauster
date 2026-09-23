@@ -42,7 +42,9 @@ def trust_directory(path: Path, claude_json: Path = CLAUDE_JSON) -> None:
     Mutates exactly one key under the shared locked, atomic, one-time-``.bak``
     transaction (:func:`~clauster.claude_json.update_claude_json`) so a concurrent CLI
     writer never sees a half-written file and clauster's own overlapping writers can't
-    lose each other's updates. Idempotent.
+    lose each other's updates. Idempotent. A ``claude_json`` that exists but is not a
+    JSON object raises :class:`~clauster.claude_json.ClaudeJsonUnparseable` and is left
+    unchanged.
     """
     resolved = str(path.resolve())
 
@@ -71,11 +73,11 @@ _REMOTE_CONTROL_FLAGS = ("hasUsedRemoteControl", "remoteDialogSeen")
 def ensure_remote_control_enabled(claude_json: Path = CLAUDE_JSON) -> bool:
     """Atomically set the remote-control acknowledgment flags in ``claude_json``.
 
-    Returns True if a write landed — including when a missing or corrupt-JSON file is
-    (re)created from empty state — and False only when both flags were already set. An
-    existing file that genuinely cannot be read (e.g. ``PermissionError``) propagates its
-    ``OSError`` rather than returning False. Runs through the same shared locked, atomic
-    temp+replace +
+    Returns True if a write landed — including when a missing file is created from empty
+    state — and False only when both flags were already set. An existing file that
+    cannot be read (e.g. ``PermissionError``) propagates its ``OSError``, and one that is
+    not a JSON object raises :class:`~clauster.claude_json.ClaudeJsonUnparseable`; either
+    way nothing is written. Runs through the same shared locked, atomic temp+replace +
     one-time ``.bak`` transaction as :func:`trust_directory`, since the ``claude`` CLI
     writes this file too. Idempotent.
     """

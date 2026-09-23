@@ -101,15 +101,28 @@ def test_trust_missing_file_is_created(tmp_path: Path):
     assert trust.is_trusted(target, cj) is True
 
 
-def test_trust_directory_non_dict_root_coerced(tmp_path: Path):
-    # A valid-JSON but non-object ~/.claude.json must not crash; it's coerced to
-    # {} and the trust write proceeds.
+_NOT_AN_OBJECT = [
+    pytest.param(b'{"projects": {"/keep": {"hasTrustDialogAccepted": true}}, "oauth', id="trunc"),
+    pytest.param(b'["not", "a", "dict"]', id="array-root"),
+    pytest.param(b"\xff\xfe{}", id="non-utf8"),
+]
+
+
+@pytest.mark.parametrize("content", _NOT_AN_OBJECT)
+def test_trust_directory_refuses_an_unparseable_file(tmp_path: Path, content: bytes):
+    # #1600: Press Trust on a truncated ~/.claude.json used to replace it with one
+    # `projects` entry, dropping every other grant and the account. Now it raises and the
+    # file is byte-identical.
     cj = tmp_path / "claude.json"
-    cj.write_text(json.dumps(["not", "a", "dict"]), encoding="utf-8")
+    cj.write_bytes(content)
     target = tmp_path / "proj"
     target.mkdir()
-    trust.trust_directory(target, cj)
-    assert trust.is_trusted(target, cj) is True
+
+    with pytest.raises(claude_json.ClaudeJsonUnparseable):
+        trust.trust_directory(target, cj)
+
+    assert cj.read_bytes() == content
+    assert trust.is_trusted(target, cj) is False
 
 
 def test_ensure_remote_control_enabled_sets_flags_and_preserves(tmp_path: Path):
@@ -143,11 +156,16 @@ def test_ensure_remote_control_enabled_missing_file_created(tmp_path: Path):
     assert data["hasUsedRemoteControl"] is True and data["remoteDialogSeen"] is True
 
 
-def test_ensure_remote_control_enabled_non_dict_root_coerced(tmp_path: Path):
+@pytest.mark.parametrize("content", _NOT_AN_OBJECT)
+def test_ensure_remote_control_enabled_refuses_an_unparseable_file(tmp_path: Path, content: bytes):
+    # The spawn path reaches this writer too (auto_enable_remote_control defaults on).
     cj = tmp_path / "claude.json"
-    cj.write_text(json.dumps(["not", "a", "dict"]), encoding="utf-8")
-    assert trust.ensure_remote_control_enabled(cj) is True
-    assert json.loads(cj.read_text())["hasUsedRemoteControl"] is True
+    cj.write_bytes(content)
+
+    with pytest.raises(claude_json.ClaudeJsonUnparseable):
+        trust.ensure_remote_control_enabled(cj)
+
+    assert cj.read_bytes() == content
 
 
 def test_trust_backup_failure_is_logged_not_silent(tmp_path: Path, caplog, monkeypatch):

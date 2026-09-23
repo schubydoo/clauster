@@ -40,6 +40,7 @@ import time
 from pathlib import Path
 
 from .claude_cli import resolve_binary
+from .claude_json import ClaudeJsonUnparseable
 from .config import INHERIT_PERMISSION_MODE
 from .models import BackgroundJob
 from .procutil import child_env, jiffies_to_epoch, proc_create_time
@@ -337,10 +338,14 @@ def dispatch_background_job(
     if resume is not None and not valid_session_id(resume):
         raise DispatchError(f"invalid resume session id: {resume!r}")
     resolved = resolve_binary(binary)  # absolute path, or ClaudeNotFound
-    if claude_json is None:
-        trust_directory(cwd)
-    else:
-        trust_directory(cwd, claude_json)
+    try:
+        if claude_json is None:
+            trust_directory(cwd)
+        else:
+            trust_directory(cwd, claude_json)
+    except ClaudeJsonUnparseable as exc:
+        # The file was left unchanged (#1600); do not dispatch into an untrusted cwd.
+        raise DispatchError(f"could not trust {cwd}: {exc}") from exc
     argv = build_dispatch_argv(
         resolved,
         rc_name=rc_name,

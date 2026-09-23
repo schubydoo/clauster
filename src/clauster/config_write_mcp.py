@@ -690,7 +690,7 @@ def write_project_approvals(
         inner[DISABLED_KEY] = out_dis
         outer[key] = inner
 
-    cw.update_claude_json(claude_json, _apply)
+    cw.update_claude_json_or_invalid(claude_json, _apply)
 
 
 # ---------------------------------------------------------------------------

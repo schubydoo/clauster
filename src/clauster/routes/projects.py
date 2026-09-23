@@ -33,6 +33,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from .. import ops
 from ..auth import SESSION_USER
+from ..claude_json import ClaudeJsonUnparseable
 from ..claude_md import (
     ClaudeMdConflict,
     ClaudeMdError,
@@ -444,6 +445,11 @@ async def api_trust(name: str, runner: RunnerDep) -> Project:
         return await runner.trust_project(name)
     except UnknownProject as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ClaudeJsonUnparseable as exc:
+        # ~/.claude.json exists but does not parse; it was left unchanged (#1600).
+        raise HTTPException(
+            status_code=409, detail=f"could not update trust state: {exc}"
+        ) from exc
     except OSError as exc:
         # ~/.claude.json exists but couldn't be read/written (e.g. permissions).
         # Surface it instead of silently dropping the operator's other settings.
@@ -462,6 +468,10 @@ async def api_trust_all(runner: RunnerDep) -> list[Project]:
     """
     try:
         return await runner.trust_all_projects()
+    except ClaudeJsonUnparseable as exc:
+        raise HTTPException(
+            status_code=409, detail=f"could not update trust state: {exc}"
+        ) from exc
     except OSError as exc:
         raise HTTPException(
             status_code=500, detail=f"could not update trust state: {exc}"

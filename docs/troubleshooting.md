@@ -360,6 +360,47 @@ still inherits from a trusted ancestor).
 
 **Mechanism:** [Security — workspace trust](security.md#workspace-trust).
 
+### "~/.claude.json exists but is not a valid JSON object"
+
+**What you see:** **Trust**, **Trust all**, **Trust & start**, `clauster start --trust`
+or a background-session dispatch fails with this message:
+
+```text
+could not update trust state: /home/you/.claude.json exists but is not a valid JSON
+object (invalid JSON at line 1 column 58). Clauster did not change it. Repair the file
+or restore it from a backup, then try again.
+```
+
+A config-write save of an MCP server to user or local scope fails with the same text.
+A start without Trust fails with `directory not trusted`, because Clauster reads a file
+it cannot parse as "nothing is trusted".
+
+**Cause:** the `~/.claude.json` of the user that runs Clauster exists but does not
+parse. For example, a crash in the middle of a write can truncate it. The text in
+parentheses names the failure. It gives a line and column for invalid JSON, or says
+`it is not UTF-8 text`, `it is nested too deeply to parse`, or `the top level is not a
+JSON object`. An empty file also fails. The message never quotes the file content.
+
+Clauster does not write a file that it cannot parse. A write would keep only the keys
+that Clauster sets, and remove your other projects, trust grants and account data. The
+file stays byte-identical.
+
+**Fix:**
+
+1. On the Clauster host, run this command as the user that runs Clauster. If the file
+   has a problem, the last line of the output names it. For invalid JSON, that line
+   gives a line and column:
+
+   ```sh
+   python3 -c 'import json, sys; d = json.load(open(sys.argv[1], encoding="utf-8")); sys.exit(None if isinstance(d, dict) else "the top level is not a JSON object")' ~/.claude.json
+   ```
+
+2. Repair the file, or restore it from a copy that you trust. If Clauster wrote the
+   file before, `~/.claude.json.bak` holds its content from before the first Clauster
+   write. That copy can be old, so compare it with the damaged file before you use it.
+3. Run the command from step 1 again. No output means that Clauster can read the file.
+4. Do the action again.
+
 ## Claude itself is the problem
 
 ### "not logged in" / "access token has expired; re-authenticate with `claude`"
