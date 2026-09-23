@@ -53,28 +53,33 @@ class Check:
     detail: str
 
 
-# A comparable version: an optional ``v``, at least MAJOR.MINOR in ASCII digits, then semver's
-# optional ``-pre.release`` and ``+build`` suffixes. At least two segments is what keeps a bare
-# commit SHA out (#1304): an all-digit short SHA like ``1234567`` is otherwise a valid integer.
+# A comparable version: an optional ``v``, dotted ASCII-digit segments, then semver's optional
+# ``-pre.release`` and ``+build`` suffixes. See :func:`_parse_version` for the segment count.
 _VERSION_RE = re.compile(
-    r"v?(?P<core>[0-9]+(?:\.[0-9]+)+)"
+    r"v?(?P<core>[0-9]+(?:\.[0-9]+)*)"
     r"(?:-(?P<pre>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
 )
 
 _PreKey = tuple[int, tuple[tuple[int, int, str], ...]]
+_ParsedVersion = tuple[tuple[int, ...], _PreKey]
 
 
-def _parse_version(v: str) -> tuple[tuple[int, ...], _PreKey] | None:
+def _parse_version(v: str, *, floor: bool) -> _ParsedVersion | None:
     """Return ``(core ints, pre-release sort key)`` for a version token, or ``None``.
 
     ``None`` means the token is not version-shaped — a git SHA, ``claustrum-dev``, an empty
     string — and so cannot be compared at all. The pre-release key follows semver precedence:
     a release sorts above any of its pre-releases, numeric identifiers compare as numbers and
     sort below alphanumeric ones, and a shorter identifier list sorts first.
+
+    ``floor`` says which side the token is. A floor is operator-written config, so a single
+    segment (``2`` meaning 2.0.0) is accepted. A *reported* version must have at least
+    MAJOR.MINOR: an all-digit short SHA like ``1234567`` from ``--version`` is otherwise a
+    valid integer that clears any floor (#1304).
     """
     m = _VERSION_RE.fullmatch(v)
-    if m is None:
+    if m is None or (not floor and "." not in m["core"]):
         return None
     core = tuple(int(p) for p in m["core"].split("."))
     if m["pre"] is None:
@@ -83,23 +88,29 @@ def _parse_version(v: str) -> tuple[tuple[int, ...], _PreKey] | None:
     return core, (0, idents)
 
 
-def _version_ge(have: str, want: str) -> bool:
-    """Return whether version ``have`` is at or above ``want`` (2.1.156 >= 2.1.145).
+def _parsed_ge(have: _ParsedVersion, want: _ParsedVersion) -> bool:
+    """Return whether parsed ``have`` is at or above parsed ``want``.
 
     Cores compare numerically with a missing part read as 0 (``2.1`` == ``2.1.0``), and a
-    pre-release ranks below its release. A token that is not version-shaped on either side
-    answers ``False``: "cannot confirm", never a pass (#1304). It used to scavenge the digits
-    out of every segment, so a bare commit SHA became one enormous integer that cleared any
-    floor. Callers that need to tell "too old" from "unparseable" call :func:`_parse_version`.
+    pre-release ranks below its release.
     """
-    a, b = _parse_version(have), _parse_version(want)
-    if a is None or b is None:
-        return False
-    (a_core, a_pre), (b_core, b_pre) = a, b
+    (a_core, a_pre), (b_core, b_pre) = have, want
     n = max(len(a_core), len(b_core))
     a_core += (0,) * (n - len(a_core))
     b_core += (0,) * (n - len(b_core))
     return (a_core, a_pre) >= (b_core, b_pre)
+
+
+def _version_ge(have: str, want: str) -> bool:
+    """Return whether reported version ``have`` is at or above floor ``want`` (2.1.156 >= 2.1.145).
+
+    A token that is not version-shaped on either side answers ``False``: "cannot confirm",
+    never a pass (#1304). It used to scavenge the digits out of every segment, so a bare commit
+    SHA became one enormous integer that cleared any floor. A caller that must tell "too old"
+    from "unparseable" parses with :func:`_parse_version` and compares with :func:`_parsed_ge`.
+    """
+    a, b = _parse_version(have, floor=False), _parse_version(want, floor=True)
+    return a is not None and b is not None and _parsed_ge(a, b)
 
 
 def run_doctor(
@@ -223,19 +234,26 @@ def run_doctor(
     try:
         version = claude_cli.claude_version(config.claude.binary)
         floor = config.claude.min_version
-        if _parse_version(version) is None or _parse_version(floor) is None:
+        have_v = _parse_version(version, floor=False)
+        floor_v = _parse_version(floor, floor=True)
+        if have_v is None or floor_v is None:
             # Unparseable on either side is "cannot confirm", which for this hard floor is a
             # FAIL — never the "< required" line below (it would claim an ordering) and never
-            # an OK (a bare SHA used to parse into a huge integer and pass, #1304).
-            checks.append(
-                Check(
-                    "claude",
-                    FAIL,
-                    f"cannot compare claude version {version!r} with min_version {floor!r} — "
-                    f"both must be dotted numeric versions such as 2.1.145",
+            # an OK (a bare SHA used to parse into a huge integer and pass, #1304). Name the
+            # side that failed: the fixes differ (reinstall claude vs. edit clauster.yml).
+            bad = []
+            if have_v is None:
+                bad.append(
+                    f"`claude --version` reported {version!r}, which is not a dotted numeric "
+                    f"version — reinstall claude via the installer"
                 )
-            )
-        elif _version_ge(version, floor):
+            if floor_v is None:
+                bad.append(
+                    f"min_version {floor!r} is not a numeric version — set "
+                    f"claude.min_version to a version such as 2.1.145"
+                )
+            checks.append(Check("claude", FAIL, "cannot compare: " + "; ".join(bad)))
+        elif _parsed_ge(have_v, floor_v):
             checks.append(Check("claude", OK, f"{version} (>= {config.claude.min_version})"))
         else:
             checks.append(

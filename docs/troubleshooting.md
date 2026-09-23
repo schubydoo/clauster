@@ -403,12 +403,16 @@ the installer) to reach >= <min_version>``.
 **The fix:** `claude update` (as the same user Clauster runs as), then re-run
 `clauster doctor`.
 
-If the row says `cannot compare claude version ... with min_version ...`
-instead, one of the two values is not a dotted numeric version such as
-`2.1.145`. Doctor fails the row because it cannot confirm the floor. Set
-`claude.min_version` to a version such as `2.1.145`. If `claude --version`
-reports something else, such as a bare commit SHA, reinstall `claude` with the
-installer.
+If the row starts with `cannot compare:` instead, doctor cannot confirm the
+floor, so it fails the row. The message names the value that is not a
+version:
+
+- `min_version '<value>' is not a numeric version`: set
+  `claude.min_version` in `clauster.yml` to a version such as `2.1.145`. A
+  single number such as `2` is also accepted and means `2.0.0`.
+- `` `claude --version` reported '<value>' ``: the installed `claude` printed
+  something that is not a version, for example a bare commit SHA. Reinstall
+  `claude` with the installer.
 
 ## An Interactive Session (pty) bridge is wedged
 

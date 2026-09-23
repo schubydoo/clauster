@@ -163,8 +163,9 @@ class ClaudeConfig(BaseModel):
     )
     min_version: str = Field(
         default="2.1.145",
-        description="Minimum acceptable `claude` version, as a dotted numeric version such as "
-        "`2.1.145`. `clauster doctor` fails the `claude` check if it cannot compare this value.",
+        description="Minimum acceptable `claude` version, as a numeric version such as `2.1.145`. "
+        "A single number is allowed (`2` means `2.0.0`). `clauster doctor` fails the `claude` "
+        "check if it cannot compare this value.",
     )
     agents_json_poll_interval_seconds: int = Field(
         default=30,

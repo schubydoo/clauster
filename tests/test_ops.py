@@ -75,6 +75,11 @@ FAKE_CLAUDE = (
         ("1.9.0+build.5", "1.9.0", True),  # build metadata carries no precedence
         ("v1.9.0-3-gf0b3a9c", "v1.9.0", False),  # `git describe`: never over-reports
         ("v1.9.0-3-gf0b3a9c", "v1.8.0", True),
+        # A one-segment FLOOR is operator config and means MAJOR.0.0.
+        ("2.0.0", "2", True),
+        ("1.9.9", "2", False),
+        ("2.0.0-rc.1", "2", False),
+        ("v1.12.0", "v1", True),
     ],
 )
 def test_version_ge(have, want, expected):
@@ -86,13 +91,10 @@ def test_version_ge(have, want, expected):
     [
         "f0b3a9c00742d1e5a7b86c2f9e3d4a1b0c5e6f78",  # full 40-hex commit SHA
         "f0b3a9c",  # short SHA
-        "1234567",  # all-digit short SHA: a valid int, but not a version
-        "20260828023803",  # a bare timestamp is the same shape
         "claustrum-dev",
         "unknown",
         "",
         "v",
-        "2",  # one segment is indistinguishable from an all-digit SHA
         "2.1.",
         "2..1",
         "2.1.²",  # a Unicode digit: `str.isdigit` is True, but `int()` raised
@@ -105,7 +107,25 @@ def test_version_ge_never_passes_a_token_that_is_not_a_version(token):
     # integer that cleared any floor. Unparseable on either side is "cannot confirm".
     assert _version_ge(token, "0.0.1") is False
     assert _version_ge("999.0.0", token) is False
-    assert ops_mod._parse_version(token) is None
+    assert ops_mod._parse_version(token, floor=False) is None
+    assert ops_mod._parse_version(token, floor=True) is None
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "1234567",  # all-digit short SHA: a valid int, but not a reported version
+        "20260828023803",  # a bare timestamp is the same shape
+        "2",
+        "v2",
+    ],
+)
+def test_version_ge_rejects_a_one_segment_reported_version(token):
+    # A `--version` can print an all-digit short SHA, so a reported version needs at least
+    # MAJOR.MINOR. The same token is a legal FLOOR: an operator wrote it in clauster.yml.
+    assert _version_ge(token, "0.0.1") is False
+    assert ops_mod._parse_version(token, floor=False) is None
+    assert ops_mod._parse_version(token, floor=True) is not None
 
 
 # ----- doctor -----------------------------------------------------------
@@ -186,6 +206,8 @@ def test_doctor_fails_a_claude_version_that_is_not_a_version(
     claude = {c.name: c for c in checks}["claude"]
     assert claude.status == FAIL and ok is False
     assert "cannot compare" in claude.detail and reported in claude.detail
+    assert "`claude --version` reported" in claude.detail and "reinstall" in claude.detail
+    assert "min_version" not in claude.detail  # the floor is fine; do not blame it
     assert "< required" not in claude.detail
 
 
@@ -194,7 +216,25 @@ def test_doctor_fails_an_unparseable_min_version(write_config, tmp_path):
     checks, ok = run_doctor(_cfg_file(write_config, tmp_path, '  min_version: "latest"\n'))
     claude = {c.name: c for c in checks}["claude"]
     assert claude.status == FAIL and ok is False
-    assert "cannot compare" in claude.detail and "'latest'" in claude.detail
+    assert "cannot compare" in claude.detail and "min_version 'latest'" in claude.detail
+    assert "claude --version" not in claude.detail and "reinstall" not in claude.detail
+
+
+def test_doctor_names_both_sides_when_neither_parses(write_config, tmp_path, monkeypatch):
+    monkeypatch.setattr(ops_mod.claude_cli, "claude_version", lambda binary: "f0b3a9c")
+    checks, _ = run_doctor(_cfg_file(write_config, tmp_path, '  min_version: "latest"\n'))
+    claude = {c.name: c for c in checks}["claude"]
+    assert claude.status == FAIL
+    assert "reported 'f0b3a9c'" in claude.detail and "min_version 'latest'" in claude.detail
+
+
+@pytest.mark.parametrize("floor,status", [("2", OK), ("3", FAIL)])
+def test_doctor_accepts_a_one_segment_min_version(write_config, tmp_path, floor, status):
+    # An operator-written floor of "2" means 2.0.0; the fake claude reports 2.1.156.
+    checks, _ = run_doctor(_cfg_file(write_config, tmp_path, f'  min_version: "{floor}"\n'))
+    claude = {c.name: c for c in checks}["claude"]
+    assert claude.status == status
+    assert "cannot compare" not in claude.detail
 
 
 def test_doctor_invalid_config_fails(tmp_path):

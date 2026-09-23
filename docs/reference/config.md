@@ -39,7 +39,7 @@ nested under `auth`).
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `binary` | str | `claude` | The `claude` binary name or path (resolved to an absolute path before spawning). |
-| `min_version` | str | `2.1.145` | Minimum acceptable `claude` version, as a dotted numeric version such as `2.1.145`. `clauster doctor` fails the `claude` check if it cannot compare this value. |
+| `min_version` | str | `2.1.145` | Minimum acceptable `claude` version, as a numeric version such as `2.1.145`. A single number is allowed (`2` means `2.0.0`). `clauster doctor` fails the `claude` check if it cannot compare this value. |
 | `agents_json_poll_interval_seconds` | int | `30` | How often (≥1) the inspector cross-checks `claude agents --json` for liveness; lower = snappier live indicators + crash detection, at the cost of more subprocess spawns. |
 | `startup_grace_seconds` | float | `60.0` | How long (>0) a freshly-spawned bridge may stay alive without registering an environment before it is marked `ERROR`. Liveness alone is not "running". |
 | `auto_enable_remote_control` | bool | `true` | Before the first spawn, mark remote control acknowledged (`hasUsedRemoteControl` / `remoteDialogSeen`) in `~/.claude.json` so a detached-stdin bridge isn't stuck on the one-time "Enable Remote Control? (y/n)" prompt. Set `false` to manage it yourself. |
