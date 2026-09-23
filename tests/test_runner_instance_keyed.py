@@ -375,6 +375,7 @@ async def test_rediscover_reattaches_every_live_keeper_of_a_project(runner_confi
         connect_url="https://claude.ai/code/NEWER",
         session_id="session_NEWER",
         worktree_name="clauster-0000000b",
+        note="note for the newer session",
     )
     _write_keeper_sidecar(
         runner,
@@ -384,7 +385,14 @@ async def test_rediscover_reattaches_every_live_keeper_of_a_project(runner_confi
         connect_url="https://claude.ai/code/OLDER",
         session_id="session_OLDER",
         worktree_name="clauster-0000000a",
+        note="note for the older session",
     )
+    # Each session's own bridge log, so the tail each card binds to is checkable too. With
+    # the default config the parse-source IS the public log (`_raw_log_path_for`).
+    newer_log = runner._log_dir / "alpha-1700000000002-0.log"
+    older_log = runner._log_dir / "alpha-1700000000001-0.log"
+    newer_log.write_text("")
+    older_log.write_text("")
     live_bridges = {4242, 4243}
     monkeypatch.setattr(
         "clauster.runner.procutil.is_live_bridge",
@@ -417,6 +425,16 @@ async def test_rediscover_reattaches_every_live_keeper_of_a_project(runner_confi
         "https://claude.ai/code/OLDER",
         "session_OLDER",
         "clauster-0000000a",
+    )
+    assert (newer.notice, newer.bridge_debug_log_path, newer.bridge_raw_log_path) == (
+        "note for the newer session",
+        newer_log,
+        newer_log,
+    )
+    assert (older.notice, older.bridge_debug_log_path, older.bridge_raw_log_path) == (
+        "note for the older session",
+        older_log,
+        older_log,
     )
     assert newer.instance_id != older.instance_id
     assert {newer.instance_id, older.instance_id}.isdisjoint({"iid-pidless-a", "iid-pidless-b"})
@@ -527,6 +545,31 @@ def test_reattach_adopts_a_later_sidecar_when_the_newer_one_fails_its_gates(
     got = runner._reattach_pty_from_sidecar("alpha", _row("alpha", pid=None))
 
     assert [(i.keeper_pid, i.url) for i in got] == [(5001, "https://x/OLD")]
+
+
+def test_reattach_survives_a_live_sidecar_with_junk_string_fields(runner_config, monkeypatch):
+    # Every live sidecar now reaches the instance constructor, not only the newest. A
+    # hand-edited or corrupt one whose `session_id` / `connect_url` is not a string raised
+    # pydantic's ValidationError out of the worker thread and took `rediscover` (and the app
+    # lifespan) down with it. Decoded like the other sidecar fields instead: junk -> None,
+    # so the live keeper is still carded and the valid sibling still comes back.
+    runner = _make_runner(runner_config)
+    _write_keeper_sidecar(
+        runner, 1700000000002, keeper_pid=5001, bridge_pid=4001, connect_url="https://x/NEW"
+    )
+    _write_keeper_sidecar(
+        runner, 1700000000001, keeper_pid=5002, bridge_pid=4002, session_id=7, connect_url=["x"]
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda pid: True)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    monkeypatch.setattr("clauster.runner.procutil.proc_start_pair", lambda pid: (None, None))
+
+    got = runner._reattach_pty_from_sidecar("alpha", _row("alpha", pid=None))
+
+    assert [(i.keeper_pid, i.url, i.starter_session_id) for i in got] == [
+        (5001, "https://x/NEW", None),
+        (5002, None, None),
+    ]
 
 
 async def test_second_restart_still_hides_the_pid_less_row_of_a_live_pty_session(

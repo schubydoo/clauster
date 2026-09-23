@@ -741,8 +741,11 @@ class Rediscovery:
                 bridge_proc_start=bridge_proc_start,
                 bridge_debug_log_path=log_path,
                 bridge_raw_log_path=tail_source,
-                starter_session_id=info.get("session_id") or None,
-                url=info.get("connect_url") or None,
+                # `_row_str`, not `or None`: every live sidecar now reaches this constructor
+                # (#1307), so one hand-edited file holding a non-string here would raise
+                # pydantic's ValidationError out of `rediscover` and take the lifespan down.
+                starter_session_id=_row_str(info.get("session_id")),
+                url=_row_str(info.get("connect_url")),
                 # Carried across the restart with the URL it explains (#1390). This leg
                 # reattaches a `ready` sidecar, which is exactly the state the keeper
                 # promotes a screen-fault session into with `connect_url: null` — so
@@ -1353,8 +1356,8 @@ class Rediscovery:
         await self._registry._refresh_persisted()
         discovered = self._discovered()
         row_claimed, row_stopped = await self._reattach_rows_with_pids(discovered)
-        # Projects whose live keeper the sidecar leg re-managed under a FRESH id because no
-        # row could be correlated to it (#1108). Consumed by the pid-less pass below.
+        # Projects whose live keepers the sidecar leg re-managed, each under a FRESH id because
+        # no row could be correlated to it (#1108). Consumed by the pid-less pass below.
         uncorrelated_keepers: set[str] = set()
         for proj in discovered.values():
             if proj.name in row_claimed:
@@ -1403,14 +1406,15 @@ class Rediscovery:
                     # EVERY live keeper of the project, not only the newest (#1307).
                     for inst in reattached:
                         self._registry._instances[inst.instance_id] = inst
-                    # The keeper is managed again, but under an id of its own — so this
-                    # project's pid-less pty rows are still UNRESOLVED: one of them may be
-                    # the session this keeper is holding. The pid-less pass below would
-                    # otherwise card them STOPPED (its sweep now sees the keeper as
-                    # "accounted for", held by the card just inserted) and offer a Resume
+                    # Each keeper is managed again, but under an id of its own — so this
+                    # project's pid-less pty rows are still UNRESOLVED: any of them may be
+                    # a session one of these keepers is holding. The pid-less pass below would
+                    # otherwise card them STOPPED (its sweep now sees the keepers as
+                    # "accounted for", held by the cards just inserted) and offer a Resume
                     # that spawns a SECOND keeper on the same `--continue` conversation.
                     # Block them here instead: a hidden card is recoverable on the next
-                    # start, a duplicate bridge is not (#1108).
+                    # start, a duplicate bridge is not (#1108). The any-live-pty block in the
+                    # pid-less pass covers this too; this stays as the explicit statement.
                     uncorrelated_keepers.add(proj.name)
                 elif proj.name not in row_stopped and (
                     (stopped := self._stopped_from_persisted(proj.name)) is not None
