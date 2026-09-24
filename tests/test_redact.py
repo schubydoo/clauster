@@ -1633,6 +1633,14 @@ def test_a_secret_that_starts_inside_a_masked_id_masks_on_both_paths(line):
         assert "QWERTYUIOP" not in out and out.endswith(" done"), (path, out)
 
 
+def test_a_secret_inside_an_id_found_at_an_escape_masks_on_the_log_path():
+    # The same seed on the log path's escape branch: the id starts at a cut, not a boundary, so
+    # only its cut-anchored span can seed the secret that starts inside it.
+    line = "see\x1b[menv_ABCDEFsk-QWERTYUIOPASDFGH done"
+    for out in (redact.sanitize_line(line), redact.redact_for_disk(line)):
+        assert "QWERTYUIOP" not in out and out.endswith(" done"), out
+
+
 def test_pty_frame_masks_every_secret_of_a_welded_mixed_chain():
     # #1615 through the real surface: pyte wraps a long mixed chain across a 40 x 120 screen, and
     # the frame is what the WebSocket sends.
@@ -1755,7 +1763,7 @@ def test_secret_candidates_are_every_start_of_every_core():
             for q in range(len(text))
             if (hit := rx.match(text, q)) is not None
         )
-        assert redact._secret_candidates(text) == want, text
+        assert list(redact._secret_candidates(text)) == want, text
         missed += sorted(m.span() for rx in cores for m in rx.finditer(text)) != want
     assert missed > 100
 
@@ -1779,7 +1787,7 @@ def test_a_run_of_self_chaining_secrets_is_read_once(monkeypatch):
     monkeypatch.setattr(
         redact, "_SECRET_STARTS", tuple(s._replace(opened=Counting(s.opened)) for s in real)
     )
-    found = redact._secret_candidates(text)
+    found = list(redact._secret_candidates(text))
     assert len(found) == 2000 and len(calls) == 1
     calls.clear()
     monkeypatch.setattr(
@@ -1787,7 +1795,7 @@ def test_a_run_of_self_chaining_secrets_is_read_once(monkeypatch):
         "_SECRET_STARTS",
         tuple(s._replace(opened=Counting(s.opened), single_run=False) for s in real),
     )
-    assert redact._secret_candidates(text) == found and len(calls) == 2000
+    assert list(redact._secret_candidates(text)) == found and len(calls) == 2000
 
 
 def test_open_spans_come_back_merged():
@@ -1796,6 +1804,23 @@ def test_open_spans_come_back_merged():
     text = ("sk-" + "A" * 16) * 2000
     assert redact._open_spans(text, (), []) == [(0, len(text))]
     assert redact._merged([(5, 9), (0, 3), (3, 4), (6, 7)]) == [(0, 4), (5, 9)]
+
+
+def test_open_spans_hold_no_list_of_every_start():
+    # `"AKIA" * n` has a candidate every four characters. They stream in order and the kept ones
+    # merge as they come, so memory does not grow with the number of starts. A list per start
+    # held about 55 MB for each MB of such input (#1615 review).
+    import tracemalloc
+
+    text = "AKIA" * 50_000
+    tracemalloc.start()
+    try:
+        spans = redact._open_spans(text, (), [])
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert spans == [(0, len(text))]
+    assert peak < 1_000_000, peak
 
 
 @pytest.mark.parametrize(
@@ -1841,15 +1866,17 @@ def test_secret_start_rejects_a_core_without_a_counted_class_tail():
     ],
 )
 def test_the_fast_path_check_agrees_with_the_anchored_union(line):
-    # `_welds_past_the_anchors` skips the second run of the anchored masks for a line with no
-    # secret shape: a UUID with a `\b` on both sides is exactly an anchored UUID match. It must
-    # answer as the full comparison against every anchored mask does.
+    # `_fast_path_misses` skips the second run of the anchored masks for a line with no secret
+    # shape: a UUID with a `\b` on both sides is exactly an anchored UUID match. It must answer
+    # as the full comparison against every anchored mask does, and the spans it hands on must be
+    # the ones the union path would find.
     anchored = [m.span() for mask in redact._MASKS for m in mask[0].finditer(line)]
     covered = bytearray(len(line))
     for s, e in anchored:
         covered[s:e] = b"\x01" * (e - s)
-    full = any(covered.find(0, s, e) >= 0 for s, e in redact._open_spans(line, (), anchored))
-    assert redact._welds_past_the_anchors(line) is full
+    spans = redact._open_spans(line, (), anchored)
+    full = any(covered.find(0, s, e) >= 0 for s, e in spans)
+    assert redact._fast_path_misses(line) == (spans if full else None)
     if not full:  # the old path, byte for byte
         assert redact.sanitize_line(line) == redact.redact_secrets(redact.redact_ids(line))
 
@@ -1872,6 +1899,6 @@ def test_the_fast_path_check_agrees_with_the_anchored_union_over_a_corpus():
             covered[s:e] = b"\x01" * (e - s)
         spans = redact._open_spans(line, (), anchored)
         full = any(covered.find(0, s, e) >= 0 for s, e in spans)
-        assert redact._welds_past_the_anchors(line) is full, line
+        assert redact._fast_path_misses(line) == (spans if full else None), line
         seen.add(full)
     assert seen == {True, False}

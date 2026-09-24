@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import bisect
 import functools
+import heapq
 import re
 from collections.abc import Callable, Iterator
 from typing import NamedTuple
@@ -253,14 +254,22 @@ def _uuid_spans(text: str) -> list[tuple[int, int]]:
     return [hit.span() for hit in _every_start(_MASKS[1][1], text)]
 
 
-def _secret_candidates(text: str) -> list[tuple[int, int]]:
-    """Return every match of every secret core in ``text``, overlapping ones included, sorted.
+def _secret_candidates(text: str) -> Iterator[tuple[int, int]]:
+    """Yield every match of every secret core in ``text``, overlapping ones included, in order.
 
     A plain ``finditer`` resumes after each match, so it skips a token that starts INSIDE the
     one before it. That is the welded chain (#1615): ``ghp_<a>ghp_<b>`` reads as ``ghp_<a>ghp``
     up to the next ``_``, ``AKIA<a>AKIA<b>`` as two fixed-length keys end to end, and
     ``bearer <a>bearer <b>`` as ``bearer <a>bearer`` up to the space. Each prefix is found at
-    every start (:func:`_every_start`) and the core is matched there on its own.
+    every start (:func:`_every_start`) and the core is matched there on its own. The matches
+    come as ``(start, end)`` in sorted order, merged from one stream per core, so a long run of
+    them is never held in memory.
+    """
+    return heapq.merge(*(_core_candidates(secret, text) for secret in _SECRET_STARTS))
+
+
+def _core_candidates(secret: _SecretStart, text: str) -> Iterator[tuple[int, int]]:
+    """Yield the match of one secret core at every start in ``text``, in order.
 
     The cost stays linear. A core whose prefix leaves its class run (the ``_`` of ``ghp_``, the
     space of ``bearer``) or that has a fixed length (``AKIA``) cannot start two matches in one
@@ -269,23 +278,19 @@ def _secret_candidates(text: str) -> list[tuple[int, int]]:
     run. A start whose prefix ends inside the run the last match of that core read ends where
     that match ended, so its end is taken from there and the run is not read again.
     """
-    found: list[tuple[int, int]] = []
-    for secret in _SECRET_STARTS:
-        run_lo = run_hi = -1  # the class run the last single-run match read
-        for start in _every_start(secret.prefix, text):
-            q, body = start.span()
-            if secret.single_run and run_lo <= body <= run_hi:
-                if run_hi - body >= secret.tail_min:
-                    found.append((q, run_hi))
-                continue
-            hit = secret.opened.match(text, q)
-            if hit is None:
-                continue
-            found.append(hit.span())
-            if secret.single_run:
-                run_lo, run_hi = body, hit.end()
-    found.sort()
-    return found
+    run_lo = run_hi = -1  # the class run the last single-run match read
+    for start in _every_start(secret.prefix, text):
+        q, body = start.span()
+        if secret.single_run and run_lo <= body <= run_hi:
+            if run_hi - body >= secret.tail_min:
+                yield q, run_hi
+            continue
+        hit = secret.opened.match(text, q)
+        if hit is None:
+            continue
+        yield hit.span()
+        if secret.single_run:
+            run_lo, run_hi = body, hit.end()
 
 
 def _open_spans(
@@ -305,28 +310,28 @@ def _open_spans(
     A secret welded onto an ordinary word (``agentghp_<a>``) has none of these and stays
     visible, the residue both paths document.
 
-    The spans come back MERGED, sorted and disjoint. Every start of ``("sk-" + "A" * 16) * n``
-    is its own span to the end of the run, so unmerged, a coverage test per span
-    (:func:`_apply_spans`, :func:`_welds_past_the_anchors`) would read the run ``n`` times.
+    The spans come back MERGED, sorted and disjoint, and the kept secrets are merged as they
+    are found. Every start of ``("sk-" + "A" * 16) * n`` is its own span to the end of the run,
+    so unmerged, a coverage test per span (:func:`_apply_spans`) would read the run ``n`` times.
     """
     uuids = _uuid_spans(text)
-    candidates = _secret_candidates(text)
-    if not candidates:
-        return _merged(uuids)
     masked = sorted(seeds + uuids)
     at_cut = frozenset(cuts)
     kept: list[tuple[int, int]] = []
-    reach = -1  # the furthest end of a masked or kept span that starts before `q`
-    i = k = 0
-    for q, end in candidates:
+    reach = -1  # the furthest end of a masked span that starts before `q`, or of a kept one
+    i = 0
+    for q, end in _secret_candidates(text):
         while i < len(masked) and masked[i][0] < q:
             reach = max(reach, masked[i][1])
             i += 1
-        while k < len(kept) and kept[k][0] < q:
-            reach = max(reach, kept[k][1])
-            k += 1
         if q <= reach or q in at_cut or _BOUNDARY_RE.match(text, q):
-            kept.append((q, end))
+            # A kept span counts for the next start at once. A later candidate at this same
+            # start is kept or not by the same three tests, so nothing changes for it.
+            reach = max(reach, end)
+            if kept and q <= kept[-1][1]:
+                kept[-1] = (kept[-1][0], max(kept[-1][1], end))
+            else:
+                kept.append((q, end))
     return _merged(uuids + kept)
 
 
@@ -341,25 +346,30 @@ def _merged(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return out
 
 
-def _welds_past_the_anchors(text: str) -> bool:
-    r"""Report whether :func:`_open_spans` masks a character the anchored masks leave in ``text``.
+def _fast_path_misses(text: str) -> list[tuple[int, int]] | None:
+    r"""Return :func:`_open_spans` for an escape-free ``text``, or None if the anchors cover it.
 
-    Only then does an escape-free line leave :func:`_sanitize`'s old sequential path. With no
-    secret shape in the line, only the UUIDs are left to compare: a UUID with a ``\b`` on both
-    sides is exactly an anchored ``_UUID_RE`` match, because two UUIDs that both start at a
-    ``\b`` cannot overlap. So a line of ordinary bridge output, UUIDs included, does not pay
-    for a second run of the anchored masks.
+    None means every character those spans mask is inside an anchored match, so
+    :func:`_sanitize` keeps its old sequential path. Otherwise the spans are handed on, so the
+    union path does not find them a second time. With no escape, that path's other span
+    sources are exactly the anchored matches, the seeds used here.
+
+    With no secret shape in the line, only the UUIDs are left to compare: a UUID with a ``\b``
+    on both sides is exactly an anchored ``_UUID_RE`` match, because two UUIDs that both start
+    at a ``\b`` cannot overlap. So a line of ordinary bridge output, UUIDs included, does not
+    pay for a second run of the anchored masks.
     """
-    if not _secret_candidates(text):
-        return not all(
-            _BOUNDARY_RE.match(text, start) and _BOUNDARY_RE.match(text, end)
-            for start, end in _uuid_spans(text)
-        )
+    if next(_secret_candidates(text), None) is None:
+        uuids = _uuid_spans(text)
+        if all(_BOUNDARY_RE.match(text, s) and _BOUNDARY_RE.match(text, e) for s, e in uuids):
+            return None
+        return _merged(uuids)
     anchored = [m.span() for mask in _MASKS for m in mask[0].finditer(text)]
     covered = bytearray(len(text))
     for start, end in anchored:
         covered[start:end] = b"\x01" * (end - start)
-    return any(covered.find(0, s, e) >= 0 for s, e in _open_spans(text, (), anchored))
+    spans = _open_spans(text, (), anchored)
+    return spans if any(covered.find(0, s, e) >= 0 for s, e in spans) else None
 
 
 def strip_ansi(text: str) -> str:
@@ -624,8 +634,8 @@ def _sanitize(text: str) -> str:
     ``bearer <a>bearer <b>``) and a UUID welded onto the word before it (``run_<UUID>``).
 
     A line with no escapes and no invisible controls takes the old path verbatim unless the
-    fifth source masks a character the anchored masks leave (:func:`_welds_past_the_anchors`),
-    so an ordinary line costs a few ``search`` calls and nothing else.
+    fifth source masks a character the anchored masks leave (:func:`_fast_path_misses`), so an
+    ordinary line costs a few ``search`` calls and nothing else.
 
     KNOWN RESIDUE (by design, #1379): an identifier whose start in ``visible`` is neither a
     word boundary nor a cut stays visible -- one an attacker wrote with the preceding
@@ -636,8 +646,10 @@ def _sanitize(text: str) -> str:
     injected escape only deletes the boundary. The same holds for a secret welded onto an
     ordinary word (``agentghp_<a>``); one welded onto a masked token is not residue.
     """
+    missed: list[tuple[int, int]] | None = None
     if _ANSI_RE.search(text) is None and _INVISIBLE_RE.search(text) is None:
-        if not _welds_past_the_anchors(text):
+        missed = _fast_path_misses(text)
+        if missed is None:
             return redact_secrets(redact_ids(text))
     stripped, visible, cuts, invisible = _views(text)
     spans: list[tuple[int, int, str]] = []
@@ -653,8 +665,9 @@ def _sanitize(text: str) -> str:
             )
             for m in anchored.finditer(stripped)
         ]
-    seeds = [(start, end) for start, end, _ in spans]
-    spans += [(start, end, _REDACTED) for start, end in _open_spans(visible, cuts, seeds)]
+    if missed is None:  # an escape: the seeds are every span above, cut-anchored ones included
+        missed = _open_spans(visible, cuts, [(start, end) for start, end, _ in spans])
+    spans += [(start, end, _REDACTED) for start, end in missed]
     return _apply_spans(visible, spans)
 
 
