@@ -1259,8 +1259,10 @@ def test_sanitize_line_is_linear_in_the_number_of_cuts():
     [
         # Welded at the start, but the run then continues into a longer token with no cut
         # to end it: the trailing `\b` fails and no cut can stand in for it, so this stays
-        # residue rather than masking a prefix of somebody's compound word.
-        ("no usable cut end", "a\x1b[1menv_01ABCDEFGH_x", "aenv_01ABCDEFGH_x"),
+        # residue rather than masking a prefix of somebody's compound word. A real `01`-shape
+        # id here masks (#1619, see test_an_open_tail_id_masks_on_the_log_path); this
+        # look-alike lacks that shape.
+        ("no usable cut end", "a\x1b[1menv_ABCDEFGH_x", "aenv_ABCDEFGH_x"),
         # A cut IS in range this time, but the run it would end is only two characters
         # long — below the mask's `{6,}` — so shrinking to it does not produce an
         # identifier either.
@@ -1837,6 +1839,10 @@ def test_open_spans_hold_no_list_of_every_start():
         _UUID_1508 + "env_AAAAAA",
         "env_01AAAAAAAAsession_",
         f"Bearer {_UUID_1508}.tail ",
+        # #1619: open-tail ids at a word boundary, a chain of them, and at a cut.
+        " session_01AAAAAAAA_",
+        "env_01AAAAAAAA",
+        "\x01cse_01AAAAAAAA_",
     ],
 )
 def test_a_long_welded_chain_stays_linear(unit):
@@ -1868,6 +1874,13 @@ def test_secret_start_rejects_a_core_without_a_counted_class_tail():
         f"tok {_secret_1615('ghp', 0)}{_UUID_1508}",
         f"{_secret_1615('bearer', 0)}.bearer {'B' * 12} done",
         f"tok xoxb-{'A' * 12}--ghp_{'B' * 20} done",  # two anchored matches that touch (#1617)
+        # #1619: a `01`-shape id with an open tail leaves the sequential path; one that ends at a
+        # `\b`, or starts mid-word (residue), does not.
+        "x session_01ABCDEFGHJK_backup",
+        "x env_01ABCDEFGHJKsession_01MNPQRSTVWX y",
+        "session_01ABCDEFGHJKé",
+        "x session_01ABCDEFGHJK y",
+        "agentsession_01ABCDEFGHJK_x",
         "plain words only",
     ],
 )
@@ -2088,3 +2101,107 @@ def test_the_fast_path_never_shows_what_the_union_path_hides():
         else:
             caught += _reveals_1612([sequential], [union])
     assert kept > 1000 and caught > 50, (kept, caught)
+
+
+# --- #1619: an id with an open tail at a word boundary or a cut, on the log path ----------------
+
+_OPEN_SHAPES_1619 = ["session_01", "env_01", "cse_01"]
+_LOG_PATHS_1619 = {
+    "sanitize_line": redact.sanitize_line,
+    "redact_for_disk": redact.redact_for_disk,
+}
+
+
+def _log_paths_1619(line: str) -> dict[str, str]:
+    # Both log-path entry points, plus the colored `sanitize_line`, which must fall back to the
+    # stripped form when its sequential pass leaves an id readable.
+    out = {name: fn(line) for name, fn in _LOG_PATHS_1619.items()}
+    out["sanitize_line(colored)"] = redact.sanitize_line(line, strip_ansi_seq=False)
+    return out
+
+
+@pytest.mark.parametrize("after", ["_backup", "_", "é", "_x y", "é_01"])
+@pytest.mark.parametrize(
+    "before", ["x ", "", "(", "cfg.", "a=", "x\x1b[0m", "x\u200b", "run\x1b]0;t\x07", "\n"]
+)
+@pytest.mark.parametrize("shape", _OPEN_SHAPES_1619)
+def test_an_open_tail_id_masks_on_the_log_path(shape, before, after):
+    # #1619, safety invariant 4. A real `01`-shape id that starts at a word boundary (a space,
+    # the line start, punctuation, a newline) or at a cut (a removed CSI, OSC or invisible
+    # character), with no word boundary after it: `x session_01<a>_backup`. The anchored mask
+    # needs a trailing `\b` and the cut masks need a cut to stand in for it, so it showed.
+    line = f"{before}{_id_1617(shape, 1)}{after}"
+    for path, out in _log_paths_1619(line).items():
+        assert _leaks_1615(2, out) == [], (path, out)
+        assert "<redacted>" in out and out.endswith(after), (path, out)
+    assert _leaks_1615(2, redact.redact_screen_text([line])[0]) == []
+
+
+@pytest.mark.parametrize("after", [" y", "", "_x", "é"])
+@pytest.mark.parametrize("before", ["x ", "", "(", "x\x1b[0m"])
+@pytest.mark.parametrize("n", [2, 3, 12])
+def test_an_escape_free_chain_of_open_tail_ids_masks_whole(n, before, after):
+    # #1619. `x env_01<a>session_01<b> y`: the greedy match of the first id reads over `session`,
+    # so it has no trailing `\b` and was not masked, and nothing then seeded the second. The head
+    # is now kept at its word boundary, and each id after it starts inside a kept span. Mixed
+    # shapes, the plain id core among them, since a kept `01` head carries the rest.
+    shapes = [*_OPEN_SHAPES_1619, "env_", "session_"]
+    ids = "".join(_id_1617(shapes[i % 5] if i else "env_01", i + 1) for i in range(n))
+    line = f"{before}{ids}{after}"
+    for path, out in _log_paths_1619(line).items():
+        assert _leaks_1615(n + 1, out) == [], (path, out)
+        assert out.endswith(after), (path, out)
+    assert _leaks_1615(n + 1, redact.redact_screen_text([line])[0]) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "set session_timeout_ms = 3",
+        "env_file=.env and cse_host_name",
+        "session_01_x and env_01ab_backup",
+        "x session_01ABCDEFG_backup",  # `01` plus seven: one short of the real id shape
+        "session_0123_x.env_file",
+        "session_timeout_ms_01ABCDEFGHJK",  # `_01` inside a name, not after an id prefix
+        "load env_production_db_v2",
+    ],
+)
+def test_ordinary_names_stay_readable_with_the_open_tail_id_scan(text):
+    # #1619 readability controls. Only the real `01` shape is masked without a trailing `\b`;
+    # an ordinary name, and a look-alike one character short of the shape, stay readable on
+    # every path, exactly as on main.
+    for path, out in {**_log_paths_1619(text), **_paths_1615(text)}.items():
+        assert out == text, (path, out)
+    assert redact._fast_path_misses(text) is None
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "x " + _id_1617("session_01", 1) + "_backup",
+        "x " + _id_1617("env_01", 1) + _id_1617("session_01", 2) + " y",
+        "x\x1b[0m" + _id_1617("cse_01", 1) + "_b",
+    ],
+)
+def test_an_open_tail_id_leaks_on_the_log_path_without_the_scan(monkeypatch, line):
+    # Positive control for the tests above: with the open-tail id scan matching nothing (main
+    # keeps no id at a word boundary or a cut), the log path shows the id.
+    monkeypatch.setattr(redact, "_OPEN_TAIL_ID_RE", re.compile(r"(?!)"))
+    assert _leaks_1615(2, redact.sanitize_line(line)) != []
+
+
+@pytest.mark.parametrize(
+    ("line", "shown"),
+    [
+        ("agent" + _id_1617("session_01", 1) + "_x", [1]),
+        ("x " + _id_1617("env_01", 0) + "_" + _id_1617("session_01", 1) + " y", [1]),
+    ],
+)
+def test_an_open_tail_id_written_mid_word_stays_documented_residue(line, shown):
+    # The log path keeps its #1379 residue: an id whose start is neither a word boundary nor a
+    # cut shows. That includes a second id joined to a masked one by `_`, which is a word
+    # character (docs/security.md states it). The screen, which has no cut signal, masks every
+    # `01`-shape id.
+    for path, out in _log_paths_1619(line).items():
+        assert _leaks_1615(2, out) == shown, (path, out)
+    assert _leaks_1615(2, redact.redact_screen_text([line])[0]) == []

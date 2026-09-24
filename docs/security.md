@@ -376,6 +376,21 @@ secret welded to the word after it is masked. An identifier (`env_`,
 `session_`, `cse_`) that starts inside a masked token, or right at its end, is
 masked too, for example `AKIA<a>session_<b>` or `<UUID>env_<b>`.
 
+A real identifier has the `01` shape: `env_`, `session_` or `cse_`, then `01`,
+then eight or more letters or digits. Such an identifier needs no word boundary
+after it, on every surface. On the streamed log and the on-disk mirror, it still
+needs a word boundary before it, or the position of a removed escape. So
+`x session_01<a>_backup` is masked, and so is every identifier in a chain
+written with no separator, for example `x env_01<a>session_01<b> y`. The mask
+covers the whole run of letters and digits after `01`, because nothing marks
+where the identifier ends. A word written directly after the identifier, with
+no separator, is therefore masked with it. The masked identifier shows as the
+neutral `<redacted>` token, without its readable `env_`, `session_` or `cse_`
+marker. On the streamed log and the on-disk
+mirror, a second identifier joined to the first by `_`
+(`x env_01<a>_session_01<b>`) has no word boundary before it, so it stays
+visible. The live pty-screen view masks it.
+
 The whole value of a `bearer` header is masked, also when it holds a UUID, an
 identifier or another token (`Bearer <UUID>.<b>`). On the streamed log and the
 on-disk mirror, an identifier inside the value keeps its readable `env_`,
@@ -383,11 +398,11 @@ on-disk mirror, an identifier inside the value keeps its readable `env_`,
 `<redacted>env_<redacted>`.
 
 A terminal has already discarded the escape on the live pty-screen view. So that
-view also masks a real identifier (the `01` shape) welded onto the word before
-it or after it, and every id in a chain of such ids welded together. An ordinary
-compound name such as `resolve_session_transcript`, or a name that only looks
-like an identifier, such as `session_timeout_ms`, stays readable on every
-surface, unless it is written directly after a masked token.
+view also masks a real identifier welded onto the word before it
+(`agentsession_01<a>`). An ordinary compound name such as
+`resolve_session_transcript`, or a name that only looks like an identifier, such
+as `session_timeout_ms`, stays readable on every surface, unless it is written
+directly after a masked token.
 
 On the live pty-screen view, a long token can wrap onto the next row, and
 neither half matches a mask alone. Clauster joins the wrapped rows before it
