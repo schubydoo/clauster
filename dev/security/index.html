@@ -2170,22 +2170,30 @@ Clauster's own bridge prints the real identifier and an injected escape only
 deletes the boundary. This bounded scope is for the streamed log and the
 on-disk mirror. On every surface, a secret welded onto an ordinary word
 before it (<code>agentghp_&lt;a&gt;</code>) stays visible. On the live pty-screen view, a
-welded id without the <code>01</code> shape stays visible.</p>
+welded id without the <code>01</code> shape stays visible, unless it starts inside a
+masked token.</p>
 </div>
-<p>Two shapes do not need a word boundary before them, on the streamed log, the
+<p>Three shapes do not need a word boundary before them, on the streamed log, the
 on-disk mirror and the live pty-screen view. A UUID is masked wherever it
 appears: welded onto the word before it (<code>run_&lt;UUID&gt;</code>), onto the word after it,
 or onto another UUID. A secret that starts inside a masked token, or right at
 its end, is masked too. So every secret in a chain of secrets written with no
 separator is masked, for example <code>ghp_&lt;a&gt;ghp_&lt;b&gt;</code>, <code>AKIA&lt;a&gt;AKIA&lt;b&gt;</code> or
 <code>bearer &lt;a&gt;bearer &lt;b&gt;</code>. A secret also needs no word boundary after it, so a
-secret welded to the word after it is masked.</p>
+secret welded to the word after it is masked. An identifier (<code>env_</code>,
+<code>session_</code>, <code>cse_</code>) that starts inside a masked token, or right at its end, is
+masked too, for example <code>AKIA&lt;a&gt;session_&lt;b&gt;</code> or <code>&lt;UUID&gt;env_&lt;b&gt;</code>.</p>
+<p>The whole value of a <code>bearer</code> header is masked, also when it holds a UUID, an
+identifier or another token (<code>Bearer &lt;UUID&gt;.&lt;b&gt;</code>). On the streamed log and the
+on-disk mirror, an identifier inside the value keeps its readable <code>env_</code>,
+<code>session_</code> or <code>cse_</code> marker: <code>Bearer env_&lt;a&gt;</code> shows as
+<code>&lt;redacted&gt;env_&lt;redacted&gt;</code>.</p>
 <p>A terminal has already discarded the escape on the live pty-screen view. So that
 view also masks a real identifier (the <code>01</code> shape) welded onto the word before
 it or after it, and every id in a chain of such ids welded together. An ordinary
 compound name such as <code>resolve_session_transcript</code>, or a name that only looks
 like an identifier, such as <code>session_timeout_ms</code>, stays readable on every
-surface.</p>
+surface, unless it is written directly after a masked token.</p>
 <p>On the live pty-screen view, a long token can wrap onto the next row, and
 neither half matches a mask alone. Clauster joins the wrapped rows before it
 masks. This covers the terminal's own wrap at the right edge, and a wrap that
