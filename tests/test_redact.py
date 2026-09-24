@@ -670,6 +670,211 @@ def test_redact_wrapped_rows_bounds_the_soft_wrap_scans(monkeypatch):
     assert "AAAA" not in "".join(out)
 
 
+def _chain_1612(n: int, prefixes: tuple[str, ...] = ("env",)) -> list[str]:
+    # Distinct real `01`-shape ids, so a leak is counted per id, not per repeated string.
+    return [f"{prefixes[i % len(prefixes)]}_01{i:08d}" for i in range(n)]
+
+
+def _leaked_1612(ids: list[str], out: list[str]) -> list[str]:
+    shown = "".join(out)
+    return [i for i in ids if i[-8:] in shown]  # the id's own digits, never in a mask token
+
+
+def test_redact_wrapped_rows_masks_every_id_in_a_hard_wrapped_welded_chain():
+    # #1612, safety invariant 4: the async reviewer's input. A chain of welded ids with no word
+    # boundary after its last id never starts the anchored fixed point, and the open-tail scan
+    # read `env_01<a>env` up to the next `_`, so it skipped every id whose `env` it had eaten.
+    # On main, 237 of these 1000 ids reached the browser. Every one must mask.
+    ids = _chain_1612(1000)
+    body = "".join(ids) + "_x"
+    rows = [body[i : i + 120] for i in range(0, len(body), 120)]
+    seams = len(rows) - 1
+    out = redact.redact_wrapped_screen_rows(
+        rows, hard_seams=[True] * seams, soft_seams=[False] * seams
+    )
+    assert _leaked_1612(ids, out) == []
+    assert len(out) == len(rows)
+
+
+@pytest.mark.parametrize("prefixes", [("env",), ("session", "cse", "env")])
+@pytest.mark.parametrize("after", ["_x", "é", "_", " done"])
+def test_redact_screen_row_masks_every_id_in_a_welded_chain(after, prefixes):
+    # #1612: the same chain inside one row, with no wrap at all. The per-row pass must not
+    # depend on a trailing boundary either (`after` is a word char, `_`, or a real boundary).
+    ids = _chain_1612(6, prefixes)
+    out = redact.redact_screen_text(["see " + "".join(ids) + after])
+    assert _leaked_1612(ids, out) == [], out
+    assert out[0].startswith("see ")
+
+
+def test_redact_wrapped_rows_masks_every_id_in_a_soft_wrapped_welded_chain():
+    # #1612: the chain behind soft seams (hanging indent), both short of the scan cap and past it.
+    for n in (8, 400):
+        ids = _chain_1612(n)
+        body = "".join(ids) + "_x"
+        rows = ["  " + body[i : i + 110] for i in range(0, len(body), 110)]
+        seams = len(rows) - 1
+        out = redact.redact_wrapped_screen_rows(
+            rows, hard_seams=[False] * seams, soft_seams=[True] * seams
+        )
+        assert _leaked_1612(ids, out) == [], n
+
+
+def test_pty_frame_masks_every_id_in_a_welded_chain():
+    # #1612 through the real surface: pyte wraps the chain across a full 40 x 120 screen, and the
+    # frame is what the WebSocket sends.
+    from clauster.pty_screen import PtyScreen
+
+    ids = _chain_1612(330)
+    scr = PtyScreen(cols=120, rows=40)
+    scr.feed(("".join(ids) + "_x").encode())
+    assert _leaked_1612(ids, scr.frame()["rows"]) == []
+
+
+def test_redact_wrapped_rows_bounds_the_row_and_hard_run_scans(monkeypatch):
+    # #1612. The crafted worst case for the hard-wrap maps: a full 40 x 120 hard run of welded
+    # ids that ends at a word boundary, so the joined fixed point unwinds it one id per scan
+    # (about 340 scans and 250 ms uncapped). Capped, each row and each run stops at
+    # `_SCREEN_MAX_SCANS`, and the chain is still fully masked because a capped run fails closed.
+    ids = _chain_1612(340)
+    body = "".join(ids) + " end"
+    rows = [body[i : i + 120] for i in range(0, len(body), 120)]
+    assert len(rows) == 40
+    calls: list[int] = []
+    real = redact._screen_spans
+    monkeypatch.setattr(
+        redact, "_screen_spans", lambda text: calls.append(len(text)) or real(text)
+    )
+
+    def run() -> list[str]:
+        calls.clear()
+        return redact.redact_wrapped_screen_rows(
+            rows, hard_seams=[True] * 39, soft_seams=[False] * 39
+        )
+
+    out = run()
+    assert len([n for n in calls if n > 120]) <= redact._SCREEN_MAX_SCANS  # the one hard run
+    assert len(calls) <= 41 * redact._SCREEN_MAX_SCANS  # 40 rows + 1 run, each capped
+    assert _leaked_1612(ids, out) == []
+    # Positive control: uncapped, the same input really is the worst case the cap is for.
+    monkeypatch.setattr(redact, "_SCREEN_MAX_SCANS", 10**6)
+    uncapped = run()
+    assert len([n for n in calls if n > 120]) > 300
+    assert _leaked_1612(ids, uncapped) == []
+
+
+def test_redact_wrapped_rows_bounds_the_scans_of_a_wide_row(monkeypatch):
+    # #1612. A row on its own is capped too (`row_cov` and the per-row pass). At 120 columns a
+    # row holds too few welded ids to reach the cap, so this uses two 700-column rows of 50 ids
+    # each, joined by no seam at all: uncapped, each needs one scan per id.
+    ids = _chain_1612(100)
+    rows = ["".join(ids[:50]) + " end", "".join(ids[50:]) + " end"]
+    calls: list[int] = []
+    real = redact._screen_spans
+    monkeypatch.setattr(redact, "_screen_spans", lambda text: calls.append(1) or real(text))
+
+    def run() -> list[str]:
+        calls.clear()
+        return redact.redact_wrapped_screen_rows(rows, hard_seams=[False], soft_seams=[False])
+
+    out = run()
+    # Per row: `row_cov`, then the per-row pass's rewrite loop and its coverage map.
+    assert len(calls) <= 2 * 3 * redact._SCREEN_MAX_SCANS
+    assert out == ["<redacted> <redacted>"] * 2  # each row failed closed, `end` included
+    monkeypatch.setattr(redact, "_SCREEN_MAX_SCANS", 10**6)  # positive control
+    uncapped = run()
+    assert len(calls) > 2 * 50
+    assert _leaked_1612(ids, uncapped) == [] and all(r.endswith(" end") for r in uncapped)
+
+
+def test_redact_screen_row_fails_closed_at_the_scan_cap(monkeypatch):
+    # #1612. The per-row pass is capped the same way, and must mask MORE at the cap, never less.
+    row = "see env_01AAAAAAAAAA and sk-ABCDEFGHIJKLMNOPQR done"
+    uncapped = redact.redact_screen_text([row])[0]
+    monkeypatch.setattr(redact, "_SCREEN_MAX_SCANS", 1)  # the first scan adds, so it cannot settle
+    capped = redact.redact_screen_text([row])[0]
+    assert capped == "<redacted> <redacted> <redacted> <redacted> <redacted>"
+    assert "done" in uncapped and "AAAA" not in uncapped  # the uncapped pass really settled
+
+
+def _screen_corpus_1612(seed: int, count: int) -> list[tuple[list[str], list[bool], list[bool]]]:
+    # Random wrapped screens built from token shapes, welds and separators. Each is a list of rows
+    # with its hard and soft seam flags, in every combination.
+    frags = [
+        "env_", "session_", "cse_", "01", "AAAAAAAA", "AAAAAA", "sk-", "A" * 15, "AKIA", "B" * 16,
+        _UUID_1508, "zz", " ", " ", "  ", "_", "-", "x", "ghp_", "bearer ", "bearer", "é",
+        "github_pat_", "glpat-", "xoxb-", "done", "env_01AAAAAAAA", "env_01BBBBBBBB",
+    ]  # fmt: skip
+    rnd = random.Random(seed)  # noqa: S311 -- assembling test fixtures, not crypto
+    corpus = []
+    for _ in range(count):
+        width = rnd.randint(12, 40)
+        text = "".join(rnd.choice(frags) for _ in range(rnd.randint(2, 14)))
+        rows = [text[i : i + width] for i in range(0, len(text), width)] or [""]
+        rows = [r if not rnd.random() < 0.3 else "  " + r for r in rows]
+        seams = len(rows) - 1
+        hard = [rnd.random() < 0.6 for _ in range(seams)]
+        soft = [rnd.random() < 0.5 for _ in range(seams)]
+        corpus.append((rows, hard, soft))
+    return corpus
+
+
+def _pieces_1612(row: str) -> list[str]:
+    # What the operator can read in one rendered row: the text between mask tokens and spaces.
+    return [p for chunk in row.split() for p in chunk.split(redact._REDACTED) if p]
+
+
+def _reveals_1612(capped: list[str], uncapped: list[str]) -> int:
+    # Rows where the capped render shows a piece of text the uncapped render did not.
+    bad = 0
+    for got, want in zip(capped, uncapped, strict=True):
+        shown = _pieces_1612(want)
+        if any(not any(p in q for q in shown) for p in _pieces_1612(got)):
+            bad += 1
+    return bad
+
+
+def test_screen_scan_caps_never_reveal_what_the_uncapped_scans_hid(monkeypatch):
+    # #1612. Over a random corpus of wrapped screens, forcing every cap low (so it fires on most
+    # screens) must never show text the uncapped scans hid: a capped row, run or view fails
+    # closed. The positive control swaps the fail-closed map for an empty one (the cap "stops
+    # masking" instead) and the same oracle must catch it.
+    corpus = _screen_corpus_1612(1612, 3000)
+
+    def render(cap: int) -> list[list[str]]:
+        monkeypatch.setattr(redact, "_SCREEN_MAX_SCANS", cap)
+        monkeypatch.setattr(redact, "_SEAM_MAX_SCANS", cap)
+        return [
+            redact.redact_wrapped_screen_rows(rows, hard_seams=hard, soft_seams=soft)
+            for rows, hard, soft in corpus
+        ]
+
+    uncapped = render(10**6)
+    for cap, fired in ((1, 1000), (2, 50)):  # most screens settle by the second scan
+        capped = render(cap)
+        assert sum(_reveals_1612(c, u) for c, u in zip(capped, uncapped, strict=True)) == 0
+        assert sum(c != u for c, u in zip(capped, uncapped, strict=True)) > fired  # it fired
+    monkeypatch.setattr(redact, "_fail_closed", lambda text: bytearray(len(text)))
+    broken = render(1)
+    assert sum(_reveals_1612(c, u) for c, u in zip(broken, uncapped, strict=True)) > 100
+
+
+def test_redact_screen_row_masks_every_uuid_in_a_welded_chain():
+    # #1612, the same shape for UUIDs: the second UUID of a welded chain masked (it starts where
+    # the first one's open-tail match ends), but a third one after it showed.
+    uuids = [f"12345678-f7c9-1523-d2a2-686b9d96c4{i:02d}" for i in range(4)]
+    for after in (" ok", "zz"):
+        out = redact.redact_screen_text(["see " + "".join(uuids) + after])[0]
+        assert "686b9d" not in out and "f7c9" not in out, out
+        assert out.startswith("see ") and out.endswith(after)
+    # The same chain, hard-wrapped mid-UUID onto a second row.
+    text = "see " + "".join(uuids) + " ok"
+    wrapped = redact.redact_wrapped_screen_rows(
+        [text[:70], text[70:]], hard_seams=[True], soft_seams=[False]
+    )
+    assert "686b9d" not in "".join(wrapped) and "f7c9" not in "".join(wrapped), wrapped
+
+
 def test_bearer_is_the_only_whitespace_core():
     # `_seam_view`'s spaced view keeps a space only after `bearer`, because that is the one core
     # a wrap at a space can split (#1508). A second core that can match whitespace needs the
