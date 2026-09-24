@@ -234,6 +234,21 @@ _SECRET_STARTS = tuple(
 #: ends in ``_``, which is outside its class run, so no two of its starts share a run.
 _ID_START = _secret_start(_ID_CORE, 0, _MASKS[0][1])
 
+#: The real id shape -- the ``01`` an Anthropic ULID carries after the prefix, then eight or
+#: more characters -- with no ``\b`` on either end, the open-tail id scan (#1508):
+#: ``session_01<...>_backup`` has no trailing boundary. The plain id core is left out: a
+#: look-alike such as ``session_timeout_ms`` must stay readable. Both paths use it: the screen
+#: masks every match (:func:`_screen_open_tail_spans`), and :func:`_open_spans` keeps a match
+#: that starts at a word boundary or a cut, as it keeps a secret (#1619).
+#:
+#: It finds EVERY start, overlapping ones included, through the zero-width lookahead (#1612).
+#: A greedy match runs over the prefix of the next id in a welded chain (``env_01<a>env_01<b>``
+#: reads as ``env_01<a>env`` up to the ``_``), so a plain ``finditer`` resumed after it and
+#: skipped every second id. The anchored fixed point does not catch those when nothing after
+#: the chain gives its last id a trailing ``\b``. The cost stays linear: a match can start only
+#: after a ``_01`` it owns, so no two matches share the run of characters after it.
+_OPEN_TAIL_ID_RE = re.compile(r"(?=((?:env|session|cse)_01[A-Za-z0-9]{8,}))")
+
 
 def _every_start(rx: re.Pattern[str], text: str) -> Iterator[re.Match[str]]:
     """Yield the match of ``rx`` at every start in ``text``, overlapping ones included.
@@ -312,10 +327,14 @@ def _open_spans(
       token welded onto a masked token: the second secret of ``ghp_<a>ghp_<b>``, a key after
       a UUID. A kept secret is a span for the next one, so a whole chain masks in one pass.
 
-    An ``env_``/``session_``/``cse_`` id with no trailing ``\b`` is kept by the third test only
-    (#1617): ``AKIA<a>session_01<b>``, ``<UUID>env_<b>``. At a word boundary it would mask
-    ordinary names such as ``session_timeout_ms``, and an id at a boundary or a cut already has
-    its anchored and cut-anchored masks. A kept id is a span for the next token too.
+    An ``env_``/``session_``/``cse_`` id with no trailing ``\b`` is kept by the third test
+    (#1617): ``AKIA<a>session_01<b>``, ``<UUID>env_<b>``. Only a real ``01``-shape id
+    (:data:`_OPEN_TAIL_ID_RE`) is kept by all three, as a secret is (#1619):
+    ``x session_01<a>_backup``, and the head of the escape-free chain ``x env_01<a>session_01<b>``,
+    whose greedy match reads over ``session`` so the next id starts inside it. Any other id at a
+    word boundary would mask ordinary names such as ``session_timeout_ms``, and an id at a
+    boundary or a cut that ends at a ``\b`` already has its anchored and cut-anchored masks. A
+    kept id is a span for the next token too.
 
     A secret welded onto an ordinary word (``agentghp_<a>``) has none of these and stays
     visible, the residue both paths document.
@@ -331,7 +350,12 @@ def _open_spans(
     reach = -1  # the furthest end of a masked span that starts before `q`, or of a kept one
     i = 0
     secrets = ((q, end, False) for q, end in _secret_candidates(text))
-    ids = ((q, end, True) for q, end in _core_candidates(_ID_START, text))
+    # An id candidate and an open-tail match at `q` read the same greedy class run, so this
+    # match only asks whether that run has the `01` shape.
+    ids = (
+        (q, end, _OPEN_TAIL_ID_RE.match(text, q) is None)
+        for q, end in _core_candidates(_ID_START, text)
+    )
     for q, end, welded_only in heapq.merge(secrets, ids):
         while i < len(masked) and masked[i][0] < q:
             reach = max(reach, masked[i][1])
@@ -383,10 +407,24 @@ def _fast_path_misses(text: str) -> list[tuple[int, int]] | None:
     at a ``\b`` before a character that no id starts with. So a line of ordinary bridge output,
     UUIDs included, does not pay for a second run of the anchored masks. A line with a welded
     UUID gets every open span, because an id can be welded onto that UUID.
+
+    The ``01``-shape ids (:data:`_OPEN_TAIL_ID_RE`) are the other open span such a line can hold
+    (#1619). One that starts at a ``\b`` and ends at one is exactly an anchored ``_ID_RE`` match,
+    because both read the same greedy class run. One that does not start at a ``\b`` is kept only
+    inside a kept span, and with no secret and every UUID anchored, only such an id can start
+    one. So the line leaves the sequential path exactly when a ``01``-shape id starts at a ``\b``
+    and does not end at one: ``x session_01<a>_backup``, or the head of the chain
+    ``x env_01<a>session_01<b>``.
     """
     if next(_secret_candidates(text), None) is None:
         uuids = _uuid_spans(text)
-        if all(_BOUNDARY_RE.match(text, s) and _BOUNDARY_RE.match(text, e) for s, e in uuids):
+        if all(_BOUNDARY_RE.match(text, s) and _BOUNDARY_RE.match(text, e) for s, e in uuids) and (
+            "_01" not in text  # in every open-tail id: skips the regex walk on an ordinary line
+            or all(
+                _BOUNDARY_RE.match(text, hit.end(1)) or not _BOUNDARY_RE.match(text, hit.start())
+                for hit in _OPEN_TAIL_ID_RE.finditer(text)
+            )
+        ):
             return None
         return _open_spans(text, (), [])
     anchored = sorted(m.span() for mask in _MASKS for m in mask[0].finditer(text))
@@ -659,7 +697,9 @@ def _sanitize(text: str) -> str:
     whose start is a word boundary, a cut, or inside a masked token, with no trailing ``\b``
     (#1615). That masks each secret of a welded chain (``ghp_<a>ghp_<b>``, ``AKIA<a>AKIA<b>``,
     ``bearer <a>bearer <b>``) and a UUID welded onto the word before it (``run_<UUID>``). It
-    also adds every id that starts inside a masked token (``AKIA<a>session_01<b>``, #1617).
+    also adds every id that starts inside a masked token (``AKIA<a>session_01<b>``, #1617), and
+    every real ``01``-shape id that starts at a word boundary or a cut, with no trailing ``\b``
+    (``x session_01<a>_backup``, the chain ``x env_01<a>session_01<b>``, #1619).
 
     A line with no escapes and no invisible controls takes the old path verbatim unless the
     fifth source masks a character the anchored masks leave, or two anchored matches overlap
@@ -763,18 +803,6 @@ def redact_for_disk(text: str) -> str:
 #: caught, and (see :func:`_redact_screen_row`) neither is a secret welded onto an ordinary word.
 _SCREEN_GLUED_ID_RE = re.compile(r"(env|session|cse)_01[A-Za-z0-9]{8,}\b")
 
-#: The real id shape of :data:`_SCREEN_GLUED_ID_RE` with no ``\b`` on either end, the open-tail
-#: id scan (#1508): ``session_01<...>_backup`` has no trailing boundary. The plain id core is
-#: left out: a look-alike such as ``session_timeout_ms`` must stay readable.
-#:
-#: It finds EVERY start, overlapping ones included, through the zero-width lookahead (#1612).
-#: A greedy match runs over the prefix of the next id in a welded chain (``env_01<a>env_01<b>``
-#: reads as ``env_01<a>env`` up to the ``_``), so a plain ``finditer`` resumed after it and
-#: skipped every second id. The anchored fixed point does not catch those when nothing after
-#: the chain gives its last id a trailing ``\b``. The cost stays linear: a match can start only
-#: after a ``_01`` it owns, so no two matches share the run of characters after it.
-_SCREEN_OPEN_TAIL_ID_RE = re.compile(r"(?=((?:env|session|cse)_01[A-Za-z0-9]{8,}))")
-
 #: The UUID shape with NO ``\b`` on either end, for finding a UUID that a greedy core welded
 #: onto (#1496). Reused from the UUID mask's cut-supplied (core-alone) variant rather than
 #: recompiled, so it stays inside the anti-drift guard
@@ -857,7 +885,7 @@ def _screen_spans(text: str) -> list[tuple[int, int, str]]:
 def _screen_open_tail_spans(text: str, *, cuts: tuple[int, ...]) -> list[tuple[int, int, str]]:
     """Return the open-tail spans in ``text``: tokens with no trailing boundary (#1508).
 
-    The spans are :data:`_SCREEN_OPEN_TAIL_ID_RE` and :func:`_open_spans`, seeded with those ids
+    The spans are :data:`_OPEN_TAIL_ID_RE` and :func:`_open_spans`, seeded with those ids
     and the anchored ``_ID_RE`` matches: every UUID wherever it appears, and every secret that
     starts at a word boundary, at a soft-wrap seam in ``cuts``, or inside a masked token, so
     each secret of a welded chain masks (#1615). A seam counts because the soft-wrap view joins
@@ -873,7 +901,7 @@ def _screen_open_tail_spans(text: str, *, cuts: tuple[int, ...]) -> list[tuple[i
     masked cells, it would erase the prefixes the anchored fixed point needs to unwind that
     chain from its end, and the chain would show.
     """
-    ids = [m.span(1) for m in _SCREEN_OPEN_TAIL_ID_RE.finditer(text)]
+    ids = [m.span(1) for m in _OPEN_TAIL_ID_RE.finditer(text)]
     seeds = ids + [m.span() for m in _ID_RE.finditer(text)]
     return [(s, e, _REDACTED) for s, e in ids + _open_spans(text, cuts, seeds)]
 
