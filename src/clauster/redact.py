@@ -364,13 +364,17 @@ def _fast_path_misses(text: str) -> list[tuple[int, int]] | None:
 
     None means the sequential path masks every character the union path would, so
     :func:`_sanitize` keeps it. That needs two things. First, every character those spans mask
-    is inside an anchored match. Second, no two anchored matches overlap (#1617). The
+    is inside an anchored match. Second, no two anchored matches overlap or touch (#1617). The
     sequential path masks the ids first, and a mask it has applied can break a later match
     that overlaps it. In ``Bearer <UUID>.<tail>`` the UUID becomes ``<redacted>``, the bearer
     mask then finds no value, and ``.<tail>`` shows. The union of the same anchored matches
-    masks all of it. Otherwise the spans are handed on, so the union path does not find them a
-    second time. With no escape, that path's other span sources are exactly the anchored
-    matches, the seeds used here.
+    masks all of it. A mask that touches a later match can break it too: in
+    ``xoxb-<a>--ghp_<b>`` the ``<`` of the masked ``ghp_`` token leaves no ``\b`` after the
+    ``-``, so the ``xoxb-`` match backs off and its ``--`` shows. With no two anchored matches
+    overlapping or touching, the characters around each match stay as they were, so each one
+    masks as it did in the text. Otherwise the spans are handed on, so the union path does not
+    find them a second time. With no escape, that path's other span sources are exactly the
+    anchored matches, the seeds used here.
 
     With no secret shape in the line, only the UUIDs are left to compare: a UUID with a ``\b``
     on both sides is exactly an anchored ``_UUID_RE`` match, because two UUIDs that both start
@@ -387,8 +391,8 @@ def _fast_path_misses(text: str) -> list[tuple[int, int]] | None:
         return _open_spans(text, (), [])
     anchored = sorted(m.span() for mask in _MASKS for m in mask[0].finditer(text))
     spans = _open_spans(text, (), anchored)
-    if any(start < end for (_, end), (start, _) in itertools.pairwise(anchored)):
-        return spans  # two anchored matches overlap: the sequential path can break the later one
+    if any(start <= end for (_, end), (start, _) in itertools.pairwise(anchored)):
+        return spans  # two anchored matches overlap or touch: sequential masks can break one
     covered = bytearray(len(text))
     for start, end in anchored:
         covered[start:end] = b"\x01" * (end - start)

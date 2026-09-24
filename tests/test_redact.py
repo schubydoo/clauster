@@ -1832,6 +1832,11 @@ def test_open_spans_hold_no_list_of_every_start():
         "\x01sk-" + "A" * 16,
         "\x01ghp_" + "A" * 16,
         "".join(_secret_1615(kind, 3) for kind in _KINDS_1615),
+        # #1617: ids welded after a masked token, and a bearer value that holds a UUID.
+        "AKIA" + "B" * 16 + "session_01" + "C" * 8,
+        _UUID_1508 + "env_AAAAAA",
+        "env_01AAAAAAAAsession_",
+        f"Bearer {_UUID_1508}.tail ",
     ],
 )
 def test_a_long_welded_chain_stays_linear(unit):
@@ -1879,13 +1884,14 @@ def test_the_fast_path_check_agrees_with_the_anchored_union(line):
 def _fast_path_reference(line: str) -> tuple[list[tuple[int, int]], bool]:
     # The full comparison `_fast_path_misses` shortcuts: the open spans seeded with every anchored
     # match, and whether the line must leave the sequential path. It must when an open span masks
-    # a character outside the anchored matches, or when two anchored matches overlap (#1617).
+    # a character outside the anchored matches, or when two anchored matches overlap or touch
+    # (#1617).
     anchored = sorted(m.span() for mask in redact._MASKS for m in mask[0].finditer(line))
     covered = bytearray(len(line))
     for s, e in anchored:
         covered[s:e] = b"\x01" * (e - s)
     spans = redact._open_spans(line, (), anchored)
-    overlap = any(anchored[k + 1][0] < anchored[k][1] for k in range(len(anchored) - 1))
+    overlap = any(anchored[k + 1][0] <= anchored[k][1] for k in range(len(anchored) - 1))
     return spans, overlap or any(covered.find(0, s, e) >= 0 for s, e in spans)
 
 
@@ -2017,6 +2023,19 @@ def test_the_bearer_tail_leaks_through_the_sequential_pipeline(inner, tail):
     line = f"Authorization: Bearer {inner}{tail} done"
     assert "V4lu3" in redact.redact_secrets(redact.redact_ids(line))
     assert redact._fast_path_misses(line) is not None
+
+
+@pytest.mark.parametrize("second", ["ghp_", "gho_", "github_pat_"])
+@pytest.mark.parametrize("gap", ["-", "--", "---"])
+def test_a_token_that_touches_the_next_one_masks_whole_on_the_log_path(gap, second):
+    # #1617 review. The `xoxb-` match ends at the `\b` before `ghp_`, so the two anchored matches
+    # touch without overlapping. The sequential path masks `ghp_` first, the `<` of its mask
+    # leaves no `\b` after the `-`, and the `xoxb-` match backs off: its trailing `-` run showed.
+    # Positive control: the sequential pipeline shows it.
+    line = f"tok xoxb-{'A' * 12}{gap}{second}{'B' * 20} done"
+    assert gap in redact.redact_secrets(redact.redact_ids(line))
+    for out in (redact.sanitize_line(line), redact.redact_for_disk(line)):
+        assert out == "tok <redacted><redacted> done", out
 
 
 @pytest.mark.parametrize(

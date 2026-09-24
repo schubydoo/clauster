@@ -377,14 +377,17 @@ secret welded to the word after it is masked. An identifier (`env_`,
 masked too, for example `AKIA<a>session_<b>` or `<UUID>env_<b>`.
 
 The whole value of a `bearer` header is masked, also when it holds a UUID, an
-identifier or another token (`Bearer <UUID>.<b>`).
+identifier or another token (`Bearer <UUID>.<b>`). On the streamed log and the
+on-disk mirror, an identifier inside the value keeps its readable `env_`,
+`session_` or `cse_` marker: `Bearer env_<a>` shows as
+`<redacted>env_<redacted>`.
 
 A terminal has already discarded the escape on the live pty-screen view. So that
 view also masks a real identifier (the `01` shape) welded onto the word before
 it or after it, and every id in a chain of such ids welded together. An ordinary
 compound name such as `resolve_session_transcript`, or a name that only looks
 like an identifier, such as `session_timeout_ms`, stays readable on every
-surface.
+surface, unless it is written directly after a masked token.
 
 On the live pty-screen view, a long token can wrap onto the next row, and
 neither half matches a mask alone. Clauster joins the wrapped rows before it
