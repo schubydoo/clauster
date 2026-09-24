@@ -663,8 +663,8 @@ def _sanitize(text: str) -> str:
 
     A line with no escapes and no invisible controls takes the old path verbatim unless the
     fifth source masks a character the anchored masks leave, or two anchored matches overlap
-    (:func:`_fast_path_misses`). So an ordinary line costs a few ``search`` calls and nothing
-    else.
+    or touch (:func:`_fast_path_misses`). So an ordinary line costs a few ``search`` calls and
+    nothing else.
 
     KNOWN RESIDUE (by design, #1379): an identifier whose start in ``visible`` is neither a
     word boundary nor a cut stays visible -- one an attacker wrote with the preceding

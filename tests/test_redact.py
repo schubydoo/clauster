@@ -1867,6 +1867,7 @@ def test_secret_start_rejects_a_core_without_a_counted_class_tail():
         f"tok {_secret_1615('ghp', 0)} {_UUID_1508}",
         f"tok {_secret_1615('ghp', 0)}{_UUID_1508}",
         f"{_secret_1615('bearer', 0)}.bearer {'B' * 12} done",
+        f"tok xoxb-{'A' * 12}--ghp_{'B' * 20} done",  # two anchored matches that touch (#1617)
         "plain words only",
     ],
 )
