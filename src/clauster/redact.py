@@ -411,8 +411,10 @@ def _fast_path_misses(text: str) -> list[tuple[int, int]] | None:
     The ``01``-shape ids (:data:`_OPEN_TAIL_ID_RE`) are the other open span such a line can hold
     (#1619). One that starts at a ``\b`` and ends at one is exactly an anchored ``_ID_RE`` match,
     because both read the same greedy class run. One that does not start at a ``\b`` is kept only
-    inside a kept span, and with no secret and every UUID anchored, only such an id can start
-    one. So the line leaves the sequential path exactly when a ``01``-shape id starts at a ``\b``
+    inside a kept span or right at its end. With no secret and every UUID anchored, only an id
+    that starts at a ``\b`` and does not end at one can start such a span: one that ends at a
+    ``\b`` is followed by a non-word character, and every id starts with a word character. So
+    the line leaves the sequential path exactly when a ``01``-shape id starts at a ``\b``
     and does not end at one: ``x session_01<a>_backup``, or the head of the chain
     ``x env_01<a>session_01<b>``.
     """

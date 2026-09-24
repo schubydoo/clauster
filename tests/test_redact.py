@@ -2190,11 +2190,18 @@ def test_an_open_tail_id_leaks_on_the_log_path_without_the_scan(monkeypatch, lin
     assert _leaks_1615(2, redact.sanitize_line(line)) != []
 
 
-def test_an_open_tail_id_written_mid_word_stays_documented_residue():
+@pytest.mark.parametrize(
+    ("line", "shown"),
+    [
+        ("agent" + _id_1617("session_01", 1) + "_x", [1]),
+        ("x " + _id_1617("env_01", 0) + "_" + _id_1617("session_01", 1) + " y", [1]),
+    ],
+)
+def test_an_open_tail_id_written_mid_word_stays_documented_residue(line, shown):
     # The log path keeps its #1379 residue: an id whose start is neither a word boundary nor a
-    # cut was written with its preceding characters as literal text. The screen, which has no
-    # cut signal, masks every `01`-shape id.
-    line = "agent" + _id_1617("session_01", 1) + "_x"
+    # cut shows. That includes a second id joined to a masked one by `_`, which is a word
+    # character (docs/security.md states it). The screen, which has no cut signal, masks every
+    # `01`-shape id.
     for path, out in _log_paths_1619(line).items():
-        assert out == line, (path, out)
+        assert _leaks_1615(2, out) == shown, (path, out)
     assert _leaks_1615(2, redact.redact_screen_text([line])[0]) == []
