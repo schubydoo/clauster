@@ -1870,15 +1870,23 @@ def test_the_fast_path_check_agrees_with_the_anchored_union(line):
     # shape: a UUID with a `\b` on both sides is exactly an anchored UUID match. It must answer
     # as the full comparison against every anchored mask does, and the spans it hands on must be
     # the ones the union path would find.
-    anchored = [m.span() for mask in redact._MASKS for m in mask[0].finditer(line)]
+    spans, full = _fast_path_reference(line)
+    assert redact._fast_path_misses(line) == (spans if full else None)
+    if not full:  # the old path, byte for byte
+        assert redact.sanitize_line(line) == redact.redact_secrets(redact.redact_ids(line))
+
+
+def _fast_path_reference(line: str) -> tuple[list[tuple[int, int]], bool]:
+    # The full comparison `_fast_path_misses` shortcuts: the open spans seeded with every anchored
+    # match, and whether the line must leave the sequential path. It must when an open span masks
+    # a character outside the anchored matches, or when two anchored matches overlap (#1617).
+    anchored = sorted(m.span() for mask in redact._MASKS for m in mask[0].finditer(line))
     covered = bytearray(len(line))
     for s, e in anchored:
         covered[s:e] = b"\x01" * (e - s)
     spans = redact._open_spans(line, (), anchored)
-    full = any(covered.find(0, s, e) >= 0 for s, e in spans)
-    assert redact._fast_path_misses(line) == (spans if full else None)
-    if not full:  # the old path, byte for byte
-        assert redact.sanitize_line(line) == redact.redact_secrets(redact.redact_ids(line))
+    overlap = any(anchored[k + 1][0] < anchored[k][1] for k in range(len(anchored) - 1))
+    return spans, overlap or any(covered.find(0, s, e) >= 0 for s, e in spans)
 
 
 def test_the_fast_path_check_agrees_with_the_anchored_union_over_a_corpus():
@@ -1893,12 +1901,170 @@ def test_the_fast_path_check_agrees_with_the_anchored_union_over_a_corpus():
     seen = set()
     for _ in range(3000):
         line = "".join(rnd.choice(frags) for _ in range(rnd.randint(1, 10)))
-        anchored = [m.span() for mask in redact._MASKS for m in mask[0].finditer(line)]
-        covered = bytearray(len(line))
-        for s, e in anchored:
-            covered[s:e] = b"\x01" * (e - s)
-        spans = redact._open_spans(line, (), anchored)
-        full = any(covered.find(0, s, e) >= 0 for s, e in spans)
+        spans, full = _fast_path_reference(line)
         assert redact._fast_path_misses(line) == (spans if full else None), line
         seen.add(full)
     assert seen == {True, False}
+
+
+# --- #1617: an id welded after a masked token, and a bearer value the fast path cut short -------
+
+_ID_SHAPES_1617 = ["session_01", "env_01", "cse_01", "env_", "session_"]
+
+
+def _id_1617(shape: str, i: int) -> str:
+    # One id per shape, with the `K<index>Z` marker of `_leaks_1615` inside its value. The
+    # `01` shapes are real ids; `env_`/`session_` alone are the plain id core.
+    return f"{shape}K{i:05d}ZABCD"
+
+
+_BEFORE_1617 = [*(_secret_1615(kind, 0) for kind in _KINDS_1615), _UUID_1508]
+
+
+@pytest.mark.parametrize("after", [" done", "", "_x", "é"])
+@pytest.mark.parametrize("shape", _ID_SHAPES_1617)
+@pytest.mark.parametrize("before", _BEFORE_1617)
+def test_an_id_welded_after_a_masked_token_masks_on_both_paths(before, shape, after):
+    # #1617, safety invariant 4. `key AKIA<16>session_01<...>`: the key masks, and the id that
+    # starts right at its end (or inside it, for a greedy core that reads over `session`) showed
+    # on the log path. Every secret kind and a UUID before the id; every id shape; a boundary,
+    # nothing, a word char or a non-ASCII char after it.
+    line = f"key {before}{_id_1617(shape, 1)}{after}"
+    for path, out in _paths_1615(line).items():
+        assert _leaks_1615(2, out) == [] and "686b9d" not in out, (path, out)
+        assert out.startswith("key "), (path, out)
+        assert after != " done" or out.endswith(" done"), (path, out)
+
+
+@pytest.mark.parametrize("before", [_secret_1615("akia", 0), _secret_1615("ghp", 0), _UUID_1508])
+def test_a_chain_of_ids_welded_after_a_masked_token_masks_on_both_paths(before):
+    # A kept id is a masked token too, so each id of a chain after the first one masks.
+    ids = "".join(_id_1617(_ID_SHAPES_1617[i % 5], i + 1) for i in range(8))
+    line = f"key {before}{ids} done"
+    for path, out in _paths_1615(line).items():
+        assert _leaks_1615(9, out) == [] and "686b9d" not in out, (path, out)
+        assert out.startswith("key ") and out.endswith(" done"), (path, out)
+
+
+@pytest.mark.parametrize("before", [_secret_1615("akia", 0), _secret_1615("ghp", 0), _UUID_1508])
+def test_a_welded_id_leaks_on_the_log_path_without_the_id_scan(monkeypatch, before):
+    # Positive control for the two tests above: with the welded-id scan switched off (main has
+    # none), the log path shows the id after the masked token.
+    line = f"key {before}{_id_1617('session_01', 1)} done"
+    never = redact._ID_START._replace(prefix=re.compile(r"(?!)"))
+    monkeypatch.setattr(redact, "_ID_START", never)
+    assert _leaks_1615(2, redact.sanitize_line(line)) == [1]
+
+
+def test_pty_frame_masks_an_id_welded_after_a_masked_token():
+    # The same weld through the real screen surface. The `01` shape was already masked there;
+    # a plain id core welded onto a masked key showed.
+    from clauster.pty_screen import PtyScreen
+
+    scr = PtyScreen(cols=120, rows=4)
+    scr.feed(f"key {_secret_1615('akia', 0)}{_id_1617('env_', 1)} done".encode())
+    rows = scr.frame()["rows"]
+    assert _leaks_1615(2, "".join(rows)) == [] and rows[0].startswith("key ")
+
+
+_INNER_1617 = [
+    _UUID_1508,
+    _secret_1615("ghp", 0),
+    _secret_1615("akia", 0),
+    _secret_1615("sk", 0),
+    _secret_1615("glpat", 0),
+    _secret_1615("xoxb", 0),
+    "env_ABCDEFGH",
+    _id_1617("session_01", 0),
+]
+_TAILS_1617 = [
+    ".s3cr3tV4lu3XyZq9",
+    "-s3cr3tV4lu3XyZq9",
+    ".s3cr3t.V4lu3.XyZq9",
+    "..s3cr3t-V4lu3.XyZq9",
+]
+
+
+@pytest.mark.parametrize("lead", ["", "pre0."])
+@pytest.mark.parametrize("tail", _TAILS_1617)
+@pytest.mark.parametrize("inner", _INNER_1617)
+@pytest.mark.parametrize("hdr", ["Bearer", "bearer", "BEARER"])
+def test_the_whole_bearer_value_masks_when_it_holds_another_token(hdr, inner, tail, lead):
+    # #1617, safety invariant 4. The bearer value class holds `.` and `-`, so the whole of
+    # `Bearer <UUID>.<tail>` is one anchored bearer match. The sequential fast path masked the
+    # UUID first, the bearer mask then found no value, and `.<tail>` showed. Every token shape
+    # inside the value, tails with one or several dots and hyphens, and value text before it.
+    line = f"Authorization: {hdr} {lead}{inner}{tail} done"
+    for path, out in _paths_1615(line).items():
+        assert "s3cr3t" not in out and "V4lu3" not in out and "pre0" not in out, (path, out)
+        assert _leaks_1615(1, out) == [] and "686b9d" not in out, (path, out)
+        assert out.startswith("Authorization: ") and out.endswith(" done"), (path, out)
+
+
+@pytest.mark.parametrize(
+    ("inner", "tail"),
+    [
+        (_UUID_1508, ".s3cr3tV4lu3XyZq9"),
+        (_UUID_1508, "-s3cr3tV4lu3XyZq9"),
+        (_secret_1615("ghp", 0), ".s3cr3tV4lu3XyZq9"),
+        (_secret_1615("akia", 0), ".s3cr3t.V4lu3.XyZq9"),
+        ("env_ABCDEFGH", "..s3cr3t-V4lu3.XyZq9"),
+    ],
+)
+def test_the_bearer_tail_leaks_through_the_sequential_pipeline(inner, tail):
+    # Positive control for the test above: main's log path for these escape-free lines is this
+    # sequential pipeline (no open span leaves the anchored matches), and it shows the tail.
+    line = f"Authorization: Bearer {inner}{tail} done"
+    assert "V4lu3" in redact.redact_secrets(redact.redact_ids(line))
+    assert redact._fast_path_misses(line) is not None
+
+
+@pytest.mark.parametrize(
+    ("text", "want"),
+    [
+        ("cfg.session_timeout_ms = 3", None),
+        ("os.path.join(a, b).strip().session_timeout_ms", None),
+        ("v1.2.3.4 and a.b.c.d and x.y-z.w", None),
+        ("the bearer of bad news. session_timeout_ms stays", None),
+        (f"id {_UUID_1508} session_timeout_ms", "id <redacted> session_timeout_ms"),
+        (f"id {_UUID_1508}.session_timeout_ms", "id <redacted>.session_timeout_ms"),
+        (f"tok {_secret_1615('ghp', 0)} session_timeout_ms", "tok <redacted> session_timeout_ms"),
+        (f"key {_secret_1615('akia', 0)}.cse_worker_pool", "key <redacted>.cse_worker_pool"),
+    ],
+)
+def test_ordinary_names_near_a_masked_token_stay_readable_on_both_paths(text, want):
+    # #1617 readability controls. Only an id that starts inside a masked token, or right at its
+    # end, is masked. One after a separator, and ordinary dotted names, stay readable.
+    for path, out in _paths_1615(text).items():
+        assert out == (text if want is None else want), (path, out)
+
+
+def _union_render(line: str) -> str:
+    # `sanitize_line` forced onto the union path, whatever the fast-path gate says.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(redact, "_fast_path_misses", lambda text: _fast_path_reference(text)[0])
+        return redact.sanitize_line(line)
+
+
+def test_the_fast_path_never_shows_what_the_union_path_hides():
+    # #1617. Over random escape-free lines, a line the gate keeps on the sequential path must not
+    # show a piece of text the union path hides. Positive control: on the lines the gate sends to
+    # the union path for an overlap, the sequential path does show such a piece, so the oracle
+    # can see the leak the gate exists to stop.
+    rnd = random.Random(1617)  # noqa: S311 -- assembling test fixtures, not crypto
+    frags = [
+        _UUID_1508, "env_01AAAAAAAA", "env_ABCDEF", "session_", "ghp_", "AKIA", "B" * 16,
+        "Bearer ", "bearer ", "sk-", "glpat-", "xoxb-", ".", "-", "_", " ", "zz", "s3cr3t",
+    ]  # fmt: skip
+    kept = caught = 0
+    for _ in range(4000):
+        line = "".join(rnd.choice(frags) for _ in range(rnd.randint(1, 10)))
+        sequential = redact.redact_secrets(redact.redact_ids(line))
+        union = _union_render(line)
+        if redact._fast_path_misses(line) is None:
+            kept += 1
+            assert redact.sanitize_line(line) == sequential, line
+            assert _reveals_1612([sequential], [union]) == 0, (line, sequential, union)
+        else:
+            caught += _reveals_1612([sequential], [union])
+    assert kept > 1000 and caught > 50, (kept, caught)
