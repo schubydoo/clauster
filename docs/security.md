@@ -360,21 +360,25 @@ Three layers:
     to smuggle it past the mask. The case that matters is the escape weld, where
     Clauster's own bridge prints the real identifier and an injected escape only
     deletes the boundary. This bounded scope is for the streamed log and the
-    on-disk mirror. A terminal has already discarded the escape on the live
-    pty-screen view. So that view also masks a real identifier (the `01` shape)
-    welded onto the word before it, and every id in a chain of such ids welded
-    together. It also masks a UUID that a greedy id or secret token welded onto.
-    A `ghp_` or `github_pat_` token has no separator, so it eats the UUID's
-    leading hex digits. A chain of UUIDs welded together is masked whole when
-    its first UUID starts at a word boundary or right after a masked token. An
-    ordinary compound name such as `resolve_session_transcript` stays readable.
-    A secret welded onto the word before it, a UUID welded onto the word before
-    it (`run_<UUID>`), and a welded id without the `01` shape stay visible
-    there. That includes a secret welded onto another secret: in
-    `ghp_<a>ghp_<b>`, the second token shows. A UUID, a secret, or an `01`-shape
-    identifier welded to the word after it is masked, for example a UUID
-    followed by `zz`. A name that only looks like an identifier, such as
-    `session_timeout_ms`, stays readable.
+    on-disk mirror. On every surface, a secret welded onto an ordinary word
+    before it (`agentghp_<a>`) stays visible. On the live pty-screen view, a
+    welded id without the `01` shape stays visible.
+
+Two shapes do not need a word boundary before them, on the streamed log, the
+on-disk mirror and the live pty-screen view. A UUID is masked wherever it
+appears: welded onto the word before it (`run_<UUID>`), onto the word after it,
+or onto another UUID. A secret that starts inside a masked token, or right at
+its end, is masked too. So every secret in a chain of secrets written with no
+separator is masked, for example `ghp_<a>ghp_<b>`, `AKIA<a>AKIA<b>` or
+`bearer <a>bearer <b>`. A secret also needs no word boundary after it, so a
+secret welded to the word after it is masked.
+
+A terminal has already discarded the escape on the live pty-screen view. So that
+view also masks a real identifier (the `01` shape) welded onto the word before
+it or after it, and every id in a chain of such ids welded together. An ordinary
+compound name such as `resolve_session_transcript`, or a name that only looks
+like an identifier, such as `session_timeout_ms`, stays readable on every
+surface.
 
 On the live pty-screen view, a long token can wrap onto the next row, and
 neither half matches a mask alone. Clauster joins the wrapped rows before it
