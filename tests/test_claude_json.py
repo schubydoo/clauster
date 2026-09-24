@@ -123,7 +123,10 @@ def test_update_claude_json_unparseable_leaves_an_existing_backup_alone(tmp_path
         (b'{"a": 1,\n  "b": }', "invalid JSON at line 2 column 8"),
         (b"\xff", "not UTF-8 text"),
         (b'{"n": ' + b"1" * 5000 + b"}", "a value that cannot be parsed"),
-        (b"[" * 100_000, "nested too deeply"),
+        # Python 3.14 bounds the scanner by real stack use, not a depth counter: with a stack
+        # rlimit above 8 MB (the ubuntu CI runner) all 100,000 levels fit and the parse
+        # fails at end of input instead. The RecursionError arm is pinned in the next test.
+        (b"[" * 100_000, "nested too deeply|invalid JSON at line 1 column 100001"),
         (b"[]", "the top level is not a JSON object"),
     ],
     # Explicit ids: pytest puts the test id in PYTEST_CURRENT_TEST, and a 100,000-byte
@@ -135,6 +138,20 @@ def test_unparseable_reason_names_the_failure(tmp_path: Path, content: bytes, re
     f.write_bytes(content)
     with pytest.raises(cj.ClaudeJsonUnparseable, match=reason):
         cj.update_claude_json(f, lambda data: None)
+
+
+def test_recursion_error_names_the_nesting(tmp_path: Path, monkeypatch) -> None:
+    # Pins the RecursionError arm on every interpreter and stack size.
+    f = tmp_path / "claude.json"
+    f.write_bytes(b"{}")
+
+    def _overflow(_text: str) -> None:
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(cj.json, "loads", _overflow)
+    with pytest.raises(cj.ClaudeJsonUnparseable, match="nested too deeply"):
+        cj.update_claude_json(f, lambda data: None)
+    assert f.read_bytes() == b"{}"
 
 
 def test_update_claude_json_valid_object_still_writes(tmp_path: Path) -> None:
