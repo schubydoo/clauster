@@ -1590,6 +1590,49 @@ def test_a_welded_chain_masks_at_a_row_end_and_across_hard_and_soft_wraps(kind):
         assert len(hard) == len(soft) == len(rows)
 
 
+def _tui_frame_1615(lead: str, token: str, cols: int) -> list[str]:
+    # A word-wrapping TUI moves a long token onto rows of its own, each after a hanging indent.
+    # The soft-wrap view joins those rows with nothing between them, so the token is welded onto
+    # the last word of the row above.
+    from clauster.pty_screen import PtyScreen
+
+    rows = [lead] + ["  " + token[i : i + cols - 2] for i in range(0, len(token), cols - 2)]
+    scr = PtyScreen(cols=cols, rows=len(rows) + 2)
+    scr.feed("\r\n".join(rows).encode())
+    return scr.frame()["rows"]
+
+
+@pytest.mark.parametrize("cols", [40, 120])
+@pytest.mark.parametrize("kind", _KINDS_1615)
+def test_pty_frame_masks_a_welded_chain_the_tui_moved_onto_its_own_rows(kind, cols):
+    # #1615 review, safety invariant 4. The chain starts at a soft-wrap seam, not at a word
+    # boundary, so the open-tail pass must take the seam as a place a mask may start. Before,
+    # everything past the second seam showed.
+    n = 8
+    chain = "".join(_secret_1615(kind, i) for i in range(n))
+    out = _tui_frame_1615(
+        "  Here is the list of tokens that were printed by the tool"[:cols], chain, cols
+    )
+    assert _leaks_1615(n, "".join(out)) == [], out
+    assert out[0].startswith("  Here is the list")
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "see env_01ABCDEFGHsk-QWERTYUIOPASDFGH done",  # an open-tail id seeds the screen
+        "see env_ABCDEFsk-QWERTYUIOPASDFGH done",  # an anchored id seeds both paths
+        "see session_abcdefglpat-QWERTYUIOPASDFGH done",
+        "see env_abcdebearer tokenQWERTYUIOPASDF done",
+    ],
+)
+def test_a_secret_that_starts_inside_a_masked_id_masks_on_both_paths(line):
+    # #1615 review: an id is a masked token too, so a secret that starts inside it and runs past
+    # its end is masked on both paths. Dropping the id seeds leaves `QWERTYUIOP` showing.
+    for path, out in _paths_1615(line).items():
+        assert "QWERTYUIOP" not in out and out.endswith(" done"), (path, out)
+
+
 def test_pty_frame_masks_every_secret_of_a_welded_mixed_chain():
     # #1615 through the real surface: pyte wraps a long mixed chain across a 40 x 120 screen, and
     # the frame is what the WebSocket sends.

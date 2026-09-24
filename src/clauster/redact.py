@@ -812,15 +812,18 @@ def _screen_spans(text: str) -> list[tuple[int, int, str]]:
     return spans
 
 
-def _screen_open_tail_spans(text: str) -> list[tuple[int, int, str]]:
+def _screen_open_tail_spans(text: str, *, cuts: tuple[int, ...]) -> list[tuple[int, int, str]]:
     """Return the open-tail spans in ``text``: tokens with no trailing boundary (#1508).
 
-    The spans are :data:`_SCREEN_OPEN_TAIL_ID_RE` and :func:`_open_spans` seeded with it: every
-    UUID wherever it appears, and every secret that starts at a word boundary or inside a
-    masked token, so each secret of a welded chain masks (#1615). A token welded to the word
-    after it (``<UUID>zz``) has no trailing boundary, so the anchored mask never matches it. It
-    used to mask only when the caller's width-refit trim happened to cut the following word
-    away, so whether it showed depended on how long the rest of the row rendered.
+    The spans are :data:`_SCREEN_OPEN_TAIL_ID_RE` and :func:`_open_spans`, seeded with those ids
+    and the anchored ``_ID_RE`` matches: every UUID wherever it appears, and every secret that
+    starts at a word boundary, at a soft-wrap seam in ``cuts``, or inside a masked token, so
+    each secret of a welded chain masks (#1615). A seam counts because the soft-wrap view joins
+    the rows with nothing between them: a chain the TUI moved onto its own rows is welded onto
+    the last word of the row above. A token welded to the word after it (``<UUID>zz``) has no
+    trailing boundary, so the anchored mask never matches it. It used to mask only when the
+    caller's width-refit trim happened to cut the following word away, so whether it showed
+    depended on how long the rest of the row rendered.
 
     These are scanned ONCE over the unmasked text and unioned at render; they never feed a
     fixed point. A greedy open-tail match runs over the prefix of the next token in a welded
@@ -829,7 +832,8 @@ def _screen_open_tail_spans(text: str) -> list[tuple[int, int, str]]:
     chain from its end, and the chain would show.
     """
     ids = [m.span(1) for m in _SCREEN_OPEN_TAIL_ID_RE.finditer(text)]
-    return [(s, e, _REDACTED) for s, e in ids + _open_spans(text, (), ids)]
+    seeds = ids + [m.span() for m in _ID_RE.finditer(text)]
+    return [(s, e, _REDACTED) for s, e in ids + _open_spans(text, cuts, seeds)]
 
 
 def _fixed_point_coverage(
@@ -982,7 +986,7 @@ def _redact_screen_row(row: str) -> str:
         masked = again
     else:  # still masking at the cap: a crafted chain, so fail closed (#1612)
         return _render_coverage(row, _fail_closed(row))
-    tail = _screen_open_tail_spans(row)
+    tail = _screen_open_tail_spans(row, cuts=())
     if not tail:
         return masked
     # The NUL-probe fixed point covers the same cells as the rewrite loop above: no core can
@@ -1210,7 +1214,7 @@ def redact_wrapped_screen_rows(
     # `_screen_open_tail_spans`), over each row, each hard run and each soft-wrap view below.
     tail_cov = bytearray(n)
     for lo, hi in bounds + hard_runs:
-        for s, e, _ in _screen_open_tail_spans(joined[lo:hi]):
+        for s, e, _ in _screen_open_tail_spans(joined[lo:hi], cuts=()):
             tail_cov[lo + s : lo + e] = b"\x01" * (e - s)
 
     # The logical line across a soft wrap (#1508), projected back onto the same cells.
@@ -1224,7 +1228,7 @@ def redact_wrapped_screen_rows(
             scan = functools.partial(_screen_seam_spans, cuts=cuts)
             # Fails closed: a view that does not settle is masked whole, rather than stop masking.
             cov = _capped_coverage(text, [(0, len(text))], scan, max_scans=_SEAM_MAX_SCANS)
-            for s, e, _ in _screen_open_tail_spans(text):
+            for s, e, _ in _screen_open_tail_spans(text, cuts=cuts):
                 cov[s:e] = b"\x01" * (e - s)
             for i, cell in enumerate(cells):
                 if cov[i] and cell >= 0:
