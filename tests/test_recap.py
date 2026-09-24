@@ -396,12 +396,14 @@ def test_installer_preserves_existing_hooks(tmp_path: Path) -> None:
         pytest.param(b"not valid json {{{", ValueError, id="malformed"),
         pytest.param(b"\xff\xfe\x00not utf-8", ValueError, id="non-utf8"),
         pytest.param(b'{"n": ' + b"1" * 5000 + b"}", ValueError, id="oversized-int"),
-        pytest.param(b"[" * 100_000, RecursionError, id="deeply-nested"),
+        # RecursionError, or a JSONDecodeError on Python 3.14 when the stack rlimit is above
+        # 8 MB: 3.14 bounds the scanner by real stack use, so all 100,000 levels can fit.
+        pytest.param(b"[" * 100_000, (RecursionError, ValueError), id="deeply-nested"),
         pytest.param(json.dumps(["not", "an", "object"]).encode(), ValueError, id="non-object"),
     ],
 )
 def test_installer_never_writes_over_an_unparseable_settings_file(
-    tmp_path: Path, content: bytes, error: type[Exception]
+    tmp_path: Path, content: bytes, error: type[Exception] | tuple[type[Exception], ...]
 ) -> None:
     # settings.json is the user's file. Degrading any of these to {} used to replace the
     # whole file with just the hook block, dropping every other setting. Now the installer
