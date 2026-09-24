@@ -384,7 +384,9 @@ needs a word boundary before it, or the position of a removed escape. So
 written with no separator, for example `x env_01<a>session_01<b> y`. The mask
 covers the whole run of letters and digits after `01`, because nothing marks
 where the identifier ends. A word written directly after the identifier, with
-no separator, is therefore masked with it. On the streamed log and the on-disk
+no separator, is therefore masked with it. The masked identifier shows as the
+neutral `<redacted>` token, without its readable `env_`, `session_` or `cse_`
+marker. On the streamed log and the on-disk
 mirror, a second identifier joined to the first by `_`
 (`x env_01<a>_session_01<b>`) has no word boundary before it, so it stays
 visible. The live pty-screen view masks it.
