@@ -408,13 +408,15 @@ def test_redact_screen_text_masks_a_uuid_welded_onto_a_second_uuid_after_a_secre
     assert "-1234-" not in out and "123456789abc" not in out, out
 
 
-def test_redact_screen_text_leaves_a_uuid_welded_onto_a_plain_word_as_residue():
-    # Scope boundary for #1496, mirroring the surface's welded-secret / non-`01`-id residue: the
-    # fix keys on a real SECRET shape eating the head. A UUID welded onto an ORDINARY word (no
-    # secret, no cut) stays residue exactly as before -- masking it would need unanchoring UUID
-    # everywhere and would eat ordinary hex compounds.
+def test_redact_screen_text_masks_a_uuid_welded_onto_a_plain_word():
+    # Was residue for #1496; #1615 closes it. A UUID welded onto an ORDINARY word (no secret, no
+    # cut) is masked: the UUID shape is now masked wherever it appears, on both paths. The words
+    # that must stay readable are in test_redaction_keeps_ordinary_text_readable_on_both_paths.
     row = "commit" + _UUID_1496  # `commit` is not a secret shape
-    assert redact.redact_screen_text([row]) == [row]
+    assert redact.redact_screen_text([row]) == ["commit<redacted>"]
+    assert redact.sanitize_line(row) == "commit<redacted>"
+    # Positive control: the anchored pipeline (main's log path for this line) leaves it bare.
+    assert redact.redact_secrets(redact.redact_ids(row)) == row
 
 
 def test_redact_wrapped_rows_masks_a_uuid_a_greedy_secret_ate_across_the_wrap():
@@ -1461,3 +1463,372 @@ def test_reach_skip_never_masks_less_than_anchoring_at_every_cut(seed):
     ]
     line = "".join(rng.choice(esc) + rng.choice(tok) for _ in range(rng.randint(3, 9)))
     _never_masks_less(line)
+
+
+# --- #1615: every secret of a welded chain, and a UUID welded onto the word before it ---------
+
+_KINDS_1615 = [
+    "ghp",
+    "gho",
+    "github_pat",
+    "glpat",
+    "akia",
+    "sk",
+    "xoxb",
+    "clauster_pat",
+    "bearer",
+    "Bearer",
+]
+
+
+def _secret_1615(kind: str, i: int) -> str:
+    # One real-shaped secret per core. Its `K<index>Z` marker sits in exactly one element of a
+    # chain and in no mask token, so a leak is counted per secret, not per repeated string.
+    body = f"K{i:05d}" + "Z" * 14  # 20 characters: no open tail needs more
+    return {
+        "ghp": "ghp_" + body,
+        "gho": "gho_" + body,
+        "github_pat": "github_pat_" + body,
+        "glpat": "glpat-" + body,
+        "akia": "AKIA" + body[:16],  # the fixed count
+        "sk": "sk-" + body,
+        "xoxb": "xoxb-" + body,
+        "clauster_pat": "clauster_pat_" + body,
+        "bearer": "bearer " + body,
+        "Bearer": "Bearer " + body,
+    }[kind]
+
+
+def _leaks_1615(n: int, shown: str) -> list[int]:
+    return [i for i in range(n) if f"K{i:05d}Z" in shown]
+
+
+def _paths_1615(line: str) -> dict[str, str]:
+    return {
+        "sanitize_line": redact.sanitize_line(line),
+        "redact_for_disk": redact.redact_for_disk(line),
+        "screen": redact.redact_screen_text([line])[0],
+    }
+
+
+@pytest.mark.parametrize("after", [" done", "", "_x", "é"])
+@pytest.mark.parametrize("n", [2, 3, 40])
+@pytest.mark.parametrize("kind", _KINDS_1615)
+def test_every_secret_of_a_welded_same_kind_chain_masks_on_both_paths(kind, n, after):
+    # #1615, safety invariant 4. A secret welded onto another of its kind: `ghp_<a>ghp_<b>` reads
+    # as `ghp_<a>ghp` up to the next `_`, `AKIA<a>AKIA<b>` as two fixed-length keys end to end,
+    # `bearer <a>bearer <b>` as `bearer <a>bearer` up to the space. A plain scan resumed after
+    # the first match and never saw the second. Every secret must mask, on the log path and on
+    # the screen, whatever follows the chain (a boundary, nothing, a word char, a non-ASCII one).
+    line = "tok " + "".join(_secret_1615(kind, i) for i in range(n)) + after
+    for path, out in _paths_1615(line).items():
+        assert _leaks_1615(n, out) == [], (path, out)
+        assert out.startswith("tok "), (path, out)
+        assert after != " done" or out.endswith(" done"), (path, out)
+
+
+@pytest.mark.parametrize("kind", ["ghp", "gho", "akia", "bearer", "Bearer"])
+def test_a_welded_chain_leaks_through_the_anchored_pipeline(kind):
+    # Positive control for the test above. Main's log path for a line with no escape is exactly
+    # this sequential anchored pipeline, and it shows the second secret (#1615). The other kinds
+    # carry their own prefix inside their class, so a chain of them is one match already.
+    line = "tok " + _secret_1615(kind, 0) + _secret_1615(kind, 1) + " done"
+    assert "K00001Z" in redact.redact_secrets(redact.redact_ids(line))
+
+
+@pytest.mark.parametrize("n", [2, 3, 40])
+@pytest.mark.parametrize("first", range(len(_KINDS_1615)))
+def test_every_secret_of_a_welded_mixed_chain_masks_on_both_paths(first, n):
+    # #1615: the same weld across kinds, in every rotation. A key after a token, a token after a
+    # key, a `bearer` header after a GitHub token and so on.
+    kinds = [_KINDS_1615[(first + i) % len(_KINDS_1615)] for i in range(n)]
+    line = "tok " + "".join(_secret_1615(kind, i) for i, kind in enumerate(kinds)) + " done"
+    for path, out in _paths_1615(line).items():
+        assert _leaks_1615(n, out) == [], (path, kinds, out)
+        assert out.startswith("tok ") and out.endswith(" done"), (path, out)
+
+
+@pytest.mark.parametrize("kind", _KINDS_1615)
+def test_a_secret_welded_onto_a_masked_uuid_masks_on_both_paths(kind):
+    # A masked token of another shape is a place a mask may start too: `<UUID>ghp_<a>`.
+    line = f"id {_UUID_1508}{_secret_1615(kind, 0)}{_secret_1615(kind, 1)} done"
+    for path, out in _paths_1615(line).items():
+        assert _leaks_1615(2, out) == [] and "686b9d" not in out, (path, out)
+
+
+@pytest.mark.parametrize("kind", _KINDS_1615)
+def test_a_welded_chain_masks_across_escapes_on_the_log_path(kind):
+    # The log path's own weld signal: an escape between the secrets, and around the chain. With
+    # colour kept, the colored line shows the chain, so the line falls back to the masked form.
+    chain = "\x1b[1m".join(_secret_1615(kind, i) for i in range(3))
+    line = f"tok\x1b[31m{chain}\x1b[0m_x done"
+    for out in (redact.sanitize_line(line), redact.sanitize_line(line, strip_ansi_seq=False)):
+        assert _leaks_1615(3, out) == [] and "\x1b" not in out, out
+
+
+@pytest.mark.parametrize("kind", _KINDS_1615)
+def test_a_welded_chain_masks_at_a_row_end_and_across_hard_and_soft_wraps(kind):
+    # #1615 on the screen surface: the chain at the very end of a row, hard-wrapped by pyte at
+    # several widths (so the seams fall inside and between secrets), and soft-wrapped by the TUI
+    # with a hanging indent and trailing padding.
+    n = 12
+    chain = "".join(_secret_1615(kind, i) for i in range(n))
+    assert _leaks_1615(n, redact.redact_screen_text(["see " + chain])[0]) == []
+    text = "see " + chain + "_x"
+    for width in (19, 20, 37, 120):
+        rows = [text[i : i + width] for i in range(0, len(text), width)]
+        seams = len(rows) - 1
+        hard = redact.redact_wrapped_screen_rows(
+            rows, hard_seams=[True] * seams, soft_seams=[False] * seams
+        )
+        assert _leaks_1615(n, "".join(hard)) == [], (width, hard)
+        soft_rows = ["  " + row + "   " for row in rows]
+        soft = redact.redact_wrapped_screen_rows(
+            soft_rows, hard_seams=[False] * seams, soft_seams=[True] * seams
+        )
+        assert _leaks_1615(n, "".join(soft)) == [], (width, soft)
+        assert len(hard) == len(soft) == len(rows)
+
+
+def test_pty_frame_masks_every_secret_of_a_welded_mixed_chain():
+    # #1615 through the real surface: pyte wraps a long mixed chain across a 40 x 120 screen, and
+    # the frame is what the WebSocket sends.
+    from clauster.pty_screen import PtyScreen
+
+    n = 150
+    chain = "".join(_secret_1615(_KINDS_1615[i % len(_KINDS_1615)], i) for i in range(n))
+    scr = PtyScreen(cols=120, rows=40)
+    scr.feed(("see " + chain + "_x").encode())
+    assert _leaks_1615(n, "".join(scr.frame()["rows"])) == []
+
+
+@pytest.mark.parametrize("after", [" done", "zz", ""])
+@pytest.mark.parametrize("word", ["run_", "agent", "id=x", "commit", "0x"])
+@pytest.mark.parametrize("n", [1, 2, 3])
+def test_a_uuid_welded_onto_the_word_before_it_masks_on_both_paths(word, n, after):
+    # #1615: `run_<UUID>` (and a chain of UUIDs after the word) showed on both paths, because the
+    # UUID mask needed a word boundary before its first hex digit. A UUID is now masked wherever
+    # it appears.
+    uuids = [f"12345678-f7c9-1523-d2a2-686b9d96c4{i:02d}" for i in range(n)]
+    line = "id " + word + "".join(uuids) + after
+    for path, out in _paths_1615(line).items():
+        assert "686b9d" not in out and "f7c9" not in out, (path, out)
+        assert out.startswith("id " + word) and out.endswith(after), (path, out)
+    # Positive control: the anchored pipeline (main's log path for this line) shows the UUID.
+    assert "686b9d" in redact.redact_secrets(redact.redact_ids(line))
+
+
+def test_a_bearer_header_inside_the_value_of_the_one_before_masks_on_both_paths():
+    # `.` is in the bearer value class, so the first header's value runs on through the second
+    # `bearer` and stops at its space. The second header starts at a word boundary, but inside
+    # the first match, so a plain scan never tried it and its value showed (#1615).
+    line = "h bearer " + "A" * 12 + ".bearer " + "B" * 12 + " done"
+    for path, out in _paths_1615(line).items():
+        assert "BBBB" not in out and out.endswith(" done"), (path, out)
+    assert "B" * 12 in redact.redact_secrets(redact.redact_ids(line))  # the leak on main
+
+
+def test_a_key_that_starts_inside_the_key_before_it_masks_on_both_paths():
+    # `AKIAKIA...`: the second key's `AKIA` starts inside the first key's own prefix, so only a
+    # walk that resumes one character after each START finds it. Its last three characters sit
+    # past the first key's fixed end.
+    line = "key AKIAKIA" + "B" * 13 + "XYZ done"
+    for path, out in _paths_1615(line).items():
+        assert "XYZ" not in out and "BBB" not in out, (path, out)
+        assert out.startswith("key ") and out.endswith(" done"), (path, out)
+
+
+@pytest.mark.parametrize("kind", _KINDS_1615)
+def test_a_secret_at_an_escape_with_no_end_boundary_masks_on_the_log_path(kind):
+    # The log path's cut is a place a mask may start (#1379), and the secret needs no trailing
+    # boundary (#1615): here a word character follows it and no escape ends it, so no other
+    # span source can end the mask.
+    line = f"x\x1b[m{_secret_1615(kind, 0)}é done"
+    for out in (redact.sanitize_line(line), redact.redact_for_disk(line)):
+        assert _leaks_1615(1, out) == [] and out.endswith("é done"), out
+
+
+def test_two_uuids_that_share_hex_digits_both_mask_on_both_paths():
+    # A second UUID that starts inside the first one's last group. The welded-UUID helper names
+    # this gap for its own non-overlapping scan; the every-start UUID scan closes it on both paths.
+    line = "x aaaaaaaa-bbbb-cccc-dddd-abcd2d783407-cd32-4951-bba5-47fd9b82b8dc y"
+    for path, out in _paths_1615(line).items():
+        assert "cd32" not in out and "47fd9b" not in out, (path, out)
+        assert out.startswith("x ") and out.endswith(" y"), (path, out)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "set session_timeout_ms = 3",
+        "resolve_session_transcript ran",
+        "env_production_db and cse_worker_pool",
+        "risk-assessment-checklist",
+        "feat/task-queue-retry-backoff",
+        "the bearer of bad news",
+        "bearer_token_name = 'x'",
+        "run_12345678 finished",
+        "build-2024-01-01-1234 ok",
+        "sha256:" + "ab" * 32,
+        "v1.2.3-4-gdeadbee",
+        "trace 12345678-1234-1234-1234 no last group",
+        "tok ghp_tooshort here",
+        "AKIA123 is too short",
+    ],
+)
+def test_redaction_keeps_ordinary_text_readable_on_both_paths(text):
+    # #1615 readability controls: masking a UUID wherever it appears, and a secret that starts
+    # inside a masked token, must not touch ordinary identifiers, hyphenated words, hashes or
+    # near-miss shapes.
+    for path, out in _paths_1615(text).items():
+        assert out == text, (path, out)
+
+
+def test_a_secret_welded_onto_an_ordinary_word_stays_documented_residue():
+    # #1615 keeps this residue on both paths: nothing marks where `agent` ends and the token
+    # starts, and unanchoring the secret cores would mask inside ordinary hyphenated words.
+    line = "agentghp_" + "A" * 20 + " done"
+    for path, out in _paths_1615(line).items():
+        assert out == line, path
+
+
+def test_secret_candidates_are_every_start_of_every_core():
+    # The every-start walk, against brute force: each core matched at each position. The
+    # positive control is a plain `finditer`, which resumes after each match and must miss
+    # overlapping starts on this corpus.
+    rnd = random.Random(1615)  # noqa: S311 -- assembling test fixtures, not crypto
+    frags = [
+        "ghp_", "gho_", "github_pat_", "glpat-", "AKIA", "AKI", "sk-", "xoxb-", "xox",
+        "clauster_pat_", "bearer ", "Bearer\t", "bearer", "A" * 8, "Z" * 5, "0123", "_", "-",
+        ".", " ", "é",
+    ]  # fmt: skip
+    cores = [re.compile(core, flags) for core, flags in redact._SECRET_CORES]
+    missed = 0
+    for _ in range(3000):
+        text = "".join(rnd.choice(frags) for _ in range(rnd.randint(1, 14)))
+        want = sorted(
+            hit.span()
+            for rx in cores
+            for q in range(len(text))
+            if (hit := rx.match(text, q)) is not None
+        )
+        assert redact._secret_candidates(text) == want, text
+        missed += sorted(m.span() for rx in cores for m in rx.finditer(text)) != want
+    assert missed > 100
+
+
+def test_a_run_of_self_chaining_secrets_is_read_once(monkeypatch):
+    # `("sk-" + "A" * 16) * n` has n starts in one class run. The first reads the run; the rest
+    # take its end instead of reading it again, which keeps the walk linear. Positive control:
+    # with the reuse switched off, the same run is read n times.
+    calls: list[int] = []
+
+    class Counting:
+        def __init__(self, rx: re.Pattern[str]) -> None:
+            self.rx = rx
+
+        def match(self, text: str, pos: int) -> re.Match[str] | None:
+            calls.append(pos)
+            return self.rx.match(text, pos)
+
+    real = redact._SECRET_STARTS
+    text = ("sk-" + "A" * 16) * 2000
+    monkeypatch.setattr(
+        redact, "_SECRET_STARTS", tuple(s._replace(opened=Counting(s.opened)) for s in real)
+    )
+    found = redact._secret_candidates(text)
+    assert len(found) == 2000 and len(calls) == 1
+    calls.clear()
+    monkeypatch.setattr(
+        redact,
+        "_SECRET_STARTS",
+        tuple(s._replace(opened=Counting(s.opened), single_run=False) for s in real),
+    )
+    assert redact._secret_candidates(text) == found and len(calls) == 2000
+
+
+def test_open_spans_come_back_merged():
+    # Every start of a self-chaining run is its own span to the end of the run. Handed on
+    # unmerged, each coverage test would read the whole run again.
+    text = ("sk-" + "A" * 16) * 2000
+    assert redact._open_spans(text, (), []) == [(0, len(text))]
+    assert redact._merged([(5, 9), (0, 3), (3, 4), (6, 7)]) == [(0, 4), (5, 9)]
+
+
+@pytest.mark.parametrize(
+    "unit",
+    [
+        *(_secret_1615(kind, 7) for kind in _KINDS_1615),
+        _UUID_1508,
+        "aaaaaaaa-bbbb-cccc-dddd-",
+        "\x01sk-" + "A" * 16,
+        "\x01ghp_" + "A" * 16,
+        "".join(_secret_1615(kind, 3) for kind in _KINDS_1615),
+    ],
+)
+def test_a_long_welded_chain_stays_linear(unit):
+    # #1615. `redact_for_disk` is handed a whole bridge log (10 MB by default), so a chain of
+    # welded secrets or UUIDs must cost linear time. About 0.15 s for this N; the bound catches
+    # a quadratic walk without tripping the suite-wide timeout.
+    hostile = unit * (400_000 // len(unit))
+    start = time.monotonic()
+    redact.sanitize_line(hostile)
+    redact.redact_screen_text([hostile[:4800]])
+    assert time.monotonic() - start < 5.0
+
+
+def test_secret_start_rejects_a_core_without_a_counted_class_tail():
+    # A future core the every-start walk cannot split fails at import, not silently.
+    with pytest.raises(ValueError, match="counted character class"):
+        redact._secret_start(r"tok_\w+", 0, re.compile(r"tok_\w+"))
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "[bridge:init] bridgeId=2d783407-cd32-4951-bba5-47fd9b82b8dc machine=claude-code",
+        f"a {_UUID_1508} b {_UUID_1508}",
+        f"run_{_UUID_1508}",
+        f"{_UUID_1508}zz",
+        f"x aaaaaaaa-bbbb-cccc-dddd-abcd{_UUID_1508}",
+        f"tok {_secret_1615('ghp', 0)} {_UUID_1508}",
+        f"tok {_secret_1615('ghp', 0)}{_UUID_1508}",
+        f"{_secret_1615('bearer', 0)}.bearer {'B' * 12} done",
+        "plain words only",
+    ],
+)
+def test_the_fast_path_check_agrees_with_the_anchored_union(line):
+    # `_welds_past_the_anchors` skips the second run of the anchored masks for a line with no
+    # secret shape: a UUID with a `\b` on both sides is exactly an anchored UUID match. It must
+    # answer as the full comparison against every anchored mask does.
+    anchored = [m.span() for mask in redact._MASKS for m in mask[0].finditer(line)]
+    covered = bytearray(len(line))
+    for s, e in anchored:
+        covered[s:e] = b"\x01" * (e - s)
+    full = any(covered.find(0, s, e) >= 0 for s, e in redact._open_spans(line, (), anchored))
+    assert redact._welds_past_the_anchors(line) is full
+    if not full:  # the old path, byte for byte
+        assert redact.sanitize_line(line) == redact.redact_secrets(redact.redact_ids(line))
+
+
+def test_the_fast_path_check_agrees_with_the_anchored_union_over_a_corpus():
+    # The same agreement over random escape-free lines built from ids, UUIDs, UUID fragments,
+    # secrets and separators. Both answers must occur, or the corpus proves nothing.
+    rnd = random.Random(16150)  # noqa: S311 -- assembling test fixtures, not crypto
+    frags = [
+        _UUID_1508, _UUID_1508[:20], _UUID_1508[20:], "aaaaaaaa-bbbb-cccc-dddd-", "abcd", "run_",
+        "env_01AAAAAAAA", "session_", "ghp_", "AKIA", "B" * 16, "bearer ", "sk-", "-", "_",
+        " ", ".", "zz", "é", "done",
+    ]  # fmt: skip
+    seen = set()
+    for _ in range(3000):
+        line = "".join(rnd.choice(frags) for _ in range(rnd.randint(1, 10)))
+        anchored = [m.span() for mask in redact._MASKS for m in mask[0].finditer(line)]
+        covered = bytearray(len(line))
+        for s, e in anchored:
+            covered[s:e] = b"\x01" * (e - s)
+        spans = redact._open_spans(line, (), anchored)
+        full = any(covered.find(0, s, e) >= 0 for s, e in spans)
+        assert redact._welds_past_the_anchors(line) is full, line
+        seen.add(full)
+    assert seen == {True, False}

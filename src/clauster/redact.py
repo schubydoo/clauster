@@ -11,7 +11,7 @@ from __future__ import annotations
 import bisect
 import functools
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import NamedTuple
 
 # CSI / escape sequences (colors, cursor moves, and the C1 string sequences OSC / DCS /
@@ -193,6 +193,173 @@ _INVISIBLE_RE = re.compile(_INVISIBLE_PATTERN)
 _BOUNDARY_RE = re.compile(r"\b")
 
 _REDACTED = "<redacted>"
+
+#: The tail every secret core ends in: one character class with a ``{n}`` or ``{n,}`` count.
+#: :func:`_secret_start` cuts a core there into its literal prefix and that tail.
+_CORE_TAIL_RE = re.compile(r"\[[^\]]+\]\{(\d+),?\}\Z")
+
+
+class _SecretStart(NamedTuple):
+    """One secret core, set up so :func:`_secret_candidates` finds a match at EVERY start."""
+
+    prefix: re.Pattern[str]  #: the core up to its class tail: ``ghp_``, ``bearer\s+``
+    opened: re.Pattern[str]  #: the whole core with no ``\b`` on either end
+    single_run: bool  #: see :func:`_is_single_class_run`
+    tail_min: int  #: the ``n`` of the tail's count
+
+
+def _secret_start(core: str, flags: int, opened: re.Pattern[str]) -> _SecretStart:
+    """Split ``core`` into its prefix and its counted class tail, for :data:`_SECRET_STARTS`.
+
+    Raise :class:`ValueError` at import for a core of any other shape, so a new core cannot
+    slip past the every-start scan unnoticed.
+    """
+    tail = _CORE_TAIL_RE.search(core)
+    if tail is None:
+        raise ValueError(f"secret core {core!r} does not end in one counted character class")
+    prefix = re.compile(core[: tail.start()], flags)
+    return _SecretStart(prefix, opened, _is_single_class_run(core), int(tail.group(1)))
+
+
+#: Every secret core, in :data:`_SECRET_CORES` order. ``opened`` is reused from :data:`_MASKS`,
+#: so it stays inside the anti-drift guard rather than becoming another compile of the core.
+_SECRET_STARTS = tuple(
+    _secret_start(core, flags, mask[1])
+    for (core, flags), mask in zip(_SECRET_CORES, _MASKS[2:], strict=True)
+)
+
+
+def _every_start(rx: re.Pattern[str], text: str) -> Iterator[re.Match[str]]:
+    """Yield the match of ``rx`` at every start in ``text``, overlapping ones included.
+
+    ``finditer`` resumes after each match, so it skips a match that starts inside the one
+    before it. Resuming one character after each START finds those too. Every pattern this
+    walks begins with a literal or a fixed-length shape, so the search stays fast.
+    """
+    hit = rx.search(text)
+    while hit is not None:
+        yield hit
+        hit = rx.search(text, hit.start() + 1)
+
+
+def _uuid_spans(text: str) -> list[tuple[int, int]]:
+    r"""Return every UUID in ``text``, at every start, with no ``\b`` on either end (#1615).
+
+    A UUID is masked wherever it appears: welded onto the word before it (``run_<UUID>``), onto
+    the word after it, or onto another UUID, overlapping ones included. The 8-4-4-4-12 hex shape
+    with its four hyphens is distinctive enough that no ordinary word matches it. It is
+    fixed-length, so the walk is linear: each start reads at most 36 characters.
+    """
+    return [hit.span() for hit in _every_start(_MASKS[1][1], text)]
+
+
+def _secret_candidates(text: str) -> list[tuple[int, int]]:
+    """Return every match of every secret core in ``text``, overlapping ones included, sorted.
+
+    A plain ``finditer`` resumes after each match, so it skips a token that starts INSIDE the
+    one before it. That is the welded chain (#1615): ``ghp_<a>ghp_<b>`` reads as ``ghp_<a>ghp``
+    up to the next ``_``, ``AKIA<a>AKIA<b>`` as two fixed-length keys end to end, and
+    ``bearer <a>bearer <b>`` as ``bearer <a>bearer`` up to the space. Each prefix is found at
+    every start (:func:`_every_start`) and the core is matched there on its own.
+
+    The cost stays linear. A core whose prefix leaves its class run (the ``_`` of ``ghp_``, the
+    space of ``bearer``) or that has a fixed length (``AKIA``) cannot start two matches in one
+    run, so each run is read once. A :func:`_is_single_class_run` core whose prefix is inside
+    its own class (``sk-``, ``xoxb-``) CAN: ``("sk-" + "A" * 16) * n`` has ``n`` starts in one
+    run. A start whose prefix ends inside the run the last match of that core read ends where
+    that match ended, so its end is taken from there and the run is not read again.
+    """
+    found: list[tuple[int, int]] = []
+    for secret in _SECRET_STARTS:
+        run_lo = run_hi = -1  # the class run the last single-run match read
+        for start in _every_start(secret.prefix, text):
+            q, body = start.span()
+            if secret.single_run and run_lo <= body <= run_hi:
+                if run_hi - body >= secret.tail_min:
+                    found.append((q, run_hi))
+                continue
+            hit = secret.opened.match(text, q)
+            if hit is None:
+                continue
+            found.append(hit.span())
+            if secret.single_run:
+                run_lo, run_hi = body, hit.end()
+    found.sort()
+    return found
+
+
+def _open_spans(
+    text: str, cuts: tuple[int, ...], seeds: list[tuple[int, int]]
+) -> list[tuple[int, int]]:
+    r"""Return every UUID in ``text``, and every secret that starts where a mask may start.
+
+    Both paths union these with their other spans (#1615). A secret here has no trailing ``\b``,
+    so one welded to the word after it (``ghp_<a>_x``) masks too. It is kept when its start is:
+
+    * a word boundary, as for the anchored mask,
+    * a position in ``cuts``, where a removed escape stood (the log path's #1379 signal), or
+    * inside, or right at the end of, a span in ``seeds`` or one kept before it. That is a
+      token welded onto a masked token: the second secret of ``ghp_<a>ghp_<b>``, a key after
+      a UUID. A kept secret is a span for the next one, so a whole chain masks in one pass.
+
+    A secret welded onto an ordinary word (``agentghp_<a>``) has none of these and stays
+    visible, the residue both paths document.
+
+    The spans come back MERGED, sorted and disjoint. Every start of ``("sk-" + "A" * 16) * n``
+    is its own span to the end of the run, so unmerged, a coverage test per span
+    (:func:`_apply_spans`, :func:`_welds_past_the_anchors`) would read the run ``n`` times.
+    """
+    uuids = _uuid_spans(text)
+    candidates = _secret_candidates(text)
+    if not candidates:
+        return _merged(uuids)
+    masked = sorted(seeds + uuids)
+    at_cut = frozenset(cuts)
+    kept: list[tuple[int, int]] = []
+    reach = -1  # the furthest end of a masked or kept span that starts before `q`
+    i = k = 0
+    for q, end in candidates:
+        while i < len(masked) and masked[i][0] < q:
+            reach = max(reach, masked[i][1])
+            i += 1
+        while k < len(kept) and kept[k][0] < q:
+            reach = max(reach, kept[k][1])
+            k += 1
+        if q <= reach or q in at_cut or _BOUNDARY_RE.match(text, q):
+            kept.append((q, end))
+    return _merged(uuids + kept)
+
+
+def _merged(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Return the union of ``spans`` as sorted, disjoint spans; touching ones are joined."""
+    out: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if out and start <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], end))
+        else:
+            out.append((start, end))
+    return out
+
+
+def _welds_past_the_anchors(text: str) -> bool:
+    r"""Report whether :func:`_open_spans` masks a character the anchored masks leave in ``text``.
+
+    Only then does an escape-free line leave :func:`_sanitize`'s old sequential path. With no
+    secret shape in the line, only the UUIDs are left to compare: a UUID with a ``\b`` on both
+    sides is exactly an anchored ``_UUID_RE`` match, because two UUIDs that both start at a
+    ``\b`` cannot overlap. So a line of ordinary bridge output, UUIDs included, does not pay
+    for a second run of the anchored masks.
+    """
+    if not _secret_candidates(text):
+        return not all(
+            _BOUNDARY_RE.match(text, start) and _BOUNDARY_RE.match(text, end)
+            for start, end in _uuid_spans(text)
+        )
+    anchored = [m.span() for mask in _MASKS for m in mask[0].finditer(text)]
+    covered = bytearray(len(text))
+    for start, end in anchored:
+        covered[start:end] = b"\x01" * (end - start)
+    return any(covered.find(0, s, e) >= 0 for s, e in _open_spans(text, (), anchored))
 
 
 def strip_ansi(text: str) -> str:
@@ -451,8 +618,14 @@ def _sanitize(text: str) -> str:
     #. the same masks over ``stripped``, mapped across -- byte-for-byte the view every
        earlier release masked, so nothing that was masked before can stop being.
 
-    A line with no escapes and no invisible controls skips all of it and takes the old path
-    verbatim, so the change costs two ``search`` calls there and nothing else.
+    A fifth source, :func:`_open_spans`, adds every UUID wherever it appears and every secret
+    whose start is a word boundary, a cut, or inside a masked token, with no trailing ``\b``
+    (#1615). That masks each secret of a welded chain (``ghp_<a>ghp_<b>``, ``AKIA<a>AKIA<b>``,
+    ``bearer <a>bearer <b>``) and a UUID welded onto the word before it (``run_<UUID>``).
+
+    A line with no escapes and no invisible controls takes the old path verbatim unless the
+    fifth source masks a character the anchored masks leave (:func:`_welds_past_the_anchors`),
+    so an ordinary line costs a few ``search`` calls and nothing else.
 
     KNOWN RESIDUE (by design, #1379): an identifier whose start in ``visible`` is neither a
     word boundary nor a cut stays visible -- one an attacker wrote with the preceding
@@ -460,10 +633,12 @@ def _sanitize(text: str) -> str:
     it means already controlling the line, and an attacker who can print arbitrary text
     beside an identifier has no need to smuggle it past the mask. The escape-weld case is
     the one that matters, because there clauster's OWN bridge prints the identifier and the
-    injected escape only deletes the boundary.
+    injected escape only deletes the boundary. The same holds for a secret welded onto an
+    ordinary word (``agentghp_<a>``); one welded onto a masked token is not residue.
     """
     if _ANSI_RE.search(text) is None and _INVISIBLE_RE.search(text) is None:
-        return redact_secrets(redact_ids(text))
+        if not _welds_past_the_anchors(text):
+            return redact_secrets(redact_ids(text))
     stripped, visible, cuts, invisible = _views(text)
     spans: list[tuple[int, int, str]] = []
     for anchored, opened, closed, keeps_prefix, single_run in _MASKS:
@@ -478,6 +653,8 @@ def _sanitize(text: str) -> str:
             )
             for m in anchored.finditer(stripped)
         ]
+    seeds = [(start, end) for start, end, _ in spans]
+    spans += [(start, end, _REDACTED) for start, end in _open_spans(visible, cuts, seeds)]
     return _apply_spans(visible, spans)
 
 
@@ -541,21 +718,8 @@ def redact_for_disk(text: str) -> str:
 #: after the prefix, then eight or more characters -- keeps ordinary names like
 #: ``resolve_session_transcript`` and ``venv_project1`` readable. The anchored ``_ID_RE`` still
 #: masks a standalone id of any shape; RESIDUE: a welded id that lacks the ``01`` shape is not
-#: caught, and (see :func:`_redact_screen_row`) neither is a secret welded onto the word before.
+#: caught, and (see :func:`_redact_screen_row`) neither is a secret welded onto an ordinary word.
 _SCREEN_GLUED_ID_RE = re.compile(r"(env|session|cse)_01[A-Za-z0-9]{8,}\b")
-
-#: The UUID and every secret shape with a leading ``\b`` and NO trailing one, for the screen
-#: surface only (#1508). A UUID, key or token welded to the word after it (``<UUID>zz``) has no
-#: trailing boundary, so the anchored mask never matches it. It used to mask only when the
-#: caller's width-refit trim happened to cut the following word away, so whether it showed
-#: depended on how long the rest of the row rendered. These shapes are distinctive enough that
-#: masking them without the trailing boundary hides no ordinary word.
-#:
-#: These ADD to the anchored matches, never replace them.
-_SCREEN_OPEN_TAIL_RES: tuple[re.Pattern[str], ...] = (
-    re.compile(rf"\b{_UUID_CORE}"),
-    *(re.compile(rf"\b{core}", flags) for core, flags in _SECRET_CORES),
-)
 
 #: The real id shape of :data:`_SCREEN_GLUED_ID_RE` with no ``\b`` on either end, the open-tail
 #: id scan (#1508): ``session_01<...>_backup`` has no trailing boundary. The plain id core is
@@ -605,18 +769,14 @@ def _screen_welded_uuid_spans(
     through :func:`_apply_spans` is a harmless union. A standalone UUID at a real boundary is
     caught by the anchored ``_UUID_RE`` and is not welded, so it is not this helper's concern.
 
-    A UUID that starts exactly where a span ENDS is masked too. That is the fixed-count ``AKIA``
-    key welded directly to a UUID: the key's open-tail match (:data:`_SCREEN_OPEN_TAIL_RES`)
-    ends after its 16th character, where the UUID begins with no boundary before it (#1508).
+    A UUID that starts exactly where a span ENDS is masked too, and so is a UUID that starts
+    exactly where a UUID this helper masked ends. That unwinds a chain of UUIDs welded end to
+    end in one pass, left to right (#1612).
 
-    A UUID is a fixed-count token too, so a UUID that starts exactly where a UUID this helper
-    masked ends is masked as well. That unwinds a chain of UUIDs welded end to end in one pass,
-    left to right (#1612). Before, the second UUID of such a chain masked and the third showed.
-
-    RESIDUE: ``_UUID_CORE_RE.finditer`` is non-overlapping, so a second UUID that overlaps the
-    first by its leading hex group keeps its tail visible (two all-hex UUIDs sharing eight
-    digits). It is AUTH-gated behind an attacker-influenced bridge escape, and naming the gap
-    keeps the helper simple rather than widening the scan.
+    This helper feeds the fixed points only. ``_UUID_CORE_RE.finditer`` is non-overlapping, so
+    here a second UUID that overlaps the first by its leading hex group is missed (two all-hex
+    UUIDs sharing eight digits). The open-tail pass (:func:`_screen_open_tail_spans`) masks every
+    UUID at every start, overlapping ones included, and joins every path at render (#1615).
     """
     if not greedy_spans:
         return []
@@ -653,9 +813,14 @@ def _screen_spans(text: str) -> list[tuple[int, int, str]]:
 
 
 def _screen_open_tail_spans(text: str) -> list[tuple[int, int, str]]:
-    """Return the open-tail spans in ``text``, and a UUID welded after one.
+    """Return the open-tail spans in ``text``: tokens with no trailing boundary (#1508).
 
-    The spans are :data:`_SCREEN_OPEN_TAIL_RES` and :data:`_SCREEN_OPEN_TAIL_ID_RE`.
+    The spans are :data:`_SCREEN_OPEN_TAIL_ID_RE` and :func:`_open_spans` seeded with it: every
+    UUID wherever it appears, and every secret that starts at a word boundary or inside a
+    masked token, so each secret of a welded chain masks (#1615). A token welded to the word
+    after it (``<UUID>zz``) has no trailing boundary, so the anchored mask never matches it. It
+    used to mask only when the caller's width-refit trim happened to cut the following word
+    away, so whether it showed depended on how long the rest of the row rendered.
 
     These are scanned ONCE over the unmasked text and unioned at render; they never feed a
     fixed point. A greedy open-tail match runs over the prefix of the next token in a welded
@@ -663,11 +828,8 @@ def _screen_open_tail_spans(text: str) -> list[tuple[int, int, str]]:
     masked cells, it would erase the prefixes the anchored fixed point needs to unwind that
     chain from its end, and the chain would show.
     """
-    greedy_spans = [m.span() for rx in _SCREEN_OPEN_TAIL_RES for m in rx.finditer(text)]
-    greedy_spans += [m.span(1) for m in _SCREEN_OPEN_TAIL_ID_RE.finditer(text)]
-    spans = [(s, e, _REDACTED) for s, e in greedy_spans]
-    spans += _screen_welded_uuid_spans(text, greedy_spans)
-    return spans
+    ids = [m.span(1) for m in _SCREEN_OPEN_TAIL_ID_RE.finditer(text)]
+    return [(s, e, _REDACTED) for s, e in ids + _open_spans(text, (), ids)]
 
 
 def _fixed_point_coverage(
@@ -795,23 +957,19 @@ def _redact_screen_row(row: str) -> str:
     which keeps the leading ``\b`` and drops the trailing one. Before, such a token masked only
     when the caller's width-refit trim happened to cut the following word away. Those spans
     are unioned with the fixed point's coverage, never fed into it; a row they add nothing to
-    renders exactly as the fixed point alone renders it.
+    renders exactly as the fixed point alone renders it. The same pass masks every UUID
+    wherever it appears (``run_<UUID>``, ``agent<UUID>``, a chain of UUIDs) and every secret
+    that starts inside a masked token, so each secret of a welded chain (``ghp_<a>ghp_<b>``,
+    ``AKIA<a>AKIA<b>``, ``bearer <a>bearer <b>``) masks (#1615).
 
     RESIDUE on this surface, stated because there is no cut to distinguish it: a SECRET welded
-    onto the word before it (secrets keep their leading anchor) and a welded id that lacks the
-    ``01`` shape are not masked. The second includes a look-alike welded to the word after it
-    (``session_ABCDEF_x``). The pty screen's width-refit trim can still happen to cut the
-    ``_x`` away and mask it, so whether such a look-alike shows depends on the row's rendered
-    length; a real ``01``-shape id does not. The first includes a secret welded onto another
-    secret (``ghp_<a>ghp_<b>``, ``AKIA<a>AKIA<b>``): the second one shows. A UUID welded onto
-    the word before it (``run_<UUID>``, ``agent<UUID>``) is not masked either, nor is a chain
-    of UUIDs after it. A welded chain of real ``01``-shape ids is masked whole, and so is a
-    chain of UUIDs that starts at a word boundary or right after a masked token (#1612).
+    onto an ordinary word before it (``agentghp_<a>``; secrets keep their leading anchor) and
+    a welded id that lacks the ``01`` shape are not masked. The second includes a look-alike
+    welded to the word after it (``session_ABCDEF_x``). The pty screen's width-refit trim can
+    still happen to cut the ``_x`` away and mask it, so whether such a look-alike shows depends
+    on the row's rendered length; a real ``01``-shape id does not. A welded chain of real
+    ``01``-shape ids is masked whole (#1612).
 
-    A welded UUID is masked after every greedy core -- an id, a glued id (#1496), the secret
-    cores and the fixed-count ``AKIA`` key -- but one welded-UUID
-    gap stays, named in :func:`_screen_welded_uuid_spans`: a second UUID overlapping the first
-    by its leading hex group.
     All of these need an attacker-influenced escape from Clauster's own bridge, and the endpoint
     is AUTH-gated. The split case (a control char INSIDE an id) is not a gap: pyte joins the
     halves into one matchable run the anchored pass catches.
@@ -995,8 +1153,9 @@ def redact_wrapped_screen_rows(
     result is exactly what the hard-wrap path gave before.
 
     A fourth map, ``tail_cov``, holds :func:`_screen_open_tail_spans` over each row, each hard
-    run and each soft-wrap view: a UUID, secret or real id welded to the word AFTER it. It is
-    scanned once and never fed into a fixed point, and it joins the union at render.
+    run and each soft-wrap view: a UUID, secret or real id welded to the word AFTER it, every
+    UUID wherever it appears, and each secret of a welded chain (#1615). It is scanned once and
+    never fed into a fixed point, and it joins the union at render.
 
     A row the soft-wrap and open-tail maps add no cell to renders byte for byte as before: a
     row no hard seam touches as :func:`_redact_screen_row` renders it alone, and a row in a hard
