@@ -2183,17 +2183,31 @@ separator is masked, for example <code>ghp_&lt;a&gt;ghp_&lt;b&gt;</code>, <code>
 secret welded to the word after it is masked. An identifier (<code>env_</code>,
 <code>session_</code>, <code>cse_</code>) that starts inside a masked token, or right at its end, is
 masked too, for example <code>AKIA&lt;a&gt;session_&lt;b&gt;</code> or <code>&lt;UUID&gt;env_&lt;b&gt;</code>.</p>
+<p>A real identifier has the <code>01</code> shape: <code>env_</code>, <code>session_</code> or <code>cse_</code>, then <code>01</code>,
+then eight or more letters or digits. Such an identifier needs no word boundary
+after it, on every surface. On the streamed log and the on-disk mirror, it still
+needs a word boundary before it, or the position of a removed escape. So
+<code>x session_01&lt;a&gt;_backup</code> is masked, and so is every identifier in a chain
+written with no separator, for example <code>x env_01&lt;a&gt;session_01&lt;b&gt; y</code>. The mask
+covers the whole run of letters and digits after <code>01</code>, because nothing marks
+where the identifier ends. A word written directly after the identifier, with
+no separator, is therefore masked with it. The masked identifier shows as the
+neutral <code>&lt;redacted&gt;</code> token, without its readable <code>env_</code>, <code>session_</code> or <code>cse_</code>
+marker. On the streamed log and the on-disk
+mirror, a second identifier joined to the first by <code>_</code>
+(<code>x env_01&lt;a&gt;_session_01&lt;b&gt;</code>) has no word boundary before it, so it stays
+visible. The live pty-screen view masks it.</p>
 <p>The whole value of a <code>bearer</code> header is masked, also when it holds a UUID, an
 identifier or another token (<code>Bearer &lt;UUID&gt;.&lt;b&gt;</code>). On the streamed log and the
 on-disk mirror, an identifier inside the value keeps its readable <code>env_</code>,
 <code>session_</code> or <code>cse_</code> marker: <code>Bearer env_&lt;a&gt;</code> shows as
 <code>&lt;redacted&gt;env_&lt;redacted&gt;</code>.</p>
 <p>A terminal has already discarded the escape on the live pty-screen view. So that
-view also masks a real identifier (the <code>01</code> shape) welded onto the word before
-it or after it, and every id in a chain of such ids welded together. An ordinary
-compound name such as <code>resolve_session_transcript</code>, or a name that only looks
-like an identifier, such as <code>session_timeout_ms</code>, stays readable on every
-surface, unless it is written directly after a masked token.</p>
+view also masks a real identifier welded onto the word before it
+(<code>agentsession_01&lt;a&gt;</code>). An ordinary compound name such as
+<code>resolve_session_transcript</code>, or a name that only looks like an identifier, such
+as <code>session_timeout_ms</code>, stays readable on every surface, unless it is written
+directly after a masked token.</p>
 <p>On the live pty-screen view, a long token can wrap onto the next row, and
 neither half matches a mask alone. Clauster joins the wrapped rows before it
 masks. This covers the terminal's own wrap at the right edge, and a wrap that
