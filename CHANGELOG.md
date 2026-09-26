@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.3.0 (2026-09-26)
+
+[Compare with 1.2.1](https://github.com/schubydoo/clauster/compare/v1.2.1...v1.3.0)
+
+### Features
+
+- Name the login cookie per instance, so two instances on one host keep separate logins (every browser logs in once more after the upgrade). ([#1598](https://github.com/schubydoo/clauster/pull/1598))
+
+### Fixes
+
+- A `~/.claude.json` that exists but does not parse is now left byte-identical and the write fails with the reason, instead of being replaced with only the keys Clauster sets. ([#1601](https://github.com/schubydoo/clauster/pull/1601))
+- Fix three config-write reads (MCP server approvals, enabled plugins, declared marketplaces) that returned a 500 when a config file is corrupt (now 422) or unreadable (now 400). ([#1597](https://github.com/schubydoo/clauster/pull/1597))
+- On Windows, a dashboard login whose terminal handle fails while Clauster reads its exit status or stops it now ends as a named failure with its handle closed, instead of staying active or returning a server error. ([#1602](https://github.com/schubydoo/clauster/pull/1602))
+- Fix `clauster doctor` passing a version floor when a binary reports a bare commit SHA instead of a version. ([#1594](https://github.com/schubydoo/clauster/pull/1594))
+- Fix the hosted View panel keeping a stale "Use Resume above" after the Resume button is gone. ([#1596](https://github.com/schubydoo/clauster/pull/1596))
+- Deeply nested JSON and integers of more than 4300 digits now read as bad JSON instead of crashing the JSON readers that caught only malformed-JSON errors, the resume-recap hook installer no longer replaces a `~/.claude/settings.json` it cannot parse, and the legacy state import no longer renames a file it cannot read. ([#1595](https://github.com/schubydoo/clauster/pull/1595))
+- The explanation of a session row's CPU and memory figures now reaches screen readers through the row's description, and the help panel explains the figures for touch and keyboard users. ([#1604](https://github.com/schubydoo/clauster/pull/1604))
+- The sandbox choice of a bridge is now stored in the database. It has no visible effect while the sandbox toggle is disabled. ([#1592](https://github.com/schubydoo/clauster/pull/1592))
+- After a restart, a live Server Mode bridge found only by its pointer gets a card of its own, so it no longer takes over a stopped session's card and record. ([#1608](https://github.com/schubydoo/clauster/pull/1608))
+- The terminal screen no longer loses the text after a control character in the same read, so a login or connect link no longer goes missing depending on how the output was split, and a digit such as `²` inside an escape sequence no longer turns the screen off. ([#1606](https://github.com/schubydoo/clauster/pull/1606))
+- The live terminal view no longer turns off for the session when a program turns on origin mode without scroll margins and then moves to a line. ([#1613](https://github.com/schubydoo/clauster/pull/1613))
+- Fix the live terminal view and the connect-link scrape stopping for the rest of a pty session after the terminal emitted an escape sequence the emulator rejects. ([#1593](https://github.com/schubydoo/clauster/pull/1593))
+- After a restart, Clauster now reattaches every live Interactive Session keeper of a project, not only the newest one. ([#1603](https://github.com/schubydoo/clauster/pull/1603))
+- After a restart, a live Interactive Session keeper now gets its card and Stop button even when another session of the same project reattached from its own row or a live pointer. ([#1610](https://github.com/schubydoo/clauster/pull/1610))
+
+### Security
+
+- Fix hosted resume ignoring the project's `allow_bypass_permissions` ceiling: a session stored in bypass mode now gets 403 when the current configuration forbids bypass. ([#1591](https://github.com/schubydoo/clauster/pull/1591))
+- The live pty-screen view now masks a secret that Claude's TUI wraps onto the next row with an indent, instead of showing the wrapped tail. ([#1611](https://github.com/schubydoo/clauster/pull/1611))
+- The live pty-screen view now masks every identifier in a long chain of identifiers written with no separator, and a crafted screen can no longer make its redaction slow. ([#1614](https://github.com/schubydoo/clauster/pull/1614))
+- The streamed log and the on-disk mirror now mask a real `01`-shape session or environment id that has a word written directly after it (`session_01<id>_backup`), and every id in a chain of ids written with no separator that starts with such an id. ([#1620](https://github.com/schubydoo/clauster/pull/1620))
+- Redaction now masks an identifier written directly after a masked token, on every surface, and the whole value of a `Bearer` header that holds a UUID or another token, on the streamed log and the on-disk mirror. ([#1618](https://github.com/schubydoo/clauster/pull/1618))
+- The streamed log, the on-disk mirror and the live pty-screen view now mask every secret in a chain of secrets written with no separator, and a UUID written directly after a word. ([#1616](https://github.com/schubydoo/clauster/pull/1616))
+
 ## 1.2.1 (2026-09-22)
 
 [Compare with 1.2.0](https://github.com/schubydoo/clauster/compare/v1.2.0...v1.2.1)
