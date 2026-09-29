@@ -429,8 +429,8 @@
                  truthy == a failure to surface. Without this the card went silently dead. Distinct
                  from errorOf above (a transient *action* error). x-text auto-escapes the tail. -->
             <div class="alert alert-danger mt-2 mb-0" x-show="detailOf('{{ p.name }}')" x-cloak role="alert">
-              <!-- Tabler's .alert is display:flex;flex-direction:row, so wrap the heading and
-                   detail in one child div to stack them (heading above the stderr tail). -->
+              <!-- Tabler 1.5 made .alert display:flex;flex-direction:row (1.6 reverted it to
+                   block), so one child div keeps the heading above the stderr tail in both. -->
               <div>
                 <h4 class="alert-heading">Session failed to start</h4>
                 <pre class="mb-0 mt-1 text-break detail-pre"

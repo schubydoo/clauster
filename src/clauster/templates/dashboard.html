@@ -710,7 +710,7 @@
 
       <!-- ===== Connection-lost banner ===== -->
       <div class="mb-3" x-show="connLost" x-cloak>
-        <div class="alert alert-warning d-flex align-items-center mb-0" role="status">
+        <div class="alert alert-warning d-flex align-items-center gap-3 mb-0" role="status">
           <span class="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>
           Lost connection to the server — data may be stale. Retrying…
         </div>
@@ -1165,9 +1165,11 @@
       {# role="status" (polite live region) so a banner that appears mid-session — a newly
          discovered untrusted project surfacing on a poll — is announced (WCAG 4.1.3). Its
          text carries the count; removal on success is silent and the toast covers that. #}
+      {# gap-3: Tabler 1.6 dropped the flex gap from .alert, so without it the wrapped text
+         touches the "Trust all" button at phone width. #}
       <div class="mb-3" data-test="trust-all-banner" x-show="anyUntrusted()" x-cloak
            role="status" aria-live="polite">
-        <div class="alert alert-warning d-flex align-items-center mb-0">
+        <div class="alert alert-warning d-flex align-items-center gap-3 mb-0">
           <svg class="ico me-2 text-warning" aria-hidden="true"><use href="#ic-alert"/></svg>
           <span class="me-auto"><strong x-text="untrustedCount()"></strong>
             <span x-text="untrustedCount() === 1 ? 'project needs' : 'projects need'"></span>
