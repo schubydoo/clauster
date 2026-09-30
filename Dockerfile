@@ -53,7 +53,7 @@ FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4c
 # shadow — groupmod/usermod/useradd/groupadd for the PUID/PGID remap (busybox lacks them).
 # su-exec — musl-native privilege-drop in the entrypoint (replaces gosu; no Go CVE surface).
 # renovate: datasource=repology depName=alpine_3_24/openssl versioning=loose
-ARG OPENSSL_VERSION=3.5.8
+ARG OPENSSL_VERSION=3.5.9-r0
 # renovate: datasource=repology depName=alpine_3_24/python3 versioning=loose
 ARG PYTHON3_VERSION=3.14.7
 # renovate: datasource=repology depName=alpine_3_24/git versioning=loose
