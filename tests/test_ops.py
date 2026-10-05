@@ -2513,6 +2513,35 @@ def test_check_running_server_reports_the_healthz_verdict(status, body, expected
     assert c.detail.endswith(fragment)
 
 
+def test_check_running_server_keeps_the_status_when_the_body_stalls(monkeypatch):
+    # The status line is the verdict. A server that sends `503` and then never finishes
+    # the body must still be a FAIL, not a dropped check.
+    monkeypatch.setattr(ops_mod, "_SERVER_PROBE_TIMEOUT", 0.3)
+    done = threading.Event()
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        s.listen(1)
+        port = s.getsockname()[1]
+
+        def _stall() -> None:
+            peer, _addr = s.accept()
+            with peer:
+                peer.recv(4096)
+                peer.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 64\r\n\r\n")
+                done.wait(5)
+
+        t = threading.Thread(target=_stall, daemon=True)
+        t.start()
+        try:
+            c = _check_running_server(port, cert_file=None)
+        finally:
+            done.set()
+            t.join(5)
+    assert c is not None
+    assert c.status == FAIL
+    assert c.detail.endswith("answers /healthz with 503")
+
+
 def test_check_running_server_is_silent_for_a_non_http_listener():
     # A listener that is not HTTP is not a Clauster we can read; the port check has
     # already warned about it, so no second line.

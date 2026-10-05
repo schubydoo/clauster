@@ -1021,6 +1021,7 @@ def _server_cert_file(config: ClausterConfig) -> Path | None:
 
 
 _PEM_CERT_END = "-----END CERTIFICATE-----"
+_SERVER_PROBE_TIMEOUT = 2.0
 
 
 def _check_running_server(port: int, *, cert_file: Path | None) -> Check | None:
@@ -1054,14 +1055,21 @@ def _check_running_server(port: int, *, cert_file: Path | None) -> Check | None:
         context.check_hostname = False
         # Accept the pinned certificate itself as the anchor even when a CA issued it.
         context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
-        conn = http.client.HTTPSConnection("127.0.0.1", port, timeout=2, context=context)
+        conn = http.client.HTTPSConnection(
+            "127.0.0.1", port, timeout=_SERVER_PROBE_TIMEOUT, context=context
+        )
     else:
-        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=_SERVER_PROBE_TIMEOUT)
     try:
         conn.request("GET", "/healthz")
         resp = conn.getresponse()
         status = resp.status
-        body = resp.read(4096)
+        try:
+            body = resp.read(4096)
+        except (OSError, http.client.HTTPException):
+            # The status line already arrived, and it is the verdict. The body only
+            # carries the optional reason, so a stalled or reset body must not drop it.
+            body = b""
     except ssl.SSLCertVerificationError:
         return Check(
             "server",
