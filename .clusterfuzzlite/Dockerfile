@@ -8,7 +8,7 @@
 # run as a release artifact, so the Scorecard pinned-deps finding is dismissed
 # (won't fix) rather than fought with a brittle pin.
 # hadolint ignore=DL3006
-FROM gcr.io/oss-fuzz-base/base-builder-python@sha256:855167924712ac98dedabf0ae44071caccbb0130bb0544ea06522b1f82288371
+FROM gcr.io/oss-fuzz-base/base-builder-python@sha256:b02a06f9d3918428825b1ebfa2c3627b591a5924a83436b8aaec40c85fd15b16
 
 # Fuzz the checked-out source (CFLite builds the PR/branch under test), not a
 # pinned clone — so harnesses exercise the code actually being changed.
