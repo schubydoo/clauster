@@ -1964,6 +1964,15 @@ bundle sits beside it, and the release carries SLSA provenance
 <a href="https://docs.sigstore.dev/"><code>cosign</code></a> / <code>gh attestation verify</code> toolchain if you
 want the full supply-chain check.</p>
 <div class="admonition note">
+<p class="admonition-title">The binary unpacks into the temporary directory</p>
+<p>At start, the single-file binary unpacks its program files into a <code>_MEI…</code>
+directory under the system temporary directory (<code>/tmp</code> on Linux). A
+long-running service keeps those files alive by re-stamping them every hour,
+so an age-based cleanup of <code>/tmp</code> leaves them alone. If they are deleted
+another way, <a href="../operations/#healthz-liveness-and-readiness"><code>/healthz</code></a>
+answers <code>503</code> until you restart Clauster.</p>
+</div>
+<div class="admonition note">
 <p class="admonition-title">Unsigned for the OS, on purpose</p>
 <p>The binaries are Sigstore-signed but not yet OS code-signed, so the first run
 needs one extra step. On <strong>macOS</strong>, Gatekeeper quarantines a downloaded

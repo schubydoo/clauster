@@ -1772,7 +1772,7 @@ body is returned:</p>
 <tbody>
 <tr>
 <td><code>status</code></td>
-<td>Always <code>"ok"</code> if the process is serving.</td>
+<td><code>"ok"</code> if the process is serving. The one exception is the <code>503</code> described below.</td>
 </tr>
 <tr>
 <td><code>version</code></td>
@@ -1816,6 +1816,14 @@ monitoring system with credentials can additionally alert on <code>claude_login_
 false</code> (logged out / credentials expired — the classic "bridge runs but is dead"
 mode) or an approaching <code>claude_login_expires_at</code>, on <code>claude_ok: false</code> (the
 bridge host has lost its <code>claude</code> CLI), or watch <code>instances_running</code>.</p>
+<p><code>/healthz</code> answers <code>503</code> with a <code>detail</code> message, for every caller, in one case:
+the <a href="../installation/#standalone-binary-no-python">standalone binary</a> finds that
+some of its unpacked program files are gone. The binary unpacks itself into the
+system temporary directory at start, and Clauster re-stamps those files every
+hour so that an age-based cleanup (for example the stock <code>systemd-tmpfiles</code> rule
+for <code>/tmp</code>) does not delete them. If something else deletes them, pages stop
+rendering while the process stays up, so the probe fails. A restart unpacks a
+fresh copy, and the bridges survive it under <code>KillMode=process</code>.</p>
 <h3 id="clauster-doctor-configuration-and-environment-diagnostics"><code>clauster doctor</code> — configuration and environment diagnostics<a class="headerlink" href="#clauster-doctor-configuration-and-environment-diagnostics" title="Permanent link">&para;</a></h3>
 <p><code>clauster doctor</code> runs the same pre-launch diagnostics the dashboard's preflight
 panel uses, from the CLI:</p>
@@ -1887,9 +1895,19 @@ panel uses, from the CLI:</p>
 <td><strong>WARN</strong> if already in use.</td>
 </tr>
 <tr>
+<td><code>server</code></td>
+<td>(CLI only) when the listen port is in use, the <code>/healthz</code> verdict of the server that holds it.</td>
+<td><strong>FAIL</strong> if it answers anything but <code>200</code> — for example the <code>503</code> above. <strong>WARN</strong> if, with <code>tls</code> set, the listener presents a different certificate than the configured one (the probe trusts only that certificate) or the certificate file is unreadable. Absent when the port is free or the listener does not answer HTTP.</td>
+</tr>
+<tr>
 <td><code>systemd</code></td>
 <td>The loaded <code>clauster.service</code> uses a non-reaping <code>KillMode</code> (see below).</td>
 <td><strong>WARN</strong> if it would reap live pty bridges.</td>
+</tr>
+<tr>
+<td><code>bundle</code></td>
+<td>(Dashboard panel only, standalone binary only) the running server's unpacked program files are all present. A CLI run unpacks its own fresh copy, so it reports this through the <code>server</code> check instead.</td>
+<td><strong>FAIL</strong> if any file is missing — restart Clauster.</td>
 </tr>
 <tr>
 <td><code>extra:*</code></td>
