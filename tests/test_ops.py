@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import http.server
 import io
 import json
 import os
+import socket
+import ssl
 import subprocess
 import sys
 import tarfile
+import threading
 import time
 from pathlib import Path
 
@@ -27,6 +31,7 @@ from clauster.ops import (
     _check_node_toolchain,
     _check_port,
     _check_repo_freshness,
+    _check_running_server,
     _check_state_dir_writable,
     _check_systemd_killmode,
     _safe_extract_tar,
@@ -2455,3 +2460,116 @@ def test_windows_service_commands_still_builds_for_a_clean_config_path(tmp_path)
         state_dir=str(tmp_path),
     )
     assert cmds and cmds[0][1] == "add"
+
+
+# ----- the running server's own /healthz verdict (#1663) ----------------
+
+
+def _serve_healthz(status: int, body: bytes):
+    """Start a loopback HTTP server that answers every GET with ``status`` + ``body``."""
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(status)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args) -> None:
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "expected", "fragment"),
+    [
+        (200, b'{"status": "ok"}', OK, "answers /healthz"),
+        (
+            503,
+            b'{"detail": "unpacked program files are missing; restart Clauster"}',
+            FAIL,
+            "with 503: unpacked program files are missing; restart Clauster",
+        ),
+        (500, b"Internal Server Error", FAIL, "with 500"),
+        (503, b'{"detail": {"not": "a string"}}', FAIL, "with 503"),
+        (503, b"[" * 4000, FAIL, "with 503"),
+    ],
+)
+def test_check_running_server_reports_the_healthz_verdict(status, body, expected, fragment):
+    server = _serve_healthz(status, body)
+    try:
+        c = _check_running_server(server.server_address[1], tls=False)
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert c is not None
+    assert c.name == "server"
+    assert c.status == expected
+    assert c.detail.endswith(fragment)
+
+
+def test_check_running_server_is_silent_for_a_non_http_listener():
+    # A listener that is not HTTP is not a Clauster we can read; the port check has
+    # already warned about it, so no second line.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        s.listen(1)
+        port = s.getsockname()[1]
+
+        def _hang_up() -> None:
+            peer, _addr = s.accept()
+            peer.close()
+
+        t = threading.Thread(target=_hang_up, daemon=True)
+        t.start()
+        assert _check_running_server(port, tls=False) is None
+        t.join(5)
+
+
+def test_check_running_server_tls_probe_skips_verification(monkeypatch):
+    # The cert names the public host, never 127.0.0.1, so the loopback probe must not
+    # verify it. Capture the context instead of standing up a TLS server.
+    seen = {}
+
+    class _Conn:
+        def __init__(self, host, port, *, timeout, context) -> None:
+            seen.update(host=host, port=port, context=context)
+
+        def request(self, method, path) -> None:
+            raise OSError("stop here")
+
+        def close(self) -> None:
+            seen["closed"] = True
+
+    monkeypatch.setattr("clauster.ops.http.client.HTTPSConnection", _Conn)
+    assert _check_running_server(7621, tls=True) is None
+    assert seen["host"] == "127.0.0.1"
+    assert seen["context"].verify_mode == ssl.CERT_NONE
+    assert seen["context"].check_hostname is False
+    assert seen["closed"] is True
+
+
+def test_doctor_cli_adds_the_server_check_when_the_port_is_held(write_config, tmp_path):
+    server = _serve_healthz(503, b'{"detail": "unpacked program files are missing"}')
+    port = server.server_address[1]
+    try:
+        cfg = write_config(f"port: {port}\nstate_dir: {tmp_path / '.s'}\n")
+        checks, ok = run_doctor(str(cfg))
+    finally:
+        server.shutdown()
+        server.server_close()
+    by = {c.name: c for c in checks}
+    assert by["port"].status == WARN
+    assert by["server"].status == FAIL
+    assert ok is False
+
+
+def test_doctor_cli_has_no_server_check_when_the_port_is_free(write_config, tmp_path):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    cfg = write_config(f"port: {port}\nstate_dir: {tmp_path / '.s'}\n")
+    assert "server" not in {c.name for c in run_doctor(str(cfg))[0]}

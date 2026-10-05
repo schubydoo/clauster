@@ -7,12 +7,14 @@ of these touch the network or spawn bridges; they inspect config + manage state_
 from __future__ import annotations
 
 import contextlib
+import http.client
 import json
 import ntpath
 import os
 import re
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import tarfile
@@ -310,7 +312,15 @@ def run_doctor(
 
     # port (warn-only; see the ``check_port`` paragraph in the docstring)
     if check_port:
-        checks.append(_check_port(config.host, config.port))
+        port = _check_port(config.host, config.port)
+        checks.append(port)
+        # #1663: something holds the port, so ask it for its own health verdict. A CLI
+        # run cannot see inside the running server (a frozen binary's unpacked files,
+        # for one), but the server reports that through /healthz.
+        if port.status == WARN:
+            server = _check_running_server(config.port, tls=config.tls is not None)
+            if server is not None:
+                checks.append(server)
 
     # source-checkout freshness (only for editable/from-source installs)
     fresh = _check_repo_freshness()
@@ -989,6 +999,47 @@ def _check_port(host: str, port: int) -> Check:
     if in_use:
         return Check("port", WARN, f"{port} already in use (Clauster already running?)")
     return Check("port", OK, f"{port} free")
+
+
+def _check_running_server(port: int, *, tls: bool) -> Check | None:
+    """Report the ``/healthz`` verdict of the server already listening on loopback ``port``.
+
+    OK on a 200, FAIL on any other HTTP status (with the server's ``detail`` message when
+    it sends one). ``None`` when the listener does not answer HTTP at all: it is then not
+    a Clauster we can read, and the ``port`` check has already warned about it.
+
+    Certificate verification is off for the TLS probe on purpose. The certificate names
+    the host's public name, never ``127.0.0.1``, so a verified loopback probe always
+    fails. The request carries no credentials and only the status and ``detail`` are read.
+    """
+    conn: http.client.HTTPConnection
+    if tls:
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        conn = http.client.HTTPSConnection("127.0.0.1", port, timeout=2, context=context)
+    else:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+    try:
+        conn.request("GET", "/healthz")
+        resp = conn.getresponse()
+        status = resp.status
+        body = resp.read(4096)
+    except (OSError, http.client.HTTPException):
+        return None
+    finally:
+        conn.close()
+    if status == 200:
+        return Check("server", OK, f"running server on port {port} answers /healthz")
+    try:
+        parsed = json.loads(body)
+    except (ValueError, RecursionError):
+        parsed = None
+    detail = parsed.get("detail") if isinstance(parsed, dict) else None
+    reason = f": {detail[:200]}" if isinstance(detail, str) else ""
+    return Check(
+        "server", FAIL, f"running server on port {port} answers /healthz with {status}{reason}"
+    )
 
 
 # ----- backup / restore -------------------------------------------------

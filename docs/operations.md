@@ -83,8 +83,9 @@ It prints one line per check and exits non-zero if any check **fails**. Checks:
 | `version` | For a from-source checkout, whether `HEAD` is behind its last-fetched upstream. | **WARN** if behind; absent for PyPI/Docker installs. |
 | `node-toolchain` | On an nvm host, whether nvm's default `node` is reachable on a spawned bridge's `PATH`. | **WARN** if missing or not on the bridge `PATH` — advisory; only present on POSIX nvm hosts. |
 | `port` | (CLI only) whether the listen port is free to bind. | **WARN** if already in use. |
+| `server` | (CLI only) when the listen port is in use, the `/healthz` verdict of the server that holds it. | **FAIL** if it answers anything but `200` — for example the `503` above. Absent when the port is free or the listener does not answer HTTP. |
 | `systemd` | The loaded `clauster.service` uses a non-reaping `KillMode` (see below). | **WARN** if it would reap live pty bridges. |
-| `bundle` | (Dashboard panel only, standalone binary only) the running server's unpacked program files are all present. A CLI run unpacks its own fresh copy, so it cannot judge the server's. | **FAIL** if any file is missing — restart Clauster. |
+| `bundle` | (Dashboard panel only, standalone binary only) the running server's unpacked program files are all present. A CLI run unpacks its own fresh copy, so it reports this through the `server` check instead. | **FAIL** if any file is missing — restart Clauster. |
 | `extra:*` | Each optional [extra](installation.md) (`pty`/`notify`) is importable in the running interpreter. | **WARN** if missing (with the install hint) — never FAIL; a missing extra only leaves its feature dormant. A Windows-only extra is skipped off-Windows. |
 
 `claude-login` deserves a callout: it is the cause of the classic "bridge runs
