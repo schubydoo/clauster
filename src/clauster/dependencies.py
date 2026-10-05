@@ -47,6 +47,7 @@ from .claustrum_daemon import ClaustrumDaemon
 from .clone_jobs import CloneJobManager
 from .config import ClausterConfig
 from .engine import ClausterEngine
+from .frozen_bundle import BundleGuard
 from .hosted import HostedManager
 from .login_shepherd import LoginShepherd
 from .login_status import LoginStatusCache
@@ -148,6 +149,15 @@ def get_login_status_cache(conn: HTTPConnection) -> LoginStatusCache:
     like :func:`get_config` -- the cache object itself never goes absent in a wired app.
     """
     return conn.app.state.login_status_cache
+
+
+def get_bundle_guard(conn: HTTPConnection) -> BundleGuard:
+    """Return the BundleGuard stored on ``app.state`` at build time.
+
+    ``create_app`` builds it unconditionally (it is inert unless running as the frozen
+    binary), so ``/healthz`` and the doctor panel read its missing-file count directly.
+    """
+    return conn.app.state.bundle_guard
 
 
 def get_claustrum_daemon(conn: HTTPConnection) -> ClaustrumDaemon | None:
@@ -293,6 +303,7 @@ RenderDep = Annotated[Callable[..., Response], Depends(get_render)]
 CloneJobsDep = Annotated[CloneJobManager, Depends(get_clone_jobs)]
 CloneTasksDep = Annotated[set[asyncio.Task], Depends(get_clone_tasks)]
 LoginStatusCacheDep = Annotated[LoginStatusCache, Depends(get_login_status_cache)]
+BundleGuardDep = Annotated[BundleGuard, Depends(get_bundle_guard)]
 ClaustrumDaemonDep = Annotated[ClaustrumDaemon | None, Depends(get_claustrum_daemon)]
 AuthenticateDep = Annotated[
     Callable[[HTTPConnection], Awaitable[tuple[str | None, bool, bool]]],

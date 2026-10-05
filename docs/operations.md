@@ -30,7 +30,7 @@ body is returned:
 
 | Field | Meaning |
 | --- | --- |
-| `status` | Always `"ok"` if the process is serving. |
+| `status` | `"ok"` if the process is serving. The one exception is the `503` described below. |
 | `version` | Clauster's own version. |
 | `claude_ok` | Whether the `claude` binary probe (`claude --version`) succeeded. |
 | `claude_version` | The detected `claude` CLI version (`null` if the probe failed). |
@@ -49,6 +49,15 @@ monitoring system with credentials can additionally alert on `claude_login_ok:
 false` (logged out / credentials expired — the classic "bridge runs but is dead"
 mode) or an approaching `claude_login_expires_at`, on `claude_ok: false` (the
 bridge host has lost its `claude` CLI), or watch `instances_running`.
+
+`/healthz` answers `503` with a `detail` message, for every caller, in one case:
+the [standalone binary](installation.md#standalone-binary-no-python) finds that
+some of its unpacked program files are gone. The binary unpacks itself into the
+system temporary directory at start, and Clauster re-stamps those files every
+hour so that an age-based cleanup (for example the stock `systemd-tmpfiles` rule
+for `/tmp`) does not delete them. If something else deletes them, pages stop
+rendering while the process stays up, so the probe fails. A restart unpacks a
+fresh copy, and the bridges survive it under `KillMode=process`.
 
 ### `clauster doctor` — configuration and environment diagnostics
 
@@ -74,7 +83,9 @@ It prints one line per check and exits non-zero if any check **fails**. Checks:
 | `version` | For a from-source checkout, whether `HEAD` is behind its last-fetched upstream. | **WARN** if behind; absent for PyPI/Docker installs. |
 | `node-toolchain` | On an nvm host, whether nvm's default `node` is reachable on a spawned bridge's `PATH`. | **WARN** if missing or not on the bridge `PATH` — advisory; only present on POSIX nvm hosts. |
 | `port` | (CLI only) whether the listen port is free to bind. | **WARN** if already in use. |
+| `server` | (CLI only) when the listen port is in use, the `/healthz` verdict of the server that holds it. | **FAIL** if it answers anything but `200` — for example the `503` above. **WARN** if, with `tls` set, the listener presents a different certificate than the configured one (the probe trusts only that certificate) or the certificate file is unreadable. Absent when the port is free or the listener does not answer HTTP. |
 | `systemd` | The loaded `clauster.service` uses a non-reaping `KillMode` (see below). | **WARN** if it would reap live pty bridges. |
+| `bundle` | (Dashboard panel only, standalone binary only) the running server's unpacked program files are all present. A CLI run unpacks its own fresh copy, so it reports this through the `server` check instead. | **FAIL** if any file is missing — restart Clauster. |
 | `extra:*` | Each optional [extra](installation.md) (`pty`/`notify`) is importable in the running interpreter. | **WARN** if missing (with the install hint) — never FAIL; a missing extra only leaves its feature dormant. A Windows-only extra is skipped off-Windows. |
 
 `claude-login` deserves a callout: it is the cause of the classic "bridge runs

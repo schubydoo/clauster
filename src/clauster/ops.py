@@ -7,12 +7,14 @@ of these touch the network or spawn bridges; they inspect config + manage state_
 from __future__ import annotations
 
 import contextlib
+import http.client
 import json
 import ntpath
 import os
 import re
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import tarfile
@@ -27,7 +29,16 @@ from xml.sax.saxutils import escape as _xml_escape
 import yaml
 from pydantic import ValidationError
 
-from . import atomicio, claude_cli, config_write_mcp, deps, environments, procutil, pty_screen
+from . import (
+    atomicio,
+    claude_cli,
+    config_write_mcp,
+    deps,
+    environments,
+    procutil,
+    pty_screen,
+    tls_provision,
+)
 from .config import ClausterConfig, FixedDetailYamlError, _missing_enforced_auth, load_config
 from .config_editor import _friendly_validation_message
 from .config_write import _yaml_error_where
@@ -310,7 +321,15 @@ def run_doctor(
 
     # port (warn-only; see the ``check_port`` paragraph in the docstring)
     if check_port:
-        checks.append(_check_port(config.host, config.port))
+        port = _check_port(config.host, config.port)
+        checks.append(port)
+        # #1663: something holds the port, so ask it for its own health verdict. A CLI
+        # run cannot see inside the running server (a frozen binary's unpacked files,
+        # for one), but the server reports that through /healthz.
+        if port.status == WARN:
+            server = _check_running_server(config.port, cert_file=_server_cert_file(config))
+            if server is not None:
+                checks.append(server)
 
     # source-checkout freshness (only for editable/from-source installs)
     fresh = _check_repo_freshness()
@@ -989,6 +1008,90 @@ def _check_port(host: str, port: int) -> Check:
     if in_use:
         return Check("port", WARN, f"{port} already in use (Clauster already running?)")
     return Check("port", OK, f"{port} free")
+
+
+def _server_cert_file(config: ClausterConfig) -> Path | None:
+    """Return the certificate file the server presents, or ``None`` when it serves plain HTTP."""
+    if config.tls is None:
+        return None
+    if config.tls.provision == "self-signed":
+        return tls_provision.self_signed_cert_path(config.state_dir.expanduser().resolve())
+    # provision = off: the config validator guarantees cert_file is set and resolved.
+    return Path(config.tls.cert_file)  # type: ignore[arg-type]
+
+
+_PEM_CERT_END = "-----END CERTIFICATE-----"
+_SERVER_PROBE_TIMEOUT = 2.0
+
+
+def _check_running_server(port: int, *, cert_file: Path | None) -> Check | None:
+    """Report the ``/healthz`` verdict of the server already listening on loopback ``port``.
+
+    OK on a 200, FAIL on any other HTTP status (with the server's ``detail`` message when
+    it sends one). ``None`` when the listener does not answer HTTP at all: it is then not
+    a Clauster we can read, and the ``port`` check has already warned about it.
+
+    With TLS (``cert_file`` set) the probe trusts exactly one certificate: the first one
+    in the configured file, which is the one the server presents. The usual name check
+    cannot work, because the certificate names the host's public name and the probe dials
+    ``127.0.0.1``. Pinning the certificate is the stronger test anyway: the handshake only
+    succeeds against a listener that holds this certificate's private key. A listener that
+    presents any other certificate is a WARN, never a silent pass.
+    """
+    conn: http.client.HTTPConnection
+    if cert_file is not None:
+        try:
+            pem = cert_file.read_text(encoding="ascii")
+            leaf = pem[: pem.index(_PEM_CERT_END) + len(_PEM_CERT_END)]
+            # cadata replaces the system trust store: this one certificate is the only anchor.
+            context = ssl.create_default_context(cadata=leaf)
+        except (OSError, ValueError) as exc:
+            return Check(
+                "server",
+                WARN,
+                f"cannot check the server on port {port}: the certificate file {cert_file} "
+                f"is unreadable ({type(exc).__name__})",
+            )
+        context.check_hostname = False
+        # Accept the pinned certificate itself as the anchor even when a CA issued it.
+        context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
+        conn = http.client.HTTPSConnection(
+            "127.0.0.1", port, timeout=_SERVER_PROBE_TIMEOUT, context=context
+        )
+    else:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=_SERVER_PROBE_TIMEOUT)
+    try:
+        conn.request("GET", "/healthz")
+        resp = conn.getresponse()
+        status = resp.status
+        try:
+            body = resp.read(4096)
+        except (OSError, http.client.HTTPException):
+            # The status line already arrived, and it is the verdict. The body only
+            # carries the optional reason, so a stalled or reset body must not drop it.
+            body = b""
+    except ssl.SSLCertVerificationError:
+        return Check(
+            "server",
+            WARN,
+            f"the server on port {port} presents a different certificate than {cert_file}; "
+            "restart Clauster if the certificate was renewed",
+        )
+    except (OSError, http.client.HTTPException):
+        return None
+    finally:
+        conn.close()
+    if status == 200:
+        return Check("server", OK, f"running server on port {port} answers /healthz")
+    try:
+        parsed = json.loads(body)
+    except (ValueError, RecursionError):
+        parsed = None
+    detail = parsed.get("detail") if isinstance(parsed, dict) else None
+    reason = f": {detail[:200]}" if isinstance(detail, str) else ""
+    return Check(
+        "server", FAIL, f"running server on port {port} answers /healthz with {status}{reason}"
+    )
 
 
 # ----- backup / restore -------------------------------------------------

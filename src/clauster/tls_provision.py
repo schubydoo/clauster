@@ -136,6 +136,11 @@ def cert_needs_regen(cert_path: Path, hostnames: list[str]) -> bool:
     return requested != existing
 
 
+def self_signed_cert_path(state_dir: Path) -> Path:
+    """Return where the self-signed certificate lives under ``state_dir`` (creates nothing)."""
+    return state_dir / "tls" / "self-signed.crt"
+
+
 def generate_self_signed(
     state_dir: Path,
     hostnames: list[str],
@@ -170,7 +175,7 @@ def generate_self_signed(
         )
 
     tls_dir = _tls_dir(state_dir)
-    cert_path = tls_dir / "self-signed.crt"
+    cert_path = self_signed_cert_path(state_dir)
     key_path = tls_dir / "self-signed.key"
 
     if not cert_needs_regen(cert_path, hostnames) and key_path.is_file():

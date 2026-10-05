@@ -23,6 +23,7 @@ from . import (
     __version__,
     atomicio,
     auth,
+    frozen_bundle,
     login_shepherd,
     login_status,
     setup_wizard,
@@ -470,6 +471,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         the DB connection pool.
         """
         await runner.start_poll_loop()  # rediscover running bridges + begin polling
+        # #1663: keep the one-file build's unpacked files out of an age-based temp
+        # cleanup. Nothing to do (no task) for a source, PyPI or Docker install.
+        bundle_guard: frozen_bundle.BundleGuard = app.state.bundle_guard
+        bundle_task = (
+            asyncio.create_task(bundle_guard.run()) if bundle_guard.root is not None else None
+        )
         if config.claustrum.enabled:
             daemon = ClaustrumDaemon(config)
             app.state.claustrum_daemon = daemon
@@ -488,6 +495,8 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         try:
             yield
         finally:
+            if bundle_task is not None:
+                bundle_task.cancel()
             await app.state.hosted.aclose()  # detach (not stop); sessions survive the restart
             # Login shepherd (#839): reap any in-flight `claude auth login` subprocess so an
             # abandoned (or mid-flow-at-shutdown) login can't outlive the app. `cancel()` is a
@@ -523,6 +532,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     # use (#1156); a handler inside create_app closed over it directly.
     app.state.engine = engine
     app.state.claustrum_daemon = None  # set by lifespan when claustrum.enabled
+    # #1663: records the frozen binary's unpacked files now, while the unpack is whole;
+    # the lifespan re-stamps them and `/healthz` reads its missing-file count.
+    app.state.bundle_guard = frozen_bundle.BundleGuard(frozen_bundle.unpack_dir())
     # #838: login-status cache. `/healthz` reads it synchronously but non-blocking —
     # the `claude auth status` subprocess runs at most once per TTL on a background
     # thread (never on the request path), so the dashboard's 4s poll never stalls on

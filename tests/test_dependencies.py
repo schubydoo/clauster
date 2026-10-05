@@ -28,6 +28,7 @@ from clauster.dependencies import (
     RunnerDep,
     get_allowed_origins,
     get_authenticate,
+    get_bundle_guard,
     get_claustrum_daemon,
     get_clone_jobs,
     get_clone_tasks,
@@ -156,6 +157,7 @@ def test_accessors_read_the_real_create_app_state(write_config):
     # #1156 ops domain: the login-status cache and the two published closures
     # (_authenticate, require_elevated) the moved /healthz + Tier-B routes read.
     assert get_login_status_cache(conn) is app.state.login_status_cache
+    assert get_bundle_guard(conn) is app.state.bundle_guard
     assert get_authenticate(conn) is app.state.authenticate
     assert get_require_elevated(conn) is app.state.require_elevated
     # #1156 websockets domain: the moved WS gate reads the same Origin allowlist

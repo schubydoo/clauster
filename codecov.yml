@@ -253,6 +253,7 @@ component_management:
       paths:
         - src/clauster/ops.py
         - src/clauster/deps.py # #904 — optional-extras detection for doctor + UI greying
+        - src/clauster/frozen_bundle.py # #1663 — keeps the frozen binary's unpacked files alive
         - src/clauster/config.py
         - src/clauster/config_editor.py
         - src/clauster/config_writer.py

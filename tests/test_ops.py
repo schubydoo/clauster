@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import http.server
 import io
 import json
 import os
+import socket
+import ssl
 import subprocess
 import sys
 import tarfile
+import threading
 import time
 from pathlib import Path
 
@@ -27,9 +31,11 @@ from clauster.ops import (
     _check_node_toolchain,
     _check_port,
     _check_repo_freshness,
+    _check_running_server,
     _check_state_dir_writable,
     _check_systemd_killmode,
     _safe_extract_tar,
+    _server_cert_file,
     _version_ge,
     make_backup,
     migrate_state,
@@ -38,6 +44,7 @@ from clauster.ops import (
     restore_backup,
     run_doctor,
 )
+from clauster.tls_provision import generate_self_signed
 from conftest import needs_symlink
 
 # .cmd on Windows so the version probe resolves on Python 3.11 too (3.12+ would
@@ -2455,3 +2462,203 @@ def test_windows_service_commands_still_builds_for_a_clean_config_path(tmp_path)
         state_dir=str(tmp_path),
     )
     assert cmds and cmds[0][1] == "add"
+
+
+# ----- the running server's own /healthz verdict (#1663) ----------------
+
+
+def _serve_healthz(status: int, body: bytes):
+    """Start a loopback HTTP server that answers every GET with ``status`` + ``body``."""
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(status)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args) -> None:
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "expected", "fragment"),
+    [
+        (200, b'{"status": "ok"}', OK, "answers /healthz"),
+        (
+            503,
+            b'{"detail": "unpacked program files are missing; restart Clauster"}',
+            FAIL,
+            "with 503: unpacked program files are missing; restart Clauster",
+        ),
+        (500, b"Internal Server Error", FAIL, "with 500"),
+        (503, b'{"detail": {"not": "a string"}}', FAIL, "with 503"),
+        (503, b"[" * 4000, FAIL, "with 503"),
+    ],
+)
+def test_check_running_server_reports_the_healthz_verdict(status, body, expected, fragment):
+    server = _serve_healthz(status, body)
+    try:
+        c = _check_running_server(server.server_address[1], cert_file=None)
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert c is not None
+    assert c.name == "server"
+    assert c.status == expected
+    assert c.detail.endswith(fragment)
+
+
+def test_check_running_server_keeps_the_status_when_the_body_stalls(monkeypatch):
+    # The status line is the verdict. A server that sends `503` and then never finishes
+    # the body must still be a FAIL, not a dropped check.
+    monkeypatch.setattr(ops_mod, "_SERVER_PROBE_TIMEOUT", 0.3)
+    done = threading.Event()
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        s.listen(1)
+        port = s.getsockname()[1]
+
+        def _stall() -> None:
+            peer, _addr = s.accept()
+            with peer:
+                peer.recv(4096)
+                peer.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 64\r\n\r\n")
+                done.wait(5)
+
+        t = threading.Thread(target=_stall, daemon=True)
+        t.start()
+        try:
+            c = _check_running_server(port, cert_file=None)
+        finally:
+            done.set()
+            t.join(5)
+    assert c is not None
+    assert c.status == FAIL
+    assert c.detail.endswith("answers /healthz with 503")
+
+
+def test_check_running_server_is_silent_for_a_non_http_listener():
+    # A listener that is not HTTP is not a Clauster we can read; the port check has
+    # already warned about it, so no second line.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        s.listen(1)
+        port = s.getsockname()[1]
+
+        def _hang_up() -> None:
+            peer, _addr = s.accept()
+            peer.close()
+
+        t = threading.Thread(target=_hang_up, daemon=True)
+        t.start()
+        assert _check_running_server(port, cert_file=None) is None
+        t.join(5)
+
+
+def _serve_healthz_tls(cert: Path, key: Path):
+    """Like :func:`_serve_healthz` (200), but over TLS with the given cert + key."""
+    server = _serve_healthz(200, b'{"status": "ok"}')
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(str(cert), str(key))
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    return server
+
+
+def test_check_running_server_trusts_the_configured_certificate(tmp_path):
+    # The cert names "example.test", never 127.0.0.1: the probe must still pass, because
+    # it pins the configured certificate instead of comparing names.
+    cert, key = generate_self_signed(tmp_path / "a", ["example.test"])
+    server = _serve_healthz_tls(cert, key)
+    try:
+        c = _check_running_server(server.server_address[1], cert_file=cert)
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert c is not None
+    assert c.status == OK
+
+
+def test_check_running_server_warns_on_a_different_certificate(tmp_path):
+    # Verification stays ON: a listener holding any other certificate is not accepted.
+    cert, key = generate_self_signed(tmp_path / "a", ["example.test"])
+    other, _other_key = generate_self_signed(tmp_path / "b", ["example.test"])
+    server = _serve_healthz_tls(cert, key)
+    try:
+        c = _check_running_server(server.server_address[1], cert_file=other)
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert c is not None
+    assert c.status == WARN
+    assert "presents a different certificate" in c.detail
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        None,
+        "not a certificate",
+        "caf\u00e9",
+        "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+    ],
+)
+def test_check_running_server_warns_on_an_unreadable_certificate_file(tmp_path, content):
+    cert_file = tmp_path / "server.crt"
+    if content is not None:
+        cert_file.write_text(content, encoding="utf-8")
+    c = _check_running_server(1, cert_file=cert_file)
+    assert c is not None
+    assert c.status == WARN
+    assert "is unreadable" in c.detail
+
+
+def test_server_cert_file_follows_the_tls_mode(write_config, tmp_path):
+    state = tmp_path / ".s"
+    plain = load_config(write_config(f"state_dir: {state}\n"))
+    assert _server_cert_file(plain) is None
+
+    cert, key = generate_self_signed(tmp_path / "a", ["example.test"])
+    supplied = load_config(
+        write_config(
+            f"state_dir: {state}\ntls:\n  cert_file: {cert.as_posix()}\n"
+            f"  key_file: {key.as_posix()}\n"
+        )
+    )
+    assert _server_cert_file(supplied) == cert
+
+    generated = load_config(
+        write_config(
+            f"state_dir: {state}\ntls:\n  provision: self-signed\n  hostnames: [localhost]\n"
+        )
+    )
+    assert _server_cert_file(generated) == state.resolve() / "tls" / "self-signed.crt"
+    assert not (state / "tls").exists()  # doctor reads the path; it never creates it
+
+
+def test_doctor_cli_adds_the_server_check_when_the_port_is_held(write_config, tmp_path):
+    server = _serve_healthz(503, b'{"detail": "unpacked program files are missing"}')
+    port = server.server_address[1]
+    try:
+        cfg = write_config(f"port: {port}\nstate_dir: {tmp_path / '.s'}\n")
+        checks, ok = run_doctor(str(cfg))
+    finally:
+        server.shutdown()
+        server.server_close()
+    by = {c.name: c for c in checks}
+    assert by["port"].status == WARN
+    assert by["server"].status == FAIL
+    assert ok is False
+
+
+def test_doctor_cli_has_no_server_check_when_the_port_is_free(write_config, tmp_path):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    cfg = write_config(f"port: {port}\nstate_dir: {tmp_path / '.s'}\n")
+    assert "server" not in {c.name for c in run_doctor(str(cfg))[0]}
