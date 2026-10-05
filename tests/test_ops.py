@@ -35,6 +35,7 @@ from clauster.ops import (
     _check_state_dir_writable,
     _check_systemd_killmode,
     _safe_extract_tar,
+    _server_cert_file,
     _version_ge,
     make_backup,
     migrate_state,
@@ -43,6 +44,7 @@ from clauster.ops import (
     restore_backup,
     run_doctor,
 )
+from clauster.tls_provision import generate_self_signed
 from conftest import needs_symlink
 
 # .cmd on Windows so the version probe resolves on Python 3.11 too (3.12+ would
@@ -2501,7 +2503,7 @@ def _serve_healthz(status: int, body: bytes):
 def test_check_running_server_reports_the_healthz_verdict(status, body, expected, fragment):
     server = _serve_healthz(status, body)
     try:
-        c = _check_running_server(server.server_address[1], tls=False)
+        c = _check_running_server(server.server_address[1], cert_file=None)
     finally:
         server.shutdown()
         server.server_close()
@@ -2525,31 +2527,88 @@ def test_check_running_server_is_silent_for_a_non_http_listener():
 
         t = threading.Thread(target=_hang_up, daemon=True)
         t.start()
-        assert _check_running_server(port, tls=False) is None
+        assert _check_running_server(port, cert_file=None) is None
         t.join(5)
 
 
-def test_check_running_server_tls_probe_skips_verification(monkeypatch):
-    # The cert names the public host, never 127.0.0.1, so the loopback probe must not
-    # verify it. Capture the context instead of standing up a TLS server.
-    seen = {}
+def _serve_healthz_tls(cert: Path, key: Path):
+    """Like :func:`_serve_healthz` (200), but over TLS with the given cert + key."""
+    server = _serve_healthz(200, b'{"status": "ok"}')
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(str(cert), str(key))
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    return server
 
-    class _Conn:
-        def __init__(self, host, port, *, timeout, context) -> None:
-            seen.update(host=host, port=port, context=context)
 
-        def request(self, method, path) -> None:
-            raise OSError("stop here")
+def test_check_running_server_trusts_the_configured_certificate(tmp_path):
+    # The cert names "example.test", never 127.0.0.1: the probe must still pass, because
+    # it pins the configured certificate instead of comparing names.
+    cert, key = generate_self_signed(tmp_path / "a", ["example.test"])
+    server = _serve_healthz_tls(cert, key)
+    try:
+        c = _check_running_server(server.server_address[1], cert_file=cert)
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert c is not None
+    assert c.status == OK
 
-        def close(self) -> None:
-            seen["closed"] = True
 
-    monkeypatch.setattr("clauster.ops.http.client.HTTPSConnection", _Conn)
-    assert _check_running_server(7621, tls=True) is None
-    assert seen["host"] == "127.0.0.1"
-    assert seen["context"].verify_mode == ssl.CERT_NONE
-    assert seen["context"].check_hostname is False
-    assert seen["closed"] is True
+def test_check_running_server_warns_on_a_different_certificate(tmp_path):
+    # Verification stays ON: a listener holding any other certificate is not accepted.
+    cert, key = generate_self_signed(tmp_path / "a", ["example.test"])
+    other, _other_key = generate_self_signed(tmp_path / "b", ["example.test"])
+    server = _serve_healthz_tls(cert, key)
+    try:
+        c = _check_running_server(server.server_address[1], cert_file=other)
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert c is not None
+    assert c.status == WARN
+    assert "presents a different certificate" in c.detail
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        None,
+        "not a certificate",
+        "caf\u00e9",
+        "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+    ],
+)
+def test_check_running_server_warns_on_an_unreadable_certificate_file(tmp_path, content):
+    cert_file = tmp_path / "server.crt"
+    if content is not None:
+        cert_file.write_text(content, encoding="utf-8")
+    c = _check_running_server(1, cert_file=cert_file)
+    assert c is not None
+    assert c.status == WARN
+    assert "is unreadable" in c.detail
+
+
+def test_server_cert_file_follows_the_tls_mode(write_config, tmp_path):
+    state = tmp_path / ".s"
+    plain = load_config(write_config(f"state_dir: {state}\n"))
+    assert _server_cert_file(plain) is None
+
+    cert, key = generate_self_signed(tmp_path / "a", ["example.test"])
+    supplied = load_config(
+        write_config(
+            f"state_dir: {state}\ntls:\n  cert_file: {cert.as_posix()}\n"
+            f"  key_file: {key.as_posix()}\n"
+        )
+    )
+    assert _server_cert_file(supplied) == cert
+
+    generated = load_config(
+        write_config(
+            f"state_dir: {state}\ntls:\n  provision: self-signed\n  hostnames: [localhost]\n"
+        )
+    )
+    assert _server_cert_file(generated) == state.resolve() / "tls" / "self-signed.crt"
+    assert not (state / "tls").exists()  # doctor reads the path; it never creates it
 
 
 def test_doctor_cli_adds_the_server_check_when_the_port_is_held(write_config, tmp_path):

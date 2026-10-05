@@ -29,7 +29,16 @@ from xml.sax.saxutils import escape as _xml_escape
 import yaml
 from pydantic import ValidationError
 
-from . import atomicio, claude_cli, config_write_mcp, deps, environments, procutil, pty_screen
+from . import (
+    atomicio,
+    claude_cli,
+    config_write_mcp,
+    deps,
+    environments,
+    procutil,
+    pty_screen,
+    tls_provision,
+)
 from .config import ClausterConfig, FixedDetailYamlError, _missing_enforced_auth, load_config
 from .config_editor import _friendly_validation_message
 from .config_write import _yaml_error_where
@@ -318,7 +327,7 @@ def run_doctor(
         # run cannot see inside the running server (a frozen binary's unpacked files,
         # for one), but the server reports that through /healthz.
         if port.status == WARN:
-            server = _check_running_server(config.port, tls=config.tls is not None)
+            server = _check_running_server(config.port, cert_file=_server_cert_file(config))
             if server is not None:
                 checks.append(server)
 
@@ -1001,22 +1010,50 @@ def _check_port(host: str, port: int) -> Check:
     return Check("port", OK, f"{port} free")
 
 
-def _check_running_server(port: int, *, tls: bool) -> Check | None:
+def _server_cert_file(config: ClausterConfig) -> Path | None:
+    """Return the certificate file the server presents, or ``None`` when it serves plain HTTP."""
+    if config.tls is None:
+        return None
+    if config.tls.provision == "self-signed":
+        return tls_provision.self_signed_cert_path(config.state_dir.expanduser().resolve())
+    # provision = off: the config validator guarantees cert_file is set and resolved.
+    return Path(config.tls.cert_file)  # type: ignore[arg-type]
+
+
+_PEM_CERT_END = "-----END CERTIFICATE-----"
+
+
+def _check_running_server(port: int, *, cert_file: Path | None) -> Check | None:
     """Report the ``/healthz`` verdict of the server already listening on loopback ``port``.
 
     OK on a 200, FAIL on any other HTTP status (with the server's ``detail`` message when
     it sends one). ``None`` when the listener does not answer HTTP at all: it is then not
     a Clauster we can read, and the ``port`` check has already warned about it.
 
-    Certificate verification is off for the TLS probe on purpose. The certificate names
-    the host's public name, never ``127.0.0.1``, so a verified loopback probe always
-    fails. The request carries no credentials and only the status and ``detail`` are read.
+    With TLS (``cert_file`` set) the probe trusts exactly one certificate: the first one
+    in the configured file, which is the one the server presents. The usual name check
+    cannot work, because the certificate names the host's public name and the probe dials
+    ``127.0.0.1``. Pinning the certificate is the stronger test anyway: the handshake only
+    succeeds against a listener that holds this certificate's private key. A listener that
+    presents any other certificate is a WARN, never a silent pass.
     """
     conn: http.client.HTTPConnection
-    if tls:
-        context = ssl.create_default_context()
+    if cert_file is not None:
+        try:
+            pem = cert_file.read_text(encoding="ascii")
+            leaf = pem[: pem.index(_PEM_CERT_END) + len(_PEM_CERT_END)]
+            # cadata replaces the system trust store: this one certificate is the only anchor.
+            context = ssl.create_default_context(cadata=leaf)
+        except (OSError, ValueError) as exc:
+            return Check(
+                "server",
+                WARN,
+                f"cannot check the server on port {port}: the certificate file {cert_file} "
+                f"is unreadable ({type(exc).__name__})",
+            )
         context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
+        # Accept the pinned certificate itself as the anchor even when a CA issued it.
+        context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
         conn = http.client.HTTPSConnection("127.0.0.1", port, timeout=2, context=context)
     else:
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
@@ -1025,6 +1062,13 @@ def _check_running_server(port: int, *, tls: bool) -> Check | None:
         resp = conn.getresponse()
         status = resp.status
         body = resp.read(4096)
+    except ssl.SSLCertVerificationError:
+        return Check(
+            "server",
+            WARN,
+            f"the server on port {port} presents a different certificate than {cert_file}; "
+            "restart Clauster if the certificate was renewed",
+        )
     except (OSError, http.client.HTTPException):
         return None
     finally:
