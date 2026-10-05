@@ -44,6 +44,7 @@ from .. import (
 from ..auth import SESSION_USER
 from ..dependencies import (
     AuthenticateDep,
+    BundleGuardDep,
     ClaustrumDaemonDep,
     ConfigDep,
     EngineDep,
@@ -64,6 +65,9 @@ router = APIRouter()
 
 
 # ----- liveness, the Prometheus endpoint, and system doctor ----------------------------------
+_BUNDLE_ERROR = "unpacked program files are missing; restart Clauster"
+
+
 @router.get("/healthz")
 async def healthz(
     request: Request,
@@ -72,8 +76,14 @@ async def healthz(
     login_status_cache: LoginStatusCacheDep,
     claustrum_daemon: ClaustrumDaemonDep,
     authenticate: AuthenticateDep,
+    bundle_guard: BundleGuardDep,
 ) -> dict:
     """Report liveness — plus claude version and counts once the caller is authenticated."""
+    # #1663: a frozen binary whose unpacked files were deleted cannot render its pages,
+    # yet the process stays up. Fail the probe for every caller, before the auth split,
+    # so a monitor that only reads the status code sees it. Nothing here is sensitive.
+    if bundle_guard.missing:
+        raise HTTPException(503, detail=_BUNDLE_ERROR)
     # Unauthenticated callers get only liveness when auth is enabled — don't
     # leak claude version / running count on a public reverse-proxy deploy.
     if config.auth.enabled and (await authenticate(request))[0] is None:
@@ -169,7 +179,7 @@ async def prometheus_metrics(
 
 
 @router.get("/api/doctor")
-async def api_doctor(config: ConfigDep) -> dict:
+async def api_doctor(config: ConfigDep, bundle_guard: BundleGuardDep) -> dict:
     """System-readiness checks for the dashboard preflight panel.
 
     Surfaces the same diagnostics as the ``clauster doctor`` CLI (claude binary +
@@ -193,6 +203,21 @@ async def api_doctor(config: ConfigDep) -> dict:
     checks, ok = await asyncio.to_thread(
         ops.run_doctor, str(src) if src is not None else None, check_port=False
     )
+    # #1663: only the running server can judge its own unpack directory (a `clauster
+    # doctor` CLI run unpacks a fresh copy of its own), so this check lives here.
+    if bundle_guard.root is not None:
+        gone = bundle_guard.missing
+        checks.append(
+            ops.Check(
+                "bundle",
+                ops.FAIL if gone else ops.OK,
+                f"{gone} unpacked program file(s) missing from {bundle_guard.root}; "
+                "restart Clauster"
+                if gone
+                else f"unpacked program files present in {bundle_guard.root}",
+            )
+        )
+        ok = ok and not gone
     return {
         "ok": ok,
         "checks": [{"name": c.name, "status": c.status, "detail": c.detail} for c in checks],
