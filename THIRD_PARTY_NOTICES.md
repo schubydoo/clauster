@@ -11,7 +11,7 @@ permission notices are reproduced below. Pinned versions are tracked in
 
 - Project: <https://tabler.io>
 - Source: <https://github.com/tabler/tabler>
-- Version: 1.6.0
+- Version: 1.6.1
 - Files: `src/clauster/static/vendor/tabler/`
 - License: MIT (also retained verbatim at `src/clauster/static/vendor/tabler/LICENSE`
   and in the `tabler.min.css` banner)
