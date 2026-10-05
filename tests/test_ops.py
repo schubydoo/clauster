@@ -2564,6 +2564,7 @@ def _serve_healthz_tls(cert: Path, key: Path):
     """Like :func:`_serve_healthz` (200), but over TLS with the given cert + key."""
     server = _serve_healthz(200, b'{"status": "ok"}')
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(str(cert), str(key))
     server.socket = context.wrap_socket(server.socket, server_side=True)
     return server
