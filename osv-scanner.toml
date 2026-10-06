@@ -1,0 +1,10 @@
+# OSV-Scanner ignore list for the lockfiles in this directory. OSV-Scanner
+# (.github/workflows/osv-scanner.yml) and OpenSSF Scorecard both read it.
+#
+# Add an entry only for a vulnerability that cannot reach Clauster, and write the reason.
+# Remove the entry when a fixed version exists, then update the dependency instead.
+
+[[IgnoredVulns]]
+# braces: a deeply nested brace pattern exhausts the call stack (GHSA-vfj7-8cjw-p6xm).
+id = "CVE-2026-93687"
+reason = "Dev-only: braces comes from markdownlint-cli2 (docs lint) through micromatch, and reads only the globs in our own lint configuration. Clauster does not ship it. No fixed version exists (3.0.3 is the newest release)."
