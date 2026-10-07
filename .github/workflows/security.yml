@@ -257,7 +257,7 @@ jobs:
         # for a required check that reds on a transient hiccup, so the split lives in the
         # consumer. This step only ADDS head-SHA coverage; it must not block.
         continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: codeql-fork-sarif
           # EXACT FILE, not a `*.sarif` glob. `post-processed-sarif-path` is not cleared
