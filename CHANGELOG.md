@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.1 (2026-10-08)
+
+[Compare with 1.3.0](https://github.com/schubydoo/clauster/compare/v1.3.0...v1.3.1)
+
+### Fixes
+
+- The container image now ships zlib 1.3.2-r1, which fixes CVE-2026-85091. ([#1679](https://github.com/schubydoo/clauster/pull/1679))
+
 ## 1.3.0 (2026-10-06)
 
 [Compare with 1.2.1](https://github.com/schubydoo/clauster/compare/v1.2.1...v1.3.0)
