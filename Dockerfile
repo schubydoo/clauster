@@ -48,12 +48,18 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS runtime
 
 # openssl - for CVE mitigation
+# zlib - for CVE mitigation (CVE-2026-85091). The base image ships 1.3.2-r0, and apk
+#   keeps an installed package that already satisfies the spec, so this pin carries
+#   the `-rN` on purpose: `~1.3.2` alone leaves the vulnerable r0 in place. Drop the
+#   pin once the base image itself ships zlib 1.3.2-r1 or later.
 # python3 — runs the copied venv (same version as builder).
 # git — provisioning (create --git-init / clone).
 # shadow — groupmod/usermod/useradd/groupadd for the PUID/PGID remap (busybox lacks them).
 # su-exec — musl-native privilege-drop in the entrypoint (replaces gosu; no Go CVE surface).
 # renovate: datasource=repology depName=alpine_3_24/openssl versioning=loose
 ARG OPENSSL_VERSION=3.5.9-r0
+# renovate: datasource=repology depName=alpine_3_24/zlib versioning=loose
+ARG ZLIB_VERSION=1.3.2-r1
 # renovate: datasource=repology depName=alpine_3_24/python3 versioning=loose
 ARG PYTHON3_VERSION=3.14.8-r0
 # renovate: datasource=repology depName=alpine_3_24/git versioning=loose
@@ -64,6 +70,7 @@ ARG SHADOW_VERSION=4.18.0
 ARG SU_EXEC_VERSION=0.3
 RUN apk add --no-cache \
         openssl="~${OPENSSL_VERSION}" \
+        zlib="~${ZLIB_VERSION}" \
         python3="~${PYTHON3_VERSION}" \
         git="~${GIT_VERSION}" \
         shadow="~${SHADOW_VERSION}" \
