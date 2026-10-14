@@ -172,7 +172,7 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
-          version: "0.13.0" # pinned uv (Renovate-tracked); skip the flaky "latest" fetch
+          version: "0.13.1" # pinned uv (Renovate-tracked); skip the flaky "latest" fetch
           # Caching stays OFF even though this job no longer holds the token
           # (zizmor cache-poisoning): a cache restored from a lower-privilege
           # context could taint the artifact the publish job then ships to PyPI.
