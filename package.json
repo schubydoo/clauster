@@ -11,7 +11,7 @@
     "markdownlint-cli2": "0.23.3"
   },
   "overrides": {
-    "markdown-it": "15.0.2",
+    "markdown-it": "15.0.3",
     "js-yaml": "4.3.2",
     "smol-toml": "1.9.1",
     "katex": "0.19.0"
