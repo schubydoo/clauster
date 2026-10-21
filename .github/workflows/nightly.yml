@@ -117,7 +117,7 @@ jobs:
           #                   DIGEST; also keeps the pulled container image digest-pinned)
           # Bump both deliberately and re-validate the prediction; keep every buildx step on
           # the same versions.
-          version: v0.38.0
+          version: v0.38.1
           # renovate: datasource=docker depName=moby/buildkit versioning=docker
           driver-opts: image=moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c
           # No binary cache in a publish pipeline: nothing for a poisoned cache to swap in,
@@ -224,7 +224,7 @@ jobs:
           #                   DIGEST; also keeps the pulled container image digest-pinned)
           # Bump both deliberately and re-validate the prediction; keep every buildx step on
           # the same versions.
-          version: v0.38.0
+          version: v0.38.1
           # renovate: datasource=docker depName=moby/buildkit versioning=docker
           driver-opts: image=moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c
           # No binary cache in a publish pipeline: nothing for a poisoned cache to swap in,
@@ -311,9 +311,9 @@ jobs:
           ref: ${{ needs.gate.outputs.sha }} # the exact commit the gate froze
           persist-credentials: false
       - name: Set up uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
         with:
-          version: "0.13.3" # pinned uv (Renovate-tracked); skip the flaky "latest" fetch
+          version: "0.13.4" # pinned uv (Renovate-tracked); skip the flaky "latest" fetch
           # No cache in a publishing job (zizmor cache-poisoning): a cache
           # restored from a lower-privilege context could taint the artifact
           # this OIDC step ships. A once-a-night build gains little from a cache.
@@ -414,7 +414,7 @@ jobs:
           name: nightly-dist
           path: dist/
       - name: Publish to TestPyPI
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           repository-url: https://test.pypi.org/legacy/
           packages-dir: dist/
