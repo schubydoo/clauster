@@ -170,9 +170,9 @@ jobs:
           persist-credentials: false
           ref: ${{ needs.validate.outputs.sha }} # the exact commit validate froze
       - name: Set up uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
         with:
-          version: "0.13.3" # pinned uv (Renovate-tracked); skip the flaky "latest" fetch
+          version: "0.13.4" # pinned uv (Renovate-tracked); skip the flaky "latest" fetch
           # Caching stays OFF even though this job no longer holds the token
           # (zizmor cache-poisoning): a cache restored from a lower-privilege
           # context could taint the artifact the publish job then ships to PyPI.
@@ -217,7 +217,7 @@ jobs:
       #   owner=schubydoo, repo=clauster, workflow=release.yml, environment=pypi
       # Until that's set up, this step 403s — there is no token to add.
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           packages-dir: dist/
 
@@ -266,7 +266,7 @@ jobs:
           #                   DIGEST; also keeps the pulled container image digest-pinned)
           # Bump both deliberately and re-validate the prediction; keep every buildx step on
           # the same versions.
-          version: v0.38.0
+          version: v0.38.1
           # renovate: datasource=docker depName=moby/buildkit versioning=docker
           driver-opts: image=moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c
           # No binary cache in a publish pipeline: nothing for a poisoned cache to swap in,
@@ -440,7 +440,7 @@ jobs:
           #                   DIGEST; also keeps the pulled container image digest-pinned)
           # Bump both deliberately and re-validate the prediction; keep every buildx step on
           # the same versions.
-          version: v0.38.0
+          version: v0.38.1
           # renovate: datasource=docker depName=moby/buildkit versioning=docker
           driver-opts: image=moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c
           # No binary cache in a publish pipeline: nothing for a poisoned cache to swap in,
