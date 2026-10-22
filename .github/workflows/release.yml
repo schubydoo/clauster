@@ -170,7 +170,7 @@ jobs:
           persist-credentials: false
           ref: ${{ needs.validate.outputs.sha }} # the exact commit validate froze
       - name: Set up uv
-        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           version: "0.13.5" # pinned uv (Renovate-tracked); skip the flaky "latest" fetch
           # Caching stays OFF even though this job no longer holds the token
