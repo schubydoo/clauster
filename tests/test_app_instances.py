@@ -57,12 +57,13 @@ def test_bridge_held_by_another_project_is_a_409_on_start_resume_and_adopt(
     config, claude_json = runner_config
     runner = SessionRunner(config, claude_json=claude_json)
 
-    async def _no_poll() -> None:
+    async def _no_poll(*, side_effects: bool = True) -> None:
         return None
 
     # The poll loop and the request-time status reconcile would both judge the injected card
-    # against a pid that is not running here, and mark it CRASHED.
-    monkeypatch.setattr(runner, "poll_once", _no_poll)
+    # against a pid that is not running here, and mark it CRASHED. Patch the PollLoop, not the
+    # runner: the background loop calls `PollLoop.poll_once` directly.
+    monkeypatch.setattr(runner._poll_loop, "poll_once", _no_poll)
     monkeypatch.setattr("clauster.procutil.is_live_bridge", lambda *a, **k: True)
     monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", lambda j: 500.0)
     # The rediscover pointer leg reads `pointers.is_live`; keep it out of this test.
@@ -136,11 +137,12 @@ def test_tracked_sessions_endpoint_groups_by_instance(runner_config, monkeypatch
     # The lifespan starts a background poll loop whose first poll_once() reconciles against
     # `agents --json` and would overwrite this injected snapshot with [] — a race the endpoint
     # read can lose (intermittent macOS/3.11 failures). Stub it so the injected sessions are
-    # stable; this test exercises the grouping endpoint, not the poll/reconcile path.
-    async def _no_poll() -> None:
+    # stable; this test exercises the grouping endpoint, not the poll/reconcile path. Patch the
+    # PollLoop, not the runner: the background loop calls `PollLoop.poll_once` directly.
+    async def _no_poll(*, side_effects: bool = True) -> None:
         return None
 
-    monkeypatch.setattr(runner, "poll_once", _no_poll)
+    monkeypatch.setattr(runner._poll_loop, "poll_once", _no_poll)
     with TestClient(create_app(config, runner=runner)) as client:
         resp = client.get("/api/sessions/tracked")
         assert resp.status_code == 200
