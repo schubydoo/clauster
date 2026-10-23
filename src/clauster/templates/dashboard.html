@@ -92,6 +92,9 @@
        it hits only the direct-child action buttons, not the .btn-group filter buttons in
        the Active zone (which keep Tabler's flex:1 1 auto). */
     .zone-head .zone-actions > .btn { flex-shrink: 0; }
+    /* Tabler 1.7 widened btn-sm by 8px per chip; a .btn-group never wraps, so the five
+       Active-zone filters overflowed a 360px screen. Keep the 1.6 horizontal padding. */
+    .zone-active .zone-actions .btn-group-sm > .btn { --tblr-btn-padding-x: .5rem; }
     .proj-search { max-width: 13rem; }
     /* Two zones stacked in a flex column. Active is FIRST in the DOM (not pulled up with
        CSS `order`) so it sits above Projects AND keyboard/screen-reader focus order matches
@@ -223,6 +226,11 @@
        to it makes any WRAPPED .btn flex-grow to fill the row (full-width bars). Use a
        plain gapped flex-wrap container instead so each tab keeps its intrinsic width. */
     .cfg-jump { display: flex; flex-wrap: wrap; gap: .25rem; }
+    /* Tabler 1.7 widened btn-sm (padding .5rem→.75rem x, .3125rem→.4375rem y), which
+       wrapped the config modal's jump tabs onto an extra row at 390px and grew the sticky
+       bar ~50px. Keep the 1.6 chip padding for every .cfg-jump row (that nav and the
+       Manage-config surface tabs); it still gives a 28px touch target. */
+    .cfg-jump .btn-sm { --tblr-btn-padding-x: .5rem; --tblr-btn-padding-y: .3125rem; }
     /* Zero the body's top padding so the sticky nav pins flush to the top (no uncovered
        padding strip for rows to bleed through); the intro carries the spacing instead.
        The bottom padding gives the scroll body room below its last control (the Advanced
