@@ -1,15 +1,15 @@
 # Claude review instructions
 
-Rules for the on-demand Claude reviewer (`.github/workflows/claude-review.yml`).
+Project rules for the on-demand Claude reviewer (`.github/workflows/claude-review.yml`,
+which calls the central job in `schubydoo/shared-workflows`).
 
 **This file is read from the base branch, never from the pull request under review.**
 A PR therefore cannot edit the rules that govern its own review. Keep it that way: do
 not make the workflow read these instructions from the PR head.
 
-Tune the reviewer by editing **this file** — a normal PR. Do not move these rules into
-the workflow YAML: `claude-code-action` refuses to run when the workflow file differs
-from the copy on the default branch, so instructions living in the YAML could only be
-changed by merging a new workflow every time.
+Tune what the reviewer looks for by editing **this file** in a normal pull request. How the
+review is posted is central: the shared workflow carries that recipe, and it wins on
+posting.
 
 Length has a cost. Rules that change review behaviour belong here; general project
 context belongs in `AGENTS.md` / `CLAUDE.md`, which the reviewer already reads.
@@ -135,65 +135,9 @@ fix cannot reach round seven on style.
 
 ## Output
 
-- Post every line-specific finding as an **inline comment**, and group them all into
-  **exactly one submitted review**. Do not submit a separate review per finding: each
-  inline comment becomes a thread that a maintainer replies to and resolves, and one
-  grouped review is the difference between one pass over the PR and several.
-- **How to submit it, exactly.** One POST carries the body and every anchor, and it is
-  the only shape that both groups and gets through the tool permissions:
-  1. Use the `Write` tool to create `review.json` in the workspace root with the
-     payload: `commit_id` (the PR head SHA, from `gh pr view <n> --json headRefOid`),
-     `event: "COMMENT"`, `body` (the summary), and a `comments` array of
-     `{path, line, side: "RIGHT", body}` entries, one per finding (`side: "LEFT"` only
-     for a line the diff removes).
-  2. Run `gh api repos/<owner>/<repo>/pulls/<n>/reviews --input review.json`.
+The central workflow writes a posting recipe next to this file, and it governs how the review
+is posted: the grouped review, `review.json`, thread replies, the tally line and the allowed
+commands. Do not add posting rules here.
 
-  Every `line` must be a line the diff touches, on that side. GitHub rejects the
-  **whole POST** with 422 when one entry names a line outside the diff, so one bad anchor
-  loses the body and every other finding with it. To flag an unchanged line, anchor the
-  comment to the nearest changed line and name the real line in the comment body. If the
-  POST returns 422, re-read `review.json`, correct that entry with `Write`, and repeat
-  the same POST. Never fall back to a shape that posts findings one at a time.
-
-  Leave `review.json` where it is: nothing in this recipe deletes it, and the workspace
-  is discarded when the job ends.
-
-  **Never post a standalone inline comment.** GitHub wraps each standalone review
-  comment (`POST .../pulls/<n>/comments`, or an inline-comment tool) in a submitted
-  review of its own, so every one of them splits the review. That is what produced the
-  four-review splits on earlier runs. Every anchor rides in the `comments` array of the
-  single POST above, and a clarification after the fact is a reply on the thread, not a
-  new comment.
-
-  These are refused, so do not reach for them: JSON inline on the command line, shell
-  redirects (`> file`), compound commands (`;`, `&&`, `||`), `python3`, `ls`, `git`,
-  `rm`. `gh pr review` cannot attach inline comments. A refused attempt is a denial the
-  workflow counts.
-- Put the **summary table** — every finding with its file and line — in the **body of
-  the submitted review**, and nowhere else. That table is what makes the review readable
-  without opening the diff, and it is what survives inline anchors going stale (once the
-  PR moves, GitHub marks them outdated and drops the line number).
-- **Do not repeat the findings anywhere else.** Your final message becomes the progress
-  comment at the top of the PR; keep it to the checklist, a one-line verdict, and a
-  pointer to the review. A second copy of the table there is the same review printed
-  twice — it doubles what a maintainer reads and makes two things that can disagree
-  after an edit.
-- Submit as a **COMMENT** review. Never `REQUEST_CHANGES` and never `APPROVE` — this
-  reviewer is advisory and must not gate a merge.
-- Do not number findings as `#1`, `#2`. GitHub turns a hash followed by digits into a
-  link to an unrelated issue or PR. Use "Finding 1", "(1)", or a short description.
-- Link code with the **full** SHA and a line range with a line of context either side:
-  `https://github.com/schubydoo/clauster/blob/<full-sha>/path/file.py#L40-L46`
-- The **first line** of the review body is the tally, in exactly this lowercase form:
-  `2 important, 3 nits` (singular when a count is 1: `1 important, 1 nit`), and
-  `0 important, 0 nits` for a clean review, optionally followed by "No important
-  findings". Nothing goes above it, not even the `## Previous findings` heading of a
-  re-review. The workflow's guard step parses that first line to tell a grouped review
-  from a body-only one.
-- Use a committable ```suggestion``` block only when committing it fixes the issue
-  **entirely**. If follow-up work is needed, describe the fix instead.
-- **Findings keep their calibration.** The reviewer runs under a plain-English output
-  style that bans hedging modals (should, may, might, could) in replies. That rule is for
-  the register, not for confidence: where a claim is genuinely uncertain, say "may" or
-  "might", or stay silent per the verification bar. Never promote a hedge to "must" to
-  satisfy the style.
+Link code in this repo with the full SHA and a line range:
+`https://github.com/schubydoo/clauster/blob/<full-sha>/path/file.py#L40-L46`
