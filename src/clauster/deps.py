@@ -526,7 +526,7 @@ _SHAWL_VERSION = "v1.9.0"
 # are the release's checksums.txt asset digests (refreshed by scripts/check_binary_dep_pins.py and
 # fail-closed at install, exactly like Shawl above). Same `# renovate:` customManager pattern.
 # renovate: datasource=github-releases depName=schubydoo/claustrum
-_CLAUSTRUM_VERSION = "v1.13.0"
+_CLAUSTRUM_VERSION = "v1.14.0"
 _CLAUSTRUM_VER_BARE = _CLAUSTRUM_VERSION.removeprefix("v")  # tag "v1.7.1" -> asset infix "1.7.1"
 
 # (platform_marker, GoReleaser OS token, arch_marker, archive ext, sha256 of the archive)
@@ -536,42 +536,42 @@ _CLAUSTRUM_VARIANTS: tuple[tuple[str, str, str, str, str], ...] = (
         "Linux",
         "x86_64",
         "tar.gz",
-        "dd3044bd0cbaedfba81f2588acf41ea41b8684e4527f0f6505a08ae695a05782",
+        "0a59e96bee495921c5f8881164cc3c4b8ad1ca8032c2928948b37a04c0baf982",
     ),
     (
         "linux",
         "Linux",
         "arm64",
         "tar.gz",
-        "d63fbe42c8ea571d33ce935e85a80f7e37511e18b40f8b750b85527ba22bbfb2",
+        "d6da9120c2b219fd0610983c91175534ec7a00500271570e04d5bd917f6d2c22",
     ),
     (
         "darwin",
         "Darwin",
         "x86_64",
         "tar.gz",
-        "2302b0a1d9d015f45f11e5360508dedeff6d1deea05e733d0cf82c1c27bdc701",
+        "e5dc6a7f2e8d4884059088b13781d4e459a4e13b50b08fcac5a4554d60737baa",
     ),
     (
         "darwin",
         "Darwin",
         "arm64",
         "tar.gz",
-        "faf9903748df35689c539632ca340061b81b6af85ee766275c4ca92781c350c8",
+        "e6cfba9dfaebb8622b5e3f9783ea8d7984346c26fd7b0c43163790705aca452d",
     ),
     (
         "win32",
         "Windows",
         "x86_64",
         "zip",
-        "660404940ddd056c8b2892a283ed263f67a87ab1767a76b892c7630f665c1bb9",
+        "d1303a49ed6b0ceafba99836c85b12dfc0acd950c88bf0223ad887c707455f38",
     ),
     (
         "win32",
         "Windows",
         "arm64",
         "zip",
-        "e6e71c62c7ae56c1de196a6c32c30862658c9fd0254dbba06db301e7daffb54c",
+        "99b4e1269cd36e8ffcca59fd0c05c689cbf6ca7a50e7dc2a470cccdea9a2ee18",
     ),
 )
 
