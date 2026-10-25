@@ -18,6 +18,8 @@
   <img src="https://raw.githubusercontent.com/schubydoo/clauster/main/docs/screenshots/clauster-demo.gif" alt="Spawn a Claude session from the Clauster dashboard — open a project's launch menu, trust the directory, and the session starts, then shows Running under Active sessions" width="860">
 </p>
 
+Pass `--pilot-retry-limit <n>` to retry a failed step up to `n` times before the run exits.
+
 ## Why not just SSH in and run `claude`?
 
 | | SSH + terminal | Clauster |
