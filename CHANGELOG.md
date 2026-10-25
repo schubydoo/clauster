@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.2 (2026-10-25)
+
+[Compare with 1.3.1](https://github.com/schubydoo/clauster/compare/v1.3.1...v1.3.2)
+
+### Fixes
+
+- Update the vendored Tabler UI assets to 1.7.0, and keep the settings tabs and the Active-zone filter buttons compact on phones. ([#1734](https://github.com/schubydoo/clauster/pull/1734))
+
 ## 1.3.1 (2026-10-08)
 
 [Compare with 1.3.0](https://github.com/schubydoo/clauster/compare/v1.3.0...v1.3.1)
