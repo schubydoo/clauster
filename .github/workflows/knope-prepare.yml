@@ -111,7 +111,7 @@ jobs:
         if: ${{ steps.changesets.outputs.has == 'true' }}
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
-          version: "0.13.5" # pinned uv (Renovate-tracked); skip the flaky "latest" fetch
+          version: "0.13.6" # pinned uv (Renovate-tracked); skip the flaky "latest" fetch
           enable-cache: false
       # A SEPARATE, read-only mint for the third-party download step. The
       # binary fetch needs public read only, so it must not carry the
