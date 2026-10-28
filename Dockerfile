@@ -24,7 +24,7 @@ FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c
 # renovate: datasource=repology depName=alpine_3_24/uv versioning=loose
 ARG UV_VERSION=0.11.19
 # renovate: datasource=repology depName=alpine_3_24/python3 versioning=loose
-ARG PYTHON3_VERSION=3.14.10-r0
+ARG PYTHON3_VERSION=3.14.10-r1
 # System python3 is the interpreter uv builds the venv against; it must exist at
 # the same path in runtime (the copied venv points back at /usr/bin/python3). All
 # native deps ship musllinux wheels, so uv installs binaries — no compiler needed.
@@ -61,7 +61,7 @@ ARG OPENSSL_VERSION=3.5.9-r0
 # renovate: datasource=repology depName=alpine_3_24/zlib versioning=loose
 ARG ZLIB_VERSION=1.3.2-r1
 # renovate: datasource=repology depName=alpine_3_24/python3 versioning=loose
-ARG PYTHON3_VERSION=3.14.10-r0
+ARG PYTHON3_VERSION=3.14.10-r1
 # renovate: datasource=repology depName=alpine_3_24/git versioning=loose
 ARG GIT_VERSION=2.54.0
 # renovate: datasource=repology depName=alpine_3_24/shadow versioning=loose
