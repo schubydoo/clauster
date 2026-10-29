@@ -240,6 +240,9 @@
        programmatic scroll-into-view clear of the footer too. */
     [data-test="cfg-modal"] .modal-body { padding-top: 0; padding-bottom: 5rem; scroll-padding-bottom: 5rem; }
     [data-test="cfg-modal"] .cfg-intro { padding-top: var(--tblr-modal-padding, 1.5rem); }
+    /* Tabler 1.7.1 stopped hiding the native search "x". The transcript search has its own
+       labelled Clear button (Firefox has no native "x"), so hide the native one there. */
+    #transcript-search::-webkit-search-cancel-button { appearance: none; }
 
     /* #431: transcript turn content is plain (redacted) text — preserve its line
        breaks and wrap long lines so a turn never blows out the modal width. */
