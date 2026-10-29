@@ -1042,7 +1042,7 @@ def test_keeper_drain_reports_a_second_fault_after_a_clean_render(tmp_path: Path
 
 
 def test_keeper_survives_a_bridge_that_triggers_the_render_fault(
-    tmp_path: Path, capsys, _restore_sighup
+    tmp_path: Path, capsys, monkeypatch, _restore_sighup
 ) -> None:  # noqa: ANN001
     """End to end: the keeper must reach its terminal `exited` sidecar, not die mid-drain.
 
@@ -1055,16 +1055,31 @@ def test_keeper_survives_a_bridge_that_triggers_the_render_fault(
     from clauster import pty_keeper
 
     bridge = tmp_path / "faulting_bridge.py"
-    # The sleep is load-bearing: written back to back the two payloads land in ONE 65536-byte
+    # The wait is load-bearing: written back to back the two payloads land in ONE 65536-byte
     # read, so `screen.feed` sees the URL bytes too and repairs the cell before the scrape
     # runs -- the fault never happens and the test passes with or without the guard. Verified
-    # by bypassing the guard: without the sleep this test still passed, with it the keeper
-    # died mid-drain. The scrape must run on a chunk that ENDS in the half-overwritten cell.
+    # by bypassing the guard: with coalesced payloads this test still passed, with separate
+    # reads the keeper died mid-drain. The scrape must run on a chunk that ENDS in the
+    # half-overwritten cell. A fixed sleep was not enough: on a loaded CI runner (the alpine
+    # musl job) the keeper's first read came after both writes and the positive control
+    # below failed. So the bridge holds the URL until the keeper has fed the first chunk.
+    fed = tmp_path / "fed"
+    real_feed = pty_keeper._KeeperDrain.feed
+
+    def _feed_and_signal(self, chunk: bytes) -> None:
+        real_feed(self, chunk)
+        fed.touch()
+
+    monkeypatch.setattr(pty_keeper._KeeperDrain, "feed", _feed_and_signal)
     bridge.write_text(
-        "import sys, time\n"
+        "import os, sys, time\n"
         f"sys.stdout.buffer.write({_WIDE_CHAR_FAULT!r})\n"
         "sys.stdout.buffer.flush()\n"
-        "time.sleep(0.3)\n"
+        "deadline = time.monotonic() + 10\n"
+        f"while not os.path.exists({str(fed)!r}):\n"
+        "    if time.monotonic() > deadline:\n"
+        "        sys.exit(3)  # the sync broke: fail `rc == 0` instead of a silent slow pass\n"
+        "    time.sleep(0.01)\n"
         f"sys.stdout.buffer.write({_KEEPER_URL!r})\n"
         "sys.stdout.buffer.flush()\n"
     )

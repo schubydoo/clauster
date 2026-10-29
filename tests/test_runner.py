@@ -1135,7 +1135,10 @@ async def test_stop_serializes_on_spawn_lock(runner_config):
     assert not stop_task.done()  # blocked on the spawn lock
     assert fake.status is InstanceStatus.STARTING  # not yet stopped
     lock.release()  # spawn finished and released the lock
-    inst = await asyncio.wait_for(stop_task, timeout=1.0)
+    # The timeout only guards against a hang; the serialization itself is asserted above.
+    # After the release stop() still persists state and hops threads, which took over 1 s on
+    # a loaded Windows CI worker, so give it room.
+    inst = await asyncio.wait_for(stop_task, timeout=10.0)
     assert inst.status is InstanceStatus.STOPPED
 
 
