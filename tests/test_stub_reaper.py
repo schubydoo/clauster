@@ -9,25 +9,46 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
 
 from conftest import FAKE_CLAUDE, reap_fixture_stub_strays
 
 #: Generous: this only bounds a SIGKILL'd process's disappearance, never a happy path.
 DEATH_TIMEOUT = 30
+#: Generous too: bounds how long the stub takes to reach its own first line of Python.
+STARTUP_TIMEOUT = 30
 
 
 def _spawn_stub(tmp_path) -> subprocess.Popen:
-    """Start a `fake_claude` bridge stub that idles until signalled, as the runner does."""
-    return subprocess.Popen(  # noqa: S603 — fixture stub, absolute path, list argv
+    """Start a `fake_claude` bridge stub that idles until signalled, as the runner does.
+
+    Returns only once the stub is RUNNING its script, not merely spawned. `Popen` returns
+    after the first exec, which is `/usr/bin/env` from the shebang; env then execs
+    `python3`, and while that second exec is in flight `/proc/<pid>/cmdline` reads empty.
+    The reaper selects on argv, so a reap in that window misses the stub (seen on the
+    musl CI leg, and about one read in five locally right after `Popen`). The stub writes
+    `<debug-file>.argv.json` as its first act, which is proof the exec chain is done.
+    """
+    debug_file = tmp_path / "bridge.log"
+    proc = subprocess.Popen(  # noqa: S603 — fixture stub, absolute path, list argv
         [
             str(FAKE_CLAUDE),
             "remote-control",
             "--name",
             "reaper-probe",
             "--debug-file",
-            str(tmp_path / "bridge.log"),
+            str(debug_file),
         ]
     )
+    ready = tmp_path / "bridge.log.argv.json"
+    deadline = time.monotonic() + STARTUP_TIMEOUT
+    while not ready.exists():
+        if proc.poll() is not None or time.monotonic() > deadline:  # pragma: no cover
+            proc.kill()
+            proc.wait(timeout=DEATH_TIMEOUT)
+            raise AssertionError(f"fake_claude stub never started (rc={proc.returncode})")
+        time.sleep(0.01)
+    return proc
 
 
 def test_reaper_kills_an_abandoned_stub(tmp_path):
