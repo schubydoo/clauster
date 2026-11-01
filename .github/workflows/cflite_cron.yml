@@ -65,9 +65,10 @@ jobs:
     environment: fuzz-corpus
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    # ≈ fuzz-seconds (a TOTAL, split across harnesses) + build. The ≈7 min was observed at a
-    # smaller harness count; at 18 the build dominates and prune projects to ≈25 min.
-    timeout-minutes: 55
+    # ≈ fuzz-seconds (a TOTAL ceiling, split across harnesses) + build. Observed ≈14-15 min
+    # at 18 harnesses (build ≈10-13 min, prune ≈3 min). Worst case is the full 1998s
+    # (≈33 min) + a 13 min build + pulls ≈ 47 min, so 65 keeps real slack above it.
+    timeout-minutes: 65
     permissions:
       contents: read # checkout + build the harnesses
       security-events: write # prune writes a SARIF regardless of findings (see header)
@@ -93,12 +94,21 @@ jobs:
           # Where the 120s-vs-30s actually bites is batch and PR (see cflite_pr.yml).
           language: python
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          # 666, matching cflite_batch.yml, for the same 11 -> 18 harness-count reason:
-          # prune runs the same divide-across-targets loop, and here the per-target slice
-          # is a MERGE TIMEOUT that raises (clusterfuzz's libFuzzer engine raises
-          # TimeoutError on a timed-out merge, and nothing catches it), not a fuzz
-          # duration that simply ends. Holding the slice at ~37s keeps that headroom.
-          fuzz-seconds: 666
+          # Prune runs the same divide-across-targets loop as batch, but here the
+          # per-target slice is a MERGE TIMEOUT that raises (clusterfuzz's libFuzzer
+          # engine raises TimeoutError on a timed-out merge, and nothing catches it), not
+          # a fuzz duration that simply ends. So it is a CEILING, not time spent: most
+          # merges finish in 1-20s.
+          # cifuzz gives each target max(remaining // targets_left, total // 18), so a
+          # harness that runs EARLY gets only the floor, and the target order (an
+          # unsorted os.walk) changes per build. parse_frontmatter_fuzzer is the slow one
+          # (Atheris-instrumented PyYAML, ~2 exec/s): its merge took 49.4s at 96 inputs
+          # on 2026-10-25 while it ran late and inherited spare time. On 2026-11-01 it
+          # ran 2nd, got a 38s slice under the old 666 total, and timed out.
+          # 1998 // 18 = 111s floor: ~2.2x that worst merge, room for ~200 inputs at the
+          # slow week's ~0.5s per input. Do NOT copy this value into cflite_batch.yml,
+          # where the slice is real fuzzing time.
+          fuzz-seconds: 1998
           mode: prune
           sanitizer: address
           output-sarif: true
