@@ -113,6 +113,13 @@ jobs:
           client-id: ${{ secrets.CLAUSTER_CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
           permission-contents: write
+          # knope tags the checked-out release commit. If main moved on with a
+          # .github/workflows change before this job ran, that commit's workflow
+          # files differ from main. GitHub then refuses POST /releases, the call
+          # that creates the tag (403 "Resource not accessible by integration"),
+          # unless the token carries workflows:write.
+          # Seen on v1.3.3, 2026-11-02.
+          permission-workflows: write
       # Fail LOUD on an empty mint: knope uses this token to create the GitHub
       # Release and push the tag, and an App-identity tag is what lets the publish
       # trigger downstream automation. An empty token would degrade to GITHUB_TOKEN
@@ -257,7 +264,7 @@ jobs:
           echo "staged $(find dist/release-assets -type f | wc -l) assets for v${VERSION}"
       # A SEPARATE, read-only mint for the third-party download step. The binary
       # fetch needs public read only, so it must not carry the app-token's
-      # contents:write scope (this job also holds id-token:write for Sigstore).
+      # contents:write and workflows:write scopes (this job also holds id-token:write for Sigstore).
       # Same secrets as that mint, so the earlier "Verify App token was minted"
       # step already fails the job loud if they are broken.
       - name: Mint download-scoped GitHub App token
