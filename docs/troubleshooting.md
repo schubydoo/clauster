@@ -598,6 +598,25 @@ card shows an error like `reattach failed: ...` (server log:
 down, so there was nothing to reattach to. The transcript is not lost — start
 a new Direct Session for the project and resume from the captured session.
 
+### "stream lost: internal error (...)" on a Direct Session
+
+**What you see:** a Direct Session card changes to the red error status (the
+badge reads "Failed to start", the same label as a spawn failure), and its view
+shows `stream lost: internal error (<ExceptionName>)` (server log:
+`hosted: pump for process <id> failed`, followed by a traceback).
+
+**Most likely cause:** a bug in Clauster. Clauster could not process one line of
+the session output and stopped reading that session. Clauster does not show the
+exception message, because it can contain session output. The full traceback
+is in the server log, which the log formatter redacts. Clauster resolves any open
+permission prompt as interrupted and sends no answer to the agent, so it never
+allows a pending tool call. Please report the traceback as a bug.
+
+The agent itself can still run on the claustrum daemon. A restart of Clauster
+reattaches it and continues after the line that failed. If the agent was
+waiting on a permission prompt, that prompt does not come back after the
+reattach, because Clauster does not keep parked prompts across a restart.
+
 ### "output lost (N frames)" after a restart
 
 **What you see:** a reattached Direct Session's view opens with a yellow

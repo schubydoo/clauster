@@ -785,6 +785,20 @@ class HostedSession:
             self.status = InstanceStatus.ERROR
             self._resolve_parked()  # resolve any parked request so it isn't left stranded
             self._emit({"type": "lost", "reason": str(exc)})
+        except Exception as exc:  # any other failure while routing a frame (#1342)
+            # Fail visibly instead of letting the task die with the session still shown as
+            # running and nothing on its stream. Status and the parked set change BEFORE
+            # any emit, so a fault inside _emit itself still leaves a truthful row.
+            # CancelledError is a BaseException, so it is not caught here.
+            # Parked requests resolve as "interrupted": no control_response is written,
+            # so the agent is never sent an allow (fail closed).
+            # The reason names only the exception class: its message can quote frame
+            # content and the lost event goes to the browser unredacted. The full
+            # traceback goes to the server log, which the logging formatter redacts.
+            logger.exception("hosted: pump for process %s failed", self._process_id)
+            self.status = InstanceStatus.ERROR
+            self._resolve_parked()
+            self._emit({"type": "lost", "reason": f"internal error ({type(exc).__name__})"})
         finally:
             # The pump owns the subscription it drains; drop it whenever the pump exits on its
             # own (natural exit, daemon loss, or cancel) so a subscriber is never left on the
@@ -815,11 +829,10 @@ class HostedSession:
             # raises RecursionError on every supported interpreter (the message changed from
             # "maximum recursion depth exceeded" on <=3.13 to "Stack overflow" on 3.14+, but
             # not the type), and it is not a ValueError — so without this arm it escapes into
-            # `_pump`, which catches only CancelledError/ClaustrumError. The pump task
-            # would die and the session go dark with no `lost` event (a fail-silent that
-            # invariant 1 forbids). The scanner's depth ceiling is low — on the order of a
-            # thousand nested levels — and the agent output line is unbounded, so a hostile
-            # line reaches it on every platform.
+            # `_pump`, whose catch-all then ends the whole session as ERROR for one bad
+            # line (#1342; before that catch-all the pump died silently). The scanner's
+            # depth ceiling is low — on the order of a thousand nested levels — and the
+            # agent output line is unbounded, so a hostile line reaches it on every platform.
             # Degrading to opaque text isolates the bad frame instead of the stream.
             self._emit({"type": "text", "text": sanitize_line(line)})
             return

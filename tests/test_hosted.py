@@ -362,9 +362,8 @@ async def test_deeply_nested_stdout_line_does_not_kill_the_pump(fake_claustrum):
 
     ``json.loads`` raises RecursionError — not a ValueError — on a deeply-nested line on
     every supported interpreter, so without ``_on_line``'s arm it would escape into
-    ``_pump``, which catches only CancelledError/ClaustrumError. The pump task would die
-    and the session go dark with **no** ``lost`` event: the fail-silent invariant 1
-    forbids. The scanner's ceiling is version-dependent (~994 on the 3.11 floor), so a
+    ``_pump``, whose catch-all would then end the whole session as ERROR for one hostile
+    line. The scanner's ceiling is version-dependent (~994 on the 3.11 floor), so a
     ~40 KB line reaches it everywhere. The message changed to "Stack overflow" on 3.14+,
     but the type is RecursionError throughout.
     """
@@ -1043,6 +1042,124 @@ async def test_pump_surfaces_daemon_loss_as_error_and_resolves_parked(fake_claus
         assert "daemon vanished" in lost["reason"]
         resolved = await _drain_until(session.subscribe(), "control_resolved")
         assert resolved["request_id"] == "perm-1"
+
+
+_POISON = (json.dumps({"type": "assistant", "poison": True}) + "\n").encode()
+
+
+def _poison_redactor(monkeypatch, message: str = "boom") -> None:
+    """Make ``_redact_obj`` raise on a frame marked ``poison``: an unanticipated bug.
+
+    It stands for any exception class nobody wrote an arm for. The frame-routing path
+    is where one would come from, so the fault is injected there and not on the source.
+    """
+    real = hosted._redact_obj
+
+    def _redact(obj, _depth=0):
+        if isinstance(obj, dict) and obj.get("poison"):
+            raise RuntimeError(message)
+        return real(obj, _depth)
+
+    monkeypatch.setattr(hosted, "_redact_obj", _redact)
+
+
+async def test_pump_unexpected_error_fails_visibly_and_never_allows_parked(
+    fake_claustrum, monkeypatch, caplog
+):
+    """An exception the pump has no arm for ends the session visibly, not silently (#1342).
+
+    Before the catch-all the task died, the row stayed "running", and a parked prompt kept
+    a live Allow button. Now: status is ERROR, the parked request resolves as interrupted
+    with no control_response written (the agent is never sent an allow), and a ``lost``
+    event names only the exception class. Its message can quote frame content, and the
+    lost event reaches the browser unredacted.
+    """
+    secret = "ghp_ABCDEFGHIJKLMNOPQRST"
+    _poison_redactor(monkeypatch, f"bad frame {secret}")
+    async with _session(fake_claustrum) as (fake, session):
+        queue = session.subscribe()
+        frame = {
+            "request_id": "perm-1",
+            "type": "control_request",
+            "request": {"subtype": "can_use_tool", "tool_name": "Bash"},
+        }
+        await fake.emit(_PID, "stdout", (json.dumps(frame) + "\n").encode())
+        await _drain_until(queue, "control_request")
+        stream = session._stream
+        pump = session._pump_task
+        with caplog.at_level(logging.ERROR, logger="clauster.hosted"):
+            await fake.emit(_PID, "stdout", _POISON)
+            lost = await _drain_until(queue, "lost")
+            await wait_until(pump.done)
+
+        assert session.status == "error"
+        assert lost["reason"] == "internal error (RuntimeError)"
+        assert session.pending_requests == []
+        resolved = [e for e in session._ring if e["type"] == "control_resolved"]
+        assert [(e["request_id"], e["behavior"]) for e in resolved] == [("perm-1", "interrupted")]
+        assert not [f for f in _stdin_frames(fake) if f.get("type") == "control_response"]
+        assert secret not in json.dumps(list(session._ring))
+        # The task ended on its own terms (nothing left to "never retrieved") and released
+        # the stream subscription it drains.
+        assert pump.exception() is None
+        assert not stream._subscribers
+        # The full traceback reaches the server log, which is redacted at the formatter.
+        assert "pump for process" in caplog.text and "RuntimeError" in caplog.text
+        # And the dead session refuses to act, so a late Allow click cannot land.
+        with pytest.raises(HostedSessionError):
+            await session.respond_control("perm-1", {"behavior": "allow"})
+        with pytest.raises(HostedSessionError):
+            await session.send_message("hello")
+
+
+async def test_pump_cancellation_still_propagates_without_a_lost_event(fake_claustrum):
+    """The catch-all must not swallow cancellation (#1342).
+
+    ``detach``/``stop`` cancel the pump to tear it down. A catch-all that also caught
+    CancelledError would turn every clean clauster shutdown into an ERROR row and a
+    ``lost`` event, and would stop the cancel from ending the task.
+    """
+    async with _session(fake_claustrum) as (_fake, session):
+        pump = session._pump_task
+        await asyncio.sleep(0)  # let the pump reach its first source.get()
+        pump.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pump
+        assert session.status == "running"
+        assert not [e for e in session._ring if e["type"] == "lost"]
+
+
+async def test_manager_pump_failure_shows_error_and_a_restart_reattaches(
+    fake_claustrum, tmp_path, monkeypatch
+):
+    """The ERROR reaches the row, and a clauster restart recovers a still-running agent.
+
+    The cursor advances before a frame is routed, so the shutdown flush persists it past
+    the frame that raised. The restart then reattaches without replaying that frame, and
+    the live tail flows again. If it were replayed, the same fault would end the
+    reattached session as ERROR again.
+    """
+    _poison_redactor(monkeypatch)
+    fake = await fake_claustrum()
+    store = HostedStateStore(tmp_path)
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        pid = (await _spawn(mgr, client)).claustrum_process_id
+        await fake.emit(pid, "stdout", _POISON)
+        await wait_until(lambda: mgr.get_instance(pid).status is InstanceStatus.ERROR)
+        await mgr.aclose()
+
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        try:
+            await mgr.reattach_all(client)
+            assert mgr.get_instance(pid).status is InstanceStatus.RUNNING
+            queue = mgr.session(pid).subscribe()
+            await fake.emit(pid, "stdout", (json.dumps({"type": "user", "n": 1}) + "\n").encode())
+            assert (await _drain_until(queue, "frame"))["frame"]["n"] == 1
+            assert mgr.get_instance(pid).status is InstanceStatus.RUNNING
+        finally:
+            await mgr.aclose()
 
 
 async def test_stop_kill_escalation_waits_for_exit_and_latches(fake_claustrum):
