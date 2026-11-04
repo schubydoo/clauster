@@ -610,10 +610,12 @@ exception message, because it can contain session output. The server log has
 the full traceback. Its formatter masks known token and id shapes, but the
 message can still quote session output. Please report the traceback as a bug.
 
-Clauster then ends the agent, because nothing can read its output or answer its
-prompts any more. An open permission prompt resolves as interrupted, and
-Clauster sends no answer for it to the agent. The conversation is still in the
-transcript of `claude`. If the card offers **Resume**, use it to continue the
+Clauster then ends the agent at once (SIGKILL, with no grace period), because
+nothing can read its output or answer its prompts any more. A tool command that
+the agent runs at that time also stops. An open permission prompt shows
+`— session ended`, and Clauster sends no answer for it to the agent. The
+transcript of `claude` keeps the conversation up to the last line that `claude`
+wrote before the kill. If the card offers **Resume**, use it to continue the
 conversation in a new agent.
 
 ### "output lost (N frames)" after a restart

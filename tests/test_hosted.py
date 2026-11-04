@@ -1154,13 +1154,16 @@ async def test_pump_cancellation_still_propagates_without_a_lost_event(fake_clau
 async def test_manager_pump_failure_ends_the_agent_before_resume_can_add_one(
     fake_claustrum, tmp_path, monkeypatch
 ):
-    """The ERROR reaches the row, and a Resume never runs beside the failed agent.
+    """The ERROR reaches the row, and the KILL is sent before a Resume can spawn.
 
     ``_resume_locked`` accepts an ERROR row and only detaches the old session, and
     ``stop()`` treats ERROR as already ended. So the catch-all itself must end the agent,
-    and the kill must already be with the daemon when a Resume can first see the ERROR.
-    Resume is called the moment the row reads ERROR, without waiting for the pump, and
-    the fake records whether the old agent was still running when the new one spawned.
+    and the kill must already be on the wire when a Resume can first see the ERROR. The
+    Resume is scheduled from inside the catch-all, right after the status flips, so it
+    runs at the pump's first suspension: one ``await`` before the kill fails this test.
+    The fake records whether the old agent was still running when the new one spawned.
+    The fake handles requests in order and marks a process stopped on any signal, so
+    this pins the send order; the ``fake.killed`` assertion pins the single SIGKILL.
     """
     _poison_redactor(monkeypatch)
     fake = await fake_claustrum()
@@ -1182,16 +1185,30 @@ async def test_manager_pump_failure_ends_the_agent_before_resume_can_add_one(
             await fake.emit(pid, "stdout", (json.dumps(init) + "\n").encode())
             await wait_until(lambda: mgr.session(pid).claude_session_uuid == uuid)
 
+            session = mgr.session(pid)
+            real_resolve = session._resolve_parked
+            resume_task: list[asyncio.Future] = []
+
+            def _resolve_then_resume(*args, **kwargs):
+                real_resolve(*args, **kwargs)
+                # Status is ERROR now, so a Resume may start at the pump's next suspension.
+                resume_task.append(
+                    asyncio.ensure_future(
+                        mgr.resume(client, pid, cwd="/tmp/proj", claude_binary=_BIN)
+                    )
+                )
+
+            monkeypatch.setattr(session, "_resolve_parked", _resolve_then_resume)
             await fake.emit(pid, "stdout", _POISON)
-            await wait_until(lambda: mgr.get_instance(pid).status is InstanceStatus.ERROR)
-            resumed = await mgr.resume(client, pid, cwd="/tmp/proj", claude_binary=_BIN)
+            await wait_until(lambda: resume_task)
+            resumed = await asyncio.wait_for(resume_task[0], timeout=2.0)
 
             assert resumed.status is InstanceStatus.RUNNING
             assert resumed.claustrum_process_id != pid
             assert "--resume" in fake.spawned[-1]["args"]
             assert [(k["id"], k.get("signal")) for k in fake.killed] == [(pid, "KILL")]
-            # Two spawns: the original, then the resume. At the resume's spawn the old
-            # agent was already killed, so the two never ran side by side.
+            # Two spawns: the original, then the resume. The fake handled the KILL before
+            # the resume's spawn, because the kill was written first.
             assert len(running_at_spawn) == 2
             assert running_at_spawn[1][pid] is False
         finally:
