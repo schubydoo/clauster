@@ -1469,6 +1469,8 @@ def _rebuild_known_matcher() -> None:
     """Compile the union of every owner's values; the caller holds :data:`_known_lock`."""
     global _known_matcher
     values = frozenset().union(*_known_owners.values())
+    if _known_matcher is not None and values == _known_matcher.value_set:
+        return  # another owner still holds every value: nothing to recompile (a per-call owner)
     _known_matcher = _matcher_with(None, values) if values else None
 
 

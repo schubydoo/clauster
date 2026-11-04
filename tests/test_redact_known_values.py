@@ -454,15 +454,75 @@ def test_ws_bridge_log_stores_one_id_of_each_kind(runner_config, tmp_path: Path)
     assert redact._known_owners[instance.instance_id] == {ENV, SESSION, CSE}
 
 
+def test_ws_bridge_log_takes_a_second_id_only_from_a_bridge_line(
+    runner_config, tmp_path: Path
+) -> None:
+    """A bridge that registers again is masked exactly; echoed text cannot add a second id."""
+    env2 = "env_01Tq4Wr6Ey8Uz2Ix9Oc3Pv5Ab7"
+    env3 = "env_01Mn5Bv7Cx9Za2Sd4Fg6Hj8Kl1"
+    log = tmp_path / "alpha.log"
+    _append(log, "")
+    instance = _bare_instance(log)
+    with _client(runner_config, instance) as client:
+        with client.websocket_connect("/ws/bridge-log/alpha") as ws:
+            _append(log, f"t [DEBUG] [bridge:api] POST -> 200 environment_id={ENV}\n")
+            _append(log, f"tool said environment_id={env3}\n")  # echoed: not the bridge
+            _append(log, f"t [DEBUG] [bridge:api] POST -> 200 environment_id={env2}\n")
+            _append(log, f"weld{env2}weld\n")
+            _append(log, f"t [bridge:init] bridgeId={BRIDGE} dir=x\n")
+            out = [ws.receive_text() for _ in range(5)]
+    assert not _leaks(out[3], env2)
+    assert redact._known_owners[instance.instance_id] == {ENV, env2, BRIDGE}
+
+
+def test_a_fake_marker_first_cannot_shut_out_the_real_id() -> None:
+    """Echoed text names an env id before the bridge's own line (a rotated log, say)."""
+    from clauster.routes import websockets as ws_module
+
+    learned: dict[str, set[str]] = {}
+    fake = "env_01Mn5Bv7Cx9Za2Sd4Fg6Hj8Kl1"
+    ws_module._learn_stream_ids("iid-1", f"tool said environment_id={fake}", learned)
+    ws_module._learn_stream_ids("iid-1", f"t [bridge:api] environment_id={ENV}", learned)
+    assert ENV in redact._known_owners["iid-1"]
+    assert not _leaks(redact.sanitize_line(f"xyz{ENV}"), ENV)
+
+
+def test_an_owner_that_adds_a_stored_value_does_not_grow_the_matcher() -> None:
+    redact.remember_known_values("a", ENV, SESSION)
+    size = len(redact._known_matcher.values)
+    redact.remember_known_values("background-jobs:call", ENV)  # a per-call owner re-adds it
+    assert len(redact._known_matcher.values) == size
+
+
+def test_stream_learns_at_most_a_few_ids_of_a_kind() -> None:
+    from clauster.routes import websockets as ws_module
+
+    learned: dict[str, set[str]] = {}
+    lines = "".join(
+        f"[bridge:api] environment_id=env_01{i:04d}Zq9Wx7Vc5Bn3Mk1Lj\n" for i in range(20)
+    )
+    ws_module._learn_stream_ids("iid-1", lines, learned)
+    assert len(learned["env"]) == ws_module._STREAM_IDS_PER_KIND
+    assert len(redact._known_owners["iid-1"]) == ws_module._STREAM_IDS_PER_KIND
+
+
+def test_a_forget_that_changes_no_value_keeps_the_matcher() -> None:
+    redact.remember_known_values("a", ENV)
+    redact.remember_known_values("b", ENV)
+    before = redact._known_matcher
+    redact.forget_known_values("b")
+    assert redact._known_matcher is before  # no rebuild: "a" still holds every value
+
+
 def test_stream_id_pattern_is_linear_on_crafted_lines() -> None:
     from clauster.routes import websockets as ws_module
 
-    learned: set[str] = set()
+    learned: dict[str, set[str]] = {}
     for line in ("[bridge:init] " * 20_000, "Unarchive " * 25_000, "environment_id=" * 15_000):
         start = time.perf_counter()
         ws_module._learn_stream_ids("iid-1", line, learned)
         assert time.perf_counter() - start < 1.0
-    assert learned == set()
+    assert learned == {}
 
 
 def test_log_head_of_an_unreadable_file_is_empty(tmp_path: Path) -> None:

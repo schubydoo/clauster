@@ -64,7 +64,17 @@ _LOG_HEAD_BYTES = 256 * 1024
 _STREAM_ID_RE = re.compile(
     r"\b(?:environment_id=|environmentId=|Created initial session\s+|Unarchive\s+)"
     r"((?:env|session)_[A-Za-z0-9]+)"
+    r"|\bbridgeId=([0-9a-fA-F-]{36})"
 )
+
+#: The tags of the lines the bridge itself writes. Only such a line may add a SECOND id of a
+#: kind (a bridge that registers again, or resumes a session after it created one): tool
+#: output the bridge echoes into its log can then not grow the store.
+_BRIDGE_TAG_RE = re.compile(r"\[(?:bridge:[a-z]+|remote-bridge)\]")
+
+#: The most ids of one kind (env, session, bridge) one socket stores. A real bridge names one,
+#: or two after a re-registration; the cap only bounds a log that names many.
+_STREAM_IDS_PER_KIND = 4
 
 
 def _read_log_head(path: Path) -> str:
@@ -76,32 +86,42 @@ def _read_log_head(path: Path) -> str:
         return ""
 
 
-def _learn_stream_ids(instance_id: str, text: str, learned: set[str]) -> None:
-    """Store the first environment id and the first session id ``text`` names (#1621).
+def _learn_stream_ids(instance_id: str, text: str, learned: dict[str, set[str]]) -> None:
+    """Store the environment, session and bridge ids the marker lines of ``text`` name (#1621).
 
-    ``learned`` holds the kinds (``env``, ``session``) this socket already stored. First wins,
-    as in ``bridge_log.parse_bridge_markers``, so log text that names many ids (tool output the
-    bridge echoes) can add at most one value of each kind to the store.
+    ``learned`` maps each kind (``env``, ``session``, ``bridge``) to the ids this socket stored.
+    The first id of a kind is taken from any line, as ``bridge_log.parse_bridge_markers`` takes
+    it. A further one is taken only from a line the bridge wrote itself (:data:`_BRIDGE_TAG_RE`
+    before the id) and only up to :data:`_STREAM_IDS_PER_KIND`. So a bridge that registers a new
+    environment is still masked exactly, and echoed tool output cannot grow the store.
     """
-    for hit in _STREAM_ID_RE.finditer(text):
-        kind = hit.group(1).partition("_")[0]
-        if kind not in learned:
-            learned.add(kind)
-            redact.remember_known_values(instance_id, hit.group(1))
-        if len(learned) == 2:
-            return
+    for line in text.split("\n"):
+        for hit in _STREAM_ID_RE.finditer(line):
+            value = hit.group(1) or hit.group(2)
+            kind = "bridge" if hit.group(2) else value.partition("_")[0]
+            seen = learned.setdefault(kind, set())
+            if value in seen or len(seen) >= _STREAM_IDS_PER_KIND:
+                continue
+            if seen and _BRIDGE_TAG_RE.search(line, 0, hit.start()) is None:
+                continue  # a second id of this kind, but not from a line the bridge wrote
+            seen.add(value)
+            redact.remember_known_values(instance_id, value)
+
+
+#: How many lines one worker call sanitizes before the socket sends them. A client that goes
+#: away then stops the work at the next slice, not at the end of a whole rotated log.
+_SANITIZE_SLICE = 2000
 
 
 def _sanitize_lines(
-    instance_id: str, lines: list[str], learned: set[str], *, strip: bool
+    instance_id: str, lines: list[str], learned: dict[str, set[str]], *, strip: bool
 ) -> list[str]:
     """Learn each line's ids, then sanitize it; run off the event loop (it is CPU work)."""
     out: list[str] = []
     for line in lines:
-        if len(learned) < 2:
-            # This socket can read the line that first names an id before the runner's own
-            # parse does. Store the id first, so even that line is masked exactly.
-            _learn_stream_ids(instance_id, line, learned)
+        # This socket can read the line that first names an id before the runner's own parse
+        # does. Store the id first, so even that line is masked exactly.
+        _learn_stream_ids(instance_id, line, learned)
         out.append(sanitize_line(line, strip_ansi_seq=strip))
     return out
 
@@ -229,15 +249,16 @@ async def ws_bridge_log(
     path = instance.bridge_raw_log_path or instance.bridge_debug_log_path
     strip = config.logs.strip_ansi_in_stream
     offset = await asyncio.to_thread(logstream.initial_offset, path)
-    # The tail starts near the end, past the marker lines at the top of the log. After a
-    # Clauster restart the record may not hold its ids yet, so read them from the head first
-    # (#1621). `learned` is only ever touched by one worker thread at a time: each is awaited.
-    learned: set[str] = set()
+    learned: dict[str, set[str]] = {}
     iid = instance.instance_id
-    await asyncio.to_thread(lambda: _learn_stream_ids(iid, _read_log_head(path), learned))
 
     async def _stream() -> None:
         """Tail the bridge log from the opening offset, pushing each line to the socket."""
+        # The tail starts near the end, past the marker lines at the top of the log. After a
+        # Clauster restart the record may not hold its ids yet, so read them from the head
+        # before the first line goes out (#1621). `learned` is only ever touched by one worker
+        # thread at a time: each is awaited.
+        await asyncio.to_thread(lambda: _learn_stream_ids(iid, _read_log_head(path), learned))
         carry = ""
         local_offset = offset
         while True:
@@ -246,11 +267,16 @@ async def ws_bridge_log(
                 # Buffer whole lines so redaction never misses an id split
                 # across two reads.
                 *lines, carry = (carry + text).split("\n")
-                sanitized = await asyncio.to_thread(
-                    _sanitize_lines, iid, lines, learned, strip=strip
-                )
-                for line in sanitized:
-                    await websocket.send_text(line)
+                for start in range(0, len(lines), _SANITIZE_SLICE):
+                    sanitized = await asyncio.to_thread(
+                        _sanitize_lines,
+                        iid,
+                        lines[start : start + _SANITIZE_SLICE],
+                        learned,
+                        strip=strip,
+                    )
+                    for line in sanitized:
+                        await websocket.send_text(line)
             await asyncio.sleep(0.5)
 
     try:

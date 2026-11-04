@@ -341,11 +341,14 @@ Clauster masks secrets in two ways. Only the first one is a guarantee.
       can hold these characters. Each piece is masked only when it holds 7 or
       more characters of the random part.
     - The guarantee starts when Clauster learns the value. The bridge-log stream
-      reads the ids from the marker lines itself: from the top of the log when it
-      opens, and from each line before it sends that line. So the line that first
-      names an id is masked too. On the live pty-screen view, the keeper masks the
-      session id from the first frame after it reads the connect URL. Before that
-      moment, only the shape masks apply.
+      reads the environment, session and bridge ids from the marker lines itself:
+      from the top of the log when it opens, and from each line before it sends
+      that line. So the line that first names an id is masked too. The stream
+      takes the first id of each kind from any line. It takes a further one only
+      from a line that the bridge wrote itself (a `[bridge:…]` or
+      `[remote-bridge]` line), and at most 4 of each kind. On the live pty-screen
+      view, the keeper masks the session id from the first frame after it reads
+      the connect URL. Before that moment, only the shape masks apply.
     - Clauster stores a value only if it has the form of a real id: letters,
       digits, `_` and `-` only, at least 16 characters after the prefix, and no
       run of 7 characters that occurs twice. Any other value gets only the shape
