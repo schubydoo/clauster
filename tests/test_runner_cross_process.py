@@ -22,7 +22,7 @@ import sys
 
 import pytest
 
-from clauster import atomicio
+from clauster import atomicio, redact
 from clauster.db.persistence import Persistence
 from clauster.models import InstanceStatus, RemoteControlInstance
 from clauster.runner import SessionRunner, SpawnError, UnknownProject
@@ -230,6 +230,7 @@ async def test_resume_of_card_another_process_forgot_is_refused(runner_config):
     await runner.rediscover(persist=False)
     card = runner.get_instance_for_project("beta")
     assert card is not None
+    card.environment_id = "env_01Xk3PqR8sTvW2yZ4bNc6dFg"  # stored for exact redaction (#1621)
 
     with _other_process_store(config) as store:
         store.save({})  # the other process forgets it
@@ -237,6 +238,7 @@ async def test_resume_of_card_another_process_forgot_is_refused(runner_config):
     with pytest.raises(UnknownProject, match="forgotten by another clauster process"):
         await runner.resume(card.instance_id)
     assert runner.get_instance_for_project("beta") is None  # the stale card is gone
+    assert card.instance_id not in redact._known_owners  # and its ids left the store with it
     with _other_process_store(config) as store:
         assert "iid-r" not in store.load()  # and nothing recreated the row
 

@@ -444,8 +444,11 @@ def test_ws_bridge_log_stores_one_id_of_each_kind(runner_config, tmp_path: Path)
     echoed = [f"tool said environment_id=env_01{i:04d}Zq9Wx7Vc5Bn3Mk1Lj" for i in range(50)]
     with _client(runner_config, instance) as client:
         with client.websocket_connect("/ws/bridge-log/alpha") as ws:
-            _append(log, f"environment_id={ENV}\nCreated initial session {SESSION}\n")
+            # The echoed ids come while the session id is still unknown, so only the per-kind
+            # first-wins rule keeps them out of the store.
+            _append(log, f"environment_id={ENV}\n")
             _append(log, "".join(f"{line}\n" for line in echoed))
+            _append(log, f"Created initial session {SESSION}\n")
             for _ in range(2 + len(echoed)):
                 ws.receive_text()
     assert redact._known_owners[instance.instance_id] == {ENV, SESSION, CSE}

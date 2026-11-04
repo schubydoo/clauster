@@ -315,11 +315,10 @@ Clauster masks secrets in two ways. Only the first one is a guarantee.
    the value by exact match: the bridge-log stream, the live pty-screen view,
    hosted-session frames, transcript turns, `error_detail`, clone-job errors,
    agent text, and the on-disk mirror when `logs.redact_session_url` is on. The
-   match ignores every character that an id cannot hold, so a wrap, a hanging
-   indent, a box border, a line break, padding, an escape sequence or an
-   invisible character cannot split a value past the mask. Each piece of a
-   split value is masked where it stands. A leak of a known value blocks a
-   release.
+   match ignores every character outside `[A-Za-z0-9_-]`, so a wrap, a hanging
+   indent, a box border, padding, an escape sequence or an invisible character
+   cannot split a value past the mask. Each piece of a split value is masked
+   where it stands. A leak of a known value blocks a release.
 2. **Shapes (best effort).** Every other secret is masked by its shape: ids and
    UUIDs that Clauster did not learn, and third-party tokens that Claude prints.
    [Log redaction](#log-redaction) below describes these masks and their known
@@ -333,6 +332,14 @@ Clauster masks secrets in two ways. Only the first one is a guarantee.
       it scrolled off the screen, the program drew over it, it is not printed
       yet, or a shape mask already hides it. A run of 7 or more characters never
       shows, whole or put back together across rows.
+    - The bridge-log stream, transcript turns and hosted-session frames are
+      masked one line at a time. If a value is split across lines there, each
+      piece is masked only when it holds 7 or more characters of the random
+      part. The on-disk mirror, `error_detail`, clone-job errors and agent text
+      are masked as one block, so there a line break does not split a value.
+    - A `_` or `-` between two pieces of a value is not ignored, because a value
+      can hold these characters. Each piece is masked only when it holds 7 or
+      more characters of the random part.
     - The guarantee starts when Clauster learns the value. The bridge-log stream
       reads the ids from the marker lines itself: from the top of the log when it
       opens, and from each line before it sends that line. So the line that first
