@@ -2,4 +2,4 @@
 default: patch
 ---
 
-An unexpected error while reading a Direct Session's output now marks it as an error, resolves its open permission prompts without allowing them, shows "stream lost", and ends the agent, instead of leaving the session silently stuck as running.
+When reading a Direct Session's output fails, the session now ends visibly: it is marked as an error, its open permission prompts resolve without being allowed, the view shows "stream lost", and the agent is killed so that Resume never runs beside it.

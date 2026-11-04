@@ -781,45 +781,20 @@ class HostedSession:
         except asyncio.CancelledError:
             raise
         except ClaustrumError as exc:  # daemon loss mid-pump (CL-4b)
-            # A daemon-side failure surfaced through the reader; report it, don't swallow.
-            self.status = InstanceStatus.ERROR
-            self._resolve_parked()  # resolve any parked request so it isn't left stranded
-            self._emit({"type": "lost", "reason": str(exc)})
+            # A daemon-side failure surfaced through the reader or a stdin write; report it,
+            # don't swallow. An RpcError comes from a healthy daemon whose agent still runs,
+            # so this path ends the agent too; on a lost connection that kill just fails.
+            await self._fail_closed(str(exc))
         except Exception as exc:  # any other failure while routing a frame (#1342)
             # Fail visibly instead of letting the task die with the session still shown as
-            # running and nothing on its stream. Status and the parked set change BEFORE
-            # any emit, so a fault inside _emit itself still leaves a truthful row.
-            # CancelledError is a BaseException, so it is not caught here.
-            # Parked requests resolve as "interrupted": no control_response is written,
-            # so a still-parked request is never answered with an allow (fail closed).
+            # running and nothing on its stream. CancelledError is a BaseException, so it
+            # is not caught here.
             # The reason names only the exception class: its message can quote frame
             # content and the lost event goes to the browser unredacted. The full
             # traceback goes to the server log; its formatter masks known token and id
             # shapes only, which is the same guarantee every other server log line has.
             logger.exception("hosted: pump for process %s failed", self._process_id)
-            self.status = InstanceStatus.ERROR
-            try:
-                self._resolve_parked()
-                self._emit({"type": "lost", "reason": f"internal error ({type(exc).__name__})"})
-            finally:
-                # Then end the agent. The daemon is healthy on this path, so the agent is
-                # still running, but nothing reads its output or answers its prompts any
-                # more. An ERROR row is also one stop() treats as already ended, and one
-                # Resume and Forget accept: a live agent would let Resume start a second
-                # agent on the same conversation, and let Stop or Forget drop it unkilled.
-                # One SIGKILL, not stop()'s INT-then-grace-then-KILL: no await sits between
-                # the ERROR above and this write, so the kill is on the wire before any
-                # Resume can act on the ERROR row, and a later cancel (Stop, Forget,
-                # Resume's detach) cannot drop it. Its transcript survives, so Resume
-                # reloads the conversation.
-                try:
-                    await self._client.kill(self._process_id, signal="KILL")
-                except ClaustrumError as kill_exc:
-                    logger.warning(
-                        "hosted: could not end agent %s after pump failure: %s",
-                        self._process_id,
-                        kill_exc,
-                    )
+            await self._fail_closed(f"internal error ({type(exc).__name__})")
         finally:
             # The pump owns the subscription it drains; drop it whenever the pump exits on its
             # own (natural exit, daemon loss, or cancel) so a subscriber is never left on the
@@ -828,6 +803,44 @@ class HostedSession:
             if self._stream is not None and self._source is source:
                 self._stream.unsubscribe(source)
                 self._source = None
+
+    async def _fail_closed(self, reason: str) -> None:
+        """Latch ERROR, resolve parked requests, emit ``lost``, then SIGKILL the agent.
+
+        The pump's failure path (#1342). Status changes BEFORE any emit, so a fault inside
+        ``_emit`` itself still leaves a truthful row, and the kill sits in a ``finally`` so
+        that fault cannot skip it. Parked requests resolve as "interrupted": no
+        control_response is written, so a still-parked request is never answered with an
+        allow (fail closed).
+
+        **Why the agent is killed.** Nothing reads its output or answers its prompts any
+        more. An ERROR row is also one :meth:`stop` treats as already ended, and one Resume
+        and Forget accept: a live agent would let Resume start a second agent on the same
+        conversation, and let Stop or Forget drop it unkilled. Its transcript survives, so
+        Resume reloads the conversation.
+
+        **Why one SIGKILL, not stop()'s INT-then-grace-then-KILL.** No await sits between
+        the ERROR assignment and the kill's socket write (``kill`` → ``call`` → ``_send``
+        writes before its first ``drain``), so the kill is on the wire before any Resume
+        can act on the ERROR row, and a later cancel (Stop, Forget, Resume's detach)
+        cannot drop it. A grace window would reopen exactly that race. Keep it that way:
+        no await may be added before the kill.
+
+        A kill the daemon cannot take (the connection is gone) is logged, not raised.
+        """
+        self.status = InstanceStatus.ERROR
+        try:
+            self._resolve_parked()
+            self._emit({"type": "lost", "reason": reason})
+        finally:
+            try:
+                await self._client.kill(self._process_id, signal="KILL")
+            except ClaustrumError as kill_exc:
+                logger.warning(
+                    "hosted: could not end agent %s after pump failure: %s",
+                    self._process_id,
+                    kill_exc,
+                )
 
     async def _on_line(self, stream: Any, line: str, seq: Any = None) -> None:
         """Route one reassembled output line: stderr/non-JSON as text, else by frame type.

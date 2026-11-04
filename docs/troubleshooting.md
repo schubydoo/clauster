@@ -610,13 +610,20 @@ exception message, because it can contain session output. The server log has
 the full traceback. Its formatter masks known token and id shapes, but the
 message can still quote session output. Please report the traceback as a bug.
 
-Clauster then ends the agent at once (SIGKILL, with no grace period), because
+Clauster then ends the agent at once with a forced kill (SIGKILL on Linux and
+macOS; claustrum ends the job object on Windows), with no grace period, because
 nothing can read its output or answer its prompts any more. A tool command that
 the agent runs at that time also stops. An open permission prompt shows
 `— session ended`, and Clauster sends no answer for it to the agent. The
 transcript of `claude` keeps the conversation up to the last line that `claude`
 wrote before the kill. If the card offers **Resume**, use it to continue the
 conversation in a new agent.
+
+A `stream lost: claustrum ...` line in place of `internal error` means that the
+claustrum daemon refused a request for the session, or that Clauster lost its
+connection to the daemon. Clauster handles the session the same way: it ends
+the agent and resolves open prompts. If the connection is gone, the kill fails
+and the server log shows `hosted: could not end agent <id> after pump failure`.
 
 ### "output lost (N frames)" after a restart
 

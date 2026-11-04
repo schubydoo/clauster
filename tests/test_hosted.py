@@ -21,7 +21,12 @@ from pydantic import ValidationError
 
 import clauster.hosted as hosted
 from clauster import procutil
-from clauster.claustrum_client import ClaustrumClient, ClaustrumError, DaemonUnreachable
+from clauster.claustrum_client import (
+    ClaustrumClient,
+    ClaustrumError,
+    DaemonUnreachable,
+    RpcError,
+)
 from clauster.hosted import (
     HostedManager,
     HostedSession,
@@ -1040,6 +1045,8 @@ async def test_pump_surfaces_daemon_loss_as_error_and_resolves_parked(fake_claus
         assert session.pending_requests == []  # resolved on loss, not stranded
         lost = await _drain_until(queue, "lost")
         assert "daemon vanished" in lost["reason"]
+        # The fake daemon is healthy here, so the agent is ended too (#1342).
+        assert [(k["id"], k.get("signal")) for k in fake.killed] == [(_PID, "KILL")]
         resolved = await _drain_until(session.subscribe(), "control_resolved")
         assert resolved["request_id"] == "perm-1"
 
@@ -1151,21 +1158,40 @@ async def test_pump_cancellation_still_propagates_without_a_lost_event(fake_clau
         assert not [e for e in session._ring if e["type"] == "lost"]
 
 
+def _rpc_error_on_stdin(monkeypatch, client) -> None:
+    """Make every stdin write fail the way a healthy daemon refuses one (an RpcError)."""
+
+    async def _refuse(*_args, **_kwargs):
+        raise RpcError(-32602, "Process not running")
+
+    monkeypatch.setattr(client, "stdin", _refuse)
+
+
+_AUTO_ACK = (
+    json.dumps(
+        {"type": "control_request", "request_id": "init-1", "request": {"subtype": "initialize"}}
+    )
+    + "\n"
+).encode()
+
+
+@pytest.mark.parametrize("arm", ["catch_all", "claustrum_error"])
 async def test_manager_pump_failure_ends_the_agent_before_resume_can_add_one(
-    fake_claustrum, tmp_path, monkeypatch
+    fake_claustrum, tmp_path, monkeypatch, arm
 ):
     """The ERROR reaches the row, and the KILL is sent before a Resume can spawn.
 
     ``_resume_locked`` accepts an ERROR row and only detaches the old session, and
-    ``stop()`` treats ERROR as already ended. So the catch-all itself must end the agent,
-    and the kill must already be on the wire when a Resume can first see the ERROR. The
-    Resume is scheduled from inside the catch-all, right after the status flips, so it
-    runs at the pump's first suspension: one ``await`` before the kill fails this test.
+    ``stop()`` treats ERROR as already ended. So both pump failure arms must end the
+    agent, and the kill must already be on the wire when a Resume can first see the
+    ERROR. ``catch_all`` is an unanticipated exception (#1342). ``claustrum_error`` is an
+    RpcError from a healthy daemon on the auto-ack stdin write: the agent is just as alive.
+    The Resume is scheduled from inside the failure path, right after the status flips, so
+    it runs at the pump's first suspension: one ``await`` before the kill fails this test.
     The fake records whether the old agent was still running when the new one spawned.
     The fake handles requests in order and marks a process stopped on any signal, so
     this pins the send order; the ``fake.killed`` assertion pins the single SIGKILL.
     """
-    _poison_redactor(monkeypatch)
     fake = await fake_claustrum()
     running_at_spawn: list[dict[str, bool]] = []
     real_spawn = fake._m_process_spawn
@@ -1187,10 +1213,14 @@ async def test_manager_pump_failure_ends_the_agent_before_resume_can_add_one(
 
             session = mgr.session(pid)
             real_resolve = session._resolve_parked
+            status_at_resolve: list[str] = []
             resume_task: list[asyncio.Future] = []
 
             def _resolve_then_resume(*args, **kwargs):
                 real_resolve(*args, **kwargs)
+                status_at_resolve.append(session.status)
+                if resume_task:
+                    return  # schedule exactly one Resume, however often this runs
                 # Status is ERROR now, so a Resume may start at the pump's next suspension.
                 resume_task.append(
                     asyncio.ensure_future(
@@ -1199,10 +1229,17 @@ async def test_manager_pump_failure_ends_the_agent_before_resume_can_add_one(
                 )
 
             monkeypatch.setattr(session, "_resolve_parked", _resolve_then_resume)
-            await fake.emit(pid, "stdout", _POISON)
+            if arm == "catch_all":
+                _poison_redactor(monkeypatch)
+                await fake.emit(pid, "stdout", _POISON)
+            else:
+                _rpc_error_on_stdin(monkeypatch, client)
+                await fake.emit(pid, "stdout", _AUTO_ACK)
             await wait_until(lambda: resume_task)
             resumed = await asyncio.wait_for(resume_task[0], timeout=2.0)
 
+            assert status_at_resolve == ["error"]
+            assert session.status == "error"
             assert resumed.status is InstanceStatus.RUNNING
             assert resumed.claustrum_process_id != pid
             assert "--resume" in fake.spawned[-1]["args"]
