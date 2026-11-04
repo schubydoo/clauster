@@ -600,22 +600,21 @@ a new Direct Session for the project and resume from the captured session.
 
 ### "stream lost: internal error (...)" on a Direct Session
 
-**What you see:** a Direct Session card changes to the red error status (the
-badge reads "Failed to start", the same label as a spawn failure), and its view
-shows `stream lost: internal error (<ExceptionName>)` (server log:
+**What you see:** a Direct Session card shows the red `Error` badge, and its
+view shows `stream lost: internal error (<ExceptionName>)` (server log:
 `hosted: pump for process <id> failed`, followed by a traceback).
 
 **Most likely cause:** a bug in Clauster. Clauster could not process one line of
-the session output and stopped reading that session. Clauster does not show the
-exception message, because it can contain session output. The full traceback
-is in the server log, which the log formatter redacts. Clauster resolves any open
-permission prompt as interrupted and sends no answer to the agent, so it never
-allows a pending tool call. Please report the traceback as a bug.
+the session output and stopped reading that session. The view does not show the
+exception message, because it can contain session output. The server log has
+the full traceback. Its formatter masks known token and id shapes, but the
+message can still quote session output. Please report the traceback as a bug.
 
-The agent itself can still run on the claustrum daemon. A restart of Clauster
-reattaches it and continues after the line that failed. If the agent was
-waiting on a permission prompt, that prompt does not come back after the
-reattach, because Clauster does not keep parked prompts across a restart.
+Clauster then ends the agent, because nothing can read its output or answer its
+prompts any more. An open permission prompt resolves as interrupted, and
+Clauster sends no answer for it to the agent. The conversation is still in the
+transcript of `claude`. If the card offers **Resume**, use it to continue the
+conversation in a new agent.
 
 ### "output lost (N frames)" after a restart
 

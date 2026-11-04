@@ -1070,12 +1070,12 @@ async def test_pump_unexpected_error_fails_visibly_and_never_allows_parked(
 
     Before the catch-all the task died, the row stayed "running", and a parked prompt kept
     a live Allow button. Now: status is ERROR, the parked request resolves as interrupted
-    with no control_response written (the agent is never sent an allow), and a ``lost``
-    event names only the exception class. Its message can quote frame content, and the
-    lost event reaches the browser unredacted.
+    with no control_response written (the agent is never sent an allow), a ``lost`` event
+    names only the exception class, and the agent is ended. The exception message can
+    quote frame content, and the lost event reaches the browser unredacted.
     """
-    secret = "ghp_ABCDEFGHIJKLMNOPQRST"
-    _poison_redactor(monkeypatch, f"bad frame {secret}")
+    marker = "frame-content-marker"
+    _poison_redactor(monkeypatch, f"bad frame {marker}")
     async with _session(fake_claustrum) as (fake, session):
         queue = session.subscribe()
         frame = {
@@ -1098,18 +1098,44 @@ async def test_pump_unexpected_error_fails_visibly_and_never_allows_parked(
         resolved = [e for e in session._ring if e["type"] == "control_resolved"]
         assert [(e["request_id"], e["behavior"]) for e in resolved] == [("perm-1", "interrupted")]
         assert not [f for f in _stdin_frames(fake) if f.get("type") == "control_response"]
-        assert secret not in json.dumps(list(session._ring))
+        assert marker not in json.dumps(list(session._ring))
+        # Nothing supervises the agent any more, so it is ended: the fake never reports an
+        # exit, so the INT escalates to KILL exactly as stop() does.
+        assert [(k["id"], k.get("signal")) for k in fake.killed] == [
+            (_PID, "INT"),
+            (_PID, "KILL"),
+        ]
         # The task ended on its own terms (nothing left to "never retrieved") and released
         # the stream subscription it drains.
         assert pump.exception() is None
         assert not stream._subscribers
-        # The full traceback reaches the server log, which is redacted at the formatter.
+        # The full traceback reaches the server log.
         assert "pump for process" in caplog.text and "RuntimeError" in caplog.text
         # And the dead session refuses to act, so a late Allow click cannot land.
         with pytest.raises(HostedSessionError):
             await session.respond_control("perm-1", {"behavior": "allow"})
         with pytest.raises(HostedSessionError):
             await session.send_message("hello")
+
+
+async def test_pump_unexpected_error_survives_a_failing_kill(fake_claustrum, monkeypatch, caplog):
+    """A kill the daemon cannot take is logged; the session still ends visibly as ERROR."""
+    _poison_redactor(monkeypatch)
+    async with _session(fake_claustrum) as (fake, session):
+        queue = session.subscribe()
+
+        async def _no_kill(*_args, **_kwargs):
+            raise DaemonUnreachable("daemon gone")
+
+        monkeypatch.setattr(session._client, "kill", _no_kill)
+        pump = session._pump_task
+        with caplog.at_level(logging.WARNING, logger="clauster.hosted"):
+            await fake.emit(_PID, "stdout", _POISON)
+            await _drain_until(queue, "lost")
+            await wait_until(pump.done)
+        assert session.status == "error"
+        assert pump.exception() is None
+        assert "could not end agent" in caplog.text
 
 
 async def test_pump_cancellation_still_propagates_without_a_lost_event(fake_claustrum):
@@ -1129,35 +1155,44 @@ async def test_pump_cancellation_still_propagates_without_a_lost_event(fake_clau
         assert not [e for e in session._ring if e["type"] == "lost"]
 
 
-async def test_manager_pump_failure_shows_error_and_a_restart_reattaches(
+async def test_manager_pump_failure_ends_the_agent_before_resume_can_add_one(
     fake_claustrum, tmp_path, monkeypatch
 ):
-    """The ERROR reaches the row, and a clauster restart recovers a still-running agent.
+    """The ERROR reaches the row, and Resume never runs beside the failed agent.
 
-    The cursor advances before a frame is routed, so the shutdown flush persists it past
-    the frame that raised. The restart then reattaches without replaying that frame, and
-    the live tail flows again. If it were replayed, the same fault would end the
-    reattached session as ERROR again.
+    ``_resume_locked`` accepts an ERROR row and only detaches the old session, and
+    ``stop()`` treats ERROR as already ended. So the catch-all itself must end the agent:
+    otherwise a Resume would put a second agent on the same conversation.
     """
     _poison_redactor(monkeypatch)
     fake = await fake_claustrum()
     store = HostedStateStore(tmp_path)
     async with ClaustrumClient(fake.socket_path, fake.token) as client:
         mgr = HostedManager(store)
-        pid = (await _spawn(mgr, client)).claustrum_process_id
-        await fake.emit(pid, "stdout", _POISON)
-        await wait_until(lambda: mgr.get_instance(pid).status is InstanceStatus.ERROR)
-        await mgr.aclose()
-
-    async with ClaustrumClient(fake.socket_path, fake.token) as client:
-        mgr = HostedManager(store)
         try:
-            await mgr.reattach_all(client)
-            assert mgr.get_instance(pid).status is InstanceStatus.RUNNING
-            queue = mgr.session(pid).subscribe()
-            await fake.emit(pid, "stdout", (json.dumps({"type": "user", "n": 1}) + "\n").encode())
-            assert (await _drain_until(queue, "frame"))["frame"]["n"] == 1
-            assert mgr.get_instance(pid).status is InstanceStatus.RUNNING
+            pid = (await _spawn(mgr, client)).claustrum_process_id
+            uuid = "11111111-2222-4333-8444-555555555555"
+            init = {"type": "system", "subtype": "init", "session_id": uuid}
+            await fake.emit(pid, "stdout", (json.dumps(init) + "\n").encode())
+            await wait_until(lambda: mgr.session(pid).claude_session_uuid == uuid)
+
+            async def _exit_on_int():
+                while not any(k.get("signal") == "INT" for k in fake.killed):
+                    await asyncio.sleep(0.01)
+                await fake.emit_exit(pid, 130)
+
+            exiter = asyncio.create_task(_exit_on_int())
+            await fake.emit(pid, "stdout", _POISON)
+            await wait_until(lambda: mgr.get_instance(pid).status is InstanceStatus.ERROR)
+            await asyncio.wait_for(exiter, timeout=2.0)  # bounded: no INT must fail, not hang
+            await wait_until(mgr.session(pid)._pump_task.done)
+            # The agent took the INT and exited, so there was no escalation.
+            assert [(k["id"], k.get("signal")) for k in fake.killed] == [(pid, "INT")]
+
+            resumed = await mgr.resume(client, pid, cwd="/tmp/proj", claude_binary=_BIN)
+            assert resumed.status is InstanceStatus.RUNNING
+            assert resumed.claustrum_process_id != pid
+            assert "--resume" in fake.spawned[-1]["args"]
         finally:
             await mgr.aclose()
 
@@ -3900,7 +3935,7 @@ def test_redact_obj_truncates_past_the_depth_cap_instead_of_raising():
 
     ``json.loads`` in ``_on_line`` parses frames nested far deeper than this recursive
     walker could descend, so a deeply-nested frame raised RecursionError inside
-    ``_pump`` — which catches only ``CancelledError``/``ClaustrumError``. The pump task
+    ``_pump`` — which then caught only ``CancelledError``/``ClaustrumError``. The pump task
     died and the session went dark with **no** ``lost`` event: a fail-silent, which
     invariant 1 forbids. The redactor must still return a value (invariant 4: nothing
     unredacted may reach a subscriber), so the over-deep subtree is replaced wholesale.
