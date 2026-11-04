@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from .. import auth, logstream, pty_screen
+from .. import auth, bridge_log, logstream, pty_screen, redact
 from ..dependencies import (
     AllowedOriginsDep,
     AuthenticateDep,
@@ -35,6 +35,7 @@ from ..redact import sanitize_line
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from pathlib import Path
 
     from starlette.requests import HTTPConnection
 
@@ -48,6 +49,28 @@ router = APIRouter()
 # keeper's _SCREEN_FLUSH_INTERVAL (0.25s) so the poll roughly tracks the publish cadence
 # without busy-spinning; frames already seen are skipped by their monotonic ``seq``.
 _SCREEN_POLL_INTERVAL = 0.25
+
+
+#: How much of the top of a bridge log the bridge-log socket reads for the marker lines that
+#: name the bridge's ids. The bridge writes them while it starts, in the first few lines.
+_LOG_HEAD_BYTES = 256 * 1024
+
+
+def _read_log_head(path: Path) -> str:
+    """Return the first :data:`_LOG_HEAD_BYTES` of ``path`` as text, or ``""`` if unreadable."""
+    try:
+        with path.open("rb") as fh:
+            return fh.read(_LOG_HEAD_BYTES).decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _remember_marker_ids(instance_id: str, text: str) -> None:
+    """Store the ids the bridge-log marker lines in ``text`` name, for exact masking (#1621)."""
+    markers = bridge_log.parse_bridge_markers(text)
+    redact.remember_known_values(
+        instance_id, markers.environment_id, markers.starter_session_id, markers.bridge_id
+    )
 
 
 def _reap_ws_task(task: asyncio.Task) -> None:
@@ -173,6 +196,9 @@ async def ws_bridge_log(
     path = instance.bridge_raw_log_path or instance.bridge_debug_log_path
     strip = config.logs.strip_ansi_in_stream
     offset = await asyncio.to_thread(logstream.initial_offset, path)
+    # The tail starts near the end, past the marker lines at the top of the log. After a
+    # Clauster restart the record may not hold its ids yet, so read them from the head first.
+    _remember_marker_ids(instance.instance_id, await asyncio.to_thread(_read_log_head, path))
 
     async def _stream() -> None:
         """Tail the bridge log from the opening offset, pushing each line to the socket."""
@@ -185,6 +211,10 @@ async def ws_bridge_log(
                 # across two reads.
                 *lines, carry = (carry + text).split("\n")
                 for line in lines:
+                    # This socket can read the line that first names an id before the
+                    # runner's own parse does. Store the id first, so even that line is
+                    # masked by exact match rather than by shape alone (#1621).
+                    _remember_marker_ids(instance.instance_id, line)
                     await websocket.send_text(sanitize_line(line, strip_ansi_seq=strip))
             await asyncio.sleep(0.5)
 

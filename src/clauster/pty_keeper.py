@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import deps, procutil
+from . import deps, procutil, redact
 
 # pty_screen is first-party and always importable (it lazy-imports the optional `pyte`
 # itself, only when a PtyScreen is actually constructed), so importing it here never pulls
@@ -400,6 +400,9 @@ class _KeeperDrain:
             self._buf.extend(chunk)
             session_id = self._scan_session_id()
             if session_id is not None:
+                # This process renders the screen frames, so it stores the id it learned:
+                # from the next frame on, the keeper's own sidecar masks it exactly (#1621).
+                redact.remember_known_values("pty-keeper", session_id)
                 self._base.update(
                     connect_url=f"https://claude.ai/code/{session_id}",
                     session_id=session_id,

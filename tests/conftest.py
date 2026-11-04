@@ -259,6 +259,26 @@ def _reset_atomicio_lock_dir():
 
 
 @pytest.fixture(autouse=True)
+def _reset_known_value_store():
+    """Empty redact's process-wide exact-value store before AND after each test (#1621).
+
+    Every ``RemoteControlInstance`` a test builds stores its ids there, and the store masks
+    them in every later redaction in the same xdist worker. Without this reset a test that
+    asserts a shape-only RESIDUE stays visible would pass or fail by which test ran before.
+    """
+    from clauster import redact
+
+    def _reset() -> None:
+        with redact._known_lock:
+            redact._known_owners.clear()
+            redact._rebuild_known_matcher()
+
+    _reset()
+    yield
+    _reset()
+
+
+@pytest.fixture(autouse=True)
 def _dispose_db_engines():
     """Dispose any DB engine a test leaves open, after each test.
 

@@ -387,6 +387,7 @@ class SpawnCoordinator:
             )
         if iid not in self._registry._persisted:
             self._registry._instances.pop(iid, None)
+            redact.forget_known_values(iid)  # its ids leave the exact-value store with it
             raise UnknownProject(
                 f"session {iid} was forgotten by another clauster process — nothing left to resume"
             )

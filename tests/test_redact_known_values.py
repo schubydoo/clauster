@@ -1,0 +1,509 @@
+"""Exact-value redaction (#1621): a value Clauster knows is masked on every output path.
+
+The oracle models what a reader can SEE, not the tokens of the returned string. It removes
+every character a value cannot hold, so a wrap, a line break, padding, a box border or an
+escape cannot hide a value that the reader reassembles. It then looks for any run of
+``KNOWN_FRAGMENT_MIN`` characters of the value's random part, which is the guarantee
+``docs/security.md`` states.
+
+Every test also runs the oracle on its INPUT and requires a leak there (the positive
+control), so a test cannot pass because the oracle is blind. ``test_shape_masks_alone_leak``
+shows the store is what closes each documented residue: with the store empty, the same
+inputs leak.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import time
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+from hypothesis import given, settings
+from hypothesis import strategies as st
+
+from clauster import pty_screen, redact, supervisor
+from clauster.app import create_app
+from clauster.hosted import _redact_obj
+from clauster.models import InstanceStatus, RemoteControlInstance
+from clauster.pty_screen import PtyScreen
+from clauster.runner import SessionRunner
+from clauster.usage import _line_to_turn
+
+# Shaped like real ids: the prefix, then `01` and 22 base62 characters.
+ENV = "env_01Xk3PqR8sTvW2yZ4bNc6dFg"
+SESSION = "session_01Hm7JtL9wQe5RuY3iOp2aSd"
+CSE = "cse_01Hm7JtL9wQe5RuY3iOp2aSd"  # derived from SESSION (code_sessions.code_session_id_for)
+BRIDGE = "3f2b9c1e-7a4d-4e8b-9c2f-1d6a5b4e3c21"
+VALUES = (ENV, SESSION, CSE, BRIDGE)
+
+_NON_ID = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+def _random_part(value: str) -> str:
+    return re.sub(r"\A(?:env|session|cse)_", "", value)
+
+
+def _leaks(seen: str, value: str) -> bool:
+    """Report whether a reader of ``seen`` can read a long enough run of ``value``."""
+    squeezed = _NON_ID.sub("", seen)
+    body = _random_part(value)
+    n = redact.KNOWN_FRAGMENT_MIN
+    return any(body[i : i + n] in squeezed for i in range(len(body) - n + 1))
+
+
+@pytest.fixture
+def known() -> None:
+    """Store the test values as one instance's ids (``cse_`` comes from ``session_``)."""
+    redact.remember_known_values("iid-1", ENV, SESSION, BRIDGE)
+
+
+def _line_forms(value: str) -> dict[str, str]:
+    """One line holding ``value`` in each shape the guarantee covers."""
+    k = len(value) // 2
+    other = ENV if value != ENV else SESSION
+    return {
+        "standalone": f"x {value} y",
+        "welded-before": f"xyz{value}",  # residue of the shape masks (no boundary, no cut)
+        "welded-after": f"{value}xyz",
+        "underscore-chain": f"x {other}_{value} y",  # the log-path residue reported in PR 1620
+        "escape-split": f"x {value[:k]}\x1b[0m{value[k:]} y",
+        "osc-weld": f"agent\x1b]0;title\x07{value}",
+        "invisible-split": f"x {value[:k]}​{value[k:]} y",
+        "bel-split": f"x {value[:k]}\x07{value[k:]} y",
+        "space-split": " ".join(value[i : i + 5] for i in range(0, len(value), 5)),
+        "truncated": f"x {value[:-3]}...",
+        "tail": f"...{value[-12:]} y",
+        "bearer": f"Authorization: Bearer {value}",
+        "url": f"https://claude.ai/code?environment={value}",
+    }
+
+
+_FORM_NAMES = sorted(_line_forms(ENV))
+
+
+def _transcript_line(text: str) -> str:
+    return json.dumps(
+        {
+            "timestamp": "t",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
+        }
+    )
+
+
+#: Each line-shaped output path, as ``text -> what the reader sees``.
+_LINE_PATHS = {
+    "ws-bridge-log": redact.sanitize_line,
+    "ws-bridge-log-colored": lambda t: redact._visible(
+        redact.sanitize_line(t, strip_ansi_seq=False)
+    ),
+    "disk-mirror-and-api-errors": redact.redact_for_disk,
+    "ws-hosted-frame": lambda t: json.dumps(_redact_obj({"content": [{"text": t}]})),
+    "transcript-turn": lambda t: json.dumps(_line_to_turn(_transcript_line(t))),
+}
+
+
+@pytest.mark.usefixtures("known")
+@pytest.mark.parametrize("path", sorted(_LINE_PATHS))
+@pytest.mark.parametrize("form", _FORM_NAMES)
+@pytest.mark.parametrize("value", VALUES)
+def test_every_line_path_masks_every_form(value: str, form: str, path: str) -> None:
+    text = _line_forms(value)[form]
+    assert _leaks(redact._visible(text), value)  # positive control: the input leaks
+    assert not _leaks(_LINE_PATHS[path](text), value)
+
+
+@pytest.mark.usefixtures("known")
+@pytest.mark.parametrize("value", VALUES)
+def test_disk_mirror_masks_a_value_split_across_lines(value: str) -> None:
+    for k in range(1, len(value)):
+        text = f"first line {value[:k]}\n{value[k:]} second line\n"
+        assert _leaks(text, value)
+        out = redact.redact_for_disk(text)
+        assert not _leaks(out, value), (k, out)
+        assert out.count("\n") == 2  # the line structure survives
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"xyz{ENV}",  # the welded literal residue of docs/security.md
+        f"x {ENV}_{SESSION} y",  # the `_` chain residue reported in PR 1620
+    ],
+)
+def test_shape_masks_alone_leak(text: str) -> None:
+    """With the store empty, the documented residue reaches the reader: the store closes it."""
+    assert _leaks(redact.sanitize_line(text), SESSION if "session_" in text else ENV)
+    redact.remember_known_values("iid-1", ENV, SESSION)
+    assert not _leaks(redact.sanitize_line(text), ENV)
+    assert not _leaks(redact.sanitize_line(text), SESSION)
+
+
+def test_an_unknown_value_keeps_the_shape_behavior() -> None:
+    # The store adds masks; it changes nothing for a text that holds no stored value.
+    redact.remember_known_values("iid-1", ENV)
+    for text in ("x env_production y", "session_timeout_ms", "x env_01QQQQ y", "plain"):
+        redact.forget_known_values("iid-1")
+        before = redact.sanitize_line(text)
+        redact.remember_known_values("iid-1", ENV)
+        assert redact.sanitize_line(text) == before
+
+
+@pytest.mark.usefixtures("known")
+def test_a_short_fragment_is_not_masked() -> None:
+    # Below KNOWN_FRAGMENT_MIN the run is not the value and is left alone; at the minimum it
+    # is masked. This pins the boundary of the guarantee.
+    n = redact.KNOWN_FRAGMENT_MIN
+    body = _random_part(ENV)
+    assert redact.sanitize_line(f"x {body[5 : 5 + n - 1]} y") == f"x {body[5 : 5 + n - 1]} y"
+    assert redact.sanitize_line(f"x {body[5 : 5 + n]} y") == "x <redacted> y"
+
+
+@pytest.mark.usefixtures("known")
+def test_an_anchor_that_grows_too_little_is_not_masked() -> None:
+    # The whole line is 6 characters of the random part, so the grid reads one anchor at 0,
+    # which grows to 6: below the minimum, so it is left alone.
+    body = _random_part(ENV)
+    assert redact.sanitize_line(body[:6]) == body[:6]
+
+
+@pytest.mark.usefixtures("known")
+def test_two_split_values_in_one_text_are_both_masked() -> None:
+    # Two split runs in one block: the second reuses the block index the first one built.
+    text = f"a {ENV[:9]}\n{ENV[9:]} b {SESSION[:13]}\n  {SESSION[13:]} c\n"
+    out = redact.redact_for_disk(text)
+    assert not _leaks(out, ENV) and not _leaks(out, SESSION)
+    assert out.count("\n") == 3
+
+
+@settings(max_examples=300, deadline=None)
+@given(
+    value=st.sampled_from(VALUES),
+    cuts=st.lists(st.integers(min_value=1, max_value=35), max_size=6, unique=True),
+    seps=st.lists(
+        st.sampled_from([" ", "\n", "  \t", "\x1b[0m", "\x1b]8;;x\x07", "​", "\x07", "|", "."]),
+        min_size=6,
+        max_size=6,
+    ),
+    before=st.sampled_from(["", "x", "xyz", "agent ", "_", "env_", "<redacted>"]),
+    after=st.sampled_from(["", "x", "_backup", " y", "-1"]),
+)
+def test_property_any_split_by_non_id_characters_is_masked(
+    value, cuts, seps, before, after
+) -> None:
+    """Cut the value anywhere and join the pieces with characters a value cannot hold."""
+    redact.remember_known_values("iid-1", ENV, SESSION, BRIDGE)
+    points = sorted(c for c in cuts if c < len(value))
+    pieces = [value[i:j] for i, j in zip([0, *points], [*points, len(value)], strict=True)]
+    text = before + "".join(p + s for p, s in zip(pieces, seps, strict=False)) + after
+    assert _leaks(redact._visible(text), value)
+    assert not _leaks(redact.redact_for_disk(text), value)
+    assert not _leaks(redact.sanitize_line(text), value)
+
+
+# ----- the live pty screen ---------------------------------------------------------------
+
+
+def _screen_text(rows: list[str]) -> str:
+    return "".join(rows)
+
+
+def _frame_rows(feed: bytes) -> tuple[list[str], list[str]]:
+    screen = PtyScreen()
+    screen.feed(feed)
+    raw = list(screen._screen.display)
+    frame = screen.frame()
+    assert len(frame["rows"]) == pty_screen.SCREEN_ROWS
+    assert all(len(row) == pty_screen.SCREEN_COLS for row in frame["rows"])
+    return raw, frame["rows"]
+
+
+@pytest.mark.usefixtures("known")
+@pytest.mark.parametrize("value", VALUES)
+def test_screen_masks_a_hard_wrap_at_every_split(value: str) -> None:
+    for k in range(1, len(value)):
+        # A real id shape always masks at the edge; the welded `zz` in front makes the shape
+        # masks' job harder, the exact match does not care.
+        feed = ("zz" * 60)[: pty_screen.SCREEN_COLS - k].encode() + value.encode()
+        raw, rows = _frame_rows(feed)
+        assert _leaks(_screen_text(raw), value)
+        assert not _leaks(_screen_text(rows), value), (k, rows[:2])
+
+
+@pytest.mark.usefixtures("known")
+@pytest.mark.parametrize("value", VALUES)
+@pytest.mark.parametrize("k", [1, 3, 6, 10, 15, 20])
+def test_screen_masks_a_soft_wrap_and_a_box_border(value: str, k: int) -> None:
+    soft = f"text {value[:k]}\r\n      {value[k:]} more".encode()
+    boxed = f"│ text {value[:k]} │\r\n│    {value[k:]}  │".encode()
+    for feed in (soft, boxed):
+        raw, rows = _frame_rows(feed)
+        assert _leaks(_screen_text(raw), value)
+        assert not _leaks(_screen_text(rows), value), rows[:2]
+
+
+@pytest.mark.usefixtures("known")
+def test_screen_masks_the_visible_tail_of_a_scrolled_value() -> None:
+    raw, rows = _frame_rows(f"{ENV[-12:]} rest of the line".encode())
+    assert _leaks(_screen_text(raw), ENV)
+    assert not _leaks(_screen_text(rows), ENV)
+
+
+def test_screen_rows_keep_their_length_and_untouched_rows_stay_identical() -> None:
+    redact.remember_known_values("iid-1", ENV)
+    rows = ["a" * 10 + ENV[:6], ENV[6:] + " " * 2, "unrelated row"]
+    out = redact.redact_known_screen_rows(rows)
+    assert [len(r) for r in out] == [len(r) for r in rows]
+    assert out[2] is rows[2]
+    assert not _leaks(_screen_text(out), ENV)
+    # A short masked run keeps its cells with `*`; a long one becomes the token.
+    assert out[0] == "a" * 10 + "******" and out[1].startswith("<redacted>")
+
+
+def test_screen_pass_returns_a_copy_when_nothing_is_stored() -> None:
+    rows = [ENV]
+    out = redact.redact_known_screen_rows(rows)
+    assert out == rows and out is not rows
+
+
+def test_keeper_stores_the_session_id_it_scrapes(tmp_path: Path) -> None:
+    """The keeper process renders the frames, so it must know the id it learned."""
+    from clauster import pty_keeper
+
+    sidecar, screen_sidecar = tmp_path / "k.json", tmp_path / "k.screen.json"
+    base: dict[str, object] = {"state": "starting", "note": None}
+    drain = pty_keeper._KeeperDrain(base, sidecar, PtyScreen(), screen_sidecar)
+    drain.feed(f"connect: https://claude.ai/code/{SESSION}\r\n".encode())
+    assert base["session_id"] == SESSION
+    assert {SESSION, CSE} <= redact._known_owners["pty-keeper"]
+    # Clear the connect URL, then draw the id split across a box border: the shape masks
+    # leave that split visible (see the soft-wrap test), the exact match does not.
+    drain.feed(b"\x1b[2J\x1b[H")
+    drain.feed(f"│ door {CSE[:12]} │\r\n│    {CSE[12:]}  │".encode())
+    drain.tick()
+    frame = json.loads(screen_sidecar.read_text(encoding="utf-8"))
+    assert _leaks(_screen_text(list(drain._screen._screen.display)), CSE)
+    assert not _leaks(_screen_text(frame["screen"]["rows"]), CSE)
+
+
+# ----- the screen relay (the Clauster process re-masks with every value it knows) -------
+
+
+def _write_sidecar(path: Path, **payload) -> None:
+    path.write_text(json.dumps({"seq": 1, "state": "live", "error": None, **payload}), "utf-8")
+
+
+@pytest.mark.usefixtures("known")
+def test_relay_masks_a_value_the_keeper_did_not_know(tmp_path: Path) -> None:
+    sidecar = tmp_path / "s.json"
+    rows = ["x" * 100 + ENV[:20], ENV[20:] + " " * 112]
+    assert _leaks(_screen_text(rows), ENV)
+    _write_sidecar(sidecar, screen={"rows": rows, "cols": 120}, error=f"screen feed: {SESSION}")
+    frame = pty_screen.read_screen_sidecar(sidecar)
+    assert frame is not None
+    assert not _leaks(_screen_text(frame["screen"]["rows"]), ENV)
+    assert [len(r) for r in frame["screen"]["rows"]] == [len(r) for r in rows]
+    assert frame["screen"]["cols"] == 120  # the rest of the payload is kept
+    assert not _leaks(frame["error"], SESSION)
+
+
+@pytest.mark.parametrize(
+    "screen", [{"rows": "not a list"}, {"rows": [1, 2]}, ["rows"], {"no": "rows"}]
+)
+def test_relay_fails_closed_on_a_screen_it_cannot_check(tmp_path: Path, screen) -> None:
+    sidecar = tmp_path / "s.json"
+    _write_sidecar(sidecar, screen=screen)
+    frame = pty_screen.read_screen_sidecar(sidecar)
+    assert frame is not None and frame["screen"] is None
+
+
+def test_relay_keeps_a_status_frame_without_a_screen(tmp_path: Path) -> None:
+    sidecar = tmp_path / "s.json"
+    _write_sidecar(sidecar, screen=None, error=None)
+    assert pty_screen.read_screen_sidecar(sidecar) == {
+        "seq": 1,
+        "state": "live",
+        "error": None,
+        "screen": None,
+    }
+
+
+# ----- end to end, at the WebSocket -------------------------------------------------------
+
+
+def _client(runner_config, instance: RemoteControlInstance) -> TestClient:
+    config, claude_json = runner_config
+    config.claude.pty_screen_enabled = True
+    runner = SessionRunner(config, claude_json=claude_json)
+    runner._instances[instance.instance_id] = instance
+    return TestClient(create_app(config, runner=runner))
+
+
+def test_ws_bridge_log_masks_a_learned_value_in_every_form(runner_config, tmp_path: Path) -> None:
+    log = tmp_path / "alpha.log"
+    log.write_text("", encoding="utf-8")
+    instance = RemoteControlInstance(
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.RUNNING,
+        bridge_debug_log_path=log,
+        environment_id=ENV,  # learned: stored by the model, no call site involved
+    )
+    forms = _line_forms(ENV)
+    with _client(runner_config, instance) as client:
+        with client.websocket_connect("/ws/bridge-log/alpha") as ws:
+            with log.open("a", encoding="utf-8") as fh:
+                fh.write("".join(f"{forms[name]}\n" for name in _FORM_NAMES))
+            for name in _FORM_NAMES:
+                assert not _leaks(ws.receive_text(), ENV), name
+
+
+def test_ws_bridge_log_learns_an_id_before_the_runner_does(runner_config, tmp_path: Path) -> None:
+    """The socket reads the marker line itself, so the next line is masked exactly at once."""
+    log = tmp_path / "alpha.log"
+    log.write_text("", encoding="utf-8")
+    instance = RemoteControlInstance(
+        project="alpha", label="alpha", status=InstanceStatus.RUNNING, bridge_debug_log_path=log
+    )
+    marker = f"[bridge:api] POST /v1/environments/bridge -> 200 environment_id={ENV}"
+    residue = f"xyz{ENV}"  # the shape masks leave this whole (test_shape_masks_alone_leak)
+    with _client(runner_config, instance) as client:
+        with client.websocket_connect("/ws/bridge-log/alpha") as ws:
+            log.write_text(f"{marker}\n{residue}\n", encoding="utf-8")
+            assert not _leaks(ws.receive_text(), ENV)
+            assert not _leaks(ws.receive_text(), ENV)
+    assert instance.environment_id is None  # the runner never parsed it: the socket did
+    assert ENV in redact._known_owners[instance.instance_id]
+
+
+def test_ws_bridge_log_reads_the_ids_above_its_tail(runner_config, tmp_path: Path) -> None:
+    """After a restart the record may hold no id; the marker line is above the tail start."""
+    log = tmp_path / "alpha.log"
+    marker = f"[bridge:api] POST /v1/environments/bridge -> 200 environment_id={ENV}"
+    log.write_text(marker + "\n" + "old line\n" * 20_000, encoding="utf-8")
+    instance = RemoteControlInstance(
+        project="alpha", label="alpha", status=InstanceStatus.RUNNING, bridge_debug_log_path=log
+    )
+    with _client(runner_config, instance) as client:
+        with client.websocket_connect("/ws/bridge-log/alpha") as ws:
+            with log.open("a", encoding="utf-8") as fh:
+                fh.write(f"xyz{ENV}\n")
+            line = ws.receive_text()
+            while line == "old line":  # the tail may begin inside the old lines
+                line = ws.receive_text()
+            assert not _leaks(line, ENV)
+    assert instance.environment_id is None
+
+
+def test_log_head_of_an_unreadable_file_is_empty(tmp_path: Path) -> None:
+    from clauster.routes import websockets as ws_module
+
+    assert ws_module._read_log_head(tmp_path / "missing.log") == ""
+
+
+def test_ws_pty_screen_masks_a_learned_value(runner_config, tmp_path: Path) -> None:
+    log = tmp_path / "alpha-1-1.log"
+    instance = RemoteControlInstance(
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.RUNNING,
+        bridge_debug_log_path=log,
+        resume_mode="pty",
+    )
+    instance.environment_id = ENV  # learned after construction, as the poll loop does
+    rows = ["x" * 110 + ENV[:10], ENV[10:].ljust(120)]
+    _write_sidecar(pty_screen.screen_sidecar_path(log), screen={"rows": rows})
+    with _client(runner_config, instance) as client:
+        with client.websocket_connect("/ws/pty-screen/alpha") as ws:
+            frame = ws.receive_json()
+    assert not _leaks(_screen_text(frame["screen"]["rows"]), ENV)
+
+
+# ----- the store --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        "",
+        42,
+        "env_01short",  # too short a random part to be a real id
+        "env_01Xk3PqR8sTvW2yZ 4bNc6dFg",  # a character no id holds
+        "env_01TESTENVAAAAAAAAAAAAAAAA",  # repeats a 7-character run: not random
+        "<redacted>xxxxxxxxxxxxxxxx",
+    ],
+)
+def test_store_skips_what_is_not_a_value(value) -> None:
+    redact.remember_known_values("iid-1", value)
+    assert "iid-1" not in redact._known_owners
+    assert redact._known_matcher is None
+
+
+def test_store_pairs_a_session_id_with_its_code_session_id() -> None:
+    redact.remember_known_values("a", CSE)
+    assert redact._known_owners["a"] == {SESSION, CSE}
+
+
+def test_store_replace_and_forget() -> None:
+    redact.remember_known_values("a", ENV)
+    redact.remember_known_values("b", SESSION)
+    redact.replace_known_values("b", [BRIDGE, None])
+    assert redact._known_owners["b"] == {BRIDGE}
+    redact.replace_known_values("b", [BRIDGE])  # unchanged: no rebuild needed
+    redact.replace_known_values("b", [])
+    assert "b" not in redact._known_owners
+    redact.forget_known_values("a")
+    redact.forget_known_values("never-stored")
+    assert redact._known_matcher is None
+    assert redact.sanitize_line(f"xyz{ENV}") == f"xyz{ENV}"  # the shape residue is back
+
+
+def test_model_stores_ids_on_build_and_on_assignment() -> None:
+    inst = RemoteControlInstance(project="p", label="p", environment_id=ENV)
+    assert redact._known_owners[inst.instance_id] == {ENV}
+    inst.starter_session_id = SESSION
+    inst.bridge_id = BRIDGE
+    inst.label = "renamed"  # not an id field: no change
+    assert redact._known_owners[inst.instance_id] == {ENV, SESSION, CSE, BRIDGE}
+
+
+async def test_forget_drops_the_instance_ids(runner_config, monkeypatch) -> None:
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    inst = await runner.spawn("alpha")
+    await runner.stop(inst.instance_id)
+    inst.environment_id = ENV  # the fake bridge's own ids repeat a run, so are not stored
+    assert inst.instance_id in redact._known_owners
+    await runner.forget(inst.instance_id)
+    assert inst.instance_id not in redact._known_owners
+
+
+def test_background_job_listing_stores_the_ids_it_lists(tmp_path: Path) -> None:
+    jobs = tmp_path / "jobs"
+    (jobs / "aaaa1111").mkdir(parents=True)
+    state = {"state": "working", "detail": f"door at xyz{CSE}", "bridgeSessionId": CSE}
+    (jobs / "aaaa1111" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    [job] = supervisor.list_background_jobs(jobs, tmp_path / "roster.json")
+    assert not _leaks(job.detail, CSE)  # the job's own text was redacted AFTER the store
+    assert redact._known_owners["background-jobs"] == {SESSION, CSE}
+    (jobs / "aaaa1111" / "state.json").unlink()
+    assert supervisor.list_background_jobs(jobs, tmp_path / "roster.json") == []
+    assert "background-jobs" not in redact._known_owners  # a gone job takes its id with it
+
+
+# ----- cost -------------------------------------------------------------------------------
+
+
+def test_cost_is_linear_on_hostile_text() -> None:
+    """Long runs of anchor hits and of the value itself must stay cheap (no quadratic walk)."""
+    redact.remember_known_values("iid-1", ENV, SESSION, BRIDGE)
+    blocks = "".join(_random_part(ENV)[i : i + 4] for i in range(0, 20, 4))
+    for text in (blocks * 40_000, (ENV + " ") * 20_000, ("A" * 1000 + "\n") * 500):
+        start = time.perf_counter()
+        spans = redact._known_spans(text)
+        assert time.perf_counter() - start < 5.0
+        assert isinstance(spans, list)
