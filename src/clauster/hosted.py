@@ -530,7 +530,20 @@ class HostedSession:
             return
         self._stopping = True  # reject any concurrent respond_control while we tear down
         try:
-            await self._end_agent()
+            await self._client.kill(self._process_id, signal="INT")
+            if self._stream is not None:
+                try:
+                    await asyncio.wait_for(self._stream.exited.wait(), timeout=self._stop_grace)
+                except TimeoutError:
+                    await self._client.kill(self._process_id, signal="KILL")
+                    try:
+                        # Give the daemon's exit frame for the KILL a chance to land,
+                        # so the terminal latch below has an exit code to work with.
+                        await asyncio.wait_for(
+                            self._stream.exited.wait(), timeout=self._stop_grace
+                        )
+                    except TimeoutError:
+                        pass
         except ClaustrumError as exc:  # daemon loss during stop (CL-4b)
             self.status = InstanceStatus.ERROR
             self._resolve_parked()  # a dead session must not leave a parked request stranded
@@ -547,25 +560,6 @@ class HostedSession:
                 # that race and the row would stay "running" forever (blocking resume).
                 # Latch the terminal status here from the stream's recorded exit code.
                 self._on_exit(self._stream.exit_code)
-
-    async def _end_agent(self) -> None:
-        """Send SIGINT, then SIGKILL if the agent outlives the grace window.
-
-        Raises :class:`ClaustrumError` when the daemon cannot take the kill; the caller
-        decides what that means.
-        """
-        await self._client.kill(self._process_id, signal="INT")
-        if self._stream is not None:
-            try:
-                await asyncio.wait_for(self._stream.exited.wait(), timeout=self._stop_grace)
-            except TimeoutError:
-                await self._client.kill(self._process_id, signal="KILL")
-                try:
-                    # Give the daemon's exit frame for the KILL a chance to land,
-                    # so the terminal latch in stop() has an exit code to work with.
-                    await asyncio.wait_for(self._stream.exited.wait(), timeout=self._stop_grace)
-                except TimeoutError:
-                    pass
 
     def subscribe(self, after_seq: int = 0) -> asyncio.Queue[Mapping[str, Any]]:
         """Register a browser watcher, replaying ring events past ``after_seq``.
@@ -804,22 +798,28 @@ class HostedSession:
             # shapes only, which is the same guarantee every other server log line has.
             logger.exception("hosted: pump for process %s failed", self._process_id)
             self.status = InstanceStatus.ERROR
-            self._resolve_parked()
-            self._emit({"type": "lost", "reason": f"internal error ({type(exc).__name__})"})
-            # Then end the agent. The daemon is healthy on this path, so the agent is still
-            # running, but nothing reads its output or answers its prompts any more. An
-            # ERROR row is also one stop() treats as already ended, and that Resume and
-            # Forget accept: leaving the agent alive would let Resume start a second agent
-            # on the same conversation, and let Stop or Forget drop it unkilled. Its
-            # transcript survives, so Resume reloads the conversation.
             try:
-                await self._end_agent()
-            except ClaustrumError as kill_exc:
-                logger.warning(
-                    "hosted: could not end agent %s after pump failure: %s",
-                    self._process_id,
-                    kill_exc,
-                )
+                self._resolve_parked()
+                self._emit({"type": "lost", "reason": f"internal error ({type(exc).__name__})"})
+            finally:
+                # Then end the agent. The daemon is healthy on this path, so the agent is
+                # still running, but nothing reads its output or answers its prompts any
+                # more. An ERROR row is also one stop() treats as already ended, and one
+                # Resume and Forget accept: a live agent would let Resume start a second
+                # agent on the same conversation, and let Stop or Forget drop it unkilled.
+                # One SIGKILL, not stop()'s INT-then-grace-then-KILL: no await sits between
+                # the ERROR above and this write, so the kill is on the wire before any
+                # Resume can act on the ERROR row, and a later cancel (Stop, Forget,
+                # Resume's detach) cannot drop it. Its transcript survives, so Resume
+                # reloads the conversation.
+                try:
+                    await self._client.kill(self._process_id, signal="KILL")
+                except ClaustrumError as kill_exc:
+                    logger.warning(
+                        "hosted: could not end agent %s after pump failure: %s",
+                        self._process_id,
+                        kill_exc,
+                    )
         finally:
             # The pump owns the subscription it drains; drop it whenever the pump exits on its
             # own (natural exit, daemon loss, or cancel) so a subscriber is never left on the

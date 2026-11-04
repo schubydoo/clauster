@@ -1099,12 +1099,8 @@ async def test_pump_unexpected_error_fails_visibly_and_never_allows_parked(
         assert [(e["request_id"], e["behavior"]) for e in resolved] == [("perm-1", "interrupted")]
         assert not [f for f in _stdin_frames(fake) if f.get("type") == "control_response"]
         assert marker not in json.dumps(list(session._ring))
-        # Nothing supervises the agent any more, so it is ended: the fake never reports an
-        # exit, so the INT escalates to KILL exactly as stop() does.
-        assert [(k["id"], k.get("signal")) for k in fake.killed] == [
-            (_PID, "INT"),
-            (_PID, "KILL"),
-        ]
+        # Nothing supervises the agent any more, so it is ended with one SIGKILL.
+        assert [(k["id"], k.get("signal")) for k in fake.killed] == [(_PID, "KILL")]
         # The task ended on its own terms (nothing left to "never retrieved") and released
         # the stream subscription it drains.
         assert pump.exception() is None
@@ -1158,14 +1154,24 @@ async def test_pump_cancellation_still_propagates_without_a_lost_event(fake_clau
 async def test_manager_pump_failure_ends_the_agent_before_resume_can_add_one(
     fake_claustrum, tmp_path, monkeypatch
 ):
-    """The ERROR reaches the row, and Resume never runs beside the failed agent.
+    """The ERROR reaches the row, and a Resume never runs beside the failed agent.
 
     ``_resume_locked`` accepts an ERROR row and only detaches the old session, and
-    ``stop()`` treats ERROR as already ended. So the catch-all itself must end the agent:
-    otherwise a Resume would put a second agent on the same conversation.
+    ``stop()`` treats ERROR as already ended. So the catch-all itself must end the agent,
+    and the kill must already be with the daemon when a Resume can first see the ERROR.
+    Resume is called the moment the row reads ERROR, without waiting for the pump, and
+    the fake records whether the old agent was still running when the new one spawned.
     """
     _poison_redactor(monkeypatch)
     fake = await fake_claustrum()
+    running_at_spawn: list[dict[str, bool]] = []
+    real_spawn = fake._m_process_spawn
+
+    async def _spawn_spy(request_id, params, writer):
+        running_at_spawn.append({p: proc.running for p, proc in fake._processes.items()})
+        await real_spawn(request_id, params, writer)
+
+    monkeypatch.setattr(fake, "_m_process_spawn", _spawn_spy)
     store = HostedStateStore(tmp_path)
     async with ClaustrumClient(fake.socket_path, fake.token) as client:
         mgr = HostedManager(store)
@@ -1176,23 +1182,18 @@ async def test_manager_pump_failure_ends_the_agent_before_resume_can_add_one(
             await fake.emit(pid, "stdout", (json.dumps(init) + "\n").encode())
             await wait_until(lambda: mgr.session(pid).claude_session_uuid == uuid)
 
-            async def _exit_on_int():
-                while not any(k.get("signal") == "INT" for k in fake.killed):
-                    await asyncio.sleep(0.01)
-                await fake.emit_exit(pid, 130)
-
-            exiter = asyncio.create_task(_exit_on_int())
             await fake.emit(pid, "stdout", _POISON)
             await wait_until(lambda: mgr.get_instance(pid).status is InstanceStatus.ERROR)
-            await asyncio.wait_for(exiter, timeout=2.0)  # bounded: no INT must fail, not hang
-            await wait_until(mgr.session(pid)._pump_task.done)
-            # The agent took the INT and exited, so there was no escalation.
-            assert [(k["id"], k.get("signal")) for k in fake.killed] == [(pid, "INT")]
-
             resumed = await mgr.resume(client, pid, cwd="/tmp/proj", claude_binary=_BIN)
+
             assert resumed.status is InstanceStatus.RUNNING
             assert resumed.claustrum_process_id != pid
             assert "--resume" in fake.spawned[-1]["args"]
+            assert [(k["id"], k.get("signal")) for k in fake.killed] == [(pid, "KILL")]
+            # Two spawns: the original, then the resume. At the resume's spawn the old
+            # agent was already killed, so the two never ran side by side.
+            assert len(running_at_spawn) == 2
+            assert running_at_spawn[1][pid] is False
         finally:
             await mgr.aclose()
 
