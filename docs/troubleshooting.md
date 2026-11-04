@@ -619,11 +619,15 @@ transcript of `claude` keeps the conversation up to the last line that `claude`
 wrote before the kill. If the card offers **Resume**, use it to continue the
 conversation in a new agent.
 
-A `stream lost: claustrum ...` line in place of `internal error` means that the
-claustrum daemon refused a request for the session, or that Clauster lost its
-connection to the daemon. Clauster handles the session the same way: it ends
-the agent and resolves open prompts. If the connection is gone, the kill fails
-and the server log shows `hosted: could not end agent <id> after pump failure`.
+A `stream lost:` line with any other text than `internal error (...)` means
+that the claustrum daemon refused a request for the session, or that Clauster
+lost its connection to the daemon. Clauster handles the session the same way:
+it ends the agent and resolves open prompts. If Clauster cannot confirm the
+kill, the server log shows `hosted: could not end agent <id> after pump
+failure`. That can mean that the connection was gone and the kill failed, or
+that the daemon received the kill but its reply did not arrive. Before you
+resume such a session, make sure that its `claude` process is not still running
+on the host.
 
 ### "output lost (N frames)" after a restart
 
