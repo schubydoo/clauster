@@ -18,11 +18,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from .. import auth, bridge_log, logstream, pty_screen, redact
+from .. import auth, logstream, pty_screen, redact
 from ..dependencies import (
     AllowedOriginsDep,
     AuthenticateDep,
@@ -56,6 +57,16 @@ _SCREEN_POLL_INTERVAL = 0.25
 _LOG_HEAD_BYTES = 256 * 1024
 
 
+#: The marker text before the remote-session ids a bridge log names: the same markers
+#: ``bridge_log.parse_bridge_markers`` reads, in one linear pattern. That parser's own
+#: ``[^\n]*`` patterns re-read a line once per marker they start on, which crafted log text
+#: could make cost seconds; the socket runs on every streamed line, so it does not use them.
+_STREAM_ID_RE = re.compile(
+    r"\b(?:environment_id=|environmentId=|Created initial session\s+|Unarchive\s+)"
+    r"((?:env|session)_[A-Za-z0-9]+)"
+)
+
+
 def _read_log_head(path: Path) -> str:
     """Return the first :data:`_LOG_HEAD_BYTES` of ``path`` as text, or ``""`` if unreadable."""
     try:
@@ -65,12 +76,34 @@ def _read_log_head(path: Path) -> str:
         return ""
 
 
-def _remember_marker_ids(instance_id: str, text: str) -> None:
-    """Store the ids the bridge-log marker lines in ``text`` name, for exact masking (#1621)."""
-    markers = bridge_log.parse_bridge_markers(text)
-    redact.remember_known_values(
-        instance_id, markers.environment_id, markers.starter_session_id, markers.bridge_id
-    )
+def _learn_stream_ids(instance_id: str, text: str, learned: set[str]) -> None:
+    """Store the first environment id and the first session id ``text`` names (#1621).
+
+    ``learned`` holds the kinds (``env``, ``session``) this socket already stored. First wins,
+    as in ``bridge_log.parse_bridge_markers``, so log text that names many ids (tool output the
+    bridge echoes) can add at most one value of each kind to the store.
+    """
+    for hit in _STREAM_ID_RE.finditer(text):
+        kind = hit.group(1).partition("_")[0]
+        if kind not in learned:
+            learned.add(kind)
+            redact.remember_known_values(instance_id, hit.group(1))
+        if len(learned) == 2:
+            return
+
+
+def _sanitize_lines(
+    instance_id: str, lines: list[str], learned: set[str], *, strip: bool
+) -> list[str]:
+    """Learn each line's ids, then sanitize it; run off the event loop (it is CPU work)."""
+    out: list[str] = []
+    for line in lines:
+        if len(learned) < 2:
+            # This socket can read the line that first names an id before the runner's own
+            # parse does. Store the id first, so even that line is masked exactly.
+            _learn_stream_ids(instance_id, line, learned)
+        out.append(sanitize_line(line, strip_ansi_seq=strip))
+    return out
 
 
 def _reap_ws_task(task: asyncio.Task) -> None:
@@ -197,8 +230,11 @@ async def ws_bridge_log(
     strip = config.logs.strip_ansi_in_stream
     offset = await asyncio.to_thread(logstream.initial_offset, path)
     # The tail starts near the end, past the marker lines at the top of the log. After a
-    # Clauster restart the record may not hold its ids yet, so read them from the head first.
-    _remember_marker_ids(instance.instance_id, await asyncio.to_thread(_read_log_head, path))
+    # Clauster restart the record may not hold its ids yet, so read them from the head first
+    # (#1621). `learned` is only ever touched by one worker thread at a time: each is awaited.
+    learned: set[str] = set()
+    iid = instance.instance_id
+    await asyncio.to_thread(lambda: _learn_stream_ids(iid, _read_log_head(path), learned))
 
     async def _stream() -> None:
         """Tail the bridge log from the opening offset, pushing each line to the socket."""
@@ -210,12 +246,11 @@ async def ws_bridge_log(
                 # Buffer whole lines so redaction never misses an id split
                 # across two reads.
                 *lines, carry = (carry + text).split("\n")
-                for line in lines:
-                    # This socket can read the line that first names an id before the
-                    # runner's own parse does. Store the id first, so even that line is
-                    # masked by exact match rather than by shape alone (#1621).
-                    _remember_marker_ids(instance.instance_id, line)
-                    await websocket.send_text(sanitize_line(line, strip_ansi_seq=strip))
+                sanitized = await asyncio.to_thread(
+                    _sanitize_lines, iid, lines, learned, strip=strip
+                )
+                for line in sanitized:
+                    await websocket.send_text(line)
             await asyncio.sleep(0.5)
 
     try:

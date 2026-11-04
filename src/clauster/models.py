@@ -238,15 +238,28 @@ class RemoteControlInstance(BaseModel):
         The ids are set in many places (the debug-log parse, the pointer, the keeper's
         connect URL, rediscovery, the poll loop), and a site that forgot to store one would
         leave it to the best-effort shape masks. Storing on assignment means no site can.
-        """
-        super().__setattr__(name, value)
-        if name in _KNOWN_ID_FIELDS:
-            self._remember_known_ids()
 
-    def _remember_known_ids(self) -> None:
-        """Store this record's remote-session ids under its ``instance_id``."""
+        The id is stored BEFORE it is set, so no thread can read it off the record while the
+        store does not hold it yet.
+        """
+        if name in _KNOWN_ID_FIELDS:
+            self._remember_known_ids(**{name: value})
+        super().__setattr__(name, value)
+
+    def _remember_known_ids(self, **pending: Any) -> None:
+        """Store this record's remote-session ids, with ``pending`` fields not set yet."""
+        fields = {
+            "instance_id": self.instance_id,
+            "environment_id": self.environment_id,
+            "starter_session_id": self.starter_session_id,
+            "bridge_id": self.bridge_id,
+            **pending,
+        }
         redact.remember_known_values(
-            self.instance_id, self.environment_id, self.starter_session_id, self.bridge_id
+            fields["instance_id"],
+            fields["environment_id"],
+            fields["starter_session_id"],
+            fields["bridge_id"],
         )
 
     @computed_field  # type: ignore[prop-decorator]

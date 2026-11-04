@@ -1405,6 +1405,7 @@ class _KnownMatcher(NamedTuple):
     values: tuple[str, ...]
     random_starts: tuple[int, ...]  #: where each value's random part starts (after the prefix)
     anchors: dict[str, tuple[tuple[int, int], ...]]  #: piece -> (value index, offset in value)
+    value_set: frozenset[str]  #: ``values`` as a set, so an add can skip what is stored
 
 
 _known_lock = threading.Lock()
@@ -1440,24 +1441,35 @@ def _known_forms(value: object) -> frozenset[str]:
     return frozenset({value})
 
 
-def _rebuild_known_matcher() -> None:
-    """Compile the union of every owner's values; the caller holds :data:`_known_lock`."""
-    global _known_matcher
-    values = tuple(sorted(frozenset().union(*_known_owners.values())))
-    if not values:
-        _known_matcher = None
-        return
-    starts: list[int] = []
-    anchors: dict[str, list[tuple[int, int]]] = {}
-    for index, value in enumerate(values):
+def _matcher_with(base: _KnownMatcher | None, added: Iterable[str]) -> _KnownMatcher:
+    """Return a new matcher that holds ``base`` and the values of ``added`` it lacks.
+
+    ``base`` is never changed: a reader that holds it keeps a whole matcher. Only the new
+    values are compiled. The rest is copied in C, so storing one more value does not cost a
+    Python step per value already stored.
+    """
+    base = base or _KnownMatcher((), (), {}, frozenset())
+    new = sorted(frozenset(added) - base.value_set)
+    if not new:
+        return base
+    values, starts, anchors = list(base.values), list(base.random_starts), dict(base.anchors)
+    for value in new:
+        index = len(values)
+        values.append(value)
         prefix = _KNOWN_PREFIX_RE.match(value)
         start = prefix.end() if prefix else 0
         starts.append(start)
         for offset in range(start, len(value) - _KNOWN_ANCHOR + 1):
-            anchors.setdefault(value[offset : offset + _KNOWN_ANCHOR], []).append((index, offset))
-    _known_matcher = _KnownMatcher(
-        values, tuple(starts), {block: tuple(places) for block, places in anchors.items()}
-    )
+            piece = value[offset : offset + _KNOWN_ANCHOR]
+            anchors[piece] = (*anchors.get(piece, ()), (index, offset))
+    return _KnownMatcher(tuple(values), tuple(starts), anchors, base.value_set | frozenset(new))
+
+
+def _rebuild_known_matcher() -> None:
+    """Compile the union of every owner's values; the caller holds :data:`_known_lock`."""
+    global _known_matcher
+    values = frozenset().union(*_known_owners.values())
+    _known_matcher = _matcher_with(None, values) if values else None
 
 
 def remember_known_values(owner: str, *values: str | None) -> None:
@@ -1468,12 +1480,13 @@ def remember_known_values(owner: str, *values: str | None) -> None:
     ``[A-Za-z0-9_-]`` is skipped, never raised on: a caller in the poll loop must not fail on
     an odd value, and the shape masks still apply to it.
     """
+    global _known_matcher
     forms = frozenset().union(*(_known_forms(value) for value in values))
     if not forms or forms <= _known_owners.get(owner, frozenset()):
         return  # the common case: the poll loop re-assigns a value it already stored
     with _known_lock:
         _known_owners[owner] = _known_owners.get(owner, frozenset()) | forms
-        _rebuild_known_matcher()
+        _known_matcher = _matcher_with(_known_matcher, forms)  # an add compiles only the new
 
 
 def replace_known_values(owner: str, values: Iterable[str | None]) -> None:
@@ -1523,20 +1536,21 @@ def _known_runs(squeezed: str, matcher: _KnownMatcher) -> list[tuple[int, int]]:
 
     Each anchor on the grid is grown left and right for as long as the text keeps spelling
     the value it came from. The run is kept when it holds at least
-    :data:`KNOWN_FRAGMENT_MIN` characters of the value's random part. One occurrence is grown
-    once: every anchor of it has the same alignment, ``position - offset``.
+    :data:`KNOWN_FRAGMENT_MIN` characters of the value's random part. An anchor inside a run
+    already grown at the same alignment (``position - offset``) is skipped. An anchor past the
+    end of that run is grown again: one character of the value replaced by another id
+    character stops the first run, and the rest of the value after it must still be found.
 
     The cost is linear. Each grid offset holds one piece, a stored value repeats no run of
     :data:`KNOWN_FRAGMENT_MIN` characters (:func:`_known_forms`), so a piece has few places,
     and growing a run stops at the length of its value.
     """
     runs: list[tuple[int, int]] = []
-    seen: set[tuple[int, int]] = set()
+    grown: dict[tuple[int, int], int] = {}  # (value index, alignment) -> end of the last run
     for at, piece in _known_grid_hits(squeezed, matcher.anchors):
         for index, offset in matcher.anchors[piece]:
-            if (index, at - offset) in seen:
+            if at < grown.get((index, at - offset), -1):
                 continue
-            seen.add((index, at - offset))
             value = matcher.values[index]
             lo, first = at, offset
             while lo > 0 and first > 0 and squeezed[lo - 1] == value[first - 1]:
@@ -1546,6 +1560,7 @@ def _known_runs(squeezed: str, matcher: _KnownMatcher) -> list[tuple[int, int]]:
             while hi < len(squeezed) and last < len(value) and squeezed[hi] == value[last]:
                 hi += 1
                 last += 1
+            grown[(index, at - offset)] = hi
             if last - max(first, matcher.random_starts[index]) >= KNOWN_FRAGMENT_MIN:
                 runs.append((lo, hi))
     return runs
@@ -1554,10 +1569,10 @@ def _known_runs(squeezed: str, matcher: _KnownMatcher) -> list[tuple[int, int]]:
 class _KnownBlocks:
     """The way back from an offset in the squeezed text to the text, built block by block."""
 
-    def __init__(self, text: str, kept: list[int]) -> None:
-        """Index ``text`` whose blocks of :data:`_KNOWN_BLOCK` kept ``kept[b]`` characters."""
+    def __init__(self, text: str, kept_before: list[int]) -> None:
+        """Index ``text``; the squeeze kept ``kept_before[b]`` characters before block ``b``."""
         self._text = text
-        self._kept_before = list(itertools.accumulate(kept, initial=0))
+        self._kept_before = kept_before
         self._runs: dict[int, tuple[list[int], list[tuple[int, int]]]] = {}
 
     def _block_runs(self, block: int) -> tuple[list[int], list[tuple[int, int]]]:
@@ -1607,21 +1622,27 @@ def _known_spans(text: str) -> list[tuple[int, int]]:
     runs = _known_runs(squeezed, matcher)
     if not runs:
         return []
-    # Most runs stand in the text as one unbroken piece. Such a run is found with `find` from a
-    # cursor and confirmed by counting the kept characters before it, both in C. Only a run
-    # that is split, or found at the wrong place, takes the block index.
+    # Most runs stand in the text as one unbroken piece. Such a run is found with `find` and
+    # confirmed by counting the kept characters before it, both in C. Both read only the
+    # blocks that hold the run, so a run that is split (or a far later copy of it) cannot make
+    # one lookup read the rest of the text. Only a run that fails the check takes the index.
+    kept_before = list(itertools.accumulate(map(len, kept), initial=0))
     blocks: _KnownBlocks | None = None
     spans: list[tuple[int, int]] = []
     cursor = kept_at = 0  # `text[:cursor]` holds `kept_at` kept characters
     for lo, hi in _merged(runs):
+        first = bisect.bisect_right(kept_before, lo) - 1
+        if cursor < first * _KNOWN_BLOCK:  # jump to the block that holds `lo`
+            cursor, kept_at = first * _KNOWN_BLOCK, kept_before[first]
+        last = bisect.bisect_right(kept_before, hi - 1) - 1
         piece = squeezed[lo:hi]
-        at = text.find(piece, cursor)
+        at = text.find(piece, cursor, (last + 1) * _KNOWN_BLOCK)
         if at >= 0 and kept_at + len(_NOT_KNOWN_CHARS_RE.sub("", text[cursor:at])) == lo:
             spans.append((at, at + len(piece)))
             cursor = at + len(piece)
         else:
             if blocks is None:
-                blocks = _KnownBlocks(text, [len(part) for part in kept])
+                blocks = _KnownBlocks(text, kept_before)
             found = blocks.pieces(lo, hi)
             spans += found
             cursor = found[-1][1]

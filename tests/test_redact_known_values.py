@@ -46,6 +46,11 @@ def _random_part(value: str) -> str:
     return re.sub(r"\A(?:env|session|cse)_", "", value)
 
 
+def _close(a: str, b: str) -> bool:
+    """Report whether ``a`` and ``b`` differ in at most one character."""
+    return sum(x != y for x, y in zip(a, b, strict=True)) <= 1
+
+
 def _leaks(seen: str, value: str) -> bool:
     """Report whether a reader of ``seen`` can read a long enough run of ``value``."""
     squeezed = _NON_ID.sub("", seen)
@@ -170,6 +175,27 @@ def test_an_anchor_that_grows_too_little_is_not_masked() -> None:
 
 
 @pytest.mark.usefixtures("known")
+@pytest.mark.parametrize("value", VALUES)
+def test_one_substituted_character_does_not_hide_the_rest(value: str) -> None:
+    """A wrong id character stops one run; the rest of the value after it is grown again."""
+    body_start = len(value) - len(_random_part(value))
+    for k in range(body_start, len(value)):
+        swapped = "Q" if value[k] != "Q" else "R"
+        text = f"xyz{value[:k]}{swapped}{value[k + 1 :]} y"
+        for out in (redact.sanitize_line(text), redact.redact_known_screen_rows([text])[0]):
+            assert not _leaks(out, value), (k, out)
+
+
+@pytest.mark.usefixtures("known")
+def test_a_split_copy_before_a_whole_copy_is_masked() -> None:
+    # `find` for the split copy's first run lands on the later whole copy; the count of kept
+    # characters before it must reject that place.
+    text = f"a xyz{ENV[:12]}\n{ENV[12:]} b {ENV} c\n"
+    out = redact.redact_for_disk(text)
+    assert not _leaks(out.split("b")[0], ENV) and not _leaks(out, ENV), out
+
+
+@pytest.mark.usefixtures("known")
 def test_two_split_values_in_one_text_are_both_masked() -> None:
     # Two split runs in one block: the second reuses the block index the first one built.
     text = f"a {ENV[:9]}\n{ENV[9:]} b {SESSION[:13]}\n  {SESSION[13:]} c\n"
@@ -184,23 +210,31 @@ def test_two_split_values_in_one_text_are_both_masked() -> None:
     cuts=st.lists(st.integers(min_value=1, max_value=35), max_size=6, unique=True),
     seps=st.lists(
         st.sampled_from([" ", "\n", "  \t", "\x1b[0m", "\x1b]8;;x\x07", "​", "\x07", "|", "."]),
-        min_size=6,
-        max_size=6,
+        min_size=7,
+        max_size=7,
     ),
+    swap=st.none() | st.integers(min_value=0, max_value=35),
     before=st.sampled_from(["", "x", "xyz", "agent ", "_", "env_", "<redacted>"]),
     after=st.sampled_from(["", "x", "_backup", " y", "-1"]),
 )
 def test_property_any_split_by_non_id_characters_is_masked(
-    value, cuts, seps, before, after
+    value, cuts, seps, before, after, swap
 ) -> None:
-    """Cut the value anywhere and join the pieces with characters a value cannot hold."""
+    """Cut the value anywhere, join the pieces with characters a value cannot hold.
+
+    ``swap`` also replaces one character of the value by another id character: what is left
+    on either side of it must still be masked wherever it holds a long enough run.
+    """
     redact.remember_known_values("iid-1", ENV, SESSION, BRIDGE)
+    if swap is not None and swap < len(value):
+        value = value[:swap] + ("Q" if value[swap] != "Q" else "R") + value[swap + 1 :]
     points = sorted(c for c in cuts if c < len(value))
     pieces = [value[i:j] for i, j in zip([0, *points], [*points, len(value)], strict=True)]
     text = before + "".join(p + s for p, s in zip(pieces, seps, strict=False)) + after
-    assert _leaks(redact._visible(text), value)
-    assert not _leaks(redact.redact_for_disk(text), value)
-    assert not _leaks(redact.sanitize_line(text), value)
+    original = next(v for v in VALUES if len(v) == len(value) and _close(v, value))
+    assert _leaks(redact._visible(text), original)
+    assert not _leaks(redact.redact_for_disk(text), original)
+    assert not _leaks(redact.sanitize_line(text), original)
 
 
 # ----- the live pty screen ---------------------------------------------------------------
@@ -341,21 +375,27 @@ def _client(runner_config, instance: RemoteControlInstance) -> TestClient:
     return TestClient(create_app(config, runner=runner))
 
 
+def _append(log: Path, text: str) -> None:
+    # Byte-exact `\n` on every OS: the socket splits on `\n` alone.
+    with log.open("a", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)
+
+
+def _bare_instance(log: Path) -> RemoteControlInstance:
+    return RemoteControlInstance(
+        project="alpha", label="alpha", status=InstanceStatus.RUNNING, bridge_debug_log_path=log
+    )
+
+
 def test_ws_bridge_log_masks_a_learned_value_in_every_form(runner_config, tmp_path: Path) -> None:
     log = tmp_path / "alpha.log"
-    log.write_text("", encoding="utf-8")
-    instance = RemoteControlInstance(
-        project="alpha",
-        label="alpha",
-        status=InstanceStatus.RUNNING,
-        bridge_debug_log_path=log,
-        environment_id=ENV,  # learned: stored by the model, no call site involved
-    )
+    _append(log, "")
+    instance = _bare_instance(log)
+    instance.environment_id = ENV  # learned: stored by the model, no call site involved
     forms = _line_forms(ENV)
     with _client(runner_config, instance) as client:
         with client.websocket_connect("/ws/bridge-log/alpha") as ws:
-            with log.open("a", encoding="utf-8") as fh:
-                fh.write("".join(f"{forms[name]}\n" for name in _FORM_NAMES))
+            _append(log, "".join(f"{forms[name]}\n" for name in _FORM_NAMES))
             for name in _FORM_NAMES:
                 assert not _leaks(ws.receive_text(), ENV), name
 
@@ -363,15 +403,17 @@ def test_ws_bridge_log_masks_a_learned_value_in_every_form(runner_config, tmp_pa
 def test_ws_bridge_log_learns_an_id_before_the_runner_does(runner_config, tmp_path: Path) -> None:
     """The socket reads the marker line itself, so the next line is masked exactly at once."""
     log = tmp_path / "alpha.log"
-    log.write_text("", encoding="utf-8")
-    instance = RemoteControlInstance(
-        project="alpha", label="alpha", status=InstanceStatus.RUNNING, bridge_debug_log_path=log
-    )
+    _append(log, "")
+    instance = _bare_instance(log)
     marker = f"[bridge:api] POST /v1/environments/bridge -> 200 environment_id={ENV}"
     residue = f"xyz{ENV}"  # the shape masks leave this whole (test_shape_masks_alone_leak)
     with _client(runner_config, instance) as client:
         with client.websocket_connect("/ws/bridge-log/alpha") as ws:
-            log.write_text(f"{marker}\n{residue}\n", encoding="utf-8")
+            # Receive a first line, so the head read at connect is over before the marker is
+            # written: only the per-line learning can see it.
+            _append(log, "sentinel\n")
+            assert ws.receive_text() == "sentinel"
+            _append(log, f"{marker}\n{residue}\n")
             assert not _leaks(ws.receive_text(), ENV)
             assert not _leaks(ws.receive_text(), ENV)
     assert instance.environment_id is None  # the runner never parsed it: the socket did
@@ -382,19 +424,42 @@ def test_ws_bridge_log_reads_the_ids_above_its_tail(runner_config, tmp_path: Pat
     """After a restart the record may hold no id; the marker line is above the tail start."""
     log = tmp_path / "alpha.log"
     marker = f"[bridge:api] POST /v1/environments/bridge -> 200 environment_id={ENV}"
-    log.write_text(marker + "\n" + "old line\n" * 20_000, encoding="utf-8")
-    instance = RemoteControlInstance(
-        project="alpha", label="alpha", status=InstanceStatus.RUNNING, bridge_debug_log_path=log
-    )
+    _append(log, marker + "\n" + "old line\n" * 20_000)
+    instance = _bare_instance(log)
     with _client(runner_config, instance) as client:
         with client.websocket_connect("/ws/bridge-log/alpha") as ws:
-            with log.open("a", encoding="utf-8") as fh:
-                fh.write(f"xyz{ENV}\n")
+            _append(log, f"xyz{ENV}\n")
             line = ws.receive_text()
             while line == "old line":  # the tail may begin inside the old lines
                 line = ws.receive_text()
-            assert not _leaks(line, ENV)
+            assert "xyz" in line and not _leaks(line, ENV)
     assert instance.environment_id is None
+
+
+def test_ws_bridge_log_stores_one_id_of_each_kind(runner_config, tmp_path: Path) -> None:
+    """Log text that names many ids cannot grow the store: the first of each kind wins."""
+    log = tmp_path / "alpha.log"
+    _append(log, "")
+    instance = _bare_instance(log)
+    echoed = [f"tool said environment_id=env_01{i:04d}Zq9Wx7Vc5Bn3Mk1Lj" for i in range(50)]
+    with _client(runner_config, instance) as client:
+        with client.websocket_connect("/ws/bridge-log/alpha") as ws:
+            _append(log, f"environment_id={ENV}\nCreated initial session {SESSION}\n")
+            _append(log, "".join(f"{line}\n" for line in echoed))
+            for _ in range(2 + len(echoed)):
+                ws.receive_text()
+    assert redact._known_owners[instance.instance_id] == {ENV, SESSION, CSE}
+
+
+def test_stream_id_pattern_is_linear_on_crafted_lines() -> None:
+    from clauster.routes import websockets as ws_module
+
+    learned: set[str] = set()
+    for line in ("[bridge:init] " * 20_000, "Unarchive " * 25_000, "environment_id=" * 15_000):
+        start = time.perf_counter()
+        ws_module._learn_stream_ids("iid-1", line, learned)
+        assert time.perf_counter() - start < 1.0
+    assert learned == set()
 
 
 def test_log_head_of_an_unreadable_file_is_empty(tmp_path: Path) -> None:
@@ -470,6 +535,39 @@ def test_model_stores_ids_on_build_and_on_assignment() -> None:
     assert redact._known_owners[inst.instance_id] == {ENV, SESSION, CSE, BRIDGE}
 
 
+def test_model_stores_an_id_before_the_record_shows_it(monkeypatch) -> None:
+    inst = RemoteControlInstance(project="p", label="p")
+    seen: list[object] = []
+    original = redact.remember_known_values
+
+    def _spy(owner, *values):
+        seen.append(inst.environment_id)  # what a reader of the record sees at this moment
+        original(owner, *values)
+
+    monkeypatch.setattr(redact, "remember_known_values", _spy)
+    inst.environment_id = ENV
+    assert seen == [None]  # stored while the record did not show the id yet
+    assert ENV in redact._known_owners[inst.instance_id]
+
+
+def test_background_job_listing_survives_a_parallel_listing(tmp_path: Path, monkeypatch) -> None:
+    """A parallel listing that read an older directory must not drop this listing's ids."""
+    jobs = tmp_path / "jobs"
+    (jobs / "aaaa1111").mkdir(parents=True)
+    state = {"state": "working", "detail": f"door at xyz{CSE}", "bridgeSessionId": CSE}
+    (jobs / "aaaa1111" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    original = supervisor._job_from_state
+
+    def _interleaved(job_id, data, workers):
+        redact.replace_known_values("background-jobs", [])  # the other listing saw no job
+        return original(job_id, data, workers)
+
+    monkeypatch.setattr(supervisor, "_job_from_state", _interleaved)
+    [job] = supervisor.list_background_jobs(jobs, tmp_path / "roster.json")
+    assert not _leaks(job.detail, CSE)
+    assert not any(owner.startswith("background-jobs:") for owner in redact._known_owners)
+
+
 async def test_forget_drops_the_instance_ids(runner_config, monkeypatch) -> None:
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
     config, claude_json = runner_config
@@ -502,7 +600,14 @@ def test_cost_is_linear_on_hostile_text() -> None:
     """Long runs of anchor hits and of the value itself must stay cheap (no quadratic walk)."""
     redact.remember_known_values("iid-1", ENV, SESSION, BRIDGE)
     blocks = "".join(_random_part(ENV)[i : i + 4] for i in range(0, 20, 4))
-    for text in (blocks * 40_000, (ENV + " ") * 20_000, ("A" * 1000 + "\n") * 500):
+    body = _random_part(ENV)
+    split_copies = ("env_" + body[:10] + " " + body[10:] + " x ") * 70_000  # 2.2 MB
+    for text in (
+        blocks * 40_000,
+        (ENV + " ") * 20_000,
+        ("A" * 1000 + "\n") * 500,
+        split_copies,  # each copy's runs used to send `find` to the end of the text
+    ):
         start = time.perf_counter()
         spans = redact._known_spans(text)
         assert time.perf_counter() - start < 5.0

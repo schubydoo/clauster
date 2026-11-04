@@ -37,6 +37,7 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 from . import redact
@@ -206,12 +207,19 @@ def list_background_jobs(
             continue
         states.append((entry.name, data))
     # Each job's cloud-door `cse_` id opens its remote session. Store the ids of the jobs
-    # listed now, and only those, BEFORE any free text is redacted, so a job's own detail or
-    # result text cannot show its id (#1621). A job that is gone takes its id with it.
-    redact.replace_known_values(
-        "background-jobs", (_opt_str(data.get("bridgeSessionId")) for _, data in states)
-    )
-    jobs = [_job_from_state(job_id, data, workers) for job_id, data in states]
+    # listed now BEFORE any free text is redacted, so a job's own detail or result text cannot
+    # show its id (#1621). Listings run in parallel (one per polling dashboard tab), so this
+    # call holds its ids under an owner of its own while it redacts: a parallel listing that
+    # read an older directory cannot drop them. The shared owner keeps the ids of the latest
+    # listing, so a job that is gone takes its id with it.
+    ids = [_opt_str(data.get("bridgeSessionId")) for _, data in states]
+    call_owner = f"background-jobs:{uuid.uuid4()}"
+    redact.remember_known_values(call_owner, *ids)
+    try:
+        redact.replace_known_values("background-jobs", ids)
+        jobs = [_job_from_state(job_id, data, workers) for job_id, data in states]
+    finally:
+        redact.forget_known_values(call_owner)
     jobs.sort(key=lambda job: (job.updated_at, job.id), reverse=True)
     return jobs
 
