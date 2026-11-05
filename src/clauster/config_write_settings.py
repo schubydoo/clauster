@@ -441,7 +441,8 @@ def reject_scope_ignored(candidate: dict[str, Any], scope: cw.Scope) -> None:
 
     Saving such a key would show a setting that never takes effect, so the write fails
     closed, whole, with a message that names where Claude Code does read the key. A file
-    that already holds one must have it removed (or moved) before this tab saves it again.
+    that already holds one must have it removed, moved, or (for a value-level entry) set
+    to false before this tab saves it again.
     """
     paths = _ignored_paths(candidate, scope)
     if paths:

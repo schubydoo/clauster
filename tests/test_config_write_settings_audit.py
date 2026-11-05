@@ -350,6 +350,8 @@ def test_a_file_already_holding_true_saves_once_it_is_false(tmp_path: Path) -> N
         cws.write_project_settings(tmp_path, {**view, "model": "opus"}, h)
     assert "set it to false or remove it, or switch to User scope" in str(exc.value)
     cws.write_project_settings(tmp_path, {"bashEditDiffEnabled": False, "model": "opus"}, h)
+    on_disk = json.loads(cw.project_settings_path(tmp_path).read_text(encoding="utf-8"))
+    assert on_disk == {"bashEditDiffEnabled": False, "model": "opus"}
 
 
 @pytest.mark.parametrize("path", _FALSE_READ_EVERYWHERE)
