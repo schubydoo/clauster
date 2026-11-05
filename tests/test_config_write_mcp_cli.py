@@ -219,6 +219,8 @@ def test_entry_needs_direct_write_false_for_empty_env_and_headers() -> None:
             "url": "https://x/mcp",
             "oauth": {"authServerMetadataUrl": "https://u:p@a.example.com/meta"},
         },
+        # A non-permission value under a secret-shaped tool name keeps the key-name check.
+        {"type": "http", "url": "https://x/mcp", "toolPermissions": {"get_token": "sk-x"}},
     ],
 )
 def test_entry_needs_direct_write_true_for_new_secret_bearing_shapes(entry: dict) -> None:

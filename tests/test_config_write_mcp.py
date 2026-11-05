@@ -478,6 +478,25 @@ def test_tool_permissions_keyed_by_secret_shaped_tool_name_stay_editable(tmp_pat
     mcp.write_project_servers(tmp_path, servers, h)  # round-trips, no 422
 
 
+def test_tool_permissions_carve_out_never_unmasks_a_non_permission_value(tmp_path: Path) -> None:
+    # Only the three permission words are shown raw. Anything else a hand-edited file holds
+    # keeps its redacted form, and an odd (unhashable) value must not crash the read.
+    stored = {
+        "type": "http",
+        "url": "https://x/mcp",
+        "toolPermissions": {"get_token": "sk-FAKE4498", "lst": ["x"], "ok": "allow"},
+    }
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"s": stored}}), encoding="utf-8"
+    )
+    servers, _h = mcp.read_project_servers(tmp_path)
+    shown = servers["s"]["toolPermissions"]
+    assert shown["get_token"] == cw.REDACTION_SENTINEL
+    assert shown["ok"] == "allow"
+    assert shown["lst"] == ["x"]
+    assert "FAKE4498" not in json.dumps(servers)
+
+
 def test_rollback_restore_writes_a_literal_sentinel_verbatim(tmp_path: Path) -> None:
     # The edit-rollback restore runs after `claude mcp remove`, so nothing is stored under
     # the name. A literal "********" in the on-disk snapshot is data, not a mask: store it
