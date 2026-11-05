@@ -1126,6 +1126,8 @@ def test_config_mgmt_skill_visibility_project_round_trip(
     _expect_focused(browser, "cm-skill-ov-add-name")
     _save_skill_visibility(browser, "alpha")
     browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+    # Save hid itself once nothing was dirty, so focus moves to the name box, not the body.
+    _expect_focused(browser, "cm-skill-ov-add-name")
 
     on_disk = json.loads(settings.read_text(encoding="utf-8"))
     assert on_disk["skillOverrides"] == {"greeter": "name-only", "doctor": "off"}
@@ -1263,6 +1265,66 @@ def test_config_mgmt_skill_visibility_save_lands_across_editor_navigation(
     browser.expect_hidden('[data-test="cm-error"]')
     on_disk = json.loads(settings.read_text(encoding="utf-8"))
     assert on_disk["skillOverrides"] == {"greeter": "name-only"}
+
+
+def _start_held_visibility_save(browser: AgentBrowser, settings: Path) -> None:
+    """Save greeter=off with the response held, and wait until the write is on disk."""
+    browser.select('[data-test="cm-skill-ov-greeter"]', "off")
+    assert browser.eval_json(_HOLD_VISIBILITY_PUT) is True
+    _save_skill_visibility(browser, "alpha")
+    deadline = time.monotonic() + 10
+    while not (settings.exists() and "greeter" in settings.read_text(encoding="utf-8")):
+        assert time.monotonic() < deadline, "the held save never reached the server"
+        time.sleep(0.1)
+
+
+def _release_held_save(browser: AgentBrowser) -> None:
+    browser.eval_json("(() => { window.__release249(); return true; })()")
+
+
+def test_config_mgmt_skill_visibility_save_does_not_take_focus_from_delete(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A save that lands while a Delete confirm is open leaves focus in that confirm."""
+    alpha = _projects_root(config_mgmt_server) / "alpha"
+    _seed_skill(alpha, "greeter")
+    settings = alpha / ".claude" / "settings.json"
+
+    _open_skill_visibility(browser, config_mgmt_server)
+    _start_held_visibility_save(browser, settings)
+    browser.click('[data-test="cm-skill-del-greeter"]')
+    browser.expect_visible('[data-test="cm-skill-delete-confirm"]')
+    _expect_focused(browser, "cm-skill-delete-input")
+    _release_held_save(browser)
+    # The save landed: its reload made "off" the baseline.
+    browser.expect_hidden('[data-test="cm-skill-ov-changed-greeter"]', timeout_ms=_SAVE_TIMEOUT)
+    browser.expect_value('[data-test="cm-skill-ov-greeter"]', "off")
+    time.sleep(0.3)  # past the $nextTick in which a wrong focus move would happen
+    _expect_focused(browser, "cm-skill-delete-input")
+
+
+def test_config_mgmt_skill_visibility_save_dropped_after_surface_switch(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A save that lands after a switch to another tab shows nothing on that tab."""
+    alpha = _projects_root(config_mgmt_server) / "alpha"
+    _seed_skill(alpha, "greeter")
+    settings = alpha / ".claude" / "settings.json"
+
+    _open_skill_visibility(browser, config_mgmt_server)
+    _start_held_visibility_save(browser, settings)
+    browser.click('[data-test="cm-surface-claude-md"]')
+    browser.expect_visible('[data-test="cm-view-claude-md"]')
+    _release_held_save(browser)
+    deadline = time.monotonic() + 1.5
+    while time.monotonic() < deadline:  # a late "Saved." would appear within this window
+        assert not browser.is_visible('[data-test="cm-saved"]'), "a dropped save showed Saved."
+        time.sleep(0.1)
+
+    # Back on Skills, a fresh load shows the value on disk as the baseline.
+    browser.click('[data-test="cm-surface-skills"]')
+    browser.expect_value('[data-test="cm-skill-ov-greeter"]', "off")
+    browser.expect_hidden('[data-test="cm-skill-ov-changed-greeter"]')
 
 
 def test_config_mgmt_skill_save_keeps_unsaved_visibility_choices(

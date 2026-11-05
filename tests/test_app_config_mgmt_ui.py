@@ -541,7 +541,7 @@ def test_skill_editor_shows_the_conversion_note(write_config):
     assert 's.converted = "";' in new_skill
     cancel = _between(html, "configMgmtCancelSkill() {", "configMgmtSkillDirty()")
     assert 's.converted = "";' in cancel
-    reload = _between(html, "async _loadSkills(myGen, keepOvEdits) {", "_skillOvRow(")
+    reload = _between(html, "async _loadSkills(keepOvEdits) {", "_skillOvRow(")
     assert 'c.skills.converted = "";' in reload
     switch = _between(
         html,
