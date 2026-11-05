@@ -433,6 +433,53 @@ def test_config_mgmt_settings_empty_env_not_dirty(
     browser.expect_disabled('[data-test="cm-save"]')
 
 
+# Fail the User-scope settings GET in the page, either as an HTTP error or as a network
+# error, so the load fails while ~/.claude/settings.json does NOT exist. That is the case
+# TASK-463 names: a missing file takes a null hash, so the server would accept the save.
+_FAIL_USER_SETTINGS_GET = """(() => {
+  const orig = window.fetch;
+  window.fetch = (url, opts) => {
+    const u = String(url);
+    if (u.includes("/api/config-write/settings?") && u.includes("scope=user")) {
+      return %s;
+    }
+    return orig(url, opts);
+  };
+  return "stubbed";
+})()"""
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        'Promise.resolve(new Response("{}", { status: 500 }))',
+        'Promise.reject(new TypeError("Failed to fetch"))',
+    ],
+    ids=["http-error", "network-error"],
+)
+def test_config_mgmt_settings_failed_load_clears_previous_env_rows(
+    browser: AgentBrowser, config_mgmt_server: Server, failure: str
+) -> None:
+    """A failed Settings load never lets another target's env rows save (TASK-463)."""
+    _seed_alpha_settings(config_mgmt_server, {"env": {"ALPHA_VAR": "alpha-only"}})
+    user_settings = (
+        Path(config_mgmt_server.state_dir).parent / "home" / ".claude" / "settings.json"
+    )
+    assert not user_settings.exists()
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-settings"]')
+    browser.expect_value('[data-test="cm-settings-env-key"]', "ALPHA_VAR")  # alpha loaded
+    assert browser.eval_json(_FAIL_USER_SETTINGS_GET % failure) == "stubbed"
+    _switch_to_user_scope(browser)
+    browser.expect_visible('[data-test="cm-error"]')
+    browser.expect_count('[data-test="cm-settings-env-key"]', 0)  # alpha's row is gone
+    browser.fill('[data-test="cm-confirm"]', "USER SCOPE")
+    browser.expect_disabled('[data-test="cm-save"]')  # nothing to save into User scope
+    assert not user_settings.exists()
+
+
 def test_config_mgmt_hooks_tab_loads(browser: AgentBrowser, config_mgmt_server: Server) -> None:
     """Switching to the Hooks tab loads its JSON editor for the scope."""
     _open_modal(browser, config_mgmt_server)

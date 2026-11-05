@@ -8,17 +8,18 @@ fail-closed Foundation pipeline (gate -> confirm -> validate -> contain ->
 stale-hash -> atomic write). It owns no gate, no writer, and no redaction
 primitive of its own -- it *consumes* :mod:`clauster.config_write`.
 
-**The carve (#772 scope, locked 2026-06-29).** :data:`OWNED_KEYS` --
-``permissions``, ``autoMode`` (added for TASK-449.1), ``hooks``, ``enabledPlugins``,
-``disabledPlugins``, ``enabledMcpjsonServers``, ``disabledMcpjsonServers`` -- are
-excluded from this surface: each already has (or will have) its own dedicated
-config-write surface, and writing them here would race/duplicate that surface's own
-validation. A write candidate naming one of them is rejected **whole** (422), never
-silently stripped; the error names the tab that owns each key. Every *other*
+**The carve (#772 scope, locked 2026-06-29; narrowed for TASK-449.2).** :data:`OWNED_KEYS`
+-- ``permissions``, ``autoMode`` (added for TASK-449.1), ``hooks``, ``enabledPlugins`` --
+are excluded from this surface: each has a dedicated config-write surface that writes
+it, and writing them here would race/duplicate that surface's own validation. A key
+that another tab only reads (the settings-file MCP approval lists) or that nothing reads
+(``disabledPlugins``) is not carved, so this tab can show and remove it. A write
+candidate naming a carved key is rejected **whole** (422), never silently stripped;
+the error names the tab that owns each key. Every *other*
 top-level key -- ``env``, ``model``, and the wide (and still-growing) vocabulary
 of "documented misc" keys Claude Code ships (``apiKeyHelper``,
 ``cleanupPeriodDays``, ``includeCoAuthoredBy``, ``statusLine``, ``outputStyle``,
-``attribution``, ... see https://docs.anthropic.com/en/docs/claude-code/settings) -- is handled
+``attribution``, ... see https://code.claude.com/docs/en/settings-reference) -- is handled
 generically here. Unlike the permissions/hooks validators (a narrow, enumerated
 shape because they are literally code Claude executes), this surface
 deliberately does **not** maintain an exhaustive allowlist of recognized misc
@@ -28,6 +29,14 @@ resolves, spawns, or interprets any of these values itself (only the spawned
 through as opaque JSON. The one exception is ``env``, which gets its own shape
 check (must be a flat ``str -> str`` map) because it is also this surface's one
 true secret-bearing shape (see the redaction decision below).
+
+**Keys Claude Code reads only at some scopes (TASK-449.2).** The settings reference
+gives each key a scope; some are read only from user settings, only from user and local
+settings, only from managed settings, or only from ``~/.claude.json``. A write that names
+such a key (:data:`SCOPE_LIMITED_KEYS`) at a scope where Claude Code ignores it is
+refused whole (422, :func:`reject_scope_ignored`), with a message naming the scope that
+works, and the merged view leaves it out of that scope's layer. This is a scope rule,
+not a key allowlist: every other key still passes through as opaque JSON.
 
 **Redaction decision (#772, applying the #822 lesson) -- flagged for maintainer
 review.** :func:`~clauster.config_write.redact_secrets` only masks a value whose
@@ -47,12 +56,15 @@ response" as follows:
   key/value-shaped subset :func:`~clauster.config_write.redact_secrets` would
   catch. The read view shows ``{"MY_VAR": "********"}`` for every entry,
   secret-looking or not (see :func:`_redact_misc`).
+* Every credential helper (:data:`SECRET_HELPER_KEYS`: ``apiKeyHelper``,
+  ``awsAuthRefresh``, ``awsCredentialExport``, ``gcpAuthRefresh``,
+  ``otelHeadersHelper``, ``proxyAuthHelper``) is masked whole, unconditionally:
+  the command can embed the credential it prints.
 * Every *other* top-level key runs through the normal
   :func:`~clauster.config_write.redact_secrets` key/value heuristic (``model``
   is not secret-shaped and passes through in the clear; something coincidentally
-  matching the heuristic, e.g. an ``apiKeyHelper`` shell-command path, is masked
-  -- over-masking, the same deliberately-conservative direction the rest of the
-  Foundation takes).
+  matching the heuristic is masked -- over-masking, the same deliberately-conservative
+  direction the rest of the Foundation takes).
 * **Write is unaffected** -- the operator can still send a real (unmasked) value
   for any ``env`` var or other key; only a value that comes back as the literal
   sentinel is treated as keep-stored
@@ -61,7 +73,9 @@ response" as follows:
   value back requires resending it verbatim (the sentinel) to keep it -- the
   operator cannot use this surface to *reveal* what is currently stored. That is
   the deliberate trade-off: full editability, zero read-side disclosure, for the
-  one subtree that is a real secret store.
+  one subtree that is a real secret store. A mask that no longer lines up with a stored
+  value (a renamed ``env`` variable, a helper sent as a mask to a file without one) is
+  refused whole (422) rather than dropped (:func:`_reject_orphan_sentinels`).
 
 This is a **default, not a claimed-final answer** -- the design doc (#772
 scoping, 2026-06-29 §8) explicitly flagged the env-secret tension as needing a
@@ -71,26 +85,18 @@ above is too coarse in practice.
 
 **Scope-merge provenance (the novel part of #772).**
 :func:`_compute_effective_settings` (module-private on purpose) computes, for
-the union of (non-owned)
-top-level keys across the three scopes, the *effective* value and *which scope
-supplied it* -- following Claude Code's own precedence order (verified against
-https://docs.anthropic.com/en/docs/claude-code/settings, "How scopes interact",
-checked 2026-07-02): **Managed > command-line arguments > Local > Project >
-User**. Managed settings and CLI-arg overrides are out of clauster's scope (see
-the config-management design doc's scope model -- clauster manages only
+the union of (non-owned) top-level keys across the three scopes, the *effective*
+value and *which scopes supplied it* -- following Claude Code's own precedence order
+(https://code.claude.com/docs/en/settings, "Settings precedence", re-checked 2026-11-04):
+**Managed > command line (``--settings``) > Local > Project > User**. Managed settings
+and CLI-arg overrides are out of clauster's scope (clauster manages only
 User/Project/Local), so among the three scopes clauster manages, the order is
-**local > project > user**. Precedence is computed **per top-level key** (the
-docs' own "merged at the individual setting level, not the entire file"
-default): a scope that does not define a key at all falls through to the next
-scope; a scope that *does* define the key supplies the **entire** value -- this
-surface does not deep-merge, e.g. a project-scope ``env`` object is not
-key-by-key merged with a user-scope ``env`` object; the highest-precedence scope
-that defines ``env`` at all supplies it whole. The docs call out specific
-*documented* exceptions where arrays merge/concatenate across scopes instead of
-one scope winning outright (``permissions.allow``/``deny``, sandbox filesystem
-allow/deny paths, ``allowedHttpHookUrls``) -- none of those keys are in this
-surface's carve (``permissions`` is `OWNED_KEYS`-excluded entirely), so the
-simpler per-key-whole-value rule applies to everything this surface manages.
+**local > project > user**. The merge itself follows Claude Code 2.1.318's merge
+customizer and the same docs page ("Lists merge instead of overriding"): objects such
+as ``env`` merge key by key, lists from several scopes combine, and a scalar from a
+higher scope replaces a lower one (:func:`_merge_setting` lists the exceptions). Until
+TASK-449.2 this view took each top-level key whole from one scope, which no longer
+matched either source.
 
 Three read/write surfaces, one entry shape (mirroring Claude Code's own
 ``settings.json``):
@@ -101,9 +107,8 @@ Three read/write surfaces, one entry shape (mirroring Claude Code's own
 * **user** scope -> ``~/.claude/settings.json``, gated additionally on
   ``allow_user_scope``
 
-Only the non-owned top-level keys are ever written; ``permissions``/``hooks``/
-the plugin- and MCP-enable keys, and every other sibling key in the file, are
-preserved verbatim by the locked atomic replace.
+Only the non-owned top-level keys are ever written; ``permissions``/``autoMode``/
+``hooks``/``enabledPlugins`` keep their values through the locked atomic replace.
 """
 
 from __future__ import annotations
@@ -127,17 +132,182 @@ from .claude_json import locked_replace_json_file
 #: ``autoMode`` (the auto mode classifier rules) is a top-level key that the
 #: Permissions tab manages beside ``permissions``
 #: (:mod:`clauster.config_write_permissions`).
+#:
+#: Only a key that another tab WRITES is carved (TASK-449.2). ``disabledPlugins`` is not:
+#: the Plugins tab never writes it, and Claude Code 2.1.318 does not read it (the name is
+#: absent from its bundle). ``enabledMcpjsonServers``/``disabledMcpjsonServers`` are not
+#: either: the MCP tab writes approvals to ``~/.claude.json`` and shows a settings-file
+#: approval read-only, so the Settings tab is where a settings-file list is edited.
+#: ``skillOverrides`` stays here until the Skills tab has an editor for it (TASK-249).
 OWNED_KEY_TABS: dict[str, str] = {
     "permissions": "Permissions",
     "autoMode": "Permissions",
     "hooks": "Hooks",
     "enabledPlugins": "Plugins",
-    "disabledPlugins": "Plugins",
-    "enabledMcpjsonServers": "MCP",
-    "disabledMcpjsonServers": "MCP",
 }
 
 OWNED_KEYS = frozenset(OWNED_KEY_TABS)
+
+#: Top-level keys whose whole value is a credential helper: a command that prints an API
+#: key, cloud credentials or OpenTelemetry headers (settings reference, "Authentication
+#: and providers"; ``proxyAuthHelper`` is CLI-parsed in 2.1.318 but undocumented). The
+#: command text can itself carry the credential, so each value is masked whole on read,
+#: whatever its key name matches (``otelHeadersHelper`` matches no credential-shaped
+#: pattern), and a resent mask keeps the stored value.
+SECRET_HELPER_KEYS = frozenset(
+    {
+        "apiKeyHelper",
+        "awsAuthRefresh",
+        "awsCredentialExport",
+        "gcpAuthRefresh",
+        "otelHeadersHelper",
+        "proxyAuthHelper",
+    }
+)
+
+#: Where Claude Code reads a scope-limited key: kind -> (the scopes clauster writes that
+#: Claude Code reads the key from, the phrase for those sources, how to fix the write).
+_READ_FROM: dict[str, tuple[frozenset[str], str, str]] = {
+    "user": (
+        frozenset({"user"}),
+        "user settings",
+        "switch to User scope, or edit ~/.claude/settings.json on the host",
+    ),
+    "user+local": (
+        frozenset({"user", "local"}),
+        "user and local settings",
+        "switch to User or Local scope",
+    ),
+    "managed": (
+        frozenset(),
+        "managed settings",
+        "your organization deploys managed settings, which clauster does not write; remove it",
+    ),
+    "global": (
+        frozenset(),
+        "~/.claude.json (global config)",
+        "Claude Code's /config writes it there; remove it from this file",
+    ),
+}
+
+#: Keys (dotted for a nested key) that Claude Code reads only from some settings files,
+#: from the Scope column of https://code.claude.com/docs/en/settings-reference (checked
+#: 2026-11-04 against Claude Code 2.1.318). A write that names one at a scope where it is
+#: ignored is refused whole (422) with a message naming the scope that works, as the
+#: Permissions tab does for ``autoMode`` (PR 1801). ``autoMode`` itself is carved above.
+#: A value-level caveat (for example a ``mask`` entry in ``sandbox.credentials.envVars``)
+#: is not enforced here: the key is read at that scope, only some of its values are not.
+SCOPE_LIMITED_KEYS: dict[str, str] = {
+    **dict.fromkeys(
+        (
+            "appendPlugins",
+            "askUserQuestionTimeout",
+            "autoContinueAtUsageLimit",
+            "axScreenReader",
+            "bashEditDiffEnabled",
+            "desktopSessionCleanupPeriodDays",
+            "dialogExpiry",
+            "feedbackDrafts",
+            "footerLinksRegexes",
+            "forceLoginGatewayUrl",
+            "modelPicker",
+            "pluginConfigs",
+            "prependPlugins",
+            "processWrapper",
+            "sandbox.allowAppleEvents",
+            "sandbox.allowNestedUserNamespaces",
+            "sandbox.credentials.allowPlaintextInject",
+            "sandbox.credentials.awsPairs",
+            "sandbox.credentials.sigv4",
+            "sandbox.filesystem.disabled",
+            "sandbox.network.strictAllowlist",
+            "sandbox.network.tlsTerminate",
+            "sandbox.ripgrep",
+            "skipAutoPermissionPrompt",
+            "spellcheck",
+            "sshConfigs",
+            "sshHostCommands",
+            "vimInsertModeRemaps",
+            "worktree.location",
+        ),
+        "user",
+    ),
+    **dict.fromkeys(
+        (
+            "skipDangerousModePermissionPrompt",
+            "syncClaudeAiPlugins",
+            "syncClaudeAiSkills",
+            "useAutoModeDuringPlan",
+        ),
+        "user+local",
+    ),
+    **dict.fromkeys(
+        (
+            "allowAllClaudeAiMcps",
+            "allowClaudeInChromeWithManagedMcp",
+            "allowManagedHooksOnly",
+            "allowManagedMcpServersOnly",
+            "allowManagedPermissionRulesOnly",
+            "allowedChannelPlugins",
+            "allowedProviders",
+            "availableModelsMatch",
+            "blockedMarketplaces",
+            "browserExternalPageTools",
+            "channelsEnabled",
+            "claudeMd",
+            "deniedModels",
+            "disableBrowserExternalNavigation",
+            "disableCommandPluginSources",
+            "disableDesktopLocalSessions",
+            "disableMobileSimulatorTools",
+            "disableSideloadFlags",
+            "forceRemoteSettingsRefresh",
+            "gatewayInternalNetworks",
+            "managedMcpServers",
+            "managedSourcesBehavior",
+            "modelPricing",
+            "parentSettingsBehavior",
+            "pluginSuggestionMarketplaces",
+            "pluginTrustMessage",
+            "policyHelper",
+            "requiredMaximumVersion",
+            "requiredMinimumVersion",
+            "sandbox.bwrapPath",
+            "sandbox.filesystem.allowManagedReadPathsOnly",
+            "sandbox.network.allowManagedDomainsOnly",
+            "sandbox.socatPath",
+            "sshHostAllowlist",
+            "strictKnownMarketplaces",
+            "strictPluginOnlyCustomization",
+            "wslInheritsWindowsSettings",
+        ),
+        "managed",
+    ),
+    **dict.fromkeys(
+        (
+            "autoConnectIde",
+            "autoInstallIdeExtension",
+            "claudeInChromeDefaultEnabled",
+            "copyFullResponse",
+            "copyOnSelect",
+            "defaultToAgentsView",
+            "diffTool",
+            "externalEditorContext",
+            "leftArrowOpensAgents",
+            "permissionExplainerEnabled",
+            "prStatusFooterEnabled",
+            "teammateDefaultModel",
+        ),
+        "global",
+    ),
+}
+
+#: The file each scope writes, for a refusal message.
+_SCOPE_LABEL: dict[str, str] = {
+    "user": "user settings (~/.claude/settings.json)",
+    "project": "project settings (.claude/settings.json)",
+    "local": "local settings (.claude/settings.local.json)",
+}
 
 #: The one key this surface treats as an unconditional secret container: every
 #: value under it is masked on read regardless of the key/value heuristic (see
@@ -193,6 +363,56 @@ def validate_misc_settings(candidate: Any) -> None:
         _validate_env(candidate[ENV_KEY])
 
 
+def _has_path(data: Any, dotted: str) -> bool:
+    """Whether ``data`` holds the dotted key path ``dotted`` (each step a dict key)."""
+    for part in dotted.split("."):
+        if not isinstance(data, dict) or part not in data:
+            return False
+        data = data[part]
+    return True
+
+
+def _ignored_paths(data: dict[str, Any], scope: cw.Scope) -> list[str]:
+    """Return the :data:`SCOPE_LIMITED_KEYS` paths in ``data`` ignored at ``scope``."""
+    return sorted(
+        path
+        for path, kind in SCOPE_LIMITED_KEYS.items()
+        if scope not in _READ_FROM[kind][0] and _has_path(data, path)
+    )
+
+
+def reject_scope_ignored(candidate: dict[str, Any], scope: cw.Scope) -> None:
+    """Refuse (422) a write naming a key Claude Code does not read at ``scope``.
+
+    Saving such a key would show a setting that never takes effect, so the write fails
+    closed, whole, with a message that names where Claude Code does read the key. A file
+    that already holds one must have it removed (or moved) before this tab saves it again.
+    """
+    paths = _ignored_paths(candidate, scope)
+    if paths:
+        raise cw.InvalidCandidateError(
+            " ".join(
+                f"Claude Code reads {path} only from {_READ_FROM[SCOPE_LIMITED_KEYS[path]][1]} "
+                f"and ignores it in {_SCOPE_LABEL[scope]}; "
+                f"{_READ_FROM[SCOPE_LIMITED_KEYS[path]][2]}."
+                for path in paths
+            )
+        )
+
+
+def _without_paths(data: dict[str, Any], paths: list[str]) -> dict[str, Any]:
+    """Return a copy of ``data`` without each dotted path (copying only the dicts on a path)."""
+    out = dict(data)
+    for dotted in paths:
+        *parents, leaf = dotted.split(".")
+        node = out
+        for part in parents:
+            node[part] = dict(node[part])
+            node = node[part]
+        del node[leaf]
+    return out
+
+
 def _misc_view(data: dict[str, Any]) -> dict[str, Any]:
     """Return the subset of ``data`` this surface manages (non-owned keys)."""
     return {k: v for k, v in data.items() if k not in OWNED_KEYS}
@@ -203,7 +423,8 @@ def _redact_misc(misc: dict[str, Any]) -> dict[str, Any]:
 
     Runs the normal structural :func:`~clauster.config_write.redact_secrets`
     heuristic over every key, then unconditionally masks every ``env`` value on
-    top -- the #822-lesson override described in the module docstring -- and
+    top -- the #822-lesson override described in the module docstring -- masks each
+    :data:`SECRET_HELPER_KEYS` value whole, and
     redacts ``extraKnownMarketplaces`` (and its ``additionalMarketplaces`` alias)
     with :func:`clauster.config_write_plugins.redact_named_map`.
     """
@@ -211,6 +432,10 @@ def _redact_misc(misc: dict[str, Any]) -> dict[str, Any]:
     env = misc.get(ENV_KEY)
     if isinstance(env, dict):
         redacted[ENV_KEY] = dict.fromkeys(env, cw.REDACTION_SENTINEL)
+    # A credential helper's command can hold the credential itself, so it is masked whole,
+    # whatever its value's shape. A resent sentinel keeps the stored value.
+    for key in SECRET_HELPER_KEYS & misc.keys():
+        redacted[key] = cw.REDACTION_SENTINEL
     # A marketplace declaration's `headers`/`headersHelper` hold credentials under plain
     # names (`Cookie`), so it gets the Plugins surface's masking, not only the key-name
     # heuristic. A resent sentinel keeps the stored value through `merge_redacted`.
@@ -292,11 +517,15 @@ def _orphan_sentinel_path(incoming: Any, stored: Any, path: str) -> str | None:
     return None
 
 
-def _reject_orphan_marketplace_sentinels(incoming: dict[str, Any], stored: dict[str, Any]) -> None:
-    """Refuse (422) a marketplace write whose masked values no longer match a stored value."""
-    for key in (cwp.EXTRA_MARKETPLACES_KEY, cwp.EXTRA_MARKETPLACES_ALIAS_KEY):
-        if key not in incoming:
-            continue
+def _reject_orphan_sentinels(incoming: dict[str, Any], stored: dict[str, Any]) -> None:
+    """Refuse (422) a write whose masked values no longer match a stored value.
+
+    Covers every key of the partition, not only the marketplace maps (TASK-449.2): a
+    renamed ``env`` variable or a credential helper sent as a mask to a file that has none
+    would otherwise be dropped by :func:`~clauster.config_write.merge_redacted` and the
+    save would report success.
+    """
+    for key in sorted(incoming):
         if incoming[key] == cw.REDACTION_SENTINEL and key not in stored:
             where: str | None = key
         else:
@@ -307,7 +536,9 @@ def _reject_orphan_marketplace_sentinels(incoming: dict[str, Any], stored: dict[
                 "entry or key was renamed, moved or reordered, or a list changed length); "
                 "enter the real value again"
             )
-        _reject_masks_sent_to_a_new_url(incoming[key], stored.get(key), key)
+    for key in (cwp.EXTRA_MARKETPLACES_KEY, cwp.EXTRA_MARKETPLACES_ALIAS_KEY):
+        if key in incoming:
+            _reject_masks_sent_to_a_new_url(incoming[key], stored.get(key), key)
 
 
 def _urls(value: Any, path: tuple[Any, ...] = ()) -> dict[tuple[Any, ...], Any]:
@@ -401,7 +632,7 @@ def _locked_write_misc(path: Path, incoming: dict[str, Any], expected_hash: str 
             raise cw.StaleConfigWriteError("config file changed on disk since it was loaded")
         current = cw.load_settings_json_obj(current_bytes)
         stored_misc = _misc_view(current)
-        _reject_orphan_marketplace_sentinels(incoming, stored_misc)
+        _reject_orphan_sentinels(incoming, stored_misc)
         merged_misc = cw.merge_redacted(incoming, stored_misc)
         # Replace the whole non-owned partition; every owned key keeps its value
         # (the file is re-rendered, so byte layout and key order are not preserved).
@@ -432,11 +663,13 @@ def write_project_settings(
     project that has no ``.claude`` dir yet does not fail the atomic writer's
     ``mkstemp`` in a missing directory), then runs the fail-closed Foundation
     pipeline. The candidate is validated *before* the directory is created, so
-    a bad shape (422) leaves the filesystem untouched. A masked marketplace value that no
+    a bad shape (422) leaves the filesystem untouched, as does a key Claude Code ignores
+    at project scope (:func:`reject_scope_ignored`). A masked value that no
     longer matches its stored value is refused inside the lock instead (also 422); the
     settings file is unchanged, though a new ``.claude`` directory may be left behind.
     """
     cw.validate_candidate(incoming, validate_misc_settings)
+    reject_scope_ignored(incoming, "project")
     path = cw.project_settings_path(project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     _locked_write_misc(path, incoming, expected_hash)
@@ -461,6 +694,7 @@ def write_user_settings(
     created, so a bad shape (422) writes nothing.
     """
     cw.validate_candidate(incoming, validate_misc_settings)
+    reject_scope_ignored(incoming, "user")
     settings_json.parent.mkdir(parents=True, exist_ok=True)
     _locked_write_misc(settings_json, incoming, expected_hash)
 
@@ -487,6 +721,7 @@ def write_project_local_settings(
     idempotent, so an already-gitignored file is a no-op there.
     """
     cw.validate_candidate(incoming, validate_misc_settings)
+    reject_scope_ignored(incoming, "local")
     path = cw.project_local_settings_path(project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     # Ignore BEFORE writing, never after: the write creates a `.bak` holding the PREVIOUS
@@ -528,11 +763,13 @@ def _compute_effective_settings(
 
     Precedence follows Claude Code's own scope order among the three scopes
     clauster manages -- **local > project > user** (see module docstring for
-    the full chain and the docs citation) -- computed **per top-level key**:
-    the highest-precedence scope that defines a key supplies the *entire*
-    value for that key (no deep merge inside an object-valued key like
-    ``env``). Returns ``{key: {"value": ..., "source": "local"|"project"|"user"}}``
-    for the union of keys across every scope that was read.
+    the full chain and the docs citation) -- and the merge is Claude Code's own
+    (:func:`_merge_setting`): objects merge key by key, lists combine, and a scalar
+    from a higher scope replaces a lower one. A key Claude Code ignores at a scope
+    (:data:`SCOPE_LIMITED_KEYS`) is left out of that scope's layer. Returns
+    ``{key: {"value": ..., "source": <highest scope>, "sources": [<scopes>]}}`` for the
+    union of keys across every scope that was read; ``sources`` lists, highest first,
+    each scope whose value is part of the merged result.
     """
     by_scope: dict[cw.Scope, dict[str, Any] | None] = {
         "local": local_misc,
@@ -543,16 +780,59 @@ def _compute_effective_settings(
     for scope in _SCOPE_PRECEDENCE:
         misc = by_scope[scope]
         if misc is not None:
-            layers.append((scope, misc))
+            layers.append((scope, _without_paths(misc, _ignored_paths(misc, scope))))
 
-    # ``layers`` is in precedence order (local, project, user). Walk it
-    # reversed so the highest-precedence scope is applied *last* and wins on
-    # a shared key -- a plain last-write-wins merge, with no inner loop that
-    # would need a break (and no "loop exhausts without finding the key"
-    # branch for codecov to flag: every scope's own keys are always found in
-    # that scope's own dict).
+    # ``layers`` is in precedence order (local, project, user). Walk it reversed so
+    # each higher scope merges OVER the lower ones, as Claude Code applies them.
     effective: dict[str, dict[str, Any]] = {}
     for scope, misc in reversed(layers):
         for key, value in misc.items():
-            effective[key] = {"value": value, "source": scope}
+            below = effective.get(key)
+            if below is None:
+                effective[key] = {"value": value, "source": scope, "sources": [scope]}
+                continue
+            merged = _merge_setting(below["value"], value, key)
+            sources = [scope] if merged == value else [scope, *below["sources"]]
+            effective[key] = {"value": merged, "source": scope, "sources": sources}
     return {key: effective[key] for key in sorted(effective)}
+
+
+#: Keys whose object value Claude Code merges one entry deep: a higher scope's entry
+#: replaces the lower scope's entry of the same name whole.
+_SHALLOW_MERGE_KEYS = frozenset(
+    {cwp.EXTRA_MARKETPLACES_KEY, cwp.EXTRA_MARKETPLACES_ALIAS_KEY, "managedMcpServers"}
+)
+
+
+def _merge_setting(lower: Any, higher: Any, key: Any) -> Any:
+    """Merge one settings value from a higher scope over a lower one, as Claude Code does.
+
+    Mirrors the merge customizer in Claude Code 2.1.318 (and the settings docs, "Lists
+    merge instead of overriding"): two lists combine, lower entries first, with repeated
+    plain values kept once; ``fallbackModel`` is an ordered chain, so the higher list
+    replaces it; ``modelPicker`` is taken whole from the higher scope; the marketplace
+    maps and ``managedMcpServers`` merge one entry deep; two objects merge key by key;
+    anything else is replaced by the higher value. The rule applies at every depth, as
+    the customizer receives each nested key. A masked value is never collapsed into
+    another, because two masks can stand for different stored values.
+    """
+    if key == "modelPicker":
+        return higher
+    if isinstance(lower, list) and isinstance(higher, list):
+        if key == "fallbackModel":
+            return higher
+        out: list[Any] = []
+        for item in [*lower, *higher]:
+            plain = not isinstance(item, (dict, list)) and item != cw.REDACTION_SENTINEL
+            # Typed equality: Python's ``1 == True`` must not merge two distinct entries.
+            if not (plain and any(type(o) is type(item) and o == item for o in out)):
+                out.append(item)
+        return out
+    if isinstance(lower, dict) and isinstance(higher, dict):
+        if key in _SHALLOW_MERGE_KEYS:
+            return {**lower, **higher}
+        merged = dict(lower)
+        for k, v in higher.items():
+            merged[k] = _merge_setting(lower[k], v, k) if k in lower else v
+        return merged
+    return higher
