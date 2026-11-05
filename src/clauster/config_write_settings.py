@@ -218,7 +218,54 @@ def _redact_misc(misc: dict[str, Any]) -> dict[str, Any]:
         declared = misc.get(key)
         if isinstance(declared, dict):
             redacted[key] = cwp.redact_named_map(declared)
+        elif declared is not None:
+            # Malformed (not the documented map), but it can still carry credentials.
+            redacted[key] = cwp.redact_plugin_display(declared)
     return redacted
+
+
+_MISSING = object()
+
+
+def _orphan_sentinel_path(incoming: Any, stored: Any, path: str) -> str | None:
+    """Return the path of the first sentinel in ``incoming`` with no stored value behind it.
+
+    :func:`~clauster.config_write.merge_redacted` silently DROPS such a sentinel (there is
+    nothing to keep), so renaming a masked marketplace entry or header on the Settings
+    tab would save a declaration with its credential gone and report success. Paths are
+    matched by dict key and list index, exactly as the merge restores them.
+    """
+    if isinstance(incoming, dict):
+        items: Any = incoming.items()
+    elif isinstance(incoming, list):
+        items = enumerate(incoming)
+    else:
+        return None
+    for k, v in items:
+        if isinstance(incoming, dict):
+            here = stored.get(k, _MISSING) if isinstance(stored, dict) else _MISSING
+        else:
+            here = stored[k] if isinstance(stored, list) and k < len(stored) else _MISSING
+        where = f"{path}.{k}"
+        if v == cw.REDACTION_SENTINEL and here is _MISSING:
+            return where
+        found = _orphan_sentinel_path(v, None if here is _MISSING else here, where)
+        if found:
+            return found
+    return None
+
+
+def _reject_orphan_marketplace_sentinels(incoming: dict[str, Any], stored: dict[str, Any]) -> None:
+    """Refuse (422) a marketplace write whose masked values no longer match a stored value."""
+    for key in (cwp.EXTRA_MARKETPLACES_KEY, cwp.EXTRA_MARKETPLACES_ALIAS_KEY):
+        if key not in incoming:
+            continue
+        where = _orphan_sentinel_path(incoming[key], stored.get(key), key)
+        if where:
+            raise cw.InvalidCandidateError(
+                f"{where} is a masked value with no stored value behind it (the entry or key "
+                "was renamed or moved); enter the real value again"
+            )
 
 
 def _read_misc(path: Path) -> tuple[dict[str, Any], str]:
@@ -266,6 +313,7 @@ def _locked_write_misc(path: Path, incoming: dict[str, Any], expected_hash: str 
             raise cw.StaleConfigWriteError("config file changed on disk since it was loaded")
         current = cw.load_settings_json_obj(current_bytes)
         stored_misc = _misc_view(current)
+        _reject_orphan_marketplace_sentinels(incoming, stored_misc)
         merged_misc = cw.merge_redacted(incoming, stored_misc)
         # Replace the whole non-owned partition; every owned key keeps its value
         # (the file is re-rendered, so byte layout and key order are not preserved).

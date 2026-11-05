@@ -952,3 +952,98 @@ def test_route_effective_path_escape_is_400(write_config, tmp_path) -> None:
 def test_route_effective_missing_project_is_422(write_config, tmp_path) -> None:
     with _client(write_config, tmp_path, _ON) as c:
         assert c.get(_EFFECTIVE_URL).status_code == 422
+
+
+# --- marketplace declarations on the Settings tab (TASK-449.7) ----------------------
+
+_HOSTED = {
+    "hosted": {
+        "source": {
+            "source": "url",
+            "url": "https://plugins.example.com/m.json",
+            "headers": {"Cookie": "session=C123"},
+            "headersHelper": "/bin/h --t SEK",
+        }
+    }
+}
+
+
+def _store(tmp_path: Path, data: dict) -> str:
+    _s, h0 = cws.read_project_settings(tmp_path)
+    cws.write_project_settings(tmp_path, data, h0)
+    return cws.read_project_settings(tmp_path)[1]
+
+
+def _on_disk(tmp_path: Path) -> dict:
+    return json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8"))
+
+
+def test_marketplace_inline_plugin_args_mask_whole_and_round_trip(tmp_path: Path) -> None:
+    # `args` shows as ONE sentinel, so a resend keeps the stored list whole (a
+    # per-element mask would restore by position and shift values on an edit).
+    stored = {
+        "inline": {
+            "source": {
+                "source": "settings",
+                "name": "inline",
+                "plugins": [{"name": "p", "mcpServers": {"s": {"args": ["--v", "--key", "S1"]}}}],
+            }
+        }
+    }
+    h = _store(tmp_path, {"extraKnownMarketplaces": stored})
+    view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
+    assert view["inline"]["source"]["plugins"][0]["mcpServers"]["s"]["args"] == (
+        cw.REDACTION_SENTINEL
+    )
+    cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": view}, h)
+    assert _on_disk(tmp_path)["extraKnownMarketplaces"] == stored
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        pytest.param(lambda v: {"hosted2": v["hosted"]}, id="entry-renamed"),
+        pytest.param(
+            lambda v: {
+                "hosted": {
+                    "source": {
+                        **v["hosted"]["source"],
+                        "headers": {"cookie": cw.REDACTION_SENTINEL},
+                    }
+                }
+            },
+            id="header-key-renamed",
+        ),
+    ],
+)
+def test_marketplace_write_with_orphaned_mask_is_rejected_whole(tmp_path: Path, edit) -> None:
+    # merge_redacted would silently DROP a sentinel with nothing stored behind it, saving
+    # a marketplace with its credential gone. Fail closed: refuse the write, change nothing.
+    h = _store(tmp_path, {"extraKnownMarketplaces": _HOSTED})
+    view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
+    with pytest.raises(cw.InvalidCandidateError, match="masked value"):
+        cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": edit(view)}, h)
+    assert _on_disk(tmp_path)["extraKnownMarketplaces"] == _HOSTED
+
+
+def test_marketplace_moved_to_alias_with_masks_is_rejected(tmp_path: Path) -> None:
+    h = _store(tmp_path, {"extraKnownMarketplaces": _HOSTED})
+    view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
+    with pytest.raises(cw.InvalidCandidateError):
+        cws.write_project_settings(tmp_path, {"additionalMarketplaces": view}, h)
+
+
+def test_marketplace_secret_shaped_name_keeps_its_entry_editable(tmp_path: Path) -> None:
+    stored = {"auth-tools": {"source": {"source": "github", "repo": "acme/auth-tools"}}}
+    _store(tmp_path, {"extraKnownMarketplaces": stored})
+    assert cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"] == stored
+
+
+def test_malformed_marketplace_declaration_is_still_masked(tmp_path: Path) -> None:
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(
+        json.dumps({"extraKnownMarketplaces": [_HOSTED["hosted"]]}), encoding="utf-8"
+    )
+    view = cws.read_project_settings(tmp_path)[0]
+    assert "C123" not in json.dumps(view) and "SEK" not in json.dumps(view)

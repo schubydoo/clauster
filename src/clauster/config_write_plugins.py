@@ -171,14 +171,18 @@ _CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
 #: entry's) and a plugin MCP server's ``env``/``headers`` routinely hold a literal
 #: credential under a benign name (``Cookie``, ``X-Registry``) that the key-name heuristic
 #: in :func:`clauster.config_write.redact_secrets` cannot see — the same reason the
-#: settings surface masks every ``env`` value. A plugin MCP server's ``args`` is masked
-#: too: ``--api-key VALUE`` puts the secret in a list element with no key at all. This
-#: read is display-only, so over-masking there costs nothing.
-_MASK_ALL_LEAVES_KEYS = frozenset({"env", "headers", "args"})
+#: settings surface masks every ``env`` value. These are maps, so a resent sentinel is
+#: restored by NAME on the Settings tab's write path (``merge_redacted``).
+_MASK_ALL_LEAVES_KEYS = frozenset({"env", "headers"})
 
-#: String fields masked whole: a ``headersHelper`` is a command line, and a command can
-#: carry a token in its own arguments.
-_MASK_WHOLE_STRING_KEYS = frozenset({"headersHelper"})
+#: Fields replaced by ONE sentinel whatever their shape. A ``headersHelper`` is a command
+#: line, and a command can carry a token in its own arguments. A plugin MCP server's
+#: ``args`` can hold ``--api-key VALUE``, a secret in a list element with no key at all.
+#: One sentinel for the whole value, not one per element, because ``merge_redacted``
+#: restores a list by POSITION: per-element sentinels let a deleted or inserted element
+#: on the Settings tab shift a stored secret to the wrong place. A single sentinel keeps
+#: the stored value whole, and any edit has to retype it in full.
+_MASK_WHOLE_KEYS = frozenset({"headersHelper", "args"})
 
 
 def _mask_leaves(value: Any) -> Any:
@@ -197,7 +201,7 @@ def _mask_credential_fields(data: Any) -> Any:
         for k, v in data.items():
             if k in _MASK_ALL_LEAVES_KEYS:
                 out[k] = _mask_leaves(v)
-            elif k in _MASK_WHOLE_STRING_KEYS and isinstance(v, str) and v:
+            elif k in _MASK_WHOLE_KEYS and v not in (None, "", [], {}):
                 out[k] = cw.REDACTION_SENTINEL
             else:
                 out[k] = _mask_credential_fields(v)
@@ -211,7 +215,7 @@ def redact_plugin_display(data: Any) -> Any:
     """Return a display copy of a plugin/marketplace read with its secrets masked.
 
     Two passes. First the documented credential fields are masked unconditionally
-    (:data:`_MASK_ALL_LEAVES_KEYS`, :data:`_MASK_WHOLE_STRING_KEYS`). Then the shared
+    (:data:`_MASK_ALL_LEAVES_KEYS`, :data:`_MASK_WHOLE_KEYS`). Then the shared
     structural heuristic (:func:`clauster.config_write.redact_secrets`) masks the rest:
     a secret-shaped key, a ``${...}`` interpolation, or a credential-bearing URL such as
     a marketplace ``url`` of ``https://user:token@host/repo.git``. Over-masking only

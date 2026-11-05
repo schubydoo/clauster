@@ -1701,7 +1701,7 @@ def test_cli_list_plugins_masks_plugin_mcp_server_credentials(tmp_path: Path) ->
     server = got["mcpServers"]["deploy"]
     assert server["env"] == {"REGION": cw.REDACTION_SENTINEL, "DEPLOY_KEY": cw.REDACTION_SENTINEL}
     assert server["headers"] == {"X-Registry": cw.REDACTION_SENTINEL}
-    assert server["args"] == [cw.REDACTION_SENTINEL] * 3
+    assert server["args"] == cw.REDACTION_SENTINEL
     assert server["command"] == "node"
     assert got["mcpServers"]["github-token"] == {
         "type": "http",
@@ -1716,7 +1716,7 @@ def test_cli_list_plugins_masks_plugin_mcp_server_credentials(tmp_path: Path) ->
     ("fn_name", "stderr"),
     [
         ("cli_list_plugins", "Error: settings file not found"),
-        ("cli_list_marketplaces", "Marketplace 'x' is not declared in user settings"),
+        ("cli_list_marketplaces", "Error: known_marketplaces.json not found"),
     ],
 )
 def test_failing_reads_are_never_404(tmp_path: Path, fn_name: str, stderr: str) -> None:
@@ -1863,6 +1863,14 @@ def test_redact_plugin_display_masks_malformed_credential_fields_too() -> None:
         "env": cw.REDACTION_SENTINEL,
         "headersHelper": "",
     }
+
+
+@pytest.mark.parametrize("value", [["/bin/h", "--t", "SEK"], {"cmd": "SEK"}, "/bin/h --t SEK"])
+def test_headers_helper_and_args_mask_whole_whatever_their_shape(value) -> None:
+    # One sentinel for the whole value: the Settings tab restores a list by position, so
+    # per-element sentinels would let a deleted element shift a stored secret.
+    got = plugins.redact_plugin_display({"headersHelper": value, "args": value})
+    assert got == {"headersHelper": cw.REDACTION_SENTINEL, "args": cw.REDACTION_SENTINEL}
 
 
 def test_read_marketplaces_secret_shaped_name_does_not_mask_the_entry(tmp_path: Path) -> None:

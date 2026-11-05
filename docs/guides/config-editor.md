@@ -523,7 +523,10 @@ checked against Claude Code 2.1.318.
   not put a credential there.
 - **The Settings tab masks `extraKnownMarketplaces` in the same way.** If you
   save the Raw JSON with a masked value unchanged, Clauster keeps the stored
-  value.
+  value. An `args` list shows as one `********`, so you keep it whole or type
+  the full list again. If you rename or move an entry or a header that holds a
+  masked value, Clauster refuses the save (`422`), because the stored value
+  cannot follow the new name. Type the real value again under the new name.
 - **The `additionalMarketplaces` spelling is read too.** Claude Code 2.1.232 and
   later accept it as another name for `extraKnownMarketplaces`. When a file sets
   both, the canonical key wins, as it does in Claude Code.
