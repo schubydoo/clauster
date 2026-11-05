@@ -343,9 +343,11 @@ file is one row, and the editor follows the JSON type of the value:
 - A Boolean is a switch.
 - A number is a number box. A save sends a number, and an empty box blocks the
   save.
-- A string is a list of values when the settings reference gives the key a fixed
-  set of values, for example `tui` or `theme`. Clauster sends that set with the
-  file. Any other string is a text box, and a value outside the set is text too.
+- A string is a list of values when the settings reference gives the key a set
+  of preset values, for example `tui` or `theme`. Clauster sends that set when the
+  tab loads. Any other string is a text box, and a value outside the set is text
+  too. To set a value that the list does not hold, such as a custom theme or a
+  `timeFormat` pattern, use Raw JSON.
 - An object, a list or `null` is a read-only row. Use **Edit in Raw JSON** to
   change it. A save writes it back unchanged.
 - `env` has its own table of variables below the rows.
@@ -353,13 +355,14 @@ file is one row, and the editor follows the JSON type of the value:
 Each value saves with the JSON type that it had when it loaded, unless you change
 it. For example, the string `"1"` stays a string. To add a key, type its name in
 **Add a key**, or pick one of the suggestions. The suggestions are the documented
-keys that Claude Code reads at the current scope. A documented key gets its
-editor, and a new switch starts off. Any other name gets a text box, and Clauster
-sends it as you typed it. If you type a key that another tab edits, the tab names
-that tab and links to it. The browser does not decide whether Claude Code reads
-a key at a scope. The server checks every key when you save, and the error gives
-its reason. Raw JSON shows the whole file as JSON. A switch between the two modes
-keeps every value. While a number box is empty or two `env` variables have the
+keys of one value (a switch, a number, a choice or text) that Claude Code reads at
+the current scope. A documented key gets its editor, and a new switch starts off.
+A documented key that holds an object or a list is added in Raw JSON, and the tab
+says so. Any other name gets a text box, and Clauster sends it as you typed it. If
+you type a key that another tab edits, the tab names that tab and links to it.
+The browser does not decide whether Claude Code reads a key at a scope. The server
+checks every key when you save, and the error gives its reason. Raw JSON shows
+the same keys as JSON. A switch between the two modes keeps every value. While a number box is empty or two `env` variables have the
 same name, the tab stays in Rows mode, and a warning names the problem.
 
 No other tab writes these keys in a settings file, so the Settings tab shows them:
@@ -403,9 +406,10 @@ example:
   Code `/config` command writes.
 
 If a file already holds such a key, remove the key (its **Remove** button in
-Rows mode, or Raw JSON) before you save the file again at that scope. The auto mode key `disableAutoMode` and the hook
-keys `disableAllHooks`, `allowedHttpHookUrls` and `httpHookAllowedEnvVars` work
-in every settings file, so the tab accepts them at every scope.
+Rows mode, or Raw JSON) before you save the file again at that scope. The auto
+mode key `disableAutoMode` and the hook keys `disableAllHooks`,
+`allowedHttpHookUrls` and `httpHookAllowedEnvVars` work in every settings file,
+so the tab accepts them at every scope.
 
 The settings reference gives `bashEditDiffEnabled` and
 `sandbox.allowNestedUserNamespaces` User scope, but Claude Code also reads

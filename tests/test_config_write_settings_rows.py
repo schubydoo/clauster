@@ -45,7 +45,7 @@ def test_catalog_entries_are_well_formed() -> None:
             assert all(isinstance(v, str) and v for v in kind), key
             assert len(set(kind)) == len(kind), key
         else:
-            assert kind in {"boolean", "number", "string"}, key
+            assert kind in {"boolean", "number", "string", "object", "list"}, key
 
 
 def test_catalog_holds_no_key_that_no_clauster_scope_reads() -> None:
@@ -68,6 +68,10 @@ def test_catalog_payload_shape() -> None:
     assert catalog["cleanupPeriodDays"] == {"type": "number", "here": True}
     assert catalog["model"] == {"type": "string", "here": True}
     assert catalog["tui"] == {"type": "enum", "values": ["default", "fullscreen"], "here": True}
+    # An object or list key is in the catalog too, so the tab can send it to Raw JSON
+    # instead of saving a string where Claude Code reads an object.
+    assert catalog["statusLine"] == {"type": "object", "here": True}
+    assert catalog["companyAnnouncements"] == {"type": "list", "here": True}
 
 
 @pytest.mark.parametrize(

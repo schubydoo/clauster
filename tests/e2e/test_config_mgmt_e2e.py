@@ -592,8 +592,15 @@ def test_config_mgmt_settings_add_and_remove_key_rows(
     browser.fill('[data-test="cm-confirm"]', "alpha")
     browser.expect_visible('[data-test="cm-settings-number-error"]')
     browser.expect_disabled('[data-test="cm-save"]')
+    # Raw JSON would lose that row, so the switch is refused and says why at the top.
+    browser.click('[data-test="cm-settings-mode-raw"]')
+    browser.expect_text(
+        '[data-test="cm-settings-raw-blocked"]', "Enter a number for cleanupPeriodDays"
+    )
+    browser.expect_visible('[data-test="cm-settings-rows"]')
     browser.fill(_row("cleanupPeriodDays", "cm-settings-number"), "7")
     browser.expect_hidden('[data-test="cm-settings-number-error"]')
+    browser.expect_hidden('[data-test="cm-settings-raw-blocked"]')
     _save_alpha(browser)
     stored = json.loads(_alpha_settings_path(config_mgmt_server).read_text(encoding="utf-8"))
     assert stored == {
@@ -602,6 +609,12 @@ def test_config_mgmt_settings_add_and_remove_key_rows(
         "theme": "dark",
         "cleanupPeriodDays": 7,
     }
+
+    # A documented object key is not made a text row; the message sends it to Raw JSON.
+    _add_settings_key(browser, "statusLine")
+    browser.expect_text('[data-test="cm-settings-add-error"]', "statusLine holds an object")
+    browser.expect_visible('[data-test="cm-settings-add-raw"]')
+    browser.expect_count(_row("statusLine"), 0)
 
     # A key that another tab edits is not added; the message links to that tab.
     _add_settings_key(browser, "hooks")
@@ -639,6 +652,7 @@ def test_config_mgmt_settings_rows_raw_switch_keeps_every_value(
     """Rows <-> Raw never drops a value, an unedited switch is not dirty (TASK-271)."""
     seeded = {
         "constructor": "x",  # a key named like an Object member is an ordinary key
+        "__proto__": "p",
         "verbose": True,
         "feedbackSurveyRate": 0.25,
         "attribution": False,
@@ -674,6 +688,24 @@ def test_config_mgmt_settings_rows_raw_switch_keeps_every_value(
     _save_alpha(browser)
     stored = json.loads(_alpha_settings_path(config_mgmt_server).read_text(encoding="utf-8"))
     assert stored == {**seeded, "verbose": False, "feedbackSurveyRate": 0.5}
+
+
+def test_config_mgmt_settings_env_of_another_shape_is_a_read_only_row(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """An env that is not text-to-text is a read-only row, and the server refuses its save."""
+    # The server masks each env value, so only an env that is not an object (masked whole)
+    # reaches the page in another shape.
+    _seed_alpha_settings(config_mgmt_server, {"env": ["A=1"], "verbose": True})
+    before = _alpha_settings_path(config_mgmt_server).read_bytes()
+    _open_settings_rows(browser, config_mgmt_server)
+    browser.expect_visible(_row("env", "cm-settings-readonly"))
+    browser.expect_hidden('[data-test="cm-settings-env-add"]')
+    browser.click(_row("verbose", "cm-settings-bool"))
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    browser.click('[data-test="cm-save"]')
+    browser.expect_text('[data-test="cm-error"]', "'env' must be an object")
+    assert _alpha_settings_path(config_mgmt_server).read_bytes() == before
 
 
 def test_config_mgmt_settings_row_count_matches_merged_view(

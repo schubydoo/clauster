@@ -229,6 +229,16 @@ def test_settings_typed_rows_are_wired(write_config):
     assert '"fullscreen"' not in html
 
 
+def test_settings_owned_key_tabs_are_surface_labels(write_config):
+    # The owner link matches the server's tab name against a surface label; a tab name
+    # with no surface would hide the link, so every carved key must name a real tab.
+    from clauster.config_write_settings import OWNED_KEY_TABS
+
+    html = _html(write_config, _ON)
+    for tab in set(OWNED_KEY_TABS.values()):
+        assert f'label: "{tab}" }}' in html, tab
+
+
 def test_settings_desktop_only_note_is_wired(write_config):
     # TASK-490: the note names the Desktop-only keys the server lists for the loaded file.
     html = _html(write_config, _ON)

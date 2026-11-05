@@ -2090,7 +2090,7 @@
             <div data-test="cm-view-settings"
                  x-show="!configMgmt.loading && !configMgmtNeedsProject() && configMgmt.surface === 'settings'" x-cloak>
               <div class="d-flex justify-content-between align-items-center mb-1">
-                <label class="form-label small mb-0" for="cm-settings">settings.json — env / model / misc</label>
+                <label class="form-label small mb-0" for="cm-settings">settings.json — the keys no other tab edits</label>
                 <!-- #765: friendly env rows vs the raw-JSON escape hatch -->
                 <div class="btn-group btn-group-sm" role="group" aria-label="Settings editor mode">
                   <button type="button" class="btn" data-test="cm-settings-mode-rows"
@@ -2107,6 +2107,10 @@
               <!-- Shape error shows in either mode so a rejected 'Rows' click explains itself. -->
               <div class="alert alert-warning py-1 small" data-test="cm-settings-env-error" role="alert"
                    x-show="configMgmt.settings.envError" x-cloak x-text="configMgmt.settings.envError"></div>
+              <!-- TASK-271: a refused switch to Raw JSON says why here, above the rows, so a
+                   click on a phone (where the row warning can be off screen) explains itself. -->
+              <div class="alert alert-warning py-1 small" data-test="cm-settings-raw-blocked" role="alert"
+                   x-show="configMgmtSettingsRawBlocked()" x-cloak x-text="configMgmtSettingsRawBlocked()"></div>
               <!-- TASK-490: keys of this file that only Claude Desktop reads (the server lists them). -->
               <!-- text-info-emphasis: plain .alert-info text misses AA contrast (see the note
                    on the Plugins tab alerts). -->
@@ -2177,14 +2181,15 @@
                                     x-text="row.preview"></code>
                               <span class="text-secondary small" x-text="row.note"></span>
                               <button type="button" class="btn btn-sm btn-ghost-primary" data-test="cm-settings-edit-raw"
-                                      :aria-label="'Edit ' + row.key + ' in Raw JSON'"
-                                      @click="configMgmtSettingsMode('raw')">Edit in Raw JSON</button>
+                                      :aria-label="'Edit in Raw JSON: ' + row.key"
+                                      @click="configMgmtSettingsEditRaw()">Edit in Raw JSON</button>
                             </div>
                           </template>
                           <template x-if="row.kind === 'owned'">
                             <div class="d-flex flex-wrap align-items-center gap-1" data-test="cm-settings-owned">
                               <span class="small">Edited on the <span x-text="row.owner"></span> tab.</span>
                               <button type="button" class="btn btn-sm btn-ghost-primary" data-test="cm-settings-owner-link"
+                                      x-show="configMgmtSurfaceKeyForLabel(row.owner)"
                                       @click="configMgmtOpenSurfaceByLabel(row.owner)"
                                       x-text="'Open the ' + row.owner + ' tab'"></button>
                             </div>
@@ -2223,17 +2228,21 @@
                     </template>
                   </datalist>
                   <div class="form-hint small mt-1" id="cm-settings-add-hint">
-                    The list holds the documented keys that Claude Code reads at this scope. A key that
-                    is not on it gets a text box, and the server checks every key when you save.
+                    The list holds the documented keys of one value (a switch, a number, a choice or
+                    text) that Claude Code reads at this scope. A key that is not on it gets a text box,
+                    and the server checks every key when you save.
                   </div>
                   <div class="alert alert-warning py-1 small mt-1 mb-0 d-flex flex-wrap align-items-center gap-2"
                        data-test="cm-settings-add-error" role="alert"
                        x-show="configMgmt.settings.addError" x-cloak>
                     <span x-text="configMgmt.settings.addError"></span>
                     <button type="button" class="btn btn-sm btn-ghost-primary" data-test="cm-settings-add-owner-link"
-                            x-show="configMgmt.settings.addOwner" x-cloak
+                            x-show="configMgmtSurfaceKeyForLabel(configMgmt.settings.addOwner)" x-cloak
                             @click="configMgmtOpenSurfaceByLabel(configMgmt.settings.addOwner)"
                             x-text="'Open the ' + configMgmt.settings.addOwner + ' tab'"></button>
+                    <button type="button" class="btn btn-sm btn-ghost-primary" data-test="cm-settings-add-raw"
+                            x-show="configMgmt.settings.addRaw" x-cloak
+                            @click="configMgmtSettingsEditRaw()">Edit in Raw JSON</button>
                   </div>
                 </div>
 

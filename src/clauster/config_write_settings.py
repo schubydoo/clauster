@@ -41,10 +41,11 @@ reads at every scope but with one value it reads only at some
 This is a scope rule, not a key allowlist: every other key still passes through as
 opaque JSON.
 
-**Row types (TASK-271).** :data:`ROW_KEY_TYPES` gives each documented scalar key the
-editor that the tab's Rows mode shows for it (a toggle, a number, a select or text), and
-the read payload carries it (:func:`row_key_catalog`) so the browser keeps no copy. It is
-a display hint and refuses nothing.
+**Row types (TASK-271).** :data:`ROW_KEY_TYPES` gives each documented top-level key the
+editor that the tab's Rows mode shows for it (a toggle, a number, a select or text, or
+Raw JSON for an object or a list), and the read payload carries it
+(:func:`row_key_catalog`) so the browser keeps no copy. It is a display hint and refuses
+nothing.
 
 **Redaction decision (#772, applying the #822 lesson) -- flagged for maintainer
 review.** :func:`~clauster.config_write.redact_secrets` only masks a value whose
@@ -349,17 +350,20 @@ DESKTOP_ONLY_KEYS: dict[str, str] = {
     "sshHostAllowlist": "managed settings",
 }
 
-#: The value type of each documented top-level scalar key that a User, Project or Local
-#: settings file can set, from the Type line of each key in
+#: The value type of each documented top-level key that a User, Project or Local settings
+#: file can set, from the Type line of each key in
 #: https://code.claude.com/docs/en/settings-reference (read 2026-11-05, TASK-271). A tuple
-#: lists the only strings the key takes. The Settings tab's Rows mode uses it to pick an
-#: editor for a key that the operator adds (a toggle, a number, a select or a text box) and
-#: to offer a select for a loaded string that is one of the listed values. It is a display
-#: hint, NOT an allowlist: a key missing here is a text row and passes through as opaque
-#: JSON, a loaded value is shown by its own JSON type, and nothing here refuses a write. A
-#: key that only managed settings or ``~/.claude.json`` hold, and a Desktop-only key, is
-#: left out, because no scope that clauster writes reads it. ``theme`` also takes
-#: ``custom:<slug>``, which a select cannot list, so such a value shows as text.
+#: lists the preset strings the key takes. The Settings tab's Rows mode uses it to pick an
+#: editor for a key that the operator adds (a toggle, a number, a select or a text box, or
+#: Raw JSON for an ``object`` or a ``list``) and to offer a select for a loaded string that
+#: is one of the listed values. It is a display hint, NOT an allowlist: a key missing here
+#: is a text row and passes through as opaque JSON, a loaded value is shown by its own JSON
+#: type, and nothing here refuses a write. A key that only managed settings or
+#: ``~/.claude.json`` hold, a Desktop-only key and a carved key (:data:`OWNED_KEY_TABS`)
+#: are left out, as is ``env``, which has its own table. Two tuples are not the whole set:
+#: ``theme`` also takes ``custom:<slug>``, and ``timeFormat`` takes any pattern that holds a
+#: ``%``. A select cannot list those, so such a value shows as text, and a new one is typed
+#: in Raw JSON.
 ROW_KEY_TYPES: dict[str, str | tuple[str, ...]] = {
     # Model and output
     "advisorModel": "string",
@@ -490,17 +494,50 @@ ROW_KEY_TYPES: dict[str, str | tuple[str, ...]] = {
     "feedbackSurveyRate": "number",
     "minimumVersion": "string",
     "skipWebFetchPreflight": "boolean",
+    # Objects and lists: a read-only row, edited in Raw JSON
+    "allowedHttpHookUrls": "list",
+    "allowedMcpServers": "list",
+    "appendPlugins": "list",
+    "attribution": "object",
+    "availableModels": "list",
+    "claudeMdExcludes": "list",
+    "companyAnnouncements": "list",
+    "deniedMcpServers": "list",
+    "disabledMcpjsonServers": "list",
+    "enabledMcpjsonServers": "list",
+    "extraKnownMarketplaces": "object",
+    "fallbackModel": "list",
+    "fileSuggestion": "object",
+    "footerLinksRegexes": "list",
+    "httpHookAllowedEnvVars": "list",
+    "modelOverrides": "object",
+    "modelPicker": "object",
+    "modelSettings": "object",
+    "pluginConfigs": "object",
+    "prependPlugins": "list",
+    "sandbox": "object",
+    "skillOverrides": "object",
+    "spellcheck": "object",
+    "spinnerTipsOverride": "object",
+    "spinnerVerbs": "object",
+    "sshHostCommands": "list",
+    "statusLine": "object",
+    "subagentStatusLine": "object",
+    "vimInsertModeRemaps": "object",
+    "voice": "object",
+    "worktree": "object",
 }
 
 
 def row_key_catalog(scope: cw.Scope) -> dict[str, dict[str, Any]]:
     """Return the Rows-mode type of each :data:`ROW_KEY_TYPES` key, for the read payload.
 
-    Each entry is ``{"type": "boolean" | "number" | "string"}`` or ``{"type": "enum",
-    "values": [...]}``, plus ``"here"``: whether Claude Code reads the key at ``scope``
-    (:data:`SCOPE_LIMITED_KEYS`). The tab offers only the ``here`` keys when the operator
-    adds a row. It never refuses a key itself: a save that names a key Claude Code ignores
-    at ``scope`` gets the refusal of :func:`reject_scope_ignored`.
+    Each entry is ``{"type": "boolean" | "number" | "string" | "object" | "list"}`` or
+    ``{"type": "enum", "values": [...]}``, plus ``"here"``: whether Claude Code reads the
+    key at ``scope`` (:data:`SCOPE_LIMITED_KEYS`). The tab offers only the ``here`` keys of
+    one value (not an object or a list) when the operator adds a row. It never refuses a
+    key itself: a save that names a key Claude Code ignores at ``scope`` gets the refusal
+    of :func:`reject_scope_ignored`.
     """
     catalog: dict[str, dict[str, Any]] = {}
     for key, kind in ROW_KEY_TYPES.items():

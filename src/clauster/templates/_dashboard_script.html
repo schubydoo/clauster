@@ -260,8 +260,10 @@
           // `ownedKeys` (the tab that edits each carved key), so neither list lives here.
           // `envEditable` is false when the file's env is not a text-to-text object: env
           // is then a read-only row and the env table is hidden.
+          // `rawBlocked` records a refused switch to Raw JSON, so the reason shows at the
+          // top of the view until the row that blocked it is fixed.
           keyRows: [], keyTypes: {}, ownedKeys: {}, envEditable: true,
-          addKey: "", addError: "", addOwner: "",
+          addKey: "", addError: "", addOwner: "", addRaw: false, rawBlocked: false,
         },
         // JSON surfaces sharing _loadJsonSurface/_saveJsonSurface (#773 slice B).
         // Permissions (#958 Part 5): a friendly rows editor over allow/deny/ask +
@@ -1976,7 +1978,8 @@
           const s = c.settings;
           s.envRows = []; s.envError = ""; s.text = ""; s.orig = ""; s.hash = null;
           s.desktopOnly = []; s.keyRows = []; s.envEditable = true;
-          s.addKey = ""; s.addError = ""; s.addOwner = "";
+          s.keyTypes = {}; s.ownedKeys = {}; s.rawBlocked = false;
+          s.addKey = ""; s.addError = ""; s.addOwner = ""; s.addRaw = false;
           return;
         }
         const s = c.settings;
@@ -1984,7 +1987,7 @@
         const isMap = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
         s.keyTypes = isMap(d.key_types) ? d.key_types : {};
         s.ownedKeys = isMap(d.owned_keys) ? d.owned_keys : {};
-        s.addKey = ""; s.addError = ""; s.addOwner = "";
+        s.addKey = ""; s.addError = ""; s.addOwner = ""; s.addRaw = false; s.rawBlocked = false;
         // Rebuild the rows from the freshly loaded JSON. Only a text that is not a JSON
         // object cannot be shown as rows; it falls back to the raw view (rather than an
         // empty row set) so nothing is hidden.
@@ -2054,8 +2057,12 @@
         if (s.mode === mode) return;
         if (mode === "raw") {
           // A row the serializer cannot write (a bad number, two env rows with one
-          // name) would be lost in the switch, so stay in rows: its warning is showing.
-          if (this.configMgmtSettingsNumberWarning() || this.configMgmtEnvRowsWarning()) return;
+          // name) would be lost in the switch, so stay in rows and say why at the top of
+          // the view (configMgmtSettingsRawBlocked), where the click can see it.
+          if (this.configMgmtSettingsNumberWarning() || this.configMgmtEnvRowsWarning()) {
+            s.rawBlocked = true; return;
+          }
+          s.rawBlocked = false;
           // Materialize the rows into the raw text so the escape hatch shows current
           // edits. With no edit, keep the loaded text as it was, so a plain switch never
           // reads as an unsaved change.
@@ -2211,13 +2218,34 @@
         }
         return JSON.stringify(obj, null, 2);
       },
-      // The documented keys the server says Claude Code reads at this scope, minus the
-      // keys that already have a row, for the "Add a key" suggestions.
+      // Why the last switch to Raw JSON was refused, while that is still so ("" after).
+      configMgmtSettingsRawBlocked() {
+        const s = this.configMgmt.settings;
+        if (!s.rawBlocked || s.mode !== "rows") return "";
+        const why = this.configMgmtSettingsNumberWarning() || this.configMgmtEnvRowsWarning();
+        return why ? "Raw JSON opens when the rows can be saved. " + why : "";
+      },
+      // "Edit in Raw JSON" on a read-only row: switch, then put focus in the editor (the
+      // button that had it is now hidden).
+      configMgmtSettingsEditRaw() {
+        this.configMgmtSettingsMode("raw");
+        if (this.configMgmt.settings.mode !== "raw") return;
+        this.$nextTick(() => {
+          const box = document.getElementById("cm-settings");
+          if (box && box.focus) box.focus();
+        });
+      },
+      // The documented one-value keys (not an object or a list) the server says Claude
+      // Code reads at this scope, minus the keys that already have a row, for the "Add a
+      // key" suggestions.
       configMgmtSettingsKeyOptions() {
         const s = this.configMgmt.settings;
         const have = new Set(s.keyRows.map((r) => r.key));
         return Object.keys(s.keyTypes)
-          .filter((k) => s.keyTypes[k] && s.keyTypes[k].here && !have.has(k))
+          .filter((k) => {
+            const t = s.keyTypes[k];
+            return t && t.here && t.type !== "object" && t.type !== "list" && !have.has(k);
+          })
           .sort();
       },
       // Add a row for the typed key. A documented key gets the editor the server names;
@@ -2225,7 +2253,7 @@
       configMgmtAddSettingsKey() {
         const s = this.configMgmt.settings;
         const k = (s.addKey || "").trim();
-        s.addError = ""; s.addOwner = "";
+        s.addError = ""; s.addOwner = ""; s.addRaw = false;
         if (!k) { s.addError = "Type a key name, or pick one from the list."; return; }
         if (k === "env") {
           s.addError = "Add environment variables in the env table below."; return;
@@ -2236,6 +2264,13 @@
           s.addError = k + " is edited on the " + s.addOwner + " tab."; return;
         }
         const type = this._hasOwn(s.keyTypes, k) ? s.keyTypes[k] : null;
+        if (type && (type.type === "object" || type.type === "list")) {
+          // A text row would save a string where Claude Code reads an object or a list.
+          s.addRaw = true;
+          s.addError = k + " holds " + (type.type === "list" ? "a list" : "an object") +
+            ". Add it in Raw JSON.";
+          return;
+        }
         let value = "";
         if (type && type.type === "boolean") value = false;
         else if (type && type.type === "enum" && Array.isArray(type.values) && type.values.length) {
@@ -2263,16 +2298,34 @@
           s.envEditable = true; s.envRows = [];
           s.keyRows.push({ id: ++s.envSeq, key: "env", kind: "env", inFile: false });
         }
+        // The focused button is gone: move focus to the next row's first visible control
+        // (the row that took its place), else to the "Add a key" box.
+        const shown = this.configMgmtSettingsRows();
+        const next = at === -1 ? null : shown[Math.min(at, shown.length - 1)];
+        this.$nextTick(() => {
+          const li = next && document.querySelector(
+            '[data-test="cm-settings-key-row"][data-row-id="' + next.id + '"]');
+          const ctls = li ? [...li.querySelectorAll("input, select, button")] : [];
+          const ctl = ctls.find((el) => el.offsetParent !== null)
+            || document.getElementById("cm-settings-add-key");
+          if (ctl && ctl.focus) ctl.focus();
+        });
       },
       // A text row's value diverged from the mask sentinel: it's now a real value the
       // operator is setting, so drop the "masked" flag.
       configMgmtSettingsRowEdited(row, val) {
         if (row && row.masked && val !== CONFIG_MASK) row.masked = false;
       },
+      // The surface key of the tab the server names by its label ("" if no tab has it,
+      // so the link to it is not shown rather than shown dead).
+      configMgmtSurfaceKeyForLabel(label) {
+        const surf = this.configMgmtSurfaces.find((x) => x.label === label);
+        return surf ? surf.key : "";
+      },
       // Open the tab that edits a carved key; the server names the tab by its label.
       configMgmtOpenSurfaceByLabel(label) {
-        const surf = this.configMgmtSurfaces.find((x) => x.label === label);
-        if (surf) this.configMgmtSetSurface(surf.key);
+        const key = this.configMgmtSurfaceKeyForLabel(label);
+        if (key) this.configMgmtSetSurface(key);
       },
       configMgmtAddEnvRow() {
         const s = this.configMgmt.settings;
