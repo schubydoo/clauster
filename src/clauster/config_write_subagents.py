@@ -287,24 +287,61 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     return data, text[match.end() :]
 
 
-def _validate_string_or_string_list(value: Any, label: str) -> None:
-    """Reject ``value`` unless it is a non-empty string or a non-empty list of them.
+def _cli_tool_entries(items: list[str]) -> list[str]:
+    """Split tool-list strings into entries the way the 2.1.318 CLI does (its ``fu``).
 
-    Structural only: a comma-separated ``tools`` string or list entry is never split,
-    resolved against a real tool registry, or otherwise interpreted here — that grant
-    is enforced later, by Claude Code itself, when the subagent actually runs.
+    A comma or a space ends an entry unless it is inside parentheses, so
+    ``Agent(worker, researcher), Read`` is two entries. Splitting here only decides
+    whether the list is empty or holds ``*``; no entry is resolved against a tool registry.
+    """
+    entries: list[str] = []
+    for item in items:
+        current, in_parens = "", False
+        for char in item:
+            if char == "(":
+                in_parens = True
+                current += char
+            elif char == ")":
+                in_parens = False
+                current += char
+            elif char == ",":
+                if in_parens:
+                    current += char
+                else:
+                    if current.strip():
+                        entries.append(current.strip())
+                    current = ""
+            elif char == " ":
+                if in_parens:
+                    current += char
+                elif current.strip():
+                    entries.append(current.strip())
+                    current = ""
+            elif current or char.strip():
+                current += char
+        if current.strip():
+            entries.append(current.strip())
+    return entries
+
+
+def _validate_string_or_string_list(value: Any, label: str) -> None:
+    """Reject ``value`` unless it is a string or list of strings naming at least one tool.
+
+    Structural only: the entries are never resolved against a real tool registry — that
+    grant is enforced later, by Claude Code itself, when the subagent actually runs. A value
+    that splits to no entry at all (``""``, ``","``, ``[]``) is refused, because Claude Code
+    then refuses to launch the subagent with zero tools.
     """
     if isinstance(value, str):
-        if not value.strip():
-            raise cw.InvalidCandidateError(f"{label} must be a non-empty string")
-        return
-    if isinstance(value, list):
-        if not value or not all(isinstance(v, str) and v.strip() for v in value):
-            raise cw.InvalidCandidateError(
-                f"{label} must be a non-empty list of non-empty strings"
-            )
-        return
-    raise cw.InvalidCandidateError(f"{label} must be a string or a list of strings")
+        items = [value]
+    elif isinstance(value, list) and all(isinstance(v, str) and v.strip() for v in value):
+        items = value
+    elif isinstance(value, list):
+        raise cw.InvalidCandidateError(f"{label} must be a list of non-empty strings")
+    else:
+        raise cw.InvalidCandidateError(f"{label} must be a string or a list of strings")
+    if not _cli_tool_entries(items):
+        raise cw.InvalidCandidateError(f"{label} must name at least one tool")
 
 
 def _validate_non_empty_string(value: Any, label: str) -> None:
@@ -330,17 +367,38 @@ def _validate_bool_or_bool_string(value: Any, label: str) -> None:
         raise cw.InvalidCandidateError(f"{label} must be true or false")
 
 
-def _validate_optional_string_list(value: Any, label: str) -> None:
-    """Reject ``value`` unless the CLI reads it as a (possibly empty) list of names.
+def _optional_string_list_items(value: Any, label: str) -> list[str]:
+    """Return ``value`` as the list of strings the CLI splits, or reject it.
 
     Accepted: ``null`` and any string (the CLI splits a string on commas; an empty one is
     an empty list), or a list of non-empty strings (an empty list passes). A list entry that
     is not a non-empty string is refused, because the CLI silently drops it.
     """
-    if value is None or isinstance(value, str):
-        return
-    if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
-        raise cw.InvalidCandidateError(f"{label} must be a string or a list of non-empty strings")
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list) and all(isinstance(v, str) and v.strip() for v in value):
+        return value
+    raise cw.InvalidCandidateError(f"{label} must be a string or a list of non-empty strings")
+
+
+def _validate_optional_string_list(value: Any, label: str) -> None:
+    """Reject ``value`` unless the CLI reads it as a (possibly empty) list of names."""
+    _optional_string_list_items(value, label)
+
+
+def _validate_disallowed_tools(value: Any, label: str) -> None:
+    """Like :func:`_validate_optional_string_list`, but refuse a ``*`` entry.
+
+    The CLI turns a ``*`` anywhere in the denylist into NO denylist, so an operator who
+    means "deny everything" would get "deny nothing". (``tools: "*"`` is different: it
+    means every tool, which is what it says.)
+    """
+    if "*" in _cli_tool_entries(_optional_string_list_items(value, label)):
+        raise cw.InvalidCandidateError(
+            f"{label} cannot contain '*': Claude Code reads it as no denylist at all"
+        )
 
 
 # --- integer parsing the way the 2.1.318 agent-file loader does it ------------------------
@@ -352,18 +410,41 @@ def _validate_optional_string_list(value: Any, label: str) -> None:
 # object, which this surface does not treat as a value the CLI reads.
 
 #: The CLI's exponent-notation and grouped-integer patterns (`R` and `E` in its source).
-_CLI_EXPONENT_RE = re.compile(r"^[+-]?(\d+(\.\d*)?|\.\d+)[eE][+-]?\d+$")
-_CLI_GROUPED_INT_RE = re.compile(r"^[+-]?\d{1,3}([_,   ])\d{3}(?:\1\d{3})*$")
-_CLI_GROUP_SEPARATORS_RE = re.compile(r"[_,   ]")
+#: JavaScript regular expressions and ``parseInt`` take ASCII digits only, where Python's
+#: ``\d`` matches any Unicode digit (``٥``, ``５``), hence ``[0-9]`` throughout.
+_CLI_EXPONENT_RE = re.compile(r"^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)[eE][+-]?[0-9]+$")
+_CLI_GROUPED_INT_RE = re.compile(r"^[+-]?[0-9]{1,3}([_,\u00a0\u202f ])[0-9]{3}(?:\1[0-9]{3})*$")
+_CLI_GROUP_SEPARATORS_RE = re.compile(r"[_,\u00a0\u202f ]")
+#: The characters JavaScript's ``trim`` and ``parseInt`` skip (WhiteSpace and
+#: LineTerminator). Python's ``str.strip``/``\s`` differ: they also skip ``\x1c``-``\x1f``
+#: and ``\x85``, and they keep the BOM, ``\ufeff``.
+_JS_WHITESPACE = (
+    "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008"
+    "\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
 #: JavaScript ``parseInt(s, 10)``: optional leading whitespace, an optional sign, then the
 #: longest run of digits; anything after the digits is ignored.
-_JS_PARSE_INT_RE = re.compile(r"\s*([+-]?\d+)")
+_JS_PARSE_INT_RE = re.compile(f"[{_JS_WHITESPACE}]*([+-]?[0-9]+)")
+
+
+def _as_js_number(value: int) -> int | None:
+    """Return ``value``, or None when JavaScript would hold it as ``Infinity``.
+
+    A JavaScript number is a double, so an integer past the double range becomes
+    ``Infinity``, which ``Number.isInteger`` rejects. (Precision loss below that range keeps
+    a whole number whole, so it does not change the answer.)
+    """
+    try:
+        float(value)
+    except OverflowError:
+        return None
+    return value
 
 
 def _js_parse_int(text: str) -> int | None:
-    """Return what JavaScript ``parseInt(text, 10)`` returns, or None for ``NaN``."""
+    """Return what JavaScript ``parseInt(text, 10)`` returns, or None for ``NaN``/``Infinity``."""
     match = _JS_PARSE_INT_RE.match(text)
-    return int(match.group(1)) if match else None
+    return _as_js_number(int(match.group(1))) if match else None
 
 
 def _integral(value: float) -> int | None:
@@ -373,12 +454,12 @@ def _integral(value: float) -> int | None:
 
 def _cli_int_from_text(raw: str) -> int | None:
     """Return the CLI's ``Bf`` reading of a string: exponent, grouped, then ``parseInt``."""
-    text = raw.strip()
+    text = raw.strip(_JS_WHITESPACE)
     if len(text) <= 32:
         if _CLI_EXPONENT_RE.match(text):
             return _integral(float(text))
         if _CLI_GROUPED_INT_RE.match(text):
-            return int(_CLI_GROUP_SEPARATORS_RE.sub("", text))
+            return _as_js_number(int(_CLI_GROUP_SEPARATORS_RE.sub("", text)))
     return _js_parse_int(text)
 
 
@@ -388,7 +469,7 @@ def _cli_positive_int(value: Any) -> int | None:
         # JavaScript stringifies a boolean to "true"/"false", which parses to NaN.
         return None
     if isinstance(value, int):
-        number: int | None = value
+        number: int | None = _as_js_number(value)
     elif isinstance(value, float):
         number = _integral(value)
     elif isinstance(value, str):
@@ -419,7 +500,7 @@ def _cli_effort(value: Any) -> str | int | None:
     if value is None or value == "" or isinstance(value, bool):
         return None
     if isinstance(value, int):
-        return value
+        return _as_js_number(value)
     if isinstance(value, float):
         whole = _integral(value)
         if whole is not None:
@@ -604,14 +685,18 @@ def _validate_env(value: Any, label: str) -> None:
 #: installed CLI's agent-file loader (2.1.318) reads, which is a superset of the documented
 #: lists in places (an integer or upper-case ``effort``, ``isolation: remote``, a string
 #: ``maxTurns``) — the maintainer's call on TASK-449.5. A value the CLI rejects or silently
-#: ignores is refused, so a save never lands as a no-op.
+#: ignores is refused. ⚠️ Every check sees the value as PyYAML (YAML 1.1) loaded it, and the
+#: CLI loads YAML 1.2, so a few spellings read differently: a plain ``yes`` is a boolean
+#: here and a string there (:func:`_refuse_yaml11_only_booleans` closes that gap for the
+#: boolean fields), and a plain ``2024-01-01`` is a date here, so it is refused as a
+#: ``maxTurns`` that the CLI would read as 2024. The gaps that remain fail closed.
 _OPTIONAL_FRONTMATTER_RULES: tuple[tuple[str, _FrontmatterRule], ...] = (
     # Claude Code accepts either a comma-separated string or an array for these —
     # this repo's own shipped subagents use the string form. `tools` must name at least
     # one tool: an empty grant makes the CLI refuse to launch the subagent.
     ("tools", _validate_string_or_string_list),
     # An empty or null denylist / preload list is read as "none", so it is accepted.
-    ("disallowedTools", _validate_optional_string_list),
+    ("disallowedTools", _validate_disallowed_tools),
     ("skills", _validate_optional_string_list),
     # An alias (`sonnet`, `opus`, `haiku`, `fable`), `inherit`, or a full model id. The
     # id set is open-ended, so this stays a non-empty-string check.
@@ -710,6 +795,40 @@ def validate_agent_content(candidate: Any, *, expected_name: str | None = None) 
         raise cw.InvalidCandidateError(f"content is {size} bytes, over the {MAX_BYTES} byte cap")
     frontmatter, _body = parse_frontmatter(candidate)
     validate_frontmatter(frontmatter, expected_name=expected_name)
+    header = _FRONTMATTER_RE.match(candidate)
+    if header is not None:  # pragma: no branch — always, once parse_frontmatter accepted it
+        _refuse_yaml11_only_booleans(header.group(1))
+
+
+#: The fields where a boolean is accepted, and the YAML 1.2 core spellings of a boolean.
+_BOOLEAN_FIELDS = ("background", "omitClaudeMd")
+_YAML12_BOOLEANS = frozenset({"true", "True", "TRUE", "false", "False", "FALSE"})
+
+
+def _refuse_yaml11_only_booleans(header: str) -> None:
+    """Refuse ``yes``/``no``/``on``/``off`` (and kin) as the value of a boolean field.
+
+    PyYAML follows YAML 1.1, where a plain ``yes`` is ``True``; the CLI's loader follows
+    YAML 1.2, where it is the string ``"yes"``, which ``background`` logs as invalid and
+    ``omitClaudeMd`` ignores. :func:`validate_frontmatter` sees only the loaded ``True``,
+    so this looks at how the value is SPELLED: a plain scalar that PyYAML resolved to a
+    boolean must be one of the YAML 1.2 spellings. ``header`` already loaded as a mapping,
+    so composing it again yields a mapping node and does not fail.
+    """
+    root = yaml.compose(header, Loader=yaml.SafeLoader)
+    for key_node, value_node in root.value:
+        if (
+            isinstance(key_node, yaml.ScalarNode)
+            and key_node.value in _BOOLEAN_FIELDS
+            and isinstance(value_node, yaml.ScalarNode)
+            and value_node.style is None
+            and value_node.tag == "tag:yaml.org,2002:bool"
+            and value_node.value not in _YAML12_BOOLEANS
+        ):
+            raise cw.InvalidCandidateError(
+                f"frontmatter {key_node.value!r}: Claude Code reads {value_node.value!r} as a "
+                "string, not a boolean, and ignores it. Write true or false"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -828,31 +947,62 @@ MCP_SERVERS_CONVERSION_NOTE = (
     "Code reads only the list form and ignores a mapping. Save to write the list form."
 )
 
-#: A top-level ``mcpServers:`` key line, at column 0 of the frontmatter.
+#: A top-level ``mcpServers:`` key line, at column 0 of the frontmatter (any value).
 _MCP_SERVERS_KEY_LINE_RE = re.compile(r"^mcpServers[ \t]*:")
+#: The same line with NO value on it (an optional comment only): the block form, whose
+#: entries follow on indented lines. A flow mapping on the key line is not rewritten.
+_MCP_SERVERS_BLOCK_KEY_RE = re.compile(r"^mcpServers[ \t]*:[ \t]*(?:#.*)?$")
 
 
-class _ListIndentDumper(yaml.SafeDumper):
-    """A ``SafeDumper`` that indents a block list under its key, as the docs examples do."""
+def _indent_as_list_items(block: list[str]) -> list[str] | None:
+    """Re-indent the lines of a block mapping so each entry becomes a list item.
 
-    def increase_indent(self, flow: bool = False, indentless: bool = False) -> None:
-        """Never emit an indentless sequence (a ``- item`` at the key's own column)."""
-        return super().increase_indent(flow, False)
+    An entry line, at the block's own indent ``n``, gains ``- `` at column ``n``; every
+    deeper line, and any comment at or past ``n``, gains two spaces, so it stays under its
+    entry. No scalar is touched, so every value keeps its exact spelling and quoting and
+    reads the same under any YAML version. Returns None for a shape this cannot shift
+    safely: a tab in the indentation, or a content line shallower than the first entry.
+    """
+    indent: int | None = None
+    out: list[str] = []
+    for line in block:
+        stripped = line.lstrip(" ")
+        if not stripped.strip():
+            out.append(line)  # a blank line stays as it is
+            continue
+        lead = len(line) - len(stripped)
+        if stripped.startswith("\t"):
+            return None
+        if indent is None and not stripped.startswith("#"):
+            indent = lead
+        if stripped.startswith("#") and (indent is None or lead >= indent):
+            out.append("  " + line)
+        elif indent is not None and lead == indent:
+            out.append(line[:lead] + "- " + stripped)
+        elif indent is not None and lead > indent:
+            out.append("  " + line)
+        else:
+            return None
+    return out
 
 
 def _mcp_servers_as_list(text: str) -> str | None:
     """Return ``text`` with a mapping ``mcpServers`` rewritten as the list form, or None.
 
-    The old mapping spelling (``mcpServers: {name: definition}``) is the one Claude Code
-    ignores; the list spelling (``- name: definition``) is the one it reads. Each mapping
-    entry becomes one single-key list item, in order. Only the ``mcpServers`` block of the
-    frontmatter is rewritten (comments inside it are lost); every other byte is kept.
+    The old mapping spelling (``mcpServers:`` then ``name: definition`` lines) is the one
+    Claude Code ignores; the list spelling (``- name: definition``) is the one it reads.
+    The rewrite is textual (:func:`_indent_as_list_items`): each entry becomes one list
+    item, in order, and only the indentation of the ``mcpServers`` block changes. Values,
+    quoting and comments are kept byte for byte, so a value PyYAML (YAML 1.1) and the CLI's
+    YAML 1.2 loader read differently (``yes``, ``0755``) still reads as it did.
 
-    Fail closed: the rewrite is re-parsed, and it is used only when the result parses to
-    exactly the original frontmatter with ``mcpServers`` as the list and the body unchanged.
-    Anything else (a duplicate key, a block the line scan cannot bound, a value the YAML
-    dumper cannot write) returns None, and the editor shows the file as it is. Its save is
-    then refused with a message that explains the list form. Nothing here writes to disk.
+    Fail closed: the rewrite is re-parsed, and it is used only when it parses to exactly the
+    original frontmatter with ``mcpServers`` as that list and the body unchanged. That check
+    also catches two entries with the same name, which a mapping collapses and a list keeps.
+    Anything else returns None — a flow mapping on the key line, a duplicate top-level
+    ``mcpServers`` line, a block the line scan cannot bound — and the editor shows the file
+    as it is. Its save is then refused with a message that explains the list form. Nothing
+    here writes to disk.
     """
     match = _FRONTMATTER_RE.match(text)
     if not match:
@@ -862,12 +1012,11 @@ def _mcp_servers_as_list(text: str) -> str | None:
     except cw.InvalidCandidateError:
         return None
     servers = frontmatter.get("mcpServers")
-    if not isinstance(servers, dict):
+    if not isinstance(servers, dict) or not servers:
         return None
-    header = match.group(1)
-    lines = header.splitlines(keepends=True)
+    lines = match.group(1).splitlines(keepends=True)
     starts = [i for i, line in enumerate(lines) if _MCP_SERVERS_KEY_LINE_RE.match(line)]
-    if len(starts) != 1:
+    if len(starts) != 1 or not _MCP_SERVERS_BLOCK_KEY_RE.match(lines[starts[0]].rstrip("\r\n")):
         return None
     start = starts[0]
     # The block runs until the next line that starts at column 0 (the next top-level key).
@@ -879,31 +1028,17 @@ def _mcp_servers_as_list(text: str) -> str | None:
         ),
         len(lines),
     )
-    converted = [{server_name: definition} for server_name, definition in servers.items()]
-    try:
-        block = yaml.dump(
-            {"mcpServers": converted},
-            Dumper=_ListIndentDumper,
-            sort_keys=False,
-            default_flow_style=False,
-            allow_unicode=True,
-            width=2**31 - 1,
-        )
-    except (yaml.YAMLError, TypeError, ValueError, RecursionError):
+    block = _indent_as_list_items(lines[start + 1 : end])
+    if block is None:
         return None
-    newline = "\r\n" if "\r\n" in header else "\n"
-    block = block.replace("\n", newline)
-    # The header slice excludes the newline before the closing fence, so a block that ends
-    # the header must not end with one either.
-    if end == len(lines):
-        block = block.removesuffix(newline)
-    rewritten = "".join(lines[:start]) + block + "".join(lines[end:])
+    rewritten = "".join(lines[: start + 1]) + "".join(block) + "".join(lines[end:])
     candidate = text[: match.start(1)] + rewritten + text[match.end(1) :]
     try:
         new_frontmatter, new_body = parse_frontmatter(candidate)
     except cw.InvalidCandidateError:
         return None
-    if new_body != body or new_frontmatter != {**frontmatter, "mcpServers": converted}:
+    expected = [{server_name: definition} for server_name, definition in servers.items()]
+    if new_body != body or new_frontmatter != {**frontmatter, "mcpServers": expected}:
         return None
     return candidate
 

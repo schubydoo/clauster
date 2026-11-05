@@ -414,6 +414,40 @@ _CLI_PARSED_VALUES: list[tuple[str, object]] = [
 ]
 
 
+def test_tool_lists_split_like_the_cli() -> None:
+    # `tools: "*"` means every tool; a `*` inside a specifier is not a bare `*` entry.
+    sub.validate_frontmatter({"name": "x", "description": "d", "tools": "*"})
+    sub.validate_frontmatter({"name": "x", "description": "d", "disallowedTools": "Bash(rm *)"})
+    # A tab right after a separator is skipped (only a space ends an entry).
+    assert sub._cli_tool_entries(["Read,\tGrep"]) == ["Read", "Grep"]
+    assert sub._cli_tool_entries(["Agent(worker, researcher), Read  Bash", ""]) == [
+        "Agent(worker, researcher)",
+        "Read",
+        "Bash",
+    ]
+
+
+@pytest.mark.parametrize("spelling", ["yes", "no", "on", "off", "Yes", "OFF", "y", "n"])
+@pytest.mark.parametrize("key", ["background", "omitClaudeMd"])
+def test_yaml11_only_booleans_are_refused(key: str, spelling: str) -> None:
+    # PyYAML reads a plain `yes` as True; the CLI's YAML 1.2 loader reads the string
+    # "yes", which `background` logs as invalid and `omitClaudeMd` ignores.
+    text = f"---\nname: x\ndescription: d\n{key}: {spelling}\n---\nbody\n"
+    loaded = sub.parse_frontmatter(text)[0][key]
+    if isinstance(loaded, bool):  # `y`/`n` are strings even to PyYAML
+        with pytest.raises(cw.InvalidCandidateError, match="Write true or false"):
+            sub.validate_agent_content(text, expected_name="x")
+    else:
+        with pytest.raises(cw.InvalidCandidateError, match="must be true or false"):
+            sub.validate_agent_content(text, expected_name="x")
+
+
+@pytest.mark.parametrize("spelling", ["true", "True", "FALSE", "'true'", '"false"'])
+def test_yaml12_booleans_and_quoted_strings_still_save(spelling: str) -> None:
+    text = f"---\nname: x\ndescription: d\nbackground: {spelling}\nomitClaudeMd: {spelling}\n"
+    sub.validate_agent_content(text + "---\nbody\n", expected_name="x")  # no raise
+
+
 @pytest.mark.parametrize(("key", "value"), _CLI_PARSED_VALUES)
 def test_validate_frontmatter_accepts_every_cli_parsed_value(key: str, value: object) -> None:
     sub.validate_frontmatter({"name": "x", "description": "d", key: value})  # no raise
@@ -427,6 +461,15 @@ def test_validate_frontmatter_accepts_every_cli_parsed_value(key: str, value: ob
         ("2e1", 20),
         ("1,000", 1000),
         ("1" * 40, int("1" * 40)),  # over 32 chars: straight to parseInt
+        # Over 32 chars, so the grouped-integer pattern is skipped and parseInt stops at
+        # the first comma: 1, not 10**27.
+        ("1,000,000,000,000,000,000,000,000,000", 1),
+        ("1" * 400, None),  # past the double range: Infinity in JavaScript
+        (10**400, None),
+        ("٥", None),  # an Arabic-Indic five: JavaScript reads ASCII digits only
+        ("５", None),  # a fullwidth five
+        ("\x85 5", None),  # NEL is whitespace to Python, not to JavaScript
+        ("﻿5", 5),  # the BOM is whitespace to JavaScript, not to Python
         ("200_000", 200000),
         ("1\u00a0000", 1000),
         (5.0, 5),
@@ -454,6 +497,9 @@ def test_cli_positive_int_mirrors_the_cli(value: object, expected: int | None) -
         (2.5, 2),
         (2.0, 2),
         (float("inf"), None),
+        (10**400, None),
+        ("1" * 400, None),
+        ("٥", None),
         (True, None),
         ("", None),
         ({"a": 1}, None),
@@ -521,6 +567,12 @@ def test_validate_frontmatter_accepts_well_formed_env() -> None:
         {"name": "x", "description": "d", "skills": {"a": 1}},
         {"name": "x", "description": "d", "disallowedTools": 5},
         {"name": "x", "description": "d", "tools": None},  # the CLI reads zero tools
+        {"name": "x", "description": "d", "tools": ","},  # splits to no entry at all
+        {"name": "x", "description": "d", "tools": " , "},
+        # `*` in the denylist switches the denylist OFF in the CLI.
+        {"name": "x", "description": "d", "disallowedTools": "*"},
+        {"name": "x", "description": "d", "disallowedTools": "Write, *"},
+        {"name": "x", "description": "d", "disallowedTools": ["Bash", "*"]},
         {"name": "x", "description": "d", "skills": [1]},
         {"name": "x", "description": "d", "model": ""},
         {"name": "x", "description": "d", "model": 5},
@@ -981,12 +1033,15 @@ _MAP_FORM = (
     "model: opus\n"
     "---\nYou are a helper.\n"
 )
+# The textual rewrite: entries gain `- `, deeper lines and comments gain two spaces, and
+# every value keeps its exact spelling (the flow list, the quoted url, the comment).
 _LIST_FORM = (
     "---\nname: my-agent\ndescription: d\n"
     "mcpServers:\n"
-    "  - playwright:\n      type: stdio\n      command: npx\n      args:\n"
-    "        - -y\n        - '@playwright/mcp'\n"
-    "  - remote:\n      type: http\n      url: https://example.com/mcp\n"
+    "    # inline, scoped to this agent\n"
+    "  - playwright:\n      type: stdio\n      command: npx\n"
+    '      args: ["-y", "@playwright/mcp"]\n'
+    '  - remote: {type: http, url: "https://example.com/mcp"}\n'
     "model: opus\n"
     "---\nYou are a helper.\n"
 )
@@ -1033,12 +1088,31 @@ def test_saving_the_converted_content_writes_the_list_form(tmp_path: Path) -> No
     assert again["content"] == _LIST_FORM
 
 
-def test_the_unconverted_mapping_is_still_refused_with_the_list_form_explained(
-    tmp_path: Path,
-) -> None:
-    # A direct API write of the mapping is refused, and the message says how to fix it.
-    with pytest.raises(cw.InvalidCandidateError, match="reads only the list form"):
-        sub.write_project_agent(tmp_path, "my-agent", _MAP_FORM, None)
+def test_saving_converted_content_over_a_changed_file_is_stale(tmp_path: Path) -> None:
+    # The converted text carries the hash of the file it came from, so an edit on disk
+    # after the load still makes the save a 409 rather than a silent overwrite.
+    path = _place(tmp_path, "my-agent", _MAP_FORM)
+    doc = sub.read_project_agent(tmp_path, "my-agent")
+    path.write_bytes(_MAP_FORM.replace("model: opus", "model: haiku").encode("utf-8"))
+    with pytest.raises(cw.StaleConfigWriteError):
+        sub.write_project_agent(tmp_path, "my-agent", doc["content"], doc["hash"])
+    assert b"model: haiku" in path.read_bytes()
+
+
+def test_conversion_keeps_every_value_spelled_as_written(tmp_path: Path) -> None:
+    # PyYAML reads YAML 1.1 and the CLI reads YAML 1.2, which disagree on `yes`, `0755`,
+    # `1:30` and on whether `'1e5'` needs its quotes. Re-indenting instead of re-dumping
+    # keeps each scalar's text, so the CLI reads the converted file as it read the old one.
+    text = (
+        "---\nname: my-agent\ndescription: d\nmcpServers:\n  srv:\n    command: x\n"
+        "    env:\n      DEBUG: yes\n      MODE: 0755\n      PORT: 1:30\n      T: '1e5'\n"
+        "---\nbody\n"
+    )
+    _place(tmp_path, "my-agent", text)
+    content = sub.read_project_agent(tmp_path, "my-agent")["content"]
+    for spelling in ("DEBUG: yes", "MODE: 0755", "PORT: 1:30", "T: '1e5'"):
+        assert f"        {spelling}\n" in content
+    assert "  - srv:\n" in content
 
 
 def test_conversion_keeps_crlf_line_endings(tmp_path: Path) -> None:
@@ -1048,9 +1122,9 @@ def test_conversion_keeps_crlf_line_endings(tmp_path: Path) -> None:
 
 
 def test_conversion_of_a_block_that_ends_the_header(tmp_path: Path) -> None:
-    # The header slice has no newline before the closing fence, so a converted block in the
-    # last position must not add one (or the body would gain a blank line).
-    text = "---\nname: my-agent\ndescription: d\nmcpServers: {srv: {command: x}}\n---\nbody\n"
+    # The header slice has no newline before the closing fence: the last entry line keeps
+    # that shape, so the body does not gain a blank line.
+    text = "---\nname: my-agent\ndescription: d\nmcpServers:\n  srv:\n    command: x\n---\nbody\n"
     _place(tmp_path, "my-agent", text)
     doc = sub.read_project_agent(tmp_path, "my-agent")
     assert doc["content"] == (
@@ -1058,16 +1132,43 @@ def test_conversion_of_a_block_that_ends_the_header(tmp_path: Path) -> None:
     )
 
 
+def test_conversion_keeps_an_anchor_used_after_the_block(tmp_path: Path) -> None:
+    # The anchor's text stays where it was, so an alias after the block still resolves.
+    text = (
+        "---\nname: my-agent\ndescription: d\nmcpServers:\n  srv: &cfg {command: x}\n"
+        "\n  other: {command: y}\nextra: *cfg\n---\nbody\n"
+    )
+    _place(tmp_path, "my-agent", text)
+    doc = sub.read_project_agent(tmp_path, "my-agent")
+    assert doc["converted"] is not None
+    # The blank line between the entries stays as it is.
+    assert (
+        "  - srv: &cfg {command: x}\n\n  - other: {command: y}\nextra: *cfg\n" in (doc["content"])
+    )
+
+
 @pytest.mark.parametrize(
     "text",
     [
+        # A flow mapping on the key line: re-spelling it would mean re-dumping values.
+        "---\nname: my-agent\ndescription: d\nmcpServers: {a: {command: x}}\n---\nbody\n",
+        "---\nname: my-agent\ndescription: d\nmcpServers: {}\n---\nbody\n",
         # Two top-level mcpServers lines: which one YAML keeps is not the line scan's call.
-        "---\nname: my-agent\ndescription: d\nmcpServers: {a: {command: x}}\n"
-        "mcpServers: {b: {command: y}}\n---\nbody\n",
-        # An anchor defined inside the block and used after it: removing the block would
-        # break the alias, so the re-parse check refuses the rewrite.
-        "---\nname: my-agent\ndescription: d\nmcpServers:\n  srv: &cfg {command: x}\n"
-        "extra: *cfg\n---\nbody\n",
+        "---\nname: my-agent\ndescription: d\nmcpServers:\n  a: {command: x}\n"
+        "mcpServers:\n  b: {command: y}\n---\nbody\n",
+        # Two entries with one name: the mapping kept only the second, the list would keep
+        # both, so the re-parse check refuses to change what the file means.
+        "---\nname: my-agent\ndescription: d\nmcpServers:\n  gh: {command: x}\n"
+        "  gh: {command: y}\n---\nbody\n",
+        # Keys that Python counts as one (`1` and `true`) collapse the same way.
+        "---\nname: my-agent\ndescription: d\nmcpServers:\n  1: {command: x}\n"
+        "  true: {command: y}\n---\nbody\n",
+        # A comment shallower than the entries: no safe column to move it to.
+        "---\nname: my-agent\ndescription: d\nmcpServers:\n    a:\n      command: x\n"
+        "  # note\n    b:\n      command: y\n---\nbody\n",
+        # A tab after the indentation spaces, inside a block scalar.
+        "---\nname: my-agent\ndescription: d\nmcpServers:\n  a:\n    command: |\n"
+        "      \tindented\n---\nbody\n",
     ],
 )
 def test_conversion_falls_back_to_the_raw_file_when_unsafe(tmp_path: Path, text: str) -> None:
@@ -1083,6 +1184,7 @@ def test_list_form_and_unparsable_files_are_not_converted(tmp_path: Path) -> Non
     _place(tmp_path, "broken", "no frontmatter here\n")
     doc = sub.read_project_agent(tmp_path, "broken")
     assert (doc["content"], doc["converted"]) == ("no frontmatter here\n", None)
+    assert sub._mcp_servers_as_list("no fence\n") is None
 
 
 def test_read_only_files_are_not_converted(tmp_path: Path) -> None:
@@ -1098,25 +1200,23 @@ def test_read_only_files_are_not_converted(tmp_path: Path) -> None:
     assert (doc["editable"], doc["content"], doc["converted"]) == (False, override, None)
 
 
-def test_conversion_helper_rejects_non_frontmatter_and_dump_failures(
-    monkeypatch: pytest.MonkeyPatch,
+def test_the_unconverted_mapping_is_still_refused_with_the_list_form_explained(
+    tmp_path: Path,
 ) -> None:
-    assert sub._mcp_servers_as_list("no fence\n") is None
-
-    def _boom(*_args: object, **_kwargs: object) -> str:
-        raise yaml.representer.RepresenterError("cannot represent")
-
-    monkeypatch.setattr(sub.yaml, "dump", _boom)
-    assert sub._mcp_servers_as_list(_MAP_FORM) is None
+    # A direct API write of the mapping is refused, and the message says how to fix it.
+    with pytest.raises(cw.InvalidCandidateError, match="reads only the list form"):
+        sub.write_project_agent(tmp_path, "my-agent", _MAP_FORM, None)
 
 
 def test_conversion_is_dropped_when_the_rewrite_reads_back_as_other_data(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The last guard: a rewrite that parses but does not read back as the same servers is
-    # never handed to the editor. No real input is known to reach it (PyYAML round-trips the
-    # data it loaded), so the dumper is made to lose an entry.
-    monkeypatch.setattr(sub.yaml, "dump", lambda *_a, **_k: "mcpServers: []\n")
+    # The last guard, pinned on its own: a rewrite that parses but does not read back as the
+    # same servers is never handed to the editor.
+    monkeypatch.setattr(sub, "_indent_as_list_items", lambda _lines: ["  - other: {command: z}\n"])
+    assert sub._mcp_servers_as_list(_MAP_FORM) is None
+    # ...and one that does not parse at all is dropped the same way.
+    monkeypatch.setattr(sub, "_indent_as_list_items", lambda _lines: ["  - [unclosed\n"])
     assert sub._mcp_servers_as_list(_MAP_FORM) is None
 
 

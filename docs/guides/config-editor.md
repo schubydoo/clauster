@@ -270,8 +270,13 @@ saves the file. It checks each field in the
 [Claude Code frontmatter reference](https://code.claude.com/docs/en/sub-agents#supported-frontmatter-fields).
 It accepts every value that the installed Claude Code (2.1.318) reads for
 that field, also a value that the reference does not list. It refuses a value
-that Claude Code rejects or ignores, so a save never lands as a silent no-op.
-If one field fails, Clauster refuses the whole save and writes nothing.
+that Claude Code rejects or ignores. If one field fails, Clauster refuses the
+whole save and writes nothing.
+
+Clauster reads YAML 1.1 and Claude Code reads YAML 1.2, so a few unquoted
+spellings mean different things to the two. Clauster refuses the ones it can
+detect. For example, write `true`, not `yes`, and quote a value that must stay
+a string.
 Clauster never runs a hook command and never connects to an MCP server from
 this editor.
 
@@ -289,7 +294,10 @@ this editor.
   `autoCompactWindow` must be from `100000` to `1000000`. Do not write
   `200k`: Claude Code reads it as 200, which is out of range.
 - `background` and `omitClaudeMd` accept `true` and `false`, also as quoted
-  strings.
+  strings. They refuse `yes`, `no`, `on` and `off`: Claude Code reads those as
+  text and ignores them.
+- `tools` must name at least one tool. `disallowedTools` refuses a `*` entry,
+  because Claude Code then applies no denylist at all.
 - `mcpServers` must be a list. Each item is the name of a server that you
   configured already, or a `name: definition` object. Claude Code reads only
   the list form and ignores a mapping.
@@ -303,9 +311,12 @@ this editor.
 If you open a subagent file that writes `mcpServers` as a mapping, the editor
 shows it already converted to the list form, with a note above the text. The
 file on disk does not change until you save. Read the converted text, then
-save to write the list form. A comment inside the old `mcpServers` block is
-not kept. If the editor cannot convert the block safely, it shows the file as
-it is, and the save tells you to rewrite `mcpServers` as a list.
+save to write the list form. The conversion only changes the indentation of
+the `mcpServers` block, so every value and comment stays as you wrote it. If
+the editor cannot convert the block safely, it shows the file as it is, and
+the save tells you to rewrite `mcpServers` as a list. Two examples are a
+mapping written on one line, such as `mcpServers: {github: {...}}`, and two
+servers with the same name.
 
 A file with the name of a built-in subagent, such as `claude.md`, overrides
 that built-in in Claude Code. The list shows the file as a read-only row next
