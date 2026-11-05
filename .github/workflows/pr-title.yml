@@ -52,7 +52,7 @@ jobs:
           client-id: ${{ secrets.CLAUSTER_CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
           permission-pull-requests: read
-      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+      - uses: amannn/action-semantic-pull-request@2252a14e810aa9b85c2d560bd7070c802206ecf6 # v6.1.2
         env:
           # App token on same-repo PRs; GITHUB_TOKEN fallback on forks (the mint
           # step above is skipped, so steps.app-token.outputs.token is empty).
