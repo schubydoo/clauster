@@ -905,6 +905,39 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#yaml-spellings-that-clauster-refuses" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        YAML spellings that Clauster refuses
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#skill-frontmatter-checks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Skill frontmatter checks
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#skill-names-in-skilloverrides" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Skill names in skillOverrides
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -1649,6 +1682,39 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#yaml-spellings-that-clauster-refuses" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        YAML spellings that Clauster refuses
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#skill-frontmatter-checks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Skill frontmatter checks
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#skill-names-in-skilloverrides" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Skill names in skillOverrides
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -1940,7 +2006,7 @@ on; the User scope additionally requires <code>config_write.allow_user_scope</co
 </tr>
 <tr>
 <td>Skills</td>
-<td>Skills: list, a per-skill <code>SKILL.md</code> editor, create, delete.</td>
+<td>Skills: list, a per-skill <code>SKILL.md</code> editor, create, delete. See <a href="#skill-frontmatter-checks">Skill frontmatter checks</a>.</td>
 </tr>
 <tr>
 <td>Plugins</td>
@@ -2157,7 +2223,8 @@ whole save and writes nothing.</p>
 <p>Clauster reads YAML 1.1 and Claude Code reads YAML 1.2, so a few unquoted
 spellings mean different things to the two. Clauster refuses the ones it can
 detect. For example, write <code>true</code>, not <code>yes</code>. Write a plain decimal number,
-not <code>010</code>, <code>0b101</code> or <code>1_000</code>. Quote a value that must stay a string.
+not <code>010</code>, <code>0b101</code> or <code>1_000</code>. Quote a value that must stay a string. See
+<a href="#yaml-spellings-that-clauster-refuses">YAML spellings that Clauster refuses</a>.
 Clauster never runs a hook command and never connects to an MCP server from
 this editor.</p>
 <ul>
@@ -2408,6 +2475,152 @@ The commands, flags and settings below were checked against Claude Code 2.1.318.
   applies them: a change that the policy blocks fails with Claude Code's own
   message.</li>
 </ul>
+<h3 id="yaml-spellings-that-clauster-refuses">YAML spellings that Clauster refuses<a class="headerlink" href="#yaml-spellings-that-clauster-refuses" title="Permanent link">&para;</a></h3>
+<p>These rules apply to the frontmatter of subagent files and of <code>SKILL.md</code>
+files. The frontmatter is the YAML block between the two <code>---</code> lines, which
+are called fences. If the frontmatter has one of these, Clauster refuses the
+whole save:</p>
+<ul>
+<li>A NEL (U+0085), LINE SEPARATOR (U+2028) or PARAGRAPH SEPARATOR (U+2029)
+  character. YAML 1.1 reads it as a line break, and YAML 1.2 does not, so the
+  two see different fields.</li>
+<li>The text <code>---</code> anywhere before the closing fence, also inside a value or in
+  quotes. Claude Code ends the frontmatter at the first <code>---</code>.</li>
+<li>An alias (a <code>*name</code> reference) to a node that contains it, such as
+  <code>a: &amp;a {&lt;&lt;: *a}</code>.</li>
+<li>A nested value that YAML 1.1 and YAML 1.2 read differently. Examples are
+  <code>async: yes</code>, <code>timeout: 1_000</code> or <code>timeout: 010</code> inside <code>hooks</code>, and
+  <code>DEBUG: yes</code> inside an MCP server's <code>env</code>. Other examples are <code>1:30</code>,
+  <code>0b101</code>, <code>1e3</code>, <code>0o17</code>, and a tagged value such as <code>!!int "10"</code>, which the
+  two read differently. Write <code>true</code>, <code>false</code> or a plain decimal. If the value
+  must stay text, quote it.</li>
+<li>A <code>#</code> with no space before it, right after a quoted value or a bracket, such
+  as <code>"a"#b</code>, <code>[x]#b</code> or <code>[a,#c</code>. YAML 1.2 refuses it, so Claude Code reads a
+  changed copy of the frontmatter, or none of it. Put a space before the <code>#</code>.</li>
+<li>A lone carriage return (CR) that is not part of a CRLF line ending.</li>
+<li>A quoted value that goes on to a line that starts at column 0. Indent the
+  next line.</li>
+<li>A key that appears twice in the same mapping. This includes two spellings
+  that one YAML version reads as the same key, such as <code>1</code> and <code>01</code>, or <code>null</code>
+  and <code>~</code>, and two <code>&lt;&lt;</code> merge keys in one mapping.</li>
+<li>A tab inside a plain value or after it, such as <code>a</code> then a tab then <code>b</code>.
+  YAML 1.2 accepts it, but Clauster's parser does not. Use a space.</li>
+</ul>
+<p>Some frontmatter is not valid YAML, but Claude Code still reads it, and so does
+Clauster. When the first parse fails, Claude Code parses a changed copy of the
+frontmatter. In that copy, a top-level <code>key: value</code> line gets its value in
+double quotes if the key has only letters, <code>_</code> and <code>-</code>, and the value holds a
+YAML symbol such as <code>[</code>, <code>{</code>, <code>#</code>, or a colon and a space. A value that is
+already quoted or is a flow list such as <code>[Read, Grep]</code> stays as it is. Each
+tab at the start of a line becomes two spaces. Clauster reads the same copy,
+so it checks the values that Claude Code sees in the known cases. For example,
+<code>argument-hint: [filename] [format]</code> saves, and its value is the text
+<code>[filename] [format]</code>. The editor does not remove fields on load from a file
+that Claude Code reads through this copy.</p>
+<p>A file that is not valid YAML even after these changes is refused. One example
+is a bad line that is indented under another key. Another example is a line in
+a file with Windows (CRLF) line endings, because Claude Code does not change
+those lines. Clauster also refuses some files that YAML 1.2 reads but its own
+parser does not, because it cannot read the values the same way. The examples
+are a file that uses one anchor name twice, such as <code>&amp;t</code> on two values, an
+anchor name with a dot or a non-ASCII letter, such as <code>&amp;d.1</code>, a list item
+that starts with <code>:</code>, such as <code>[:a]</code>, and a tab between a value and a comment,
+such as <code>Bash</code>, a tab, then <code># note</code>.</p>
+<h3 id="skill-frontmatter-checks">Skill frontmatter checks<a class="headerlink" href="#skill-frontmatter-checks" title="Permanent link">&para;</a></h3>
+<p>The Skills editor checks the frontmatter of <code>SKILL.md</code> before it saves the
+file. The fields are those of the
+<a href="https://code.claude.com/docs/en/skills#frontmatter-reference">frontmatter reference</a>.
+The editor accepts every value that Claude Code 2.1.318 reads for that field,
+including a value that the reference does not list. Version 2.1.318 is the
+version that these checks were last compared against. Clauster refuses a
+value that Claude Code rejects or ignores, and it then writes nothing.
+Clauster never runs a hook command or a skill script from this editor.</p>
+<ul>
+<li>Every field is optional. A <code>SKILL.md</code> without frontmatter is also valid:
+  Claude Code reads the whole file as the skill's instructions. Without a
+  <code>description</code>, Claude Code uses the first non-empty line of the
+  instructions.</li>
+<li>Clauster refuses a file that opens a <code>---</code> block but never closes it.
+  Clauster also refuses a fence that only Claude Code can read, for example
+  a fence with a no-break space after <code>---</code>. Put each <code>---</code> alone on its
+  line.</li>
+<li><code>disable-model-invocation</code>, <code>user-invocable</code>, <code>background</code> and <code>fallback</code>
+  accept <code>true</code> and <code>false</code>. They also accept <code>yes</code>, <code>no</code>, <code>on</code>, <code>off</code>, <code>1</code>
+  and <code>0</code> in any letter case. A <code>user-invocable:</code> line with no value hides the
+  skill from the <code>/</code> menu, because Claude Code reads it as <code>false</code>.</li>
+<li><code>allowed-tools</code>, <code>disallowed-tools</code> and <code>disallowedTools</code> accept a space- or
+  comma-separated string or a list of strings. If <code>disallowed-tools</code> is set,
+  Claude Code ignores <code>disallowedTools</code>. So Clauster refuses the two
+  together.</li>
+<li><code>paths</code> accepts a comma-separated string or a list. <code>arguments</code> accepts a
+  space-separated string or a list of names. Clauster refuses an argument
+  name that is only digits.</li>
+<li><code>argument-hint</code>, <code>when_to_use</code>, <code>agent</code> and <code>version</code> accept text, a number,
+  <code>true</code>, <code>false</code>, or a list such as <code>[issue-number]</code>. Claude Code shows that
+  list as <code>issue-number</code>. Clauster refuses a mapping. The field is
+  <code>when_to_use</code>. Claude Code does not read <code>when-to-use</code>.</li>
+<li><code>effort</code> accepts a level name in any case, the alias <code>med</code>, or an integer.
+  It accepts these inside a one-item list too, such as <code>[high]</code>.</li>
+<li><code>model</code> accepts any alias, any model ID, or <code>inherit</code>. <code>context</code> accepts
+  only <code>fork</code>. <code>shell</code> accepts <code>bash</code> or <code>powershell</code> in any case.</li>
+<li><code>name</code> is the command name. It can differ from the folder name and can
+  hold single spaces. Clauster refuses a name that Claude Code cannot show.
+  Examples are a hidden or direction-changing character, two spaces in a row,
+  a space at the start or end, and <code>&lt;</code> or <code>&gt;</code>. The limit is 256 UTF-16 units,
+  so an emoji counts as two. Clauster also refuses a name with a combining
+  mark, even where Claude Code shows it.</li>
+<li>Clauster checks <code>hooks</code> with the same rules as the
+  <a href="#the-hooks-tab">Hooks tab</a> and as subagent frontmatter hooks. So it accepts
+  every documented hook event, hook type and field, and it refuses any other
+  value. Claude Code drops a bad entry under most events and keeps the others,
+  but Clauster refuses the save instead.</li>
+<li>Clauster also refuses hook definitions outside <code>hooks</code>, because Claude Code
+  then loads the skill with no hooks and no <code>allowed-tools</code>. A hook definition
+  is a <code>PreToolUse</code> or <code>PermissionRequest</code> key, or a matcher group (a <code>matcher</code>
+  and its list of <code>hooks</code> entries). Clauster looks for them at the top level
+  and up to three levels into another field. It does not look into
+  <code>metadata</code>, <code>mcpServers</code> or <code>lspServers</code>, because Claude Code does not.</li>
+<li><code>metadata</code> must be a mapping. <code>created_by</code> and <code>improved_by</code> are fields that
+  Claude Code uses for its own records, and they accept only
+  <code>dream-proposal</code>. <code>version</code>, <code>fallback</code> and <code>disallowedTools</code> are not in the
+  reference, but Claude Code reads them, so Clauster checks them as above.</li>
+<li>Clauster saves <code>license</code>, <code>compatibility</code> and every other field as written.
+  The nested-value rule in
+  <a href="#yaml-spellings-that-clauster-refuses">YAML spellings that Clauster refuses</a>
+  still applies to them.</li>
+</ul>
+<p>Clauster reads YAML 1.1 and Claude Code reads YAML 1.2. If a field means
+something different in the two, Clauster refuses it and names the field. For
+example, <code>description: yes</code> is the text <code>yes</code> to Claude Code. <code>effort: 010</code> is
+10 to Claude Code but 8 to Clauster. Quote the value, or write it as a plain
+number. Clauster accepts <code>user-invocable: yes</code>, because both read it as true.</p>
+<p>If you open a <code>SKILL.md</code> that holds a field whose value Claude Code ignores,
+the editor can remove that field from the text. Examples are <code>shell: zsh</code> and
+<code>effort: banana</code>. Claude Code treats such a field as if it were not there.
+The removal does not change what the skill does. The editor then shows a note
+above the text. The file on disk does not change until you save.</p>
+<p>The editor removes fields only if all of these conditions are true:</p>
+<ul>
+<li>Every problem in the file is such a field.</li>
+<li>Each of those fields holds a single value, or it is a <code>metadata</code> value that
+  is not a mapping.</li>
+<li>No field has a YAML tag that Clauster cannot read the same way as Claude
+  Code, such as <code>!!bool "true"</code>.</li>
+<li>The frontmatter is a plain block of <code>key: value</code> lines, each field appears
+  once, and no field is indented or comes from a <code>&lt;&lt;</code> merge.</li>
+</ul>
+<p>If one of these is false, the editor shows the file as it is, and Clauster
+refuses its save. The error names the field. Two other cases are never
+removed, because Claude Code acts on them. The first is a <code>hooks</code> value that is
+not a mapping and not empty: Claude Code then also drops <code>allowed-tools</code>. The
+second is a <code>disallowed-tools</code> value next to <code>disallowedTools</code>: it still hides
+<code>disallowedTools</code>.</p>
+<h3 id="skill-names-in-skilloverrides">Skill names in skillOverrides<a class="headerlink" href="#skill-names-in-skilloverrides" title="Permanent link">&para;</a></h3>
+<p>In <code>skillOverrides</code>, a key is the name of a skill, as Claude Code shows it.
+The key can be a frontmatter <code>name</code>, the name of a bundled skill such as
+<code>doctor</code>, or a name with a colon. Clauster refuses an empty key, the key
+<code>__proto__</code>, and a name that Claude Code cannot show. The values are <code>on</code>,
+<code>name-only</code>, <code>user-invocable-only</code> and <code>off</code>.</p>
 <h2 id="troubleshooting-and-limits">Troubleshooting and limits<a class="headerlink" href="#troubleshooting-and-limits" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
