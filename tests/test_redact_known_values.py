@@ -59,6 +59,11 @@ def _leaks(seen: str, value: str) -> bool:
     return any(body[i : i + n] in squeezed for i in range(len(body) - n + 1))
 
 
+def _streamed(owner: str) -> frozenset[str]:
+    """The values a bridge-log stream learned for ``owner`` (kept apart from the record's)."""
+    return redact._known_owners.get(f"{owner}#stream", frozenset())
+
+
 @pytest.fixture
 def known() -> None:
     """Store the test values as one instance's ids (``cse_`` comes from ``session_``)."""
@@ -417,7 +422,7 @@ def test_ws_bridge_log_learns_an_id_before_the_runner_does(runner_config, tmp_pa
             assert not _leaks(ws.receive_text(), ENV)
             assert not _leaks(ws.receive_text(), ENV)
     assert instance.environment_id is None  # the runner never parsed it: the socket did
-    assert ENV in redact._known_owners[instance.instance_id]
+    assert ENV in _streamed(instance.instance_id)
 
 
 def test_ws_bridge_log_reads_the_ids_above_its_tail(runner_config, tmp_path: Path) -> None:
@@ -451,7 +456,7 @@ def test_ws_bridge_log_stores_one_id_of_each_kind(runner_config, tmp_path: Path)
             _append(log, f"Created initial session {SESSION}\n")
             for _ in range(2 + len(echoed)):
                 ws.receive_text()
-    assert redact._known_owners[instance.instance_id] == {ENV, SESSION, CSE}
+    assert _streamed(instance.instance_id) == {ENV, SESSION, CSE}
 
 
 def test_ws_bridge_log_takes_a_second_id_only_from_a_bridge_line(
@@ -472,7 +477,68 @@ def test_ws_bridge_log_takes_a_second_id_only_from_a_bridge_line(
             _append(log, f"t [bridge:init] bridgeId={BRIDGE} dir=x\n")
             out = [ws.receive_text() for _ in range(5)]
     assert not _leaks(out[3], env2)
-    assert redact._known_owners[instance.instance_id] == {ENV, env2, BRIDGE}
+    assert _streamed(instance.instance_id) == {ENV, env2, BRIDGE}
+
+
+def _tagged_env(i: int) -> str:
+    return f"t [DEBUG] [bridge:api] POST -> 200 environment_id=env_01{i:04d}Zq9Wx7Vc5Bn3Mk1Lj"
+
+
+def test_reconnects_learn_at_most_the_cap_in_total() -> None:
+    """Each connection has its own `learned`; the cap must hold over all of them together."""
+    from clauster.routes import websockets as ws_module
+
+    cap = ws_module._STREAM_IDS_PER_KIND
+    # The record's own ids sit apart: they never count against the stream's cap.
+    redact.remember_known_values("iid-1", ENV, SESSION, BRIDGE)
+    for connection in range(3):  # three reconnects over a tail with new tagged markers
+        lines = "\n".join(_tagged_env(10 * connection + i) for i in range(cap))
+        ws_module._learn_stream_ids("iid-1", lines, {})
+    assert len(_streamed("iid-1")) == cap  # 3 * cap without the shared cap
+    assert redact._known_owners["iid-1"] == {ENV, SESSION, CSE, BRIDGE}
+    before = redact._known_matcher
+    ws_module._learn_stream_ids("iid-1", _tagged_env(0), {})  # a reconnect re-reads an old one
+    assert redact._known_matcher is before  # already held: nothing stored, nothing rebuilt
+    redact.remember_stream_value("iid-1", "env_short", cap=cap)  # not a value: skipped
+    assert redact._known_matcher is before
+    # A session id and its `cse_` twin count as one, so the session kind also reaches the cap.
+    for connection in range(2):
+        lines = "\n".join(
+            f"[remote-bridge] Unarchive session_01{10 * connection + i:04d}Pz8Ox6Ny4Mw2Lv9Ku"
+            for i in range(cap)
+        )
+        ws_module._learn_stream_ids("iid-1", lines, {})
+    sessions = [f for f in _streamed("iid-1") if f.startswith("session_")]
+    assert len(sessions) == cap
+    redact.forget_known_values("iid-1")
+    assert _streamed("iid-1") == frozenset() and "iid-1" not in redact._known_owners
+
+
+def test_ws_bridge_log_reconnects_share_the_cap(runner_config, tmp_path: Path) -> None:
+    """A client that reconnects as the tail moves on cannot store the cap again each time."""
+    from clauster.routes import websockets as ws_module
+
+    cap = ws_module._STREAM_IDS_PER_KIND
+    filler = "x" * 999 + "\n"
+    log = tmp_path / "alpha.log"
+    _append(log, filler * 300)  # 300 KB: past the head read, so only the tail can learn
+    instance = _bare_instance(log)
+
+    def _read_until(ws, sentinel: str) -> None:
+        while ws.receive_text() != sentinel:
+            pass
+
+    with _client(runner_config, instance) as client:
+        with client.websocket_connect("/ws/bridge-log/alpha") as ws:
+            _append(log, "".join(f"{_tagged_env(i)}\n" for i in range(cap)) + "end1\n")
+            _read_until(ws, "end1")
+        assert len(_streamed(instance.instance_id)) == cap
+        # 70 KB more, then new markers: the next tail window no longer holds the first ones.
+        _append(log, filler * 70 + "".join(f"{_tagged_env(100 + i)}\n" for i in range(cap)))
+        _append(log, "end2\n")
+        with client.websocket_connect("/ws/bridge-log/alpha") as ws:
+            _read_until(ws, "end2")
+    assert len(_streamed(instance.instance_id)) == cap  # 2 * cap without the shared cap
 
 
 def test_a_fake_marker_first_cannot_shut_out_the_real_id() -> None:
@@ -483,7 +549,7 @@ def test_a_fake_marker_first_cannot_shut_out_the_real_id() -> None:
     fake = "env_01Mn5Bv7Cx9Za2Sd4Fg6Hj8Kl1"
     ws_module._learn_stream_ids("iid-1", f"tool said environment_id={fake}", learned)
     ws_module._learn_stream_ids("iid-1", f"t [bridge:api] environment_id={ENV}", learned)
-    assert ENV in redact._known_owners["iid-1"]
+    assert ENV in _streamed("iid-1")
     assert not _leaks(redact.sanitize_line(f"xyz{ENV}"), ENV)
 
 
@@ -509,7 +575,7 @@ def test_stream_learns_at_most_a_few_ids_of_a_kind() -> None:
     )
     ws_module._learn_stream_ids("iid-1", lines, learned)
     assert len(learned["env"]) == ws_module._STREAM_IDS_PER_KIND
-    assert len(redact._known_owners["iid-1"]) == ws_module._STREAM_IDS_PER_KIND
+    assert len(_streamed("iid-1")) == ws_module._STREAM_IDS_PER_KIND
 
 
 def test_a_forget_that_changes_no_value_keeps_the_matcher() -> None:

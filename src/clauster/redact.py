@@ -1505,12 +1505,58 @@ def replace_known_values(owner: str, values: Iterable[str | None]) -> None:
 
 
 def forget_known_values(owner: str) -> None:
-    """Drop every value ``owner`` holds, when the instance or session that owns them is gone."""
-    if owner not in _known_owners:
+    """Drop every value ``owner`` holds, when the instance or session that owns them is gone.
+
+    The values a log stream learned for ``owner`` (:func:`remember_stream_value`) go with them.
+    """
+    stream = _stream_owner(owner)
+    if owner not in _known_owners and stream not in _known_owners:
         return
     with _known_lock:
         _known_owners.pop(owner, None)
+        _known_owners.pop(stream, None)
         _rebuild_known_matcher()
+
+
+def _stream_owner(owner: str) -> str:
+    """Return the owner key for the values a log stream learned for ``owner``."""
+    return f"{owner}#stream"
+
+
+def _form_kind(form: str) -> str:
+    """Return a stored form's kind: ``env``, ``session`` (also its ``cse_`` twin), or other."""
+    prefix = _KNOWN_PREFIX_RE.match(form)
+    if prefix is None:
+        return "other"
+    return "env" if prefix.group() == "env_" else "session"
+
+
+def remember_stream_value(owner: str, value: str, *, cap: int) -> None:
+    """Store ``value`` that a log stream read for ``owner``, unless that kind is at its cap.
+
+    Text a stream reads (tool output the bridge echoes) is not trusted the way the record is,
+    so the stream's values sit under an owner of their own (``<owner>#stream``), and each kind
+    (``env``, ``session``, other) holds at most ``cap`` of them across every connection of the
+    stream, not per connection: a reconnecting client cannot add ``cap`` more each time. The
+    values the record itself stores (:func:`remember_known_values` under ``owner``) do not
+    count. The count and the add happen under the lock, so two sockets cannot both pass it.
+    """
+    global _known_matcher
+    forms = _known_forms(value)
+    if not forms:
+        return
+    stream = _stream_owner(owner)
+    with _known_lock:
+        held = _known_owners.get(stream, frozenset())
+        if forms <= held:
+            return
+        kind = _form_kind(next(iter(forms)))
+        # A session id is stored with its `cse_` twin: count the `session_` forms only.
+        count = sum(1 for form in held if _form_kind(form) == kind and not form.startswith("cse_"))
+        if count >= cap:
+            return
+        _known_owners[stream] = held | forms
+        _known_matcher = _matcher_with(_known_matcher, forms)
 
 
 def _known_grid_hits(

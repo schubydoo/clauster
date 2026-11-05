@@ -73,8 +73,9 @@ _STREAM_ID_RE = re.compile(
 #: the line: with the cap below, it bounds how many ids the store can gain from one stream.
 _BRIDGE_TAG_RE = re.compile(r"\[(?:bridge:[a-z]+|remote-bridge)\]")
 
-#: The most ids of one kind (env, session, bridge) one socket stores. A real bridge names one,
-#: or two after a re-registration; the cap only bounds a log that names many.
+#: The most ids of one kind (env, session, bridge) the bridge-log stream of one instance stores,
+#: over all its connections together (:func:`clauster.redact.remember_stream_value`). A real
+#: bridge names one, or two after a re-registration; the cap only bounds a log that names many.
 _STREAM_IDS_PER_KIND = 4
 
 
@@ -99,7 +100,7 @@ def _learn_stream_ids(instance_id: str, text: str, learned: dict[str, set[str]])
     ``learned`` maps each kind (``env``, ``session``, ``bridge``) to the ids this socket stored.
     The first id of a kind is taken from any marker line, as ``bridge_log.parse_bridge_markers``
     takes it. A further one is taken only from a line with a bridge tag before the id
-    (:data:`_BRIDGE_TAG_RE`), and only up to :data:`_STREAM_IDS_PER_KIND` per stream. So a
+    (:data:`_BRIDGE_TAG_RE`), and only up to :data:`_STREAM_IDS_PER_KIND` per instance. So a
     bridge that registers a new environment is still masked exactly, and echoed tool output can
     add only a few values, which then only mask more.
     """
@@ -120,7 +121,10 @@ def _learn_stream_ids(instance_id: str, text: str, learned: dict[str, set[str]])
                 if tag_end > hit.start():
                     continue  # a second id of this kind, on a line with no tag before it
             seen.add(value)
-            redact.remember_known_values(instance_id, value)
+            # The store holds the cap across every connection of this instance's stream, so a
+            # reconnect cannot add up to the cap again (the per-socket check above is only an
+            # early exit). The record's own ids are stored apart and do not count.
+            redact.remember_stream_value(instance_id, value, cap=_STREAM_IDS_PER_KIND)
 
 
 #: How many lines one worker call sanitizes before the socket sends them. A client that goes
