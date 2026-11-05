@@ -262,6 +262,10 @@ def _projects_holding(config: ClausterConfig, cwd: Path) -> list[str]:
     not borrow ``<name>``'s ceiling. An unresolvable path matches nothing (fail closed).
     """
     found: set[str] = set()
+    # A NUL byte is never a real directory. POSIX resolve() raises ValueError on it, but
+    # Windows' non-strict resolve() returns the path unresolved, so refuse it up front.
+    if "\x00" in str(cwd):
+        return []
     try:
         resolved = cwd.resolve()
         root = config.projects_root.resolve()
@@ -274,7 +278,7 @@ def _projects_holding(config: ClausterConfig, cwd: Path) -> list[str]:
             base = (config.projects_root / name).resolve()
             if resolved == base or base in resolved.parents:
                 found.add(name)
-    # RuntimeError: a symlink loop on 3.11/3.12. ValueError: a NUL byte in the path.
+    # RuntimeError: a symlink loop on 3.11/3.12. ValueError: a path the OS rejects.
     except (OSError, RuntimeError, ValueError):
         return []
     return sorted(found)
