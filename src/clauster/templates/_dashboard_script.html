@@ -2060,9 +2060,16 @@
           // name) would be lost in the switch, so stay in rows and say why at the top of
           // the view (configMgmtSettingsRawBlocked), where the click can see it.
           if (this.configMgmtSettingsNumberWarning() || this.configMgmtEnvRowsWarning()) {
-            s.rawBlocked = true; return;
+            s.rawBlocked = true;
+            // The click can be far down a long list: bring the reason into view.
+            this.$nextTick(() => {
+              const note = document.querySelector('[data-test="cm-settings-raw-blocked"]');
+              if (note && note.scrollIntoView) note.scrollIntoView({ block: "nearest" });
+            });
+            return;
           }
-          s.rawBlocked = false;
+          // The Add-a-key message belongs to the rows: never bring a stale one back.
+          s.rawBlocked = false; s.addKey = ""; s.addError = ""; s.addOwner = ""; s.addRaw = false;
           // Materialize the rows into the raw text so the escape hatch shows current
           // edits. With no edit, keep the loaded text as it was, so a plain switch never
           // reads as an unsaved change.
@@ -2222,8 +2229,14 @@
       configMgmtSettingsRawBlocked() {
         const s = this.configMgmt.settings;
         if (!s.rawBlocked || s.mode !== "rows") return "";
-        const why = this.configMgmtSettingsNumberWarning() || this.configMgmtEnvRowsWarning();
-        return why ? "Raw JSON opens when the rows can be saved. " + why : "";
+        // The warning itself shows beside the rows, so this names it, not repeats it.
+        if (this.configMgmtSettingsNumberWarning()) {
+          return "Raw JSON opens when every number box holds a number. See the warning below.";
+        }
+        if (this.configMgmtEnvRowsWarning()) {
+          return "Raw JSON opens when each env variable has its own name. See the warning below.";
+        }
+        return "";
       },
       // "Edit in Raw JSON" on a read-only row: switch, then put focus in the editor (the
       // button that had it is now hidden).

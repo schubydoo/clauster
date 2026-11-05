@@ -236,7 +236,7 @@ def test_settings_owned_key_tabs_are_surface_labels(write_config):
 
     html = _html(write_config, _ON)
     for tab in set(OWNED_KEY_TABS.values()):
-        assert f'label: "{tab}" }}' in html, tab
+        assert f'{{ key: "{tab.lower()}", label: "{tab}" }}' in html, tab
 
 
 def test_settings_desktop_only_note_is_wired(write_config):

@@ -594,9 +594,7 @@ def test_config_mgmt_settings_add_and_remove_key_rows(
     browser.expect_disabled('[data-test="cm-save"]')
     # Raw JSON would lose that row, so the switch is refused and says why at the top.
     browser.click('[data-test="cm-settings-mode-raw"]')
-    browser.expect_text(
-        '[data-test="cm-settings-raw-blocked"]', "Enter a number for cleanupPeriodDays"
-    )
+    browser.expect_text('[data-test="cm-settings-raw-blocked"]', "every number box holds a number")
     browser.expect_visible('[data-test="cm-settings-rows"]')
     browser.fill(_row("cleanupPeriodDays", "cm-settings-number"), "7")
     browser.expect_hidden('[data-test="cm-settings-number-error"]')
