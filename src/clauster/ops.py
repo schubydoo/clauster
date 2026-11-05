@@ -1041,10 +1041,10 @@ def _bundle_env_suspects(config: ClausterConfig, projects: list[Project]) -> lis
     Standard bridges (from their bridge pointer), pty bridges (from the keeper sidecars),
     background agents (from Claude Code's roster), and the claustrum daemon (by its
     ``-socket`` argument), which every hosted session inherits its environment from. Each
-    pid must pass the same identity gate its owner uses (cmdline and recorded start time),
-    so a recycled pid is never reported. A pty KEEPER is deliberately not listed: a current
-    keeper keeps the bundle's runtime on purpose (``procutil.keeper_launch_env``), and
-    what reaches the session is its bridge's environment.
+    pid must pass the identity gate its owner uses, so a recycled pid is not reported. A
+    pty KEEPER is deliberately not listed: a current keeper keeps the bundle's runtime on
+    purpose (``procutil.keeper_launch_env``), and what reaches the session is its bridge's
+    environment.
     """
     from . import pointers, pty_keeper, supervisor  # local: keeps ops' import graph as it was
 
@@ -1071,6 +1071,8 @@ def _bundle_env_suspects(config: ClausterConfig, projects: list[Project]) -> lis
         ):
             found.append((f"pty bridge for {keeper.project or 'an unknown project'}", bridge_pid))
     for worker_id, worker in supervisor.load_roster_workers().items():
+        if not supervisor.valid_job_id(worker_id):  # a Claude-owned file: show only safe ids
+            continue
         pid = worker.get("pid") if isinstance(worker, dict) else None
         if isinstance(pid, int) and supervisor.worker_alive(pid, worker.get("procStart")):
             found.append((f"background agent {worker_id}", pid))

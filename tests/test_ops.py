@@ -2793,13 +2793,18 @@ def test_bundle_env_suspects_lists_each_live_tracked_process_and_nothing_else(
     seen_gate = []
 
     def _is_live_bridge(pid, start, *, start_ticks, boot_id):
+        assert pid is not None, "a keeper without a bridge pid must never reach the gate"
         seen_gate.append((pid, start, start_ticks, boot_id))
         return pid in (202, 302)
 
     monkeypatch.setattr(procutil, "is_live_bridge", _is_live_bridge)
-    workers = {"ab12": {"pid": 601, "procStart": "9"}, "cd34": {"pid": 602, "procStart": "9"}}
+    workers = {
+        "ab12cd34": {"pid": 601, "procStart": "9"},
+        "ef567890": {"pid": 602, "procStart": "9"},  # not alive
+        "<b>x</b>": {"pid": 603, "procStart": "9"},  # alive, but not a job-id shape
+    }
     monkeypatch.setattr(supervisor, "load_roster_workers", lambda: workers)
-    monkeypatch.setattr(supervisor, "worker_alive", lambda pid, start: pid == 601)
+    monkeypatch.setattr(supervisor, "worker_alive", lambda pid, start: pid in (601, 603))
     sock = str(ClaustrumDaemon(config).socket_path)
     procs = [
         types.SimpleNamespace(
@@ -2815,7 +2820,7 @@ def test_bundle_env_suspects_lists_each_live_tracked_process_and_nothing_else(
     assert ops_mod._bundle_env_suspects(config, projects) == [
         ("bridge for std", 101),
         ("pty bridge for pty", 202),  # the bridge, never its keeper
-        ("background agent ab12", 601),
+        ("background agent ab12cd34", 601),
         ("claustrum daemon", 401),
     ]
     # The pty bridge is checked with the identity the keeper recorded, not a bare pid.

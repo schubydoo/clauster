@@ -228,21 +228,26 @@ def _pid_alive(pid: int) -> bool:
     stat = Path(f"/proc/{pid}/stat")  # Linux: an unreaped zombie still answers signal 0
     try:
         return stat.read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except (FileNotFoundError, ProcessLookupError):
+        return not Path("/proc/self").is_dir()  # Linux: reaped since the probe
     except (OSError, IndexError):
         return True
 
 
 def _cmdline(pid: int) -> str:
     """Return ``pid``'s command line, or ``""`` when it cannot be read. POSIX only."""
-    proc = Path(f"/proc/{pid}/cmdline")
-    if proc.parent.is_dir():
+    if Path("/proc/self").is_dir():
         try:
-            return proc.read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
+            raw = Path(f"/proc/{pid}/cmdline").read_bytes()
         except OSError:
             return ""
-    result = subprocess.run(
-        ["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True, check=False
-    )
+        return raw.replace(b"\0", b" ").decode("utf-8", "replace")
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True, check=False
+        )
+    except OSError:
+        return ""
     return result.stdout.strip()
 
 
@@ -250,10 +255,12 @@ def _kill_leftovers(tmp: Path, dumps_dir: Path) -> None:
     """SIGKILL every fake bridge and pty keeper this check started that is still up (POSIX).
 
     The set comes from ground truth, not from what the check got far enough to record:
-    every bridge-shaped run the fake claude dumped, and every pid in a keeper sidecar.
-    A pid is only killed while its command line still names the fake claude or the
-    keeper, so a pid the OS recycled onto another process is left alone.
+    every run the fake claude dumped, and every pid in a keeper sidecar. A pid is only
+    killed while its command line still names the fake claude or the keeper AND this
+    check's temp dir (every bridge and keeper here carries a ``--debug-file`` or
+    ``--sidecar`` under it), so a recycled pid, or another Clauster's keeper, is left alone.
     """
+    roots = {str(tmp), os.path.realpath(tmp)}
     pids = {
         int(path.stem.removeprefix("env-"))
         for path in dumps_dir.glob("env-*.json")
@@ -269,11 +276,10 @@ def _kill_leftovers(tmp: Path, dumps_dir: Path) -> None:
         )
     for pid in sorted(pids):
         line = _cmdline(pid) if _pid_alive(pid) else ""
-        if "fake_claude" in line or "__pty-keeper__" in line:
-            try:
+        ours = any(root in line for root in roots)
+        if ours and ("fake_claude" in line or "__pty-keeper__" in line):
+            with contextlib.suppress(OSError):
                 os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
 
 
 def _wait_until(predicate, timeout: float, what: str) -> None:
@@ -295,7 +301,11 @@ def _stop_server(proc: subprocess.Popen) -> bool:
     """
     if os.name == "nt":
         subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
-        proc.wait(timeout=15)
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:  # taskkill refused: at least end the bootloader
+            proc.kill()
+            proc.wait(timeout=5)
         return True
     proc.terminate()
     try:
@@ -327,7 +337,7 @@ def _keeper_survives_its_server(keeper: dict, server: subprocess.Popen) -> None:
         if not mei:  # PyInstaller is pinned; a rename must not quietly weaken this check
             raise SystemExit("the frozen keeper has no _PYI_APPLICATION_HOME_DIR in its env")
     if _stop_server(server):
-        raise SystemExit("the server ignored SIGTERM and had to be killed")
+        raise SystemExit("the server did not exit within 15s of SIGTERM and was killed")
     if mei:
         _wait_until(lambda: not os.path.isdir(mei), 20, "the server's unpack dir to be deleted")
     if not _pid_alive(keeper_pid):
