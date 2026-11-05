@@ -1702,8 +1702,8 @@ class SessionRunner:
         against their allowed sets (:class:`InvalidSpawnOption`), then applies the two
         project-scoped policy gates that are the reason ``proj`` is passed at all: a
         ``worktree`` spawn on a non-git project (:class:`InvalidSpawnOption`), and a
-        permission mode the project's config forbids — the bypassPermissions 403 gate
-        (:class:`PermissionModeNotAllowed`).
+        permission mode the project's config forbids — the bypassPermissions / inherit
+        403 gate (:class:`PermissionModeNotAllowed`).
         """
         if spawn_mode not in SPAWN_MODES:
             raise InvalidSpawnOption(
@@ -1727,8 +1727,7 @@ class SessionRunner:
             )
         if self._config.bypass_denied(proj.name, permission_mode):
             raise PermissionModeNotAllowed(
-                f"bypassPermissions is not enabled for project {proj.name!r}. Set "
-                "projects.<name>.allow_bypass_permissions: true in clauster.yml first."
+                self._config.bypass_denied_detail(proj.name, permission_mode=permission_mode)
             )
 
     def _unique_log_path(self, name: str) -> Path:

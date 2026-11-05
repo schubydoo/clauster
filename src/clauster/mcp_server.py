@@ -367,7 +367,9 @@ _WRITE_TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "description": "default | plan | acceptEdits | auto | dontAsk | "
                     "bypassPermissions | inherit. 'inherit' is Clauster's own sentinel "
-                    "for passing no --permission-mode flag at all, not a claude mode.",
+                    "for passing no --permission-mode flag at all, not a claude mode. "
+                    "bypassPermissions and inherit are refused unless the project sets "
+                    "allow_bypass_permissions: true in clauster.yml.",
                 },
                 "resume_mode": {"type": "string", "description": "standard | pty."},
                 "custom_name": {"type": "string", "description": "Display name (standard only)."},

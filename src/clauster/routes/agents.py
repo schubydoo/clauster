@@ -3,9 +3,11 @@
 These four routes drive the agent-view background sessions: list them read-only,
 dispatch a new one, stop one cleanly, and resume an ended one. Every dispatch
 validates the project name before spawning (invariant 2) and mirrors the runner's
-``bypassPermissions`` ceiling via :func:`clauster.routes._common.enforce_bypass_ceiling`,
-failing closed so the background channel cannot sidestep a project's
-``allow_bypass_permissions`` gate (invariant 1).
+``bypassPermissions`` / ``inherit`` ceiling via
+:func:`clauster.routes._common.enforce_bypass_ceiling`, failing closed so the
+background channel cannot sidestep a project's ``allow_bypass_permissions`` gate
+(invariant 1). A resume applies the same ceiling to the project that holds the job's
+recorded directory.
 The stop route redacts any ``claude rm`` detail through :func:`clauster.redact.redact_for_disk`
 before it leaves the process on the ``bg-settled`` event (invariant 4).
 """
@@ -13,10 +15,12 @@ before it leaves the process on the ``bg-settled`` event (invariant 4).
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
 from .. import claude_cli, supervisor
+from ..config import CEILING_GATED_MODES, ClausterConfig
 from ..dependencies import ConfigDep, RunnerDep
 from ..discovery import is_valid_project_name
 from ..models import BackgroundJob
@@ -194,20 +198,99 @@ async def api_resume_agent(job_id: str, config: ConfigDep, runner: RunnerDep) ->
     (`valid_session_id`) — the 8-hex guard would reject a UUID. Resume mints a NEW
     job id (and session UUID) that inherits the prior transcript, so `{id}` returned
     here differs from the path id; the panel surfaces it as a new row.
+
+    The resume runs in the configured default permission mode, like a dispatch that
+    names none, and that mode faces the ceiling of the project holding the job's
+    directory (403 when refused, TASK-335).
     """
     if not supervisor.valid_job_id(job_id):
         raise HTTPException(status_code=422, detail="invalid job id")
+    pm = config.instance_defaults.permission_mode
     try:
         new_id = await asyncio.to_thread(
             supervisor.resume_background_job,
             job_id,
+            permission_mode=pm,
+            refuse_cwd=lambda cwd: _resume_ceiling_refusal(config, cwd, pm),
             binary=config.claude.binary,
             claude_json=runner.claude_json,
         )
     except claude_cli.ClaudeNotFound as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except supervisor.ResumeNotAllowed as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except supervisor.ResumeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except supervisor.DispatchError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {"id": new_id}
+
+
+def _resume_ceiling_refusal(config: ClausterConfig, cwd: Path, permission_mode: str) -> str | None:
+    """Return the 403 detail when ``permission_mode`` is refused for a job in ``cwd``.
+
+    An explicit mode forces its own flag, so only :data:`CEILING_GATED_MODES` are
+    checked. Those need the ceiling of EVERY project whose real directory holds the
+    job's real directory (:func:`_projects_holding`), so overlapping project
+    directories (one symlinked inside another) can only make the gate stricter, never
+    depend on the order of the ``projects:`` keys. A job in no project has no ceiling
+    and is refused (fail closed).
+    """
+    if permission_mode not in CEILING_GATED_MODES:
+        return None
+    projects = _projects_holding(config, cwd)
+    if not projects:
+        return (
+            f"{permission_mode} is not enabled for this background job: its directory is in "
+            "no project that sets projects.<name>.allow_bypass_permissions: true in "
+            "clauster.yml."
+        )
+    for project in projects:
+        if config.bypass_denied(project, permission_mode):
+            return config.bypass_denied_detail(project, permission_mode=permission_mode)
+    return None
+
+
+def _projects_holding(config: ClausterConfig, cwd: Path) -> list[str]:
+    """Return every project whose directory holds ``cwd``, sorted; empty if none.
+
+    The candidates are every entry directly under ``projects_root``, configured or not
+    and symlinked or not (an entry with no config entry has no ceiling), the first path
+    part of the resolved ``cwd`` under the resolved ``projects_root``, and each valid
+    ``config.projects`` key (which can point outside the root through a symlink).
+    Both sides are compared after ``resolve()``, so ``..`` and symlinks cannot move a
+    job into a project it does not run in, a symlink alias under ``projects_root`` (one
+    project directory reached under two names) brings in the alias's own ceiling, and a
+    directory name is never matched by name alone: ``/tmp/<name>`` does not borrow
+    ``<name>``'s ceiling. An unresolvable ``cwd`` matches nothing (fail closed).
+    """
+    found: set[str] = set()
+    # A NUL byte is never a real directory. POSIX resolve() raises ValueError on it, but
+    # Windows' non-strict resolve() returns the path unresolved, so refuse it up front.
+    if "\x00" in str(cwd):
+        return []
+    try:
+        resolved = cwd.resolve()
+        root = config.projects_root.resolve()
+        if root in resolved.parents:
+            found.add(resolved.relative_to(root).parts[0])
+        for entry in config.projects_root.iterdir():
+            try:
+                base = entry.resolve()
+            except RuntimeError:
+                # A symlink loop (3.11/3.12 raise) leads to no directory, so it cannot
+                # hold the job. Any other resolve error refuses the resume (outer except).
+                continue
+            if resolved == base or base in resolved.parents:
+                found.add(entry.name)
+        for name in config.projects:
+            # A key like ".." would make projects_root's parent a "project" (widening).
+            if not is_valid_project_name(name):
+                continue
+            base = (config.projects_root / name).resolve()
+            if resolved == base or base in resolved.parents:
+                found.add(name)
+    # RuntimeError: a symlink loop on 3.11/3.12. ValueError: a path the OS rejects.
+    except (OSError, RuntimeError, ValueError):
+        return []
+    return sorted(found)

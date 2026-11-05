@@ -242,8 +242,8 @@ async def _resume_hosted(
 
     ``instance`` is the row the route already fetched. Refuses with 404 when the row's
     project no longer exists, then with 403 when the row's stored permission mode is
-    ``bypassPermissions`` and the project's current ``allow_bypass_permissions`` ceiling
-    forbids it. Maps the engine's
+    ``bypassPermissions`` or ``inherit`` and the project's current
+    ``allow_bypass_permissions`` ceiling forbids it. Maps the engine's
     :class:`HostedSessionError` (unknown / still-running / no-uuid / malformed-uuid /
     no-project) to 409 and a daemon spawn failure to 502.
     """

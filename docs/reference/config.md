@@ -101,7 +101,7 @@ row in the table above.
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `spawn_mode` | `same-dir` \| `worktree` \| `session` | `same-dir` | Default spawn mode for new **bridge** sessions (the standard / pty launch flow) — where the session's working directory lives. `worktree` requires a git repo; `session` runs in a fresh sandbox. Bridge launches only — hosted (browser) sessions ignore this. |
-| `permission_mode` | `default` \| `plan` \| `acceptEdits` \| `auto` \| `dontAsk` \| `bypassPermissions` \| `inherit` | `default` | Default permission mode for new bridges. `inherit` is a Clauster sentinel, not a claude mode: it passes **no** `--permission-mode` flag, so the session starts in whatever mode it would pick on its own. Caveat: with no flag passed, an existing `permissions.defaultMode` in a settings file takes effect — including a hand-edited `bypassPermissions` Clauster refuses to write itself. See the `inherit` caveat in the security guide before using it on a project with `allow_bypass_permissions: false`. |
+| `permission_mode` | `default` \| `plan` \| `acceptEdits` \| `auto` \| `dontAsk` \| `bypassPermissions` \| `inherit` | `default` | Default permission mode for new bridges, for background runs that name no mode, and for background resumes. `inherit` is a Clauster sentinel, not a claude mode: it passes **no** `--permission-mode` flag, so the session starts in whatever mode it would pick on its own. With no flag passed, a `permissions.defaultMode: bypassPermissions` in user or managed settings takes effect, so `inherit` is gated like `bypassPermissions`: a project accepts it only with `allow_bypass_permissions: true`, and refuses it with a 403 otherwise. |
 | `verbose` | bool | `false` | Pass `--verbose` to spawned standard `claude remote-control` bridges for detailed connection/session logs — every spawn mode (same-dir/worktree/session). The pty (flag-form) bridge is never passed --verbose. Off by default. |
 | `session_name_prefix` | str \| null | `null` | Optional prefix for auto-generated Remote Control session names (maps to `claude remote-control --remote-control-session-name-prefix`); applies to the standard multi-session bridge only. Unset → claude's default (the hostname). |
 | `capacity` | int | `32` | Max concurrent sessions a single standard bridge runs in `same-dir`/`worktree` spawn mode (≥1); passed to `claude remote-control --capacity`. Ignored for `session` spawn mode and the pty bridge (both single-session). |
@@ -109,7 +109,7 @@ row in the table above.
 <!-- END GEN: instance_defaults -->
 
 Permission modes: `default`, `plan`, `acceptEdits`, `auto`, `dontAsk`,
-`bypassPermissions`. `bypassPermissions` is footgun-gated — see
+`bypassPermissions`. `bypassPermissions` is footgun-gated (as is `inherit`, below) — see
 `projects.<name>.allow_bypass_permissions` below.
 
 **New in 1.1:** `inherit` is a seventh choice and not a claude mode at all: Clauster
@@ -120,11 +120,12 @@ same mode later at runtime does not do. It applies to every launch channel (stan
 bridge, Interactive Session, browser/hosted, and background runs) and is opt-in — the
 shipped default stays `default`.
 
-`inherit` cannot itself *request* `bypassPermissions`, but because no flag is passed,
-an on-disk `permissions.defaultMode` takes effect instead — including a
-`bypassPermissions` one that was hand-edited into a settings file, which Clauster
-refuses to write but cannot prevent. Prefer an explicit mode where
-`allow_bypass_permissions: false` is what you are relying on; the full caveat is in
+Because no flag is passed, a `permissions.defaultMode: bypassPermissions` in user or
+managed settings takes effect under `inherit`. So `inherit` needs the same ceiling
+as `bypassPermissions`: a project accepts it only with
+`projects.<name>.allow_bypass_permissions: true`, and every channel refuses it with
+a `403` otherwise. If you set `permission_mode: inherit` here, launches on a project
+without the ceiling are refused until you pick an explicit mode. The reasons are in
 [bypassPermissions footgun gate](../security.md#bypasspermissions-footgun-gate).
 
 ## `projects` — per-project map (`ProjectConfig`)
@@ -134,7 +135,7 @@ A map of project name → settings. Additive-only; unknown keys ignored.
 <!-- BEGIN GEN: projects -->
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `allow_bypass_permissions` | bool | `false` | The **hard ceiling** for the bypassPermissions footgun gate. A project can never be spawned with `--permission-mode bypassPermissions` unless this is set here in `clauster.yml`. The dashboard's per-session typed-confirm is the second layer. |
+| `allow_bypass_permissions` | bool | `false` | The **hard ceiling** for the bypassPermissions footgun gate. A project can never be spawned with `--permission-mode bypassPermissions`, or with the `inherit` mode (no flag, so a `bypassPermissions` default in user or managed settings would take effect), unless this is set here in `clauster.yml`. The dashboard's per-session typed-confirm for bypassPermissions is the second layer. |
 <!-- END GEN: projects -->
 
 ```yaml

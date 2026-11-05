@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import signal
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,7 +13,7 @@ from fastapi.testclient import TestClient
 from clauster import supervisor
 from clauster.app import create_app
 from clauster.claude_cli import ClaudeNotFound
-from clauster.config import load_config
+from clauster.config import CEILING_GATED_MODES, ClausterConfig, load_config
 
 FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
 
@@ -966,10 +967,35 @@ def test_resume_background_job_dispatches(monkeypatch):
 
     monkeypatch.setattr(supervisor, "list_background_jobs", lambda *a, **k: [_fake_job()])
     monkeypatch.setattr(supervisor, "dispatch_background_job", _fake_dispatch)
-    new_id = supervisor.resume_background_job("29e8026f", binary="/abs/claude")
+    seen: list[Path] = []
+
+    def _allow(cwd):
+        seen.append(cwd)
+        return None
+
+    new_id = supervisor.resume_background_job(
+        "29e8026f", permission_mode="plan", refuse_cwd=_allow, binary="/abs/claude"
+    )
     assert new_id == "newjob01"
     assert captured["cwd"] == Path("/proj")
     assert captured["kw"]["resume"] == _UUID  # the FULL uuid, not the 8-hex id
+    # TASK-335: the mode is passed explicitly (no flag would be the inherit argv), and the
+    # caller's ceiling check saw the job's recorded cwd before the dispatch.
+    assert captured["kw"]["permission_mode"] == "plan"
+    assert seen == [Path("/proj")]
+
+
+def test_resume_background_job_refused_cwd_never_dispatches(monkeypatch):
+    dispatched: list = []
+    monkeypatch.setattr(supervisor, "list_background_jobs", lambda *a, **k: [_fake_job()])
+    monkeypatch.setattr(
+        supervisor, "dispatch_background_job", lambda *a, **k: dispatched.append(a) or "x"
+    )
+    with pytest.raises(supervisor.ResumeNotAllowed, match="not enabled"):
+        supervisor.resume_background_job(
+            "29e8026f", permission_mode="inherit", refuse_cwd=lambda cwd: "not enabled"
+        )
+    assert dispatched == []
 
 
 @pytest.mark.parametrize(
@@ -986,7 +1012,9 @@ def test_resume_background_job_errors(job, match, monkeypatch):
     jobs = [] if job is None else [job]
     monkeypatch.setattr(supervisor, "list_background_jobs", lambda *a, **k: jobs)
     with pytest.raises(supervisor.ResumeError, match=match):
-        supervisor.resume_background_job("29e8026f")
+        supervisor.resume_background_job(
+            "29e8026f", permission_mode="default", refuse_cwd=lambda cwd: None
+        )
 
 
 def test_api_resume_agent(write_config, tmp_path, monkeypatch):
@@ -994,6 +1022,376 @@ def test_api_resume_agent(write_config, tmp_path, monkeypatch):
     r = _client(write_config, tmp_path).post("/api/agents/29e8026f/resume")
     assert r.status_code == 201
     assert r.json() == {"id": "newjob01"}
+
+
+# TASK-335: a bg resume used to pass no --permission-mode at all, which is the inherit argv
+# (a bypassPermissions default in user/managed settings takes effect). It now runs in the
+# configured default mode, gated by the ceiling of the project holding the job's cwd.
+def _resume_via_route(write_config, tmp_path, monkeypatch, *, cwd: Path, extra: str = ""):
+    captured: list[dict] = []
+
+    def _fake_dispatch(cwd, **kw):
+        captured.append({"cwd": cwd, **kw})
+        return "newjob01"
+
+    monkeypatch.setattr(supervisor, "list_background_jobs", lambda *a, **k: [_fake_job(cwd=cwd)])
+    monkeypatch.setattr(supervisor, "dispatch_background_job", _fake_dispatch)
+    cfg = write_config(f"state_dir: {tmp_path}/.s\n{extra}")
+    with TestClient(create_app(load_config(cfg))) as client:
+        r = client.post("/api/agents/29e8026f/resume")
+    return r, captured
+
+
+_INHERIT_DEFAULT = "instance_defaults:\n  permission_mode: inherit\n"
+_ALPHA_CEILING = "projects:\n  alpha:\n    allow_bypass_permissions: true\n"
+
+
+def test_api_resume_agent_passes_the_default_mode(
+    write_config, tmp_path, projects_root, monkeypatch
+):
+    r, captured = _resume_via_route(
+        write_config, tmp_path, monkeypatch, cwd=projects_root / "alpha"
+    )
+    assert r.status_code == 201
+    assert captured[0]["permission_mode"] == "default"  # an explicit flag, never "none"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [_INHERIT_DEFAULT, "instance_defaults:\n  permission_mode: bypassPermissions\n"],
+)
+def test_api_resume_agent_gated_default_without_ceiling_is_403(
+    write_config, tmp_path, projects_root, monkeypatch, extra
+):
+    r, captured = _resume_via_route(
+        write_config, tmp_path, monkeypatch, cwd=projects_root / "alpha", extra=extra
+    )
+    assert r.status_code == 403
+    assert "allow_bypass_permissions" in r.json()["detail"]
+    assert captured == []  # refused before any dispatch
+
+
+def test_api_resume_agent_inherit_with_ceiling_resumes(
+    write_config, tmp_path, projects_root, monkeypatch
+):
+    # Positive control: the ceiling is the only thing the 403 above depends on. A job in a
+    # subdirectory of the project (a worktree, say) is covered by that project's ceiling.
+    r, captured = _resume_via_route(
+        write_config,
+        tmp_path,
+        monkeypatch,
+        cwd=projects_root / "alpha" / "sub",
+        extra=_INHERIT_DEFAULT + _ALPHA_CEILING,
+    )
+    assert r.status_code == 201
+    assert captured[0]["permission_mode"] == "inherit"
+
+
+def _outside(tmp_path: Path) -> Path:
+    # projects_root IS tmp_path here, so "outside" is a sibling of it.
+    return tmp_path.parent / f"elsewhere-{tmp_path.name}"
+
+
+@pytest.mark.parametrize("mode", sorted(CEILING_GATED_MODES))
+@pytest.mark.parametrize("where", ["outside", "root", "dotdot", "dotdot-missing", "sibling"])
+def test_api_resume_agent_gated_mode_outside_the_ceiling_project_is_403(
+    write_config, tmp_path, projects_root, monkeypatch, mode, where
+):
+    # Only alpha has the ceiling. A job that is not really in alpha must not borrow it:
+    # not by its directory name, not at projects_root itself, and not by a `..` that
+    # leads out of alpha (existing or not) — the mapping compares resolved paths.
+    cwd = {
+        "outside": _outside(tmp_path) / "alpha",
+        "root": projects_root,
+        "dotdot": projects_root / "alpha" / ".." / "beta",
+        "dotdot-missing": projects_root / "alpha" / ".." / ".." / "gone" / "x",
+        "sibling": projects_root / "beta",
+    }[where]
+    extra = f"instance_defaults:\n  permission_mode: {mode}\n" + _ALPHA_CEILING
+    r, captured = _resume_via_route(write_config, tmp_path, monkeypatch, cwd=cwd, extra=extra)
+    assert r.status_code == 403
+    assert "allow_bypass_permissions: true" in r.json()["detail"]
+    assert captured == []
+
+
+def test_api_resume_agent_prefix_sibling_does_not_borrow(
+    write_config, tmp_path, projects_root, monkeypatch
+):
+    # Containment is by path parts, not a string prefix: alpha-x is not inside alpha.
+    (projects_root / "alpha-x").mkdir()
+    r, captured = _resume_via_route(
+        write_config,
+        tmp_path,
+        monkeypatch,
+        cwd=projects_root / "alpha-x",
+        extra=_INHERIT_DEFAULT + _ALPHA_CEILING,
+    )
+    assert r.status_code == 403
+    assert captured == []
+
+
+def test_api_resume_agent_nul_byte_cwd_is_403(write_config, tmp_path, projects_root, monkeypatch):
+    # A NUL-byte cwd is refused before resolve() on every OS: a 403, never a 500.
+    r, captured = _resume_via_route(
+        write_config,
+        tmp_path,
+        monkeypatch,
+        cwd=projects_root / "alpha" / "bad\x00name",
+        extra=_INHERIT_DEFAULT + _ALPHA_CEILING,
+    )
+    assert r.status_code == 403
+    assert captured == []
+
+
+def test_projects_holding_refuses_nul_even_when_resolve_does_not_raise(
+    write_config, tmp_path, projects_root, monkeypatch
+):
+    # Windows' non-strict resolve() returns a NUL path unresolved instead of raising, so
+    # emulate that here: the guard, not the ValueError catch, must refuse it.
+    from clauster.routes import agents as agents_module
+
+    config = load_config(write_config(_ALPHA_CEILING))
+    monkeypatch.setattr(Path, "resolve", lambda self, strict=False: self)
+    assert agents_module._projects_holding(config, projects_root / "alpha" / "bad\x00name") == []
+
+
+_A_ON = "  a:\n    allow_bypass_permissions: true\n"
+_B_ON = "  b:\n    allow_bypass_permissions: true\n"
+_B_OFF = "  b:\n    allow_bypass_permissions: false\n"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="os.symlink needs privilege on Windows")
+@pytest.mark.parametrize(
+    ("projects_yaml", "expected"),
+    [
+        # b (no ceiling) listed after / before a (ceiling): the order must not matter.
+        (
+            _A_ON + _B_OFF,
+            403,
+        ),
+        (
+            _B_OFF + _A_ON,
+            403,
+        ),
+        # b with no config entry at all is a project with no ceiling, too.
+        ("  a:\n    allow_bypass_permissions: true\n", 403),
+        # Positive control: both ceilings on -> the overlap is allowed.
+        (
+            _A_ON + _B_ON,
+            201,
+        ),
+    ],
+)
+def test_api_resume_agent_overlapping_projects_need_every_ceiling(
+    write_config, tmp_path, projects_root, monkeypatch, projects_yaml, expected
+):
+    # projects_root/a is a symlink to projects_root/b/sub, so a job in b/sub/x is in both
+    # projects: every one of them must allow the gated mode.
+    (projects_root / "b" / "sub" / "x").mkdir(parents=True)
+    (projects_root / "a").symlink_to(projects_root / "b" / "sub", target_is_directory=True)
+    r, captured = _resume_via_route(
+        write_config,
+        tmp_path,
+        monkeypatch,
+        cwd=projects_root / "b" / "sub" / "x",
+        extra=_INHERIT_DEFAULT + "projects:\n" + projects_yaml,
+    )
+    assert r.status_code == expected
+    assert (captured == []) is (expected == 403)
+
+
+def test_api_resume_agent_project_with_ceiling_off_names_the_project(
+    write_config, tmp_path, projects_root, monkeypatch
+):
+    extra = _INHERIT_DEFAULT + "projects:\n  alpha:\n    allow_bypass_permissions: false\n"
+    r, captured = _resume_via_route(
+        write_config, tmp_path, monkeypatch, cwd=projects_root / "alpha", extra=extra
+    )
+    assert r.status_code == 403
+    assert r.json() == {
+        "detail": ClausterConfig.bypass_denied_detail("alpha", permission_mode="inherit")
+    }
+    assert captured == []
+
+
+def test_api_resume_agent_ignores_a_traversal_project_key(
+    write_config, tmp_path, projects_root, monkeypatch
+):
+    # A `projects:` key that is not a valid project name (here "..") must not make the
+    # parent of projects_root a project whose ceiling covers everything under it.
+    extra = _INHERIT_DEFAULT + "projects:\n  '..':\n    allow_bypass_permissions: true\n"
+    r, captured = _resume_via_route(
+        write_config, tmp_path, monkeypatch, cwd=_outside(tmp_path), extra=extra
+    )
+    assert r.status_code == 403
+    assert captured == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="os.symlink needs privilege on Windows")
+def test_api_resume_agent_symlink_out_of_the_project_is_403(
+    write_config, tmp_path, tmp_path_factory, projects_root, monkeypatch
+):
+    # A link inside alpha that points outside: the job really runs outside alpha.
+    target = tmp_path_factory.mktemp("outside335")
+    (projects_root / "alpha" / "link").symlink_to(target, target_is_directory=True)
+    r, captured = _resume_via_route(
+        write_config,
+        tmp_path,
+        monkeypatch,
+        cwd=projects_root / "alpha" / "link",
+        extra=_INHERIT_DEFAULT + _ALPHA_CEILING,
+    )
+    assert r.status_code == 403
+    assert captured == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="os.symlink needs privilege on Windows")
+def test_api_resume_agent_symlinked_project_keeps_its_ceiling(
+    write_config, tmp_path, tmp_path_factory, projects_root, monkeypatch
+):
+    # Positive control for the resolved comparison: a project whose directory is itself
+    # a symlink still matches its own ceiling (both sides resolve to the same place).
+    real = tmp_path_factory.mktemp("delta-real335")
+    (projects_root / "delta").symlink_to(real, target_is_directory=True)
+    extra = _INHERIT_DEFAULT + "projects:\n  delta:\n    allow_bypass_permissions: true\n"
+    r, captured = _resume_via_route(
+        write_config, tmp_path, monkeypatch, cwd=projects_root / "delta", extra=extra
+    )
+    assert r.status_code == 201
+    assert captured[0]["permission_mode"] == "inherit"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="os.symlink needs privilege on Windows")
+def test_api_resume_agent_prefix_of_a_symlinked_project_does_not_borrow(
+    write_config, tmp_path, tmp_path_factory, projects_root, monkeypatch
+):
+    # Outside projects_root only the configured match decides, so pin that containment
+    # is by path parts: <real>-2 shares <real>'s string prefix but is not inside it.
+    real = tmp_path_factory.mktemp("delta-real335")
+    sibling = real.parent / f"{real.name}-2"
+    sibling.mkdir()
+    (projects_root / "delta").symlink_to(real, target_is_directory=True)
+    extra = _INHERIT_DEFAULT + "projects:\n  delta:\n    allow_bypass_permissions: true\n"
+    r, captured = _resume_via_route(write_config, tmp_path, monkeypatch, cwd=sibling, extra=extra)
+    assert r.status_code == 403
+    assert captured == []
+
+
+_SYMLINK_SKIP = pytest.mark.skipif(
+    sys.platform == "win32", reason="os.symlink needs privilege on Windows"
+)
+
+
+@_SYMLINK_SKIP
+@pytest.mark.parametrize("mode", sorted(CEILING_GATED_MODES))
+@pytest.mark.parametrize("via", ["alias", "real", "alias-sub", "real-sub"])
+def test_api_resume_agent_unconfigured_symlink_alias_denies(
+    write_config, tmp_path, projects_root, monkeypatch, mode, via
+):
+    # projects_root/omega is an alias of alpha with no config entry, so no ceiling. A job
+    # in that directory, or below it, is in omega too, whichever name its cwd uses.
+    (projects_root / "alpha" / "sub").mkdir()
+    (projects_root / "omega").symlink_to(projects_root / "alpha", target_is_directory=True)
+    cwd = projects_root / ("omega" if via.startswith("alias") else "alpha")
+    if via.endswith("-sub"):
+        cwd = cwd / "sub"
+    extra = f"instance_defaults:\n  permission_mode: {mode}\n" + _ALPHA_CEILING
+    r, captured = _resume_via_route(write_config, tmp_path, monkeypatch, cwd=cwd, extra=extra)
+    assert r.status_code == 403
+    assert r.json() == {
+        "detail": ClausterConfig.bypass_denied_detail("omega", permission_mode=mode)
+    }
+    assert captured == []
+
+
+@_SYMLINK_SKIP
+def test_api_resume_agent_configured_symlink_alias_with_ceiling_resumes(
+    write_config, tmp_path, projects_root, monkeypatch
+):
+    # Positive control: give the alias its own ceiling and the same job resumes.
+    (projects_root / "omega").symlink_to(projects_root / "alpha", target_is_directory=True)
+    extra = _INHERIT_DEFAULT + _ALPHA_CEILING + "  omega:\n    allow_bypass_permissions: true\n"
+    r, captured = _resume_via_route(
+        write_config, tmp_path, monkeypatch, cwd=projects_root / "omega", extra=extra
+    )
+    assert r.status_code == 201
+    assert captured[0]["permission_mode"] == "inherit"
+
+
+@_SYMLINK_SKIP
+@pytest.mark.parametrize("kind", ["loop", "dangling"])
+def test_api_resume_agent_loop_or_dangling_link_cwd_is_403(
+    write_config, tmp_path, projects_root, monkeypatch, kind
+):
+    link = projects_root / "zeta"
+    link.symlink_to(link if kind == "loop" else projects_root / "no-such-dir")
+    r, captured = _resume_via_route(
+        write_config, tmp_path, monkeypatch, cwd=link, extra=_INHERIT_DEFAULT + _ALPHA_CEILING
+    )
+    assert r.status_code == 403
+    assert captured == []
+
+
+def test_projects_holding_skips_a_looping_entry(write_config, projects_root, monkeypatch):
+    # A looping entry under projects_root leads to no directory, so it cannot hold a job:
+    # a job in alpha still maps to alpha alone. Path.resolve is forced to raise for the
+    # entry, as 3.11/3.12 do on a loop, so no real symlink is needed (runs on Windows).
+    from clauster.routes import agents as agents_module
+
+    config = load_config(write_config(_ALPHA_CEILING))
+    (projects_root / "zeta").mkdir()
+    real_resolve = Path.resolve
+
+    def _resolve(self, strict=False):
+        if self.name == "zeta":
+            raise RuntimeError("Symlink loop")
+        return real_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", _resolve)
+    assert agents_module._projects_holding(config, projects_root / "alpha") == ["alpha"]
+
+
+def test_projects_holding_unreadable_projects_root_matches_nothing(
+    write_config, projects_root, monkeypatch
+):
+    # Any other failure while listing projects_root refuses the resume (fail closed).
+    from clauster.routes import agents as agents_module
+
+    config = load_config(write_config(_ALPHA_CEILING))
+
+    def _boom(self):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(Path, "iterdir", _boom)
+    assert agents_module._projects_holding(config, projects_root / "alpha") == []
+
+
+def test_api_resume_agent_unresolvable_cwd_is_403(
+    write_config, tmp_path, projects_root, monkeypatch
+):
+    # Python 3.11/3.12 raise RuntimeError on a symlink loop; any resolve failure fails closed.
+    class _LoopPath(type(Path())):
+        def resolve(self, strict=False):
+            raise RuntimeError("Symlink loop")
+
+    r, captured = _resume_via_route(
+        write_config,
+        tmp_path,
+        monkeypatch,
+        cwd=_LoopPath(projects_root / "alpha"),
+        extra=_INHERIT_DEFAULT + _ALPHA_CEILING,
+    )
+    assert r.status_code == 403
+    assert captured == []
+
+
+def test_api_resume_agent_outside_projects_explicit_mode_resumes(
+    write_config, tmp_path, monkeypatch
+):
+    # A non-gated default forces its own flag, so the ceiling does not apply to it.
+    r, captured = _resume_via_route(write_config, tmp_path, monkeypatch, cwd=_outside(tmp_path))
+    assert r.status_code == 201
+    assert captured[0]["permission_mode"] == "default"
 
 
 def test_api_resume_agent_invalid_job_id(write_config, tmp_path):

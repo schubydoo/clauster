@@ -566,19 +566,38 @@ startup, so a changed ceiling takes effect after a restart. The check does not s
 a session that is still running: a session keeps the mode it was started with until
 you stop it.
 
-The `inherit` permission mode (**No forced mode** in the launch picker) cannot itself
-*request* `bypassPermissions`, and Clauster refuses to write that value into any
-`settings.json` it manages. **But the caveat is structural:** because no
-`--permission-mode` flag is passed, an existing `permissions.defaultMode` in the
-project, local, or user settings file takes effect — including a `bypassPermissions`
-one that was hand-edited, committed to the repo, or enterprise-managed, which Clauster
-cannot prevent. Before `inherit` existed, the always-passed flag overrode any such
-file; with `inherit`, that file wins. On a project with
-`allow_bypass_permissions: false`, prefer an explicit mode — or audit the project's
-settings files before offering `inherit` to its operators. The mode is still screened
-against the allowed set before any spawn, so no unrecognized string ever reaches the
-subprocess, and `inherit` is not a value this deployment can write into
-`permissions.defaultMode`: it is a Clauster launch-time sentinel, not a claude mode.
+The same ceiling gates the `inherit` permission mode (**No forced mode** in the
+launch picker). `inherit` passes no `--permission-mode` flag, so the session takes
+its mode from `permissions.defaultMode` in a settings file. Claude Code accepts a
+`bypassPermissions` value there from user settings (`~/.claude/settings.json`),
+managed settings, and a `--settings` file. Clauster refuses to write that value, but
+it cannot prevent a person or an administrator from writing it. Clauster also cannot
+read every managed source (server-managed settings, and MDM or registry policies), so
+it does not try to inspect the files. Instead, it refuses `inherit` itself:
+
+- The launch picker offers **No forced mode** only on a project with
+  `allow_bypass_permissions: true`.
+- Every launch channel (standard bridge, Interactive Session, browser/hosted, and
+  background runs) refuses `inherit` with a `403` on any other project. This
+  includes a request that names no mode while `instance_defaults.permission_mode`
+  is `inherit`.
+- A resume of a stopped bridge or a hosted session that was started with `inherit`
+  gets the same `403` after you remove the ceiling.
+- A resume of an ended background run uses `instance_defaults.permission_mode`, like
+  a new background run that names no mode. If that default is `inherit` or
+  `bypassPermissions`, the resume needs the ceiling of every project whose directory
+  holds the run's directory. This includes each entry under `projects_root`, with or
+  without a config entry, so a symlink alias directly under `projects_root` needs its
+  own ceiling too. Clauster compares the resolved paths, so a `..` cannot borrow
+  another project's ceiling, and a run in no project is refused. A deeper link, or a
+  link outside `projects_root`, counts as the directory that it resolves to.
+
+Claude Code ignores `bypassPermissions` in a project's `.claude/settings.json` and
+`.claude/settings.local.json` (the session starts in the default mode), so a value
+committed to a repository cannot turn `inherit` into bypass. Claude Code versions
+before 2.1.257 did not ignore it. The `inherit` value is a Clauster launch-time
+sentinel, not a claude mode, so Clauster never writes it into
+`permissions.defaultMode`, and it never reaches the subprocess argv.
 
 ## Ghost-environment reaper
 

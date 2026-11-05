@@ -152,12 +152,57 @@ def test_build_cmd_still_passes_every_real_mode(runner_config):
 
 async def test_inherit_passes_validation(runner_config, monkeypatch):
     # Validate-before-spawn stays intact: the sentinel is an ACCEPTED value (not a
-    # string smuggled past the gate), and the spawned bridge records it.
+    # string smuggled past the gate), and the spawned bridge records it. The project
+    # needs the bypass ceiling for it (TASK-335; the refusal is asserted below).
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
-    runner = _runner(runner_config)
+    config, claude_json = runner_config
+    config.projects = {"alpha": ProjectConfig(allow_bypass_permissions=True)}
+    runner = SessionRunner(config, claude_json=claude_json)
     inst = await runner.spawn("alpha", permission_mode="inherit")
     assert inst.permission_mode == "inherit"
     await runner.stop(inst.instance_id)
+
+
+async def test_inherit_without_ceiling_rejected(runner_config):
+    # TASK-335: inherit passes no flag, so a bypassPermissions defaultMode in user or
+    # managed settings would take effect. Without the ceiling the bridge is refused
+    # before any spawn, with the inherit-specific reason.
+    runner = _runner(runner_config)
+    with pytest.raises(PermissionModeNotAllowed) as exc_info:
+        await runner.spawn("alpha", permission_mode="inherit")
+    assert str(exc_info.value) == ClausterConfig.bypass_denied_detail(
+        "alpha", permission_mode="inherit"
+    )
+    assert runner.list_instances() == []
+
+
+@pytest.mark.parametrize("mode", ["bypassPermissions", "inherit"])
+async def test_bridge_resume_after_ceiling_removed_rejected(runner_config, monkeypatch, mode):
+    # A resume respawns with the stored mode, so the ceiling is re-applied against the
+    # CURRENT config: a bridge started with the ceiling is refused once it is gone.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, claude_json = runner_config
+    config.projects = {"alpha": ProjectConfig(allow_bypass_permissions=True)}
+    runner = SessionRunner(config, claude_json=claude_json)
+    inst = await runner.spawn("alpha", permission_mode=mode)
+    await runner.stop(inst.instance_id)
+    config.projects = {}
+    with pytest.raises(PermissionModeNotAllowed):
+        await runner.resume(inst.instance_id)
+    # Positive control: with the ceiling back, the same stored row resumes.
+    config.projects = {"alpha": ProjectConfig(allow_bypass_permissions=True)}
+    revived = await runner.resume(inst.instance_id)
+    assert revived.permission_mode == mode
+    await runner.stop(revived.instance_id)
+
+
+async def test_inherit_default_without_ceiling_rejected(runner_config):
+    # The configured default is gated too: omitting permission_mode cannot sidestep it.
+    config, claude_json = runner_config
+    config.instance_defaults.permission_mode = "inherit"
+    runner = SessionRunner(config, claude_json=claude_json)
+    with pytest.raises(PermissionModeNotAllowed):
+        await runner.spawn("alpha")
 
 
 # ----- validation -------------------------------------------------------
@@ -1014,6 +1059,34 @@ def test_bypass_option_hidden_without_ceiling(write_config):
     assert _BYPASS_OPTION not in client.get("/").text
 
 
+_INHERIT_OPTION = '<option value="inherit">'
+
+
+def _perm_select(html: str, project: str) -> str:
+    start = html.index(f'id="perm-{project}"')
+    return html[start : html.index("</select>", start)]
+
+
+def test_inherit_option_hidden_without_ceiling(write_config):
+    # TASK-335: inherit is offered only where the bypass ceiling is on, in the option
+    # list AND in the select's effect tooltip.
+    html = _client(write_config).get("/").text
+    select = _perm_select(html, "alpha")
+    assert _INHERIT_OPTION not in select
+    assert "inherit = " not in select
+    assert '<option value="default">' in select  # the explicit modes stay offered
+
+
+def test_inherit_option_shown_with_ceiling(write_config):
+    extra = "projects:\n  alpha:\n    allow_bypass_permissions: true\n"
+    html = _client(write_config, extra).get("/").text
+    alpha = _perm_select(html, "alpha")
+    assert _INHERIT_OPTION in alpha
+    assert "inherit = " in alpha
+    # The ceiling is per project: beta has none, so it still hides the option.
+    assert _INHERIT_OPTION not in _perm_select(html, "beta")
+
+
 def test_bypass_option_shown_with_ceiling(write_config):
     extra = "projects:\n  alpha:\n    allow_bypass_permissions: true\n"
     client = _client(write_config, extra)
@@ -1050,6 +1123,10 @@ def _ceiling_config(projects_root, *, allow: bool) -> ClausterConfig:
         ("bypassPermissions", False, True),
         # Ceiling permits bypass for this project -> allowed.
         ("bypassPermissions", True, False),
+        # inherit passes no flag, so a bypass defaultMode from user/managed settings would
+        # take effect: the ceiling gates it exactly like bypass (TASK-335).
+        ("inherit", False, True),
+        ("inherit", True, False),
         # Non-bypass modes are never gated by the ceiling, regardless of the flag.
         ("default", False, False),
         ("default", True, False),
@@ -1068,7 +1145,18 @@ def test_bypass_denied_unknown_project_denies_bypass(projects_root):
     # An absent project has no ceiling entry -> allows_bypass is False -> bypass is denied.
     config = _ceiling_config(projects_root, allow=True)
     assert config.bypass_denied("ghost", "bypassPermissions") is True
+    assert config.bypass_denied("ghost", "inherit") is True
     assert config.bypass_denied("ghost", "default") is False
+
+
+def test_bypass_denied_detail_names_the_refused_mode():
+    bypass = ClausterConfig.bypass_denied_detail("alpha", permission_mode="bypassPermissions")
+    inherit = ClausterConfig.bypass_denied_detail("alpha", permission_mode="inherit")
+    assert bypass.startswith("bypassPermissions is not enabled for project 'alpha'")
+    assert inherit.startswith("The inherit permission mode is not enabled for project 'alpha'")
+    # Both name the one config key that lifts the refusal.
+    for detail in (bypass, inherit):
+        assert "projects.<name>.allow_bypass_permissions: true" in detail
 
 
 # Every spawn entry point must reach the SAME decision. Parametrize the request across the
@@ -1084,27 +1172,34 @@ def test_bypass_denied_unknown_project_denies_bypass(projects_root):
 # binary or daemon. The bridge ALLOW path is covered at the runner level by
 # test_bypass_with_ceiling_allowed (which wires the fake `claude` via runner_config); the
 # hosted/background ALLOW paths clear the gate without a real spawn and are asserted below.
-def _bypass_post(client: TestClient, channel: str):
+def _bypass_post(client: TestClient, channel: str, mode: str = "bypassPermissions"):
     if channel == "background":
         # prompt required since #1033 (unregistered bg dispatch); ceiling intent unchanged
         return client.post(
             "/api/agents",
-            json={"project": "alpha", "permission_mode": "bypassPermissions", "prompt": "hi"},
+            json={"project": "alpha", "permission_mode": mode, "prompt": "hi"},
         )
-    body = {"project": "alpha", "permission_mode": "bypassPermissions"}
+    body = {"project": "alpha", "permission_mode": mode}
     if channel == "hosted":
         body["channel"] = "hosted"
     return client.post("/api/instances", json=body)
 
 
+@pytest.mark.parametrize("mode", ["bypassPermissions", "inherit"])
 @pytest.mark.parametrize("channel", ["bridge", "hosted", "background"])
-def test_every_channel_rejects_bypass_without_ceiling(write_config, channel):
+def test_every_channel_rejects_bypass_without_ceiling(write_config, channel, mode):
     # `with` so the lifespan runs for the background-task route (testing.md); harmless for the
-    # others. No ceiling configured -> every channel must 403 through the shared predicate.
+    # others. No ceiling configured -> every channel must 403 through the shared predicate,
+    # for bypass AND for inherit (TASK-335), with the one shared wording.
     with _client(write_config) as client:
-        assert _bypass_post(client, channel).status_code == 403
+        resp = _bypass_post(client, channel, mode)
+        assert resp.status_code == 403
+        assert resp.json() == {
+            "detail": ClausterConfig.bypass_denied_detail("alpha", permission_mode=mode)
+        }
 
 
+@pytest.mark.parametrize("mode", ["bypassPermissions", "inherit"])
 @pytest.mark.parametrize(
     ("channel", "expected_status"),
     [
@@ -1115,7 +1210,7 @@ def test_every_channel_rejects_bypass_without_ceiling(write_config, channel):
     ],
 )
 def test_spawnless_channels_clear_gate_with_ceiling(
-    write_config, monkeypatch, channel, expected_status
+    write_config, monkeypatch, channel, expected_status, mode
 ):
     # The two channels that can clear the gate via HTTP without a real spawn: hosted dead-ends
     # at the absent daemon (503), background dispatches through a stub (201). Both prove the
@@ -1124,6 +1219,6 @@ def test_spawnless_channels_clear_gate_with_ceiling(
         "clauster.supervisor.dispatch_background_job", lambda cwd, **kwargs: "abcd1234"
     )
     with _client(write_config, _BYPASS_CEILING) as client:
-        resp = _bypass_post(client, channel)
+        resp = _bypass_post(client, channel, mode)
         assert resp.status_code != 403
         assert resp.status_code == expected_status
