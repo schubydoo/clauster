@@ -2687,44 +2687,108 @@ def test_carries_bundle_env(env, carries):
 
 
 @pytest.mark.skipif(not hasattr(os, "getuid"), reason="/proc ownership is POSIX")
-def test_proc_environ_reads_an_own_process_and_skips_the_rest(tmp_path, monkeypatch):
+def test_proc_environ_tells_gone_from_unreadable(tmp_path, monkeypatch):
     (tmp_path / "7").mkdir()
     (tmp_path / "7" / "environ").write_bytes(b"_PYI_X=1\0PATH=/usr/bin\0junk\0")
+    (tmp_path / "9").mkdir()
+    (tmp_path / "9" / "environ").write_bytes(b"")  # a zombie / exiting process reads empty
+    (tmp_path / "10").mkdir()  # the pid vanished between the stat and the read
     assert ops_mod._proc_environ(7, tmp_path) == {"_PYI_X": "1", "PATH": "/usr/bin"}
-    assert ops_mod._proc_environ(8, tmp_path) is None  # gone: skipped, never an error
+    assert ops_mod._proc_environ(8, tmp_path) == "gone"  # no such pid: it exited
+    assert ops_mod._proc_environ(9, tmp_path) == "unreadable"
+    assert ops_mod._proc_environ(10, tmp_path) == "gone"
     other_uid = os.getuid() + 1
     monkeypatch.setattr(ops_mod.os, "getuid", lambda: other_uid)
-    assert ops_mod._proc_environ(7, tmp_path) is None  # another user's process: not read
+    assert ops_mod._proc_environ(7, tmp_path) == "unreadable"  # another user's: not read
+
+
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="/proc ownership is POSIX")
+def test_proc_environ_a_permission_error_is_unreadable_not_gone(tmp_path, monkeypatch):
+    (tmp_path / "7").mkdir()
+    (tmp_path / "7" / "environ").write_bytes(b"PATH=/usr/bin\0")
+    real_read = Path.read_bytes
+
+    def _denied(self):
+        if self.name == "environ":
+            raise PermissionError(13, "Permission denied")
+        return real_read(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _denied)
+    assert ops_mod._proc_environ(7, tmp_path) == "unreadable"
 
 
 def _bundle_check(monkeypatch, suspects, envs, *, platform="linux"):
+    """Run the row with a fake /proc reader: ``envs`` maps pid -> env, "gone" or "unreadable"."""
     monkeypatch.setattr(ops_mod.sys, "platform", platform)
     monkeypatch.setattr(ops_mod, "_bundle_env_suspects", lambda config, projects: suspects)
-    return ops_mod._check_bundle_env(None, [], read_environ=envs.get)
+    return ops_mod._check_bundle_env(None, [], read_environ=lambda pid: envs[pid])
+
+
+def _assert_no_values(detail):
+    for value in ("/usr/local/bin/clauster", "_MEI0042abc", "/opt/lib", "/usr/bin"):
+        assert value not in detail  # names and pids only (redaction invariant)
 
 
 def test_bundle_env_check_names_each_leaking_process_and_never_a_value(monkeypatch):
-    suspects = [
-        ("bridge for a", 11),
-        ("pty bridge for b", 22),
-        ("claustrum daemon", 33),
-        ("bridge for c", 44),
-    ]
-    envs = {11: _LEAKED, 22: _MEI_PATH, 44: _CLEAN}  # 33 is unreadable: skipped
-    check = _bundle_check(monkeypatch, suspects, envs)
+    suspects = [("bridge for a", 11), ("pty bridge for b", 22), ("bridge for c", 44)]
+    check = _bundle_check(monkeypatch, suspects, {11: _LEAKED, 22: _MEI_PATH, 44: _CLEAN})
     assert check.status == WARN
     assert "bridge for a (pid 11)" in check.detail
     assert "pty bridge for b (pid 22)" in check.detail
-    assert "pid 33" not in check.detail
     assert "pid 44" not in check.detail
     assert "restart it to drop the old binary's environment" in check.detail
-    for value in ("/usr/local/bin/clauster", "_MEI0042abc", "/opt/lib", "/usr/bin"):
-        assert value not in check.detail  # names and pids only (redaction invariant)
+    assert "could not be read" not in check.detail
+    _assert_no_values(check.detail)
 
 
-def test_bundle_env_check_ok_when_clean_or_nothing_runs(monkeypatch):
-    clean = _bundle_check(monkeypatch, [("bridge for a", 11)], {11: _CLEAN})
-    assert clean.status == OK and "1 running process(es)" in clean.detail
+def test_bundle_env_check_all_readable_and_clean_is_ok(monkeypatch):
+    suspects = [("bridge for a", 11), ("claustrum daemon", 33)]
+    check = _bundle_check(monkeypatch, suspects, {11: _CLEAN, 33: _CLEAN})
+    assert check.status == OK
+    assert check.detail == "2 running process(es) have a clean environment"
+
+
+def test_bundle_env_check_mixed_clean_and_unreadable_warns_and_names_the_unread(monkeypatch):
+    suspects = [("bridge for a", 11), ("bridge for b", 12), ("claustrum daemon", 33)]
+    check = _bundle_check(monkeypatch, suspects, {11: _CLEAN, 12: _CLEAN, 33: "unreadable"})
+    assert check.status == WARN  # an unread process might be the leaking one
+    assert check.detail == "2 clean, 1 could not be read: claustrum daemon (pid 33)"
+
+
+def test_bundle_env_check_all_unreadable_is_not_completed(monkeypatch):
+    # Invariant 1: reading nothing must never look like a pass.
+    suspects = [("bridge for a", 11), ("claustrum daemon", 33)]
+    check = _bundle_check(monkeypatch, suspects, {11: "unreadable", 33: "unreadable"})
+    assert check.status == WARN
+    assert check.detail.startswith(
+        "check not completed: no tracked process environment could be read"
+    )
+    assert "bridge for a (pid 11)" in check.detail
+    assert "claustrum daemon (pid 33)" in check.detail
+
+
+def test_bundle_env_check_leaked_plus_unreadable_reports_both(monkeypatch):
+    suspects = [("bridge for a", 11), ("claustrum daemon", 33)]
+    check = _bundle_check(monkeypatch, suspects, {11: _LEAKED, 33: "unreadable"})
+    assert check.status == WARN
+    assert "old standalone binary's environment: bridge for a (pid 11)" in check.detail
+    assert "could not be read: claustrum daemon (pid 33)" in check.detail
+    _assert_no_values(check.detail)
+
+
+def test_bundle_env_check_leaves_out_a_process_that_exited(monkeypatch):
+    # A process gone since it was listed hands its environment to nobody: not a finding,
+    # not a clean result, and not an unreadable one either.
+    one_gone = _bundle_check(
+        monkeypatch, [("bridge for a", 11), ("bridge for b", 12)], {11: _CLEAN, 12: "gone"}
+    )
+    assert one_gone.status == OK
+    assert one_gone.detail == "1 running process(es) have a clean environment"
+    all_gone = _bundle_check(monkeypatch, [("bridge for a", 11)], {11: "gone"})
+    assert all_gone.status == OK and "no running bridge" in all_gone.detail
+
+
+def test_bundle_env_check_ok_when_nothing_runs(monkeypatch):
     none = _bundle_check(monkeypatch, [], {})
     assert none.status == OK and "no running bridge" in none.detail
 

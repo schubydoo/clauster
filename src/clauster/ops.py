@@ -1002,20 +1002,36 @@ def _check_node_toolchain(config: ClausterConfig) -> Check | None:
 _BUNDLE_ENV_HINT = "restart it to drop the old binary's environment"
 
 
-def _proc_environ(pid: int, proc_root: Path = Path("/proc")) -> dict[str, str] | None:
-    """Return the environment ``pid`` started with, or ``None`` when it cannot be read.
+#: ``_proc_environ`` results that are not an environment. A GONE process exited after it was
+#: listed, so it hands nothing to anyone and is left out of the counts. An UNREADABLE one is
+#: still running (or cannot be told apart from running) but its environment was not read, so
+#: it is reported: counting it as clean would claim a check that never happened.
+_ENV_GONE = "gone"
+_ENV_UNREADABLE = "unreadable"
+EnvironRead = dict[str, str] | Literal["gone", "unreadable"]
 
-    Reads ``/proc/<pid>/environ`` for a process of THIS user only: another user's
-    process, a gone pid, or any read error is ``None`` (skipped, never an error). The
-    values are returned for the caller to classify and are never reported.
+
+def _proc_environ(pid: int, proc_root: Path = Path("/proc")) -> EnvironRead:
+    """Return the environment ``pid`` started with, or why it could not be read.
+
+    Reads ``/proc/<pid>/environ`` for a process of THIS user only. ``_ENV_GONE`` when the
+    pid no longer exists (``FileNotFoundError`` / ``ProcessLookupError``, the kernel's
+    answer for an exited process). ``_ENV_UNREADABLE`` for another user's process, a
+    permission or other read error, or an empty environ (a process exiting as a zombie
+    reads empty; a bridge never runs with an empty environment). The values are returned
+    for the caller to classify and are never reported.
     """
     proc_dir = proc_root / str(pid)
     try:
         if proc_dir.stat().st_uid != os.getuid():
-            return None
+            return _ENV_UNREADABLE
         raw = (proc_dir / "environ").read_bytes()
+    except (FileNotFoundError, ProcessLookupError):
+        return _ENV_GONE
     except (OSError, ValueError):
-        return None
+        return _ENV_UNREADABLE
+    if not raw:
+        return _ENV_UNREADABLE
     env: dict[str, str] = {}
     for item in raw.split(b"\0"):
         name, sep, value = item.partition(b"=")
@@ -1104,41 +1120,61 @@ def _check_bundle_env(
     config: ClausterConfig,
     projects: list[Project],
     *,
-    read_environ: Callable[[int], dict[str, str] | None] = _proc_environ,
+    read_environ: Callable[[int], EnvironRead] = _proc_environ,
 ) -> Check:
     """Flag bridges and daemons that still carry an old standalone binary's env (#1708).
 
     A release before the fix passed the binary's ``_PYI_*`` state and its ``_MEI…``
     library path to everything it started. Bridges, pty keepers and the claustrum
     daemon outlive a Clauster upgrade, so they keep handing that environment to every
-    session until they are restarted. Linux only (it reads ``/proc``). Never FAILs: an
-    unreadable process is skipped, and the row names only the process and its pid,
-    never an environment value.
+    session until they are restarted. Linux only (it reads ``/proc``).
+
+    Three counts, so the row never claims a check it did not do (invariant 1): leaked,
+    clean, and not readable. A process that exited after it was listed is left out. Any
+    leaked or unreadable process makes the row a WARN, and when no environment could be
+    read at all it says the check was not completed. It never FAILs, and it names only
+    the process and its pid, never an environment value.
     """
     if not sys.platform.startswith("linux"):
         return Check("bundle-env", OK, f"not checked on {sys.platform}: it reads Linux /proc")
     try:
         suspects = _bundle_env_suspects(config, projects)
-        leaking = []
+        leaking: list[str] = []
+        unreadable: list[str] = []
+        clean = 0
         for label, pid in suspects:
             env = read_environ(pid)
-            if env is not None and _carries_bundle_env(env):
+            if env == _ENV_GONE:
+                continue
+            if not isinstance(env, dict):
+                unreadable.append(f"{label} (pid {pid})")
+            elif _carries_bundle_env(env):
                 leaking.append(f"{label} (pid {pid})")
+            else:
+                clean += 1
     except Exception as exc:  # noqa: BLE001 - an advisory probe must never break doctor
         # The traceback names files and pids, never an environment value.
         _log.debug("bundle-env probe failed", exc_info=True)
         return Check("bundle-env", WARN, f"could not check: {type(exc).__name__}")
+    not_read = f"could not be read: {', '.join(unreadable)}" if unreadable else ""
     if leaking:
+        detail = (
+            "started with an old standalone binary's environment: "
+            + ", ".join(leaking)
+            + f" — {_BUNDLE_ENV_HINT}"
+        )
+        return Check("bundle-env", WARN, detail + (f"; {not_read}" if not_read else ""))
+    if unreadable and not clean:
         return Check(
             "bundle-env",
             WARN,
-            "started with an old standalone binary's environment: "
-            + ", ".join(leaking)
-            + f" — {_BUNDLE_ENV_HINT}",
+            f"check not completed: no tracked process environment could be read ({not_read})",
         )
-    if not suspects:
+    if unreadable:
+        return Check("bundle-env", WARN, f"{clean} clean, {len(unreadable)} {not_read}")
+    if not clean:
         return Check("bundle-env", OK, "no running bridge, agent or claustrum daemon to check")
-    return Check("bundle-env", OK, f"{len(suspects)} running process(es) have a clean environment")
+    return Check("bundle-env", OK, f"{clean} running process(es) have a clean environment")
 
 
 def _check_port(host: str, port: int) -> Check:

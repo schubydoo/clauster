@@ -767,7 +767,7 @@ present in every run:
 | `systemd` | `KillMode=process` (bridges survive a restart) | a restart would kill live pty bridges |
 | `node-toolchain` | node resolvable for npx MCP servers | nvm-only node invisible to bridges |
 | `workspace-trust` | `N/M discovered projects trusted` (OK when all are) | any untrusted discovered project — a session there will stall on the trust prompt (see above) |
-| `bundle-env` | no running bridge, background agent or claustrum daemon has an older binary's environment (Linux only) | a process that an older standalone binary started; restart it as [described above](#in-a-session-node-fails-with-glibc_238-not-found-or-clauster-cannot-load-libpython) |
+| `bundle-env` | no running bridge, background agent or claustrum daemon has an older binary's environment (Linux only) | a process that an older standalone binary started; restart it as [described above](#in-a-session-node-fails-with-glibc_238-not-found-or-clauster-cannot-load-libpython). `could not be read` or `check not completed` means doctor could not read that process's environment, so it does not know: check it with the `/proc` command above |
 
 The rest belong to two **prefixed families** that grow as optional pieces are
 added, so read the prefix rather than expecting this page to enumerate them:
