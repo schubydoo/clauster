@@ -877,6 +877,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#plugins-and-marketplaces" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Plugins and marketplaces
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -1593,6 +1604,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#plugins-and-marketplaces" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Plugins and marketplaces
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -1845,7 +1867,9 @@ on; the User scope additionally requires <code>config_write.allow_user_scope</co
   surfaces, and the <code>permissions</code> rules, return the raw content, because they
   round-trip the exact text on write. Do not put a secret anywhere in a subagent
   file, for example in an inline <code>mcpServers</code> block in the frontmatter. For what
-  the Hooks tab masks, see <a href="#the-hooks-tab">The Hooks tab</a>.</li>
+  the Hooks tab masks, see <a href="#the-hooks-tab">The Hooks tab</a>. The
+  Plugins surface is read-only for these values, and it masks them too. See
+  <a href="#plugins-and-marketplaces">Plugins and marketplaces</a>.</li>
 </ul>
 <p>The surface tabs:</p>
 <table>
@@ -2214,6 +2238,73 @@ change the plugin.</p>
 <p>The <code>disableAllHooks</code>, <code>allowedHttpHookUrls</code>, and <code>httpHookAllowedEnvVars</code>
 settings are top-level keys, not part of the <code>hooks</code> key, so the Hooks tab does
 not edit them.</p>
+<h3 id="plugins-and-marketplaces">Plugins and marketplaces<a class="headerlink" href="#plugins-and-marketplaces" title="Permanent link">&para;</a></h3>
+<p>The Plugins tab runs the <code>claude plugin</code> command on the host for every change.
+For enable, disable, install, update, uninstall, and marketplace add and
+remove, Clauster passes <code>--scope</code> with the scope you chose, so one change never
+reaches a second settings file. The marketplace Update button is the exception:
+<code>claude plugin marketplace update</code> takes no <code>--scope</code>, because a marketplace's
+checkout is shared by every scope and project. An update therefore refreshes
+that marketplace for every project on the host, not only the one you selected.
+The commands, flags and settings below were checked against Claude Code 2.1.318.</p>
+<ul>
+<li><strong>Install and update never accept a marketplace command for you.</strong> Some
+  marketplace entries install a plugin by running a command, or fetch it with a
+  <code>headersHelper</code> command. Claude Code shows that command and asks before it
+  runs it. Clauster never passes <code>-y</code> or <code>--accept-command</code>, so Claude Code
+  refuses the install and the tab shows the error. To install such a plugin,
+  read the command and run <code>claude plugin install</code> from a terminal on the host.</li>
+<li><strong>Enable and Disable can refuse a plugin that already has that state.</strong> The
+  badge on each row shows the merged state from all scopes. If the plugin is
+  already enabled at the scope you chose, Claude Code refuses and names that
+  scope. A plugin that the project enables cannot be disabled at user scope. To
+  turn it off for yourself only, disable it at the Local scope.</li>
+<li><strong>Each marketplace row shows the source type and its location</strong>, for example
+  <code>github · owner/repo</code>. A URL that carries a user name or password, such as
+  <code>https://user:token@host/repo.git</code>, shows as <code>********</code>.</li>
+<li><strong>Clauster masks credentials in what it reads.</strong> It masks every <code>headers</code>,
+  <code>env</code> and MCP server <code>args</code> value, every <code>headersHelper</code> command, and every URL
+  that carries a user name or password. This applies to the marketplace list, to
+  the marketplaces that a scope declares (<code>extraKnownMarketplaces</code>), and to the
+  MCP server definitions in the plugin list. A masked value is never written
+  back. A token in a URL query string, such as <code>?sig=...</code>, is not detected. Do
+  not put a credential there.</li>
+<li><strong>The Settings tab masks <code>extraKnownMarketplaces</code> in the same way.</strong> If you
+  save the Raw JSON with a masked value unchanged, Clauster keeps the stored
+  value. An <code>args</code> list shows as one <code>********</code>, so you keep it whole or type
+  the full list again. Clauster refuses the save (<code>422</code>) if a masked value can no
+  longer be matched to its stored value. This happens when you rename or move an
+  entry or a header that holds one. It also happens when you delete, reorder or
+  edit an element of a list (such as a <code>settings</code> source's <code>plugins</code>) that holds
+  one. Type the real values again, then save.</li>
+<li><strong>A masked credential stays bound to its marketplace URL.</strong> If you change any
+  <code>url</code> in a marketplace entry on the Settings tab, or remove one, Clauster
+  refuses the save (<code>422</code>) while that entry still holds any masked value, for
+  example a <code>headers</code> value or a <code>headersHelper</code>. Any change to the text counts,
+  including the letter case of the host or an added <code>:443</code>. This stops the
+  stored credential from going to a new host. Type the credential again, then
+  save.</li>
+<li><strong>The <code>additionalMarketplaces</code> spelling is read too.</strong> Claude Code 2.1.232 and
+  later accept it as another name for <code>extraKnownMarketplaces</code>. When a file sets
+  both, the canonical key wins, as it does in Claude Code.</li>
+<li><strong>Claude Code ignores marketplaces that a project declares until you trust the
+  folder.</strong> This applies to the <code>extraKnownMarketplaces</code> entries in a project's
+  <code>.claude/settings.json</code> and <code>.claude/settings.local.json</code>. Such an entry has no
+  effect until the folder is trusted.</li>
+</ul>
+<p>The tab does not offer these commands and settings:</p>
+<ul>
+<li><code>plugin configure</code> and <code>install --config</code>. Plugin options can be secrets, and
+  Clauster does not put a secret in a command line.</li>
+<li><code>install --marketplace</code>, <code>marketplace add --claudeai</code>, <code>marketplace add
+  --sparse</code>, <code>disable --all</code>, <code>prune</code>, and the authoring commands (<code>init</code>,
+  <code>validate</code>, <code>eval</code>, <code>tag</code>, <code>test</code>).</li>
+<li>Managed policy settings such as <code>strictKnownMarketplaces</code>,
+  <code>blockedMarketplaces</code> and <code>disableCommandPluginSources</code>. Only managed settings
+  can hold them, and Clauster never writes managed settings. Claude Code still
+  applies them: a change that the policy blocks fails with Claude Code's own
+  message.</li>
+</ul>
 <h2 id="troubleshooting-and-limits">Troubleshooting and limits<a class="headerlink" href="#troubleshooting-and-limits" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -2258,6 +2349,21 @@ not edit them.</p>
 <td>A subagent has no description and won't edit</td>
 <td>It is built-in, or a plugin owns it — the <strong>Source</strong> badge says which</td>
 <td>Built-in: nothing to do, there is no file. Plugin: change the plugin, not Clauster</td>
+</tr>
+<tr>
+<td>A plugin install or update fails and the message names a command</td>
+<td>The marketplace entry runs a command, and Clauster never accepts one for you</td>
+<td>Read the command, then run <code>claude plugin install</code> from a terminal on the host</td>
+</tr>
+<tr>
+<td>Enable or Disable fails with "is already enabled" or "is installed at project scope, not user"</td>
+<td>The badge is the merged state, and the chosen scope already has that value or cannot override it</td>
+<td>Pick the scope that the message names, or use the Local scope to override a project setting for yourself</td>
+</tr>
+<tr>
+<td>Removing a marketplace returns <code>404</code> with "is not declared in user settings"</td>
+<td>A different scope declares it</td>
+<td>Switch to the scope that declares it and remove it there</td>
 </tr>
 </tbody>
 </table>
