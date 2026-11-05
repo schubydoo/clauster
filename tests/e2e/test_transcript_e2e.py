@@ -95,3 +95,96 @@ def test_transcript_modal_shows_empty_state_without_transcripts(
     browser.expect_visible('[data-test="transcript-modal"]')
     browser.expect_visible('[data-test="transcript-empty"]')
     browser.expect_text('[data-test="transcript-empty"]', "No transcripts for this project yet.")
+
+
+def _seed_long_session(home: Path, project_path: Path, name: str, turns: int) -> None:
+    """Write a ``turns``-long transcript: even turns say ``even``, every tenth ``needle``."""
+    from clauster.pointers import sanitize_cwd  # pure cwd→dirname mapping
+
+    tdir = home / ".claude" / "projects" / sanitize_cwd(project_path)
+    tdir.mkdir(parents=True, exist_ok=True)
+    lines = [
+        {
+            "timestamp": f"2026-07-16T00:{i // 60:02d}:{i % 60:02d}Z",
+            "message": {
+                "role": "user" if i % 2 == 0 else "assistant",
+                "content": f"turn {i}"
+                + (" even" if i % 2 == 0 else "")
+                + (" needle" if i % 10 == 0 else ""),
+            },
+        }
+        for i in range(turns)
+    ]
+    (tdir / name).write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
+
+
+def test_transcript_position_indicator_tracks_paging_search_and_sort(
+    browser: AgentBrowser, usage_server: Server, mutable_projects_tree: Path
+) -> None:
+    """The paged viewer shows "showing X of Y turns" and what Load more has left to fetch.
+
+    The read-only viewer used to page blind (backlog TASK-268). The position line and
+    the Load more label must stay honest after each Load more, under a search (``total``
+    is the post-filter count), and after the sort flips (the turns left become newer).
+    """
+    home = usage_server.state_dir.parent / "home"
+    _seed_long_session(home, (mutable_projects_tree / "beta").resolve(), "sess-268.jsonl", 120)
+
+    browser.goto(usage_server.url)
+    browser.expect_visible('[data-project="beta"]')
+    browser.click('[data-project="beta"] [data-test="transcript-trigger"]')
+    browser.expect_visible('[data-test="transcript-modal"]')
+    browser.expect_count('[data-test="transcript-session"]', 1, timeout_ms=STATUS_TIMEOUT)
+    browser.click('[data-test="transcript-session"]')
+
+    position = '[data-test="transcript-position"]'
+    more = '[data-test="transcript-load-more"]'
+    browser.expect_text(position, "showing 50 of 120 turns", timeout_ms=STATUS_TIMEOUT)
+    browser.expect_attr(position, "aria-live", "polite")
+    browser.expect_text(more, "Load more (70 older)", timeout_ms=STATUS_TIMEOUT)
+
+    # Each Load more appends below the list and moves the button down, so wait for the
+    # new position text (the layout settled) before the next click.
+    browser.scroll_into_view(more)
+    browser.click(more)
+    browser.expect_text(position, "showing 100 of 120 turns", timeout_ms=STATUS_TIMEOUT)
+    browser.expect_text(more, "Load more (20 older)", timeout_ms=STATUS_TIMEOUT)
+    browser.scroll_into_view(more)
+    browser.click(more)
+    browser.expect_text(position, "showing 120 of 120 turns", timeout_ms=STATUS_TIMEOUT)
+    browser.expect_hidden(more, timeout_ms=STATUS_TIMEOUT)
+
+    # A search counts only the matching turns (12 of the 120 carry "needle").
+    search = '[data-test="transcript-search"]'
+    browser.scroll_into_view(search)
+    browser.fill(search, "needle")
+    browser.expect_text(position, "showing 12 of 12 matching turns", timeout_ms=STATUS_TIMEOUT)
+    browser.expect_hidden(more, timeout_ms=STATUS_TIMEOUT)
+
+    # A search with no hits says so in the live region, not only in the visual empty state.
+    browser.fill(search, "zzz")
+    browser.expect_visible('[data-test="transcript-no-matches"]', timeout_ms=STATUS_TIMEOUT)
+    browser.expect_text(position, "0 matching turns", timeout_ms=STATUS_TIMEOUT)
+
+    # Load more continues the search on screen, even when the box now holds a term that
+    # is too short to search: the 60 "even" turns stay 60, never the unfiltered 120.
+    browser.fill(search, "even")
+    browser.expect_text(position, "showing 50 of 60 matching turns", timeout_ms=STATUS_TIMEOUT)
+    browser.expect_text(more, "Load more (10 older)", timeout_ms=STATUS_TIMEOUT)
+    browser.fill(search, "e")
+    # The "keep typing" hint opens above the list and moves the button: wait for it.
+    browser.expect_visible('[data-test="transcript-query-short"]', timeout_ms=STATUS_TIMEOUT)
+    browser.scroll_into_view(more)
+    browser.click(more)
+    browser.expect_text(position, "showing 60 of 60 matching turns", timeout_ms=STATUS_TIMEOUT)
+    browser.expect_hidden(more, timeout_ms=STATUS_TIMEOUT)
+
+    browser.scroll_into_view(search)
+    browser.click('[data-test="transcript-search-clear"]')
+    browser.expect_text(position, "showing 50 of 120 turns", timeout_ms=STATUS_TIMEOUT)
+
+    # Oldest first: the turns that Load more has left are now the newer ones.
+    browser.expect_enabled('[data-test="transcript-order-toggle"]', timeout_ms=STATUS_TIMEOUT)
+    browser.click('[data-test="transcript-order-toggle"]')
+    browser.expect_text(more, "Load more (70 newer)", timeout_ms=STATUS_TIMEOUT)
+    browser.expect_text(position, "showing 50 of 120 turns", timeout_ms=STATUS_TIMEOUT)

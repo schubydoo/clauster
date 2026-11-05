@@ -355,6 +355,10 @@
         session: "", turns: [], total: 0, nextCursor: null,
         error: "", trigger: null, gen: 0,
         order: "desc", q: "", queryTooShort: false,
+        // appliedQ: the search term the loaded list was filtered with ("" = none). Load
+        // more pages with it and the position line says "matching" when it is set
+        // (backlog TASK-268); set per request in loadTranscriptTurnsFromStart.
+        appliedQ: "",
         // --- live-tail (#614 Part 2): follow a running session's transcript ---
         // SINGLE-LIST design (#614 Part 2 follow-up): a live session is ONE unified,
         // tailing transcript — there is NO separate "live tail" box. `turns` is the one
@@ -3214,7 +3218,7 @@
         t.gen = (t.gen || 0) + 1;
         t.open = false; t.loading = false; t.loadingMore = false;
         // Reset the per-view controls so the next open starts newest-first, unfiltered.
-        t.order = "desc"; t.q = ""; t.queryTooShort = false;
+        t.order = "desc"; t.q = ""; t.appliedQ = ""; t.queryTooShort = false;
         if (t._searchTimer) { clearTimeout(t._searchTimer); t._searchTimer = null; }
         this._stopTranscriptTail();  // #614: kill the live-tail poll loop on close
         t.live = false; t.tailRaw = []; t.tailOffset = 0; t.tailKey = 0; t.tailError = ""; t.tailTruncated = false;  // clear live state on close
@@ -3230,7 +3234,7 @@
         t.trigger = document.activeElement;  // remember the opener to restore focus on close
         t.open = true; t.project = name; t.error = ""; t.loading = true;
         t.sessions = []; t.session = ""; t.turns = []; t.total = 0; t.nextCursor = null;
-        t.order = "desc"; t.q = ""; t.queryTooShort = false;  // fresh open: newest-first, unfiltered
+        t.order = "desc"; t.q = ""; t.appliedQ = ""; t.queryTooShort = false;  // fresh open: newest-first, unfiltered
         document.body.style.overflow = "hidden";  // lock background scroll while modal is up
         try {
           const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/transcripts");
@@ -3245,21 +3249,29 @@
       // Minimum search term length: a 1-char query matches almost everything, so we
       // gate it behind a "keep typing" hint rather than fetch on it (#612).
       TRANSCRIPT_MIN_QUERY: 2,
+      // The search term that can filter: the trimmed box text once it clears the min
+      // length, else "" (no filter).
+      _transcriptTerm() {
+        const term = (this.transcripts.q || "").trim();
+        return term.length >= this.TRANSCRIPT_MIN_QUERY ? term : "";
+      },
       // Build the "?cursor=…&order=…&q=…" query string for the turns route. order is
-      // only sent when non-default (asc) and q only when it clears the min length, so
-      // a plain newest-first page request stays byte-identical to the #431 shape.
+      // only sent when non-default (asc) and q only when a search is applied, so a
+      // plain newest-first page request stays byte-identical to the #431 shape. q is
+      // the APPLIED term (backlog TASK-268), not the live box text: Load more must
+      // continue the list on screen, even while a new term waits on the debounce or is
+      // too short to search.
       _transcriptQuery(t, cursor) {
         let qs = "?cursor=" + encodeURIComponent(cursor);
         if (t.order === "asc") qs += "&order=asc";
-        const term = (t.q || "").trim();
-        if (term.length >= this.TRANSCRIPT_MIN_QUERY) qs += "&q=" + encodeURIComponent(term);
+        if (t.appliedQ) qs += "&q=" + encodeURIComponent(t.appliedQ);
         return qs;
       },
       // Select a session and load its first page of turns (honoring order + search).
       async openTranscriptSession(session) {
         const t = this.transcripts;
         // A fresh session always starts from the default order with no active filter.
-        t.session = session; t.order = "desc"; t.q = ""; t.queryTooShort = false;
+        t.session = session; t.order = "desc"; t.q = ""; t.appliedQ = ""; t.queryTooShort = false;
         // #614 Part 2: if this session is currently running, follow it. The list
         // already carries `live` per session (Part 1) — reuse it as the gate so the
         // tail only engages for a session that's actually being written right now.
@@ -3292,6 +3304,9 @@
         // the lock set — which would silently dead-button the next "Load more".
         t.error = ""; t.loading = true; t.loadingMore = false;
         t.turns = []; t.total = 0; t.nextCursor = null;
+        // Record the term THIS request applies. Load more pages with it, and the position
+        // line says "matching" for it, not for a term still waiting on the debounce.
+        t.appliedQ = this._transcriptTerm();
         try {
           const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(t.project) +
             "/transcripts/" + encodeURIComponent(t.session) + this._transcriptQuery(t, 0));
@@ -3337,6 +3352,8 @@
         const filtered = t.tailRaw.filter((turn) => this._liveMatch(turn));
         t.turns = t.order === "asc" ? filtered : filtered.reverse();
         t.total = filtered.length;
+        // Same rule as _liveMatch, so an ended (uncapped) list keeps "matching" honest.
+        t.appliedQ = this._transcriptTerm();
         t.nextCursor = null;  // the live list isn't paged — it tails the whole file
       },
       // Debounced in-message search: re-fetch from the top once the term clears the
@@ -3359,7 +3376,7 @@
       clearTranscriptSearch() {
         const t = this.transcripts;
         if (t._searchTimer) { clearTimeout(t._searchTimer); t._searchTimer = null; }
-        t.q = ""; t.queryTooShort = false;
+        t.q = ""; t.appliedQ = ""; t.queryTooShort = false;
         this._reloadTranscriptTurns();
       },
       // Apply the current order + search to the rendered list. For a LIVE session that's
@@ -3385,9 +3402,32 @@
           if (!res.ok) { t.error = "Failed to load more turns."; return; }
           const d = await res.json();
           if (Array.isArray(d.turns)) t.turns.push(...d.turns);
+          if (typeof d.total === "number") t.total = d.total;  // keep "X of Y" on the latest count
           t.nextCursor = (d.next_cursor === undefined) ? null : d.next_cursor;
         } catch (e) { t.error = "Failed to load more turns."; }
         finally { if (t.gen === myGen) t.loadingMore = false; }
+      },
+      // Position line for the PAGED (non-live) list (backlog TASK-268): "showing X of
+      // Y turns", with "matching" when a search filtered the page (total is the
+      // post-filter count). Empty while a page loads, so the polite live region
+      // announces only the settled position. A search with no hits says "0 matching
+      // turns" HERE, because the visual empty states below are not live regions. A
+      // failed first load leaves it empty: the error alert carries that case.
+      transcriptPositionLabel() {
+        const t = this.transcripts;
+        if (t.loading || (t.total === 0 && t.error)) return "";
+        const noun = (t.appliedQ ? " matching" : "") + (t.total === 1 ? " turn" : " turns");
+        if (t.total === 0) return "0" + noun;
+        return "showing " + t.turns.length + " of " + t.total + noun;
+      },
+      // Load more label: how many turns the next clicks can still fetch. In newest-first
+      // order those are older turns, in oldest-first order newer ones.
+      transcriptLoadMoreLabel() {
+        const t = this.transcripts;
+        if (t.loadingMore) return "Loading…";
+        const left = Math.max(t.total - t.turns.length, 0);
+        if (left === 0) return "Load more";
+        return "Load more (" + left + (t.order === "asc" ? " newer)" : " older)");
       },
       // Return to the session list (clear the selected session, its turns, + the filters).
       backToTranscriptList() {
@@ -3397,7 +3437,7 @@
         this._stopTranscriptTail();  // #614: stop following the (now-deselected) session
         t.session = ""; t.turns = []; t.total = 0; t.nextCursor = null; t.error = ""; t.loadingMore = false;
         t.live = false; t.tailRaw = []; t.tailOffset = 0; t.tailKey = 0; t.tailError = ""; t.tailTruncated = false;  // clear live state
-        t.order = "desc"; t.q = ""; t.queryTooShort = false;
+        t.order = "desc"; t.q = ""; t.appliedQ = ""; t.queryTooShort = false;
       },
       // --- live-tail poll loop (#614 Part 2) -----------------------------------
       // Poll cadence for following a running session's transcript. A few seconds is

@@ -3025,12 +3025,26 @@
                  A live session never sets `loading` (its tail-derived list updates in
                  place), so this wrapper shows immediately for live and gates only the
                  non-live re-fetch. #}
-              <div x-show="!transcripts.loading">
+              {# Position line (backlog TASK-268): the paged viewer says how much of the
+                 session is on screen ("showing X of Y turns"; "matching" under a search,
+                 where total is the post-filter count; "0 matching turns" for a search
+                 with no hits). It sits OUTSIDE the loading gate so
+                 the polite live region stays in the accessibility tree: its text clears
+                 while a page loads and is announced when the page lands, which happens
+                 only on a user action (open, Load more, search, sort). The live list keeps
+                 its plain count and no live region, so the tail poll never chatters. #}
               <div class="text-secondary small mb-2">
                 <code x-text="transcripts.session"></code>
-                · <span x-text="transcripts.total"></span>
-                <span x-text="transcripts.total === 1 ? 'turn' : 'turns'">turns</span>
+                <span x-show="transcripts.live" x-cloak
+                      x-text="'· ' + transcripts.total + (transcripts.total === 1 ? ' turn' : ' turns')"></span>
+                {# The separator stays out of the live region, so an announcement starts
+                   with "showing" and not with "middle dot". #}
+                <span aria-hidden="true"
+                      x-show="!transcripts.live && transcriptPositionLabel() !== ''">·</span>
+                <span data-test="transcript-position" role="status" aria-live="polite"
+                      x-show="!transcripts.live" x-text="transcriptPositionLabel()"></span>
               </div>
+              <div x-show="!transcripts.loading">
               {# Distinct empty states: a true-empty session vs. a search that matched nothing. #}
               <div class="text-secondary small" data-test="transcript-no-matches"
                    x-show="transcripts.turns.length === 0 && !transcripts.error && !transcripts.queryTooShort && transcripts.q.trim().length >= 2">
@@ -3070,7 +3084,7 @@
               <div class="text-center mt-3" x-show="transcripts.nextCursor !== null" x-cloak>
                 <button type="button" class="btn btn-sm" data-test="transcript-load-more"
                         :disabled="transcripts.loadingMore" @click="loadMoreTranscriptTurns()">
-                  <span x-text="transcripts.loadingMore ? 'Loading…' : 'Load more'">Load more</span>
+                  <span x-text="transcriptLoadMoreLabel()">Load more</span>
                 </button>
               </div>
               </div>

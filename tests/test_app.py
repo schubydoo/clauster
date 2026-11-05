@@ -1384,6 +1384,45 @@ def test_dashboard_transcript_viewer_trigger_and_modal_render(write_config):
     assert page.count('window.location.assign(ROOT + "/login")') >= 1
 
 
+def test_dashboard_transcript_position_indicator(write_config):
+    # Backlog TASK-268: the paged viewer rendered no position, so a long transcript paged
+    # blind. It now shows "showing X of Y turns" from the endpoint's post-filter total and
+    # puts the remaining count on Load more. The browser behaviour is pinned by
+    # tests/e2e/test_transcript_e2e.py; this pins the wiring that must ship in the page.
+    page = _client(write_config).get("/").text
+    # A polite live region, rendered for the paged list only (the live tail polls, so its
+    # count must stay out of a live region or it would announce every poll).
+    assert (
+        '<span data-test="transcript-position" role="status" aria-live="polite"\n'
+        '                      x-show="!transcripts.live" x-text="transcriptPositionLabel()">'
+    ) in page
+    # The position line sits OUTSIDE the loading gate, so the live region stays in the
+    # accessibility tree across a reload instead of being display:none when it updates.
+    assert page.index('data-test="transcript-position"') < page.index(
+        '<div x-show="!transcripts.loading">'
+    )
+    # The separator dot is outside the region, so an announcement starts with "showing".
+    assert '<span aria-hidden="true"' in page
+    assert "x-show=\"!transcripts.live && transcriptPositionLabel() !== ''\">·</span>" in page
+    assert "transcriptPositionLabel() {" in page
+    assert 'if (t.loading || (t.total === 0 && t.error)) return "";' in page
+    assert 'const noun = (t.appliedQ ? " matching" : "")' in page
+    # A search with no hits is announced too: the visual empty states are not live regions.
+    assert 'if (t.total === 0) return "0" + noun;' in page
+    assert 'return "showing " + t.turns.length + " of " + t.total + noun;' in page
+    # "matching" and Load more follow the APPLIED search, recorded per request (and per
+    # live re-derive), never the box text that may wait on the debounce or be too short.
+    assert 'appliedQ: "",' in page
+    assert page.count("t.appliedQ = this._transcriptTerm();") == 2
+    assert 'if (t.appliedQ) qs += "&q=" + encodeURIComponent(t.appliedQ);' in page
+    # Load more names what is left, in the direction of the current sort.
+    assert '<span x-text="transcriptLoadMoreLabel()">Load more</span>' in page
+    assert "const left = Math.max(t.total - t.turns.length, 0);" in page
+    assert '(t.order === "asc" ? " newer)" : " older)")' in page
+    # Load more refreshes the total, so "X of Y" tracks the latest response.
+    assert 'if (typeof d.total === "number") t.total = d.total;' in page
+
+
 def test_dashboard_live_session_row_has_transcript_button(write_config):
     # #866: the live desktop/bridge session row carries its own read-only Transcript
     # trigger (distinct data-test from the project-row one), wired to openTranscripts
