@@ -720,21 +720,17 @@ Clauster never runs a hook command or a skill script from this editor.
   a space at the start or end, and `<` or `>`. The limit is 256 UTF-16 units,
   so an emoji counts as two. Clauster also refuses a name with a combining
   mark, even where Claude Code shows it.
-- `hooks` must be a mapping of hook events. A matcher group is one item of an
-  event's list: a `matcher` and its list of `hooks` entries. Clauster refuses
-  the shapes that make Claude Code load the skill with no hooks and no
-  `allowed-tools`:
-  - A `PreToolUse` or `PermissionRequest` value that is not a list.
-  - A `PreToolUse` or `PermissionRequest` group that is not a mapping, or
-    whose `hooks` is not a list of mappings.
-  - Hook definitions outside `hooks`. These are a `PreToolUse` or
-    `PermissionRequest` key, or a matcher group, at the top level or up to
-    three levels into another field. Clauster does not look into `metadata`,
-    `mcpServers` or `lspServers`, because Claude Code does not.
-- Clauster does not check each hook entry against the hooks schema here. For
-  `PreToolUse` and `PermissionRequest`, one bad entry makes Claude Code drop
-  all of the skill's hooks and its `allowed-tools`. For other events, Claude
-  Code drops only that entry.
+- Clauster checks `hooks` with the same rules as the
+  [Hooks tab](#the-hooks-tab) and as subagent frontmatter hooks. So it accepts
+  every documented hook event, hook type and field, and it refuses any other
+  value. Claude Code drops a bad entry under most events and keeps the others,
+  but Clauster refuses the save instead.
+- Clauster also refuses hook definitions outside `hooks`, because Claude Code
+  then loads the skill with no hooks and no `allowed-tools`. A hook definition
+  is a `PreToolUse` or `PermissionRequest` key, or a matcher group (a `matcher`
+  and its list of `hooks` entries). Clauster looks for them at the top level
+  and up to three levels into another field. It does not look into
+  `metadata`, `mcpServers` or `lspServers`, because Claude Code does not.
 - `metadata` must be a mapping. `created_by` and `improved_by` are fields that
   Claude Code uses for its own records, and they accept only
   `dream-proposal`. `version`, `fallback` and `disallowedTools` are not in the

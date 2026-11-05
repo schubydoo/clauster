@@ -2197,10 +2197,11 @@ def test_shell_refuses_a_value_javascript_never_sees() -> None:
 @pytest.mark.parametrize(
     "hooks",
     [
-        # A date VALUE nested in hooks: a date to PyYAML, a string to YAML 1.2.
-        "hooks: {PreToolUse: [{hooks: [{type: command, command: x, at: 2024-01-01}]}]}",
-        # A date KEY nested in hooks: PyYAML's key is a date, which no JavaScript key is.
-        "hooks: {PreToolUse: [{hooks: [{type: command, command: x, 2024-01-01: y}]}]}",
+        # A date VALUE in a text field: a date to PyYAML, a string to YAML 1.2.
+        "hooks: {PreToolUse: [{hooks: [{type: command, command: x, statusMessage: 2024-01-01}]}]}",
+        # A date KEY inside an MCP tool's free-form input: no JavaScript key is a date.
+        "hooks: {PreToolUse: [{hooks: [{type: mcp_tool, server: s, tool: t, "
+        "input: {2024-01-01: y}}]}]}",
     ],
 )
 def test_a_date_inside_hooks_is_refused(hooks: str) -> None:
@@ -2240,15 +2241,23 @@ def _deep_hooks(levels: int) -> str:
     return _fm("hooks: {PreToolUse: [{hooks: [" + "{a: " * levels + "1" + "}" * levels + "]}]}")
 
 
+def _deep_input(levels: int) -> str:
+    return "{a: " * levels + "1" + "}" * levels
+
+
 def test_a_deep_hooks_value_is_a_422_on_every_path(tmp_path: Path) -> None:
-    # PyYAML composes 300 levels, but reading them back recursively would overflow the
-    # stack: that must be a refusal on write, an error entry on list, and a plain load.
-    content = _deep_hooks(300)
-    with pytest.raises(cw.InvalidCandidateError, match="nested too deeply"):
+    # PyYAML composes 300 levels inside an mcp_tool `input`; reading them back must be a
+    # refusal on write, an error entry on list, and a plain load, never a 500.
+    content = _fm(
+        "hooks: {PreToolUse: [{hooks: [{type: mcp_tool, server: s, tool: t, input: "
+        + _deep_input(300)
+        + "}]}]}"
+    )
+    with pytest.raises(cw.InvalidCandidateError):
         sk.validate_skill_md_content(content)
     _skill(tmp_path, content)
     (item,) = sk.list_skills(tmp_path)
-    assert "nested too deeply" in item["frontmatter_error"]
+    assert item["frontmatter_error"]
     assert sk.read_skill_file_for_edit(tmp_path, "s")[3] is None
 
 
@@ -2324,12 +2333,15 @@ def test_a_hooks_value_that_cancels_the_skills_hooks_is_refused(hooks: str) -> N
         "hooks: {Unknown: [x]}",
         "hooks: {PostToolUse: null}",
         "hooks: {Unknown: [{matcher: x, hooks: [{type: command, command: y}]}]}",
+        "hooks: {Stop: [5]}",
+        "hooks: {Stop: [{hooks: x}]}",
     ],
 )
-def test_a_hooks_entry_the_cli_drops_quietly_still_saves(hooks: str) -> None:
-    # Not refused yet: the CLI drops such an entry with a note and keeps the rest. Checking
-    # the hook entries is the hooks surface's work (TASK-449.4).
-    sk.validate_skill_md_content(_fm(hooks))  # no raise
+def test_a_hooks_entry_the_cli_would_drop_is_refused(hooks: str) -> None:
+    # TASK-482: skill hooks go through the hooks surface's validator, as subagent hooks do.
+    # The CLI drops such an entry and keeps the rest; this surface refuses the save instead.
+    with pytest.raises(cw.InvalidCandidateError, match="'hooks': "):
+        sk.validate_skill_md_content(_fm(hooks))
 
 
 def test_load_never_removes_a_collection_the_cli_may_scan(tmp_path: Path) -> None:
@@ -2415,15 +2427,9 @@ def test_effort_reader_ignores_a_value_javascript_never_sees() -> None:
 )
 def test_a_matcher_group_that_cancels_the_skills_hooks_is_refused(hooks: str) -> None:
     # The CLI's `Vn`: under a guard event, one bad group or entry is not dropped alone; the
-    # skill then loads with no hooks and no allowed-tools.
-    with pytest.raises(cw.InvalidCandidateError, match="matcher group that Claude Code"):
+    # skill then loads with no hooks and no allowed-tools. The hooks validator refuses each.
+    with pytest.raises(cw.InvalidCandidateError, match="'hooks': "):
         sk.validate_skill_md_content(_fm("allowed-tools: Bash", hooks))
-
-
-@pytest.mark.parametrize("hooks", ["hooks: {Stop: [5]}", "hooks: {Stop: [{hooks: x}]}"])
-def test_a_bad_group_under_another_event_still_saves(hooks: str) -> None:
-    # For other events the CLI drops only the bad group, so this is not refused here.
-    sk.validate_skill_md_content(_fm(hooks))  # no raise
 
 
 def test_the_docs_argument_hint_example_saves_and_lists(tmp_path: Path) -> None:
@@ -2459,3 +2465,59 @@ def test_load_does_not_remove_a_field_a_nested_alias_needs(tmp_path: Path) -> No
     _skill(tmp_path, raw)
     content, _, _, note = sk.read_skill_file_for_edit(tmp_path, "s")
     assert note is None and content == raw
+
+
+# --- TASK-482: skill hooks use the hooks surface's validator ---------------------------
+
+_VALID_HOOKS = [
+    pytest.param("{type: command, command: ./check.sh, async: true, once: true}", id="command"),
+    pytest.param("{type: http, url: 'https://example.com/hook', timeout: 5}", id="http"),
+    pytest.param("{type: mcp_tool, server: github, tool: comment, input: {a: 1}}", id="mcp_tool"),
+    pytest.param("{type: prompt, prompt: Is this safe, model: haiku}", id="prompt"),
+    pytest.param("{type: agent, prompt: Check the tests}", id="agent"),
+]
+
+
+@pytest.mark.parametrize("entry", _VALID_HOOKS)
+def test_a_valid_skill_hook_of_every_type_saves(entry: str) -> None:
+    sk.validate_skill_md_content(
+        _fm("hooks:", "  PreToolUse:", "    - matcher: Bash", f"      hooks: [{entry}]")
+    )  # no raise
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        pytest.param("{type: shell, command: x}", id="unknown-type"),
+        pytest.param("{type: command, command: x, extra: 1}", id="unknown-field"),
+        pytest.param("{type: http}", id="missing-url"),
+        pytest.param("{type: command, command: x, timeout: 0}", id="timeout-not-positive"),
+        pytest.param("{type: command, command: '${CLAUDE_PLUGIN_ROOT}/x'}", id="plugin-owned"),
+    ],
+)
+def test_an_invalid_skill_hook_is_refused(entry: str) -> None:
+    with pytest.raises(cw.InvalidCandidateError):
+        sk.validate_skill_md_content(
+            _fm("hooks:", "  PreToolUse:", "    - matcher: Bash", f"      hooks: [{entry}]")
+        )
+
+
+def test_a_date_inside_an_mcp_tool_input_is_refused() -> None:
+    # A date to PyYAML, a string to YAML 1.2: the two readings of `hooks` differ.
+    content = _fm(
+        "hooks: {PreToolUse: [{hooks: [{type: mcp_tool, server: s, tool: t, "
+        "input: {a: 2024-01-01}}]}]}"
+    )
+    with pytest.raises(cw.InvalidCandidateError, match="'hooks' reads differently"):
+        sk.validate_skill_md_content(content)
+
+
+def test_a_reader_that_runs_out_of_stack_is_a_422(monkeypatch) -> None:
+    # Defence in depth: today the hooks validator bounds every nested hook value, but a
+    # reader that overflows the stack must still be a refusal, never a 500.
+    def _deep(_value):
+        raise RecursionError
+
+    monkeypatch.setattr(sk, "_FIELD_READERS", (("description", _deep),))
+    with pytest.raises(cw.InvalidCandidateError, match="nested too deeply to check"):
+        sk.validate_frontmatter({"description": "d"})

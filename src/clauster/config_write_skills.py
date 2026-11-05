@@ -116,6 +116,7 @@ import yaml
 
 from . import config_file_writer as fw
 from . import config_write as cw
+from .config_write_hooks import validate_hooks
 
 #: The skill's required entrypoint file (Claude Code's own convention).
 SKILL_FILENAME = "SKILL.md"
@@ -723,12 +724,15 @@ def _read_paths(value: Any) -> list[str]:
 
 
 def _read_hooks(value: Any) -> Any:
-    """Read ``hooks``: a mapping of hook events. Its entries are stored, never executed.
+    """Read ``hooks``: checked by the hooks surface's validator, stored, never executed.
 
-    The entries are compared between the YAML 1.1 and YAML 1.2 readings, but not checked
-    against the hooks schema here: the hooks surface owns that check (TASK-449.4), and
-    running a stale copy of it would refuse hooks Claude Code accepts. A value that is not
-    a mapping makes the CLI load the skill with no hooks and no ``allowed-tools``.
+    The same check as subagent frontmatter hooks and the Hooks tab
+    (:func:`~clauster.config_write_hooks.validate_hooks`, TASK-482): every documented event,
+    hook type and field, and nothing else. It is stricter than the CLI in one direction
+    only: the CLI drops a bad entry under most events and keeps the rest, and this refuses
+    the save instead. The entries are also compared between the YAML 1.1 and YAML 1.2
+    readings. A ``hooks`` that is false, empty or 0 is ignored by the CLI exactly as if it
+    were absent, so a load may remove it.
     """
     if value is None:
         return None
@@ -737,53 +741,11 @@ def _read_hooks(value: Any) -> Any:
         raise _IgnoredFieldError(
             "hooks", f"{_label('hooks')} must be a mapping of hook events to matcher lists"
         )
-    if not isinstance(value, dict) or _looks_like_matcher(value):
-        raise cw.InvalidCandidateError(
-            f"{_label('hooks')} must be a mapping of hook events to matcher lists. Claude "
-            "Code ignores any other value and then also drops 'allowed-tools'"
-        )
-    for event, groups in value.items():
-        # The CLI's `_Ce` guards: a list is required for PreToolUse/PermissionRequest, and
-        # guard hooks under an unknown event are not dropped quietly but cancel the skill's
-        # hooks and `allowed-tools`.
-        known = event in _HOOK_EVENTS
-        bad = (
-            _holds_guard_hooks(groups, 3, matchers=not isinstance(groups, list))
-            if not known
-            else not isinstance(groups, list)
-            and (
-                (event in _GUARD_EVENTS and groups is not None)
-                or _holds_guard_hooks(groups, 3, matchers=False)
-            )
-        )
-        if known and isinstance(groups, list):
-            bad = any(_bad_matcher_group(event, group) for group in groups)
-        if bad:
-            raise cw.InvalidCandidateError(
-                f"{_label('hooks')} has a hook event or matcher group that Claude Code cannot "
-                "load, and it then drops all of the skill's hooks and its 'allowed-tools'. A "
-                "PreToolUse or PermissionRequest group must be a mapping whose 'hooks' is a "
-                "list of hook entries"
-            )
+    try:
+        validate_hooks(value)
+    except cw.InvalidCandidateError as exc:
+        raise cw.InvalidCandidateError(f"{_label('hooks')}: {exc}") from exc
     return _tagged(value)
-
-
-def _bad_matcher_group(event: str, group: Any) -> bool:
-    """Whether one matcher group makes the CLI drop the skill's hooks (part of its ``Vn``).
-
-    Any event: a group that itself holds PreToolUse/PermissionRequest hooks. A guard event
-    only (PreToolUse, PermissionRequest): a group that is not a mapping, a ``hooks`` that is
-    not a list, or an entry that is not a mapping. For other events the CLI drops just the
-    bad group or entry. The CLI's schema check of each entry and group is not ported; the
-    hooks surface owns that check (TASK-449.4).
-    """
-    if _holds_guard_hooks(group, 3, matchers=False):
-        return True
-    if event not in _GUARD_EVENTS:
-        return False
-    if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
-        return True
-    return not all(isinstance(entry, dict) for entry in group["hooks"])
 
 
 def _read_dream_marker(key: str, value: Any) -> str | None:

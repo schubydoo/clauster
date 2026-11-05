@@ -61,6 +61,7 @@ from typing import Any, Literal
 
 import yaml
 from fastapi import HTTPException
+from yaml.composer import ComposerError
 
 from .claude_json import ClaudeJsonUnparseable, locked_replace_json_file, update_claude_json
 from .config import ClausterConfig
@@ -1396,7 +1397,7 @@ def _is_duplicate_anchor(exc: yaml.YAMLError) -> bool:
     PyYAML's composer fails. Such a header must not take the retry: the CLI reads it as
     written, and the retry would quote its values into other strings.
     """
-    return isinstance(exc, yaml.composer.ComposerError) and exc.problem == "second occurrence"
+    return isinstance(exc, ComposerError) and exc.problem == "second occurrence"
 
 
 def _is_yaml_list(text: str) -> bool:

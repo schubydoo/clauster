@@ -2105,3 +2105,10 @@ def test_the_retry_replaces_tabs_after_a_lone_cr() -> None:
     # CLI's line pattern takes \r\t as the space after `m:` and quotes `k: v`, as this port does.)
     assert cw._cli_retry_text("# c\r\tk: v\n\t\tj: w") == "# c\r  k: v\n    j: w"
     assert cw._cli_retry_text("m:\r\tk: v") == 'm: "k: v"'
+
+
+def test_the_flow_list_check_treats_a_too_deep_value_as_not_a_list() -> None:
+    assert cw._is_yaml_list("[" * 5000 + "]" * 5000) is False
+    assert cw._is_yaml_list("[a, b]") is True
+    assert cw._is_yaml_list("[&x a, &x b]") is True  # a duplicate anchor: a list to YAML 1.2
+    assert cw._is_yaml_list("[a] [b]") is False
