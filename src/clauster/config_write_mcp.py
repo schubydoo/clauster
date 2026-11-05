@@ -765,6 +765,8 @@ def _check_destination(name: str, entry: Any, stored: Any) -> None:
     A stdio server is bound the same way (maintainer decision, 2026-11-05): a masked
     ``env`` value keeps its stored value only while the ``command`` and every ``args``
     element are exactly unchanged, because the env goes to whatever program those name.
+    Any other masked value in the entry (a masked ``args`` element or ``command``) is bound
+    by the same check, since it is handed to that program too.
     A remote entry that turns into stdio, or the reverse, changes ``type`` and is refused.
     """
     if not isinstance(entry, dict) or not isinstance(stored, dict):
@@ -777,9 +779,9 @@ def _check_destination(name: str, entry: Any, stored: Any) -> None:
     if now is None or now != then:
         if now is not None and then is not None and now[0] == then[0] == "stdio":
             raise cw.InvalidCandidateError(
-                f"server {name!r} keeps a masked 'env' value '********' but its command or "
-                "args changed; the stored value is not handed to a new command. Retype the "
-                "masked env values for the new command"
+                f"server {name!r} keeps a masked value '********' but its command or args "
+                "changed; the stored value is not handed to a new command. Retype the masked "
+                "env values, and any other masked value, for the new command"
             )
         raise cw.InvalidCandidateError(
             f"server {name!r} keeps a masked value '********' but its type or a url changed; "

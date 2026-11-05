@@ -2242,6 +2242,20 @@ def test_stdio_command_or_args_change_refuses_a_masked_env(tmp_path: Path, chang
     assert (tmp_path / ".mcp.json").read_bytes() == before
 
 
+def test_stdio_masked_arg_without_env_is_bound_too(tmp_path: Path) -> None:
+    # A masked args element (here a ${VAR}) is handed to the program as well, so it is
+    # bound like an env value, and the message does not claim an env exists.
+    stored = {"command": "srv", "args": ["--key", "${API_KEY}"]}
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"s": stored}}), encoding="utf-8"
+    )
+    before = (tmp_path / ".mcp.json").read_bytes()
+    shown, _h = mcp.read_project_servers(tmp_path)
+    with pytest.raises(cw.InvalidCandidateError, match="any other masked value"):
+        mcp.write_project_server_entry(tmp_path, "s", {**shown["s"], "command": "evil"}, op="edit")
+    assert (tmp_path / ".mcp.json").read_bytes() == before
+
+
 def test_stdio_new_command_with_retyped_env_saves(tmp_path: Path) -> None:
     _seed_stdio(tmp_path)
     fresh = {"command": "uvx", "args": ["other"], "env": {"T": "sk-new", "MODE": "b"}}
@@ -2288,7 +2302,7 @@ def test_stdio_masked_command_resent_counts_as_unchanged(tmp_path: Path) -> None
 
 
 def test_stdio_stored_args_not_a_list_refuses_a_masked_env(tmp_path: Path) -> None:
-    # A hand-edited `args` that is not a list compares as itself, never as the new list.
+    # A hand-edited `args` that is not a list never equals any list: fail closed.
     stored = {"command": "srv", "args": "oops", "env": {"T": "sk-4498"}}
     (tmp_path / ".mcp.json").write_text(
         json.dumps({"mcpServers": {"s": stored}}), encoding="utf-8"
