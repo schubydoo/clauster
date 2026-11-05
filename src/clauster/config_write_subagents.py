@@ -84,6 +84,7 @@ CLAUDE.md, hooks, and permissions all use), so a save always re-submits the real
 
 from __future__ import annotations
 
+import functools
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -958,7 +959,30 @@ def _check_mapping(
             visit(key_node.value, value_node)
 
 
-def _check_top_level_field(key: str, node: yaml.Node) -> None:
+class _InlineWalk:
+    """The composed nodes each inline-server check has walked already, by ``id``.
+
+    ``compose`` resolves an alias to the SAME node object, so an anchor shared ``N`` times per
+    level across ``L`` levels is ``N**L`` paths but one node. A walk that follows paths
+    without memory is then exponential in a file of a few hundred bytes. ``safe_load`` keeps
+    only the last of two duplicate keys, so a pyramid under a key that a later duplicate
+    overrides passes every check on the loaded data and reaches only this walk (Greptile on
+    TASK-479). One set per kind of check, shared across the whole header: each kind checks a
+    node the same way wherever it is reached, so checking it once is enough. The kinds stay
+    apart, because a node reached as a definition and as a value gets different checks.
+    """
+
+    __slots__ = ("definitions", "items", "oauth", "values")
+
+    def __init__(self) -> None:
+        """Start with nothing walked."""
+        self.items: set[int] = set()
+        self.definitions: set[int] = set()
+        self.oauth: set[int] = set()
+        self.values: set[int] = set()
+
+
+def _check_top_level_field(key: str, node: yaml.Node, *, walk: _InlineWalk) -> None:
     """Check one top-level frontmatter field, and the inline servers under ``mcpServers``."""
     _check_spelling(
         f"frontmatter {key!r}", node, boolean=key in _BOOLEAN_FIELDS, number=key in _NUMBER_FIELDS
@@ -966,13 +990,17 @@ def _check_top_level_field(key: str, node: yaml.Node) -> None:
     if key == "mcpServers" and isinstance(node, yaml.SequenceNode):
         for item in node.value:
             if isinstance(item, yaml.MappingNode):
-                _check_mapping(item, set(), visit=_check_inline_server)
+                _check_mapping(
+                    item, walk.items, visit=functools.partial(_check_inline_server, walk=walk)
+                )
             else:
                 # A server-name reference (`- 0o17`) the CLI would read as a number.
-                _refuse_yaml12_number_strings("frontmatter 'mcpServers' server name", item)
+                _refuse_yaml12_number_strings(
+                    "frontmatter 'mcpServers' server name", item, seen=walk.values
+                )
 
 
-def _check_inline_server(name: str, node: yaml.Node) -> None:
+def _check_inline_server(name: str, node: yaml.Node, *, walk: _InlineWalk) -> None:
     """Check the spelling of each value of one inline MCP definition, ``oauth`` included.
 
     A boolean or number field must not use a YAML 1.1-only spelling, and a string value
@@ -982,7 +1010,7 @@ def _check_inline_server(name: str, node: yaml.Node) -> None:
         return
     label = f"frontmatter 'mcpServers' inline server {name!r}"
 
-    def field(key: str, value: yaml.Node) -> None:
+    def check_field(key: str, value: yaml.Node) -> None:
         _check_spelling(
             f"{label} {key!r}",
             value,
@@ -992,7 +1020,7 @@ def _check_inline_server(name: str, node: yaml.Node) -> None:
         if key == "oauth" and isinstance(value, yaml.MappingNode):
             _check_mapping(
                 value,
-                set(),
+                walk.oauth,
                 visit=lambda oauth_key, oauth_value: _check_spelling(
                     f"{label} 'oauth' {oauth_key!r}",
                     oauth_value,
@@ -1000,9 +1028,9 @@ def _check_inline_server(name: str, node: yaml.Node) -> None:
                     number=oauth_key in _MCP_OAUTH_NUMBER_FIELDS,
                 ),
             )
-        _refuse_yaml12_number_strings(f"{label} {key!r}", value)
+        _refuse_yaml12_number_strings(f"{label} {key!r}", value, seen=walk.values)
 
-    _check_mapping(node, set(), visit=field)
+    _check_mapping(node, walk.definitions, visit=check_field)
 
 
 #: A plain scalar that the CLI reads as a number although PyYAML (YAML 1.1) reads a string:
@@ -1021,7 +1049,7 @@ _YAML12_NUMBER_RE = re.compile(
 _STR_TAG = "tag:yaml.org,2002:str"
 
 
-def _refuse_yaml12_number_strings(label: str, node: yaml.Node) -> None:
+def _refuse_yaml12_number_strings(label: str, node: yaml.Node, *, seen: set[int]) -> None:
     """Refuse a plain string value under ``node`` that the CLI's YAML 1.2 reads as a number.
 
     Every value of an MCP entry that is not a boolean or a number is a string, and the CLI's
@@ -1029,20 +1057,32 @@ def _refuse_yaml12_number_strings(label: str, node: yaml.Node) -> None:
     with ``env: {A: 1e3}`` and ``args: [0o17]``; the quoted ``"1e3"`` connects). Only values
     are checked, never keys. ⚠️ This is stricter than the CLI for an explicit ``!!str 1e3``,
     which the composed node cannot tell from a plain ``1e3``. Quoting is the fix for both.
+
+    Iterative, and each node is checked once: ``seen`` (:attr:`_InlineWalk.values`) is
+    shared across the whole header, so a shared alias costs one visit, and a deep nesting
+    adds no stack frames. A ``<<`` value is walked like any other value, so its merged
+    mappings are checked too.
     """
-    if isinstance(node, yaml.ScalarNode):
-        if node.tag == _STR_TAG and node.style is None and _YAML12_NUMBER_RE.fullmatch(node.value):
-            raise cw.InvalidCandidateError(
-                f"{label}: Claude Code reads {node.value!r} as a number, not a string, and "
-                "drops that mcpServers item. Quote it"
-            )
-    elif isinstance(node, yaml.SequenceNode):
-        for child in node.value:
-            _refuse_yaml12_number_strings(label, child)
-    elif isinstance(node, yaml.MappingNode):  # pragma: no branch — a node is one of the three
-        _check_mapping(
-            node, set(), visit=lambda _key, value: _refuse_yaml12_number_strings(label, value)
-        )
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, yaml.ScalarNode):
+            if (
+                current.tag == _STR_TAG
+                and current.style is None
+                and _YAML12_NUMBER_RE.fullmatch(current.value)
+            ):
+                raise cw.InvalidCandidateError(
+                    f"{label}: Claude Code reads {current.value!r} as a number, not a string, "
+                    "and drops that mcpServers item. Quote it"
+                )
+        elif isinstance(current, yaml.SequenceNode):
+            stack.extend(current.value)
+        else:  # a mapping: a node is a scalar, a sequence or a mapping
+            stack.extend(value_node for _key_node, value_node in current.value)
 
 
 def _refuse_enclosing_references(node: yaml.Node, path: set[int], done: set[int]) -> None:
@@ -1106,7 +1146,9 @@ def _refuse_yaml11_only_spellings(header: str) -> None:
             )
     root = yaml.compose(header, Loader=yaml.SafeLoader)
     _refuse_enclosing_references(root, set(), set())
-    _check_mapping(root, set(), visit=_check_top_level_field)
+    _check_mapping(
+        root, set(), visit=functools.partial(_check_top_level_field, walk=_InlineWalk())
+    )
 
 
 # ---------------------------------------------------------------------------

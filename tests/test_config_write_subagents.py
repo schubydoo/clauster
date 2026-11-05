@@ -1480,6 +1480,72 @@ def test_inline_spelling_check_leaves_other_shapes_to_the_validator(header: str)
     sub._refuse_yaml11_only_spellings(header)
 
 
+def _alias_pyramid(depth: int, *, bottom: str = "a") -> str:
+    """Return a subagent file whose discarded duplicate `args` keys hold an alias pyramid.
+
+    Each level aliases the one below four times. `safe_load` keeps only the last `args`,
+    `[]`, so the loaded data is tiny and passes every check on it; only a walk of the
+    composed tree sees the pyramid.
+    """
+    levels = [f"      args: &p0 [{bottom}, {bottom}, {bottom}, {bottom}]"]
+    for level in range(1, depth + 1):
+        below = f"*p{level - 1}"
+        levels.append(f"      args: &p{level} [{below}, {below}, {below}, {below}]")
+    return (
+        "---\nname: x\ndescription: d\nmcpServers:\n  - srv:\n      command: c\n"
+        + "\n".join(levels)
+        + "\n      args: []\n---\nbody\n"
+    )
+
+
+def _naive_walk_visits(node: yaml.Node) -> int:
+    """Count the nodes a walk that follows every alias path visits (memoized, so it is fast)."""
+    counts: dict[int, int] = {}
+
+    def visits(current: yaml.Node) -> int:
+        if id(current) not in counts:
+            if isinstance(current, yaml.SequenceNode):
+                children = current.value
+            elif isinstance(current, yaml.MappingNode):
+                children = [value for _key, value in current.value]
+            else:
+                children = []
+            counts[id(current)] = 1 + sum(visits(child) for child in children)
+        return counts[id(current)]
+
+    return visits(node)
+
+
+@pytest.mark.timeout(20)
+def test_shared_aliases_under_a_discarded_key_do_not_hang_a_save(tmp_path: Path) -> None:
+    # Greptile on TASK-479: the number-string walk followed each alias path again, so this
+    # file of under 1 KB, which a walk without memory visits more than 10**12 times, never
+    # finished saving and held a server worker. Each composed node is now checked once.
+    text = _alias_pyramid(20)
+    assert len(text.encode("utf-8")) < 1024
+    header = sub._FRONTMATTER_RE.match(text)
+    assert header is not None
+    root = yaml.compose(header.group(1), Loader=yaml.SafeLoader)
+    assert _naive_walk_visits(root) > 10**12  # the positive control: it IS a pyramid
+    start = time.monotonic()
+    sub.write_project_agent(tmp_path, "x", text, None)
+    assert time.monotonic() - start < 0.5
+    # A bad value at the bottom of the same pyramid is still found, as fast.
+    start = time.monotonic()
+    with pytest.raises(cw.InvalidCandidateError, match="as a number, not a string"):
+        sub.validate_agent_content(_alias_pyramid(20, bottom="1e3"), expected_name="x")
+    assert time.monotonic() - start < 0.5
+
+
+def test_each_kind_of_inline_check_keeps_its_own_walked_nodes() -> None:
+    # One node reached first as an `env` value (the number-string walk) and then as server
+    # b's definition must still get the definition checks: one shared walked set would skip
+    # it and accept `alwaysLoad: yes`, which the CLI reads as a string.
+    header = "mcpServers:\n  - a: {command: x, env: &n {alwaysLoad: yes}}\n  - b: *n\n"
+    with pytest.raises(cw.InvalidCandidateError, match="inline server 'b' 'alwaysLoad'"):
+        sub._refuse_yaml11_only_spellings(header)
+
+
 _INLINE_LEGACY = (
     "---\nname: my-agent\ndescription: d\n"
     "mcpServers:\n"
