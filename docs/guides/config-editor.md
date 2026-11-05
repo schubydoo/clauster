@@ -293,8 +293,9 @@ hook command and never connects to an MCP server from this editor.
   Clauster still refuses an `env` that is not a map of names to plain values.
 
 A file with the name of a built-in subagent, such as `claude.md`, overrides
-that built-in in Claude Code. The list shows the file as read-only. Clauster
-shows its content, but does not edit or delete it.
+that built-in in Claude Code. The list shows the file as a read-only row next
+to the built-in row. Clauster does not edit or delete that file, so change it
+on the host.
 
 ## Troubleshooting and limits
 
