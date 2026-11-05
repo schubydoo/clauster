@@ -237,7 +237,11 @@ ignores them:
   `oauth.authServerMetadataUrl`. Clauster compares the text exactly, so a
   change of letter case, an added default port or a new query string also
   counts. Clauster does not send a stored credential to a new destination.
-  Type the credential again. A change to a stdio server's `command` keeps the
+  Type the credential again.
+- A masked `env` value in a stdio server when you changed its `command` or any
+  element of its `args`, including their order. Clauster compares the text
+  exactly. It does not hand a stored value to a new command. Type the masked
+  `env` values again. A change to an unmasked `env` value keeps the other
   masked values.
 - A reserved name, such as `workspace`, `claude-in-chrome` or `computer-use`.
 - An entry with a `url` and no `type`. Claude Code reads such an entry as a

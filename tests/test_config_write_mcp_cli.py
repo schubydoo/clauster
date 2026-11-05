@@ -850,11 +850,12 @@ def test_entry_writer_ignores_a_sibling_with_cli_only_keys(tmp_path: Path, scope
     cj, project_dir = _seed_scope(
         tmp_path, scope, {"lean-ctx": lean, "gh": {"command": "old", "env": {"T": "sk-gh"}}}
     )
-    edited = {"command": "new", "args": ["stdio"], "env": {"T": cw.REDACTION_SENTINEL}}
+    # Same command and args (a masked env is bound to them), a new timeout.
+    edited = {"command": "old", "timeout": 5000, "env": {"T": cw.REDACTION_SENTINEL}}
     _write_entry(cj, project_dir, scope, "gh", edited, "edit")
     stored = _stored_scope(cj, project_dir, scope)
     assert stored["lean-ctx"] == lean
-    assert stored["gh"] == {"command": "new", "args": ["stdio"], "env": {"T": "sk-gh"}}
+    assert stored["gh"] == {"command": "old", "timeout": 5000, "env": {"T": "sk-gh"}}
 
 
 @pytest.mark.parametrize("scope", ["project", "user", "local"])

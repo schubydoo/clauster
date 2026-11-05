@@ -2207,16 +2207,107 @@ def test_undecidable_stored_destination_refuses_a_mask(tmp_path: Path, stored: d
         mcp.write_project_server_entry(tmp_path, "s", entry, op="edit")
 
 
-def test_stdio_command_change_keeps_a_masked_env(tmp_path: Path) -> None:
-    # Deliberately not bound: the env goes to a program the operator chose on this host.
-    stored = {"command": "old", "env": {"T": "sk-4498"}}
+_STDIO = {"command": "npx", "args": ["-y", "srv@1"], "env": {"T": "sk-4498", "MODE": "a"}}
+
+
+def _seed_stdio(tmp_path: Path) -> bytes:
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"s": _STDIO}}), encoding="utf-8"
+    )
+    return (tmp_path / ".mcp.json").read_bytes()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param({"command": "new"}, id="command"),
+        pytest.param({"command": "NPX"}, id="command-case"),
+        pytest.param({"args": ["-y", "srv@2"]}, id="arg-changed"),
+        pytest.param({"args": ["srv@1", "-y"]}, id="arg-order"),
+        pytest.param({"args": ["-y", "srv@1", "--extra"]}, id="arg-added"),
+        pytest.param({"args": ["-y"]}, id="arg-removed"),
+        pytest.param({"args": []}, id="args-emptied"),
+    ],
+)
+def test_stdio_command_or_args_change_refuses_a_masked_env(tmp_path: Path, change: dict) -> None:
+    # Maintainer decision (2026-11-05): a masked env is bound to the exact command and args,
+    # because the env goes to whatever program those name.
+    before = _seed_stdio(tmp_path)
+    shown, h = mcp.read_project_servers(tmp_path)
+    edited = {**shown["s"], **change}
+    with pytest.raises(cw.InvalidCandidateError, match="Retype the masked env values"):
+        mcp.write_project_server_entry(tmp_path, "s", edited, op="edit")
+    with pytest.raises(cw.InvalidCandidateError, match="Retype the masked env values"):
+        mcp.write_project_servers(tmp_path, {"s": edited}, h)
+    assert (tmp_path / ".mcp.json").read_bytes() == before
+
+
+def test_stdio_new_command_with_retyped_env_saves(tmp_path: Path) -> None:
+    _seed_stdio(tmp_path)
+    fresh = {"command": "uvx", "args": ["other"], "env": {"T": "sk-new", "MODE": "b"}}
+    mcp.write_project_server_entry(tmp_path, "s", fresh, op="edit")
+    on_disk = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]
+    assert on_disk["s"] == fresh
+
+
+def test_stdio_unmasked_env_change_restores_the_masks(tmp_path: Path) -> None:
+    # Command and args unchanged; the operator retypes one env value and leaves the other
+    # masked: the mask is restored from the stored value.
+    _seed_stdio(tmp_path)
+    shown, _h = mcp.read_project_servers(tmp_path)
+    edited = {**shown["s"], "env": {"T": cw.REDACTION_SENTINEL, "MODE": "b"}}
+    mcp.write_project_server_entry(tmp_path, "s", edited, op="edit")
+    on_disk = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]
+    assert on_disk["s"] == {**_STDIO, "env": {"T": "sk-4498", "MODE": "b"}}
+
+
+def test_stdio_masked_arg_resent_counts_as_unchanged(tmp_path: Path) -> None:
+    # An args element masked by shape (a ${VAR}) is restored at its index, so resending the
+    # masked view unchanged keeps both the arg and the env.
+    stored = {"command": "srv", "args": ["--key", "${API_KEY}"], "env": {"T": "sk-4498"}}
     (tmp_path / ".mcp.json").write_text(
         json.dumps({"mcpServers": {"s": stored}}), encoding="utf-8"
     )
     shown, _h = mcp.read_project_servers(tmp_path)
-    mcp.write_project_server_entry(tmp_path, "s", {**shown["s"], "command": "new"}, op="edit")
+    assert shown["s"]["args"][1] == cw.REDACTION_SENTINEL
+    mcp.write_project_server_entry(tmp_path, "s", shown["s"], op="edit")
     on_disk = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]
-    assert on_disk["s"] == {"command": "new", "env": {"T": "sk-4498"}}
+    assert on_disk["s"] == stored
+
+
+def test_stdio_masked_command_resent_counts_as_unchanged(tmp_path: Path) -> None:
+    stored = {"command": "${MCP_BIN}", "env": {"T": "sk-4498"}}
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"s": stored}}), encoding="utf-8"
+    )
+    shown, _h = mcp.read_project_servers(tmp_path)
+    assert shown["s"]["command"] == cw.REDACTION_SENTINEL
+    mcp.write_project_server_entry(tmp_path, "s", shown["s"], op="edit")
+    on_disk = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]
+    assert on_disk["s"] == stored
+
+
+def test_stdio_stored_args_not_a_list_refuses_a_masked_env(tmp_path: Path) -> None:
+    # A hand-edited `args` that is not a list compares as itself, never as the new list.
+    stored = {"command": "srv", "args": "oops", "env": {"T": "sk-4498"}}
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"s": stored}}), encoding="utf-8"
+    )
+    entry = {"command": "srv", "args": [], "env": {"T": cw.REDACTION_SENTINEL}}
+    with pytest.raises(cw.InvalidCandidateError, match="Retype the masked env values"):
+        mcp.write_project_server_entry(tmp_path, "s", entry, op="edit")
+
+
+def test_stdio_absent_args_equals_empty_args(tmp_path: Path) -> None:
+    # The CLI writes `"args": []` for an entry stored without args; the two are the same.
+    stored = {"command": "srv", "env": {"T": "sk-4498"}}
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"s": stored}}), encoding="utf-8"
+    )
+    shown, _h = mcp.read_project_servers(tmp_path)
+    mcp.write_project_server_entry(tmp_path, "s", {**shown["s"], "args": []}, op="edit")
+    on_disk = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]
+    assert on_disk["s"] == {**stored, "args": []}
 
 
 def test_remote_to_stdio_with_a_mask_is_refused(tmp_path: Path) -> None:

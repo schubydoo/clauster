@@ -720,16 +720,31 @@ def _destination(entry: dict[str, Any], stored: dict[str, Any]) -> tuple[Any, ..
     ``https://evil.example.com\@good.example.com/`` (Python reads host ``good``, Node
     reads ``evil``), so any parsed comparison can be steered. Any change at all to a url,
     host letter case and an added default port included, therefore counts as a new
-    destination. A stdio entry returns ``("stdio",)``: it is not bound (see
-    :func:`_check_destination`); its key allowlist has no url field anyway, so the explicit
-    branch only states the intent. ``None`` means the destination cannot be decided.
+    destination.
+
+    A stdio entry hands its ``env`` to the program it runs, so its destination is the exact
+    ``command`` and the exact ``args`` list, element by element, in order. A masked element
+    takes the stored value at the same place, as ``merge_redacted`` will write it. An absent
+    ``args`` reads as ``[]``, the CLI's own default. ``None`` means the destination cannot
+    be decided.
     """
     try:
         transport = entry_transport(entry)
     except cw.InvalidCandidateError:
         return None
     if transport == "stdio":
-        return ("stdio",)
+        command = entry.get("command")
+        if command == cw.REDACTION_SENTINEL:
+            command = stored.get("command")
+        args = entry.get("args", [])
+        held = stored.get("args", [])
+        held = held if isinstance(held, list) else []
+        if isinstance(args, list):
+            args = [
+                (held[i] if i < len(held) else None) if a == cw.REDACTION_SENTINEL else a
+                for i, a in enumerate(args)
+            ]
+        return "stdio", command, args
     return transport, _url_texts(entry, stored)
 
 
@@ -747,10 +762,10 @@ def _check_destination(name: str, entry: Any, stored: Any) -> None:
     change. The stored entry is first converted as on load, so a legacy ``transport``
     compares as its ``type``.
 
-    A stdio server is deliberately NOT bound: editing its ``command`` while keeping a
-    masked ``env`` is a supported edit (the env goes to a program on this host that the
-    operator chose, not to a network destination). A remote entry that turns into stdio,
-    or the reverse, changes ``type`` and is refused.
+    A stdio server is bound the same way (maintainer decision, 2026-11-05): a masked
+    ``env`` value keeps its stored value only while the ``command`` and every ``args``
+    element are exactly unchanged, because the env goes to whatever program those name.
+    A remote entry that turns into stdio, or the reverse, changes ``type`` and is refused.
     """
     if not isinstance(entry, dict) or not isinstance(stored, dict):
         return
@@ -758,7 +773,14 @@ def _check_destination(name: str, entry: Any, stored: Any) -> None:
         return
     stored_entry = _convert_legacy_entry(stored)[0]
     now = _destination(entry, stored_entry)
-    if now is None or now != _destination(stored_entry, stored_entry):
+    then = _destination(stored_entry, stored_entry)
+    if now is None or now != then:
+        if now is not None and then is not None and now[0] == then[0] == "stdio":
+            raise cw.InvalidCandidateError(
+                f"server {name!r} keeps a masked 'env' value '********' but its command or "
+                "args changed; the stored value is not handed to a new command. Retype the "
+                "masked env values for the new command"
+            )
         raise cw.InvalidCandidateError(
             f"server {name!r} keeps a masked value '********' but its type or a url changed; "
             "the stored credential is not sent to a new destination. Retype the credential "
