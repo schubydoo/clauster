@@ -1277,6 +1277,101 @@ def test_api_resume_agent_prefix_of_a_symlinked_project_does_not_borrow(
     assert captured == []
 
 
+_SYMLINK_SKIP = pytest.mark.skipif(
+    sys.platform == "win32", reason="os.symlink needs privilege on Windows"
+)
+
+
+@_SYMLINK_SKIP
+@pytest.mark.parametrize("mode", sorted(CEILING_GATED_MODES))
+@pytest.mark.parametrize("via", ["alias", "real"])
+def test_api_resume_agent_unconfigured_symlink_alias_denies(
+    write_config, tmp_path, projects_root, monkeypatch, mode, via
+):
+    # projects_root/omega is an alias of alpha with no config entry, so no ceiling. A job
+    # in that directory is in omega too, whichever name its recorded cwd uses.
+    (projects_root / "omega").symlink_to(projects_root / "alpha", target_is_directory=True)
+    cwd = projects_root / ("omega" if via == "alias" else "alpha")
+    extra = f"instance_defaults:\n  permission_mode: {mode}\n" + _ALPHA_CEILING
+    r, captured = _resume_via_route(write_config, tmp_path, monkeypatch, cwd=cwd, extra=extra)
+    assert r.status_code == 403
+    assert r.json() == {
+        "detail": ClausterConfig.bypass_denied_detail("omega", permission_mode=mode)
+    }
+    assert captured == []
+
+
+@_SYMLINK_SKIP
+def test_api_resume_agent_configured_symlink_alias_with_ceiling_resumes(
+    write_config, tmp_path, projects_root, monkeypatch
+):
+    # Positive control: give the alias its own ceiling and the same job resumes.
+    (projects_root / "omega").symlink_to(projects_root / "alpha", target_is_directory=True)
+    extra = _INHERIT_DEFAULT + _ALPHA_CEILING + "  omega:\n    allow_bypass_permissions: true\n"
+    r, captured = _resume_via_route(
+        write_config, tmp_path, monkeypatch, cwd=projects_root / "omega", extra=extra
+    )
+    assert r.status_code == 201
+    assert captured[0]["permission_mode"] == "inherit"
+
+
+@_SYMLINK_SKIP
+@pytest.mark.parametrize("kind", ["loop", "dangling"])
+def test_api_resume_agent_loop_or_dangling_link_cwd_is_403(
+    write_config, tmp_path, projects_root, monkeypatch, kind
+):
+    link = projects_root / "zeta"
+    link.symlink_to(link if kind == "loop" else projects_root / "no-such-dir")
+    r, captured = _resume_via_route(
+        write_config, tmp_path, monkeypatch, cwd=link, extra=_INHERIT_DEFAULT + _ALPHA_CEILING
+    )
+    assert r.status_code == 403
+    assert captured == []
+
+
+@_SYMLINK_SKIP
+def test_api_resume_agent_loop_entry_does_not_block_other_projects(
+    write_config, tmp_path, projects_root, monkeypatch
+):
+    # A looping entry under projects_root leads to no directory, so it cannot hold a job:
+    # a job in alpha (with the ceiling) still resumes. Path.resolve is forced to raise for
+    # the loop, as 3.11/3.12 do (3.13 returns a path instead).
+    loop = projects_root / "zeta"
+    loop.symlink_to(loop)
+    real_resolve = Path.resolve
+
+    def _resolve(self, strict=False):
+        if self.name == "zeta":
+            raise RuntimeError("Symlink loop")
+        return real_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", _resolve)
+    r, captured = _resume_via_route(
+        write_config,
+        tmp_path,
+        monkeypatch,
+        cwd=projects_root / "alpha",
+        extra=_INHERIT_DEFAULT + _ALPHA_CEILING,
+    )
+    assert r.status_code == 201
+    assert captured[0]["permission_mode"] == "inherit"
+
+
+def test_projects_holding_unreadable_projects_root_matches_nothing(
+    write_config, projects_root, monkeypatch
+):
+    # Any other failure while listing projects_root refuses the resume (fail closed).
+    from clauster.routes import agents as agents_module
+
+    config = load_config(write_config(_ALPHA_CEILING))
+
+    def _boom(self):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(Path, "iterdir", _boom)
+    assert agents_module._projects_holding(config, projects_root / "alpha") == []
+
+
 def test_api_resume_agent_unresolvable_cwd_is_403(
     write_config, tmp_path, projects_root, monkeypatch
 ):

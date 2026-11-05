@@ -254,12 +254,15 @@ def _resume_ceiling_refusal(config: ClausterConfig, cwd: Path, permission_mode: 
 def _projects_holding(config: ClausterConfig, cwd: Path) -> list[str]:
     """Return every project whose directory holds ``cwd``, sorted; empty if none.
 
-    The candidates are each valid ``config.projects`` key and the first path part of
-    ``cwd`` under ``projects_root`` (a project with no config entry, so no ceiling).
+    The candidates are every entry directly under ``projects_root``, configured or not
+    and symlinked or not (an entry with no config entry has no ceiling), the first path
+    part of the resolved ``cwd`` under the resolved ``projects_root``, and each valid
+    ``config.projects`` key (which can point outside the root through a symlink).
     Both sides are compared after ``resolve()``, so ``..`` and symlinks cannot move a
-    job into a project it does not run in (a symlinked project directory still matches
-    itself), and a directory name is never matched by name alone: ``/tmp/<name>`` does
-    not borrow ``<name>``'s ceiling. An unresolvable path matches nothing (fail closed).
+    job into a project it does not run in, a symlink alias under ``projects_root`` (one
+    project directory reached under two names) brings in the alias's own ceiling, and a
+    directory name is never matched by name alone: ``/tmp/<name>`` does not borrow
+    ``<name>``'s ceiling. An unresolvable ``cwd`` matches nothing (fail closed).
     """
     found: set[str] = set()
     # A NUL byte is never a real directory. POSIX resolve() raises ValueError on it, but
@@ -271,6 +274,15 @@ def _projects_holding(config: ClausterConfig, cwd: Path) -> list[str]:
         root = config.projects_root.resolve()
         if root in resolved.parents:
             found.add(resolved.relative_to(root).parts[0])
+        for entry in config.projects_root.iterdir():
+            try:
+                base = entry.resolve()
+            except RuntimeError:
+                # A symlink loop (3.11/3.12 raise) leads to no directory, so it cannot
+                # hold the job. Any other resolve error refuses the resume (outer except).
+                continue
+            if resolved == base or base in resolved.parents:
+                found.add(entry.name)
         for name in config.projects:
             # A key like ".." would make projects_root's parent a "project" (widening).
             if not is_valid_project_name(name):

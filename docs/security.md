@@ -586,9 +586,10 @@ it does not try to inspect the files. Instead, it refuses `inherit` itself:
 - A resume of an ended background run uses `instance_defaults.permission_mode`, like
   a new background run that names no mode. If that default is `inherit` or
   `bypassPermissions`, the resume needs the ceiling of every project whose directory
-  holds the run's directory. Clauster compares the resolved paths, so a `..` or a
-  symlink cannot borrow another project's ceiling, and a run in no project is
-  refused.
+  holds the run's directory. This includes each entry under `projects_root`, with or
+  without a config entry, so a symlink alias of a project directory needs its own
+  ceiling too. Clauster compares the resolved paths, so a `..` or a symlink cannot
+  borrow another project's ceiling, and a run in no project is refused.
 
 Claude Code ignores `bypassPermissions` in a project's `.claude/settings.json` and
 `.claude/settings.local.json` (the session starts in the default mode), so a value
