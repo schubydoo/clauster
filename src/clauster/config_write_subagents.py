@@ -941,22 +941,31 @@ def _check_mapping(
     never be looked at. A source is checked even where an explicit key overrides it, which
     only ever refuses more. ``seen`` skips a source merged twice; an alias cycle never gets
     here, because :func:`_refuse_enclosing_references` refuses it first.
+
+    Iterative: a chain of ``<<`` merges declared in document order loads without trouble
+    (PyYAML flattens each mapping as it reaches it) and passes the merge-size guard (each
+    link is one pair), so a recursive walk here met its full length, one frame per link, and
+    a 29 KB chain of about 1200 links raised ``RecursionError``. The sources of a mapping are
+    still walked after its own keys, in their written order.
     """
-    if id(node) in seen:
-        return
-    seen.add(id(node))
-    for key_node, value_node in node.value:
-        if key_node.tag == _MERGE_TAG:
-            sources = (
-                value_node.value if isinstance(value_node, yaml.SequenceNode) else [value_node]
-            )
-            for source in sources:
-                # Always a mapping: PyYAML's load already refused a merge of anything else.
-                if isinstance(source, yaml.MappingNode):  # pragma: no branch
-                    _check_mapping(source, seen, visit=visit)
-        # A non-scalar key cannot be hashed into a dict, so the load already refused it.
-        elif isinstance(key_node, yaml.ScalarNode):  # pragma: no branch
-            visit(key_node.value, value_node)
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        sources: list[yaml.MappingNode] = []
+        for key_node, value_node in current.value:
+            if key_node.tag == _MERGE_TAG:
+                merged = (
+                    value_node.value if isinstance(value_node, yaml.SequenceNode) else [value_node]
+                )
+                # Always mappings: PyYAML's load already refused a merge of anything else.
+                sources.extend(s for s in merged if isinstance(s, yaml.MappingNode))
+            # A non-scalar key cannot be hashed into a dict, so the load already refused it.
+            elif isinstance(key_node, yaml.ScalarNode):  # pragma: no branch
+                visit(key_node.value, value_node)
+        stack.extend(reversed(sources))
 
 
 class _InlineWalk:

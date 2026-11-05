@@ -1528,13 +1528,46 @@ def test_shared_aliases_under_a_discarded_key_do_not_hang_a_save(tmp_path: Path)
     root = yaml.compose(header.group(1), Loader=yaml.SafeLoader)
     assert _naive_walk_visits(root) > 10**12  # the positive control: it IS a pyramid
     start = time.monotonic()
-    sub.write_project_agent(tmp_path, "x", text, None)
+    sub.validate_agent_content(text, expected_name="x")
     assert time.monotonic() - start < 0.5
-    # A bad value at the bottom of the same pyramid is still found, as fast.
+    sub.write_project_agent(tmp_path, "x", text, None)  # and the save goes through
+    # The walk still follows aliases: here the bad value sits in the bottom level of a
+    # pyramid that only the discarded `args: *p20` reaches, 21 alias levels down. The levels
+    # are discarded duplicates of a top-level key, which this walk does not enter itself.
+    levels = ["pyr: &p0 [1e3, a]"] + [f"pyr: &p{i} [*p{i - 1}, *p{i - 1}]" for i in range(1, 21)]
+    deep = (
+        "---\nname: x\ndescription: d\n"
+        + "\n".join(levels)
+        + "\npyr: 0\nmcpServers:\n  - srv:\n      command: c\n      args: *p20\n"
+        "      args: []\n---\nbody\n"
+    )
     start = time.monotonic()
     with pytest.raises(cw.InvalidCandidateError, match="as a number, not a string"):
-        sub.validate_agent_content(_alias_pyramid(20, bottom="1e3"), expected_name="x")
+        sub.validate_agent_content(deep, expected_name="x")
     assert time.monotonic() - start < 0.5
+
+
+@pytest.mark.parametrize(
+    "bottom", ["{command: c}", "{command: c, alwaysLoad: yes}", "{command: c, args: [1e3]}"]
+)
+def test_a_long_merge_chain_behind_an_inline_server_is_walked_without_recursion(
+    bottom: str,
+) -> None:
+    # A `<<` chain declared in document order loads fine and passes the merge-size guard
+    # (each link is one pair), so the spelling walk met its full length. Recursively, 1500
+    # links overflowed the stack; the walk is iterative now and still reaches the bottom.
+    links = [f"x0: &a0 {bottom}"] + [f"x{i}: &a{i} {{<<: *a{i - 1}}}" for i in range(1, 1500)]
+    text = (
+        "---\nname: x\ndescription: d\n"
+        + "\n".join(links)
+        + "\nmcpServers:\n  - s: *a1499\n---\nbody\n"
+    )
+    assert len(text.encode("utf-8")) < sub.MAX_BYTES
+    if bottom == "{command: c}":
+        sub.validate_agent_content(text, expected_name="x")
+    else:
+        with pytest.raises(cw.InvalidCandidateError, match="inline server 's'"):
+            sub.validate_agent_content(text, expected_name="x")
 
 
 def test_each_kind_of_inline_check_keeps_its_own_walked_nodes() -> None:
