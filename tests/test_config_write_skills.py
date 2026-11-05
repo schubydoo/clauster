@@ -17,9 +17,11 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import time
 from pathlib import Path
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 
 from clauster import config_write as cw
@@ -150,9 +152,11 @@ def test_parse_frontmatter_tolerates_trailing_whitespace_on_a_fence() -> None:
     assert body == "body\n"
 
 
-def test_validate_frontmatter_requires_description() -> None:
-    with pytest.raises(cw.InvalidCandidateError, match="description"):
-        sk.validate_frontmatter({})
+def test_validate_frontmatter_requires_no_field() -> None:
+    # TASK-449.6: "All fields are optional" (docs, frontmatter reference). Without a
+    # description the CLI uses the first line of the content. Before this the surface
+    # required `description`.
+    assert sk.validate_frontmatter({}) == {}
 
 
 def test_validate_frontmatter_passes_unknown_keys_through() -> None:
@@ -180,15 +184,15 @@ def test_validate_frontmatter_accepts_all_documented_fields() -> None:
 @pytest.mark.parametrize(
     "candidate",
     [
-        {"description": "x", "name": "../escape"},
-        {"description": "x", "name": 5},
-        {"description": "x", "disable-model-invocation": "true"},
-        {"description": "x", "user-invocable": "false"},
+        {"description": "x", "name": "a<b"},
+        {"description": "x", "name": "two  spaces"},
+        {"description": "x", "disable-model-invocation": "maybe"},
+        {"description": "x", "user-invocable": "maybe"},
         {"description": "x", "allowed-tools": 5},
-        {"description": "x", "argument-hint": 5},
+        {"description": "x", "argument-hint": {"a": 1}},
         {"description": ""},
         {"description": "   "},
-        {"description": 5},
+        {"description": [5]},
         "not-a-dict",
     ],
 )
@@ -286,7 +290,7 @@ def test_write_skill_rejects_invalid_name(tmp_path: Path) -> None:
 def test_write_skill_rejects_bad_skill_md_writes_nothing(tmp_path: Path) -> None:
     with pytest.raises(cw.InvalidCandidateError):
         sk.write_skill(
-            tmp_path, "my-skill", {sk.SKILL_FILENAME: "no frontmatter"}, expected_hash=None
+            tmp_path, "my-skill", {sk.SKILL_FILENAME: "---\nnever closed\n"}, expected_hash=None
         )
     assert not (tmp_path / "skills").exists()
 
@@ -575,7 +579,12 @@ def test_list_skills_frontmatter_error_never_leaks_a_token_from_yaml_prose(
     token = "FAKEFAKEFAKEFAKEFAKEfake42"
     skills_root = tmp_path / "skills"
     for i, header in enumerate(
-        (f"name: x\nextra: *{token}\n", f"a: &{token} 1\nb: &{token} 2\n", f"a: !{token} 1\n")
+        # Nested: the CLI retry re-quotes a top-level line with `*` or `&` (TASK-449.6).
+        (
+            f"name: x\nm:\n  extra: *{token}\n",
+            f"m:\n  a: &{token} 1\n  b: &{token} 2\n",
+            f"a: !{token} 1\n",
+        )
     ):
         bad = skills_root / f"broken{i}"
         bad.mkdir(parents=True)
@@ -618,7 +627,8 @@ def test_list_skills_frontmatter_error_carries_no_document_text(tmp_path: Path) 
     bad = skills_root / "broken"
     bad.mkdir(parents=True)
     (bad / sk.SKILL_FILENAME).write_bytes(
-        b"---\ndescription: [unclosed ${SUPER_SECRET_VALUE}\n---\nbody"
+        # Nested: the CLI retry would re-quote a top-level `[` line (TASK-449.6).
+        b"---\nm:\n  description: [unclosed ${SUPER_SECRET_VALUE}\n---\nbody"
     )
     listing = sk.list_skills(tmp_path)
     err = listing[0]["frontmatter_error"]
@@ -631,7 +641,7 @@ def test_list_skills_reports_frontmatter_error_without_raising(tmp_path: Path) -
     skills_root = tmp_path / "skills"
     bad = skills_root / "broken"
     bad.mkdir(parents=True)
-    (bad / sk.SKILL_FILENAME).write_bytes(b"no frontmatter here")
+    (bad / sk.SKILL_FILENAME).write_bytes(b"---\nan unclosed frontmatter block\n")
     listing = sk.list_skills(tmp_path)
     assert len(listing) == 1
     assert "frontmatter_error" in listing[0]
@@ -812,7 +822,9 @@ def test_validate_skill_overrides_accepts_empty() -> None:
     "candidate",
     [
         "not-a-dict",
-        {"../escape": "on"},
+        {"": "on"},
+        {"two  spaces": "on"},
+        {"__proto__": "on"},
         {"good-name": "bogus-value"},
         {"good-name": True},
         {5: "on"},
@@ -979,7 +991,7 @@ def test_route_skills_bad_shape_is_422_and_writes_nothing(
                 "project": "alpha",
                 "confirm": "alpha",
                 "name": "greeter",
-                "files": {"SKILL.md": "no frontmatter"},
+                "files": {"SKILL.md": "---\nnever closed\n"},
             },
         )
         assert resp.status_code == 422
@@ -1484,7 +1496,7 @@ def test_route_skills_write_user_scope_bad_shape_is_422(write_config, tmp_path) 
                 "scope": "user",
                 "confirm": cw.USER_SCOPE_TOKEN,
                 "name": "greeter",
-                "files": {"SKILL.md": "no frontmatter"},
+                "files": {"SKILL.md": "---\nnever closed\n"},
             },
         )
         assert resp.status_code == 422
@@ -1666,3 +1678,1059 @@ def test_list_skills_error_text_survives_an_errno_less_oserror(tmp_path, monkeyp
 
     assert "None" not in listed[0]["frontmatter_error"]
     assert "device fell off the bus" in listed[0]["frontmatter_error"]
+
+
+# --- TASK-449.6: every documented field, every CLI-parsed value -------------------------
+#
+# Sources: https://code.claude.com/docs/en/skills#frontmatter-reference (DOC) and the
+# skill loader of the installed CLI 2.1.318 (CLI: `oPe`, `bye`, `tv`/`fu`, `wke`, `dq`,
+# `tdo`, `Ka`, `jMt`, `ace`). Each case is one SKILL.md header line.
+
+
+def _fm(*lines: str) -> str:
+    return "---\n" + "\n".join(lines) + "\n---\nBody.\n"
+
+
+_DOCUMENTED_FIELDS = [
+    pytest.param("name: my-skill", id="DOC-name"),
+    pytest.param("description: What this skill does", id="DOC-description"),
+    pytest.param("when_to_use: When the user asks for a deploy", id="DOC-when_to_use"),
+    pytest.param("argument-hint: '[issue-number]'", id="DOC-argument-hint"),
+    pytest.param("arguments: issue branch", id="DOC-arguments-string"),
+    pytest.param("arguments: [issue, branch]", id="DOC-arguments-list"),
+    pytest.param("disable-model-invocation: true", id="DOC-disable-model-invocation"),
+    pytest.param("user-invocable: false", id="DOC-user-invocable"),
+    pytest.param("allowed-tools: Read Grep", id="DOC-allowed-tools-space"),
+    pytest.param("allowed-tools: Read, Grep", id="DOC-allowed-tools-comma"),
+    pytest.param("allowed-tools: [Read, 'Bash(git add *)']", id="DOC-allowed-tools-list"),
+    pytest.param("disallowed-tools: AskUserQuestion", id="DOC-disallowed-tools-string"),
+    pytest.param("disallowed-tools: [AskUserQuestion, Bash]", id="DOC-disallowed-tools-list"),
+    pytest.param("model: sonnet", id="DOC-model-alias"),
+    pytest.param("model: claude-opus-5-5", id="DOC-model-id"),
+    pytest.param("model: inherit", id="DOC-model-inherit"),
+    *[
+        pytest.param(f"effort: {level}", id=f"DOC-effort-{level}")
+        for level in ("low", "medium", "high", "xhigh", "max")
+    ],
+    pytest.param("context: fork", id="DOC-context"),
+    pytest.param("agent: Explore", id="DOC-agent"),
+    pytest.param("background: false", id="DOC-background"),
+    pytest.param(
+        "hooks:\n  PreToolUse:\n    - matcher: Bash\n      hooks:\n"
+        "        - {type: command, command: ./check.sh, once: true}",
+        id="DOC-hooks",
+    ),
+    pytest.param("paths: 'src/**/*.ts, tests/**'", id="DOC-paths-string"),
+    pytest.param("paths: [src/**/*.ts, tests/**]", id="DOC-paths-list"),
+    pytest.param("shell: bash", id="DOC-shell-bash"),
+    pytest.param("shell: powershell", id="DOC-shell-powershell"),
+    pytest.param("metadata: {owner: platform, tier: 2}", id="DOC-metadata"),
+    pytest.param("license: Apache-2.0", id="DOC-license"),
+    pytest.param("compatibility: Claude Code with git on PATH", id="DOC-compatibility"),
+]
+
+
+@pytest.mark.parametrize("line", _DOCUMENTED_FIELDS)
+def test_every_documented_field_saves_with_its_documented_type(line: str) -> None:
+    sk.validate_skill_md_content(_fm(line))  # no raise
+
+
+_CLI_PARSED = [
+    *[
+        pytest.param(f"{key}: {word}", id=f"CLI-{key}-{word}")
+        for key in ("disable-model-invocation", "user-invocable", "background")
+        for word in ("yes", "No", "ON", "off", "1", "0", "'TRUE'", "' yes '")
+    ],
+    pytest.param("user-invocable:", id="CLI-user-invocable-null-reads-false"),
+    pytest.param("fallback: true", id="CLI-fallback"),
+    pytest.param("version: 1.2.0", id="CLI-version"),
+    pytest.param("version: 2", id="CLI-version-number"),
+    pytest.param("disallowedTools: Bash", id="CLI-disallowedTools-camel"),
+    pytest.param("created_by: dream-proposal", id="CLI-created_by"),
+    pytest.param("improved_by: dream-proposal", id="CLI-improved_by"),
+    pytest.param("description: 42", id="CLI-description-number"),
+    pytest.param("description: true", id="CLI-description-bool"),
+    pytest.param("name: My Deploy Skill", id="CLI-name-with-spaces"),
+    pytest.param("name: anthropic-skills:pdf", id="CLI-name-with-colon"),
+    pytest.param("name: déployer", id="CLI-name-non-ascii"),
+    pytest.param("name: 7", id="CLI-name-number"),
+    pytest.param("argument-hint: [issue-number]", id="CLI-argument-hint-yaml-list"),
+    pytest.param("argument-hint: 3", id="CLI-argument-hint-number"),
+    pytest.param("when_to_use: [deploy, ship]", id="CLI-when_to_use-list"),
+    pytest.param("allowed-tools: ''", id="CLI-allowed-tools-empty"),
+    pytest.param("allowed-tools: '*'", id="CLI-allowed-tools-star"),
+    pytest.param("allowed-tools:", id="CLI-allowed-tools-null"),
+    pytest.param("arguments: ''", id="CLI-arguments-empty"),
+    pytest.param("effort: HIGH", id="CLI-effort-upper"),
+    pytest.param("effort: med", id="CLI-effort-alias"),
+    pytest.param("effort: 3", id="CLI-effort-integer"),
+    pytest.param("effort: 3 tokens", id="CLI-effort-parseInt"),
+    pytest.param("model: ' opus '", id="CLI-model-padded"),
+    pytest.param("model: INHERIT", id="CLI-model-inherit-upper"),
+    pytest.param("shell: ' PowerShell '", id="CLI-shell-case"),
+    pytest.param("paths: [[src/**, docs/**], tests/**]", id="CLI-paths-nested-list"),
+    pytest.param("paths: '{src,lib}/**/*.py'", id="CLI-paths-brace"),
+    pytest.param("hooks:", id="CLI-hooks-null"),
+    pytest.param("PreToolUse: []", id="CLI-top-level-event-empty"),
+    pytest.param("metadata:", id="CLI-metadata-null"),
+]
+
+
+@pytest.mark.parametrize("line", _CLI_PARSED)
+def test_every_cli_parsed_value_saves(line: str) -> None:
+    sk.validate_skill_md_content(_fm(line))  # no raise
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param("Just the instructions.\n", id="no-frontmatter"),
+        pytest.param("\ufeff---\ndescription: d\n---\nbody\n", id="bom-then-frontmatter"),
+        pytest.param("---\n---\nbody\n", id="empty-frontmatter"),
+        pytest.param("---\n\n---\nbody\n", id="blank-frontmatter"),
+        pytest.param("\n---\ndescription: d\n---\n", id="fence-not-on-line-1-is-content"),
+    ],
+)
+def test_skill_md_without_frontmatter_fields_saves(content: str) -> None:
+    # The docs: "All fields are optional" and the frontmatter is read only when the opening
+    # `---` is the file's first line; otherwise the whole file is the skill's content. The
+    # CLI drops a leading BOM first (its `qw`).
+    sk.validate_skill_md_content(content)  # no raise
+
+
+# Refused, and whether a load may remove the field (the CLI treats it as absent: True), or
+# not (the CLI does something else with it: False).
+_REFUSED = [
+    pytest.param("description: ''", True, id="description-blank"),
+    pytest.param("description: [a]", True, id="description-list"),
+    pytest.param("name: ''", True, id="name-empty"),
+    pytest.param("name: " + "x" * 257, True, id="name-over-256"),
+    pytest.param("name: '  lead'", False, id="name-leading-space"),
+    pytest.param("name: 'a  b'", False, id="name-double-space"),
+    pytest.param("name: 'a<b'", False, id="name-angle-bracket"),
+    pytest.param('name: "a\\u200bb"', False, id="name-zero-width"),
+    pytest.param('name: "a\\u00a0b"', False, id="name-no-break-space"),
+    pytest.param('name: "\\u202ertl"', False, id="name-bidi"),
+    pytest.param("name: {a: 1}", False, id="name-mapping"),
+    pytest.param("disable-model-invocation: maybe", True, id="dmi-unreadable"),
+    pytest.param("background: maybe", True, id="background-unreadable"),
+    pytest.param("fallback: 2", True, id="fallback-unreadable"),
+    pytest.param("user-invocable: maybe", False, id="user-invocable-unreadable-reads-false"),
+    pytest.param("allowed-tools: 5", True, id="allowed-tools-number"),
+    pytest.param("allowed-tools: {Read: 1}", True, id="allowed-tools-mapping"),
+    pytest.param("allowed-tools: [Read, 5]", False, id="allowed-tools-non-string-entry"),
+    pytest.param("disallowed-tools: true", True, id="disallowed-tools-bool"),
+    pytest.param("arguments: 5", True, id="arguments-number"),
+    pytest.param("arguments: issue 2", False, id="arguments-digit-name"),
+    pytest.param("arguments: [issue, '']", False, id="arguments-blank-entry"),
+    pytest.param("arguments: [issue, 5]", False, id="arguments-non-string-entry"),
+    pytest.param("effort: banana", True, id="effort-unknown"),
+    pytest.param("effort: ' high'", True, id="effort-not-trimmed"),
+    pytest.param("effort: true", True, id="effort-bool"),
+    pytest.param("model: ''", True, id="model-blank"),
+    pytest.param("model: 5", True, id="model-number"),
+    pytest.param("context: forked", True, id="context-other"),
+    pytest.param("context: Fork", True, id="context-case"),
+    pytest.param("shell: zsh", True, id="shell-unknown"),
+    pytest.param("shell: ''", True, id="shell-blank"),
+    pytest.param("metadata: [1, 2]", True, id="metadata-list"),
+    pytest.param("metadata: text", True, id="metadata-string"),
+    pytest.param("paths: 5", True, id="paths-number"),
+    pytest.param("paths: [src/**, 5]", False, id="paths-non-string-entry"),
+    pytest.param("hooks: [x]", False, id="hooks-list-drops-allowed-tools"),
+    pytest.param("hooks: on-commit", False, id="hooks-string"),
+    pytest.param("hooks: false", True, id="hooks-false"),
+    pytest.param("argument-hint: {a: 1}", False, id="argument-hint-mapping"),
+    pytest.param("agent: [{a: 1}]", False, id="agent-list-of-mapping"),
+    pytest.param("created_by: alice", True, id="created_by-other"),
+    pytest.param("PreToolUse: [{hooks: []}]", False, id="top-level-PreToolUse"),
+    pytest.param("PermissionRequest: {a: 1}", False, id="top-level-PermissionRequest"),
+    pytest.param("disallowed-tools: Bash\ndisallowedTools: Read", True, id="both-denylists"),
+]
+
+
+@pytest.mark.parametrize(("line", "droppable"), _REFUSED)
+def test_a_value_the_cli_rejects_or_ignores_is_refused(line: str, droppable: bool) -> None:
+    with pytest.raises(cw.InvalidCandidateError) as excinfo:
+        sk.validate_skill_md_content(_fm(line))
+    assert isinstance(excinfo.value, sk._IgnoredFieldError) is droppable
+
+
+@pytest.mark.parametrize(
+    ("line", "field"),
+    [
+        # A string to the CLI's YAML 1.2, a boolean to PyYAML: the text differs.
+        ("description: yes", "description"),
+        # 8 to PyYAML, 10 to YAML 1.2.
+        ("effort: 010", "effort"),
+        # A string to PyYAML (it needs a dot), the number 1 to YAML 1.2, so `true` to the CLI.
+        ("disable-model-invocation: 1e0", "disable-model-invocation"),
+        # A date to PyYAML, a string to YAML 1.2.
+        ("version: 2024-01-01", "version"),
+        # A string to PyYAML, the octal number 7 to YAML 1.2, so the name "7" to the CLI.
+        ("name: 0o7", "name"),
+    ],
+)
+def test_a_value_yaml_1_1_and_1_2_read_differently_is_refused_by_name(
+    line: str, field: str
+) -> None:
+    with pytest.raises(cw.InvalidCandidateError, match=f"'{field}' reads differently"):
+        sk.validate_skill_md_content(_fm(line))
+
+
+def test_a_yaml_1_1_boolean_that_the_cli_also_reads_as_that_boolean_saves() -> None:
+    # `yes` is a string to YAML 1.2, but the CLI's boolean reader takes the string `yes` as
+    # true, so PyYAML's True and the CLI agree: the docs list yes/no/on/off for booleans.
+    readings = sk.validate_frontmatter({"user-invocable": True})
+    sk.validate_skill_md_content(_fm("user-invocable: yes"))  # no raise
+    assert readings == {"user-invocable": ("bool-or-null", True)}
+
+
+@pytest.mark.parametrize(
+    "hook_line",
+    ["async: yes", "timeout: 1_000", "timeout: 010", "once: on", "timeout: 0b101"],
+)
+def test_a_yaml_1_1_only_spelling_inside_frontmatter_hooks_is_refused(hook_line: str) -> None:
+    # Coordinator scope addition, 2026-11-05: the shared seam walks nested values, so a
+    # skill's frontmatter hook with `async: yes` or `timeout: 1_000` is refused. The CLI's
+    # YAML 1.2 reads both as strings and rejects or ignores them.
+    content = _fm(
+        "hooks:",
+        "  PreToolUse:",
+        "    - hooks:",
+        f"        - {{type: command, command: ./x.sh, {hook_line}}}",
+    )
+    with pytest.raises(cw.InvalidCandidateError, match="nested value"):
+        sk.validate_skill_md_content(content)
+
+
+def test_a_plain_spelling_inside_frontmatter_hooks_saves() -> None:
+    content = _fm(
+        "hooks:",
+        "  PreToolUse:",
+        "    - hooks:",
+        "        - {type: command, command: ./x.sh, async: true, timeout: 1000}",
+    )
+    sk.validate_skill_md_content(content)  # no raise
+
+
+@pytest.mark.parametrize(
+    ("name", "shown"),
+    [
+        ("x" * 256, True),
+        ("x" * 257, False),
+        ("\U0001f600" * 128, True),  # 256 UTF-16 units: JavaScript counts a surrogate pair as 2
+        ("\U0001f600" * 129, False),
+        ("doctor", True),
+        ("apps/web:deploy", True),
+        ("", False),
+        ("tab\there", False),
+        ("a\u3164b", False),  # Hangul filler: a letter to Python, a blank to the CLI
+        ("a\u2800b", False),  # Braille blank
+        ("caf\u0065\u0301", False),  # a combining mark: narrower than the CLI, on purpose
+        ("a&lt;b", False),  # the CLI turns &lt; back into < before it checks
+    ],
+)
+def test_cli_shows_name(name: str, shown: bool) -> None:
+    assert sk.cli_shows_name(name) is shown
+
+
+@pytest.mark.parametrize(
+    ("value", "text"),
+    [
+        (True, "true"),
+        (None, "null"),
+        (5, "5"),
+        (5.0, "5"),
+        (-0.0, "0"),
+        (0.5, "0.5"),
+        (1e21, "1e+21"),
+        (10**21, "1e+21"),
+        (1.5e-7, "1.5e-7"),
+        (0.000001, "0.000001"),
+        (123456.789, "123456.789"),
+        (float("inf"), "Infinity"),
+        (float("nan"), "NaN"),
+        (10**400, "Infinity"),
+        (["a", None, 1, ["b"]], "a,,1,b"),
+        ({"a": 1}, "[object Object]"),
+    ],
+)
+def test_js_string_matches_javascript(value: object, text: str) -> None:
+    assert sk._js_string(value) == text
+
+
+def test_js_string_refuses_a_value_javascript_never_sees() -> None:
+    import datetime
+
+    with pytest.raises(TypeError):
+        sk._js_string(datetime.date(2024, 1, 1))
+
+
+def test_effort_reader_follows_the_cli() -> None:
+    assert sk._cli_effort(4.0) == 4
+    assert sk._cli_effort(4.5) == 4  # String(4.5) is "4.5", and parseInt reads 4
+    # dq stringifies anything that is not a number: a list joins, a mapping never matches.
+    assert sk._cli_effort([1]) == 1
+    assert sk._cli_effort(["High"]) == "high"
+    assert sk._cli_effort({"a": 1}) is None
+
+
+def test_list_skills_shows_what_the_cli_reads(tmp_path: Path) -> None:
+    root = tmp_path / "skills"
+    for name, text in {
+        "bare": "Only instructions.\n",
+        "yes-flag": "---\ndescription: '  padded  '\ndisable-model-invocation: 'Yes'\n---\nb\n",
+    }.items():
+        (root / name).mkdir(parents=True)
+        (root / name / sk.SKILL_FILENAME).write_bytes(text.encode("utf-8"))
+    listing = {item["name"]: item for item in sk.list_skills(tmp_path)}
+    assert "frontmatter_error" not in listing["bare"]
+    assert listing["bare"]["description"] is None
+    assert listing["bare"]["disable_model_invocation"] is False
+    # The string 'Yes' was `True` under the old bool(...) check only by accident; it is
+    # true now because the CLI's reader says so. The description is trimmed, as the CLI shows it.
+    assert listing["yes-flag"]["disable_model_invocation"] is True
+    assert listing["yes-flag"]["description"] == "padded"
+
+
+def test_list_skills_reports_a_yaml_version_mismatch(tmp_path: Path) -> None:
+    (tmp_path / "skills" / "s").mkdir(parents=True)
+    (tmp_path / "skills" / "s" / sk.SKILL_FILENAME).write_bytes(b"---\neffort: 010\n---\nb\n")
+    (item,) = sk.list_skills(tmp_path)
+    assert "'effort' reads differently" in item["frontmatter_error"]
+
+
+@pytest.mark.parametrize("unclosed", ["---\nname: x\n", "---", "--- \t\r\ndescription: d"])
+def test_an_unclosed_frontmatter_block_is_refused(unclosed: str) -> None:
+    with pytest.raises(cw.InvalidCandidateError, match="never closes it"):
+        sk.validate_skill_md_content(unclosed)
+
+
+# --- TASK-449.6: convert on load ------------------------------------------------------
+
+
+def _skill(tmp_path: Path, text: str, name: str = "s") -> Path:
+    path = tmp_path / "skills" / name / sk.SKILL_FILENAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(text.encode("utf-8"))
+    return path
+
+
+def test_load_removes_fields_the_cli_ignores_and_says_so(tmp_path: Path) -> None:
+    raw = (
+        "---\ndescription: d\nshell: zsh  # my shell\neffort: banana\n"
+        "metadata:\n  - not\n  - a map\nname: kept\n---\nBody.\n"
+    )
+    path = _skill(tmp_path, raw)
+    content, file_hash, exists, note = sk.read_skill_file_for_edit(tmp_path, "s")
+    assert exists
+    assert content == "---\ndescription: d\nname: kept\n---\nBody.\n"
+    assert file_hash == cw.hash_bytes(path.read_bytes())  # the file ON DISK, for the 409 guard
+    assert note is not None
+    for key in ("'shell'", "'effort'", "'metadata'"):
+        assert key in note
+    sk.validate_skill_md_content(content)  # the converted text saves
+    # The plain read never converts: it is the file as it is on disk.
+    assert sk.read_skill_file(tmp_path, "s")[0] == raw
+
+
+def test_load_keeps_a_bom_and_crlf_line_ends_when_it_converts(tmp_path: Path) -> None:
+    _skill(tmp_path, "\ufeff---\r\ndescription: d\r\ncontext: forked\r\n---\r\nBody.\r\n")
+    content, _, _, note = sk.read_skill_file_for_edit(tmp_path, "s")
+    assert content == "\ufeff---\r\ndescription: d\r\n---\r\nBody.\r\n"
+    assert note is not None
+
+
+def test_load_converts_the_last_field_without_a_blank_line(tmp_path: Path) -> None:
+    _skill(tmp_path, "---\ndescription: d\nshell: zsh\n---\nBody.\n")
+    content, _, _, _ = sk.read_skill_file_for_edit(tmp_path, "s")
+    assert content == "---\ndescription: d\n---\nBody.\n"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param("---\ndescription: d\n---\nBody.\n", id="nothing-to-convert"),
+        pytest.param("---\nhooks: [x]\n---\nBody.\n", id="hooks-not-droppable"),
+        pytest.param("---\nuser-invocable: maybe\n---\nb\n", id="user-invocable-not-droppable"),
+        pytest.param("---\n{shell: zsh}\n---\nb\n", id="flow-style-root"),
+        pytest.param("---\nshell: zsh\nshell: bash\n---\nb\n", id="duplicate-key"),
+        pytest.param("---\neffort: x\neffort: y\n---\nb\n", id="duplicate-ignored-key"),
+        pytest.param("---\n  description: d\n  shell: zsh\n---\nb\n", id="indented-root"),
+        pytest.param("---\nx: &x {shell: zsh}\n<<: *x\n---\nb\n", id="field-from-a-merge"),
+        pytest.param("---\nshell: zsh\neffort: 010\n---\nb\n", id="also-a-mismatch"),
+        pytest.param("---\nnever closed\n", id="unparseable"),
+    ],
+)
+def test_load_never_converts_what_it_cannot_prove_equivalent(tmp_path: Path, raw: str) -> None:
+    _skill(tmp_path, raw)
+    content, _, _, note = sk.read_skill_file_for_edit(tmp_path, "s")
+    assert note is None
+    assert content == raw
+
+
+def test_load_redacts_after_converting(tmp_path: Path) -> None:
+    _skill(tmp_path, "---\ndescription: d\napi_key: sk-not-a-real-key-0000\nshell: zsh\n---\nb\n")
+    content, _, _, note = sk.read_skill_file_for_edit(tmp_path, "s")
+    assert note is not None
+    assert "sk-not-a-real-key-0000" not in content
+    assert "shell" not in content
+
+
+def test_load_does_not_convert_a_supporting_file(tmp_path: Path) -> None:
+    _skill(tmp_path, "---\ndescription: d\n---\nb\n")
+    (tmp_path / "skills" / "s" / "notes.md").write_bytes(b"---\nshell: zsh\n---\n")
+    content, _, _, note = sk.read_skill_file_for_edit(tmp_path, "s", "notes.md")
+    assert note is None and "shell: zsh" in content
+
+
+def test_route_returns_the_converted_text_and_saves_it(
+    write_config, tmp_path, projects_root
+) -> None:
+    raw = "---\ndescription: d\neffort: banana\n---\nBody.\n"
+    path = projects_root / "alpha" / ".claude" / "skills" / "greeter" / sk.SKILL_FILENAME
+    path.parent.mkdir(parents=True)
+    # Byte-exact LF: text mode writes CRLF on Windows, and the route returns the file's
+    # own line endings (Windows CI, PR 1810).
+    path.write_bytes(raw.encode("utf-8"))
+    with _client(write_config, tmp_path, _ON) as c:
+        view = c.get(f"{_FILE_URL}?project=alpha&name=greeter").json()
+        assert view["converted"] and "'effort'" in view["converted"]
+        assert view["content"] == "---\ndescription: d\n---\nBody.\n"
+        body = {
+            "scope": "project",
+            "project": "alpha",
+            "confirm": "alpha",
+            "name": "greeter",
+            "files": {"SKILL.md": view["content"]},
+            "hash": view["hash"],
+        }
+        assert c.put(_SKILLS_URL, json=body).status_code == 200
+        again = c.get(f"{_FILE_URL}?project=alpha&name=greeter").json()
+        assert again["converted"] is None
+    assert path.read_text() == "---\ndescription: d\n---\nBody.\n"
+
+
+def test_route_user_scope_file_read_carries_the_converted_field(write_config, tmp_path) -> None:
+    with _client(write_config, tmp_path, _ON) as c:
+        view = c.get(f"{_FILE_URL}?scope=user&name=missing").json()
+        assert view["exists"] is False and view["converted"] is None
+
+
+# --- TASK-449.6: skillOverrides keys and values ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "key", ["My Deploy Skill", "doctor", "anthropic-skills:pdf", "deploy.staging", "x" * 256]
+)
+def test_skill_overrides_accepts_every_name_the_cli_can_match(key: str) -> None:
+    # The 2.1.318 settings schema is a record of ANY string to the four values, matched
+    # exactly against skill names, and a frontmatter `name` need not be directory-shaped.
+    sk.validate_skill_overrides({key: "off"})  # no raise
+
+
+@pytest.mark.parametrize("key", ["", "__proto__", " lead", "a  b", "x<y", "x" * 257, "a\u200bb"])
+def test_skill_overrides_refuses_a_key_no_skill_can_have(key: str) -> None:
+    with pytest.raises(cw.InvalidCandidateError, match="invalid skill name"):
+        sk.validate_skill_overrides({key: "off"})
+
+
+def test_skill_override_values_match_the_docs_and_the_cli() -> None:
+    assert frozenset({"on", "name-only", "user-invocable-only", "off"}) == sk.SKILL_OVERRIDE_VALUES
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "description",
+        "name",
+        "when_to_use",
+        "argument-hint",
+        "arguments",
+        "disable-model-invocation",
+        "disallowed-tools",
+        "model",
+        "effort",
+        "context",
+        "agent",
+        "background",
+        "fallback",
+        "paths",
+        "shell",
+        "version",
+        "created_by",
+        "improved_by",
+    ],
+)
+def test_an_empty_field_is_not_set(key: str) -> None:
+    # A YAML null (`key:` with no value) is "not set" for the CLI: every reader returns
+    # its absent value for it. Only `user-invocable` differs (it reads false), tested above.
+    sk.validate_skill_md_content(_fm(f"{key}:"))  # no raise
+
+
+@pytest.mark.parametrize(
+    ("line", "entries"),
+    [
+        ('allowed-tools: "Read,, Grep"', ("Read", "Grep")),
+        ('allowed-tools: "\\tRead Grep, "', ("Read", "Grep")),
+        (
+            "allowed-tools: 'Agent(worker, researcher), Read'",
+            ("Agent(worker, researcher)", "Read"),
+        ),
+    ],
+)
+def test_tool_lists_split_like_the_cli(line: str, entries: tuple[str, ...]) -> None:
+    content = _fm(line)
+    readings = sk._check_skill_md(content)
+    assert readings["allowed-tools"] == ("list", tuple(("str", e) for e in entries))
+
+
+def test_a_boolean_field_refuses_a_list() -> None:
+    with pytest.raises(sk._IgnoredFieldError):
+        sk.validate_skill_md_content(_fm("background: [true]"))
+
+
+def test_shell_refuses_a_value_javascript_never_sees() -> None:
+    import datetime
+
+    with pytest.raises(sk._IgnoredFieldError):
+        sk._read_shell(datetime.date(2024, 1, 1))
+
+
+@pytest.mark.parametrize(
+    "hooks",
+    [
+        # A date VALUE in a text field: a date to PyYAML, a string to YAML 1.2.
+        "hooks: {PreToolUse: [{hooks: [{type: command, command: x, statusMessage: 2024-01-01}]}]}",
+        # A date KEY inside an MCP tool's free-form input: no JavaScript key is a date.
+        "hooks: {PreToolUse: [{hooks: [{type: mcp_tool, server: s, tool: t, "
+        "input: {2024-01-01: y}}]}]}",
+    ],
+)
+def test_a_date_inside_hooks_is_refused(hooks: str) -> None:
+    with pytest.raises(cw.InvalidCandidateError, match="'hooks' reads differently"):
+        sk.validate_skill_md_content(_fm(hooks))
+
+
+def test_a_whole_float_inside_hooks_equals_its_int() -> None:
+    # JavaScript has one number type, so a timeout of 5.0 and of 5 are the same value.
+    sk.validate_skill_md_content(
+        _fm("hooks: {PreToolUse: [{hooks: [{type: command, command: x, timeout: 5.0}]}]}")
+    )
+
+
+def test_a_top_level_key_javascript_cannot_name_is_refused() -> None:
+    with pytest.raises(cw.InvalidCandidateError, match="a key Claude Code cannot read"):
+        sk.validate_skill_md_content(_fm("? !!binary aGk=\n: x"))
+
+
+def test_name_refuses_a_hangul_jamo_the_cli_checks_by_script() -> None:
+    assert not sk.cli_shows_name("aᆨb")
+
+
+def test_load_does_not_remove_a_field_another_field_aliases(tmp_path: Path) -> None:
+    # Removing `shell` would leave `*s` with no anchor: the converted text would not parse,
+    # so nothing is converted and the save is refused instead.
+    raw = "---\nshell: &s zsh\nagent: *s\n---\nb\n"
+    _skill(tmp_path, raw)
+    content, _, _, note = sk.read_skill_file_for_edit(tmp_path, "s")
+    assert note is None and content == raw
+
+
+# --- TASK-449.6 review round 1 ---------------------------------------------------------
+
+
+def _deep_hooks(levels: int) -> str:
+    return _fm("hooks: {PreToolUse: [{hooks: [" + "{a: " * levels + "1" + "}" * levels + "]}]}")
+
+
+def _deep_input(levels: int) -> str:
+    return "{a: " * levels + "1" + "}" * levels
+
+
+def test_a_deep_hooks_value_is_a_422_on_every_path(tmp_path: Path) -> None:
+    # PyYAML composes 300 levels inside an mcp_tool `input`; reading them back must be a
+    # refusal on write, an error entry on list, and a plain load, never a 500.
+    content = _fm(
+        "hooks: {PreToolUse: [{hooks: [{type: mcp_tool, server: s, tool: t, input: "
+        + _deep_input(300)
+        + "}]}]}"
+    )
+    with pytest.raises(cw.InvalidCandidateError):
+        sk.validate_skill_md_content(content)
+    _skill(tmp_path, content)
+    (item,) = sk.list_skills(tmp_path)
+    assert item["frontmatter_error"]
+    assert sk.read_skill_file_for_edit(tmp_path, "s")[3] is None
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param("---\u00a0\nallowed-tools: 5\n---\nbody\n", id="nbsp-after-fence"),
+        pytest.param("---\f\nhooks: [1]\n---\nbody\n", id="form-feed-after-fence"),
+        pytest.param("---\nname: 'a<b'\nx---body\n", id="closing-fence-mid-line"),
+    ],
+)
+def test_a_fence_only_the_cli_reads_is_refused(content: str) -> None:
+    # Claude Code's fence regex takes JavaScript whitespace after `---`, and ends the header
+    # at the first `---` anywhere. Accepting these as "no frontmatter" would save fields that
+    # were never checked.
+    with pytest.raises(cw.InvalidCandidateError, match="frontmatter fence that Claude Code"):
+        sk.validate_skill_md_content(content)
+
+
+_GUARD_HOOK = "{PreToolUse: [{matcher: Bash, hooks: [{type: command, command: 'true'}]}]}"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        f"effort: {_GUARD_HOOK}",
+        f"custom: {_GUARD_HOOK}",
+        "custom: {matcher: Bash, hooks: [{type: command, command: x}]}",
+        "custom: [[{PermissionRequest: [x]}]]",
+        "PreToolUse: [{hooks: []}]",
+    ],
+)
+def test_hooks_outside_hooks_are_refused_whole(line: str) -> None:
+    # The CLI's `Hse` scan: hook definitions in any other field (three levels deep) make it
+    # load the skill with no hooks and no allowed-tools.
+    with pytest.raises(cw.InvalidCandidateError, match="hook definitions outside 'hooks'"):
+        sk.validate_skill_md_content(_fm("allowed-tools: Bash", line))
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        f"metadata: {_GUARD_HOOK}",  # `metadata` is one of the keys the scan skips
+        "custom: [[[[{PreToolUse: [x]}]]]]",  # deeper than the scan's three levels
+        "custom: {PostToolUse: [x]}",  # not a guard event, and not shaped like a matcher
+        # A typed hook entry inside a `hooks` list is not scanned further.
+        "Stop: {hooks: [{type: x, a: {PreToolUse: [1]}}]}",
+    ],
+)
+def test_hook_shaped_data_the_cli_does_not_flag_still_saves(line: str) -> None:
+    sk.validate_skill_md_content(_fm(line))  # no raise
+
+
+@pytest.mark.parametrize(
+    "hooks",
+    [
+        "hooks: {PreToolUse: 5}",
+        "hooks: {PermissionRequest: {}}",
+        "hooks: {Unknown: {PreToolUse: [x]}}",
+        "hooks: {matcher: Bash, hooks: [{type: command, command: y}]}",
+    ],
+)
+def test_a_hooks_value_that_cancels_the_skills_hooks_is_refused(hooks: str) -> None:
+    # The CLI's `_Ce` guards: these drop every hook of the skill and its allowed-tools.
+    with pytest.raises(cw.InvalidCandidateError, match="'hooks'"):
+        sk.validate_skill_md_content(_fm(hooks))
+
+
+@pytest.mark.parametrize(
+    "hooks",
+    [
+        "hooks: {Stop: 5}",
+        "hooks: {Unknown: [x]}",
+        "hooks: {PostToolUse: null}",
+        "hooks: {Unknown: [{matcher: x, hooks: [{type: command, command: y}]}]}",
+        "hooks: {Stop: [5]}",
+        "hooks: {Stop: [{hooks: x}]}",
+    ],
+)
+def test_a_hooks_entry_the_cli_would_drop_is_refused(hooks: str) -> None:
+    # TASK-482: skill hooks go through the hooks surface's validator, as subagent hooks do.
+    # The CLI drops such an entry and keeps the rest; this surface refuses the save instead.
+    with pytest.raises(cw.InvalidCandidateError, match="'hooks': "):
+        sk.validate_skill_md_content(_fm(hooks))
+
+
+def test_load_never_removes_a_collection_the_cli_may_scan(tmp_path: Path) -> None:
+    raw = "---\nallowed-tools: Bash\nshell: [zsh]\n---\nb\n"
+    _skill(tmp_path, raw)
+    assert sk.read_skill_file_for_edit(tmp_path, "s")[3] is None
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param('---\ndisable-model-invocation: !!bool "true"\n---\nb\n', id="tagged-bool"),
+        pytest.param('---\ndescription: !!int "5"\n---\nb\n', id="tagged-description"),
+        pytest.param(
+            "---\ndisallowed-tools: false\ndisallowedTools: Bash\n---\nb\n", id="denylist-fallback"
+        ),
+    ],
+)
+def test_load_never_removes_a_field_the_cli_reads(tmp_path: Path, raw: str) -> None:
+    # A tagged scalar may be read by the CLI (Bun reads `!!bool "true"` as the string
+    # "true", which its boolean reader takes as true). An ignored `disallowed-tools` still
+    # hides `disallowedTools` (`??`), so removing it would deny Bash. All three are refused
+    # on save, and none is converted on load.
+    with pytest.raises(cw.InvalidCandidateError) as excinfo:
+        sk.validate_skill_md_content(raw)
+    assert not isinstance(excinfo.value, sk._IgnoredFieldError)
+    _skill(tmp_path, raw)
+    assert sk.read_skill_file_for_edit(tmp_path, "s")[3] is None
+
+
+def test_load_converts_every_ignored_field_in_one_validation(tmp_path: Path, monkeypatch) -> None:
+    fields = ["effort: banana", "shell: zsh", "context: forked", "model: ''", "created_by: me"]
+    _skill(tmp_path, _fm("description: d", *fields, "metadata: [x]"))
+    calls = []
+    real = sk.validate_skill_md_content
+    monkeypatch.setattr(sk, "validate_skill_md_content", lambda c: calls.append(1) or real(c))
+    content, _, _, note = sk.read_skill_file_for_edit(tmp_path, "s")
+    assert content == _fm("description: d")
+    assert note is not None and len(calls) == 1
+
+
+def test_effort_reads_a_list_as_the_cli_does() -> None:
+    sk.validate_skill_md_content(_fm("effort: [high]"))  # String([high]) is "high"
+
+
+@pytest.mark.parametrize(
+    ("value", "text"),
+    [
+        # Checked with node: JavaScript keeps the shortest round-trip digits of a double.
+        (12345678901234567890, "12345678901234567000"),
+        (2**53, "9007199254740992"),
+        (2**53 + 1, "9007199254740992"),
+        (float(2**60), "1152921504606847000"),
+        (9007199254740993.0, "9007199254740992"),
+        (0.1 + 0.2, "0.30000000000000004"),
+        (123e-20, "1.23e-18"),
+    ],
+)
+def test_js_string_loses_digits_past_2_53_as_javascript_does(value: object, text: str) -> None:
+    assert sk._js_string(value) == text
+
+
+def test_an_empty_user_invocable_reads_false() -> None:
+    assert sk.validate_frontmatter({"user-invocable": None}) == {
+        "user-invocable": ("bool-or-null", False)
+    }
+
+
+def test_effort_reader_ignores_a_value_javascript_never_sees() -> None:
+    import datetime
+
+    assert sk._cli_effort(datetime.date(2024, 1, 1)) is None
+
+
+@pytest.mark.parametrize(
+    "hooks",
+    [
+        "hooks: {PreToolUse: [5]}",
+        "hooks: {PreToolUse: [{matcher: Bash, hooks: x}]}",
+        "hooks: {PermissionRequest: [{hooks: [5]}]}",
+        "hooks: {Stop: [{a: {PreToolUse: [1]}}]}",
+    ],
+)
+def test_a_matcher_group_that_cancels_the_skills_hooks_is_refused(hooks: str) -> None:
+    # The CLI's `Vn`: under a guard event, one bad group or entry is not dropped alone; the
+    # skill then loads with no hooks and no allowed-tools. The hooks validator refuses each.
+    with pytest.raises(cw.InvalidCandidateError, match="'hooks': "):
+        sk.validate_skill_md_content(_fm("allowed-tools: Bash", hooks))
+
+
+def test_the_docs_argument_hint_example_saves_and_lists(tmp_path: Path) -> None:
+    # The frontmatter reference's own example, unquoted: not valid YAML, but the CLI reads it
+    # through its re-quote retry, so the editor saves it and shows the CLI's description.
+    content = _fm("description: Use this: for issues", "argument-hint: [filename] [format]")
+    readings = sk._check_skill_md(content)
+    assert readings["argument-hint"] == ("str", "[filename] [format]")
+    sk.write_skill(tmp_path, "s", {sk.SKILL_FILENAME: content}, expected_hash=None)
+    (item,) = sk.list_skills(tmp_path)
+    assert item["description"] == "Use this: for issues"
+    assert "frontmatter_error" not in item
+
+
+def test_a_tab_indented_skill_header_saves() -> None:
+    sk.validate_skill_md_content(_fm("hooks:", "\tPreToolUse: []", "description: d"))
+
+
+def test_load_does_not_convert_a_header_the_cli_reads_through_its_retry(tmp_path: Path) -> None:
+    # The lines on disk are not the lines the CLI parses, so no line is removed.
+    raw = _fm("argument-hint: [a] [b]", "shell: zsh")
+    _skill(tmp_path, raw)
+    content, _, _, note = sk.read_skill_file_for_edit(tmp_path, "s")
+    assert note is None and content == raw
+    with pytest.raises(sk._IgnoredFieldError):
+        sk.validate_skill_md_content(raw)
+
+
+def test_load_does_not_remove_a_field_a_nested_alias_needs(tmp_path: Path) -> None:
+    # Without `shell`, the nested `*s` has no anchor and the text no longer parses at all
+    # (the CLI's retry only re-quotes top-level lines), so nothing is converted.
+    raw = "---\nshell: &s zsh\nmeta:\n  a: *s\n---\nb\n"
+    _skill(tmp_path, raw)
+    content, _, _, note = sk.read_skill_file_for_edit(tmp_path, "s")
+    assert note is None and content == raw
+
+
+# --- TASK-482: skill hooks use the hooks surface's validator ---------------------------
+
+_VALID_HOOKS = [
+    pytest.param("{type: command, command: ./check.sh, async: true, once: true}", id="command"),
+    pytest.param("{type: http, url: 'https://example.com/hook', timeout: 5}", id="http"),
+    pytest.param("{type: mcp_tool, server: github, tool: comment, input: {a: 1}}", id="mcp_tool"),
+    pytest.param("{type: prompt, prompt: Is this safe, model: haiku}", id="prompt"),
+    pytest.param("{type: agent, prompt: Check the tests}", id="agent"),
+]
+
+
+@pytest.mark.parametrize("entry", _VALID_HOOKS)
+def test_a_valid_skill_hook_of_every_type_saves(entry: str) -> None:
+    sk.validate_skill_md_content(
+        _fm("hooks:", "  PreToolUse:", "    - matcher: Bash", f"      hooks: [{entry}]")
+    )  # no raise
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        pytest.param("{type: shell, command: x}", id="unknown-type"),
+        pytest.param("{type: command, command: x, extra: 1}", id="unknown-field"),
+        pytest.param("{type: http}", id="missing-url"),
+        pytest.param("{type: command, command: x, timeout: 0}", id="timeout-not-positive"),
+        pytest.param("{type: command, command: '${CLAUDE_PLUGIN_ROOT}/x'}", id="plugin-owned"),
+    ],
+)
+def test_an_invalid_skill_hook_is_refused(entry: str) -> None:
+    with pytest.raises(cw.InvalidCandidateError):
+        sk.validate_skill_md_content(
+            _fm("hooks:", "  PreToolUse:", "    - matcher: Bash", f"      hooks: [{entry}]")
+        )
+
+
+def test_a_date_inside_an_mcp_tool_input_is_refused() -> None:
+    # A date to PyYAML, a string to YAML 1.2: the two readings of `hooks` differ.
+    content = _fm(
+        "hooks: {PreToolUse: [{hooks: [{type: mcp_tool, server: s, tool: t, "
+        "input: {a: 2024-01-01}}]}]}"
+    )
+    with pytest.raises(cw.InvalidCandidateError, match="'hooks' reads differently"):
+        sk.validate_skill_md_content(content)
+
+
+def test_a_reader_that_runs_out_of_stack_is_a_422(monkeypatch) -> None:
+    # Defence in depth: today the hooks validator bounds every nested hook value, but a
+    # reader that overflows the stack must still be a refusal, never a 500.
+    def _deep(_value):
+        raise RecursionError
+
+    monkeypatch.setattr(sk, "_FIELD_READERS", (("description", _deep),))
+    with pytest.raises(cw.InvalidCandidateError, match="nested too deeply to check"):
+        sk.validate_frontmatter({"description": "d"})
+
+
+@pytest.mark.parametrize(
+    "hooks",
+    [
+        pytest.param("hooks:\n  1: []\n  foo: []", id="mixed-event-keys"),
+        pytest.param("hooks:\n  ~: []\n  foo: []", id="null-and-text-event-keys"),
+        pytest.param("hooks: {Stop: [{1: x, foo: y, hooks: []}]}", id="mixed-group-keys"),
+        pytest.param(
+            "hooks: {Stop: [{hooks: [{type: command, command: x, 1: a, foo: b}]}]}",
+            id="mixed-entry-keys",
+        ),
+    ],
+)
+def test_mixed_type_hook_keys_are_a_422_on_every_path(tmp_path: Path, hooks: str) -> None:
+    # The hooks validator sorts unknown keys for its message; an int and a str do not sort,
+    # and that TypeError used to escape as a 500 (and a 500 for the whole Skills list).
+    content = _fm("description: d", hooks)
+    with pytest.raises(cw.InvalidCandidateError, match="unknown"):
+        sk.validate_skill_md_content(content)
+    _skill(tmp_path, content)
+    (item,) = sk.list_skills(tmp_path)
+    assert "unknown" in item["frontmatter_error"]
+    assert sk.read_skill_file_for_edit(tmp_path, "s")[3] is None
+
+
+# --- TASK-449.6: the seam's composed-tree walks are memoized and iterative -----------------
+
+
+@pytest.mark.timeout(20)
+def test_a_skill_with_a_long_merge_chain_is_read_without_recursion() -> None:
+    # 1500 `<<` links load fine in PyYAML and pass the merge-size cap; the YAML 1.2 view and
+    # every seam walk follow the whole chain without a stack frame per link.
+    links = ["x0: &a0 {k: v}"] + [f"x{i}: &a{i} {{<<: *a{i - 1}}}" for i in range(1, 1500)]
+    content = "---\ndescription: d\nmetadata:\n  " + "\n  ".join(links) + "\n---\nb\n"
+    assert len(content.encode("utf-8")) < sk.MAX_SKILL_MD_BYTES
+    start = time.monotonic()
+    sk.validate_skill_md_content(content)  # no raise
+    assert time.monotonic() - start < 10.0  # linear; generous for loaded CI runners
+    view = cw.yaml12_view(content.split("---\n")[1])
+    assert view["metadata"]["x1499"] == {"k": "v"}
+
+
+@pytest.mark.timeout(20)
+def test_a_skill_alias_pyramid_under_a_discarded_key_is_refused_quickly(tmp_path: Path) -> None:
+    # PyYAML keeps only the last of two `metadata` keys, so the loaded data is tiny; only a
+    # walk of the composed tree sees the pyramid. Each seam walk visits a node once, and the
+    # repeated key is refused.
+    levels = ["metadata: &p0 [a, a, a, a]"] + [
+        f"metadata: &p{i} [*p{i - 1}, *p{i - 1}, *p{i - 1}, *p{i - 1}]" for i in range(1, 21)
+    ]
+    content = "---\ndescription: d\n" + "\n".join(levels) + "\nmetadata: {}\n---\nb\n"
+    assert len(content.encode("utf-8")) < 1500
+    start = time.monotonic()
+    with pytest.raises(cw.InvalidCandidateError, match="see differently"):
+        sk.validate_skill_md_content(content)
+    _skill(tmp_path, content)
+    (item,) = sk.list_skills(tmp_path)
+    assert item["frontmatter_error"]
+    assert time.monotonic() - start < 5.0  # a walk per alias path would take hours
+
+
+# --- Greptile on PR 1810: digit-limit ValueError and nested mappings in text fields ------
+
+_HUGE = "9" * 5000  # past Python's 4300-digit int() limit
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        pytest.param(f'effort: "{_HUGE}"', id="quoted-huge-effort"),
+        pytest.param(f'effort: "{_HUGE} tokens"', id="huge-effort-with-text"),
+        pytest.param(f"description: 0{_HUGE}", id="leading-zero-huge-number"),
+    ],
+)
+def test_a_huge_number_is_refused_never_a_500(tmp_path: Path, line: str) -> None:
+    # JavaScript reads these digits as Infinity, which is not an integer, so the CLI ignores
+    # the effort; Python's int() raised ValueError instead, a 500 on write and on every read.
+    content = _fm(line)
+    with pytest.raises(cw.InvalidCandidateError):
+        sk.validate_skill_md_content(content)
+    _skill(tmp_path, content, name="bad")
+    _skill(tmp_path, _fm("description: fine"), name="good")
+    listing = {item["name"]: item for item in sk.list_skills(tmp_path)}
+    assert listing["bad"]["frontmatter_error"]
+    assert listing["good"]["description"] == "fine"
+    sk.read_skill_file_for_edit(tmp_path, "bad")  # no raise
+
+
+def test_effort_reads_a_number_past_the_double_range_as_ignored() -> None:
+    # 400 digits: int() copes, but JavaScript's parseInt gives Infinity, which the CLI's
+    # effort reader refuses (not an integer).
+    assert sk._cli_effort("9" * 400) is None
+    assert sk._cli_effort("9" * 5000) is None
+    assert sk._cli_effort(10**400) is None  # a YAML 1.2 hex or octal number this large
+    assert sk._cli_effort("12 tokens") == 12
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "argument-hint: [[{a: 1}]]",
+        "argument-hint: [x, [y, [{a: 1}]]]",
+        "when_to_use: [[[{a: 1}]]]",
+    ],
+)
+def test_a_mapping_nested_in_lists_is_refused(line: str) -> None:
+    # The CLI would show `[object Object]`, however deep the mapping sits in the lists.
+    with pytest.raises(cw.InvalidCandidateError, match="must be text"):
+        sk.validate_skill_md_content(_fm(line))
+
+
+def test_nested_lists_of_text_still_save() -> None:
+    sk.validate_skill_md_content(_fm("argument-hint: [[a, b], [c, [d]]]"))  # no raise
+
+
+def test_js_integer_never_converts_more_digits_than_a_double_holds() -> None:
+    assert cw.js_integer("9" * 5000) is None
+    assert cw.js_integer("9" * 309) is None  # 309 digits, but past 1.8e308
+    assert cw.js_integer("-" + "0" * 5000 + "12") == -12
+    assert cw.js_integer("+7") == 7
+
+
+def test_a_huge_hex_key_breaks_neither_the_list_nor_the_editor(tmp_path: Path) -> None:
+    # An OverflowError in the duplicate-key check failed the whole listing (review on PR 1810).
+    _skill(tmp_path, _fm("x:\n  0x" + "f" * 300 + ": 1"), name="bad")
+    _skill(tmp_path, _fm("description: fine"), name="good")
+    listing = {item["name"]: item for item in sk.list_skills(tmp_path)}
+    assert "nested value" in listing["bad"]["frontmatter_error"]
+    assert listing["good"]["description"] == "fine"
+    sk.read_skill_file_for_edit(tmp_path, "bad")  # no raise
+
+
+def test_a_huge_hex_effort_is_refused_as_the_cli_ignores_it() -> None:
+    with pytest.raises(cw.InvalidCandidateError, match="effort"):
+        sk.validate_skill_md_content(_fm("effort: 0x" + "f" * 300))
+
+
+# --- Greptile on PR 1810: one file that crashes a check never breaks the listing ----------
+
+
+def _poison_the_checks(monkeypatch, crash: Exception) -> None:
+    real = cw._yaml12_refuses
+
+    def _boom(text, root):
+        if "poison" in text:
+            raise crash
+        return real(text, root)
+
+    monkeypatch.setattr(cw, "_yaml12_refuses", _boom)
+
+
+def test_route_list_survives_a_value_tagged_key(write_config, tmp_path, projects_root) -> None:
+    skills = projects_root / "alpha" / ".claude" / "skills"
+    for name, extra in (("bad", "metadata: {=: x}\n"), ("good", "")):
+        (skills / name).mkdir(parents=True)
+        (skills / name / sk.SKILL_FILENAME).write_bytes(
+            f"---\nname: {name}\ndescription: fine\n{extra}---\nbody\n".encode()
+        )
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.get(f"{_SKILLS_URL}?project=alpha")
+        assert resp.status_code == 200
+        listed = {item["name"]: item for item in resp.json()["skills"]}
+        assert set(listed) == {"bad", "good"}
+        assert listed["good"]["description"] == "fine"
+        assert listed["bad"]["description"] == "fine"  # the `=` key reads, as in PyYAML
+        assert "frontmatter_error" not in listed["bad"]
+        assert c.get(f"{_FILE_URL}?project=alpha&name=bad").status_code == 200
+
+
+@pytest.mark.parametrize(
+    "crash",
+    [
+        yaml.constructor.ConstructorError("x", None, "y"),
+        ValueError("x"),
+        OverflowError("x"),
+        TypeError("x"),
+        RecursionError(),
+    ],
+    ids=lambda exc: type(exc).__name__,
+)
+def test_route_list_shows_a_file_that_crashes_a_check_as_refused(
+    write_config, tmp_path, projects_root, monkeypatch, crash: Exception
+) -> None:
+    _poison_the_checks(monkeypatch, crash)
+    skills = projects_root / "alpha" / ".claude" / "skills"
+    for name, extra in (("bad", "x: poison\n"), ("good", "")):
+        (skills / name).mkdir(parents=True)
+        (skills / name / sk.SKILL_FILENAME).write_bytes(
+            f"---\nname: {name}\ndescription: fine\n{extra}---\nbody\n".encode()
+        )
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.get(f"{_SKILLS_URL}?project=alpha")
+        assert resp.status_code == 200
+        listed = {item["name"]: item for item in resp.json()["skills"]}
+        assert set(listed) == {"bad", "good"}
+        assert listed["bad"]["frontmatter_error"]  # refused, with its reason
+        assert listed["good"]["description"] == "fine"
+        assert c.get(f"{_FILE_URL}?project=alpha&name=bad").status_code == 200
+
+
+def test_a_crash_in_the_skills_reading_of_the_view_is_a_refusal(monkeypatch) -> None:
+    def _boom(_header):
+        raise TypeError("x")
+
+    monkeypatch.setattr(cw, "yaml12_view", _boom)
+    with pytest.raises(cw.InvalidCandidateError, match="TypeError"):
+        sk.validate_skill_md_content(_fm("description: d"))
+    assert sk._ignorable_keys(_fm("effort: 1.5")) is None  # the editor read degrades, no 500

@@ -192,7 +192,7 @@ The surface tabs:
 | Hooks | The `hooks` key, as rows or raw JSON. |
 | MCP | MCP server definitions (add / edit / delete), as fields or raw JSON, plus per-server **approvals** for committed `.mcp.json` servers — Approve / Reject each, or reset all choices behind a typed confirm. |
 | Subagents | Subagent definition files: list, edit, create, delete. |
-| Skills | Skills: list, a per-skill `SKILL.md` editor, create, delete. |
+| Skills | Skills: list, a per-skill `SKILL.md` editor, create, delete. See [Skill frontmatter checks](#skill-frontmatter-checks). |
 | Plugins | Installed plugins (install / uninstall / enable / disable / update) and the marketplaces they come from (add / remove). |
 
 ### MCP server definitions
@@ -397,7 +397,8 @@ whole save and writes nothing.
 Clauster reads YAML 1.1 and Claude Code reads YAML 1.2, so a few unquoted
 spellings mean different things to the two. Clauster refuses the ones it can
 detect. For example, write `true`, not `yes`. Write a plain decimal number,
-not `010`, `0b101` or `1_000`. Quote a value that must stay a string.
+not `010`, `0b101` or `1_000`. Quote a value that must stay a string. See
+[YAML spellings that Clauster refuses](#yaml-spellings-that-clauster-refuses).
 Clauster never runs a hook command and never connects to an MCP server from
 this editor.
 
@@ -634,6 +635,161 @@ The tab does not offer these commands and settings:
   can hold them, and Clauster never writes managed settings. Claude Code still
   applies them: a change that the policy blocks fails with Claude Code's own
   message.
+
+### YAML spellings that Clauster refuses
+
+These rules apply to the frontmatter of subagent files and of `SKILL.md`
+files. The frontmatter is the YAML block between the two `---` lines, which
+are called fences. If the frontmatter has one of these, Clauster refuses the
+whole save:
+
+- A NEL (U+0085), LINE SEPARATOR (U+2028) or PARAGRAPH SEPARATOR (U+2029)
+  character. YAML 1.1 reads it as a line break, and YAML 1.2 does not, so the
+  two see different fields.
+- The text `---` anywhere before the closing fence, also inside a value or in
+  quotes. Claude Code ends the frontmatter at the first `---`.
+- An alias (a `*name` reference) to a node that contains it, such as
+  `a: &a {<<: *a}`.
+- A nested value that YAML 1.1 and YAML 1.2 read differently. Examples are
+  `async: yes`, `timeout: 1_000` or `timeout: 010` inside `hooks`, and
+  `DEBUG: yes` inside an MCP server's `env`. Other examples are `1:30`,
+  `0b101`, `1e3`, `0o17`, and a tagged value such as `!!int "10"`, which the
+  two read differently. Write `true`, `false` or a plain decimal. If the value
+  must stay text, quote it.
+- A `#` with no space before it, right after a quoted value or a bracket, such
+  as `"a"#b`, `[x]#b` or `[a,#c`. YAML 1.2 refuses it, so Claude Code reads a
+  changed copy of the frontmatter, or none of it. Put a space before the `#`.
+- A lone carriage return (CR) that is not part of a CRLF line ending.
+- A quoted value that goes on to a line that starts at column 0. Indent the
+  next line.
+- A key that appears twice in the same mapping. This includes two spellings
+  that one YAML version reads as the same key, such as `1` and `01`, or `null`
+  and `~`, and two `<<` merge keys in one mapping.
+- A tab inside a plain value or after it, such as `a` then a tab then `b`.
+  YAML 1.2 accepts it, but Clauster's parser does not. Use a space.
+
+Some frontmatter is not valid YAML, but Claude Code still reads it, and so does
+Clauster. When the first parse fails, Claude Code parses a changed copy of the
+frontmatter. In that copy, a top-level `key: value` line gets its value in
+double quotes if the key has only letters, `_` and `-`, and the value holds a
+YAML symbol such as `[`, `{`, `#`, or a colon and a space. A value that is
+already quoted or is a flow list such as `[Read, Grep]` stays as it is. Each
+tab at the start of a line becomes two spaces. Clauster reads the same copy,
+so it checks the values that Claude Code sees in the known cases. For example,
+`argument-hint: [filename] [format]` saves, and its value is the text
+`[filename] [format]`. The editor does not remove fields on load from a file
+that Claude Code reads through this copy.
+
+A file that is not valid YAML even after these changes is refused. One example
+is a bad line that is indented under another key. Another example is a line in
+a file with Windows (CRLF) line endings, because Claude Code does not change
+those lines. Clauster also refuses some files that YAML 1.2 reads but its own
+parser does not, because it cannot read the values the same way. The examples
+are a file that uses one anchor name twice, such as `&t` on two values, an
+anchor name with a dot or a non-ASCII letter, such as `&d.1`, a list item
+that starts with `:`, such as `[:a]`, and a tab between a value and a comment,
+such as `Bash`, a tab, then `# note`.
+
+### Skill frontmatter checks
+
+The Skills editor checks the frontmatter of `SKILL.md` before it saves the
+file. The fields are those of the
+[frontmatter reference](https://code.claude.com/docs/en/skills#frontmatter-reference).
+The editor accepts every value that Claude Code 2.1.318 reads for that field,
+including a value that the reference does not list. Version 2.1.318 is the
+version that these checks were last compared against. Clauster refuses a
+value that Claude Code rejects or ignores, and it then writes nothing.
+Clauster never runs a hook command or a skill script from this editor.
+
+- Every field is optional. A `SKILL.md` without frontmatter is also valid:
+  Claude Code reads the whole file as the skill's instructions. Without a
+  `description`, Claude Code uses the first non-empty line of the
+  instructions.
+- Clauster refuses a file that opens a `---` block but never closes it.
+  Clauster also refuses a fence that only Claude Code can read, for example
+  a fence with a no-break space after `---`. Put each `---` alone on its
+  line.
+- `disable-model-invocation`, `user-invocable`, `background` and `fallback`
+  accept `true` and `false`. They also accept `yes`, `no`, `on`, `off`, `1`
+  and `0` in any letter case. A `user-invocable:` line with no value hides the
+  skill from the `/` menu, because Claude Code reads it as `false`.
+- `allowed-tools`, `disallowed-tools` and `disallowedTools` accept a space- or
+  comma-separated string or a list of strings. If `disallowed-tools` is set,
+  Claude Code ignores `disallowedTools`. So Clauster refuses the two
+  together.
+- `paths` accepts a comma-separated string or a list. `arguments` accepts a
+  space-separated string or a list of names. Clauster refuses an argument
+  name that is only digits.
+- `argument-hint`, `when_to_use`, `agent` and `version` accept text, a number,
+  `true`, `false`, or a list such as `[issue-number]`. Claude Code shows that
+  list as `issue-number`. Clauster refuses a mapping. The field is
+  `when_to_use`. Claude Code does not read `when-to-use`.
+- `effort` accepts a level name in any case, the alias `med`, or an integer.
+  It accepts these inside a one-item list too, such as `[high]`.
+- `model` accepts any alias, any model ID, or `inherit`. `context` accepts
+  only `fork`. `shell` accepts `bash` or `powershell` in any case.
+- `name` is the command name. It can differ from the folder name and can
+  hold single spaces. Clauster refuses a name that Claude Code cannot show.
+  Examples are a hidden or direction-changing character, two spaces in a row,
+  a space at the start or end, and `<` or `>`. The limit is 256 UTF-16 units,
+  so an emoji counts as two. Clauster also refuses a name with a combining
+  mark, even where Claude Code shows it.
+- Clauster checks `hooks` with the same rules as the
+  [Hooks tab](#the-hooks-tab) and as subagent frontmatter hooks. So it accepts
+  every documented hook event, hook type and field, and it refuses any other
+  value. Claude Code drops a bad entry under most events and keeps the others,
+  but Clauster refuses the save instead.
+- Clauster also refuses hook definitions outside `hooks`, because Claude Code
+  then loads the skill with no hooks and no `allowed-tools`. A hook definition
+  is a `PreToolUse` or `PermissionRequest` key, or a matcher group (a `matcher`
+  and its list of `hooks` entries). Clauster looks for them at the top level
+  and up to three levels into another field. It does not look into
+  `metadata`, `mcpServers` or `lspServers`, because Claude Code does not.
+- `metadata` must be a mapping. `created_by` and `improved_by` are fields that
+  Claude Code uses for its own records, and they accept only
+  `dream-proposal`. `version`, `fallback` and `disallowedTools` are not in the
+  reference, but Claude Code reads them, so Clauster checks them as above.
+- Clauster saves `license`, `compatibility` and every other field as written.
+  The nested-value rule in
+  [YAML spellings that Clauster refuses](#yaml-spellings-that-clauster-refuses)
+  still applies to them.
+
+Clauster reads YAML 1.1 and Claude Code reads YAML 1.2. If a field means
+something different in the two, Clauster refuses it and names the field. For
+example, `description: yes` is the text `yes` to Claude Code. `effort: 010` is
+10 to Claude Code but 8 to Clauster. Quote the value, or write it as a plain
+number. Clauster accepts `user-invocable: yes`, because both read it as true.
+
+If you open a `SKILL.md` that holds a field whose value Claude Code ignores,
+the editor can remove that field from the text. Examples are `shell: zsh` and
+`effort: banana`. Claude Code treats such a field as if it were not there.
+The removal does not change what the skill does. The editor then shows a note
+above the text. The file on disk does not change until you save.
+
+The editor removes fields only if all of these conditions are true:
+
+- Every problem in the file is such a field.
+- Each of those fields holds a single value, or it is a `metadata` value that
+  is not a mapping.
+- No field has a YAML tag that Clauster cannot read the same way as Claude
+  Code, such as `!!bool "true"`.
+- The frontmatter is a plain block of `key: value` lines, each field appears
+  once, and no field is indented or comes from a `<<` merge.
+
+If one of these is false, the editor shows the file as it is, and Clauster
+refuses its save. The error names the field. Two other cases are never
+removed, because Claude Code acts on them. The first is a `hooks` value that is
+not a mapping and not empty: Claude Code then also drops `allowed-tools`. The
+second is a `disallowed-tools` value next to `disallowedTools`: it still hides
+`disallowedTools`.
+
+### Skill names in skillOverrides
+
+In `skillOverrides`, a key is the name of a skill, as Claude Code shows it.
+The key can be a frontmatter `name`, the name of a bundled skill such as
+`doctor`, or a name with a colon. Clauster refuses an empty key, the key
+`__proto__`, and a name that Claude Code cannot show. The values are `on`,
+`name-only`, `user-invocable-only` and `off`.
 
 ## Troubleshooting and limits
 

@@ -10,9 +10,11 @@ under the autouse HOME-isolation fixture — the live account is never touched.
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import errno
 import json
+import math
 import time
 from pathlib import Path
 
@@ -1012,13 +1014,16 @@ def test_load_frontmatter_yaml_rejects_wide_sibling_merges_that_each_stay_small(
     assert time.perf_counter() - started < 1.0  # refused on the node graph, before the flatten
 
 
-def test_load_frontmatter_yaml_leaves_a_self_referential_merge_to_safe_load() -> None:
+def test_load_frontmatter_yaml_refuses_a_self_referential_merge_quickly() -> None:
     # A `<<` that merges its own anchor cannot be sized on the node graph (its target is never
-    # memoized), so the guard counts it as zero and passes it through. `safe_load` then handles
-    # it without hanging: `flatten_mapping` deletes the merge key before recursing, so the
-    # self-merge is a no-op and the mapping keeps its own keys.
-    value = cw.load_frontmatter_yaml("x: &x {<<: *x, k: v}\n", what="frontmatter")
-    assert value == {"x": {"k": "v"}}
+    # memoized), so the pair-cap guard counts it as zero. PyYAML would load it without hanging
+    # (`flatten_mapping` deletes the merge key before recursing) and silently drop the merge,
+    # but the CLI's YAML 1.2 loader refuses it ("Merge key cannot reference an enclosing
+    # node"), so since TASK-449.6 the seam refuses it too, on the node graph, before the load.
+    started = time.perf_counter()
+    with pytest.raises(cw.InvalidCandidateError, match="alias to a node that encloses it"):
+        cw.load_frontmatter_yaml("x: &x {<<: *x, k: v}\n", what="frontmatter")
+    assert time.perf_counter() - started < 1.0
 
 
 # --- #1369: a YAMLError's prose must not echo the offending token -------------------------
@@ -1033,8 +1038,9 @@ def test_load_frontmatter_yaml_leaves_a_self_referential_merge_to_safe_load() ->
 # the token is distinctive and that PyYAML copies it into the prose verbatim.
 _LEAK_TOKEN = "FAKEFAKEFAKEFAKEFAKEfake42"
 _TOKEN_IN_PROSE = [
-    pytest.param(f"name: x\nextra: *{_LEAK_TOKEN}\n", id="undefined-alias"),
-    pytest.param(f"a: &{_LEAK_TOKEN} 1\nb: &{_LEAK_TOKEN} 2\n", id="duplicate-anchor"),
+    # Nested: the CLI retry re-quotes a top-level line with `*` or `&` (TASK-449.6).
+    pytest.param(f"name: x\nm:\n  extra: *{_LEAK_TOKEN}\n", id="undefined-alias"),
+    pytest.param(f"m:\n  a: &{_LEAK_TOKEN} 1\n  b: &{_LEAK_TOKEN} 2\n", id="duplicate-anchor"),
     pytest.param(f"a: !{_LEAK_TOKEN} 1\n", id="unknown-tag"),
 ]
 
@@ -1131,7 +1137,7 @@ def test_load_frontmatter_yaml_reports_the_second_position_when_it_differs() -> 
     assert "see also line " in str(raised.value)
 
     with pytest.raises(cw.InvalidCandidateError) as dup:
-        cw.load_frontmatter_yaml("a: &m 1\nb: &m 2\n", what="frontmatter")
+        cw.load_frontmatter_yaml("x:\n  a: &m 1\n  b: &m 2\n", what="frontmatter")
     assert "see also line " in str(dup.value)
 
 
@@ -1778,3 +1784,791 @@ def test_redact_secret_lines_is_linear_on_every_hostile_shape():
         cw.redact_secret_lines(payload)
         elapsed = time.perf_counter() - start
         assert elapsed < 2.0, f"{label} took {elapsed:.2f}s — quadratic behaviour is back"
+
+
+# --- TASK-449.6: the YAML 1.1 (PyYAML) vs YAML 1.2 (CLI) differences, at the shared seam ----
+#
+# Both `parse_frontmatter` implementations go through `load_frontmatter_yaml`, so each case
+# runs on the subagent and the skills surface. The CLI's loader is `Rd` in 2.1.318: it drops
+# a BOM, cuts the header at the first `---` (`/^---\s*\n([\s\S]*?)---\s*\n?/`), and parses it
+# with Bun.YAML (YAML 1.2).
+
+
+def _both_parsers():
+    return [
+        pytest.param(config_write_subagents.parse_frontmatter, id="subagents"),
+        pytest.param(config_write_skills.parse_frontmatter, id="skills"),
+    ]
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize("char", ["\x85", "\u2028", "\u2029"])
+def test_a_yaml_1_1_only_line_break_is_refused_on_both_surfaces(parse, char: str) -> None:
+    # `tools: Read # c<LS>disallowedTools: Bash` is two keys to PyYAML and one comment to
+    # the CLI, which then never sees the denylist.
+    text = f"---\nname: a\ndescription: d\ntools: Read # c{char}disallowedTools: Bash\n---\nb\n"
+    with pytest.raises(cw.InvalidCandidateError, match=f"U\\+{ord(char):04X}, a line break"):
+        parse(text)
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize("value", ["a --- b", "'quoted --- too'", "x---"])
+def test_a_triple_dash_inside_the_header_is_refused_on_both_surfaces(parse, value: str) -> None:
+    # The CLI's lazy fence ends the header at the first `---`, even mid-line or in quotes.
+    with pytest.raises(cw.InvalidCandidateError, match="contains '---' before its closing"):
+        parse(f"---\nname: a\ndescription: {value}\n---\nb\n")
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+def test_an_alias_to_an_enclosing_node_is_refused_on_both_surfaces(parse) -> None:
+    with pytest.raises(cw.InvalidCandidateError, match="encloses it"):
+        parse("---\nname: a\ndescription: d\nx: &x {<<: *x, k: v}\n---\nb\n")
+
+
+def test_a_shared_alias_that_does_not_enclose_itself_still_loads() -> None:
+    value = cw.load_frontmatter_yaml("a: &x {k: v}\nb: {<<: *x, j: 1}\nc: *x\n", what="f")
+    assert value == {"a": {"k": "v"}, "b": {"k": "v", "j": 1}, "c": {"k": "v"}}
+
+
+_NESTED_HOOK = (
+    "---\nname: a\ndescription: d\nhooks:\n  PreToolUse:\n    - hooks:\n"
+    "        - {{type: command, command: ./x.sh, {entry}}}\n---\nb\n"
+)
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "async: yes",
+        "asyncRewake: On",
+        "once: off",
+        "continueOnBlock: no",
+        "timeout: 1_000",
+        "timeout: 010",
+        "timeout: 0b101",
+        "timeout: 1:30",
+        "timeout: 1_0.5",
+        "async: !!bool yes",
+        "timeout: !!int '5'",
+    ],
+)
+def test_a_yaml_1_1_only_spelling_in_frontmatter_hooks_is_refused_on_both_surfaces(
+    parse, entry: str
+) -> None:
+    # Coordinator scope addition (2026-11-05): the walker is generic, so it needs no list
+    # of which hook fields are booleans or numbers. YAML 1.2 reads each of these as a
+    # string (or, for `010`, as 10), and the CLI then rejects or ignores the hook.
+    with pytest.raises(cw.InvalidCandidateError, match="nested value at line 7"):
+        parse(_NESTED_HOOK.format(entry=entry))
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "async: true",
+        "once: False",
+        "timeout: 1000",
+        "timeout: 0x1F",
+        "timeout: 1.5",
+        "timeout: -3",
+        "async: 'yes'",
+        "statusMessage: yes please",
+        "async: !!bool true",
+    ],
+)
+def test_a_spelling_both_yaml_versions_read_alike_still_loads(parse, entry: str) -> None:
+    frontmatter, _body = parse(_NESTED_HOOK.format(entry=entry))
+    assert "hooks" in frontmatter
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+def test_the_nested_walker_leaves_top_level_fields_to_the_surface(parse) -> None:
+    # A skill's `user-invocable: yes` is true to the CLI as well (its boolean reader takes
+    # the string), and a subagent surface checks its own top-level fields. A `<<` source
+    # merged into the root stands in for top-level fields too, and a key is checked too.
+    frontmatter, _ = parse("---\nname: a\ndescription: d\nbackground: yes\n---\nb\n")
+    assert frontmatter["background"] is True
+    frontmatter, _ = parse("---\nname: a\ndescription: d\nm: &m {k: 1}\n<<: *m\n---\nb\n")
+    assert frontmatter["k"] == 1
+    with pytest.raises(cw.InvalidCandidateError, match="nested value"):
+        parse("---\nname: a\ndescription: d\nmetadata: {on: 1}\n---\nb\n")
+
+
+def test_the_nested_walker_reports_a_position_never_the_value() -> None:
+    secret = "FAKEFAKEFAKEFAKEFAKEfake42"
+    with pytest.raises(cw.InvalidCandidateError) as excinfo:
+        cw.load_frontmatter_yaml(f"{secret}:\n  a: yes\n", what="frontmatter", line_offset=1)
+    assert secret not in str(excinfo.value)
+    assert "line 3, column 6" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        ("a: yes", {"a": "yes"}),
+        ("a: On", {"a": "On"}),
+        ("a: TRUE", {"a": True}),
+        ("a: tRue", {"a": "tRue"}),
+        ("a: 010", {"a": 10}),
+        ("a: 0o17", {"a": 15}),
+        ("a: 0x1F", {"a": 31}),
+        ("a: 0b101", {"a": "0b101"}),
+        ("a: 1_000", {"a": "1_000"}),
+        ("a: 1:30", {"a": "1:30"}),
+        ("a: 1e3", {"a": 1000.0}),
+        ("a: .5", {"a": 0.5}),
+        ("a: 1.", {"a": 1.0}),
+        ("a: -.inf", {"a": float("-inf")}),
+        ("a: ~", {"a": None}),
+        ("a:", {"a": None}),
+        ("a: 2024-01-01", {"a": "2024-01-01"}),
+        ('a: "010"', {"a": "010"}),
+        ("a: !!str 010", {"a": "010"}),
+        ("a: [yes, 1e3]", {"a": ["yes", 1000.0]}),
+        ("b: &x {k: 1}\nc: {<<: *x, j: 2}", {"b": {"k": 1}, "c": {"k": 1, "j": 2}}),
+        ("b: &x {k: 1}\nc: {<<: [*x, {k: 2}], j: 3}", {"b": {"k": 1}, "c": {"k": 1, "j": 3}}),
+        ("", None),
+    ],
+)
+def test_yaml12_view_reads_plain_scalars_by_the_yaml_1_2_core_schema(
+    header: str, expected: object
+) -> None:
+    # The readings were checked against eemeli/yaml (YAML 1.2, core schema), the stand-in
+    # for Bun.YAML, which cannot run on this host.
+    assert cw.yaml12_view(header) == expected
+
+
+def test_yaml12_view_marks_an_explicit_tag_it_cannot_vouch_for() -> None:
+    value = cw.yaml12_view("a: !!int '5'\nb: !!binary aGk=\n")
+    assert isinstance(value["a"], cw.Yaml12Unknown)
+    assert isinstance(value["b"], cw.Yaml12Unknown)
+    assert repr(value["a"]) == "<explicitly tagged YAML value>"
+    assert math.isnan(cw.yaml12_view("a: .NaN")["a"])
+
+
+def test_yaml12_view_maps_a_recursion_error_to_a_rejection(monkeypatch) -> None:
+    def _deep(*_a, **_k):
+        raise RecursionError
+
+    monkeypatch.setattr(cw, "_yaml12_node", _deep)
+    with pytest.raises(cw.InvalidCandidateError, match="nested too deeply"):
+        cw.yaml12_view("a: 1")
+
+
+@pytest.mark.parametrize("entry", ["async: yes", "timeout: 1_000"])
+def test_a_subagent_file_with_a_yaml_1_1_only_hook_spelling_is_refused_whole(entry: str) -> None:
+    # The write path of the subagent surface, end to end: `timeout: 1_000` is 1000 to
+    # PyYAML (so the hooks validator alone would accept it) and the string "1_000" to the
+    # CLI's YAML 1.2. The seam refuses it before any surface check runs.
+    content = _NESTED_HOOK.format(entry=entry).replace("name: a", "name: my-agent")
+    with pytest.raises(cw.InvalidCandidateError, match="nested value at line 7"):
+        config_write_subagents.validate_agent_content(content, expected_name="my-agent")
+    plain = content.replace(entry, "timeout: 1000")
+    config_write_subagents.validate_agent_content(plain, expected_name="my-agent")  # no raise
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize("entry", ["timeout: 1e3", "timeout: 1.0e3", "timeout: 0o17"])
+def test_a_nested_number_only_yaml_1_2_reads_is_refused_on_both_surfaces(
+    parse, entry: str
+) -> None:
+    # The other direction: a string to PyYAML, a number to the CLI's YAML 1.2.
+    with pytest.raises(cw.InvalidCandidateError, match="nested value at line 7"):
+        parse(_NESTED_HOOK.format(entry=entry))
+
+
+# --- TASK-449.6: the CLI's retry for a header that is not valid YAML -------------------
+#
+# The 2.1.318 loader (`Rd` -> `SMn`) parses the header, and when that fails it parses a copy
+# with each top-level `key: value` line that holds a YAML indicator put in double quotes
+# (`Bm`), and with leading tabs turned into two spaces each. The expected values below are
+# what eemeli/yaml (YAML 1.2) gives for the retry text; it also fails on each original.
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize(
+    ("lines", "expected"),
+    [
+        pytest.param(
+            "argument-hint: [filename] [format]",
+            {"argument-hint": "[filename] [format]"},
+            id="docs-argument-hint-example",
+        ),
+        pytest.param(
+            "metadata:\n\towner: me\n\ttier: 2",
+            {"metadata": {"owner": "me", "tier": 2}},
+            id="tab-indented-block",
+        ),
+        pytest.param("when: Use this: for deploys", {"when": "Use this: for deploys"}, id="colon"),
+        pytest.param('when: say "hi": now', {"when": 'say "hi": now'}, id="inner-quotes"),
+        pytest.param(
+            "when: [a, b] [c]\nlist: [Read, Grep]",
+            {"when": "[a, b] [c]", "list": ["Read", "Grep"]},
+            id="flow-list-kept",
+        ),
+    ],
+)
+def test_a_header_the_cli_reads_through_its_retry_loads(parse, lines: str, expected) -> None:
+    frontmatter, body = parse(f"---\nname: a\ndescription: d\n{lines}\n---\nbody\n")
+    assert frontmatter == {"name": "a", "description": "d", **expected}
+    assert body == "body\n"
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize(
+    "lines",
+    [
+        # Indented, so the retry does not quote it, and it stays invalid YAML.
+        pytest.param("metadata:\n  a: b: c", id="nested-line-not-requoted"),
+        # A CRLF line ends in \r, which JavaScript's `.` does not match: no retry for it.
+        pytest.param("argument-hint: [a] [b]\r", id="crlf-line-not-requoted"),
+        # Valid YAML with an unknown tag: no syntax error, so no retry.
+        pytest.param("agent: !custom x", id="unknown-tag-is-not-retried"),
+    ],
+)
+def test_a_header_the_retry_cannot_save_is_still_refused(parse, lines: str) -> None:
+    with pytest.raises(cw.InvalidCandidateError):
+        parse(f"---\nname: a\ndescription: d\n{lines}\n---\nbody\n")
+
+
+def test_a_valid_header_is_never_retried() -> None:
+    # `a # b: c` would be quoted by the retry, but the header is valid YAML, so the CLI
+    # parses it as written and reads the comment as a comment.
+    header = "name: x\ndescription: a # b: c\n"
+    assert cw.cli_frontmatter_text(header) == header
+    assert cw.load_frontmatter_yaml(header, what="f") == {"name": "x", "description": "a"}
+
+
+def test_the_yaml12_view_reads_the_retry_text_too() -> None:
+    assert cw.yaml12_view("description: Use this: for x\n") == {"description": "Use this: for x"}
+
+
+def test_a_too_deep_header_is_not_retried() -> None:
+    header = "a: " + "[" * 5000 + "]" * 5000
+    assert cw.cli_frontmatter_text(header) == header
+
+
+def test_a_subagent_file_the_cli_reads_through_its_retry_saves() -> None:
+    content = "---\nname: my-agent\ndescription: Use this: for reviews\n---\nPrompt.\n"
+    config_write_subagents.validate_agent_content(content, expected_name="my-agent")  # no raise
+
+
+def test_frontmatter_header_keeps_the_cr_the_cli_keeps() -> None:
+    text = "---\r\nname: a\r\nhint: [a] [b]\r\n---\r\nbody\r\n"
+    match = cw.FRONTMATTER_RE.match(text)
+    assert match is not None
+    assert cw.frontmatter_header(text, match) == "name: a\r\nhint: [a] [b]\r"
+    with pytest.raises(cw.InvalidCandidateError, match="not valid YAML"):
+        config_write_skills.parse_frontmatter(text)
+    lf = "---\nname: a\nhint: [a] [b]\n---\nbody\n"
+    match = cw.FRONTMATTER_RE.match(lf)
+    assert match is not None
+    assert cw.frontmatter_header(lf, match) == "name: a\nhint: [a] [b]"
+    assert config_write_skills.parse_frontmatter(lf)[0]["hint"] == "[a] [b]"
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize(
+    "lines",
+    [
+        pytest.param("allowed-tools: &t [Bash]\nwhen_to_use: &t [Read]", id="two-anchors"),
+        pytest.param("model: &d opus\nagent: &d x\nhint: [a] [b]", id="anchors-and-a-bad-line"),
+        pytest.param("k: [&x a, &x b]\nhint: [a] [b]", id="anchors-in-a-flow-list"),
+    ],
+)
+def test_a_duplicate_anchor_is_refused_not_retried(parse, lines: str) -> None:
+    # YAML 1.2 allows two anchors of one name; PyYAML does not. The retry would read the
+    # values as other strings, so refuse instead (fail closed). For the case with a bad
+    # line the CLI does take its retry, but the refusal stands.
+    with pytest.raises(cw.InvalidCandidateError, match="not valid YAML"):
+        parse(f"---\nname: a\ndescription: d\n{lines}\n---\nbody\n")
+
+
+def test_a_merge_pyramid_in_a_retried_header_is_refused_quickly() -> None:
+    levels = ["&l0 {k0: 0, k1: 1}"] + [
+        f"&l{i} {{<<: [*l{i - 1}, *l{i - 1}]}}" for i in range(1, 22)
+    ]
+    header = "argument-hint: [a] [b]\nx: [" + ", ".join(levels) + "]\n"
+    started = time.perf_counter()
+    with pytest.raises(cw.InvalidCandidateError):
+        cw.load_frontmatter_yaml(header, what="frontmatter")
+    assert time.perf_counter() - started < 2.0
+
+
+def test_the_retry_keeps_an_already_quoted_value() -> None:
+    header = "when: 'a: b'\nhint: [a] [b]\n"
+    assert cw.load_frontmatter_yaml(header, what="f") == {"when": "a: b", "hint": "[a] [b]"}
+
+
+def test_the_retry_replaces_tabs_after_a_lone_cr() -> None:
+    # JavaScript's multiline `^` also matches after a lone CR. (`m:\r\tk: v` would not do: the
+    # CLI's line pattern takes \r\t as the space after `m:` and quotes `k: v`, as this port does.)
+    assert cw._cli_retry_text("# c\r\tk: v\n\t\tj: w") == "# c\r  k: v\n    j: w"
+    assert cw._cli_retry_text("m:\r\tk: v") == 'm: "k: v"'
+
+
+def test_the_flow_list_check_treats_a_too_deep_value_as_not_a_list() -> None:
+    assert cw._is_yaml_list("[" * 5000 + "]" * 5000) is False
+    assert cw._is_yaml_list("[a, b]") is True
+    assert cw._is_yaml_list("[&x a, &x b]") is True  # a duplicate anchor: a list to YAML 1.2
+    assert cw._is_yaml_list("[a] [b]") is False
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize(
+    "lines",
+    [
+        pytest.param("description2: &d.1 Deploys prod\nhint: [a] [b]", id="anchor-with-a-dot"),
+        pytest.param("x: &é v\nhint: [a] [b]", id="anchor-non-ascii"),
+        pytest.param("x: &a v\ny: *a.b\nhint: [a] [b]", id="alias-with-a-dot"),
+        pytest.param("x: [:a]\nhint: [a] [b]", id="flow-item-starts-with-colon"),
+        # PyYAML cannot start a token at a tab after a value; YAML 1.2 reads a comment.
+        pytest.param("disallowedTools: Bash\t# , Read", id="tab-then-hash-in-a-value"),
+    ],
+)
+def test_syntax_only_yaml_1_2_accepts_is_refused_not_retried(parse, lines: str) -> None:
+    # eemeli/yaml (YAML 1.2) parses each of these as written, so the CLI does not take the
+    # retry. PyYAML refuses them; the retry would read other values, so refuse instead.
+    with pytest.raises(cw.InvalidCandidateError, match="not valid YAML"):
+        parse(f"---\nname: a\ndescription: d\n{lines}\n---\nbody\n")
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize(
+    "lines",
+    [
+        pytest.param('when: "a"#b\ndisallowedTools: [Bash] # deny', id="hash-after-double-quote"),
+        pytest.param("when: 'a'#b", id="hash-after-single-quote"),
+        pytest.param("when: [x]#b", id="hash-after-flow-list"),
+        pytest.param("when: {x: 1}#b", id="hash-after-flow-map"),
+        pytest.param("when: x\rdisallowedTools: Bash", id="lone-carriage-return"),
+    ],
+)
+def test_syntax_only_pyyaml_accepts_is_refused(parse, lines: str) -> None:
+    # eemeli/yaml refuses each of these, so the CLI reads its retry text or no fields at
+    # all: `[Bash] # deny` would become a string, and Bash would no longer be denied.
+    with pytest.raises(cw.InvalidCandidateError, match="see differently"):
+        parse(f"---\nname: a\ndescription: d\n{lines}\n---\nbody\n")
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize("lines", ['when: "a" #b', "when: [x] # b", "when: x#b", "when: 'it''s'"])
+def test_a_comment_after_white_space_still_loads(parse, lines: str) -> None:
+    parse(f"---\nname: a\ndescription: d\n{lines}\n---\nbody\n")  # no raise
+
+
+def test_the_lone_cr_position_names_the_line() -> None:
+    with pytest.raises(cw.InvalidCandidateError, match="line 2, column 5"):
+        cw.load_frontmatter_yaml("a: 1\nb: x\rc: y\n", what="f")
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize(
+    "lines",
+    [
+        pytest.param("x: [a,#c\n  b]\ndisallowedTools: [Bash] # deny", id="hash-after-comma"),
+        pytest.param("x: [#c\n  a]", id="hash-after-open-bracket"),
+        pytest.param("x: {#c\n  a: 1}", id="hash-after-open-brace"),
+        pytest.param('x: "a\nb"\ndisallowedTools: Bash', id="double-quoted-at-column-0"),
+        pytest.param("x: 'a\nb'", id="single-quoted-at-column-0"),
+        pytest.param("x: a\nx: b\ndisallowedTools: Bash", id="duplicate-top-level-key"),
+        pytest.param(
+            "hooks:\n  Stop:\n    - hooks:\n        - {type: command, command: a, command: b}",
+            id="duplicate-nested-key",
+        ),
+    ],
+)
+def test_more_syntax_the_two_yaml_versions_read_differently_is_refused(parse, lines) -> None:
+    # Each is accepted by PyYAML and refused, or read otherwise, by eemeli/yaml (YAML 1.2).
+    # The CLI would then read fewer fields (or none) than the editor checked.
+    with pytest.raises(cw.InvalidCandidateError, match="see differently"):
+        parse(f"---\nname: a\ndescription: d\n{lines}\n---\nbody\n")
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize(
+    "lines",
+    [
+        'x: "a\n  b"',  # a quoted value that goes on indented
+        "x: [a, # c\n  b]",  # a comment after a space
+        "# a comment line\nx: 1",
+        "a: &m {k: 1}\nb: {<<: *m, j: 2}",  # merge keys are not duplicates
+        "url: http://x/#frag",  # a '#' with no space before it stays in a plain value
+    ],
+)
+def test_the_same_syntax_written_portably_still_loads(parse, lines: str) -> None:
+    parse(f"---\nname: a\ndescription: d\n{lines}\n---\nbody\n")  # no raise
+
+
+def test_a_tab_used_as_indentation_or_a_reserved_character_still_takes_the_retry() -> None:
+    # Both YAML versions refuse these, so the CLI retries, and so does the seam.
+    assert cw.cli_frontmatter_text("m:\n\tk: v\n") == "m:\n  k: v\n"
+    assert cw.cli_frontmatter_text("x: @y\n") == 'x: "@y"\n'
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize(
+    "keys",
+    [
+        pytest.param("1: a\n01: b", id="one-and-zero-one"),
+        pytest.param("1: a\n1.0: b", id="int-and-float"),
+        pytest.param("0x1: a\n1: b", id="hex-and-decimal"),
+        pytest.param("null: a\n~: b", id="two-nulls"),
+        pytest.param("true: a\nTrue: b", id="two-trues"),
+        pytest.param('yes: a\n"yes": b', id="yes-and-quoted-yes"),
+        pytest.param("x: &m {k: 1}\ny: {<<: *m, <<: *m}", id="two-merge-keys"),
+    ],
+)
+def test_keys_that_one_yaml_reading_merges_are_refused(parse, keys: str) -> None:
+    # Different spellings, one key to YAML 1.2 (or to PyYAML): a strict YAML 1.2 parser
+    # refuses the header, so the CLI would drop every field, the denylist included.
+    with pytest.raises(cw.InvalidCandidateError, match="see differently"):
+        parse(f"---\nname: a\ndescription: d\n{keys}\ndisallowedTools: Bash\n---\nbody\n")
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize(
+    "lines",
+    [
+        "when: >\n  Long text\n# Tools\nlist: Read",
+        "when: |\n  Long text\n# Tools\nlist: Read",
+        "when: |+\n  Long text\n\n# Tools\nlist: Read",
+        "when: >\r\n  Long text\r\n# Tools\r\nlist: Read",
+    ],
+)
+def test_a_comment_line_after_a_block_scalar_still_loads(parse, lines: str) -> None:
+    frontmatter, _ = parse(f"---\nname: a\ndescription: d\n{lines}\n---\nbody\n")
+    assert frontmatter["list"] == "Read"
+
+
+def test_an_explicitly_tagged_key_never_collides_in_the_yaml12_reading() -> None:
+    root = yaml.compose('a: {? !!int "5" : x, "5": y}\n', Loader=yaml.SafeLoader)
+    # PyYAML reads the first key as 5 and the second as "5": no collision either way.
+    assert cw._duplicate_key(root) is None
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize(
+    "keys",
+    [
+        pytest.param("9007199254740993: a\n9007199254740992: b", id="past-2-53"),
+        pytest.param("1e21: a\n1000000000000000000000: b", id="exponent-and-digits"),
+        # Only PyYAML merges these (a Python dict folds 1 and True); the CLI keeps two.
+        pytest.param("1: a\ntrue: b", id="pyyaml-only-one-and-true"),
+        pytest.param("on: a\nyes: b", id="pyyaml-only-on-and-yes"),
+    ],
+)
+def test_keys_one_reading_merges_past_the_obvious_cases_are_refused(parse, keys: str) -> None:
+    with pytest.raises(cw.InvalidCandidateError, match="see differently"):
+        parse(f"---\nname: a\ndescription: d\n{keys}\ndisallowedTools: Bash\n---\nbody\n")
+
+
+def test_the_yaml12_key_of_a_huge_integer_is_infinity() -> None:
+    node = yaml.compose("1" + "0" * 400 + ": a\n", Loader=yaml.SafeLoader).value[0][0]
+    assert cw._yaml12_key(node) == "Infinity"
+
+
+def test_yaml12_view_of_a_scalar_header_is_the_scalar() -> None:
+    assert cw.yaml12_view("just text") == "just text"
+
+
+_MERGE_SPELLINGS = [
+    pytest.param("<<", id="plain"),
+    pytest.param("!!merge x", id="bang-bang-merge"),
+    pytest.param("!<tag:yaml.org,2002:merge> x", id="verbatim-tag"),
+    pytest.param("!!m%65rge x", id="percent-escaped"),
+]
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize("merge", _MERGE_SPELLINGS)
+def test_an_enclosing_merge_in_any_spelling_is_refused(parse, merge: str) -> None:
+    # Every spelling composes to the merge tag, so the seam checks the composed graph, not
+    # a `<<` in the text (a regression against main once the guard was text-gated).
+    text = (
+        f"---\nname: a\ndescription: d\npermissionMode: plan # c\na: &a {{{merge} : *a}}\n---\nb\n"
+    )
+    with pytest.raises(cw.InvalidCandidateError, match="encloses it"):
+        parse(text)
+
+
+@pytest.mark.timeout(20)
+@pytest.mark.parametrize("merge", _MERGE_SPELLINGS)
+def test_a_merge_pyramid_in_any_spelling_hits_the_pair_cap_quickly(merge: str) -> None:
+    levels = ["l0: &l0 {k0: 0, k1: 1}"] + [
+        f"l{i}: &l{i} {{{merge} : [*l{i - 1}, *l{i - 1}], k{i}: {i}}}" for i in range(1, 24)
+    ]
+    started = time.perf_counter()
+    with pytest.raises(cw.InvalidCandidateError, match="pair cap"):
+        cw.load_frontmatter_yaml("\n".join(levels) + "\n", what="frontmatter")
+    assert time.perf_counter() - started < 5.0
+
+
+def _override_pyramid(depth: int) -> list[str]:
+    """Return anchor lines of an alias pyramid whose top, ``P{depth}``, a merge reaches only.
+
+    Used behind an overridden merge key, so the loaded value stays tiny and every check on
+    it passes: only the walks of the composed graph meet the pyramid.
+    """
+    lines = ["  - &P0 [a, a, a, a]"]
+    lines += [
+        f"  - &P{i} [*P{i - 1}, *P{i - 1}, *P{i - 1}, *P{i - 1}]" for i in range(1, depth + 1)
+    ]
+    return lines
+
+
+@pytest.mark.timeout(20)
+def test_every_seam_walk_is_memoized_on_an_override_shaped_pyramid() -> None:
+    # Review of TASK-449.6: removing the visited set from any composed-tree walk left the
+    # suite green but hung on this 530-byte shape. The anchors sit in a list under an
+    # unknown key, which the CLI ignores, so nothing else refuses the file first.
+    header = (
+        "description: d\nanchors:\n"
+        + "\n".join(_override_pyramid(20))
+        + "\nmetadata: {<<: {x: *P20}, x: 1}\n"
+    )
+    root = yaml.compose(header, Loader=yaml.SafeLoader)
+    started = time.perf_counter()
+    cw._first_nested_yaml11_number(root)
+    cw._duplicate_key(root)
+    cw._has_enclosing_alias(root)
+    cw._has_merge_key(root)
+    cw.yaml12_view(header)
+    assert time.perf_counter() - started < 2.0
+
+
+def _inline_pyramid(depth: int) -> str:
+    """Return a flow list whose items anchor an alias pyramid ``depth`` levels deep."""
+    items = ["&P0 [a, a, a, a]"] + [
+        f"&P{i} [*P{i - 1}, *P{i - 1}, *P{i - 1}, *P{i - 1}]" for i in range(1, depth + 1)
+    ]
+    return "[" + ", ".join(items) + "]"
+
+
+@pytest.mark.timeout(20)
+def test_an_override_shaped_pyramid_saves_quickly_on_both_surfaces() -> None:
+    # The merge source is overridden, so the loaded value is tiny and passes every check on
+    # it. Only the walks of the composed graph meet the pyramid, and each must visit a node
+    # once (a walk per alias path would take hours).
+    pyramid = _inline_pyramid(20)
+    skill = f"---\ndescription: d\nmetadata: {{<<: {{x: {pyramid}}}, x: 1}}\n---\nb\n"
+    agent = (
+        "---\nname: x\ndescription: d\nmcpServers:\n"
+        f"  - srv: {{command: c, <<: {{args: {pyramid}}}, args: []}}\n---\nb\n"
+    )
+    started = time.perf_counter()
+    config_write_skills.validate_skill_md_content(skill)
+    config_write_subagents.validate_agent_content(agent, expected_name="x")
+    assert time.perf_counter() - started < 5.0
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+def test_a_huge_leading_zero_number_in_a_nested_value_is_refused_not_a_500(parse) -> None:
+    # PyYAML reads `0999...` (5000 digits) as a string; YAML 1.2 reads a decimal number,
+    # and int() past Python's digit limit raised ValueError after the load: a 500.
+    huge = "0" + "9" * 5000
+    assert cw.yaml12_view(f"y: {huge}") == {"y": math.inf}  # JavaScript Infinity
+    with pytest.raises(cw.InvalidCandidateError, match="nested value"):
+        parse(f"---\nname: a\ndescription: d\nx:\n  y: {huge}\n---\nb\n")
+
+
+@pytest.mark.parametrize(
+    "line",
+    [f'maxTurns: "{"9" * 5000}"', f'effort: "{"9" * 5000}"', f'autoCompactWindow: "{"9" * 5000}"'],
+)
+def test_a_subagent_number_field_with_huge_digits_is_refused_not_a_500(line: str) -> None:
+    text = f"---\nname: x\ndescription: d\n{line}\n---\nbody\n"
+    with pytest.raises(cw.InvalidCandidateError):
+        config_write_subagents.validate_agent_content(text, expected_name="x")
+
+
+_HUGE_HEX = "0x" + "f" * 300  # bases 8 and 16 have no int() digit limit, but pass a double
+_HUGE_OCT = "0o" + "7" * 400
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize(
+    "extra",
+    [
+        pytest.param(f"x:\n  {_HUGE_HEX}: 1\n", id="nested-hex-key"),
+        pytest.param(f"x:\n  {_HUGE_OCT}: 1\n", id="nested-oct-key"),
+        pytest.param(f"x:\n  y: {_HUGE_HEX}\n", id="nested-hex-value"),
+        pytest.param("x:\n  y: " + "9" * 309 + "\n", id="nested-decimal-past-a-double"),
+    ],
+)
+def test_a_nested_number_past_the_double_range_is_refused_not_a_500(parse, extra: str) -> None:
+    # YAML 1.1 reads a Python int; the CLI's YAML 1.2 reads Infinity, so they disagree. The
+    # key spellings raised OverflowError in the duplicate-key check: a 500.
+    with pytest.raises(cw.InvalidCandidateError, match="nested value"):
+        parse(f"---\nname: a\ndescription: d\n{extra}---\nb\n")
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+def test_a_huge_top_level_hex_key_and_the_largest_nested_decimal_still_load(parse) -> None:
+    parse(f"---\nname: a\ndescription: d\n{_HUGE_HEX}: 1\n---\nb\n")  # no raise
+    parse("---\nname: a\ndescription: d\nx:\n  y: " + "9" * 308 + "\n---\nb\n")
+
+
+def test_the_yaml12_view_reads_a_huge_hex_or_oct_number_as_infinity() -> None:
+    assert cw.yaml12_view(f"a: {_HUGE_HEX}\nb: -{_HUGE_OCT}\nc: 0x10") == {
+        "a": math.inf,
+        "b": -math.inf,
+        "c": 16,
+    }
+
+
+# --- Greptile on PR 1810: a `=` key, and one wrapper around every composed-tree check -----
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [
+        pytest.param("metadata: {=: x}", {"metadata": {"=": "x"}}, id="flow"),
+        pytest.param("metadata:\n  =: x", {"metadata": {"=": "x"}}, id="block"),
+        pytest.param("=: x", {"=": "x"}, id="top-level"),
+        pytest.param("metadata: [{=: x}]", {"metadata": [{"=": "x"}]}, id="in-a-list"),
+        pytest.param("metadata: {!!value k: x}", {"metadata": {"k": "x"}}, id="bang-value"),
+        pytest.param(
+            "metadata: {!<tag:yaml.org,2002:value> k: x}", {"metadata": {"k": "x"}}, id="verbatim"
+        ),
+        pytest.param(
+            "base: &b {=: 1}\nmetadata: {<<: *b}",
+            {"base": {"=": 1}, "metadata": {"=": 1}},
+            id="merge-source",
+        ),
+    ],
+)
+def test_a_value_tagged_key_reads_as_pyyaml_reads_it(parse, extra: str, expected: dict) -> None:
+    # PyYAML's construct_mapping retags a `=` (or `!!value`) KEY as a string; the duplicate-key
+    # check constructed the node as it stood and raised ConstructorError: a 500.
+    frontmatter, _body = parse(f"---\nname: a\ndescription: d\n{extra}\n---\nb\n")
+    assert {k: v for k, v in frontmatter.items() if k not in ("name", "description")} == expected
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+def test_a_value_tagged_key_still_counts_as_a_repeated_key(parse) -> None:
+    with pytest.raises(cw.InvalidCandidateError, match="repeated key"):
+        parse("---\nname: a\ndescription: d\nmetadata: {=: x, '=': y}\n---\nb\n")
+
+
+class _CheckCrashedError(BaseException):
+    """A check crashed: no `except Exception` in the seam can turn this into a refusal."""
+
+
+@contextlib.contextmanager
+def _crash_escapes(_what: str):
+    try:
+        yield
+    except cw.InvalidCandidateError:
+        raise
+    except Exception as exc:
+        raise _CheckCrashedError(type(exc).__name__) from exc
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "metadata: {a: =}",
+        "metadata: {? !!value [a] : x}",
+        "base: &b {a: 1}\nmetadata: {<<: *b, c: 2}",
+        "metadata: {!!merge <<: {a: 1}}",
+        "metadata: !!set {a, b}",
+        "metadata: !!omap [{a: 1}, {a: 2}]",
+        "metadata: !!pairs [{a: 1}, {a: 2}]",
+        "metadata: {a: !!binary aGk=}",
+        "metadata: {? !!binary aGk= : x}",
+        "metadata: {2024-01-01: x}",
+        "metadata: {2024-01-01: x, !!timestamp 2024-01-01: y}",
+        "metadata: {? [a] : x}",
+        "metadata: {? {a: 1} : x}",
+        "? [a]\n: x",
+        "metadata: {~: x, null: y}",
+        "metadata: {.nan: x}",
+        "metadata: {!!bool yes: x}",
+        "metadata: {!!int x: y}",
+        "metadata: {!!str 1: x, 1: y}",
+        "metadata: {!!yaml k: x}",
+        "metadata: {: x}",
+        "a: &k key\nmetadata: {*k : x}",
+        "metadata: !!omap [{? [a] : 1}]",
+        "metadata: !!pairs [{? {a: 1} : 1}]",
+    ],
+)
+def test_a_tag_or_node_shape_pyyaml_loads_specially_never_escapes_the_seam(
+    extra, monkeypatch
+) -> None:
+    # The self-pass on the third round: every PyYAML tag and node shape the seam's own node
+    # walks might read differently from PyYAML's loader. Each loads or is refused by a check
+    # that means to refuse it. The crash wrapper is replaced by one that raises a
+    # BaseException no seam handler catches, so a check that crashes fails this test, whatever
+    # the wrapper's message says and whatever handler sits around the check.
+    monkeypatch.setattr(cw, "refuse_check_failures", _crash_escapes)
+    text = f"---\nname: a\ndescription: d\n{extra}\n---\nb\n"
+    surfaces = [
+        lambda: config_write_subagents.parse_frontmatter(text),
+        lambda: config_write_skills.parse_frontmatter(text),
+        lambda: config_write_skills.validate_skill_md_content(text),
+        lambda: config_write_subagents.validate_agent_content(text, expected_name="a"),
+    ]
+    for surface in surfaces:
+        try:
+            surface()
+        except cw.InvalidCandidateError:
+            pass
+
+
+@pytest.mark.parametrize(
+    "extra", ["metadata: !!omap [{? [a] : 1}]", "metadata: !!pairs [{? {a: 1} : 1}]"]
+)
+def test_a_list_or_mapping_key_in_an_ordered_mapping_is_refused(extra: str) -> None:
+    # PyYAML builds `!!omap`/`!!pairs` without hashing a key; the YAML 1.2 view raised
+    # TypeError on it (review on PR 1810).
+    with pytest.raises(cw.InvalidCandidateError, match="a list or a mapping as a key"):
+        config_write_skills.validate_skill_md_content(
+            f"---\nname: a\ndescription: d\n{extra}\n---\nb\n"
+        )
+
+
+_CHECK_CRASHES = [
+    pytest.param(yaml.constructor.ConstructorError("x", None, "SECRET-1"), id="ConstructorError"),
+    pytest.param(ValueError("SECRET-1"), id="ValueError"),
+    pytest.param(OverflowError("SECRET-1"), id="OverflowError"),
+    pytest.param(TypeError("SECRET-1"), id="TypeError"),
+    pytest.param(KeyError("SECRET-1"), id="KeyError"),
+    pytest.param(AttributeError("SECRET-1"), id="AttributeError"),
+    pytest.param(IndexError("SECRET-1"), id="IndexError"),
+]
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize("crash", _CHECK_CRASHES)
+@pytest.mark.parametrize("check", ["_yaml12_refuses", "_merge_expands_beyond"])
+def test_a_crash_in_any_composed_tree_check_is_a_refusal(
+    parse, crash: Exception, check: str, monkeypatch
+) -> None:
+    def _boom(*_args, **_kwargs):
+        raise crash
+
+    monkeypatch.setattr(cw, check, _boom)
+    with pytest.raises(cw.InvalidCandidateError, match=type(crash).__name__) as caught:
+        parse("---\nname: a\ndescription: d\n---\nb\n")
+    assert "SECRET" not in str(caught.value)  # the class name only, never the payload
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+def test_a_recursion_error_in_a_check_is_a_refusal(parse, monkeypatch) -> None:
+    def _boom(*_args, **_kwargs):
+        raise RecursionError
+
+    monkeypatch.setattr(cw, "_first_nested_yaml11_number", _boom)
+    with pytest.raises(cw.InvalidCandidateError, match="nested too deeply to check"):
+        parse("---\nname: a\ndescription: d\nx: {y: 1}\n---\nb\n")
+
+
+def test_the_check_wrapper_passes_a_refusal_through_unchanged() -> None:
+    with pytest.raises(cw.InvalidCandidateError, match="^the original$"):
+        with cw.refuse_check_failures("frontmatter"):
+            raise cw.InvalidCandidateError("the original")

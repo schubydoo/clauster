@@ -70,7 +70,8 @@ def test_parse_frontmatter_rejects_missing_block() -> None:
 
 def test_parse_frontmatter_rejects_invalid_yaml() -> None:
     with pytest.raises(cw.InvalidCandidateError, match="YAML"):
-        sub.parse_frontmatter("---\nname: [unterminated\n---\nbody\n")
+        # Nested: the CLI retry would re-quote a top-level `[` line (TASK-449.6).
+        sub.parse_frontmatter("---\nm:\n  name: [unterminated\n---\nbody\n")
 
 
 def test_parse_frontmatter_rejects_deeply_nested_yaml() -> None:
@@ -1184,16 +1185,33 @@ def test_conversion_keeps_every_value_spelled_as_written(tmp_path: Path) -> None
     # PyYAML reads YAML 1.1 and the CLI reads YAML 1.2, which disagree on `yes`, `0755`,
     # `1:30` and on whether `'1e5'` needs its quotes. Re-indenting instead of re-dumping
     # keeps each scalar's text, so the CLI reads the converted file as it read the old one.
+    # Since TASK-449.6 the shared seam refuses the UNQUOTED nested `yes`, `0755` and `1:30`
+    # outright (see the next test), so this one pins that the quoting survives, and a
+    # plain spelling both versions read alike (`0x1F`) keeps its text.
     text = (
         "---\nname: my-agent\ndescription: d\nmcpServers:\n  srv:\n    command: x\n"
-        "    env:\n      DEBUG: yes\n      MODE: 0755\n      PORT: 1:30\n      T: '1e5'\n"
-        "---\nbody\n"
+        "    env:\n      DEBUG: 'yes'\n      MODE: \"0755\"\n      PORT: '1:30'\n"
+        "      T: '1e5'\n      H: 0x1F\n---\nbody\n"
     )
     _place(tmp_path, "my-agent", text)
     content = sub.read_project_agent(tmp_path, "my-agent")["content"]
-    for spelling in ("DEBUG: yes", "MODE: 0755", "PORT: 1:30", "T: '1e5'"):
+    for spelling in ("DEBUG: 'yes'", 'MODE: "0755"', "PORT: '1:30'", "T: '1e5'", "H: 0x1F"):
         assert f"        {spelling}\n" in content
     assert "  - srv:\n" in content
+
+
+def test_a_nested_yaml_1_1_only_spelling_blocks_the_conversion(tmp_path: Path) -> None:
+    # The unquoted `DEBUG: yes` is a boolean to PyYAML and the string "yes" to the CLI, so
+    # the shared seam refuses the header (TASK-449.6). The file is shown as it is, with the
+    # error, and is not converted: the conversion never builds on a header the seam refused.
+    text = (
+        "---\nname: my-agent\ndescription: d\nmcpServers:\n  srv:\n    command: x\n"
+        "    env:\n      DEBUG: yes\n---\nbody\n"
+    )
+    _place(tmp_path, "my-agent", text)
+    doc = sub.read_project_agent(tmp_path, "my-agent")
+    assert doc["content"] == text
+    assert not doc.get("converted")
 
 
 def test_conversion_keeps_crlf_line_endings(tmp_path: Path) -> None:
@@ -1418,7 +1436,9 @@ def test_inline_servers_refuse_yaml11_only_spellings(definition: str) -> None:
     if "command" not in definition and "url" not in definition:
         definition = "      command: x\n" + definition
     text = f"---\nname: x\ndescription: d\nmcpServers:\n  - srv:\n{definition}---\nbody\n"
-    with pytest.raises(cw.InvalidCandidateError, match="frontmatter 'mcpServers' inline server"):
+    # TASK-449.6: the shared seam's nested walker refuses this first, for every surface,
+    # so the message is the seam's (it names the line and column, never the value).
+    with pytest.raises(cw.InvalidCandidateError, match="nested value at line"):
         sub.validate_agent_content(text, expected_name="x")
 
 
@@ -1442,9 +1462,9 @@ def test_inline_servers_refuse_strings_yaml12_reads_as_numbers(item: str) -> Non
     # PyYAML reads each plain value as a string; the CLI's YAML 1.2 reads a number, which its
     # entry schema refuses, so it skips the server (probed: `env: {A: 1e3}`, `args: [0o17]`).
     text = f"---\nname: x\ndescription: d\nmcpServers:\n{item}---\nbody\n"
-    with pytest.raises(
-        cw.InvalidCandidateError, match="as a number, not a string, and drops that mcpServers"
-    ):
+    # TASK-449.6: the shared seam's nested walker refuses this first, for every surface,
+    # so the message is the seam's (it names the line and column, never the value).
+    with pytest.raises(cw.InvalidCandidateError, match="nested value at line"):
         sub.validate_agent_content(text, expected_name="x")
 
 
@@ -1527,22 +1547,25 @@ def test_shared_aliases_under_a_discarded_key_do_not_hang_a_save(tmp_path: Path)
     assert header is not None
     root = yaml.compose(header.group(1), Loader=yaml.SafeLoader)
     assert _naive_walk_visits(root) > 10**12  # the positive control: it IS a pyramid
+    # TASK-449.6: the shared seam now refuses a repeated key (the two YAML versions may keep
+    # different values), so this file is refused, and it must be refused just as fast: every
+    # composed-tree walk in the seam visits each node once.
     start = time.monotonic()
-    sub.validate_agent_content(text, expected_name="x")
+    with pytest.raises(cw.InvalidCandidateError, match="see differently"):
+        sub.validate_agent_content(text, expected_name="x")
     assert time.monotonic() - start < 0.5
-    sub.write_project_agent(tmp_path, "x", text, None)  # and the save goes through
-    # The walk still follows aliases: here the bad value sits in the bottom level of a
-    # pyramid that only the discarded `args: *p20` reaches, 21 alias levels down. The levels
-    # are discarded duplicates of a top-level key, which this walk does not enter itself.
-    levels = ["pyr: &p0 [1e3, a]"] + [f"pyr: &p{i} [*p{i - 1}, *p{i - 1}]" for i in range(1, 21)]
+    with pytest.raises(cw.InvalidCandidateError):
+        sub.write_project_agent(tmp_path, "x", text, None)
+    # The walks still follow aliases: here the bad value sits at the bottom of a chain of
+    # distinct keys that only `args: *p20` reaches, 21 alias levels down.
+    levels = ["p0: &p0 [1e3, a]"] + [f"p{i}: &p{i} [*p{i - 1}]" for i in range(1, 21)]
     deep = (
         "---\nname: x\ndescription: d\n"
         + "\n".join(levels)
-        + "\npyr: 0\nmcpServers:\n  - srv:\n      command: c\n      args: *p20\n"
-        "      args: []\n---\nbody\n"
+        + "\nmcpServers:\n  - srv:\n      command: c\n      args: *p20\n---\nbody\n"
     )
     start = time.monotonic()
-    with pytest.raises(cw.InvalidCandidateError, match="as a number, not a string"):
+    with pytest.raises(cw.InvalidCandidateError, match="nested value at line"):
         sub.validate_agent_content(deep, expected_name="x")
     assert time.monotonic() - start < 0.5
 
@@ -1566,7 +1589,8 @@ def test_a_long_merge_chain_behind_an_inline_server_is_walked_without_recursion(
     if bottom == "{command: c}":
         sub.validate_agent_content(text, expected_name="x")
     else:
-        with pytest.raises(cw.InvalidCandidateError, match="inline server 's'"):
+        # The shared seam's nested walker refuses it first (TASK-449.6), also iteratively.
+        with pytest.raises(cw.InvalidCandidateError, match="nested value at line"):
             sub.validate_agent_content(text, expected_name="x")
 
 
@@ -1575,8 +1599,10 @@ def test_each_kind_of_inline_check_keeps_its_own_walked_nodes() -> None:
     # b's definition must still get the definition checks: one shared walked set would skip
     # it and accept `alwaysLoad: yes`, which the CLI reads as a string.
     header = "mcpServers:\n  - a: {command: x, env: &n {alwaysLoad: yes}}\n  - b: *n\n"
-    with pytest.raises(cw.InvalidCandidateError, match="inline server 'b' 'alwaysLoad'"):
-        sub._refuse_yaml11_only_spellings(header)
+    # TASK-449.6: the shared seam's walker checks every nested value once, wherever it is
+    # reached, and needs no per-check sets: a nested `yes` is a mismatch in any position.
+    with pytest.raises(cw.InvalidCandidateError, match="nested value at line"):
+        cw.load_frontmatter_yaml(header, what="frontmatter")
 
 
 _INLINE_LEGACY = (
@@ -2867,3 +2893,44 @@ def test_delete_path_verify_gets_none_when_the_bytes_are_unreadable(tmp_path, mo
     assert sub.fw.delete_path(tmp_path, "f.txt", verify=_record) is True
     assert seen["current"] is None
     assert not target.exists()
+
+
+# --- Greptile on PR 1810: one file that crashes a check never breaks the listing ----------
+
+
+def test_route_list_survives_a_value_tagged_key_and_a_crashing_check(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    real = cw._yaml12_refuses
+
+    def _boom(text, root):
+        if "poison" in text:
+            raise OverflowError("x")
+        return real(text, root)
+
+    monkeypatch.setattr(cw, "_yaml12_refuses", _boom)
+    agents = projects_root / "alpha" / ".claude" / "agents"
+    agents.mkdir(parents=True)
+    for name, extra in (("eq-key", "metadata: {=: x}\n"), ("crash", "x: poison\n"), ("good", "")):
+        (agents / f"{name}.md").write_bytes(
+            f"---\nname: {name}\ndescription: fine\n{extra}---\nbody\n".encode()
+        )
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.get(f"{_LIST_URL}?project=alpha")
+        assert resp.status_code == 200
+        listed = {a["name"]: a for a in resp.json()["agents"]}
+        assert {"eq-key", "crash", "good"} <= set(listed)
+        assert listed["good"]["description"] == "fine"
+        assert listed["eq-key"]["description"] == "fine"
+        assert listed["crash"]["description"] is None  # refused, still listed
+        for name in ("eq-key", "crash"):
+            assert c.get(f"{_agent_url(name)}?project=alpha").status_code == 200
+
+
+def test_a_crash_in_the_subagent_spelling_walk_is_a_refusal(monkeypatch) -> None:
+    def _boom(_header):
+        raise TypeError("x")
+
+    monkeypatch.setattr(sub, "_refuse_yaml11_only_spellings", _boom)
+    with pytest.raises(cw.InvalidCandidateError, match="TypeError"):
+        sub.validate_agent_content(_content("my-agent"), expected_name="my-agent")

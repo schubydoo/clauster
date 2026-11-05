@@ -47,6 +47,7 @@ The gate ordering the children must follow (each step aborts before the write)::
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import datetime
 import fnmatch
@@ -61,6 +62,9 @@ from typing import Any, Literal
 
 import yaml
 from fastapi import HTTPException
+from yaml.composer import ComposerError
+from yaml.parser import ParserError
+from yaml.scanner import ScannerError
 
 from .claude_json import ClaudeJsonUnparseable, locked_replace_json_file, update_claude_json
 from .config import ClausterConfig
@@ -860,6 +864,17 @@ def capability_status(config: ClausterConfig) -> dict[str, bool]:
 FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*\r?\n?", re.DOTALL)
 
 
+def frontmatter_header(text: str, match: re.Match[str]) -> str:
+    r"""Return the header of a :data:`FRONTMATTER_RE` ``match`` on ``text``, as the CLI keeps it.
+
+    The CLI's fence ends at the ``---`` itself, so in a CRLF file its header keeps the ``\r``
+    before the closing fence, which ``FRONTMATTER_RE`` leaves out of the group. YAML reads
+    both alike; the CLI's retry for a header that is not valid YAML does not (it never
+    re-quotes a line that ends in ``\r``), so every caller passes this text to the seam.
+    """
+    return match.group(1) + ("\r" if text.startswith("\r", match.end(1)) else "")
+
+
 def _is_self_referential(value: Any) -> bool:
     """Whether ``value`` contains a container that is reachable from itself.
 
@@ -1073,6 +1088,9 @@ def _expands_beyond(value: Any, limit: int) -> bool:
 #: ``SafeConstructor.flatten_mapping`` splice the referenced mapping(s) in at *construction*
 #: time — the step a merge-key pyramid detonates in, before any object is returned.
 _YAML_MERGE_TAG = "tag:yaml.org,2002:merge"
+#: The tag of a plain ``=`` scalar (and of ``!!value``). PyYAML's ``flatten_mapping`` retags
+#: such a KEY as a string before it constructs it; anywhere else it has no constructor.
+_YAML_VALUE_TAG = "tag:yaml.org,2002:value"
 
 #: Cap on the key-value pairs a header is allowed to flatten to once its ``<<`` merge keys are
 #: followed — counted CUMULATIVELY across every mapping, not per mapping. A merge-key pyramid
@@ -1165,6 +1183,570 @@ def _merge_expands_beyond(root: yaml.Node, limit: int) -> bool:
         else:  # a sequence has no size of its own — only mappings to discover beneath it
             stack.extend((child, False) for child in node.value)
     return False
+
+
+#: Line breaks to YAML 1.1 (PyYAML) but ordinary characters to YAML 1.2 (the CLI): NEL,
+#: LINE SEPARATOR and PARAGRAPH SEPARATOR. A header with one reads as different keys in the
+#: two: ``tools: Read # c<LS>disallowedTools: Bash`` hides the denylist from the CLI.
+_YAML11_ONLY_LINE_BREAKS = ("\x85", "\u2028", "\u2029")
+
+
+def _has_enclosing_alias(root: yaml.Node) -> bool:
+    """Whether composed ``root`` holds an alias to a node that encloses it.
+
+    PyYAML loads ``a: &a {<<: *a}`` (its ``flatten_mapping`` deletes the merge key before it
+    follows it); the CLI's YAML 1.2 loader refuses it ("Merge key cannot reference an
+    enclosing node"). Iterative, like :func:`_merge_expands_beyond`, so it adds no stack
+    frames, and each node is walked once, so a shared alias costs nothing extra.
+    """
+    on_path: set[int] = set()
+    done: set[int] = set()
+    stack: list[tuple[yaml.Node, bool]] = [(root, False)]
+    while stack:
+        node, leaving = stack.pop()
+        if leaving:
+            on_path.discard(id(node))
+            done.add(id(node))
+            continue
+        if id(node) in on_path:
+            return True
+        if id(node) in done or not isinstance(node, yaml.CollectionNode):
+            continue
+        on_path.add(id(node))
+        stack.append((node, True))
+        if isinstance(node, yaml.MappingNode):
+            stack.extend((part, False) for pair in node.value for part in pair)
+        else:
+            stack.extend((child, False) for child in node.value)
+    return False
+
+
+def _has_merge_key(root: yaml.Node) -> bool:
+    """Whether any mapping in composed ``root`` has a merge key, however it is spelled.
+
+    ``<<``, ``!!merge x``, the verbatim ``!<tag:yaml.org,2002:merge>`` and a ``%``-escaped
+    tag all compose to the merge tag, so the composed graph is checked, not the text.
+    Iterative, and each node is walked once.
+    """
+    seen: set[int] = set()
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, yaml.CollectionNode) or id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, yaml.MappingNode):
+            for key_node, value_node in node.value:
+                if key_node.tag == _YAML_MERGE_TAG:
+                    return True
+                stack.extend((key_node, value_node))
+        else:
+            stack.extend(node.value)
+    return False
+
+
+class Yaml12Unknown:
+    """A scalar :func:`yaml12_view` does not resolve: one with an explicit tag but ``!!str``.
+
+    Claude Code's YAML 1.2 loader may read ``!!bool yes`` or ``!!int 010`` differently from
+    PyYAML, and there is no way to ask it. A surface that type-checks a field fails closed
+    on this object, because it is neither a string, a number nor a boolean.
+    """
+
+    def __repr__(self) -> str:
+        """Return a fixed label: the scalar text stays out of any message (invariant 4)."""
+        return "<explicitly tagged YAML value>"
+
+
+#: YAML 1.2 core-schema plain scalars (https://yaml.org/spec/1.2.2/#1032-tag-resolution).
+_YAML12_NULL_RE = re.compile(r"(?:~|null|Null|NULL)?")
+_YAML12_BOOLS = {"true": True, "True": True, "TRUE": True}
+_YAML12_BOOLS.update({"false": False, "False": False, "FALSE": False})
+_YAML12_INT_RE = re.compile(r"[-+]?[0-9]+")
+# A sign is allowed on octal: the core schema has none, but Claude Code's YAML 1.2 loader
+# reads `-0o17` and `+0o7` as numbers (probed on 2.1.318 in TASK-479: each made an inline
+# MCP server invalid, as a number does). Signed hex was not probed, so it stays a string
+# here, which makes PyYAML's int reading of `-0x1F` a mismatch: refused, failing closed.
+_YAML12_OCT_RE = re.compile(r"[-+]?0o[0-7]+")
+_YAML12_HEX_RE = re.compile(r"0x[0-9a-fA-F]+")
+_YAML12_FLOAT_RE = re.compile(r"[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?")
+_YAML12_INF_RE = re.compile(r"[-+]?\.(?:inf|Inf|INF)")
+_YAML12_NAN_RE = re.compile(r"\.(?:nan|NaN|NAN)")
+_YAML_STR_TAG = "tag:yaml.org,2002:str"
+#: The resolver ``SafeLoader`` composes with, to tell an implicit tag from an explicit one.
+_RESOLVER = yaml.resolver.Resolver()
+
+
+def js_integer(digits: str) -> int | None:
+    """Return the integer a JavaScript number holds for decimal ``digits``, or None.
+
+    ``digits`` is an optional sign and ASCII digits (as ``parseInt`` reads them). A
+    JavaScript number is a double, so a value past the double range is ``Infinity``, which
+    ``Number.isInteger`` rejects: None. Never calls ``int()`` on more digits than a double can
+    hold, so Python's 4300-digit conversion limit cannot raise ``ValueError`` here (a 500 on
+    the write and on every read of the stored file, Greptile on PR 1810).
+    """
+    sign = "-" if digits.startswith("-") else ""
+    unsigned = digits[1:] if digits.startswith(("+", "-")) else digits
+    significant = unsigned.lstrip("0") or "0"
+    if len(significant) > 309:  # 1.8e308 has 309 digits: anything longer is Infinity
+        return None
+    value = int(sign + significant)
+    try:
+        float(value)
+    except OverflowError:
+        return None
+    return value
+
+
+def _yaml12_scalar(node: yaml.ScalarNode) -> Any:
+    """Return the value a YAML 1.2 core-schema loader gives the scalar ``node``."""
+    implicit = _RESOLVER.resolve(
+        yaml.ScalarNode, node.value, (node.style is None, node.style is not None)
+    )
+    if node.tag != implicit:
+        # An explicit tag. `!!str` reads the same in both versions; any other tag is refused
+        # by whichever surface checks the field.
+        return node.value if node.tag == _YAML_STR_TAG else Yaml12Unknown()
+    text = node.value
+    if node.style is not None:
+        return text  # quoted, literal or folded: a string in both versions
+    if _YAML12_NULL_RE.fullmatch(text):
+        return None
+    if text in _YAML12_BOOLS:
+        return _YAML12_BOOLS[text]
+    if _YAML12_INT_RE.fullmatch(text):
+        # Past the double range JavaScript holds Infinity; float() has no digit limit.
+        whole = js_integer(text)
+        return float(text) if whole is None else whole
+    if _YAML12_OCT_RE.fullmatch(text) or _YAML12_HEX_RE.fullmatch(text):
+        sign = -1 if text.startswith("-") else 1
+        digits = text.lstrip("+-")
+        # Bases 8 and 16 have no digit limit, but past the double range JavaScript
+        # holds Infinity, and every later reader of this value assumes a double.
+        value = sign * int(digits[2:], 8 if digits[1] == "o" else 16)
+        try:
+            float(value)
+        except OverflowError:
+            return math.inf if value > 0 else -math.inf
+        return value
+    if _YAML12_FLOAT_RE.fullmatch(text) or _YAML12_INF_RE.fullmatch(text):
+        return float(text.replace(".inf", "inf").replace(".Inf", "inf").replace(".INF", "inf"))
+    if _YAML12_NAN_RE.fullmatch(text):
+        return float("nan")
+    return text
+
+
+def _yaml12_node(root: yaml.Node) -> Any:
+    """Build the YAML 1.2 value of ``root``, one value per composed node, iteratively.
+
+    Two passes, neither recursive, so a 1500-link ``<<`` chain or a deep nesting adds no
+    stack frames: a depth-first walk lists every collection node once, children before
+    parents (an alias resolves to the same node, so a shared anchor is listed once and an
+    alias pyramid costs its node count, not its path count); then each collection is filled
+    in that order, so a merge source is complete before the mapping that merges it.
+    """
+    if isinstance(root, yaml.ScalarNode):
+        return _yaml12_scalar(root)
+    memo: dict[int, Any] = {}
+    order: list[yaml.CollectionNode] = []
+    stack: list[tuple[yaml.Node, bool]] = [(root, False)]
+    while stack:
+        node, leaving = stack.pop()
+        if leaving:
+            order.append(node)  # type: ignore[arg-type]
+            continue
+        if not isinstance(node, yaml.CollectionNode) or id(node) in memo:
+            continue
+        memo[id(node)] = [] if isinstance(node, yaml.SequenceNode) else {}
+        stack.append((node, True))
+        children = (
+            node.value
+            if isinstance(node, yaml.SequenceNode)
+            else [part for pair in node.value for part in pair]
+        )
+        stack.extend((child, False) for child in reversed(children))
+
+    def value_of(node: yaml.Node) -> Any:
+        if isinstance(node, yaml.ScalarNode):
+            return _yaml12_scalar(node)
+        return memo[id(node)]  # a collection: composing yields no other node kind
+
+    for node in order:
+        built = memo[id(node)]
+        if isinstance(node, yaml.SequenceNode):
+            built.extend(value_of(child) for child in node.value)
+            continue
+        merged: dict[Any, Any] = {}
+        own: dict[Any, Any] = {}
+        for key_node, value_node in node.value:
+            if key_node.tag == _YAML_MERGE_TAG:
+                sources = (
+                    value_node.value if isinstance(value_node, yaml.SequenceNode) else [value_node]
+                )
+                # The first source wins a clash, as in PyYAML's flatten_mapping, so the
+                # sources are applied last to first. Each source is a mapping: PyYAML's load
+                # already refused any other merge.
+                for source in reversed(sources):
+                    merged.update(value_of(source))
+                continue
+            key = value_of(key_node)
+            if isinstance(key, (dict, list)):
+                # PyYAML's load refuses such a key in a plain mapping, but `!!omap` and
+                # `!!pairs` build their pairs without hashing it (review on PR 1810).
+                raise InvalidCandidateError(
+                    "frontmatter has a list or a mapping as a key, which Claude Code "
+                    "reads differently. Use a plain key"
+                )
+            own[key] = value_of(value_node)
+        built.update(merged)
+        built.update(own)
+    return memo[id(root)]
+
+
+_YAML_TYPED_TAGS = frozenset(
+    {"tag:yaml.org,2002:bool", "tag:yaml.org,2002:int", "tag:yaml.org,2002:float"}
+)
+
+
+def _same_js_scalar(a: Any, b: Any) -> bool:
+    """Whether two scalars are the same JavaScript value: a boolean, or one number."""
+    if isinstance(a, bool) or isinstance(b, bool):
+        return isinstance(a, bool) and isinstance(b, bool) and a == b
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return a == b
+    return False
+
+
+def _first_nested_yaml11_number(root: yaml.Node) -> yaml.Node | None:
+    """Return the first NESTED scalar PyYAML reads as a boolean or number and YAML 1.2 does not.
+
+    The YAML 1.1-only spellings: ``yes``/``no``/``on``/``off`` (strings to YAML 1.2),
+    ``010`` (8 to PyYAML, 10 to YAML 1.2), ``0b101``, ``1_000`` and ``1:30`` (strings to
+    YAML 1.2), and an explicit ``!!bool``/``!!int``/``!!float`` tag. Also the other way
+    round: a plain ``1e3``, ``1.0e3`` or ``0o17`` is a string to PyYAML and a number to
+    YAML 1.2. A plain ``null``/``~`` or empty value is null to both and is not a mismatch.
+    Generic on purpose: it looks at every scalar below the top-level fields, mapping keys
+    included, without a list of which nested fields are booleans or numbers (a frontmatter
+    ``hooks`` entry's ``async``, ``once`` or ``timeout``, an inline MCP server's ``env``).
+    Top-level values are left to each surface, because there the fields differ: a skill's
+    ``user-invocable: yes`` means true to the CLI as well, since its boolean reader takes
+    the string ``yes``.
+    Iterative, and each node is visited once.
+    """
+    constructor = yaml.constructor.SafeConstructor()
+    seen: set[tuple[int, bool]] = set()
+    # Levels: 0 is the root mapping (or a `<<` source merged into it), 1 is a top-level key
+    # or value, 2 is anything nested below that. Only level-2 scalars are checked.
+    stack: list[tuple[yaml.Node, int]] = [(root, 0)]
+    while stack:
+        node, level = stack.pop()
+        if isinstance(node, yaml.ScalarNode):
+            if level == 2 and node.tag in _YAML_TYPED_TAGS:
+                loaded = constructor.construct_object(node)
+                if not _same_js_scalar(loaded, _yaml12_scalar(node)):
+                    return node
+            elif level == 2 and node.tag == _YAML_STR_TAG and node.style is None:
+                # A plain `1e3`, `1.0e3` or `0o17` is a string to PyYAML and a number to the
+                # CLI: the same mismatch, the other way round.
+                if not isinstance(_yaml12_scalar(node), str):
+                    return node
+            continue
+        if (id(node), level == 0) in seen:
+            continue
+        seen.add((id(node), level == 0))
+        if isinstance(node, yaml.MappingNode):
+            for key_node, value_node in node.value:
+                if level == 0 and key_node.tag == _YAML_MERGE_TAG:
+                    sources = (
+                        value_node.value
+                        if isinstance(value_node, yaml.SequenceNode)
+                        else [value_node]
+                    )
+                    stack.extend((source, 0) for source in sources)
+                    continue
+                child = 1 if level == 0 else 2
+                stack.append((key_node, child))
+                stack.append((value_node, child))
+        else:  # a sequence: composing yields no other collection
+            stack.extend((child, 2) for child in node.value)
+    return None
+
+
+#: JavaScript's ``\s`` (WhiteSpace and LineTerminator), as the body of a regex class.
+_JS_SPACE_CLASS = r"\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+#: One line the CLI's re-quote pass (its ``Bm``) looks at: ``/^([a-zA-Z_-]+):\s+(\S.*)$/``.
+#: JavaScript's ``.`` stops at a line terminator, so a line that still ends in ``\r`` (a
+#: CRLF file split on ``\n``) never matches, and the CLI leaves it alone.
+_CLI_REQUOTE_LINE_RE = re.compile(
+    rf"([a-zA-Z_-]+):[{_JS_SPACE_CLASS}]+([^{_JS_SPACE_CLASS}][^\n\r\u2028\u2029]*)"
+)
+#: The characters that make the CLI put a value in quotes (its ``jm``).
+_CLI_REQUOTE_SPECIAL_RE = re.compile(r"[{}\[\]*&#!|>%@`]|: ")
+#: Tabs at the start of a line, which the CLI's retry turns into two spaces each. JavaScript's
+#: multiline ``^`` also matches after a lone ``\r`` (and after LS and PS, which the seam
+#: refuses before this runs).
+_CLI_LEADING_TABS_RE = re.compile(r"(?:\A|(?<=\n)|(?<=\r))\t+")
+
+
+def _is_yaml11_only_syntax_error(exc: yaml.YAMLError) -> bool:
+    r"""Whether ``exc`` is PyYAML refusing syntax that YAML 1.2 accepts.
+
+    Then the CLI's first parse succeeds where PyYAML's fails, so the header must not take
+    the retry: the CLI reads it as written, and the retry would quote its values into other
+    strings. The seam refuses such a header instead. The known cases, each checked against
+    eemeli/yaml (YAML 1.2): a second anchor of one name (YAML 1.2 does not require unique
+    anchors), an anchor or alias name with a character other than letters, digits, ``_``
+    and ``-`` (``&a.b``, ``&é``), a flow item that starts with ``:`` (``[:a]``), and a tab
+    after a value (``Bash\t# note``: PyYAML cannot start a token there, YAML 1.2 reads the
+    tab as white space and the ``#`` as a comment). A tab used as indentation is refused by
+    both, and that one does take the retry (which turns it into spaces).
+    """
+    if isinstance(exc, ComposerError):
+        return exc.problem == "second occurrence"
+    if isinstance(exc, ScannerError):
+        if exc.context in ("while scanning an anchor", "while scanning an alias"):
+            return True
+        return _is_tab_after_content(exc)
+    if isinstance(exc, ParserError):
+        return (
+            exc.context == "while parsing a flow node"
+            and exc.problem == "expected the node content, but found ':'"
+        )
+    return False
+
+
+def _is_tab_after_content(exc: ScannerError) -> bool:
+    """Whether PyYAML stopped at a tab that has something other than blanks before it."""
+    mark = exc.problem_mark
+    if exc.context != "while scanning for the next token" or mark is None or mark.buffer is None:
+        return False
+    if "'\\t'" not in (exc.problem or ""):
+        return False
+    line_start = mark.buffer.rfind("\n", 0, mark.pointer) + 1
+    return mark.buffer[line_start : mark.pointer].strip(" \t") != ""
+
+
+def _is_yaml_list(text: str) -> bool:
+    """Whether ``text`` alone parses as a YAML list (the CLI's ``Array.isArray(G0(w))``).
+
+    Composes only, never constructs, so a merge-key pyramid in the value costs nothing here
+    (the seam's pair cap runs later, on the whole header). A duplicate anchor counts as a
+    list, as it is to YAML 1.2: the value then stays unquoted, the retry text fails to
+    compose, and the seam refuses the header as written.
+    """
+    try:
+        return isinstance(yaml.compose(text, Loader=yaml.SafeLoader), yaml.SequenceNode)
+    except yaml.YAMLError as exc:
+        return _is_yaml11_only_syntax_error(exc)
+    except RecursionError:
+        return False
+
+
+def _cli_retry_text(header: str) -> str:
+    """Return the text the CLI parses when its first YAML parse fails (its ``SMn`` retry).
+
+    A port of ``Bm`` plus the tab fix: each top-level ``key: value`` line whose value holds
+    a YAML indicator (``[``, ``{``, ``#``, ``: ``, ...) gets the value wrapped in double
+    quotes, unless the value is already quoted or is a flow list; then every run of leading
+    tabs becomes two spaces per tab. So ``argument-hint: [filename] [format]``, which is not
+    valid YAML, reads as the string ``[filename] [format]``.
+    """
+    lines = []
+    for line in header.split("\n"):
+        match = _CLI_REQUOTE_LINE_RE.fullmatch(line)
+        if match is not None:
+            key, value = match.groups()
+            quoted = (value.startswith('"') and value.endswith('"')) or (
+                value.startswith("'") and value.endswith("'")
+            )
+            flow_list = value.startswith("[") and value.endswith("]") and _is_yaml_list(value)
+            if not quoted and not flow_list and _CLI_REQUOTE_SPECIAL_RE.search(value):
+                escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+                line = f'{key}: "{escaped}"'
+        lines.append(line)
+    return _CLI_LEADING_TABS_RE.sub(lambda tabs: "  " * len(tabs.group()), "\n".join(lines))
+
+
+def _yaml12_key(node: yaml.ScalarNode) -> object:
+    """Return the JavaScript property name a YAML 1.2 loader gives the key ``node``.
+
+    ``1``, ``01``, ``0x1`` and ``1.0`` are all ``"1"``; ``null`` and ``~`` are ``"null"``; an
+    explicitly tagged key the view cannot read gets a unique object, so it never collides.
+    """
+    value = _yaml12_scalar(node)
+    if isinstance(value, Yaml12Unknown):
+        return value
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "null"
+    if isinstance(value, (int, float)):
+        # A JavaScript number is a double: 2**53 + 1 and 2**53 are one key there. An int here
+        # fits a double (`_yaml12_scalar` reads a longer decimal, octal or hex number as
+        # float Infinity), and a NaN key never gets here (the seam refused it as
+        # JSON-unsafe before this check runs).
+        number = float(value)
+        if math.isinf(number):
+            return "Infinity" if number > 0 else "-Infinity"
+        if number.is_integer() and abs(number) < 1e21:
+            return str(int(number))
+        return repr(number)
+    return str(value)
+
+
+def _duplicate_key(root: yaml.Node) -> yaml.Node | None:
+    """Return a mapping key that repeats in its mapping, by either YAML reading, or None.
+
+    Two keys collide when PyYAML reads them as one key (``1`` and ``01``, ``1`` and
+    ``true``: a Python dict merges them, last one wins) or when YAML 1.2 does (``1`` and
+    ``1.0``, ``null`` and ``~``, ``yes`` and ``"yes"``: a strict YAML 1.2 parser refuses the
+    header). A second ``<<`` merge key in one mapping counts too. Either way the two
+    readings may differ, so the seam refuses it. Iterative, and each node is walked once.
+    """
+    constructor = yaml.constructor.SafeConstructor()
+    seen: set[int] = set()
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, yaml.CollectionNode) or id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, yaml.MappingNode):
+            pyyaml_keys: set[object] = set()
+            yaml12_keys: set[object] = set()
+            merges = 0
+            for key_node, value_node in node.value:
+                if key_node.tag == _YAML_MERGE_TAG:
+                    merges += 1
+                    if merges > 1:
+                        return key_node
+                elif isinstance(key_node, yaml.ScalarNode):
+                    # Read each key as PyYAML's `construct_mapping` does: it retags a `=` or
+                    # `!!value` key as a string first, and constructing it as it stands
+                    # raises ConstructorError (Greptile on PR 1810).
+                    loaded = (
+                        key_node.value
+                        if key_node.tag == _YAML_VALUE_TAG
+                        else constructor.construct_object(key_node)
+                    )
+                    as_yaml12 = _yaml12_key(key_node)
+                    if loaded in pyyaml_keys or as_yaml12 in yaml12_keys:
+                        return key_node
+                    pyyaml_keys.add(loaded)
+                    yaml12_keys.add(as_yaml12)
+                stack.extend((key_node, value_node))
+        else:
+            stack.extend(node.value)
+    return None
+
+
+def _yaml12_refuses(text: str, root: yaml.Node | None) -> tuple[int, int] | None:
+    """Return the (line, column) of syntax PyYAML accepts and YAML 1.2 refuses, or None.
+
+    The CLI's first parse then fails, so it reads the retry text, or no fields at all, or
+    it reads another value, while PyYAML's reading is what this tier would check. The known
+    cases, checked against eemeli/yaml (YAML 1.2):
+
+    * a lone carriage return (a line break to PyYAML; eemeli refuses the header). A carriage
+      return at the very end is the CRLF closing fence's (:func:`frontmatter_header`) and is
+      fine;
+    * a ``#`` right after any token, with no space before it: after a quoted value, a
+      ``]``/``}``, or a ``[``, ``{`` or ``,`` inside a flow collection (``[a,#c``). This also
+      refuses a few spellings both read alike (``{a:#c 1}``), which only refuses more;
+    * a quoted value that continues on a line starting at column 0;
+    * a key that repeats in its mapping (:func:`_duplicate_key`).
+
+    ``text`` already composed (to ``root``, which the seam passes in so it composes once),
+    so scanning it cannot fail.
+    """
+    body = text[:-1] if text.endswith("\r") else text
+    lone_cr = re.search(r"\r(?!\n)", body)
+    if lone_cr is not None:
+        # The first lone CR: every `\r` before it is part of a `\r\n`, so `\n` counts lines.
+        at = lone_cr.start()
+        return body.count("\n", 0, at), at - (body.rfind("\n", 0, at) + 1)
+    for token in yaml.scan(text, Loader=yaml.SafeLoader):
+        end = token.end_mark
+        # Zero-width tokens (stream, block start and end) sit before a comment line, not on
+        # it, and a token that ends at a line start (a block scalar) is followed by a comment
+        # LINE, which both versions read alike.
+        ends_inline = end.index > token.start_mark.index and end.column > 0
+        if ends_inline and text.startswith("#", end.index):
+            return end.line, end.column
+        if not isinstance(token, yaml.ScalarToken):
+            continue
+        if not token.plain and end.line != token.start_mark.line:
+            raw = text[token.start_mark.index : end.index]
+            if any(line[:1] not in ("", " ", "\t", "\r") for line in raw.split("\n")[1:]):
+                return token.start_mark.line, token.start_mark.column
+    duplicate = None if root is None else _duplicate_key(root)
+    if duplicate is not None:
+        return duplicate.start_mark.line, duplicate.start_mark.column
+    return None
+
+
+def cli_frontmatter_text(header: str) -> str:
+    """Return the frontmatter text Claude Code actually parses: ``header``, or its retry text.
+
+    The CLI's loader (``Rd`` → ``SMn``, 2.1.318) parses the header, and only when that fails
+    parses :func:`_cli_retry_text` of it instead. This does the same, with PyYAML's composer
+    standing in for the CLI's first parse: a header that composes is used as written. Only a
+    SYNTAX failure takes the retry; a header that composes but fails to construct (an unknown
+    tag, say) keeps its own text, so its rejection stands. When the retry text does not
+    compose either, the header is returned unchanged and its own error is the one reported.
+    Every consumer that composes a frontmatter header must compose THIS text, so that the
+    checks and the CLI read one document.
+
+    Syntax that YAML 1.2 accepts and PyYAML refuses never takes the retry
+    (:func:`_is_yaml11_only_syntax_error`); the seam refuses it. Syntax that PyYAML accepts
+    and YAML 1.2 refuses is refused by the seam where it is known (:func:`_yaml12_refuses`).
+    Known and not handled (follow-ups): a duplicate key, which a strict YAML 1.2 parser may
+    refuse, and a flow collection that continues at column 0. Other differences may exist:
+    this is a port checked against a stand-in parser, not Bun.YAML itself.
+    """
+    try:
+        yaml.compose(header, Loader=yaml.SafeLoader)
+        return header
+    except RecursionError:
+        return header  # too deep to check; the seam maps the same error on its own parse
+    except yaml.YAMLError as exc:
+        if _is_yaml11_only_syntax_error(exc):
+            return header
+    retry = _cli_retry_text(header)
+    try:
+        yaml.compose(retry, Loader=yaml.SafeLoader)
+    except (yaml.YAMLError, RecursionError):
+        return header
+    return retry
+
+
+def yaml12_view(header: str) -> Any:
+    """Return ``header`` as Claude Code's YAML 1.2 loader reads it, for comparison only.
+
+    Clauster loads frontmatter with PyYAML, which reads YAML 1.1. The CLI (2.1.318) loads it
+    with ``Bun.YAML``, which reads YAML 1.2, so some plain scalars differ: ``yes`` and ``on``
+    are booleans to PyYAML and strings to the CLI, ``010`` is 8 to PyYAML and 10 to the CLI,
+    ``1e3`` is a string to PyYAML and a number to the CLI, and ``2024-01-01`` is a date to
+    PyYAML and a string to the CLI. This composes the header with PyYAML (structure is the
+    same in both) and resolves every plain scalar by the YAML 1.2 core schema instead. A
+    surface compares what the CLI reads from this view with what it reads from the PyYAML
+    value, and refuses the field when the two differ.
+
+    Call it only on a header that :func:`load_frontmatter_yaml` already accepted: that is what
+    bounds the nesting depth, the alias expansion and the merge expansion. Mapping keys keep
+    their YAML type here; the caller turns them into JavaScript property names. An explicitly
+    tagged scalar other than ``!!str`` becomes a :class:`Yaml12Unknown`. Never evaluates
+    anything. ``RecursionError`` is mapped to :class:`InvalidCandidateError` like the seam's,
+    and so is a list or mapping key. A caller runs it inside :func:`refuse_check_failures`,
+    so a node shape this view reads differently from PyYAML is a refusal, never a crash.
+    The header goes through :func:`cli_frontmatter_text` first, as in the seam.
+    """
+    try:
+        root = yaml.compose(cli_frontmatter_text(header), Loader=yaml.SafeLoader)
+        return None if root is None else _yaml12_node(root)
+    except RecursionError as exc:
+        raise InvalidCandidateError("frontmatter is nested too deeply to parse") from exc
 
 
 def _yaml_error_where(exc: yaml.YAMLError, line_offset: int = 0, *, block_name: str) -> str:
@@ -1327,91 +1909,54 @@ def _first_json_unsafe(value: Any) -> str | None:
     return None
 
 
-def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> Any:
-    """``safe_load`` a frontmatter ``header``, mapping every failure to a rejection.
+#: What a check on an already-parsed header can raise when PyYAML's own loader and the
+#: check read a node differently: the classes the parse itself can raise (see
+#: :func:`load_frontmatter_yaml`), plus a number past a double (``OverflowError``) and a
+#: value of a type the check did not expect (``TypeError``).
+_CHECK_FAILURES = (
+    yaml.YAMLError,
+    ValueError,
+    OverflowError,
+    TypeError,
+    KeyError,
+    AttributeError,
+    IndexError,
+)
 
-    The shared YAML seam behind both ``parse_frontmatter`` implementations, for the same
-    reason :data:`FRONTMATTER_RE` is shared: each surface names itself via ``what``
-    (``"frontmatter"`` / ``"SKILL.md frontmatter"``) but the *contract* — only
-    :class:`InvalidCandidateError` escapes — is enforced in one place.
 
-    ``safe_load`` never evaluates the document (no ``python/object`` construction), but
-    the composer and ``SafeConstructor`` can raise outside :class:`yaml.YAMLError`, and
-    each escape used to reach the route as a 500 on a path documented to fail as a 422:
+@contextlib.contextmanager
+def refuse_check_failures(what: str) -> Iterator[None]:
+    """Turn a crash in a check of a parsed frontmatter header into a refusal.
 
-    * ``RecursionError`` — deeply-nested flow collections overflow the composer before it
-      can raise ``YAMLError`` (#1326).
-    * A resolvable **explicit tag** whose scalar does not fit it (#1354): ``!!int x`` and
-      ``!!float x`` raise ``ValueError``, ``!!bool x`` a ``KeyError``, ``!!timestamp x``
-      an ``AttributeError`` (``construct_yaml_timestamp`` calls ``.groupdict()`` on an
-      unchecked ``re.match``), and an **empty or all-underscore scalar** under ``!!int``
-      / ``!!float`` an ``IndexError`` — both constructors index the scalar before
-      parsing it. Every *other* tag already fails as a ``ConstructorError``, which is a
-      ``YAMLError``. Caught only around the ``safe_load`` call itself, so nothing beyond
-      the parse is swallowed.
-
-    The bullets record where each class was SEEN, not a proof of exhaustiveness — the
-    fuzz harness (``fuzz/parse_frontmatter_fuzzer.py``) is what hunts for members this
-    tuple is still missing; a new one belongs in the tuple below, not in a wider
-    blanket ``except``.
-
-    All of them are the same structural verdict — we could not parse the header, so we
-    refuse to act on it. Fails closed: this only ever converts a crash into a rejection,
-    never a rejection into an accept.
-
-    Three rejections are NOT parse failures. A header that parses fine but builds a
-    self-referential structure (:func:`_is_self_referential`) is refused after the load,
-    because no consumer can finish walking it; so is one that parses fine but expands past
-    :data:`MAX_EXPANDED_CHARS` through its aliases (:func:`_expands_beyond`), because no
-    consumer can finish serializing it; and so is one that parses fine but holds a scalar
-    the JSON response path cannot represent (:func:`_first_json_unsafe`), because that
-    scalar would 500 the route where this tier's contract is 422 (#1415).
-
-    ``line_offset`` is added to any line number the rejection reports, so a caller passing a
-    slice of a larger file can have the message name the line in the FILE. Both
-    ``parse_frontmatter`` implementations pass ``1``: they hand us ``FRONTMATTER_RE.group(1)``,
-    which begins after the opening ``---`` fence — exactly one line in.
+    The checks that compare PyYAML's reading with the CLI's walk the composed node tree
+    themselves, so a node shape PyYAML's loader treats specially can make one raise after the
+    parse catch: a 500 on the write, on the editor read, and on every listing that holds the
+    file (three rounds of Greptile on PR 1810). Every such check runs inside this, and
+    :class:`InvalidCandidateError` passes through unchanged. Fails closed: it only turns a
+    crash into a refusal. The message names the class only, never the payload, which can
+    quote the document (invariant 4).
     """
     try:
-        if "<<" in header:
-            # A `<<` merge key flattens at *construction* time, so — unlike the alias pyramid
-            # #1393 whose blow-up is post-parse — a merge-key pyramid detonates inside
-            # ``safe_load`` itself, before any post-parse guard can run (#1417). Compose the
-            # node graph first (linear, no flattening) and refuse a mapping that would flatten
-            # past the pair cap. Gated on the `<<` substring: a header without one cannot carry
-            # a merge key, so the ordinary case skips the extra parse entirely. ``compose``
-            # raises the same ``YAMLError``/``RecursionError`` ``safe_load`` would, mapped below.
-            root = yaml.compose(header, Loader=yaml.SafeLoader)
-            if root is not None and _merge_expands_beyond(root, MAX_MERGE_EXPANDED_PAIRS):
-                raise InvalidCandidateError(
-                    f"{what} expands past the {MAX_MERGE_EXPANDED_PAIRS} pair cap "
-                    f"through its YAML merge keys"
-                )
-        value = yaml.safe_load(header)
-    except yaml.YAMLError as exc:
-        raise InvalidCandidateError(
-            f"{what} is not valid YAML"
-            f"{_yaml_error_where(exc, line_offset, block_name='frontmatter block')}"
-        ) from exc
+        yield
+    except InvalidCandidateError:
+        raise
     except RecursionError as exc:
-        raise InvalidCandidateError(f"{what} is nested too deeply to parse") from exc
-    except (ValueError, KeyError, AttributeError, IndexError) as exc:
-        # The class name ONLY — never the exception's payload. PyYAML embeds the offending
-        # scalar in the unfitting-value shapes ("KeyError('<the value>')"), and this message is
-        # surfaced to the browser as a skill's ``frontmatter_error``, so echoing it would
-        # put a credential pasted into a frontmatter value straight onto the dashboard:
-        # :func:`redact_secret_lines` scans line-anchored ``key: value`` pairs, and a bare
-        # payload sits mid-line where that scanner cannot reach it.
-        #
-        # The ``YAMLError`` branch above no longer interpolates ``exc`` either (#1369): it
-        # used to, on the theory that its mark re-emits the source line with its key intact
-        # for the redactor to mask — the common shape, but not a guarantee. PyYAML also
-        # writes the token into message *prose* ("found undefined alias 'X'", duplicate
-        # anchor, unknown tag), mid-line and unreachable by the line-anchored scanner. Both
-        # branches are now positions-and-class-name only; see :func:`_yaml_error_where`.
+        raise InvalidCandidateError(f"{what} is nested too deeply to check") from exc
+    except _CHECK_FAILURES as exc:
         raise InvalidCandidateError(
-            f"{what} has a YAML tag its value does not satisfy ({type(exc).__name__})"
+            f"{what} has YAML this editor cannot compare with what Claude Code reads "
+            f"({type(exc).__name__}). Quote the unusual keys and values, or remove them"
         ) from exc
+
+
+def _refuse_after_load(
+    header: str, root: yaml.Node | None, value: Any, *, what: str, line_offset: int
+) -> None:
+    """Refuse a parsed header no consumer can walk, or one the CLI reads differently.
+
+    The post-load half of :func:`load_frontmatter_yaml`, which documents each rejection;
+    it runs inside :func:`refuse_check_failures`.
+    """
     if _is_self_referential(value):
         # Well-formed YAML that no consumer can finish walking — see :func:`_is_self_referential`.
         # Rejecting here is the fail-closed direction: it stops the write, so such a document
@@ -1442,6 +1987,159 @@ def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> An
         # any serializer. The reason is a static class label, never the offending scalar —
         # invariant 4.
         raise InvalidCandidateError(f"{what} contains {reason}")
+    if (where := _yaml12_refuses(header, root)) is not None:
+        # Positions only — invariant 4.
+        raise InvalidCandidateError(
+            f"{what} has syntax at line {where[0] + 1 + line_offset}, column {where[1] + 1} "
+            "that YAML 1.1 and the YAML 1.2 that Claude Code reads see differently: a lone "
+            "carriage return, a '#' with no space before it, a space or tab before a '#' "
+            "inside a value, a quoted value that goes on at column 0, or a repeated key"
+        )
+    if root is not None and isinstance(value, (dict, list)):
+        # The graph composed above; the load already bounded nesting, aliases and merges.
+        # Positions only in the message, never the scalar — invariant 4.
+        nested = _first_nested_yaml11_number(root)
+        if nested is not None:
+            mark = nested.start_mark
+            raise InvalidCandidateError(
+                f"{what} has a nested value at line {mark.line + 1 + line_offset}, column "
+                f"{mark.column + 1} that YAML 1.1 reads as a boolean or a number and the YAML "
+                "1.2 that Claude Code reads does not, or not as the same number (yes, on, "
+                "010, 0b101, 1_000 and 1:30 are such spellings). Quote it, or write true, "
+                "false or a plain decimal"
+            )
+
+
+def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> Any:
+    """``safe_load`` a frontmatter ``header``, mapping every failure to a rejection.
+
+    The shared YAML seam behind both ``parse_frontmatter`` implementations, for the same
+    reason :data:`FRONTMATTER_RE` is shared: each surface names itself via ``what``
+    (``"frontmatter"`` / ``"SKILL.md frontmatter"``) but the *contract* — only
+    :class:`InvalidCandidateError` escapes — is enforced in one place.
+
+    ``safe_load`` never evaluates the document (no ``python/object`` construction), but
+    the composer and ``SafeConstructor`` can raise outside :class:`yaml.YAMLError`, and
+    each escape used to reach the route as a 500 on a path documented to fail as a 422:
+
+    * ``RecursionError`` — deeply-nested flow collections overflow the composer before it
+      can raise ``YAMLError`` (#1326).
+    * A resolvable **explicit tag** whose scalar does not fit it (#1354): ``!!int x`` and
+      ``!!float x`` raise ``ValueError``, ``!!bool x`` a ``KeyError``, ``!!timestamp x``
+      an ``AttributeError`` (``construct_yaml_timestamp`` calls ``.groupdict()`` on an
+      unchecked ``re.match``), and an **empty or all-underscore scalar** under ``!!int``
+      / ``!!float`` an ``IndexError`` — both constructors index the scalar before
+      parsing it. Every *other* tag already fails as a ``ConstructorError``, which is a
+      ``YAMLError``. Caught only around the ``safe_load`` call itself, so nothing beyond
+      the parse is swallowed. The checks that walk the composed tree themselves run inside
+      :func:`refuse_check_failures`, which maps the same classes (and ``OverflowError`` and
+      ``TypeError``) to a refusal that names the class.
+
+    The bullets record where each class was SEEN, not a proof of exhaustiveness — the
+    fuzz harness (``fuzz/parse_frontmatter_fuzzer.py``) is what hunts for members this
+    tuple is still missing; a new one belongs in the tuple below, not in a wider
+    blanket ``except``.
+
+    All of them are the same structural verdict — we could not parse the header, so we
+    refuse to act on it. Fails closed: this only ever converts a crash into a rejection,
+    never a rejection into an accept.
+
+    Three rejections are NOT parse failures. A header that parses fine but builds a
+    self-referential structure (:func:`_is_self_referential`) is refused after the load,
+    because no consumer can finish walking it; so is one that parses fine but expands past
+    :data:`MAX_EXPANDED_CHARS` through its aliases (:func:`_expands_beyond`), because no
+    consumer can finish serializing it; and so is one that parses fine but holds a scalar
+    the JSON response path cannot represent (:func:`_first_json_unsafe`), because that
+    scalar would 500 the route where this tier's contract is 422 (#1415).
+
+    Four more rejections come from the CLI, not from PyYAML (TASK-449.6). PyYAML reads YAML
+    1.1 and the CLI's loader (2.1.318) reads YAML 1.2, behind its own fence regex. A header
+    the two would read differently is refused, because this tier would then check one
+    document while Claude Code runs another. The fourth is a nested boolean or number with a
+    YAML 1.1-only spelling (:func:`_first_nested_yaml11_number`); the other three are:
+
+    * a NEL, LINE SEPARATOR or PARAGRAPH SEPARATOR (:data:`_YAML11_ONLY_LINE_BREAKS`), a line
+      break to YAML 1.1 only;
+    * the text ``---`` anywhere in the header: the CLI ends the frontmatter at the first
+      ``---`` it finds, even mid-line, where :data:`FRONTMATTER_RE` needs a fence line;
+    * an alias to a node that encloses it, through a merge key (``a: &a {<<: *a}``). PyYAML
+      drops that merge without a word; the CLI's loader refuses the whole header and then
+      reads every field from a re-quoted copy.
+
+    ``line_offset`` is added to any line number the rejection reports, so a caller passing a
+    slice of a larger file can have the message name the line in the FILE. Both
+    ``parse_frontmatter`` implementations pass ``1``: they hand us ``FRONTMATTER_RE.group(1)``,
+    which begins after the opening ``---`` fence — exactly one line in.
+    """
+    for char in _YAML11_ONLY_LINE_BREAKS:
+        if char in header:
+            # The code point only, never the text around it — invariant 4.
+            raise InvalidCandidateError(
+                f"{what} contains U+{ord(char):04X}, a line break to YAML 1.1 but not to the "
+                "YAML 1.2 that Claude Code reads. Remove it"
+            )
+    if "---" in header:
+        raise InvalidCandidateError(
+            f"{what} contains '---' before its closing fence. Claude Code ends the "
+            "frontmatter at the first '---', even in the middle of a line or in quotes. "
+            "Reword it"
+        )
+    # The text the CLI parses: the header itself, or its re-quoted, tab-fixed retry when the
+    # header is not valid YAML (TASK-449.6). Every check below reads that same text. Line
+    # numbers do not move, so a mark still names the line in the file; a column after a
+    # re-quoted value or a replaced tab can be off by the characters the retry added.
+    header = cli_frontmatter_text(header)
+    try:
+        # A merge key flattens at *construction* time, so — unlike the alias pyramid #1393
+        # whose blow-up is post-parse — a merge-key pyramid detonates inside ``safe_load``
+        # itself, before any post-parse guard can run (#1417). Compose the node graph first
+        # (linear, no flattening) and refuse a mapping that would flatten past the pair cap.
+        # Not gated on a `<<` in the text any more (TASK-449.6): `!!merge x :`, the verbatim
+        # `!<tag:yaml.org,2002:merge>` and a `%`-escaped tag are merge keys too. Every walk
+        # below reads this one composed graph. ``compose`` raises the same
+        # ``YAMLError``/``RecursionError`` ``safe_load`` would, mapped below.
+        root = yaml.compose(header, Loader=yaml.SafeLoader)
+        with refuse_check_failures(what):
+            if root is not None and _merge_expands_beyond(root, MAX_MERGE_EXPANDED_PAIRS):
+                raise InvalidCandidateError(
+                    f"{what} expands past the {MAX_MERGE_EXPANDED_PAIRS} pair cap "
+                    f"through its YAML merge keys"
+                )
+            # Only a merge key can hide such an alias: without one, an alias to an enclosing
+            # node is a cycle, and `_is_self_referential` refuses it after the load, with its
+            # own message.
+            if root is not None and _has_enclosing_alias(root) and _has_merge_key(root):
+                raise InvalidCandidateError(
+                    f"{what} has an alias to a node that encloses it, which the YAML 1.2 "
+                    "that Claude Code reads refuses. Remove the self-reference"
+                )
+        value = yaml.safe_load(header)
+    except yaml.YAMLError as exc:
+        raise InvalidCandidateError(
+            f"{what} is not valid YAML"
+            f"{_yaml_error_where(exc, line_offset, block_name='frontmatter block')}"
+        ) from exc
+    except RecursionError as exc:
+        raise InvalidCandidateError(f"{what} is nested too deeply to parse") from exc
+    except (ValueError, KeyError, AttributeError, IndexError) as exc:
+        # The class name ONLY — never the exception's payload. PyYAML embeds the offending
+        # scalar in the unfitting-value shapes ("KeyError('<the value>')"), and this message is
+        # surfaced to the browser as a skill's ``frontmatter_error``, so echoing it would
+        # put a credential pasted into a frontmatter value straight onto the dashboard:
+        # :func:`redact_secret_lines` scans line-anchored ``key: value`` pairs, and a bare
+        # payload sits mid-line where that scanner cannot reach it.
+        #
+        # The ``YAMLError`` branch above no longer interpolates ``exc`` either (#1369): it
+        # used to, on the theory that its mark re-emits the source line with its key intact
+        # for the redactor to mask — the common shape, but not a guarantee. PyYAML also
+        # writes the token into message *prose* ("found undefined alias 'X'", duplicate
+        # anchor, unknown tag), mid-line and unreachable by the line-anchored scanner. Both
+        # branches are now positions-and-class-name only; see :func:`_yaml_error_where`.
+        raise InvalidCandidateError(
+            f"{what} has a YAML tag its value does not satisfy ({type(exc).__name__})"
+        ) from exc
+    with refuse_check_failures(what):
+        _refuse_after_load(header, root, value, what=what, line_offset=line_offset)
     return value
 
 

@@ -84,7 +84,6 @@ CLAUDE.md, hooks, and permissions all use), so a save always re-submits the real
 
 from __future__ import annotations
 
-import functools
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -281,7 +280,9 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
         )
     # `line_offset=1`: the header slice starts after the opening `---` fence, so a raw mark
     # names the line one above the fault in the FILE the operator is looking at.
-    data = cw.load_frontmatter_yaml(match.group(1), what="frontmatter", line_offset=1)
+    data = cw.load_frontmatter_yaml(
+        cw.frontmatter_header(text, match), what="frontmatter", line_offset=1
+    )
     if data is None:
         data = {}
     if not isinstance(data, dict):
@@ -450,7 +451,8 @@ def _as_js_number(value: int) -> int | None:
 def _js_parse_int(text: str) -> int | None:
     """Return what JavaScript ``parseInt(text, 10)`` returns, or None for ``NaN``/``Infinity``."""
     match = _JS_PARSE_INT_RE.match(text)
-    return _as_js_number(int(match.group(1))) if match else None
+    # Bounded: int() on 5000 digits raises ValueError (Greptile on PR 1810).
+    return cw.js_integer(match.group(1)) if match else None
 
 
 def _integral(value: float) -> int | None:
@@ -881,13 +883,9 @@ def validate_agent_content(candidate: Any, *, expected_name: str | None = None) 
     validate_frontmatter(frontmatter, expected_name=expected_name)
     header = _FRONTMATTER_RE.match(candidate)
     if header is not None:  # pragma: no branch — always, once parse_frontmatter accepted it
-        _refuse_yaml11_only_spellings(header.group(1))
+        with cw.refuse_check_failures("frontmatter"):  # it walks the composed tree itself
+            _refuse_yaml11_only_spellings(cw.frontmatter_header(candidate, header))
 
-
-#: Line breaks to YAML 1.1 (PyYAML) but ordinary characters to YAML 1.2 (the CLI): NEL,
-#: LINE SEPARATOR and PARAGRAPH SEPARATOR. A header with one reads as different keys in
-#: the two (``tools: Read # c<LS>disallowedTools: Bash`` hides the denylist from the CLI).
-_YAML11_ONLY_LINE_BREAKS = ("\x85", "\u2028", "\u2029")
 
 #: The fields whose loaded value this module checks as a boolean or a number, and the
 #: YAML 1.2 core spellings those loaded values must come from.
@@ -903,14 +901,6 @@ _BOOL_TAG = "tag:yaml.org,2002:bool"
 _INT_TAG = "tag:yaml.org,2002:int"
 _FLOAT_TAG = "tag:yaml.org,2002:float"
 _MERGE_TAG = "tag:yaml.org,2002:merge"
-
-
-#: The boolean and number fields of an inline MCP definition, and of its ``oauth`` object,
-#: as :func:`clauster.config_write_mcp._validate_server_fields` checks them.
-_MCP_BOOLEAN_FIELDS = frozenset({"alwaysLoad", "bareElicitationCapability", "discoveryCache"})
-_MCP_NUMBER_FIELDS = frozenset({"timeout", "request_timeout_ms"})
-_MCP_OAUTH_BOOLEAN_FIELDS = frozenset({"xaa"})
-_MCP_OAUTH_NUMBER_FIELDS = frozenset({"callbackPort"})
 
 
 def _check_spelling(label: str, node: yaml.Node, *, boolean: bool, number: bool) -> None:
@@ -940,7 +930,8 @@ def _check_mapping(
     ``compose`` leaves merges unflattened, so a ``<<: {background: yes}`` would otherwise
     never be looked at. A source is checked even where an explicit key overrides it, which
     only ever refuses more. ``seen`` skips a source merged twice; an alias cycle never gets
-    here, because :func:`_refuse_enclosing_references` refuses it first.
+    here, because the shared seam (:func:`~clauster.config_write.load_frontmatter_yaml`)
+    refuses an alias to an enclosing node first.
 
     Iterative: a chain of ``<<`` merges declared in document order loads without trouble
     (PyYAML flattens each mapping as it reaches it) and passes the merge-size guard (each
@@ -968,160 +959,6 @@ def _check_mapping(
         stack.extend(reversed(sources))
 
 
-class _InlineWalk:
-    """The composed nodes each inline-server check has walked already, by ``id``.
-
-    ``compose`` resolves an alias to the SAME node object, so an anchor shared ``N`` times per
-    level across ``L`` levels is ``N**L`` paths but one node. A walk that follows paths
-    without memory is then exponential in a file of a few hundred bytes. ``safe_load`` keeps
-    only the last of two duplicate keys, so a pyramid under a key that a later duplicate
-    overrides passes every check on the loaded data and reaches only this walk (Greptile on
-    TASK-479). One set per kind of check, shared across the whole header: each kind checks a
-    node the same way wherever it is reached, so checking it once is enough. The kinds stay
-    apart, because a node reached as a definition and as a value gets different checks.
-    """
-
-    __slots__ = ("definitions", "items", "oauth", "values")
-
-    def __init__(self) -> None:
-        """Start with nothing walked."""
-        self.items: set[int] = set()
-        self.definitions: set[int] = set()
-        self.oauth: set[int] = set()
-        self.values: set[int] = set()
-
-
-def _check_top_level_field(key: str, node: yaml.Node, *, walk: _InlineWalk) -> None:
-    """Check one top-level frontmatter field, and the inline servers under ``mcpServers``."""
-    _check_spelling(
-        f"frontmatter {key!r}", node, boolean=key in _BOOLEAN_FIELDS, number=key in _NUMBER_FIELDS
-    )
-    if key == "mcpServers" and isinstance(node, yaml.SequenceNode):
-        for item in node.value:
-            if isinstance(item, yaml.MappingNode):
-                _check_mapping(
-                    item, walk.items, visit=functools.partial(_check_inline_server, walk=walk)
-                )
-            else:
-                # A server-name reference (`- 0o17`) the CLI would read as a number.
-                _refuse_yaml12_number_strings(
-                    "frontmatter 'mcpServers' server name", item, seen=walk.values
-                )
-
-
-def _check_inline_server(name: str, node: yaml.Node, *, walk: _InlineWalk) -> None:
-    """Check the spelling of each value of one inline MCP definition, ``oauth`` included.
-
-    A boolean or number field must not use a YAML 1.1-only spelling, and a string value
-    must not be one that YAML 1.2 reads as a number (:func:`_refuse_yaml12_number_strings`).
-    """
-    if not isinstance(node, yaml.MappingNode):
-        return
-    label = f"frontmatter 'mcpServers' inline server {name!r}"
-
-    def check_field(key: str, value: yaml.Node) -> None:
-        _check_spelling(
-            f"{label} {key!r}",
-            value,
-            boolean=key in _MCP_BOOLEAN_FIELDS,
-            number=key in _MCP_NUMBER_FIELDS,
-        )
-        if key == "oauth" and isinstance(value, yaml.MappingNode):
-            _check_mapping(
-                value,
-                walk.oauth,
-                visit=lambda oauth_key, oauth_value: _check_spelling(
-                    f"{label} 'oauth' {oauth_key!r}",
-                    oauth_value,
-                    boolean=oauth_key in _MCP_OAUTH_BOOLEAN_FIELDS,
-                    number=oauth_key in _MCP_OAUTH_NUMBER_FIELDS,
-                ),
-            )
-        _refuse_yaml12_number_strings(f"{label} {key!r}", value, seen=walk.values)
-
-    _check_mapping(node, walk.definitions, visit=check_field)
-
-
-#: A plain scalar that the CLI reads as a number although PyYAML (YAML 1.1) reads a string:
-#: ``1e3``, ``1E3``, ``+1e3``, ``-.5`` and ``+.5e-3`` (YAML 1.1 wants a dot, a signed
-#: exponent, and no sign before a leading dot), ``0o17`` and a signed ``-0o17``/``+0o7``,
-#: and a leading-zero decimal that is not octal to YAML 1.1 (``09``). The CLI parses
-#: frontmatter with ``Bun.YAML.parse``. On 2.1.318 each of those spellings made the server
-#: invalid (probed as an ``args`` item, and ``1e3`` also as an ``env`` value), while
-#: ``0O17`` and ``0o8`` connect, so they do not match. The sign on the hex arm is there for
-#: symmetry only: a plain signed hex such as ``-0x1F`` is an int to PyYAML, so the type
-#: check refuses it first, and only an explicit ``!!str`` reaches this arm.
-_YAML12_NUMBER_RE = re.compile(
-    r"[-+]?[0-9]+|[-+]?0o[0-7]+|[-+]?0x[0-9a-fA-F]+"
-    r"|[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?"
-)
-_STR_TAG = "tag:yaml.org,2002:str"
-
-
-def _refuse_yaml12_number_strings(label: str, node: yaml.Node, *, seen: set[int]) -> None:
-    """Refuse a plain string value under ``node`` that the CLI's YAML 1.2 reads as a number.
-
-    Every value of an MCP entry that is not a boolean or a number is a string, and the CLI's
-    entry schema refuses a number there, so it drops that ``mcpServers`` item (probed on 2.1.318
-    with ``env: {A: 1e3}`` and ``args: [0o17]``; the quoted ``"1e3"`` connects). Only values
-    are checked, never keys. ⚠️ This is stricter than the CLI for an explicit ``!!str 1e3``,
-    which the composed node cannot tell from a plain ``1e3``. Quoting is the fix for both.
-
-    Iterative, and each node is checked once: ``seen`` (:attr:`_InlineWalk.values`) is
-    shared across the whole header, so a shared alias costs one visit, and a deep nesting
-    adds no stack frames. A ``<<`` value is walked like any other value, so its merged
-    mappings are checked too.
-    """
-    stack = [node]
-    while stack:
-        current = stack.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        if isinstance(current, yaml.ScalarNode):
-            if (
-                current.tag == _STR_TAG
-                and current.style is None
-                and _YAML12_NUMBER_RE.fullmatch(current.value)
-            ):
-                raise cw.InvalidCandidateError(
-                    f"{label}: Claude Code reads {current.value!r} as a number, not a string, "
-                    "and drops that mcpServers item. Quote it"
-                )
-        elif isinstance(current, yaml.SequenceNode):
-            stack.extend(current.value)
-        else:  # a mapping: a node is a scalar, a sequence or a mapping
-            stack.extend(value_node for _key_node, value_node in current.value)
-
-
-def _refuse_enclosing_references(node: yaml.Node, path: set[int], done: set[int]) -> None:
-    """Refuse an alias that points at a node enclosing it (``a: &a {<<: *a}``).
-
-    PyYAML loads that header (it drops the merge key before it follows it), but the CLI's
-    YAML 1.2 loader refuses it ("Merge key cannot reference an enclosing node") and then
-    falls back to re-quoting values, so ``permissionMode: plan # c`` would reach the CLI as
-    the string ``"plan # c"``. ``path`` holds the nodes being walked through; ``done``
-    skips a node already checked, so a shared alias is walked once.
-    """
-    if id(node) in path:
-        raise cw.InvalidCandidateError(
-            "frontmatter has an alias to a node that encloses it, which the YAML 1.2 that "
-            "Claude Code reads refuses. Remove the self-reference"
-        )
-    if id(node) in done or not isinstance(node, yaml.CollectionNode):
-        return
-    path.add(id(node))
-    children = (
-        [part for pair in node.value for part in pair]
-        if isinstance(node, yaml.MappingNode)
-        else node.value
-    )
-    for child in children:
-        _refuse_enclosing_references(child, path, done)
-    path.discard(id(node))
-    done.add(id(node))
-
-
 def _refuse_yaml11_only_spellings(header: str) -> None:
     """Refuse header text that PyYAML (YAML 1.1) and the CLI (YAML 1.2) read differently.
 
@@ -1129,34 +966,41 @@ def _refuse_yaml11_only_spellings(header: str) -> None:
     looks at how the checked values are SPELLED, so a value is not accepted on a reading
     the CLI does not share:
 
-    * a NEL / LINE SEPARATOR / PARAGRAPH SEPARATOR anywhere in the header (a line break
-      only to YAML 1.1, so the two see different keys);
     * a ``background``/``omitClaudeMd`` boolean spelled ``yes``/``no``/``on``/``off`` (a
       string to YAML 1.2, which the CLI logs or ignores), plain, quoted with an explicit
       ``!!bool``, or brought in through a ``<<`` merge;
     * a ``maxTurns``/``autoCompactWindow``/``effort`` number spelled the YAML 1.1 way
       (``010``, ``0b101``, ``1_000``, ``1:30``), which YAML 1.2 reads as another number or
       as a string;
-    * the same two spellings in the boolean and number fields of an inline ``mcpServers``
-      definition and its ``oauth`` object (``alwaysLoad: yes``, ``timeout: 1_000``). The
-      CLI's entry schema refuses a string there, so it would skip the whole server;
-    * a plain string value of an inline definition, or a server-name reference, that YAML
-      1.2 reads as a number (``env: {A: 1e3}``, ``args: [0o17]``), which the entry schema
-      refuses for the same reason.
 
-    ``header`` already loaded as a mapping, so composing it again yields a mapping node and
-    does not fail.
+    These are the TOP-LEVEL fields. The shared seam
+    (:func:`~clauster.config_write.load_frontmatter_yaml`) already refused a NEL, LINE
+    SEPARATOR or PARAGRAPH SEPARATOR, an alias to an enclosing node, and every NESTED value
+    that the two read differently before this runs (TASK-449.6). That covers the boolean
+    and number fields of an inline ``mcpServers`` definition and its ``oauth`` object
+    (``alwaysLoad: yes``, ``timeout: 1_000``), and a plain string value or server-name
+    reference that YAML 1.2 reads as a number (``env: {A: 1e3}``, ``args: [0o17]``,
+    ``- -0o17``), which the CLI's entry schema refuses, so it would skip the whole server.
+    The inline walk TASK-479 added here did the same, server by server; the seam's walker
+    replaces it, so the composed tree is walked once, memoized and iteratively. The two
+    differ only where both YAML readings agree: the seam accepts a leading-zero value below
+    8 (``timeout: 07``, 7 to both) and an explicit ``!!str`` on a spelling PyYAML would
+    read as a number (``args: [!!str 10]``), which that walk refused.
+
+    ``header`` already loaded as a mapping, so composing the text the CLI parses (the header,
+    or its retry text: :func:`~clauster.config_write.cli_frontmatter_text`) yields a mapping
+    node and does not fail.
     """
-    for char in _YAML11_ONLY_LINE_BREAKS:
-        if char in header:
-            raise cw.InvalidCandidateError(
-                f"frontmatter contains {char!r}, a line break to YAML 1.1 but not to the "
-                "YAML 1.2 that Claude Code reads. Remove it"
-            )
-    root = yaml.compose(header, Loader=yaml.SafeLoader)
-    _refuse_enclosing_references(root, set(), set())
+    root = yaml.compose(cw.cli_frontmatter_text(header), Loader=yaml.SafeLoader)
     _check_mapping(
-        root, set(), visit=functools.partial(_check_top_level_field, walk=_InlineWalk())
+        root,
+        set(),
+        visit=lambda key, node: _check_spelling(
+            f"frontmatter {key!r}",
+            node,
+            boolean=key in _BOOLEAN_FIELDS,
+            number=key in _NUMBER_FIELDS,
+        ),
     )
 
 
@@ -1366,10 +1210,8 @@ def _mcp_servers_as_list(text: str) -> str | None:
     servers = frontmatter.get("mcpServers")
     if not isinstance(servers, dict) or not servers:
         return None
-    if any(char in match.group(1) for char in _YAML11_ONLY_LINE_BREAKS):
-        # PyYAML splits lines there and YAML 1.2 does not, so re-indenting "the next line"
-        # would add two spaces inside a value for the CLI. (Its save is refused anyway.)
-        return None
+    # A NEL/LS/PS character never reaches here: `parse_frontmatter` above went through the
+    # shared seam, which refuses it, so "the next line" means the same to both YAML versions.
     lines = match.group(1).splitlines(keepends=True)
     bounds = _mcp_servers_block_bounds(lines)
     if bounds is None:
@@ -1495,7 +1337,9 @@ def _convert_inline_servers(text: str) -> tuple[str, list[str]] | None:
                 new_item = {server_name: converted}
         expected.append(new_item)
         edits.append(edit)
-    if not notes or any(char in match.group(1) for char in _YAML11_ONLY_LINE_BREAKS):
+    # A NEL/LS/PS character never reaches here: `parse_frontmatter` above went through the
+    # shared seam, which refuses it, so "the next line" means the same to both YAML versions.
+    if not notes:
         return None
     lines = match.group(1).splitlines(keepends=True)
     bounds = _mcp_servers_block_bounds(lines)
