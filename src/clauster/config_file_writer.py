@@ -221,7 +221,11 @@ def replace_tree(root: Path, relative: str, build: Callable[[Path], None]) -> Pa
     is cleaned up and never promoted.
 
     Path-contained (:func:`resolve_contained_path` on ``relative``) and flock-guarded
-    (serializes concurrent replaces of the *same* target).
+    (serializes concurrent replaces of the *same* target). ``build`` runs INSIDE the
+    lock, so a caller may read the current tree in ``build`` (a stale-hash re-check, or
+    a copy of the members it keeps) and another writer of this target cannot change it
+    between that read and the promote. ``build`` must not take this target's lock itself;
+    the lock is not reentrant.
 
     Atomicity:
 
@@ -249,13 +253,13 @@ def replace_tree(root: Path, relative: str, build: Callable[[Path], None]) -> Pa
     target.parent.mkdir(parents=True, exist_ok=True)
     staging = target.parent / f".{target.name}.staging-{uuid.uuid4().hex}"
     staging.mkdir(parents=True)
-    try:
-        build(staging)
-    except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
 
     with _locked(target):
+        try:
+            build(staging)
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
         if target.exists():
             trash = target.parent / f".{target.name}.trash-{uuid.uuid4().hex}"
             os.replace(target, trash)

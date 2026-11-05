@@ -692,6 +692,31 @@ anchor name with a dot or a non-ASCII letter, such as `&d.1`, a list item
 that starts with `:`, such as `[:a]`, and a tab between a value and a comment,
 such as `Bash`, a tab, then `# note`.
 
+### What a skill save writes
+
+A skill save writes only the files that it sends. The Skills editor sends
+`SKILL.md` alone. So a save replaces `SKILL.md` and keeps every other file in
+the skill directory, for example `scripts/` and reference files. The kept
+files stay byte for byte as they were. On Linux and macOS they also keep their
+file modes, except the setuid and setgid bits, which Clauster clears. A
+directory keeps its mode too, but its owner always gets read, write and search
+access, so that the next save can remove the old copy. Clauster removes files
+from a skill only when you delete the whole skill.
+
+Clauster refuses the save and writes nothing in these cases:
+
+- The skill directory holds a symlink, or an entry that is not a regular file
+  or a directory. Clauster does not follow a symlink inside the skill
+  directory, and it cannot keep one without following it. Replace the symlink
+  with a regular file, then save.
+- Clauster cannot read a file or a directory that it must keep, or one of them
+  changes while Clauster copies it.
+- A sent path is a directory in the stored skill, or it is inside a path that
+  the stored skill holds as a file.
+- The kept files and the sent files together are larger than 2 MiB, the size
+  limit for one skill directory. Clauster never drops a file to make the skill
+  fit.
+
 ### Skill frontmatter checks
 
 The Skills editor checks the frontmatter of `SKILL.md` before it saves the
