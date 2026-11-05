@@ -1471,13 +1471,34 @@ def _cli_retry_text(header: str) -> str:
     return _CLI_LEADING_TABS_RE.sub(lambda tabs: "  " * len(tabs.group()), "\n".join(lines))
 
 
-def _duplicate_key(root: yaml.Node) -> yaml.Node | None:
-    """Return a mapping key that repeats in its mapping, or None (``<<`` merge keys aside).
+def _yaml12_key(node: yaml.ScalarNode) -> object:
+    """Return the JavaScript property name a YAML 1.2 loader gives the key ``node``.
 
-    PyYAML keeps the last value. YAML 1.2 requires unique keys, so a strict parser refuses
-    the header; Bun.YAML's choice is not verified. Either way the two may read different
-    values, so the seam refuses it. Iterative, and each node is walked once.
+    ``1``, ``01``, ``0x1`` and ``1.0`` are all ``"1"``; ``null`` and ``~`` are ``"null"``; an
+    explicitly tagged key the view cannot read gets a unique object, so it never collides.
     """
+    value = _yaml12_scalar(node)
+    if isinstance(value, Yaml12Unknown):
+        return value
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "null"
+    if isinstance(value, float) and value.is_integer() and abs(value) < 2**53:
+        return str(int(value))
+    return str(value)
+
+
+def _duplicate_key(root: yaml.Node) -> yaml.Node | None:
+    """Return a mapping key that repeats in its mapping, by either YAML reading, or None.
+
+    Two keys collide when PyYAML reads them as one key (``1`` and ``01``, ``1`` and
+    ``true``: a Python dict merges them, last one wins) or when YAML 1.2 does (``1`` and
+    ``1.0``, ``null`` and ``~``, ``yes`` and ``"yes"``: a strict YAML 1.2 parser refuses the
+    header). A second ``<<`` merge key in one mapping counts too. Either way the two
+    readings may differ, so the seam refuses it. Iterative, and each node is walked once.
+    """
+    constructor = yaml.constructor.SafeConstructor()
     seen: set[int] = set()
     stack = [root]
     while stack:
@@ -1486,13 +1507,21 @@ def _duplicate_key(root: yaml.Node) -> yaml.Node | None:
             continue
         seen.add(id(node))
         if isinstance(node, yaml.MappingNode):
-            keys: set[tuple[str, str]] = set()
+            pyyaml_keys: set[object] = set()
+            yaml12_keys: set[object] = set()
+            merges = 0
             for key_node, value_node in node.value:
-                if isinstance(key_node, yaml.ScalarNode) and key_node.tag != _YAML_MERGE_TAG:
-                    spelled = (key_node.tag, key_node.value)
-                    if spelled in keys:
+                if key_node.tag == _YAML_MERGE_TAG:
+                    merges += 1
+                    if merges > 1:
                         return key_node
-                    keys.add(spelled)
+                elif isinstance(key_node, yaml.ScalarNode):
+                    loaded = constructor.construct_object(key_node)
+                    as_yaml12 = _yaml12_key(key_node)
+                    if loaded in pyyaml_keys or as_yaml12 in yaml12_keys:
+                        return key_node
+                    pyyaml_keys.add(loaded)
+                    yaml12_keys.add(as_yaml12)
                 stack.extend((key_node, value_node))
         else:
             stack.extend(node.value)
@@ -1525,8 +1554,11 @@ def _yaml12_refuses(text: str) -> tuple[int, int] | None:
         return body.count("\n", 0, at), at - (body.rfind("\n", 0, at) + 1)
     for token in yaml.scan(text, Loader=yaml.SafeLoader):
         end = token.end_mark
-        # Zero-width tokens (stream, block start and end) sit before a comment line, not on it.
-        if end.index > token.start_mark.index and text.startswith("#", end.index):
+        # Zero-width tokens (stream, block start and end) sit before a comment line, not on
+        # it, and a token that ends at a line start (a block scalar) is followed by a comment
+        # LINE, which both versions read alike.
+        ends_inline = end.index > token.start_mark.index and end.column > 0
+        if ends_inline and text.startswith("#", end.index):
             return end.line, end.column
         if not isinstance(token, yaml.ScalarToken):
             continue

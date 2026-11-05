@@ -662,7 +662,11 @@ whole save:
 - A lone carriage return (CR) that is not part of a CRLF line ending.
 - A quoted value that goes on to a line that starts at column 0. Indent the
   next line.
-- A key that appears twice in the same mapping.
+- A key that appears twice in the same mapping. This includes two spellings
+  that one YAML version reads as the same key, such as `1` and `01`, or `null`
+  and `~`, and two `<<` merge keys in one mapping.
+- A tab inside a plain value or after it, such as `a` then a tab then `b`.
+  YAML 1.2 accepts it, but Clauster's parser does not. Use a space.
 
 Some frontmatter is not valid YAML, but Claude Code still reads it, and so does
 Clauster. When the first parse fails, Claude Code parses a changed copy of the

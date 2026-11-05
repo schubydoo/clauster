@@ -2205,3 +2205,44 @@ def test_a_tab_used_as_indentation_or_a_reserved_character_still_takes_the_retry
     # Both YAML versions refuse these, so the CLI retries, and so does the seam.
     assert cw.cli_frontmatter_text("m:\n\tk: v\n") == "m:\n  k: v\n"
     assert cw.cli_frontmatter_text("x: @y\n") == 'x: "@y"\n'
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize(
+    "keys",
+    [
+        pytest.param("1: a\n01: b", id="one-and-zero-one"),
+        pytest.param("1: a\n1.0: b", id="int-and-float"),
+        pytest.param("0x1: a\n1: b", id="hex-and-decimal"),
+        pytest.param("null: a\n~: b", id="two-nulls"),
+        pytest.param("true: a\nTrue: b", id="two-trues"),
+        pytest.param('yes: a\n"yes": b', id="yes-and-quoted-yes"),
+        pytest.param("x: &m {k: 1}\ny: {<<: *m, <<: *m}", id="two-merge-keys"),
+    ],
+)
+def test_keys_that_one_yaml_reading_merges_are_refused(parse, keys: str) -> None:
+    # Different spellings, one key to YAML 1.2 (or to PyYAML): a strict YAML 1.2 parser
+    # refuses the header, so the CLI would drop every field, the denylist included.
+    with pytest.raises(cw.InvalidCandidateError, match="see differently"):
+        parse(f"---\nname: a\ndescription: d\n{keys}\ndisallowedTools: Bash\n---\nbody\n")
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize(
+    "lines",
+    [
+        "when: >\n  Long text\n# Tools\nlist: Read",
+        "when: |\n  Long text\n# Tools\nlist: Read",
+        "when: |+\n  Long text\n\n# Tools\nlist: Read",
+        "when: >\r\n  Long text\r\n# Tools\r\nlist: Read",
+    ],
+)
+def test_a_comment_line_after_a_block_scalar_still_loads(parse, lines: str) -> None:
+    frontmatter, _ = parse(f"---\nname: a\ndescription: d\n{lines}\n---\nbody\n")
+    assert frontmatter["list"] == "Read"
+
+
+def test_an_explicitly_tagged_key_never_collides_in_the_yaml12_reading() -> None:
+    root = yaml.compose('a: {? !!int "5" : x, "5": y}\n', Loader=yaml.SafeLoader)
+    # PyYAML reads the first key as 5 and the second as "5": no collision either way.
+    assert cw._duplicate_key(root) is None
