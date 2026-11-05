@@ -2088,10 +2088,41 @@ def test_url_texts_walks_lists_and_restores_masks_by_path() -> None:
     stored = {"a": [{"iconUrl": "https://i.example/1"}], "url": "https://x.example"}
     shown = {"a": [{"iconUrl": m}, {"iconUrl": "https://new.example"}], "url": m}
     assert mcp._url_texts(shown, stored) == {
-        "a[0].iconUrl": "https://i.example/1",
-        "a[1].iconUrl": "https://new.example",
-        "url": "https://x.example",
+        ("a", 0, "iconUrl"): "https://i.example/1",
+        ("a", 1, "iconUrl"): "https://new.example",
+        ("url",): "https://x.example",
     }
+    # Tuple paths: a key spelled with a dot cannot collide with a nested path.
+    assert mcp._url_texts({"oauth.authServerMetadataUrl": "a", "oauth": {"x": 1}}, {}) == {
+        ("oauth.authServerMetadataUrl",): "a"
+    }
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param({"toolPermissions": {"fetch_url": "allow"}}, id="tool-named-fetch_url"),
+        pytest.param(
+            {"headers": {"X": cw.REDACTION_SENTINEL, "X-Callback-Url": "b"}}, id="header"
+        ),
+    ],
+)
+def test_free_form_names_ending_in_url_are_not_destinations(tmp_path: Path, change: dict) -> None:
+    # A tool or header NAME that ends in "url" is not a url field: editing it while a
+    # masked credential is kept must not be refused as "a url changed".
+    stored = {
+        "type": "http",
+        "url": "https://x.example/mcp",
+        "headers": {"X": "h-4498", "X-Callback-Url": "a"},
+        "toolPermissions": {"fetch_url": "ask"},
+    }
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"s": stored}}), encoding="utf-8"
+    )
+    shown, _h = mcp.read_project_servers(tmp_path)
+    mcp.write_project_server_entry(tmp_path, "s", {**shown["s"], **change}, op="edit")
+    on_disk = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]["s"]
+    assert on_disk["headers"]["X"] == "h-4498"
 
 
 def test_nested_url_change_refuses_a_mask(tmp_path: Path) -> None:

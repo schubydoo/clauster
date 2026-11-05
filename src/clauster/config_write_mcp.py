@@ -682,26 +682,33 @@ def _is_url_key(key: Any) -> bool:
     return isinstance(key, str) and key.lower().endswith("url")
 
 
-def _url_texts(value: Any, stored: Any, path: str = "") -> dict[str, Any]:
-    """Return ``{path: text}`` for every url-bearing key in ``value``, at any depth.
+#: Maps whose keys are free-form names chosen by the operator (an env variable, an HTTP
+#: header, a tool), not schema fields. A header named ``X-Callback-Url`` or a tool named
+#: ``fetch_url`` is not a destination, so :func:`_url_texts` does not look inside these.
+_FREE_FORM_MAPS = frozenset({"env", "headers", "toolPermissions"})
+
+
+def _url_texts(value: Any, stored: Any, path: tuple[Any, ...] = ()) -> dict[tuple[Any, ...], Any]:
+    """Return ``{path: text}`` for every url-bearing schema key in ``value``, at any depth.
 
     A masked value takes the stored value at the same path, exactly as ``merge_redacted``
     will write it, so a url that is itself masked and resent unchanged counts as unchanged.
-    Pass ``stored`` as ``value`` to list the stored entry's own urls.
+    Pass ``stored`` as ``value`` to list the stored entry's own urls. Paths are tuples of
+    keys and list indexes, so no key spelling can collide with a nested path.
     """
-    out: dict[str, Any] = {}
+    out: dict[tuple[Any, ...], Any] = {}
     if isinstance(value, dict):
         held = stored if isinstance(stored, dict) else {}
         for k, v in value.items():
-            sub = f"{path}.{k}" if path else str(k)
+            sub = (*path, k)
             if _is_url_key(k):
                 out[sub] = held.get(k) if v == cw.REDACTION_SENTINEL else v
-            else:
+            elif k not in _FREE_FORM_MAPS:
                 out.update(_url_texts(v, held.get(k), sub))
     elif isinstance(value, list):
         held_list = stored if isinstance(stored, list) else []
         for i, v in enumerate(value):
-            out.update(_url_texts(v, held_list[i] if i < len(held_list) else None, f"{path}[{i}]"))
+            out.update(_url_texts(v, held_list[i] if i < len(held_list) else None, (*path, i)))
     return out
 
 
@@ -714,7 +721,8 @@ def _destination(entry: dict[str, Any], stored: dict[str, Any]) -> tuple[Any, ..
     reads ``evil``), so any parsed comparison can be steered. Any change at all to a url,
     host letter case and an added default port included, therefore counts as a new
     destination. A stdio entry returns ``("stdio",)``: it is not bound (see
-    :func:`_check_destination`). ``None`` means the destination cannot be decided.
+    :func:`_check_destination`); its key allowlist has no url field anyway, so the explicit
+    branch only states the intent. ``None`` means the destination cannot be decided.
     """
     try:
         transport = entry_transport(entry)
@@ -722,7 +730,7 @@ def _destination(entry: dict[str, Any], stored: dict[str, Any]) -> tuple[Any, ..
         return None
     if transport == "stdio":
         return ("stdio",)
-    return transport, sorted(_url_texts(entry, stored).items(), key=lambda kv: kv[0])
+    return transport, _url_texts(entry, stored)
 
 
 def _check_destination(name: str, entry: Any, stored: Any) -> None:
