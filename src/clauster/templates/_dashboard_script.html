@@ -256,6 +256,10 @@
         subagents: {
           list: [], editing: false, isNew: false,
           name: "", content: "", orig: "", hash: null,
+          // `converted`: the backend's note when it rewrote the file's old `mcpServers`
+          // mapping as the list form on load (TASK-449.5). Non-empty ⇒ the shown content
+          // differs from the file on disk, so the editor counts as dirty until it is saved.
+          converted: "",
           // `busy` is derived from `ops` (a concurrent-op counter) so an early op's
           // finally can't clear it while another subagent request is still in flight.
           confirm: "", busy: false, ops: 0, deletingName: "",
@@ -1664,6 +1668,7 @@
         // never carry across a switch.
         c.surface = key; c.error = ""; c.saved = false; c.confirm = "";
         c.subagents.editing = false; c.subagents.deletingName = ""; c.subagents.confirm = "";
+        c.subagents.converted = "";
         c.mcp.editing = false; c.mcp.deletingName = ""; c.mcp.confirm = "";
         c.mcp.approvals.confirm = ""; c.mcp.approvals.resetConfirm = "";
         c.skills.editing = false; c.skills.deletingName = ""; c.skills.confirm = "";
@@ -2492,7 +2497,7 @@
       // --- subagents (#773 slice C): a list surface — list + per-agent editor ------
       async _loadSubagents(myGen) {
         const c = this.configMgmt;
-        c.subagents.editing = false; c.subagents.deletingName = "";
+        c.subagents.editing = false; c.subagents.deletingName = ""; c.subagents.converted = "";
         try {
           const res = await fetch(ROOT + "/api/config-write/subagents?" + this._configMgmtQuery());
           if (c.gen !== myGen) return;
@@ -2509,6 +2514,7 @@
         c.error = ""; c.saved = false; s.deletingName = "";
         s.editing = true; s.isNew = true;
         s.name = ""; s.content = AGENT_TEMPLATE; s.orig = ""; s.hash = null; s.confirm = "";
+        s.converted = "";
       },
       // #958 Part 5: the Name box is the single source of a subagent's name. The backend
       // requires the frontmatter `name:` to equal the filename, so rather than making the
@@ -2557,16 +2563,20 @@
           if (c.gen !== gen) return;
           s.editing = true; s.isNew = false; s.name = d.name || name;
           s.content = d.content || ""; s.orig = s.content; s.hash = d.hash || null; s.confirm = "";
+          s.converted = typeof d.converted === "string" ? d.converted : "";
         } catch (e) { if (c.gen === gen) c.error = "Failed to load subagent."; }
         finally { s.ops = Math.max(0, s.ops - 1); s.busy = s.ops > 0; }
       },
       configMgmtCancelAgent() {
         const c = this.configMgmt;
-        c.subagents.editing = false; c.subagents.confirm = ""; c.error = "";
+        c.subagents.editing = false; c.subagents.confirm = ""; c.subagents.converted = ""; c.error = "";
       },
       configMgmtAgentDirty() {
         const s = this.configMgmt.subagents;
-        return s.isNew ? (s.name.trim() !== "" || s.content !== "") : (s.content !== s.orig);
+        // A converted load differs from the file on disk even before any edit, so it can
+        // be saved as shown — that save is what writes the list form.
+        return s.isNew ? (s.name.trim() !== "" || s.content !== "")
+          : (s.content !== s.orig || !!s.converted);
       },
       configMgmtCanSaveAgent() {
         const c = this.configMgmt, s = c.subagents;
@@ -2590,7 +2600,10 @@
           });
           if (c.gen !== gen) return;
           if (this._authExpired(res)) return;
-          if (res.ok) { c.saved = true; s.editing = false; s.confirm = ""; await this._loadSubagents(gen); }
+          if (res.ok) {
+            c.saved = true; s.editing = false; s.confirm = ""; s.converted = "";
+            await this._loadSubagents(gen);
+          }
           else await this._configMgmtWriteErr(res);
         } finally { s.ops = Math.max(0, s.ops - 1); s.busy = s.ops > 0; }
       },

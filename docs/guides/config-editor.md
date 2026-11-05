@@ -194,9 +194,11 @@ Three entries can look broken when they are not. The **Source** badge on each
 row tells the first two apart:
 
 - **A built-in subagent is listed with no description, and cannot be edited or
-  deleted.** Claude Code compiles `general-purpose`, `explore` and `plan` into
-  the CLI, so there is no file anywhere to edit. Every install shows these
-  three, at both scopes, before you add anything of your own.
+  deleted.** Claude Code compiles `general-purpose`, `explore`, `plan`,
+  `claude`, `statusline-setup` and `claude-code-guide` into the CLI, so there
+  is no file anywhere to edit. Every install shows these six, at both scopes,
+  before you add anything of your own. You also cannot create a subagent with
+  one of these names in Clauster.
 - **A plugin-provided subagent is listed, but cannot be edited or deleted.** A
   plugin owns that file, so Clauster refuses to change it. To change it, change
   the plugin. When the plugin supplies it as a symlink, Clauster never follows
@@ -260,6 +262,66 @@ still holds masks but their number no longer matches the number of masked
 entries on disk, the save is refused. Restore the masks as they loaded, or type
 the full entry again. If you remove every mask from a list, the save is
 accepted, and it deletes those entries.
+
+### Subagent frontmatter checks
+
+The Subagents editor checks the frontmatter of a subagent file before it
+saves the file. It checks each field in the
+[Claude Code frontmatter reference](https://code.claude.com/docs/en/sub-agents#supported-frontmatter-fields).
+It accepts every value that the installed Claude Code (2.1.318) reads for
+that field, also a value that the reference does not list. It refuses a value
+that Claude Code rejects or ignores. If one field fails, Clauster refuses the
+whole save and writes nothing.
+
+Clauster reads YAML 1.1 and Claude Code reads YAML 1.2, so a few unquoted
+spellings mean different things to the two. Clauster refuses the ones it can
+detect. For example, write `true`, not `yes`. Write a plain decimal number,
+not `010`, `0b101` or `1_000`. Quote a value that must stay a string.
+Clauster never runs a hook command and never connects to an MCP server from
+this editor.
+
+- `name` must be lowercase letters, digits and hyphens, at most 239
+  characters, and the same as the name of the file. The name is also the
+  file name, so this rule is narrower than the Claude Code rule. A file with
+  a longer or other name does not show in the list.
+- `memory`, `color` and `experimental.cacheTtl` accept only their listed
+  values, written exactly as listed.
+- `effort` accepts a level name in any case, the alias `med`, or an integer.
+  `isolation` accepts `worktree` and also `remote`, which Claude Code reads
+  but does not document.
+- `maxTurns` and `autoCompactWindow` accept a number or a string that Claude
+  Code reads as a whole number, for example `200000`, `"200,000"` or `2e5`.
+  `autoCompactWindow` must be from `100000` to `1000000`. Do not write
+  `200k`: Claude Code reads it as 200, which is out of range.
+- `background` and `omitClaudeMd` accept `true` and `false`, also as quoted
+  strings. They refuse `yes`, `no`, `on` and `off`: Claude Code reads those as
+  text and ignores them.
+- `tools` must name at least one tool. `disallowedTools` refuses a `*` entry,
+  because Claude Code then applies no denylist at all.
+- `mcpServers` must be a list. Each item is the name of a server that you
+  configured already, or a `name: definition` object. Claude Code reads only
+  the list form and ignores a mapping.
+- `permissionMode` accepts `manual` as an alias for `default`. It refuses
+  `bypassPermissions`, as every config-editor surface does. See the
+  [bypassPermissions footgun gate](../security.md#bypasspermissions-footgun-gate).
+- A field that is not in the reference is saved as written. Claude Code
+  ignores a field that it does not recognize. The one exception is `env`:
+  Clauster still refuses an `env` that is not a map of names to plain values.
+
+If you open a subagent file that writes `mcpServers` as a mapping, the editor
+shows it already converted to the list form, with a note above the text. The
+file on disk does not change until you save. Read the converted text, then
+save to write the list form. The conversion only changes the indentation of
+the `mcpServers` block, so every value and comment stays as you wrote it. If
+the editor cannot convert the block safely, it shows the file as it is, and
+the save tells you to rewrite `mcpServers` as a list. Two examples are a
+mapping written on one line, such as `mcpServers: {github: {...}}`, and two
+servers with the same name.
+
+A file with the name of a built-in subagent, such as `claude.md`, overrides
+that built-in in Claude Code. The list shows the file as a read-only row next
+to the built-in row. Clauster does not edit or delete that file, so change it
+on the host.
 
 ## Troubleshooting and limits
 

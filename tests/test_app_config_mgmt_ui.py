@@ -219,6 +219,29 @@ def test_subagents_surface_present_when_enabled(write_config):
     assert "const AGENT_TEMPLATE =" in html
 
 
+def test_subagent_editor_shows_the_mcp_conversion_note(write_config):
+    # TASK-449.5: a file loaded with the old `mcpServers` mapping arrives rewritten as the
+    # list form plus a `converted` note. The editor must show that note before the save,
+    # and count the load as dirty so the converted text can be saved without an edit.
+    html = _html(write_config, _ON)
+    assert 'data-test="cm-agent-converted"' in html
+    assert 'x-show="configMgmt.subagents.converted"' in html
+    assert 'x-text="configMgmt.subagents.converted"' in html
+    assert 's.converted = typeof d.converted === "string" ? d.converted : "";' in html
+    assert "(s.content !== s.orig || !!s.converted)" in html
+    # The note is read with the textarea, and meets AA contrast on its tint.
+    assert 'aria-describedby="cm-agent-name-hint cm-agent-converted"' in html
+    assert "alert alert-info text-info-emphasis" in html
+    # The note and the extra dirty state are cleared on every path that leaves or replaces
+    # the editor: new agent, cancel, list reload, surface switch, and a successful save.
+    assert 's.content = AGENT_TEMPLATE; s.orig = ""; s.hash = null; s.confirm = "";\n' in html
+    assert '        s.converted = "";\n      },\n      // #958 Part 5' in html
+    assert 'c.subagents.confirm = ""; c.subagents.converted = ""; c.error = "";' in html
+    assert 'c.subagents.deletingName = ""; c.subagents.converted = "";' in html
+    assert html.count('c.subagents.converted = "";') == 3
+    assert 'c.saved = true; s.editing = false; s.confirm = ""; s.converted = "";' in html
+
+
 def test_mcp_surface_present_when_enabled(write_config):
     # Slice D adds the MCP list surface (servers CRUD + project approvals panel).
     html = _html(write_config, _ON)

@@ -29,8 +29,8 @@ the logic. ``permissionMode`` reuses the same recognized-mode vocabulary as
 :mod:`clauster.config_write_permissions` (``bypassPermissions`` stays footgun-gated,
 never settable here).
 
-**Plugin / built-in agents are read-only.** Claude Code ships three built-in
-subagents (``general-purpose``, ``Explore``, ``Plan``) that are compiled in, not
+**Plugin / built-in agents are read-only.** Claude Code ships built-in subagents
+(:data:`BUILTIN_AGENT_NAMES`) that are compiled in, not
 files — there is nothing on disk to edit or delete, so a write/delete targeting one
 of :data:`BUILTIN_AGENT_NAMES` is refused (:class:`ReadOnlyAgentError`) before any
 I/O. Plugin-provided subagents live in the *plugin's own* ``agents/`` directory
@@ -89,6 +89,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from . import config_file_writer as fw
 from . import config_write as cw
 from .config_write_hooks import validate_hooks
@@ -110,10 +112,24 @@ MAX_BYTES = 64 * 1024
 #: :func:`clauster.config_file_writer.resolve_contained_path`.
 _NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 
+#: Longest accepted subagent name. Claude Code caps a ``name`` at 256 characters, but the
+#: name is also this surface's filename, and 255 bytes is the common filename limit
+#: (``NAME_MAX``): a longer name raised a bare ``OSError`` (``ENAMETOOLONG``) on read and
+#: write, a 500 instead of a 400/422. The longest name this surface puts on disk is the
+#: atomic writer's temp file, ``<name>.md.<8 random chars>.tmp`` (``tempfile.mkstemp``),
+#: 16 characters over the name, so 239 + 16 is 255. The name is ASCII (see
+#: :data:`_NAME_RE`), so characters and bytes agree. ⚠️ This is the POSIX bound. On Windows
+#: without long paths, the 260-character limit on the WHOLE path can bind first.
+MAX_NAME_CHARS = 239
+
 #: Claude Code's built-in subagents — compiled into the CLI, never files on disk.
 #: Matched case-insensitively against a candidate name (``Explore``/``Plan`` are
-#: capitalized in Claude Code's own vocabulary; ``general-purpose`` is lowercase).
-BUILTIN_AGENT_NAMES = frozenset({"general-purpose", "explore", "plan"})
+#: capitalized in Claude Code's own vocabulary; the rest are lowercase). The list is the
+#: "Built-in subagents" section of https://code.claude.com/docs/en/sub-agents, including
+#: its "Other" helper agents, and each one is an agent type in the installed CLI (2.1.318).
+BUILTIN_AGENT_NAMES = frozenset(
+    {"general-purpose", "explore", "plan", "claude", "statusline-setup", "claude-code-guide"}
+)
 
 #: Marker identifying subagent content as **plugin-owned** — mirrors
 #: ``clauster.config_write_hooks._PLUGIN_ROOT_MARKER``: this interpolation only
@@ -143,7 +159,11 @@ class ReadOnlyAgentError(cw.ConfigWriteError):
 
 def is_valid_agent_name(name: object) -> bool:
     """Whether ``name`` is a safe, Claude-Code-shaped subagent identifier."""
-    return isinstance(name, str) and _NAME_RE.fullmatch(name) is not None
+    return (
+        isinstance(name, str)
+        and len(name) <= MAX_NAME_CHARS
+        and _NAME_RE.fullmatch(name) is not None
+    )
 
 
 def is_builtin_agent(name: str) -> bool:
@@ -267,24 +287,63 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     return data, text[match.end() :]
 
 
-def _validate_string_or_string_list(value: Any, label: str) -> None:
-    """Reject ``value`` unless it is a non-empty string or a non-empty list of them.
+def _cli_tool_entries(items: list[str]) -> list[str]:
+    """Split tool-list strings into entries the way the 2.1.318 CLI does (its ``fu``).
 
-    Structural only: a comma-separated ``tools`` string or list entry is never split,
-    resolved against a real tool registry, or otherwise interpreted here — that grant
-    is enforced later, by Claude Code itself, when the subagent actually runs.
+    A comma or a space ends an entry unless it is inside parentheses, so
+    ``Agent(worker, researcher), Read`` is two entries. Splitting here only decides
+    whether the list is empty or holds ``*``; no entry is resolved against a tool registry.
+    """
+    entries: list[str] = []
+    for item in items:
+        current, in_parens = "", False
+        for char in item:
+            if char == "(":
+                in_parens = True
+                current += char
+            elif char == ")":
+                in_parens = False
+                current += char
+            elif char == ",":
+                if in_parens:
+                    current += char
+                else:
+                    if current.strip(_JS_WHITESPACE):
+                        entries.append(current.strip(_JS_WHITESPACE))
+                    current = ""
+            elif char == " ":
+                if in_parens:
+                    current += char
+                elif current.strip(_JS_WHITESPACE):
+                    entries.append(current.strip(_JS_WHITESPACE))
+                    current = ""
+            elif current or char.strip(_JS_WHITESPACE):
+                current += char
+        if current.strip(_JS_WHITESPACE):
+            entries.append(current.strip(_JS_WHITESPACE))
+    return entries
+
+
+def _validate_string_or_string_list(value: Any, label: str) -> None:
+    """Reject ``value`` unless it is a string or list of strings naming at least one tool.
+
+    Structural only: the entries are never resolved against a real tool registry — that
+    grant is enforced later, by Claude Code itself, when the subagent actually runs. A value
+    that splits to no entry at all (``""``, ``","``, ``[]``) is refused, because Claude Code
+    then refuses to launch the subagent with zero tools.
     """
     if isinstance(value, str):
-        if not value.strip():
-            raise cw.InvalidCandidateError(f"{label} must be a non-empty string")
-        return
-    if isinstance(value, list):
-        if not value or not all(isinstance(v, str) and v.strip() for v in value):
-            raise cw.InvalidCandidateError(
-                f"{label} must be a non-empty list of non-empty strings"
-            )
-        return
-    raise cw.InvalidCandidateError(f"{label} must be a string or a list of strings")
+        items = [value]
+    elif isinstance(value, list) and all(
+        isinstance(v, str) and v.strip(_JS_WHITESPACE) for v in value
+    ):
+        items = value
+    elif isinstance(value, list):
+        raise cw.InvalidCandidateError(f"{label} must be a list of non-empty strings")
+    else:
+        raise cw.InvalidCandidateError(f"{label} must be a string or a list of strings")
+    if not _cli_tool_entries(items):
+        raise cw.InvalidCandidateError(f"{label} must name at least one tool")
 
 
 def _validate_non_empty_string(value: Any, label: str) -> None:
@@ -299,28 +358,247 @@ def _validate_string(value: Any, label: str) -> None:
         raise cw.InvalidCandidateError(f"{label} must be a string")
 
 
-def _validate_bool(value: Any, label: str) -> None:
-    """Reject ``value`` unless it is a real boolean."""
-    if not isinstance(value, bool):
-        raise cw.InvalidCandidateError(f"{label} must be a boolean")
+def _validate_bool_or_bool_string(value: Any, label: str) -> None:
+    """Reject ``value`` unless it is a boolean or the string ``"true"``/``"false"``.
+
+    The 2.1.318 agent-file loader reads both spellings for ``background`` (and logs any
+    other value as invalid) and for ``omitClaudeMd``, where ``false`` in either spelling is
+    the same as leaving the field out.
+    """
+    if not isinstance(value, bool) and value not in ("true", "false"):
+        raise cw.InvalidCandidateError(f"{label} must be true or false")
 
 
-def _validate_string_list(value: Any, label: str) -> None:
-    """Reject ``value`` unless it is a list of non-empty strings (an empty list passes)."""
-    if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
-        raise cw.InvalidCandidateError(f"{label} must be a list of non-empty strings")
+def _optional_string_list_items(value: Any, label: str) -> list[str]:
+    """Return ``value`` as the list of strings the CLI splits, or reject it.
+
+    Accepted: ``null`` and any string (the CLI splits a string on commas; an empty one is
+    an empty list), or a list of non-empty strings (an empty list passes). A list entry that
+    is not a non-empty string is refused, because the CLI silently drops it.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list) and all(
+        isinstance(v, str) and v.strip(_JS_WHITESPACE) for v in value
+    ):
+        return value
+    raise cw.InvalidCandidateError(f"{label} must be a string or a list of non-empty strings")
+
+
+def _validate_optional_string_list(value: Any, label: str) -> None:
+    """Reject ``value`` unless the CLI reads it as a (possibly empty) list of names."""
+    _optional_string_list_items(value, label)
+
+
+def _validate_disallowed_tools(value: Any, label: str) -> None:
+    """Like :func:`_validate_optional_string_list`, but refuse a ``*`` entry.
+
+    The CLI turns a ``*`` anywhere in the denylist into NO denylist, so an operator who
+    means "deny everything" would get "deny nothing". (``tools: "*"`` is different: it
+    means every tool, which is what it says.)
+    """
+    if "*" in _cli_tool_entries(_optional_string_list_items(value, label)):
+        raise cw.InvalidCandidateError(
+            f"{label} cannot contain '*': Claude Code reads it as no denylist at all"
+        )
+
+
+# --- integer parsing the way the 2.1.318 agent-file loader does it ------------------------
+# `maxTurns` and `autoCompactWindow` go through one CLI helper (`bbr`): a number is used as
+# is, anything else is stringified, trimmed, and then read as exponent notation, as a
+# grouped integer (`200,000`, `200_000`), or with JavaScript's `parseInt`. `effort` uses a
+# second helper (`dq`) with its own rules. These mirror both, for the scalar YAML types only:
+# a list or mapping reaches those helpers solely through JavaScript's string coercion of an
+# object, which this surface does not treat as a value the CLI reads.
+
+#: The CLI's exponent-notation and grouped-integer patterns (`R` and `E` in its source).
+#: JavaScript regular expressions and ``parseInt`` take ASCII digits only, where Python's
+#: ``\d`` matches any Unicode digit (``٥``, ``５``), hence ``[0-9]`` throughout.
+_CLI_EXPONENT_RE = re.compile(r"^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)[eE][+-]?[0-9]+$")
+_CLI_GROUPED_INT_RE = re.compile(r"^[+-]?[0-9]{1,3}([_,\u00a0\u202f ])[0-9]{3}(?:\1[0-9]{3})*$")
+_CLI_GROUP_SEPARATORS_RE = re.compile(r"[_,\u00a0\u202f ]")
+#: The characters JavaScript's ``trim`` and ``parseInt`` skip (WhiteSpace and
+#: LineTerminator). Python's ``str.strip``/``\s`` differ: they also skip ``\x1c``-``\x1f``
+#: and ``\x85``, and they keep the BOM, ``\ufeff``.
+_JS_WHITESPACE = (
+    "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008"
+    "\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+#: JavaScript ``parseInt(s, 10)``: optional leading whitespace, an optional sign, then the
+#: longest run of digits; anything after the digits is ignored.
+_JS_PARSE_INT_RE = re.compile(f"[{_JS_WHITESPACE}]*([+-]?[0-9]+)")
+
+
+def _as_js_number(value: int) -> int | None:
+    """Return ``value``, or None when JavaScript would hold it as ``Infinity``.
+
+    A JavaScript number is a double, so an integer past the double range becomes
+    ``Infinity``, which ``Number.isInteger`` rejects. (Precision loss below that range keeps
+    a whole number whole, so it does not change the answer.)
+    """
+    try:
+        float(value)
+    except OverflowError:
+        return None
+    return value
+
+
+def _js_parse_int(text: str) -> int | None:
+    """Return what JavaScript ``parseInt(text, 10)`` returns, or None for ``NaN``/``Infinity``."""
+    match = _JS_PARSE_INT_RE.match(text)
+    return _as_js_number(int(match.group(1))) if match else None
+
+
+def _integral(value: float) -> int | None:
+    """Return ``value`` as an int when it is a finite whole number (``Number.isInteger``)."""
+    return int(value) if value == value and abs(value) != float("inf") and value % 1 == 0 else None
+
+
+def _cli_int_from_text(raw: str) -> int | None:
+    """Return the CLI's ``Bf`` reading of a string: exponent, grouped, then ``parseInt``."""
+    text = raw.strip(_JS_WHITESPACE)
+    if len(text) <= 32:
+        if _CLI_EXPONENT_RE.match(text):
+            return _integral(float(text))
+        if _CLI_GROUPED_INT_RE.match(text):
+            return _as_js_number(int(_CLI_GROUP_SEPARATORS_RE.sub("", text)))
+    return _js_parse_int(text)
+
+
+def _cli_positive_int(value: Any) -> int | None:
+    """Return the positive int the CLI reads from ``value`` (its ``bbr``), or None."""
+    if value is None or isinstance(value, bool):
+        # JavaScript stringifies a boolean to "true"/"false", which parses to NaN.
+        return None
+    if isinstance(value, int):
+        number: int | None = _as_js_number(value)
+    elif isinstance(value, float):
+        number = _integral(value)
+    elif isinstance(value, str):
+        number = _cli_int_from_text(value)
+    else:
+        return None
+    return number if number is not None and number > 0 else None
 
 
 def _validate_positive_int(value: Any, label: str) -> None:
-    """Reject ``value`` unless it is an int > 0 — ``bool`` excluded, since it subclasses int."""
-    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+    """Reject ``value`` unless the CLI reads a positive integer from it (``bool`` excluded)."""
+    if _cli_positive_int(value) is None:
         raise cw.InvalidCandidateError(f"{label} must be a positive integer")
 
 
-def _validate_string_or_mapping(value: Any, label: str) -> None:
-    """Reject ``value`` unless it is a string or a mapping."""
-    if not isinstance(value, str | dict):
-        raise cw.InvalidCandidateError(f"{label} must be a string or an object")
+#: The CLI's effort levels and its one effort alias (``med``).
+_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+_EFFORT_ALIASES = {"med": "medium"}
+
+
+def _cli_effort(value: Any) -> str | int | None:
+    """Return the effort the CLI reads from ``value`` (its ``dq``), or None when it ignores it.
+
+    A number must be a whole number, and any whole number counts. Anything else is
+    stringified and lowercased (not trimmed), mapped through the alias table, and matched
+    against the level names. Failing that, ``parseInt`` decides, so ``"3 tokens"`` is ``3``.
+    """
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return _as_js_number(value)
+    if isinstance(value, float):
+        whole = _integral(value)
+        if whole is not None:
+            return whole
+        text = repr(value)  # what JavaScript's String() gives for a finite fraction
+    elif isinstance(value, str):
+        text = value
+    else:
+        return None
+    lowered = text.lower()
+    level = _EFFORT_ALIASES.get(lowered, lowered)
+    if level in _EFFORT_LEVELS:
+        return level
+    return _js_parse_int(lowered)
+
+
+def _validate_effort(value: Any, label: str) -> None:
+    """Reject ``value`` unless the CLI reads an effort level or an integer from it."""
+    if _cli_effort(value) is None:
+        raise cw.InvalidCandidateError(
+            f"{label} must be one of {list(_EFFORT_LEVELS)} (any case, or 'med') or an integer"
+        )
+
+
+#: The signature every entry in :data:`_OPTIONAL_FRONTMATTER_RULES` satisfies:
+#: ``(value, label) -> None``, raising :class:`~clauster.config_write.InvalidCandidateError`.
+_FrontmatterRule = Callable[[Any, str], None]
+
+
+def _one_of(*allowed: str) -> _FrontmatterRule:
+    """Return a rule that rejects any value other than one of the ``allowed`` strings.
+
+    Used for the frontmatter fields the CLI matches exactly against a closed list. Claude
+    Code silently ignores a value outside the list, so the write would land and do nothing;
+    refusing it here tells the operator at save time instead.
+    """
+
+    def _check(value: Any, label: str) -> None:
+        """Reject ``value`` unless it is exactly one of the closed list."""
+        if not isinstance(value, str) or value not in allowed:
+            raise cw.InvalidCandidateError(f"{label} must be one of {list(allowed)}")
+
+    return _check
+
+
+#: Claude Code's documented ``autoCompactWindow`` range for a subagent, in tokens.
+_AUTO_COMPACT_WINDOW_MIN = 100_000
+_AUTO_COMPACT_WINDOW_MAX = 1_000_000
+
+
+def _validate_auto_compact_window(value: Any, label: str) -> None:
+    """Reject ``value`` unless the CLI reads a token count inside the documented range."""
+    # The CLI reads this field with the same integer parse as `maxTurns`, so `"200000"`,
+    # `2e5` and `200,000` all count. `200k` is refused: the CLI reads it as 200, which is
+    # out of range, and ignores the field.
+    number = _cli_positive_int(value)
+    if number is None or not _AUTO_COMPACT_WINDOW_MIN <= number <= _AUTO_COMPACT_WINDOW_MAX:
+        raise cw.InvalidCandidateError(
+            f"{label} must be an integer from {_AUTO_COMPACT_WINDOW_MIN} "
+            f"to {_AUTO_COMPACT_WINDOW_MAX}"
+        )
+
+
+#: The documented values of ``experimental.cacheTtl``.
+_CACHE_TTL_VALUES = ("5m", "1h")
+
+
+def _validate_experimental(value: Any, label: str) -> None:
+    """Reject ``value`` unless it is a mapping whose ``cacheTtl``, if set, is documented.
+
+    Only ``cacheTtl`` is documented inside the map. Any other key passes through
+    untouched, the same forward-compatible policy :func:`validate_frontmatter` applies to
+    unknown top-level keys (Claude Code ignores an unknown ``experimental`` key too).
+    """
+    if not isinstance(value, dict):
+        raise cw.InvalidCandidateError(f"{label} must be an object")
+    for key, ttl in value.items():
+        # Claude Code finds the key after it drops `-`/`_` and lowercases it (so `cachettl`
+        # and `cache_ttl` are `cacheTtl` too), then ignores a bad value. Normalize the same
+        # way, or a misspelled key with a bad value would slip past as an unknown key.
+        if not isinstance(key, str) or key.replace("-", "").replace("_", "").lower() != (
+            "cachettl"
+        ):
+            continue
+        if ttl not in _CACHE_TTL_VALUES:
+            raise cw.InvalidCandidateError(
+                f"{label} {key!r} must be one of {list(_CACHE_TTL_VALUES)}"
+            )
+
+
+#: ``manual`` is the documented frontmatter alias of ``default`` (Claude Code maps it
+#: before the lookup). It is local to this surface: the settings ``defaultMode`` vocabulary
+#: in :mod:`clauster.config_write_permissions` is a different field with its own audit.
+_MANUAL_MODE_ALIAS = "manual"
 
 
 def _validate_permission_mode(value: Any, label: str) -> None:
@@ -331,17 +609,49 @@ def _validate_permission_mode(value: Any, label: str) -> None:
         # Fail closed: bypassPermissions stays behind the existing footgun gate,
         # never settable through a subagent's frontmatter either.
         raise cw.InvalidCandidateError(f"{label} cannot be 'bypassPermissions' (footgun-gated)")
-    if value not in RECOGNIZED_MODES:
+    if value not in RECOGNIZED_MODES and value != _MANUAL_MODE_ALIAS:
         raise cw.InvalidCandidateError(
             f"unknown frontmatter permissionMode {value!r} "
-            f"(want one of {sorted(RECOGNIZED_MODES)})"
+            f"(want one of {sorted(RECOGNIZED_MODES | {_MANUAL_MODE_ALIAS})})"
         )
 
 
 def _validate_mcp_servers(value: Any, label: str) -> None:
-    """Reject ``value`` unless it maps server names to objects — never connected to."""
-    if not isinstance(value, dict) or not all(isinstance(v, dict) for v in value.values()):
-        raise cw.InvalidCandidateError(f"{label} must be an object mapping server name to object")
+    """Reject ``value`` unless it is the documented LIST of server entries — never connected.
+
+    Each entry is either a non-empty string naming an already-configured server, or a
+    non-empty mapping of server name to an inline definition object. Claude Code reads
+    only the list form: it ignores an ``mcpServers`` mapping entirely (verified in the
+    2.1.318 agent-file loader), so a mapping is refused here rather than written as a
+    silent no-op. An inline definition is checked to be an object and nothing more — it is
+    never resolved, spawned or connected to here.
+    """
+    if isinstance(value, dict):
+        raise cw.InvalidCandidateError(
+            f"{label} must be a list, not a mapping: Claude Code reads only the list form "
+            "and ignores a mapping. Write each server as a list item, '- name' for a server "
+            "you configured already or '- name:' followed by its definition"
+        )
+    if not isinstance(value, list):
+        raise cw.InvalidCandidateError(
+            f"{label} must be a list of server names or {{name: definition}} objects"
+        )
+    for entry in value:
+        if isinstance(entry, str):
+            if not entry.strip():
+                raise cw.InvalidCandidateError(f"{label} server names must be non-empty")
+            continue
+        if not isinstance(entry, dict) or not entry:
+            raise cw.InvalidCandidateError(
+                f"{label} entries must be a server name or a {{name: definition}} object"
+            )
+        for server_name, definition in entry.items():
+            if not isinstance(server_name, str) or not server_name.strip():
+                raise cw.InvalidCandidateError(f"{label} server names must be non-empty strings")
+            if not isinstance(definition, dict):
+                raise cw.InvalidCandidateError(
+                    f"{label} inline server {server_name!r} must be an object"
+                )
 
 
 def _validate_hooks_block(value: Any, label: str) -> None:
@@ -367,22 +677,36 @@ def _validate_env(value: Any, label: str) -> None:
             )
 
 
-#: The signature every entry in :data:`_OPTIONAL_FRONTMATTER_RULES` satisfies:
-#: ``(value, label) -> None``, raising :class:`~clauster.config_write.InvalidCandidateError`.
-_FrontmatterRule = Callable[[Any, str], None]
-
 #: Optional frontmatter keys → the structural check their value must pass, in the order
 #: they are checked. Table-driven (#1155) so the recognized-key set reads as one list
 #: rather than a branch per key. Every entry is a pure *shape* check: nothing here ever
 #: resolves a tool name, spawns a hook command, or connects to an MCP server. An
 #: UNRECOGNIZED key is absent from this table and passes through untouched — see
 #: :func:`validate_frontmatter` for why.
+#:
+#: The key set follows the "Frontmatter reference" table of
+#: https://code.claude.com/docs/en/sub-agents. The accepted VALUES are everything the
+#: installed CLI's agent-file loader (2.1.318) reads, which is a superset of the documented
+#: lists in places (an integer or upper-case ``effort``, ``isolation: remote``, a string
+#: ``maxTurns``) — the maintainer's call on TASK-449.5. A value the CLI rejects or silently
+#: ignores is refused. ⚠️ Every check sees the value as PyYAML (YAML 1.1) loaded it, and the
+#: CLI loads YAML 1.2, so a few spellings read differently: a plain ``yes`` is a boolean
+#: here and a string there, ``010`` is 8 here and 10 there.
+#: :func:`_refuse_yaml11_only_spellings` refuses those for the boolean and number fields.
+#: Other differences are stricter here, for example a plain ``2024-01-01`` is a date to
+#: PyYAML, so it is refused as a ``maxTurns`` that the CLI would read as 2024. Fields this
+#: module checks only as "a string" or "an object" (``model``, an inline MCP definition)
+#: are not compared spelling by spelling.
 _OPTIONAL_FRONTMATTER_RULES: tuple[tuple[str, _FrontmatterRule], ...] = (
-    # Claude Code accepts either a comma-separated string or an array for these two —
-    # this repo's own shipped subagents use the string form.
+    # Claude Code accepts either a comma-separated string or an array for these —
+    # this repo's own shipped subagents use the string form. `tools` must name at least
+    # one tool: an empty grant makes the CLI refuse to launch the subagent.
     ("tools", _validate_string_or_string_list),
-    ("disallowedTools", _validate_string_or_string_list),
-    ("skills", _validate_string_list),
+    # An empty or null denylist / preload list is read as "none", so it is accepted.
+    ("disallowedTools", _validate_disallowed_tools),
+    ("skills", _validate_optional_string_list),
+    # An alias (`sonnet`, `opus`, `haiku`, `fable`), `inherit`, or a full model id. The
+    # id set is open-ended, so this stays a non-empty-string check.
     ("model", _validate_non_empty_string),
     ("permissionMode", _validate_permission_mode),
     ("mcpServers", _validate_mcp_servers),
@@ -391,17 +715,21 @@ _OPTIONAL_FRONTMATTER_RULES: tuple[tuple[str, _FrontmatterRule], ...] = (
     # rejection) rather than duplicated. STRUCTURE ONLY — no command is ever executed.
     ("hooks", _validate_hooks_block),
     ("maxTurns", _validate_positive_int),
+    ("autoCompactWindow", _validate_auto_compact_window),
     ("initialPrompt", _validate_string),
-    ("memory", _validate_string_or_mapping),
-    ("effort", _validate_non_empty_string),
-    ("background", _validate_bool),
-    ("isolation", _validate_non_empty_string),
-    ("color", _validate_non_empty_string),
+    ("memory", _one_of("user", "project", "local")),
+    ("effort", _validate_effort),
+    ("background", _validate_bool_or_bool_string),
+    ("omitClaudeMd", _validate_bool_or_bool_string),
+    # `remote` is read by the CLI for a user/project agent though the docs list only
+    # `worktree` (a plugin agent reads only `worktree`, but plugin files are read-only here).
+    ("isolation", _one_of("worktree", "remote")),
+    ("color", _one_of("red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan")),
+    ("experimental", _validate_experimental),
     # Dropping the unknown-key allowlist made ``env`` reachable for the first time (it was
-    # never in the old recognized-key set). Claude Code loads it as a name→value
-    # environment map, so a non-mapping payload (``env: 42``) or a non-scalar value would
-    # land on disk here and only fail later when Claude Code tries to load the subagent —
-    # validate the shape at write time instead.
+    # never in the old recognized-key set). ⚠️ It is NOT a documented subagent field, and
+    # the 2.1.318 agent-file loader never reads it, so Claude Code ignores it. The shape
+    # check is kept so an existing file's `env` still gets the scalar-map guard it had.
     ("env", _validate_env),
 )
 
@@ -440,7 +768,7 @@ def validate_frontmatter(candidate: Any, *, expected_name: str | None = None) ->
     if not is_valid_agent_name(name):
         raise cw.InvalidCandidateError(
             "frontmatter 'name' must be lowercase letters, digits, and hyphens "
-            "(no leading hyphen, no path separators)"
+            f"(no leading hyphen, no path separators, at most {MAX_NAME_CHARS} characters)"
         )
     if expected_name is not None and name != expected_name:
         raise cw.InvalidCandidateError(
@@ -448,7 +776,9 @@ def validate_frontmatter(candidate: Any, *, expected_name: str | None = None) ->
         )
 
     description = candidate["description"]
-    if not isinstance(description, str) or not description.strip():
+    # Non-empty, not non-blank: the CLI skips a file whose description is missing, empty or
+    # not a string, but it loads one whose description is only whitespace.
+    if not isinstance(description, str) or not description:
         raise cw.InvalidCandidateError("frontmatter 'description' must be a non-empty string")
 
     for key, check in _OPTIONAL_FRONTMATTER_RULES:
@@ -472,6 +802,132 @@ def validate_agent_content(candidate: Any, *, expected_name: str | None = None) 
         raise cw.InvalidCandidateError(f"content is {size} bytes, over the {MAX_BYTES} byte cap")
     frontmatter, _body = parse_frontmatter(candidate)
     validate_frontmatter(frontmatter, expected_name=expected_name)
+    header = _FRONTMATTER_RE.match(candidate)
+    if header is not None:  # pragma: no branch — always, once parse_frontmatter accepted it
+        _refuse_yaml11_only_spellings(header.group(1))
+
+
+#: Line breaks to YAML 1.1 (PyYAML) but ordinary characters to YAML 1.2 (the CLI): NEL,
+#: LINE SEPARATOR and PARAGRAPH SEPARATOR. A header with one reads as different keys in
+#: the two (``tools: Read # c<LS>disallowedTools: Bash`` hides the denylist from the CLI).
+_YAML11_ONLY_LINE_BREAKS = ("\x85", "\u2028", "\u2029")
+
+#: The fields whose loaded value this module checks as a boolean or a number, and the
+#: YAML 1.2 core spellings those loaded values must come from.
+_BOOLEAN_FIELDS = frozenset({"background", "omitClaudeMd"})
+_NUMBER_FIELDS = frozenset({"maxTurns", "autoCompactWindow", "effort"})
+_YAML12_BOOLEANS = frozenset({"true", "True", "TRUE", "false", "False", "FALSE"})
+#: Decimal without a leading zero, or hex, which both versions read alike. YAML 1.1 also
+#: reads ``010`` (octal 8), ``0b101``, ``1_000`` and ``1:30`` (sexagesimal) as integers;
+#: YAML 1.2 reads ``010`` as 10 and the others as strings.
+_YAML12_INT_RE = re.compile(r"[-+]?(?:0|[1-9][0-9]*)|0x[0-9a-fA-F]+")
+_YAML12_FLOAT_RE = re.compile(r"[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?")
+_BOOL_TAG = "tag:yaml.org,2002:bool"
+_INT_TAG = "tag:yaml.org,2002:int"
+_FLOAT_TAG = "tag:yaml.org,2002:float"
+_MERGE_TAG = "tag:yaml.org,2002:merge"
+
+
+def _check_spelling(key: str, node: yaml.Node) -> None:
+    """Refuse a checked field whose value PyYAML and the CLI's YAML 1.2 read differently."""
+    if not isinstance(node, yaml.ScalarNode):
+        return
+    if key in _BOOLEAN_FIELDS and node.tag == _BOOL_TAG and node.value not in _YAML12_BOOLEANS:
+        raise cw.InvalidCandidateError(
+            f"frontmatter {key!r}: Claude Code reads {node.value!r} as a string, not a "
+            "boolean, and ignores it. Write true or false"
+        )
+    if key in _NUMBER_FIELDS and (
+        (node.tag == _INT_TAG and not _YAML12_INT_RE.fullmatch(node.value))
+        or (node.tag == _FLOAT_TAG and not _YAML12_FLOAT_RE.fullmatch(node.value))
+    ):
+        raise cw.InvalidCandidateError(
+            f"frontmatter {key!r}: {node.value!r} is a number to YAML 1.1 but not, or not "
+            "the same number, to the YAML 1.2 that Claude Code reads. Write a plain decimal"
+        )
+
+
+def _check_mapping(node: yaml.MappingNode, seen: set[int]) -> None:
+    """Check each checked field of ``node``, following ``<<`` merge keys into their sources.
+
+    ``compose`` leaves merges unflattened, so a ``<<: {background: yes}`` would otherwise
+    never be looked at. A source is checked even where an explicit key overrides it, which
+    only ever refuses more. ``seen`` skips a source merged twice; an alias cycle never gets
+    here, because :func:`_refuse_enclosing_references` refuses it first.
+    """
+    if id(node) in seen:
+        return
+    seen.add(id(node))
+    for key_node, value_node in node.value:
+        if key_node.tag == _MERGE_TAG:
+            sources = (
+                value_node.value if isinstance(value_node, yaml.SequenceNode) else [value_node]
+            )
+            for source in sources:
+                # Always a mapping: PyYAML's load already refused a merge of anything else.
+                if isinstance(source, yaml.MappingNode):  # pragma: no branch
+                    _check_mapping(source, seen)
+        # A non-scalar key cannot be hashed into a dict, so the load already refused it.
+        elif isinstance(key_node, yaml.ScalarNode):  # pragma: no branch
+            _check_spelling(key_node.value, value_node)
+
+
+def _refuse_enclosing_references(node: yaml.Node, path: set[int], done: set[int]) -> None:
+    """Refuse an alias that points at a node enclosing it (``a: &a {<<: *a}``).
+
+    PyYAML loads that header (it drops the merge key before it follows it), but the CLI's
+    YAML 1.2 loader refuses it ("Merge key cannot reference an enclosing node") and then
+    falls back to re-quoting values, so ``permissionMode: plan # c`` would reach the CLI as
+    the string ``"plan # c"``. ``path`` holds the nodes being walked through; ``done``
+    skips a node already checked, so a shared alias is walked once.
+    """
+    if id(node) in path:
+        raise cw.InvalidCandidateError(
+            "frontmatter has an alias to a node that encloses it, which the YAML 1.2 that "
+            "Claude Code reads refuses. Remove the self-reference"
+        )
+    if id(node) in done or not isinstance(node, yaml.CollectionNode):
+        return
+    path.add(id(node))
+    children = (
+        [part for pair in node.value for part in pair]
+        if isinstance(node, yaml.MappingNode)
+        else node.value
+    )
+    for child in children:
+        _refuse_enclosing_references(child, path, done)
+    path.discard(id(node))
+    done.add(id(node))
+
+
+def _refuse_yaml11_only_spellings(header: str) -> None:
+    """Refuse header text that PyYAML (YAML 1.1) and the CLI (YAML 1.2) read differently.
+
+    Every check in :func:`validate_frontmatter` sees the value as PyYAML loaded it. This
+    looks at how the checked values are SPELLED, so a value is not accepted on a reading
+    the CLI does not share:
+
+    * a NEL / LINE SEPARATOR / PARAGRAPH SEPARATOR anywhere in the header (a line break
+      only to YAML 1.1, so the two see different keys);
+    * a ``background``/``omitClaudeMd`` boolean spelled ``yes``/``no``/``on``/``off`` (a
+      string to YAML 1.2, which the CLI logs or ignores), plain, quoted with an explicit
+      ``!!bool``, or brought in through a ``<<`` merge;
+    * a ``maxTurns``/``autoCompactWindow``/``effort`` number spelled the YAML 1.1 way
+      (``010``, ``0b101``, ``1_000``, ``1:30``), which YAML 1.2 reads as another number or
+      as a string.
+
+    ``header`` already loaded as a mapping, so composing it again yields a mapping node and
+    does not fail.
+    """
+    for char in _YAML11_ONLY_LINE_BREAKS:
+        if char in header:
+            raise cw.InvalidCandidateError(
+                f"frontmatter contains {char!r}, a line break to YAML 1.1 but not to the "
+                "YAML 1.2 that Claude Code reads. Remove it"
+            )
+    root = yaml.compose(header, Loader=yaml.SafeLoader)
+    _refuse_enclosing_references(root, set(), set())
+    _check_mapping(root, set())
 
 
 # ---------------------------------------------------------------------------
@@ -547,7 +1003,9 @@ def _list_agents(root: Path, source: str) -> list[dict[str, Any]]:
             {
                 "name": name,
                 "source": "plugin" if read_only else source,
-                "editable": not read_only,
+                # A file named like a built-in overrides it in Claude Code, but PUT and DELETE
+                # refuse a built-in name, so LIST must not offer an Edit it cannot honor.
+                "editable": not read_only and not is_builtin_agent(name),
                 "description": description,
             }
         )
@@ -582,6 +1040,126 @@ def _is_pair_list(value: Any) -> bool:
     return bool(value) and all(isinstance(entry, tuple) and len(entry) == 2 for entry in value)
 
 
+#: Shown in the editor when :func:`_mcp_servers_as_list` converted a file on load.
+MCP_SERVERS_CONVERSION_NOTE = (
+    "mcpServers was converted from the old mapping form to the list form, because Claude "
+    "Code reads only the list form and ignores a mapping. Save to write the list form."
+)
+
+#: A top-level ``mcpServers:`` key line, at column 0 of the frontmatter (any value).
+_MCP_SERVERS_KEY_LINE_RE = re.compile(r"^mcpServers[ \t]*:")
+#: The same line with NO value on it (an optional comment only): the block form, whose
+#: entries follow on indented lines. A flow mapping on the key line is not rewritten.
+_MCP_SERVERS_BLOCK_KEY_RE = re.compile(r"^mcpServers[ \t]*:[ \t]*(?:#.*)?$")
+
+
+def _indent_as_list_items(block: list[str]) -> list[str] | None:
+    """Re-indent the lines of a block mapping so each entry becomes a list item.
+
+    An entry line, at the block's own indent ``n``, gains ``- `` at column ``n``; every
+    deeper line, and any comment at or past ``n``, gains two spaces, so it stays under its
+    entry. No scalar is touched, so every value keeps its exact spelling and quoting and
+    reads the same in YAML 1.1 and 1.2 (the caller refuses a NEL/LS/PS character, the one
+    case where the two disagree on where a line ends). Returns None for a shape this cannot shift
+    safely: a tab in the indentation, or a content line shallower than the first entry.
+    """
+    indent: int | None = None
+    out: list[str] = []
+    for line in block:
+        stripped = line.lstrip(" ")
+        if not stripped.strip():
+            out.append(line)  # a blank line stays as it is
+            continue
+        lead = len(line) - len(stripped)
+        if stripped.startswith("\t"):
+            return None
+        if indent is None and not stripped.startswith("#"):
+            indent = lead
+        if stripped.startswith("#") and (indent is None or lead >= indent):
+            out.append("  " + line)
+        elif indent is not None and lead == indent:
+            out.append(line[:lead] + "- " + stripped)
+        elif indent is not None and lead > indent:
+            out.append("  " + line)
+        else:
+            return None
+    return out
+
+
+def _mcp_servers_as_list(text: str) -> str | None:
+    """Return ``text`` with a mapping ``mcpServers`` rewritten as the list form, or None.
+
+    The old mapping spelling (``mcpServers:`` then ``name: definition`` lines) is the one
+    Claude Code ignores; the list spelling (``- name: definition``) is the one it reads.
+    The rewrite is textual (:func:`_indent_as_list_items`): each entry becomes one list
+    item, in order, and only the indentation of the ``mcpServers`` block changes. Values,
+    quoting and comments are kept byte for byte, so a value PyYAML (YAML 1.1) and the CLI's
+    YAML 1.2 loader read differently (``yes``, ``0755``) still reads as it did.
+
+    Fail closed: the rewrite is re-parsed, and it is used only when it parses to exactly the
+    original frontmatter with ``mcpServers`` as that list and the body unchanged. That check
+    also catches two entries with the same name, which a mapping collapses and a list keeps.
+    Anything else returns None — a flow mapping on the key line, a duplicate top-level
+    ``mcpServers`` line, a block the line scan cannot bound — and the editor shows the file
+    as it is. Its save is then refused with a message that explains the list form. Nothing
+    here writes to disk.
+    """
+    match = _FRONTMATTER_RE.match(text)
+    if not match:
+        return None
+    try:
+        frontmatter, body = parse_frontmatter(text)
+    except cw.InvalidCandidateError:
+        return None
+    servers = frontmatter.get("mcpServers")
+    if not isinstance(servers, dict) or not servers:
+        return None
+    if any(char in match.group(1) for char in _YAML11_ONLY_LINE_BREAKS):
+        # PyYAML splits lines there and YAML 1.2 does not, so re-indenting "the next line"
+        # would add two spaces inside a value for the CLI. (Its save is refused anyway.)
+        return None
+    lines = match.group(1).splitlines(keepends=True)
+    starts = [i for i, line in enumerate(lines) if _MCP_SERVERS_KEY_LINE_RE.match(line)]
+    if len(starts) != 1 or not _MCP_SERVERS_BLOCK_KEY_RE.match(lines[starts[0]].rstrip("\r\n")):
+        return None
+    start = starts[0]
+    # The block runs until the next line that starts at column 0 (the next top-level key).
+    end = next(
+        (
+            i
+            for i in range(start + 1, len(lines))
+            if lines[i][:1] not in ("", " ", "\t", "\r", "\n")
+        ),
+        len(lines),
+    )
+    block = _indent_as_list_items(lines[start + 1 : end])
+    if block is None:
+        return None
+    rewritten = "".join(lines[: start + 1]) + "".join(block) + "".join(lines[end:])
+    candidate = text[: match.start(1)] + rewritten + text[match.end(1) :]
+    try:
+        new_frontmatter, new_body = parse_frontmatter(candidate)
+    except cw.InvalidCandidateError:
+        return None
+    expected = [{server_name: definition} for server_name, definition in servers.items()]
+    if new_body != body or new_frontmatter != {**frontmatter, "mcpServers": expected}:
+        return None
+    return candidate
+
+
+def _is_builtin_override_file(root: Path, name: str) -> bool:
+    """Whether a regular, non-symlink ``<name>.md`` sits in ``root`` for a built-in ``name``.
+
+    The symlink test runs first, through lstat, so a link is never followed here: a
+    symlinked file named like a built-in keeps reading as the synthetic built-in doc. A
+    built-in name that is not a valid file name (``Explore``) has no file to find.
+    """
+    if not is_valid_agent_name(name):
+        return False
+    candidate = root / f"{name}.md"
+    return not candidate.is_symlink() and candidate.is_file()
+
+
 def _read_agent(root: Path, name: str, source: str) -> dict[str, Any]:
     """Return the full detail doc for one subagent, or raise a typed read error.
 
@@ -590,9 +1168,18 @@ def _read_agent(root: Path, name: str, source: str) -> dict[str, Any]:
     agent, there is just no file backing it here). A missing real file raises
     :class:`AgentNotFoundError` (→ 404). ``frontmatter`` is a **derived, redacted**
     display field (:func:`~clauster.config_write.redact_secrets`); ``content`` is the
-    raw, unredacted file text — the value a subsequent write must re-submit.
+    raw, unredacted file text — the value a subsequent write must re-submit. One exception:
+    when an editable file still uses the old ``mcpServers`` mapping, ``content`` is that text
+    with the block rewritten in the list form (:func:`_mcp_servers_as_list`) and
+    ``converted`` carries the note the editor shows; otherwise ``converted`` is None. The
+    ``frontmatter`` display field always describes the file as it is on disk.
+
+    A built-in name with a regular FILE behind it is the exception: Claude Code lets a user
+    or project agent override a built-in of the same name, so that file is real
+    configuration. It reads like any other file, but never as editable, because write and
+    delete still refuse every built-in name.
     """
-    if is_builtin_agent(name):
+    if is_builtin_agent(name) and not _is_builtin_override_file(root, name):
         return {
             "name": name,
             "source": "built-in",
@@ -658,12 +1245,19 @@ def _read_agent(root: Path, name: str, source: str) -> dict[str, Any]:
         # An unparsable frontmatter block still surfaces via `content` (so the
         # operator can see and fix it); the derived display field just degrades.
         frontmatter = {}
+    editable = not read_only and not is_builtin_agent(name)
+    # Convert-on-save for the old `mcpServers` mapping (the maintainer's call on
+    # TASK-449.5): an editable file is handed to the editor already in the list form, with a
+    # note saying so, so the operator sees the change and the next save writes it. `hash`
+    # stays the hash of the bytes ON DISK, so the stale-write guard is unaffected.
+    converted = _mcp_servers_as_list(text) if editable else None
     return {
         "name": name,
         "source": "plugin" if read_only else source,
-        "editable": not read_only,
+        "editable": editable,
         "exists": True,
-        "content": text,
+        "content": text if converted is None else converted,
+        "converted": None if converted is None else MCP_SERVERS_CONVERSION_NOTE,
         "frontmatter": frontmatter,
         "hash": cw.hash_bytes(raw),
     }
