@@ -844,6 +844,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#subagent-frontmatter-checks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Subagent frontmatter checks
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -1527,6 +1538,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#subagent-frontmatter-checks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Subagent frontmatter checks
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -1825,9 +1847,11 @@ on; the User scope additionally requires <code>config_write.allow_user_scope</co
 row tells the first two apart:</p>
 <ul>
 <li><strong>A built-in subagent is listed with no description, and cannot be edited or
-  deleted.</strong> Claude Code compiles <code>general-purpose</code>, <code>explore</code> and <code>plan</code> into
-  the CLI, so there is no file anywhere to edit. Every install shows these
-  three, at both scopes, before you add anything of your own.</li>
+  deleted.</strong> Claude Code compiles <code>general-purpose</code>, <code>explore</code>, <code>plan</code>,
+  <code>claude</code>, <code>statusline-setup</code> and <code>claude-code-guide</code> into the CLI, so there
+  is no file anywhere to edit. Every install shows these six, at both scopes,
+  before you add anything of your own. You also cannot create a subagent with
+  one of these names in Clauster.</li>
 <li><strong>A plugin-provided subagent is listed, but cannot be edited or deleted.</strong> A
   plugin owns that file, so Clauster refuses to change it. To change it, change
   the plugin. When the plugin supplies it as a symlink, Clauster never follows
@@ -1886,6 +1910,62 @@ still holds masks but their number no longer matches the number of masked
 entries on disk, the save is refused. Restore the masks as they loaded, or type
 the full entry again. If you remove every mask from a list, the save is
 accepted, and it deletes those entries.</p>
+<h3 id="subagent-frontmatter-checks">Subagent frontmatter checks<a class="headerlink" href="#subagent-frontmatter-checks" title="Permanent link">&para;</a></h3>
+<p>The Subagents editor checks the frontmatter of a subagent file before it
+saves the file. It checks each field in the
+<a href="https://code.claude.com/docs/en/sub-agents#supported-frontmatter-fields">Claude Code frontmatter reference</a>.
+It accepts every value that the installed Claude Code (2.1.318) reads for
+that field, also a value that the reference does not list. It refuses a value
+that Claude Code rejects or ignores. If one field fails, Clauster refuses the
+whole save and writes nothing.</p>
+<p>Clauster reads YAML 1.1 and Claude Code reads YAML 1.2, so a few unquoted
+spellings mean different things to the two. Clauster refuses the ones it can
+detect. For example, write <code>true</code>, not <code>yes</code>. Write a plain decimal number,
+not <code>010</code>, <code>0b101</code> or <code>1_000</code>. Quote a value that must stay a string.
+Clauster never runs a hook command and never connects to an MCP server from
+this editor.</p>
+<ul>
+<li><code>name</code> must be lowercase letters, digits and hyphens, at most 239
+  characters, and the same as the name of the file. The name is also the
+  file name, so this rule is narrower than the Claude Code rule. A file with
+  a longer or other name does not show in the list.</li>
+<li><code>memory</code>, <code>color</code> and <code>experimental.cacheTtl</code> accept only their listed
+  values, written exactly as listed.</li>
+<li><code>effort</code> accepts a level name in any case, the alias <code>med</code>, or an integer.
+  <code>isolation</code> accepts <code>worktree</code> and also <code>remote</code>, which Claude Code reads
+  but does not document.</li>
+<li><code>maxTurns</code> and <code>autoCompactWindow</code> accept a number or a string that Claude
+  Code reads as a whole number, for example <code>200000</code>, <code>"200,000"</code> or <code>2e5</code>.
+  <code>autoCompactWindow</code> must be from <code>100000</code> to <code>1000000</code>. Do not write
+  <code>200k</code>: Claude Code reads it as 200, which is out of range.</li>
+<li><code>background</code> and <code>omitClaudeMd</code> accept <code>true</code> and <code>false</code>, also as quoted
+  strings. They refuse <code>yes</code>, <code>no</code>, <code>on</code> and <code>off</code>: Claude Code reads those as
+  text and ignores them.</li>
+<li><code>tools</code> must name at least one tool. <code>disallowedTools</code> refuses a <code>*</code> entry,
+  because Claude Code then applies no denylist at all.</li>
+<li><code>mcpServers</code> must be a list. Each item is the name of a server that you
+  configured already, or a <code>name: definition</code> object. Claude Code reads only
+  the list form and ignores a mapping.</li>
+<li><code>permissionMode</code> accepts <code>manual</code> as an alias for <code>default</code>. It refuses
+  <code>bypassPermissions</code>, as every config-editor surface does. See the
+  <a href="../../security/#bypasspermissions-footgun-gate">bypassPermissions footgun gate</a>.</li>
+<li>A field that is not in the reference is saved as written. Claude Code
+  ignores a field that it does not recognize. The one exception is <code>env</code>:
+  Clauster still refuses an <code>env</code> that is not a map of names to plain values.</li>
+</ul>
+<p>If you open a subagent file that writes <code>mcpServers</code> as a mapping, the editor
+shows it already converted to the list form, with a note above the text. The
+file on disk does not change until you save. Read the converted text, then
+save to write the list form. The conversion only changes the indentation of
+the <code>mcpServers</code> block, so every value and comment stays as you wrote it. If
+the editor cannot convert the block safely, it shows the file as it is, and
+the save tells you to rewrite <code>mcpServers</code> as a list. Two examples are a
+mapping written on one line, such as <code>mcpServers: {github: {...}}</code>, and two
+servers with the same name.</p>
+<p>A file with the name of a built-in subagent, such as <code>claude.md</code>, overrides
+that built-in in Claude Code. The list shows the file as a read-only row next
+to the built-in row. Clauster does not edit or delete that file, so change it
+on the host.</p>
 <h2 id="troubleshooting-and-limits">Troubleshooting and limits<a class="headerlink" href="#troubleshooting-and-limits" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
