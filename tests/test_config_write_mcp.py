@@ -1998,3 +1998,205 @@ def test_route_read_returns_local_scope_conversion_notes(
         local = c.get("/api/config-write/mcp", params={"scope": "local", "project": "alpha"})
     assert local.json()["servers"]["l"] == {"type": "ws", "url": "wss://x"}
     assert [(n["name"], n["field"]) for n in local.json()["conversions"]] == [("l", "transport")]
+
+
+# --- TASK-449.8: a masked credential is bound to its destination ------------------
+# `merge_redacted` restores a mask by key. Without a destination check, changing a
+# remote server's url and resending the mask would send the stored credential to the
+# new host.
+
+_BOUND = {
+    "type": "http",
+    "url": "https://mcp.example.com/v1/mcp?tenant=a",
+    "headers": {"Authorization": "Bearer sk-FAKE4498"},
+    "headersHelper": "print-token-4498",
+    "oauth": {"clientId": "client-4498"},
+}
+
+
+def _seed_bound(tmp_path: Path) -> bytes:
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"s": _BOUND}}), encoding="utf-8"
+    )
+    return (tmp_path / ".mcp.json").read_bytes()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param({"url": "https://evil.example.net/v1/mcp?tenant=a"}, id="host"),
+        pytest.param({"url": "http://mcp.example.com/v1/mcp?tenant=a"}, id="scheme"),
+        pytest.param({"url": "https://mcp.example.com:8443/v1/mcp?tenant=a"}, id="port"),
+        pytest.param({"url": "https://mcp.example.com/other?tenant=a"}, id="path"),
+        pytest.param({"url": "https://mcp.example.com:bad/v1"}, id="unparseable"),
+        pytest.param({"type": "sse"}, id="type"),
+        pytest.param({"type": "streamable-http"}, id="alias-is-same-type"),
+    ],
+)
+def test_masked_credential_is_refused_for_a_new_destination(
+    tmp_path: Path, change: dict, request: pytest.FixtureRequest
+) -> None:
+    before = _seed_bound(tmp_path)
+    shown, h = mcp.read_project_servers(tmp_path)
+    edited = {**shown["s"], **change}
+    if request.node.callspec.id == "alias-is-same-type":
+        # `streamable-http` IS `http`: the destination is unchanged, so the mask is kept.
+        mcp.write_project_server_entry(tmp_path, "s", edited, op="edit")
+        on_disk = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
+        assert on_disk["mcpServers"]["s"]["headers"] == _BOUND["headers"]
+        return
+    with pytest.raises(cw.InvalidCandidateError, match="type or url changed"):
+        mcp.write_project_server_entry(tmp_path, "s", edited, op="edit")
+    with pytest.raises(cw.InvalidCandidateError, match="type or url changed"):
+        mcp.write_project_servers(tmp_path, {"s": edited}, h)
+    assert (tmp_path / ".mcp.json").read_bytes() == before  # nothing written
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param({}, id="unchanged"),
+        pytest.param({"url": "https://mcp.example.com/v1/mcp?tenant=b"}, id="query-only"),
+        pytest.param({"url": "HTTPS://MCP.EXAMPLE.COM/v1/mcp?tenant=a"}, id="case-only"),
+        pytest.param({"timeout": 120000}, id="other-field"),
+    ],
+)
+def test_masked_credential_is_kept_for_the_same_destination(tmp_path: Path, change: dict) -> None:
+    _seed_bound(tmp_path)
+    shown, h = mcp.read_project_servers(tmp_path)
+    edited = {**shown["s"], **change}
+    mcp.write_project_server_entry(tmp_path, "s", edited, op="edit")
+    on_disk = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]["s"]
+    assert on_disk["headers"] == _BOUND["headers"]
+    assert on_disk["headersHelper"] == _BOUND["headersHelper"]
+    assert on_disk["oauth"] == _BOUND["oauth"]
+
+
+def test_new_destination_with_retyped_credentials_is_accepted(tmp_path: Path) -> None:
+    _seed_bound(tmp_path)
+    fresh = {"type": "http", "url": "https://other.example.org/mcp", "headers": {"X": "new"}}
+    mcp.write_project_server_entry(tmp_path, "s", fresh, op="edit")
+    on_disk = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]
+    assert on_disk["s"] == fresh
+
+
+def test_masked_url_with_masked_header_is_kept(tmp_path: Path) -> None:
+    # A credential url is itself masked; a resent mask restores it, so the host is the same.
+    stored = {
+        "type": "http",
+        "url": "https://user:pw-4498@mcp.example.com/mcp",
+        "headers": {"X": "h-4498"},
+    }
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"s": stored}}), encoding="utf-8"
+    )
+    shown, h = mcp.read_project_servers(tmp_path)
+    assert shown["s"]["url"] == cw.REDACTION_SENTINEL
+    mcp.write_project_servers(tmp_path, shown, h)
+    assert (
+        json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]["s"]
+        == stored
+    )
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        pytest.param(
+            {"type": "http", "url": 5, "headers": {"X": "h"}}, id="stored-url-not-a-string"
+        ),
+        pytest.param(
+            {"type": "ftp", "url": "https://x.example/mcp", "headers": {"X": "h"}},
+            id="stored-type-unknown",
+        ),
+    ],
+)
+def test_undecidable_stored_destination_refuses_a_mask(tmp_path: Path, stored: dict) -> None:
+    # A stored entry whose destination cannot be decided never matches: fail closed.
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"s": stored}}), encoding="utf-8"
+    )
+    entry = {
+        "type": "http",
+        "url": "https://x.example/mcp",
+        "headers": {"X": cw.REDACTION_SENTINEL},
+    }
+    with pytest.raises(cw.InvalidCandidateError, match="type or url changed"):
+        mcp.write_project_server_entry(tmp_path, "s", entry, op="edit")
+
+
+def test_stdio_command_change_keeps_a_masked_env(tmp_path: Path) -> None:
+    # Deliberately not bound: the env goes to a program the operator chose on this host.
+    stored = {"command": "old", "env": {"T": "sk-4498"}}
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"s": stored}}), encoding="utf-8"
+    )
+    shown, _h = mcp.read_project_servers(tmp_path)
+    mcp.write_project_server_entry(tmp_path, "s", {**shown["s"], "command": "new"}, op="edit")
+    on_disk = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]
+    assert on_disk["s"] == {"command": "new", "env": {"T": "sk-4498"}}
+
+
+def test_remote_to_stdio_with_a_mask_is_refused(tmp_path: Path) -> None:
+    # A legacy remote `env` backs the mask by key, so only the type change stops it from
+    # being handed to a new stdio program.
+    stored = {"type": "http", "url": "https://x.example/mcp", "env": {"K": "sk-4498"}}
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"s": stored}}), encoding="utf-8"
+    )
+    before = (tmp_path / ".mcp.json").read_bytes()
+    entry = {"command": "x", "env": {"K": cw.REDACTION_SENTINEL}}
+    with pytest.raises(cw.InvalidCandidateError, match="type or url changed"):
+        mcp.write_project_server_entry(tmp_path, "s", entry, op="edit")
+    assert (tmp_path / ".mcp.json").read_bytes() == before
+
+
+def test_destination_binding_on_user_and_local_scope(tmp_path: Path) -> None:
+    cj = tmp_path / "claude.json"
+    proj = tmp_path / "p"
+    cj.write_text(
+        json.dumps(
+            {"mcpServers": {"u": _BOUND}, "projects": {str(proj): {"mcpServers": {"l": _BOUND}}}}
+        ),
+        encoding="utf-8",
+    )
+    before = cj.read_bytes()
+    moved = {"url": "https://evil.example.net/v1/mcp"}
+    user = mcp.read_user_servers(cj)["u"]
+    local = mcp.read_project_local_servers(cj, proj)["l"]
+    with pytest.raises(cw.InvalidCandidateError, match="type or url changed"):
+        mcp.write_user_server_entry(cj, "u", {**user, **moved}, op="edit")
+    with pytest.raises(cw.InvalidCandidateError, match="type or url changed"):
+        mcp.write_project_local_server_entry(cj, proj, "l", {**local, **moved}, op="edit")
+    with pytest.raises(cw.InvalidCandidateError, match="type or url changed"):
+        mcp.write_user_servers(cj, {"u": {**user, **moved}})
+    assert cj.read_bytes() == before
+
+
+def test_route_edit_to_a_new_host_with_a_mask_is_422(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    mcp_json = projects_root / "alpha" / ".mcp.json"
+    mcp_json.write_text(json.dumps({"mcpServers": {"s": _BOUND}}), encoding="utf-8")
+    before = mcp_json.read_bytes()
+    argv_file = tmp_path / "argv.json"
+    monkeypatch.setenv("FAKE_CLAUDE_MCP_ARGV_FILE", str(argv_file))
+    with _client(write_config, tmp_path, _ON) as c:
+        shown = c.get(
+            "/api/config-write/mcp", params={"scope": "project", "project": "alpha"}
+        ).json()["servers"]["s"]
+        resp = c.post(
+            "/api/config-write/mcp/server",
+            json={
+                "scope": "project",
+                "project": "alpha",
+                "confirm": "alpha",
+                "op": "edit",
+                "name": "s",
+                "entry": {**shown, "url": "https://evil.example.net/v1/mcp"},
+            },
+        )
+    assert resp.status_code == 422
+    assert "new host" in resp.json()["detail"]
+    assert mcp_json.read_bytes() == before
+    assert not argv_file.exists()

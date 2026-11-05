@@ -73,6 +73,7 @@ import logging
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from . import config_write as cw
 
@@ -677,8 +678,89 @@ def _unbacked_sentinel(incoming: Any, stored: Any, path: str) -> str | None:
     return None
 
 
+def _url_destination(url: Any) -> tuple[str, str, int | None, str] | None:
+    """Return ``(scheme, host, port, path)`` of ``url``, or ``None`` when it cannot be parsed.
+
+    Scheme and host are lowercased (both are case-insensitive). ``None`` never compares
+    equal to a parsed destination, so an unparseable url fails the check closed.
+    """
+    if not isinstance(url, str):
+        return None
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return None
+    return parts.scheme.lower(), (parts.hostname or "").lower(), port, parts.path
+
+
+def _destination(entry: dict[str, Any], stored: dict[str, Any]) -> tuple[Any, ...] | None:
+    """Return where a remote ``entry`` sends credentials, after masks are restored.
+
+    The destination is the ``type`` and the ``url`` (scheme, host, port, path), the url
+    taken from ``stored`` when it is itself masked. A stdio entry returns ``("stdio",)``:
+    it is not bound (see :func:`_check_destination`). ``None`` means the destination
+    cannot be decided, which never matches.
+    """
+    try:
+        transport = entry_transport(entry)
+    except cw.InvalidCandidateError:
+        return None
+    if transport == "stdio":
+        return ("stdio",)
+    url = entry.get("url")
+    where = _url_destination(stored.get("url") if url == cw.REDACTION_SENTINEL else url)
+    return None if where is None else (transport, where)
+
+
+def _check_destination(name: str, entry: Any, stored: Any) -> None:
+    """Refuse a masked value whose server now points somewhere else (→ 422).
+
+    ``merge_redacted`` restores a sentinel by KEY. Without this check an operator who
+    cannot read a stored header could change the server's ``url`` to a host they control,
+    resend the mask, and Claude Code would send the real credential there. So a masked
+    value in a remote server keeps its stored value only when that server's ``type`` and
+    ``url`` (scheme, host, port, path) are unchanged. The stored entry is first converted
+    as on load, so a legacy ``transport`` compares as its ``type``.
+
+    A stdio server is deliberately NOT bound: editing its ``command`` while keeping a
+    masked ``env`` is a supported edit (the env goes to a program on this host that the
+    operator chose, not to a network destination). A remote entry that turns into stdio,
+    or the reverse, changes ``type`` and is refused.
+    """
+    if not isinstance(entry, dict) or not isinstance(stored, dict):
+        return
+    if not _has_sentinel(entry):
+        return
+    stored_entry = _convert_legacy_entry(stored)[0]
+    now = _destination(entry, stored_entry)
+    if now is None or now != _destination(stored_entry, stored_entry):
+        raise cw.InvalidCandidateError(
+            f"server {name!r} keeps a masked value '********' but its type or url changed; "
+            "the stored credential is not sent to a new host. Type the credential for the "
+            "new host"
+        )
+
+
+def _has_sentinel(value: Any) -> bool:
+    """Whether the redaction sentinel appears anywhere in ``value`` (dicts and lists)."""
+    if value == cw.REDACTION_SENTINEL:
+        return True
+    if isinstance(value, dict):
+        return any(_has_sentinel(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_has_sentinel(v) for v in value)
+    return False
+
+
 def _merge_kept(incoming: Any, stored: Any, path: str = "") -> Any:
-    """Merge ``incoming`` over ``stored``, refusing a sentinel that has nothing to keep (→ 422).
+    """Merge ``incoming`` over ``stored``, refusing a mask that must not be restored (→ 422).
+
+    Two refusals, both before the merge: a sentinel that has nothing to keep
+    (:func:`_unbacked_sentinel`), and a sentinel in a server whose destination changed
+    (:func:`_check_destination`). ``path`` names the server when ``incoming`` is ONE entry
+    (the single-entry writers); an empty ``path`` means ``incoming`` is a whole server map,
+    and each of its entries is checked against its stored twin.
 
     Runs inside the locked writers, over the value read under the lock, so a stored value
     removed by a concurrent edit is caught too. Raising here aborts the transaction before
@@ -690,6 +772,13 @@ def _merge_kept(incoming: Any, stored: Any, path: str = "") -> Any:
             f"{missing} is the masked value '********' but nothing is stored to keep; "
             "type the real value"
         )
+    if path:
+        _check_destination(path, incoming, stored)
+    else:
+        # A whole server map; the writers validated it as an object before the lock.
+        stored_map = stored if isinstance(stored, dict) else {}
+        for name, entry in incoming.items():
+            _check_destination(str(name), entry, stored_map.get(name))
     return cw.merge_redacted(incoming, stored)
 
 

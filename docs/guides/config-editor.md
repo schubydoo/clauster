@@ -232,6 +232,11 @@ ignores them:
 - A masked value (`********`) when nothing is stored behind it, for example in
   a new server that you copied from the masked view of another one. Type the
   real value instead.
+- A masked value in an `http`, `sse` or `ws` server when you changed its `type`,
+  or the scheme, host, port or path of its `url`. Clauster does not send a
+  stored credential to a new host. Type the credential again for the new host.
+  A change to the query string only, or to a stdio server's `command`, keeps
+  the masked values.
 - A reserved name, such as `workspace`, `claude-in-chrome` or `computer-use`.
 - An entry with a `url` and no `type`. Claude Code reads such an entry as a
   stdio server and skips it.
