@@ -852,7 +852,8 @@ def _check_mapping(node: yaml.MappingNode, seen: set[int]) -> None:
 
     ``compose`` leaves merges unflattened, so a ``<<: {background: yes}`` would otherwise
     never be looked at. A source is checked even where an explicit key overrides it, which
-    only ever refuses more. ``seen`` stops an alias cycle.
+    only ever refuses more. ``seen`` skips a source merged twice; an alias cycle never gets
+    here, because :func:`_refuse_enclosing_references` refuses it first.
     """
     if id(node) in seen:
         return

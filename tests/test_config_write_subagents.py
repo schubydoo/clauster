@@ -468,7 +468,7 @@ def test_yaml12_booleans_and_quoted_strings_still_save(spelling: str) -> None:
         # falls back to re-quoting values, so `plan # c` would arrive as one string.
         "a: &a {<<: *a}\npermissionMode: plan # read only",
         "a: &a {<<: *a}\n<<: *a",
-        "a: &a [1, *a]",
+        "a: &a {<<: [*a]}\npermissionMode: plan # c",  # the same, through a merge list
         "maxTurns: 1:30",
         "effort: 0b11",
         "maxTurns: 5.0_0",
@@ -476,7 +476,7 @@ def test_yaml12_booleans_and_quoted_strings_still_save(spelling: str) -> None:
 )
 def test_yaml11_only_spellings_are_refused(header: str) -> None:
     text = f"---\nname: x\ndescription: d\n{header}\n---\nbody\n"
-    with pytest.raises(cw.InvalidCandidateError, match="YAML|true or false"):
+    with pytest.raises(cw.InvalidCandidateError, match="YAML 1.2|true or false"):
         sub.validate_agent_content(text, expected_name="x")
 
 
