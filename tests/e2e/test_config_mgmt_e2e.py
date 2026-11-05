@@ -1210,6 +1210,61 @@ def test_config_mgmt_skill_visibility_stale_hash_is_refused(
     }
 
 
+# Holds the response of the skill-visibility PUT in the page until `__release249()` runs.
+# The request itself goes out at once, so the write lands on disk while the page still
+# waits: exactly the window in which an operator can click Edit on a skill.
+_HOLD_VISIBILITY_PUT = """(() => {
+  window.__hold249 = new Promise(r => { window.__release249 = r; });
+  const real = window.fetch;
+  window.fetch = function (url, opts) {
+    const p = real.apply(this, arguments);
+    const isPut = opts && opts.method === "PUT" && String(url).includes("/skills/overrides");
+    return isPut ? window.__hold249.then(() => p) : p;
+  };
+  return true;
+})()"""
+
+
+def test_config_mgmt_skill_visibility_save_lands_across_editor_navigation(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Edit clicked during a visibility save does not drop the saved hash and baseline."""
+    alpha = _projects_root(config_mgmt_server) / "alpha"
+    _seed_skill(alpha, "greeter")
+    settings = alpha / ".claude" / "settings.json"
+
+    _open_skill_visibility(browser, config_mgmt_server)
+    browser.select('[data-test="cm-skill-ov-greeter"]', "off")
+    assert browser.eval_json(_HOLD_VISIBILITY_PUT) is True
+    _save_skill_visibility(browser, "alpha")
+
+    # The write lands while the page still waits for the response.
+    deadline = time.monotonic() + 10
+    while not (settings.exists() and "greeter" in settings.read_text(encoding="utf-8")):
+        assert time.monotonic() < deadline, "the held save never reached the server"
+        time.sleep(0.1)
+    browser.click('[data-test="cm-skill-edit-greeter"]')  # bumps the editor's gen
+    browser.expect_visible('[data-test="cm-skill-editor"]')
+    browser.eval_json("(() => { window.__release249(); return true; })()")
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+    browser.click('[data-test="cm-skill-cancel"]')
+
+    # Back in the list: the saved value is the baseline, so nothing reads as unsaved.
+    browser.expect_value('[data-test="cm-skill-ov-greeter"]', "off")
+    browser.expect_hidden('[data-test="cm-skill-ov-changed-greeter"]')
+    browser.expect_hidden('[data-test="cm-skill-ov-confirm"]')
+
+    # A second save uses the new hash, so it is not refused as changed on disk.
+    browser.select('[data-test="cm-skill-ov-greeter"]', "name-only")
+    _save_skill_visibility(browser, "alpha")
+    # "Saved." may still show from the first save, so wait on the outcome instead: the
+    # confirm hides only once the reload makes the new value the baseline.
+    browser.expect_hidden('[data-test="cm-skill-ov-confirm"]', timeout_ms=_SAVE_TIMEOUT)
+    browser.expect_hidden('[data-test="cm-error"]')
+    on_disk = json.loads(settings.read_text(encoding="utf-8"))
+    assert on_disk["skillOverrides"] == {"greeter": "name-only"}
+
+
 def test_config_mgmt_skill_save_keeps_unsaved_visibility_choices(
     browser: AgentBrowser, config_mgmt_server: Server
 ) -> None:

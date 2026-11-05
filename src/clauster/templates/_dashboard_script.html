@@ -1785,6 +1785,7 @@
         // `loading` blocks reopen (openConfigMgmt bails on `c.loading`) and a stranded
         // `saving` keeps Save disabled. The gen bump already voids the stale response.
         c.loading = false; c.saving = false;
+        c.skills.ov.loadId += 1;  // a late skill-visibility result must not land after close
         document.body.style.overflow = "";  // release the scroll lock
         if (c.trigger && c.trigger.focus) c.trigger.focus();
       },
@@ -1872,6 +1873,10 @@
       async configMgmtReload() {
         const c = this.configMgmt;
         c.saved = false; c.error = "";
+        // Every scope, project or surface change lands here: void the skill-visibility
+        // map load and save in flight (they ignore c.gen, see _loadSkillOverrides). Before
+        // the early return, so a switch to a scope with no project voids them too.
+        c.skills.ov.loadId += 1;
         if (this.configMgmtNeedsProject()) { c.loading = false; return; }
         c.gen = (c.gen || 0) + 1;
         const myGen = c.gen;
@@ -3614,7 +3619,8 @@
       },
       // Staleness is `loadId`, not `c.gen`: opening or creating a skill bumps gen without
       // reloading, and a gen-gated finally would then leave `loading` set for good. Every
-      // scope, project or surface change reloads through _loadSkills, which bumps loadId.
+      // scope, project or surface change runs configMgmtReload, and closing the window runs
+      // closeConfigMgmt: both bump loadId, as does each new map load here.
       async _loadSkillOverrides(names, keepOvEdits) {
         const c = this.configMgmt, ov = c.skills.ov;
         ov.listed = names;
@@ -3722,10 +3728,15 @@
         if (ov.confirm !== this.configMgmtConfirmToken()) return false;  // type-the-name gate
         return this.configMgmtSkillOvDirty();
       },
+      // Guarded by `loadId`, not `c.gen`, like the map load: Edit, New skill and Delete bump
+      // gen for the editor but change neither scope nor project, so a write that succeeded
+      // must still land its new hash and baseline. Only what makes the save stale (a scope,
+      // project or surface change, a closed window, a fresh map load) bumps loadId.
       async configMgmtSaveSkillOv() {
         const c = this.configMgmt, ov = c.skills.ov;
         if (!this.configMgmtCanSaveSkillOv()) return;
-        const gen = c.gen; ov.ops += 1; ov.busy = true; c.error = ""; c.saved = false;
+        const id = ov.loadId; ov.ops += 1; ov.busy = true; c.error = ""; c.saved = false;
+        let live = false;  // this save's result still belongs to the panel on screen
         try {
           const body = Object.assign(this._configMgmtTarget(), {
             overrides: this._skillOvPayload(), confirm: ov.confirm, hash: ov.hash,
@@ -3733,20 +3744,26 @@
           const res = await fetch(ROOT + "/api/config-write/skills/overrides", {
             method: "PUT", headers: JSON_HEADERS, body: JSON.stringify(body),
           });
-          if (c.gen !== gen) return;
+          if (ov.loadId !== id) return;
           if (this._authExpired(res)) return;
+          live = true;
           if (res.ok) {
             c.saved = true; ov.confirm = "";
+            // The reload takes the next loadId synchronously, before its first await.
+            const reload = ov.loadId + 1;
             await this._loadSkillOverrides(ov.listed, false);
+            live = ov.loadId === reload;
             // The confirm and Save hide once nothing is dirty; give focus a visible home.
-            if (c.gen === gen) this._focusSkillOvAddName();
+            if (live) this._focusSkillOvAddName();
           }
           else await this._configMgmtWriteErr(res);
-        } catch (e) { if (c.gen === gen) c.error = "Save failed."; }
+        } catch (e) {
+          if (ov.loadId === id) { live = true; c.error = "Save failed."; }
+        }
         finally {
           ov.ops = Math.max(0, ov.ops - 1); ov.busy = ov.ops > 0;
           // The banners sit above the panel and Save sits at its foot (#1031).
-          if (c.gen === gen && (c.error || c.saved)) {
+          if (live && (c.error || c.saved)) {
             this.revealFeedback(c.error ? '[data-test="cm-error"]' : '[data-test="cm-saved"]');
           }
         }
