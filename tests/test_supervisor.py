@@ -1131,7 +1131,7 @@ def test_api_resume_agent_prefix_sibling_does_not_borrow(
 
 
 def test_api_resume_agent_nul_byte_cwd_is_403(write_config, tmp_path, projects_root, monkeypatch):
-    # resolve() raises ValueError on an embedded NUL: still a 403, never a 500.
+    # A NUL-byte cwd is refused before resolve() on every OS: a 403, never a 500.
     r, captured = _resume_via_route(
         write_config,
         tmp_path,
@@ -1141,6 +1141,18 @@ def test_api_resume_agent_nul_byte_cwd_is_403(write_config, tmp_path, projects_r
     )
     assert r.status_code == 403
     assert captured == []
+
+
+def test_projects_holding_refuses_nul_even_when_resolve_does_not_raise(
+    write_config, tmp_path, projects_root, monkeypatch
+):
+    # Windows' non-strict resolve() returns a NUL path unresolved instead of raising, so
+    # emulate that here: the guard, not the ValueError catch, must refuse it.
+    from clauster.routes import agents as agents_module
+
+    config = load_config(write_config(_ALPHA_CEILING))
+    monkeypatch.setattr(Path, "resolve", lambda self, strict=False: self)
+    assert agents_module._projects_holding(config, projects_root / "alpha" / "bad\x00name") == []
 
 
 _A_ON = "  a:\n    allow_bypass_permissions: true\n"
