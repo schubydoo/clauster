@@ -39,6 +39,19 @@ def _open_modal(browser: AgentBrowser, server: Server) -> None:
     browser.expect_visible('[data-test="configmgmt-modal"]')
 
 
+def _switch_to_user_scope(browser: AgentBrowser) -> None:
+    """Click the User scope and wait for the layout it causes to settle.
+
+    User scope hides the project selector (`x-show`), which sits above the surface tabs,
+    so every tab moves up by the selector's height on the next Alpine frame. A click
+    sent before that frame is aimed at the tab's OLD position, which is then inside the
+    CLAUDE.md textarea: the click focuses the textarea and the surface never changes.
+    Waiting for the selector to be hidden makes the next click hit the tab it names.
+    """
+    browser.click('[data-test="cm-scope-user"]')
+    browser.expect_hidden('[data-test="cm-project"]')
+
+
 def test_config_mgmt_claude_md_project_round_trip(
     browser: AgentBrowser, config_mgmt_server: Server
 ) -> None:
@@ -204,7 +217,7 @@ def test_config_mgmt_auto_mode_user_scope_round_trip(
     home = Path(config_mgmt_server.state_dir).parent / "home"
 
     _open_modal(browser, config_mgmt_server)
-    browser.click('[data-test="cm-scope-user"]')
+    _switch_to_user_scope(browser)
     browser.click('[data-test="cm-surface-permissions"]')
     browser.expect_visible('[data-test="cm-view-permissions"]')
     browser.expect_visible('[data-test="cm-automode-text"]')
@@ -229,7 +242,7 @@ def test_config_mgmt_auto_mode_only_edit_keeps_permissions_as_loaded(
     settings.write_text(json.dumps({"permissions": seeded}), encoding="utf-8")
 
     _open_modal(browser, config_mgmt_server)
-    browser.click('[data-test="cm-scope-user"]')
+    _switch_to_user_scope(browser)
     browser.click('[data-test="cm-surface-permissions"]')
     browser.expect_visible('[data-test="cm-permissions-rows"]')  # the seed fits the rows
     browser.fill('[data-test="cm-automode-text"]', json.dumps(_MAINTAINER_AUTO_MODE))
@@ -263,8 +276,10 @@ def test_config_mgmt_permissions_failed_load_clears_previous_rows(
     _open_modal(browser, config_mgmt_server)
     browser.select('[data-test="cm-project"]', "alpha")
     browser.click('[data-test="cm-surface-permissions"]')
-    browser.expect_count('[data-test="cm-perm-rule-allow"]', 1)  # alpha's rule loaded
-    browser.click('[data-test="cm-scope-user"]')
+    # Wait for the rule row to be VISIBLE, not just in the DOM: a count also sees rows
+    # under a still-hidden view, so the scope switch below could beat the load.
+    browser.expect_visible('[data-test="cm-perm-rule-allow"]')  # alpha's rule loaded
+    _switch_to_user_scope(browser)
     browser.expect_visible('[data-test="cm-error"]')
     browser.expect_count('[data-test="cm-perm-rule-allow"]', 0)  # alpha's rule is gone
     browser.fill('[data-test="cm-confirm"]', "USER SCOPE")
