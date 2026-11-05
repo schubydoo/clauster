@@ -1301,6 +1301,452 @@ def test_conversion_is_dropped_when_the_rewrite_reads_back_as_other_data(
     assert sub._mcp_servers_as_list(_MAP_FORM) is None
 
 
+# --- Inline mcpServers definitions go through the MCP tab's validator (TASK-479) ----------
+#
+# The 2.1.318 agent-file loader reads each inline item with the `.mcp.json` entry schema,
+# skips an item with more than one key, and skips a reserved name, but applies no charset
+# to the name. Each case below was probed against that CLI in an isolated config dir.
+
+
+def _servers(*items: object) -> dict[str, object]:
+    return {"name": "x", "description": "d", "mcpServers": list(items)}
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        # Names the agent-file loader connects, though the MCP tab refuses them for
+        # `.mcp.json`: no charset applies to an inline name.
+        {"dotted.name": {"command": "npx"}},
+        {"space name": {"command": "npx"}},
+        {"-lead": {"command": "npx"}},
+        {"constructor": {"command": "npx"}},
+        {"prototype": {"command": "npx"}},
+        # Every field the MCP tab accepts, per transport.
+        {
+            "full-http": {
+                "type": "streamable-http",
+                "url": "https://example.com/mcp",
+                "headers": {"Authorization": "Bearer ${TOKEN}"},
+                "headersHelper": "/usr/local/bin/helper",
+                "oauth": {"clientId": "c", "callbackPort": 8080, "xaa": True},
+                "request_timeout_ms": 5000,
+                "tools": [{"name": "fetch", "permission_policy": "always_ask"}],
+                "toolPermissions": {"fetch": "ask"},
+                "displayName": "Full",
+                "discoveryCache": False,
+                "timeout": 30000,
+                "alwaysLoad": True,
+                "bareElicitationCapability": True,
+                "role": "comms",
+            }
+        },
+        {"sock": {"type": "ws", "url": "wss://example.com", "headersHelper": "h"}},
+        {"local": {"type": "stdio", "command": "npx", "args": ["-y", "x"], "env": {"A": "b"}}},
+    ],
+)
+def test_inline_servers_accept_what_the_agent_loader_reads(item: object) -> None:
+    sub.validate_frontmatter(_servers(item, "github"))
+
+
+@pytest.mark.parametrize(
+    ("items", "message"),
+    [
+        # The MCP tab's field refusals, now reached for inline servers too.
+        ([{"srv": {"transport": "sse", "url": "https://e.com"}}], "'transport' is not"),
+        ([{"srv": {"type": "http", "url": "https://e.com", "env": {"A": "b"}}}], "has 'env'"),
+        ([{"srv": {"command": "x", "cwd": "/tmp"}}], r"unknown keys: \['cwd'\]"),
+        ([{"srv": {"url": "https://e.com"}}], "has a 'url' but no 'type'"),
+        ([{"srv": {"type": "sdk", "name": "x"}}], "registered at runtime"),
+        ([{"srv": {"type": "bogus", "command": "x"}}], "unknown server transport"),
+        ([{"srv": {"type": "http"}}], "requires a non-empty string 'url'"),
+        ([{"srv": {"args": ["a"]}}], "requires a non-empty string 'command'"),
+        ([{"srv": {"command": "x", "timeout": 0}}], "'timeout' must be a positive integer"),
+        ([{"srv": {"type": "ws", "url": "wss://e", "oauth": {}}}], "unknown keys"),
+        ([{"srv": "not-an-object"}], "must be an object"),
+        # What the agent-file loader skips.
+        ([{"a": {"command": "x"}, "b": {"command": "y"}}], "defines 2 servers"),
+        ([{"gh": {"command": "x"}}, {"gh": {"command": "y"}}], "defines inline server 'gh' twice"),
+        # YAML can give a definition a number or null key; the 422 still names the keys.
+        ([{"srv": {"command": "x", 1: "y", None: "z"}}], r"unknown keys: \[1, None\]"),
+        ([{"srv": {"type": "http", "url": "u", "oauth": {1: "a", "b": "c"}}}], "unknown keys"),
+        (
+            [{"srv": {"type": "http", "url": "u", "tools": [{"name": "n", 1: "a", "b": "c"}]}}],
+            "unknown",
+        ),
+    ],
+)
+def test_inline_servers_refuse_what_the_cli_rejects_or_ignores(
+    items: list[object], message: str
+) -> None:
+    with pytest.raises(cw.InvalidCandidateError, match=message) as exc:
+        sub.validate_frontmatter(_servers(*items))
+    # The message says which subagent field and which server it is about.
+    assert str(exc.value).startswith("frontmatter 'mcpServers'")
+
+
+@pytest.mark.parametrize("name", sorted(sub._FRONTMATTER_SKIPPED_SERVER_NAMES))
+def test_inline_servers_refuse_each_name_the_agent_loader_skips(name: str) -> None:
+    with pytest.raises(cw.InvalidCandidateError, match="is reserved by Claude Code"):
+        sub.validate_frontmatter(_servers({name: {"command": "x"}}))
+
+
+def test_a_string_reference_may_repeat_an_inline_name() -> None:
+    # Only two INLINE definitions of one name collide: the loader skips string references
+    # when it builds the inline servers.
+    sub.validate_frontmatter(_servers("gh", {"gh": {"command": "x"}}))
+
+
+@pytest.mark.parametrize(
+    "definition",
+    [
+        "      alwaysLoad: yes\n",
+        "      bareElicitationCapability: on\n",
+        "      timeout: 1_000\n",
+        "      timeout: 010\n",
+        '      type: http\n      url: "https://e.com"\n      oauth:\n        xaa: no\n',
+        "      type: http\n      url: https://e.com\n      oauth:\n        callbackPort: 0b101\n",
+        '      type: http\n      url: "https://e.com"\n      discoveryCache: off\n',
+        '      type: http\n      url: "https://e.com"\n      request_timeout_ms: 1:30\n',
+        # Through a merge key, which `compose` leaves unflattened.
+        "      <<: {alwaysLoad: yes}\n",
+    ],
+)
+def test_inline_servers_refuse_yaml11_only_spellings(definition: str) -> None:
+    # PyYAML reads these as booleans or numbers; the CLI's YAML 1.2 reads another value or
+    # a string, which its entry schema refuses, so it would skip the whole server.
+    if "command" not in definition and "url" not in definition:
+        definition = "      command: x\n" + definition
+    text = f"---\nname: x\ndescription: d\nmcpServers:\n  - srv:\n{definition}---\nbody\n"
+    with pytest.raises(cw.InvalidCandidateError, match="frontmatter 'mcpServers' inline server"):
+        sub.validate_agent_content(text, expected_name="x")
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        "  - srv:\n      command: x\n      env: {A: 1e3}\n",
+        "  - srv:\n      command: x\n      args: [ok, 0o17]\n",
+        "  - srv:\n      command: '09'\n      args:\n        - 09\n",
+        "  - srv:\n      type: http\n      url: https://e.com\n      headers:\n        X: 1.0e3\n",
+        "  - srv:\n      type: http\n      url: https://e.com\n      oauth: {clientId: 1e5}\n",
+        "  - 0o17\n",  # a server-name reference
+        # Probed one by one as an `args` item on 2.1.318: each made the server invalid.
+        *[
+            f"  - srv:\n      command: x\n      args: [{v}]\n"
+            for v in ("+1e3", "1E3", "-0o17", "+0o7", "-.5", "+.5e-3")
+        ],
+    ],
+)
+def test_inline_servers_refuse_strings_yaml12_reads_as_numbers(item: str) -> None:
+    # PyYAML reads each plain value as a string; the CLI's YAML 1.2 reads a number, which its
+    # entry schema refuses, so it skips the server (probed: `env: {A: 1e3}`, `args: [0o17]`).
+    text = f"---\nname: x\ndescription: d\nmcpServers:\n{item}---\nbody\n"
+    with pytest.raises(
+        cw.InvalidCandidateError, match="as a number, not a string, and drops that mcpServers"
+    ):
+        sub.validate_agent_content(text, expected_name="x")
+
+
+def test_inline_servers_accept_quoted_number_strings() -> None:
+    text = (
+        "---\nname: x\ndescription: d\nmcpServers:\n  - srv:\n      command: x\n"
+        "      args: ['0o17', \"1e3\", --port, 0O17, 0o8, 1.2.3]\n"
+        "      env: {A: '1e3', B: 1e3x}\n---\nbody\n"
+    )
+    sub.validate_agent_content(text, expected_name="x")
+
+
+def test_inline_servers_accept_yaml12_spellings() -> None:
+    text = (
+        "---\nname: x\ndescription: d\nmcpServers:\n  - github\n  - srv:\n"
+        "      type: http\n      url: https://e.com\n      alwaysLoad: true\n"
+        "      timeout: 30000\n      oauth:\n        xaa: false\n        callbackPort: 8080\n"
+        "---\nbody\n"
+    )
+    sub.validate_agent_content(text, expected_name="x")
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "mcpServers:\n  srv: {alwaysLoad: yes}\n",  # the mapping form: refused elsewhere
+        "mcpServers:\n  - srv: yes\n",  # not a definition object: refused elsewhere
+        "mcpServers:\n  - srv: {oauth: yes}\n",  # an oauth that is not an object
+        "mcpServers:\n  - srv: {headers: {X: yes}}\n",  # not a boolean field
+    ],
+)
+def test_inline_spelling_check_leaves_other_shapes_to_the_validator(header: str) -> None:
+    sub._refuse_yaml11_only_spellings(header)
+
+
+def _alias_pyramid(depth: int, *, bottom: str = "a") -> str:
+    """Return a subagent file whose discarded duplicate `args` keys hold an alias pyramid.
+
+    Each level aliases the one below four times. `safe_load` keeps only the last `args`,
+    `[]`, so the loaded data is tiny and passes every check on it; only a walk of the
+    composed tree sees the pyramid.
+    """
+    levels = [f"      args: &p0 [{bottom}, {bottom}, {bottom}, {bottom}]"]
+    for level in range(1, depth + 1):
+        below = f"*p{level - 1}"
+        levels.append(f"      args: &p{level} [{below}, {below}, {below}, {below}]")
+    return (
+        "---\nname: x\ndescription: d\nmcpServers:\n  - srv:\n      command: c\n"
+        + "\n".join(levels)
+        + "\n      args: []\n---\nbody\n"
+    )
+
+
+def _naive_walk_visits(node: yaml.Node) -> int:
+    """Count the nodes a walk that follows every alias path visits (memoized, so it is fast)."""
+    counts: dict[int, int] = {}
+
+    def visits(current: yaml.Node) -> int:
+        if id(current) not in counts:
+            if isinstance(current, yaml.SequenceNode):
+                children = current.value
+            elif isinstance(current, yaml.MappingNode):
+                children = [value for _key, value in current.value]
+            else:
+                children = []
+            counts[id(current)] = 1 + sum(visits(child) for child in children)
+        return counts[id(current)]
+
+    return visits(node)
+
+
+@pytest.mark.timeout(20)
+def test_shared_aliases_under_a_discarded_key_do_not_hang_a_save(tmp_path: Path) -> None:
+    # Greptile on TASK-479: the number-string walk followed each alias path again, so this
+    # file of under 1 KB, which a walk without memory visits more than 10**12 times, never
+    # finished saving and held a server worker. Each composed node is now checked once.
+    text = _alias_pyramid(20)
+    assert len(text.encode("utf-8")) < 1024
+    header = sub._FRONTMATTER_RE.match(text)
+    assert header is not None
+    root = yaml.compose(header.group(1), Loader=yaml.SafeLoader)
+    assert _naive_walk_visits(root) > 10**12  # the positive control: it IS a pyramid
+    start = time.monotonic()
+    sub.validate_agent_content(text, expected_name="x")
+    assert time.monotonic() - start < 0.5
+    sub.write_project_agent(tmp_path, "x", text, None)  # and the save goes through
+    # The walk still follows aliases: here the bad value sits in the bottom level of a
+    # pyramid that only the discarded `args: *p20` reaches, 21 alias levels down. The levels
+    # are discarded duplicates of a top-level key, which this walk does not enter itself.
+    levels = ["pyr: &p0 [1e3, a]"] + [f"pyr: &p{i} [*p{i - 1}, *p{i - 1}]" for i in range(1, 21)]
+    deep = (
+        "---\nname: x\ndescription: d\n"
+        + "\n".join(levels)
+        + "\npyr: 0\nmcpServers:\n  - srv:\n      command: c\n      args: *p20\n"
+        "      args: []\n---\nbody\n"
+    )
+    start = time.monotonic()
+    with pytest.raises(cw.InvalidCandidateError, match="as a number, not a string"):
+        sub.validate_agent_content(deep, expected_name="x")
+    assert time.monotonic() - start < 0.5
+
+
+@pytest.mark.parametrize(
+    "bottom", ["{command: c}", "{command: c, alwaysLoad: yes}", "{command: c, args: [1e3]}"]
+)
+def test_a_long_merge_chain_behind_an_inline_server_is_walked_without_recursion(
+    bottom: str,
+) -> None:
+    # A `<<` chain declared in document order loads fine and passes the merge-size guard
+    # (each link is one pair), so the spelling walk met its full length. Recursively, 1500
+    # links overflowed the stack; the walk is iterative now and still reaches the bottom.
+    links = [f"x0: &a0 {bottom}"] + [f"x{i}: &a{i} {{<<: *a{i - 1}}}" for i in range(1, 1500)]
+    text = (
+        "---\nname: x\ndescription: d\n"
+        + "\n".join(links)
+        + "\nmcpServers:\n  - s: *a1499\n---\nbody\n"
+    )
+    assert len(text.encode("utf-8")) < sub.MAX_BYTES
+    if bottom == "{command: c}":
+        sub.validate_agent_content(text, expected_name="x")
+    else:
+        with pytest.raises(cw.InvalidCandidateError, match="inline server 's'"):
+            sub.validate_agent_content(text, expected_name="x")
+
+
+def test_each_kind_of_inline_check_keeps_its_own_walked_nodes() -> None:
+    # One node reached first as an `env` value (the number-string walk) and then as server
+    # b's definition must still get the definition checks: one shared walked set would skip
+    # it and accept `alwaysLoad: yes`, which the CLI reads as a string.
+    header = "mcpServers:\n  - a: {command: x, env: &n {alwaysLoad: yes}}\n  - b: *n\n"
+    with pytest.raises(cw.InvalidCandidateError, match="inline server 'b' 'alwaysLoad'"):
+        sub._refuse_yaml11_only_spellings(header)
+
+
+_INLINE_LEGACY = (
+    "---\nname: my-agent\ndescription: d\n"
+    "mcpServers:\n"
+    "  - github\n"
+    "  - legacy:\n      transport: sse  # old spelling\n      url: https://e.com/sse\n"
+    "  - both:\n      type: http\n      transport: http\n      url: https://e.com/mcp\n"
+    "      env:\n        # never read\n        TOKEN: x\n\n        OTHER: y\n"
+    "      alwaysLoad: true\n"
+    "  - local:\n      command: npx\n      env:\n        DEBUG: '1'\n"
+    "model: opus\n"
+    "---\nYou are a helper.\n"
+)
+# Only the `transport` and remote `env` lines change; the blank line inside the dropped
+# `env` stays, and every other value and comment keeps its spelling.
+_INLINE_CONVERTED = (
+    "---\nname: my-agent\ndescription: d\n"
+    "mcpServers:\n"
+    "  - github\n"
+    "  - legacy:\n      type: sse  # old spelling\n      url: https://e.com/sse\n"
+    "  - both:\n      type: http\n      url: https://e.com/mcp\n"
+    "\n"
+    "      alwaysLoad: true\n"
+    "  - local:\n      command: npx\n      env:\n        DEBUG: '1'\n"
+    "model: opus\n"
+    "---\nYou are a helper.\n"
+)
+
+
+def test_read_converts_the_inline_fields_claude_code_ignores(tmp_path: Path) -> None:
+    path = _place(tmp_path, "my-agent", _INLINE_LEGACY)
+    doc = sub.read_project_agent(tmp_path, "my-agent")
+    assert doc["content"] == _INLINE_CONVERTED
+    note = doc["converted"]
+    assert note == (
+        "Inline MCP server 'legacy': 'transport' is converted to \"type\": 'sse' (Claude Code "
+        "ignores it, and reads 'type' only). Inline MCP server 'both': 'transport' is removed "
+        "because 'type' is set (Claude Code ignores it). Inline MCP server 'both': 'env' on a "
+        "remote server is removed (Claude Code ignores it). It held 2 value(s), which Claude "
+        f"Code never read. {sub.INLINE_SERVERS_CONVERSION_TAIL}"
+    )
+    # The note never carries a stored value.
+    assert "TOKEN" not in note and "OTHER" not in note
+    # The read writes nothing, and the stale-write guard keys on the bytes on disk.
+    assert path.read_bytes() == _INLINE_LEGACY.encode("utf-8")
+    assert doc["hash"] == cw.hash_bytes(_INLINE_LEGACY.encode("utf-8"))
+    # The unconverted file is refused on save; the converted text saves and reads clean.
+    with pytest.raises(cw.InvalidCandidateError, match="'transport' is not"):
+        sub.write_project_agent(tmp_path, "my-agent", _INLINE_LEGACY, doc["hash"])
+    sub.write_project_agent(tmp_path, "my-agent", doc["content"], doc["hash"])
+    again = sub.read_project_agent(tmp_path, "my-agent")
+    assert (again["content"], again["converted"]) == (_INLINE_CONVERTED, None)
+
+
+def test_mapping_and_inline_conversion_share_one_note(tmp_path: Path) -> None:
+    text = (
+        "---\nname: my-agent\ndescription: d\nmcpServers:\n"
+        "  remote:\n    transport: http\n    url: https://e.com\n---\nbody\n"
+    )
+    _place(tmp_path, "my-agent", text)
+    doc = sub.read_project_agent(tmp_path, "my-agent")
+    assert doc["content"] == (
+        "---\nname: my-agent\ndescription: d\nmcpServers:\n"
+        "  - remote:\n      type: http\n      url: https://e.com\n---\nbody\n"
+    )
+    assert doc["converted"].startswith(sub.MCP_SERVERS_CONVERSION_NOTE + " Inline MCP server")
+    assert doc["converted"].endswith(sub.INLINE_SERVERS_CONVERSION_TAIL)
+
+
+def test_inline_conversion_keeps_crlf_line_endings(tmp_path: Path) -> None:
+    _place(tmp_path, "my-agent", _INLINE_LEGACY.replace("\n", "\r\n"))
+    doc = sub.read_project_agent(tmp_path, "my-agent")
+    assert doc["content"] == _INLINE_CONVERTED.replace("\n", "\r\n")
+
+
+def test_inline_conversion_skips_read_only_files(tmp_path: Path) -> None:
+    plugin = _INLINE_LEGACY.replace("model: opus", "model: opus\nnote: ${CLAUDE_PLUGIN_ROOT}")
+    _place(tmp_path, "my-agent", plugin)
+    doc = sub.read_project_agent(tmp_path, "my-agent")
+    assert (doc["editable"], doc["content"], doc["converted"]) == (False, plugin, None)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # A definition in flow style: there is no key line to edit.
+        "---\nname: my-agent\ndescription: d\nmcpServers:\n"
+        "  - srv: {transport: sse, url: https://e.com}\n---\nbody\n",
+        # The whole list in flow style on the key line.
+        "---\nname: my-agent\ndescription: d\n"
+        "mcpServers: [{srv: {transport: sse, url: https://e.com}}]\n---\nbody\n",
+        # The ignored field comes in through a merge key.
+        "---\nname: my-agent\ndescription: d\nmcpServers:\n"
+        "  - srv:\n      <<: {transport: sse}\n      url: https://e.com\n---\nbody\n",
+        # A line break only to YAML 1.1 somewhere in the header.
+        '---\nname: my-agent\ndescription: "d\u2028e"\nmcpServers:\n'
+        "  - srv:\n      transport: sse\n      url: https://e.com\n---\nbody\n",
+        # A `transport` that is not a transport word: never converted, refused on save.
+        "---\nname: my-agent\ndescription: d\nmcpServers:\n"
+        "  - srv:\n      transport: carrier-pigeon\n      url: https://e.com\n---\nbody\n",
+        # Two top-level mcpServers lines: the line scan cannot tell which one YAML keeps.
+        "---\nname: my-agent\ndescription: d\nmcpServers:\n  - a: {command: x}\n"
+        "mcpServers:\n  - srv:\n      transport: sse\n      url: https://e.com\n---\nbody\n",
+        # Nothing to convert: the stdio `env` stays, a multi-key item is the save's problem.
+        "---\nname: my-agent\ndescription: d\nmcpServers:\n  - gh\n"
+        "  - a: {command: x, env: {A: b}}\n    b: {command: y}\n---\nbody\n",
+    ],
+)
+def test_inline_conversion_falls_back_to_the_raw_file(tmp_path: Path, text: str) -> None:
+    _place(tmp_path, "my-agent", text)
+    doc = sub.read_project_agent(tmp_path, "my-agent")
+    assert (doc["content"], doc["converted"]) == (text, None)
+
+
+@pytest.mark.parametrize(
+    ("definition", "fix"),
+    [
+        ("{type: http, url: https://e.com, env: {A: b}}", "remove 'env' by hand."),
+        ("{type: http, transport: http, url: https://e.com}", "remove 'transport' by hand."),
+        # Removing a `transport` that `type` does not back up would only lead to the next
+        # refusal ("a 'url' but no 'type'"), so the fix is the rename the reload makes.
+        ("{transport: sse, url: https://e.com}", "rename 'transport' to 'type' by hand."),
+        # Both fields at once: one manual fix must clear both refusals.
+        (
+            "{transport: http, url: https://e.com, env: {A: b}}",
+            "rename 'transport' to 'type' and remove 'env' by hand.",
+        ),
+    ],
+)
+def test_unconverted_inline_field_says_how_to_fix_it_by_hand(
+    tmp_path: Path, definition: str, fix: str
+) -> None:
+    # A flow-style definition loads unconverted, so its save must not only say "reload".
+    text = f"---\nname: my-agent\ndescription: d\nmcpServers:\n  - srv: {definition}\n---\nb\n"
+    with pytest.raises(cw.InvalidCandidateError) as raised:
+        sub.write_project_agent(tmp_path, "my-agent", text, None)
+    assert str(raised.value).endswith(fix)
+    # A field the converter never touches gets no such hint.
+    with pytest.raises(cw.InvalidCandidateError) as exc:
+        sub.validate_frontmatter(_servers({"srv": {"command": "x", "cwd": "/"}}))
+    assert "by hand" not in str(exc.value)
+
+
+def test_inline_conversion_needs_a_parsable_list_form() -> None:
+    assert sub._convert_inline_servers("no fence\n") is None
+    assert sub._convert_inline_servers("---\nname: [unclosed\n---\nb\n") is None
+    assert sub._convert_inline_servers(_MAP_FORM) is None  # the mapping step runs first
+
+
+def test_inline_conversion_is_dropped_when_the_rewrite_reads_back_as_other_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sub, "_edit_inline_definitions", lambda _b, _e: ["  - other\n"])
+    assert sub._convert_inline_servers(_INLINE_LEGACY) is None
+    monkeypatch.setattr(sub, "_edit_inline_definitions", lambda _b, _e: ["  - [unclosed\n"])
+    assert sub._convert_inline_servers(_INLINE_LEGACY) is None
+
+
+def test_inline_edit_leaves_lines_it_cannot_place() -> None:
+    # A key line before any item (index -1), or past the last planned item, is kept: the
+    # caller's re-parse check is what refuses such a block.
+    block = ["  odd: 1\n", "    transport: sse\n", "  - a:\n", "      transport: sse\n"]
+    assert sub._edit_inline_definitions(block, []) == block
+    # A comment under a dropped key goes with it; one at the key column stays.
+    block = ["  - a:\n", "      env:\n", "        # gone\n", "      # kept\n", "      url: u\n"]
+    out = sub._edit_inline_definitions(block, [{"env": "drop"}])
+    assert out == ["  - a:\n", "      # kept\n", "      url: u\n"]
+
+
 def test_read_non_utf8_file_raises_invalid_candidate(tmp_path: Path) -> None:
     agents_dir = sub.project_agents_dir(tmp_path)
     agents_dir.mkdir(parents=True)

@@ -84,6 +84,7 @@ CLAUDE.md, hooks, and permissions all use), so a save always re-submits the real
 
 from __future__ import annotations
 
+import functools
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -94,6 +95,7 @@ import yaml
 from . import config_file_writer as fw
 from . import config_write as cw
 from .config_write_hooks import validate_hooks
+from .config_write_mcp import _convert_legacy_entry, _validate_server_fields
 from .config_write_permissions import BYPASS_MODE, RECOGNIZED_MODES
 
 #: The directory name holding subagent files under ``.claude/`` at either scope.
@@ -616,15 +618,49 @@ def _validate_permission_mode(value: Any, label: str) -> None:
         )
 
 
+#: Inline server names the 2.1.318 agent-file loader skips with "Skipping reserved MCP
+#: server name" (probed one name per agent file, TASK-479): the built-in servers the MCP docs
+#: list as reserved, the ``Object.prototype`` accessor names, and the Slack sign-in server.
+#: ``__proto__`` is refused too, because the loader reads that item as having no key and
+#: skips it. ⚠️ This is NOT the ``.mcp.json`` name rule of :mod:`clauster.config_write_mcp`:
+#: the agent-file loader applies no charset to an inline name, and it connects a dotted name,
+#: a name with a space or a leading hyphen, and ``constructor`` or ``prototype``. An inline
+#: name never reaches a ``claude mcp`` argv (this surface writes the file directly), so the
+#: MCP tab's arg-injection reason for its charset does not apply here either.
+_FRONTMATTER_SKIPPED_SERVER_NAMES = frozenset(
+    {
+        "workspace",
+        "claude-in-chrome",
+        "computer-use",
+        "Claude Preview",
+        "Claude Browser",
+        "Slack sign-in (Claude Code tag)",
+        "__proto__",
+        "__defineGetter__",
+        "__defineSetter__",
+        "__lookupGetter__",
+        "__lookupSetter__",
+    }
+)
+
+
 def _validate_mcp_servers(value: Any, label: str) -> None:
     """Reject ``value`` unless it is the documented LIST of server entries — never connected.
 
     Each entry is either a non-empty string naming an already-configured server, or a
-    non-empty mapping of server name to an inline definition object. Claude Code reads
-    only the list form: it ignores an ``mcpServers`` mapping entirely (verified in the
-    2.1.318 agent-file loader), so a mapping is refused here rather than written as a
-    silent no-op. An inline definition is checked to be an object and nothing more — it is
-    never resolved, spawned or connected to here.
+    mapping of ONE server name to an inline definition. Claude Code reads only the list
+    form: it ignores an ``mcpServers`` mapping entirely (verified in the 2.1.318 agent-file
+    loader), so a mapping is refused here rather than written as a silent no-op. The loader
+    also skips an item with more than one server, an inline name in
+    :data:`_FRONTMATTER_SKIPPED_SERVER_NAMES`, and a second inline server of the same name
+    (only one of the two connects), so each of those is refused.
+
+    The loader reads an inline definition with the same entry schema as ``.mcp.json``, so
+    the definition goes through the MCP tab's field validator
+    (:func:`clauster.config_write_mcp._validate_server_fields`): the same per-transport
+    fields, and the same refusals, ``transport`` and a remote ``env`` included. A stored
+    file that has those two loads converted (:func:`_convert_inline_servers`). Nothing is
+    resolved, spawned or connected to here.
     """
     if isinstance(value, dict):
         raise cw.InvalidCandidateError(
@@ -636,6 +672,7 @@ def _validate_mcp_servers(value: Any, label: str) -> None:
         raise cw.InvalidCandidateError(
             f"{label} must be a list of server names or {{name: definition}} objects"
         )
+    inline_names: set[str] = set()
     for entry in value:
         if isinstance(entry, str):
             if not entry.strip():
@@ -645,13 +682,53 @@ def _validate_mcp_servers(value: Any, label: str) -> None:
             raise cw.InvalidCandidateError(
                 f"{label} entries must be a server name or a {{name: definition}} object"
             )
-        for server_name, definition in entry.items():
-            if not isinstance(server_name, str) or not server_name.strip():
-                raise cw.InvalidCandidateError(f"{label} server names must be non-empty strings")
-            if not isinstance(definition, dict):
-                raise cw.InvalidCandidateError(
-                    f"{label} inline server {server_name!r} must be an object"
-                )
+        if len(entry) != 1:
+            raise cw.InvalidCandidateError(
+                f"{label} item defines {len(entry)} servers; Claude Code skips an item with "
+                "more than one. Write each server as its own '- name:' item"
+            )
+        ((server_name, definition),) = entry.items()
+        if not isinstance(server_name, str) or not server_name.strip():
+            raise cw.InvalidCandidateError(f"{label} server names must be non-empty strings")
+        if server_name in _FRONTMATTER_SKIPPED_SERVER_NAMES:
+            raise cw.InvalidCandidateError(
+                f"{label} inline server name {server_name!r} is reserved by Claude Code, "
+                "which skips it. Rename the server"
+            )
+        if server_name in inline_names:
+            raise cw.InvalidCandidateError(
+                f"{label} defines inline server {server_name!r} twice; Claude Code connects "
+                "only one of them. Remove or rename one"
+            )
+        inline_names.add(server_name)
+        try:
+            _validate_server_fields(server_name, definition)
+        except cw.InvalidCandidateError as exc:
+            raise cw.InvalidCandidateError(
+                f"{label} inline server {server_name!r}: {exc}.{_by_hand_hint(definition)}"
+            ) from exc
+
+
+def _by_hand_hint(definition: Any) -> str:
+    """Return the manual fix for a field the convert-on-load handles, or ``""``.
+
+    The MCP message promises a convert-on-load. Here that is a textual rewrite, which
+    declines some shapes (a flow-style definition, a merge key), so the message also says
+    what to change when the reload did not convert it. It names every converted field, so
+    one manual fix clears them all, and each fix matches what the conversion would do: a
+    ``transport`` with no ``type`` becomes ``type``, because removing it would only lead to
+    the next refusal.
+    """
+    fixes = [
+        "rename 'transport' to 'type'"
+        if note["field"] == "transport" and "type" not in definition
+        else f"remove {note['field']!r}"
+        for note in _convert_legacy_entry(definition)[1]
+    ]
+    if not fixes:
+        return ""
+    fix = " and ".join(fixes)
+    return f" If the editor did not convert it when it loaded the file, {fix} by hand."
 
 
 def _validate_hooks_block(value: Any, label: str) -> None:
@@ -694,9 +771,9 @@ def _validate_env(value: Any, label: str) -> None:
 #: here and a string there, ``010`` is 8 here and 10 there.
 #: :func:`_refuse_yaml11_only_spellings` refuses those for the boolean and number fields.
 #: Other differences are stricter here, for example a plain ``2024-01-01`` is a date to
-#: PyYAML, so it is refused as a ``maxTurns`` that the CLI would read as 2024. Fields this
-#: module checks only as "a string" or "an object" (``model``, an inline MCP definition)
-#: are not compared spelling by spelling.
+#: PyYAML, so it is refused as a ``maxTurns`` that the CLI would read as 2024. A top-level
+#: field this module checks only as "a string" (``model``) is not compared spelling by
+#: spelling; the string values of an inline MCP definition are.
 _OPTIONAL_FRONTMATTER_RULES: tuple[tuple[str, _FrontmatterRule], ...] = (
     # Claude Code accepts either a comma-separated string or an array for these —
     # this repo's own shipped subagents use the string form. `tools` must name at least
@@ -828,48 +905,193 @@ _FLOAT_TAG = "tag:yaml.org,2002:float"
 _MERGE_TAG = "tag:yaml.org,2002:merge"
 
 
-def _check_spelling(key: str, node: yaml.Node) -> None:
+#: The boolean and number fields of an inline MCP definition, and of its ``oauth`` object,
+#: as :func:`clauster.config_write_mcp._validate_server_fields` checks them.
+_MCP_BOOLEAN_FIELDS = frozenset({"alwaysLoad", "bareElicitationCapability", "discoveryCache"})
+_MCP_NUMBER_FIELDS = frozenset({"timeout", "request_timeout_ms"})
+_MCP_OAUTH_BOOLEAN_FIELDS = frozenset({"xaa"})
+_MCP_OAUTH_NUMBER_FIELDS = frozenset({"callbackPort"})
+
+
+def _check_spelling(label: str, node: yaml.Node, *, boolean: bool, number: bool) -> None:
     """Refuse a checked field whose value PyYAML and the CLI's YAML 1.2 read differently."""
     if not isinstance(node, yaml.ScalarNode):
         return
-    if key in _BOOLEAN_FIELDS and node.tag == _BOOL_TAG and node.value not in _YAML12_BOOLEANS:
+    if boolean and node.tag == _BOOL_TAG and node.value not in _YAML12_BOOLEANS:
         raise cw.InvalidCandidateError(
-            f"frontmatter {key!r}: Claude Code reads {node.value!r} as a string, not a "
+            f"{label}: Claude Code reads {node.value!r} as a string, not a "
             "boolean, and ignores it. Write true or false"
         )
-    if key in _NUMBER_FIELDS and (
+    if number and (
         (node.tag == _INT_TAG and not _YAML12_INT_RE.fullmatch(node.value))
         or (node.tag == _FLOAT_TAG and not _YAML12_FLOAT_RE.fullmatch(node.value))
     ):
         raise cw.InvalidCandidateError(
-            f"frontmatter {key!r}: {node.value!r} is a number to YAML 1.1 but not, or not "
+            f"{label}: {node.value!r} is a number to YAML 1.1 but not, or not "
             "the same number, to the YAML 1.2 that Claude Code reads. Write a plain decimal"
         )
 
 
-def _check_mapping(node: yaml.MappingNode, seen: set[int]) -> None:
-    """Check each checked field of ``node``, following ``<<`` merge keys into their sources.
+def _check_mapping(
+    node: yaml.MappingNode, seen: set[int], *, visit: Callable[[str, yaml.Node], None]
+) -> None:
+    """Call ``visit`` on each key of ``node``, following ``<<`` merge keys into their sources.
 
     ``compose`` leaves merges unflattened, so a ``<<: {background: yes}`` would otherwise
     never be looked at. A source is checked even where an explicit key overrides it, which
     only ever refuses more. ``seen`` skips a source merged twice; an alias cycle never gets
     here, because :func:`_refuse_enclosing_references` refuses it first.
+
+    Iterative: a chain of ``<<`` merges declared in document order loads without trouble
+    (PyYAML flattens each mapping as it reaches it) and passes the merge-size guard (each
+    link is one pair), so a recursive walk here met its full length, one frame per link, and
+    a 29 KB chain of about 1200 links raised ``RecursionError``. The sources of a mapping are
+    still walked after its own keys, in their written order.
     """
-    if id(node) in seen:
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        sources: list[yaml.MappingNode] = []
+        for key_node, value_node in current.value:
+            if key_node.tag == _MERGE_TAG:
+                merged = (
+                    value_node.value if isinstance(value_node, yaml.SequenceNode) else [value_node]
+                )
+                # Always mappings: PyYAML's load already refused a merge of anything else.
+                sources.extend(s for s in merged if isinstance(s, yaml.MappingNode))
+            # A non-scalar key cannot be hashed into a dict, so the load already refused it.
+            elif isinstance(key_node, yaml.ScalarNode):  # pragma: no branch
+                visit(key_node.value, value_node)
+        stack.extend(reversed(sources))
+
+
+class _InlineWalk:
+    """The composed nodes each inline-server check has walked already, by ``id``.
+
+    ``compose`` resolves an alias to the SAME node object, so an anchor shared ``N`` times per
+    level across ``L`` levels is ``N**L`` paths but one node. A walk that follows paths
+    without memory is then exponential in a file of a few hundred bytes. ``safe_load`` keeps
+    only the last of two duplicate keys, so a pyramid under a key that a later duplicate
+    overrides passes every check on the loaded data and reaches only this walk (Greptile on
+    TASK-479). One set per kind of check, shared across the whole header: each kind checks a
+    node the same way wherever it is reached, so checking it once is enough. The kinds stay
+    apart, because a node reached as a definition and as a value gets different checks.
+    """
+
+    __slots__ = ("definitions", "items", "oauth", "values")
+
+    def __init__(self) -> None:
+        """Start with nothing walked."""
+        self.items: set[int] = set()
+        self.definitions: set[int] = set()
+        self.oauth: set[int] = set()
+        self.values: set[int] = set()
+
+
+def _check_top_level_field(key: str, node: yaml.Node, *, walk: _InlineWalk) -> None:
+    """Check one top-level frontmatter field, and the inline servers under ``mcpServers``."""
+    _check_spelling(
+        f"frontmatter {key!r}", node, boolean=key in _BOOLEAN_FIELDS, number=key in _NUMBER_FIELDS
+    )
+    if key == "mcpServers" and isinstance(node, yaml.SequenceNode):
+        for item in node.value:
+            if isinstance(item, yaml.MappingNode):
+                _check_mapping(
+                    item, walk.items, visit=functools.partial(_check_inline_server, walk=walk)
+                )
+            else:
+                # A server-name reference (`- 0o17`) the CLI would read as a number.
+                _refuse_yaml12_number_strings(
+                    "frontmatter 'mcpServers' server name", item, seen=walk.values
+                )
+
+
+def _check_inline_server(name: str, node: yaml.Node, *, walk: _InlineWalk) -> None:
+    """Check the spelling of each value of one inline MCP definition, ``oauth`` included.
+
+    A boolean or number field must not use a YAML 1.1-only spelling, and a string value
+    must not be one that YAML 1.2 reads as a number (:func:`_refuse_yaml12_number_strings`).
+    """
+    if not isinstance(node, yaml.MappingNode):
         return
-    seen.add(id(node))
-    for key_node, value_node in node.value:
-        if key_node.tag == _MERGE_TAG:
-            sources = (
-                value_node.value if isinstance(value_node, yaml.SequenceNode) else [value_node]
+    label = f"frontmatter 'mcpServers' inline server {name!r}"
+
+    def check_field(key: str, value: yaml.Node) -> None:
+        _check_spelling(
+            f"{label} {key!r}",
+            value,
+            boolean=key in _MCP_BOOLEAN_FIELDS,
+            number=key in _MCP_NUMBER_FIELDS,
+        )
+        if key == "oauth" and isinstance(value, yaml.MappingNode):
+            _check_mapping(
+                value,
+                walk.oauth,
+                visit=lambda oauth_key, oauth_value: _check_spelling(
+                    f"{label} 'oauth' {oauth_key!r}",
+                    oauth_value,
+                    boolean=oauth_key in _MCP_OAUTH_BOOLEAN_FIELDS,
+                    number=oauth_key in _MCP_OAUTH_NUMBER_FIELDS,
+                ),
             )
-            for source in sources:
-                # Always a mapping: PyYAML's load already refused a merge of anything else.
-                if isinstance(source, yaml.MappingNode):  # pragma: no branch
-                    _check_mapping(source, seen)
-        # A non-scalar key cannot be hashed into a dict, so the load already refused it.
-        elif isinstance(key_node, yaml.ScalarNode):  # pragma: no branch
-            _check_spelling(key_node.value, value_node)
+        _refuse_yaml12_number_strings(f"{label} {key!r}", value, seen=walk.values)
+
+    _check_mapping(node, walk.definitions, visit=check_field)
+
+
+#: A plain scalar that the CLI reads as a number although PyYAML (YAML 1.1) reads a string:
+#: ``1e3``, ``1E3``, ``+1e3``, ``-.5`` and ``+.5e-3`` (YAML 1.1 wants a dot, a signed
+#: exponent, and no sign before a leading dot), ``0o17`` and a signed ``-0o17``/``+0o7``,
+#: and a leading-zero decimal that is not octal to YAML 1.1 (``09``). The CLI parses
+#: frontmatter with ``Bun.YAML.parse``. On 2.1.318 each of those spellings made the server
+#: invalid (probed as an ``args`` item, and ``1e3`` also as an ``env`` value), while
+#: ``0O17`` and ``0o8`` connect, so they do not match. The sign on the hex arm is there for
+#: symmetry only: a plain signed hex such as ``-0x1F`` is an int to PyYAML, so the type
+#: check refuses it first, and only an explicit ``!!str`` reaches this arm.
+_YAML12_NUMBER_RE = re.compile(
+    r"[-+]?[0-9]+|[-+]?0o[0-7]+|[-+]?0x[0-9a-fA-F]+"
+    r"|[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?"
+)
+_STR_TAG = "tag:yaml.org,2002:str"
+
+
+def _refuse_yaml12_number_strings(label: str, node: yaml.Node, *, seen: set[int]) -> None:
+    """Refuse a plain string value under ``node`` that the CLI's YAML 1.2 reads as a number.
+
+    Every value of an MCP entry that is not a boolean or a number is a string, and the CLI's
+    entry schema refuses a number there, so it drops that ``mcpServers`` item (probed on 2.1.318
+    with ``env: {A: 1e3}`` and ``args: [0o17]``; the quoted ``"1e3"`` connects). Only values
+    are checked, never keys. ⚠️ This is stricter than the CLI for an explicit ``!!str 1e3``,
+    which the composed node cannot tell from a plain ``1e3``. Quoting is the fix for both.
+
+    Iterative, and each node is checked once: ``seen`` (:attr:`_InlineWalk.values`) is
+    shared across the whole header, so a shared alias costs one visit, and a deep nesting
+    adds no stack frames. A ``<<`` value is walked like any other value, so its merged
+    mappings are checked too.
+    """
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, yaml.ScalarNode):
+            if (
+                current.tag == _STR_TAG
+                and current.style is None
+                and _YAML12_NUMBER_RE.fullmatch(current.value)
+            ):
+                raise cw.InvalidCandidateError(
+                    f"{label}: Claude Code reads {current.value!r} as a number, not a string, "
+                    "and drops that mcpServers item. Quote it"
+                )
+        elif isinstance(current, yaml.SequenceNode):
+            stack.extend(current.value)
+        else:  # a mapping: a node is a scalar, a sequence or a mapping
+            stack.extend(value_node for _key_node, value_node in current.value)
 
 
 def _refuse_enclosing_references(node: yaml.Node, path: set[int], done: set[int]) -> None:
@@ -914,7 +1136,13 @@ def _refuse_yaml11_only_spellings(header: str) -> None:
       ``!!bool``, or brought in through a ``<<`` merge;
     * a ``maxTurns``/``autoCompactWindow``/``effort`` number spelled the YAML 1.1 way
       (``010``, ``0b101``, ``1_000``, ``1:30``), which YAML 1.2 reads as another number or
-      as a string.
+      as a string;
+    * the same two spellings in the boolean and number fields of an inline ``mcpServers``
+      definition and its ``oauth`` object (``alwaysLoad: yes``, ``timeout: 1_000``). The
+      CLI's entry schema refuses a string there, so it would skip the whole server;
+    * a plain string value of an inline definition, or a server-name reference, that YAML
+      1.2 reads as a number (``env: {A: 1e3}``, ``args: [0o17]``), which the entry schema
+      refuses for the same reason.
 
     ``header`` already loaded as a mapping, so composing it again yields a mapping node and
     does not fail.
@@ -927,7 +1155,9 @@ def _refuse_yaml11_only_spellings(header: str) -> None:
             )
     root = yaml.compose(header, Loader=yaml.SafeLoader)
     _refuse_enclosing_references(root, set(), set())
-    _check_mapping(root, set())
+    _check_mapping(
+        root, set(), visit=functools.partial(_check_top_level_field, walk=_InlineWalk())
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1086,6 +1316,28 @@ def _indent_as_list_items(block: list[str]) -> list[str] | None:
     return out
 
 
+def _mcp_servers_block_bounds(lines: list[str]) -> tuple[int, int] | None:
+    """Return ``(key line, end)`` of the one block-form ``mcpServers`` in header ``lines``.
+
+    None when there is no such key line, more than one, or a value on the key line (a flow
+    collection). The block runs until the next line that starts at column 0 (the next
+    top-level key), so ``lines[start + 1 : end]`` are its entries.
+    """
+    starts = [i for i, line in enumerate(lines) if _MCP_SERVERS_KEY_LINE_RE.match(line)]
+    if len(starts) != 1 or not _MCP_SERVERS_BLOCK_KEY_RE.match(lines[starts[0]].rstrip("\r\n")):
+        return None
+    start = starts[0]
+    end = next(
+        (
+            i
+            for i in range(start + 1, len(lines))
+            if lines[i][:1] not in ("", " ", "\t", "\r", "\n")
+        ),
+        len(lines),
+    )
+    return start, end
+
+
 def _mcp_servers_as_list(text: str) -> str | None:
     """Return ``text`` with a mapping ``mcpServers`` rewritten as the list form, or None.
 
@@ -1119,19 +1371,10 @@ def _mcp_servers_as_list(text: str) -> str | None:
         # would add two spaces inside a value for the CLI. (Its save is refused anyway.)
         return None
     lines = match.group(1).splitlines(keepends=True)
-    starts = [i for i, line in enumerate(lines) if _MCP_SERVERS_KEY_LINE_RE.match(line)]
-    if len(starts) != 1 or not _MCP_SERVERS_BLOCK_KEY_RE.match(lines[starts[0]].rstrip("\r\n")):
+    bounds = _mcp_servers_block_bounds(lines)
+    if bounds is None:
         return None
-    start = starts[0]
-    # The block runs until the next line that starts at column 0 (the next top-level key).
-    end = next(
-        (
-            i
-            for i in range(start + 1, len(lines))
-            if lines[i][:1] not in ("", " ", "\t", "\r", "\n")
-        ),
-        len(lines),
-    )
+    start, end = bounds
     block = _indent_as_list_items(lines[start + 1 : end])
     if block is None:
         return None
@@ -1145,6 +1388,130 @@ def _mcp_servers_as_list(text: str) -> str | None:
     if new_body != body or new_frontmatter != {**frontmatter, "mcpServers": expected}:
         return None
     return candidate
+
+
+#: Ends the editor note when :func:`_convert_inline_servers` converted an inline server.
+INLINE_SERVERS_CONVERSION_TAIL = "Save to write the converted servers."
+
+#: A key line of an inline definition that :func:`_convert_inline_servers` may edit.
+_CONVERTED_KEY_RE = re.compile(r"(transport|env)[ \t]*:")
+
+
+def _is_item_line(stripped: str) -> bool:
+    """Whether a line, without its indentation, starts a block sequence item (``- ``)."""
+    return stripped[:1] == "-" and stripped[1:2] in ("", " ", "\t", "\r", "\n")
+
+
+def _edit_inline_definitions(block: list[str], edits: list[dict[str, str]]) -> list[str]:
+    """Apply ``edits`` (one per list item, in order) to the lines of a list-form block.
+
+    Each item starts with a ``- `` line at the block's item column. Inside an item, the
+    definition's keys sit at the column of the first content line under the item line. A
+    key line there that names an edited field is renamed to ``type`` (``"rename"``) or
+    removed with every deeper line under it (``"drop"``). Every other line is kept as it
+    is, so a shape this cannot place is left unchanged, and the caller's re-parse check
+    then refuses the result.
+    """
+    out: list[str] = []
+    item_indent: int | None = None
+    key_indent: int | None = None
+    index = -1
+    dropping = False
+    for line in block:
+        stripped = line.lstrip(" ")
+        if not stripped.strip():
+            out.append(line)
+            continue
+        lead = len(line) - len(stripped)
+        deeper = key_indent is not None and lead > key_indent
+        if stripped.startswith("#"):
+            if not (dropping and deeper):
+                out.append(line)
+            continue
+        if item_indent is None:
+            item_indent = lead
+        if lead == item_indent and _is_item_line(stripped):
+            index, key_indent, dropping = index + 1, None, False
+            out.append(line)
+            continue
+        if key_indent is None and lead > item_indent:
+            key_indent = lead
+        if dropping and deeper:
+            continue
+        dropping = False
+        key = _CONVERTED_KEY_RE.match(stripped) if lead == key_indent else None
+        action = edits[index].get(key.group(1)) if key and 0 <= index < len(edits) else None
+        if action == "rename":
+            out.append(line[:lead] + "type" + stripped[len("transport") :])
+        elif action == "drop":
+            dropping = True
+        else:
+            out.append(line)
+    return out
+
+
+def _convert_inline_servers(text: str) -> tuple[str, list[str]] | None:
+    """Return ``text`` without the inline-server fields Claude Code ignores, and the notes.
+
+    This is the MCP tab's convert-on-load, the same
+    :func:`clauster.config_write_mcp._convert_legacy_entry`, for each inline definition of
+    a list-form ``mcpServers``: ``transport`` becomes ``type`` (or is removed when ``type``
+    is set), and ``env`` is removed from a remote server. Each note names the server and
+    the change, never a value.
+
+    The rewrite is textual, like :func:`_mcp_servers_as_list`: only those key lines (and
+    the lines under a removed key) change, so every other value and comment keeps its
+    exact spelling. Fail closed: the result is used only when it re-parses to exactly the
+    converted frontmatter with the body unchanged. A definition in flow style, a field
+    that comes in through a ``<<`` merge, or any other shape the line scan cannot edit
+    returns None, and the editor shows the file as it is. Its save is then refused with
+    the validator's message. Nothing here writes to disk.
+    """
+    match = _FRONTMATTER_RE.match(text)
+    if not match:
+        return None
+    try:
+        frontmatter, body = parse_frontmatter(text)
+    except cw.InvalidCandidateError:
+        return None
+    servers = frontmatter.get("mcpServers")
+    if not isinstance(servers, list):
+        return None
+    expected: list[Any] = []
+    edits: list[dict[str, str]] = []
+    notes: list[str] = []
+    for item in servers:
+        edit: dict[str, str] = {}
+        new_item = item
+        if isinstance(item, dict) and len(item) == 1:
+            ((server_name, definition),) = item.items()
+            converted, entry_notes = _convert_legacy_entry(definition)
+            for note in entry_notes:
+                field = note["field"]
+                renames = field == "transport" and "type" not in definition
+                edit[field] = "rename" if renames else "drop"
+                notes.append(f"Inline MCP server {server_name!r}: {note['message']}.")
+            if entry_notes:
+                new_item = {server_name: converted}
+        expected.append(new_item)
+        edits.append(edit)
+    if not notes or any(char in match.group(1) for char in _YAML11_ONLY_LINE_BREAKS):
+        return None
+    lines = match.group(1).splitlines(keepends=True)
+    bounds = _mcp_servers_block_bounds(lines)
+    if bounds is None:
+        return None
+    start, end = bounds
+    block = _edit_inline_definitions(lines[start + 1 : end], edits)
+    rewritten = "".join(lines[: start + 1]) + "".join(block) + "".join(lines[end:])
+    candidate = text[: match.start(1)] + rewritten + text[match.end(1) :]
+    try:
+        new_frontmatter, new_body = parse_frontmatter(candidate)
+    except cw.InvalidCandidateError:
+        return None
+    if new_body != body or new_frontmatter != {**frontmatter, "mcpServers": expected}:
+        return None
+    return candidate, notes
 
 
 def _is_builtin_override_file(root: Path, name: str) -> bool:
@@ -1170,9 +1537,11 @@ def _read_agent(root: Path, name: str, source: str) -> dict[str, Any]:
     display field (:func:`~clauster.config_write.redact_secrets`); ``content`` is the
     raw, unredacted file text — the value a subsequent write must re-submit. One exception:
     when an editable file still uses the old ``mcpServers`` mapping, ``content`` is that text
-    with the block rewritten in the list form (:func:`_mcp_servers_as_list`) and
-    ``converted`` carries the note the editor shows; otherwise ``converted`` is None. The
-    ``frontmatter`` display field always describes the file as it is on disk.
+    with the block rewritten in the list form (:func:`_mcp_servers_as_list`), and when an
+    inline server has a field Claude Code ignores, ``content`` is without it
+    (:func:`_convert_inline_servers`). ``converted`` then carries the one note the editor
+    shows for both; otherwise ``converted`` is None. The ``frontmatter`` display field
+    always describes the file as it is on disk.
 
     A built-in name with a regular FILE behind it is the exception: Claude Code lets a user
     or project agent override a built-in of the same name, so that file is real
@@ -1249,15 +1618,26 @@ def _read_agent(root: Path, name: str, source: str) -> dict[str, Any]:
     # Convert-on-save for the old `mcpServers` mapping (the maintainer's call on
     # TASK-449.5): an editable file is handed to the editor already in the list form, with a
     # note saying so, so the operator sees the change and the next save writes it. `hash`
-    # stays the hash of the bytes ON DISK, so the stale-write guard is unaffected.
-    converted = _mcp_servers_as_list(text) if editable else None
+    # stays the hash of the bytes ON DISK, so the stale-write guard is unaffected. The inline
+    # servers of the (possibly just converted) list form then get the MCP tab's convert-on-
+    # load (TASK-479), and the one note names every change.
+    content, notes = text, []
+    if editable:
+        as_list = _mcp_servers_as_list(text)
+        if as_list is not None:
+            content = as_list
+            notes.append(MCP_SERVERS_CONVERSION_NOTE)
+        inline = _convert_inline_servers(content)
+        if inline is not None:
+            content = inline[0]
+            notes.extend([*inline[1], INLINE_SERVERS_CONVERSION_TAIL])
     return {
         "name": name,
         "source": "plugin" if read_only else source,
         "editable": editable,
         "exists": True,
-        "content": text if converted is None else converted,
-        "converted": None if converted is None else MCP_SERVERS_CONVERSION_NOTE,
+        "content": content,
+        "converted": " ".join(notes) or None,
         "frontmatter": frontmatter,
         "hash": cw.hash_bytes(raw),
     }
