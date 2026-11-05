@@ -1519,12 +1519,16 @@ def forget_known_values(owner: str) -> None:
 
 
 def _stream_owner(owner: str) -> str:
-    """Return the owner key for the values a log stream learned for ``owner``."""
+    """Return the owner key for the values a log stream learned for ``owner``.
+
+    Safe while no real owner holds a ``#``: instance ids are UUIDs, and the fixed owners are
+    ``pty-keeper`` and ``background-jobs`` (plus ``background-jobs:<uuid>``).
+    """
     return f"{owner}#stream"
 
 
 def _form_kind(form: str) -> str:
-    """Return a stored form's kind: ``env``, ``session`` (also its ``cse_`` twin), or other."""
+    """Return a stored form's kind: ``"env"``, ``"session"`` (also ``cse_``), or ``"other"``."""
     prefix = _KNOWN_PREFIX_RE.match(form)
     if prefix is None:
         return "other"
@@ -1539,7 +1543,9 @@ def remember_stream_value(owner: str, value: str, *, cap: int) -> None:
     (``env``, ``session``, other) holds at most ``cap`` of them across every connection of the
     stream, not per connection: a reconnecting client cannot add ``cap`` more each time. The
     values the record itself stores (:func:`remember_known_values` under ``owner``) do not
-    count. The count and the add happen under the lock, so two sockets cannot both pass it.
+    count: a value the record holds is not stored again, and one the stream stored before the
+    record learned it is not counted. The count and the add happen under the lock, so two
+    sockets cannot both pass it.
     """
     global _known_matcher
     forms = _known_forms(value)
@@ -1548,11 +1554,14 @@ def remember_stream_value(owner: str, value: str, *, cap: int) -> None:
     stream = _stream_owner(owner)
     with _known_lock:
         held = _known_owners.get(stream, frozenset())
-        if forms <= held:
-            return
+        record = _known_owners.get(owner, frozenset())
+        if forms <= held | record:
+            return  # stored already, by the stream or by the record
         kind = _form_kind(next(iter(forms)))
         # A session id is stored with its `cse_` twin: count the `session_` forms only.
-        count = sum(1 for form in held if _form_kind(form) == kind and not form.startswith("cse_"))
+        count = sum(
+            1 for form in held - record if _form_kind(form) == kind and not form.startswith("cse_")
+        )
         if count >= cap:
             return
         _known_owners[stream] = held | forms

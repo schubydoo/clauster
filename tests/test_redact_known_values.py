@@ -514,6 +514,25 @@ def test_reconnects_learn_at_most_the_cap_in_total() -> None:
     assert _streamed("iid-1") == frozenset() and "iid-1" not in redact._known_owners
 
 
+def test_a_record_id_the_stream_reads_again_takes_no_slot() -> None:
+    """The bridge's first marker names the record's own id: that must not use up the cap."""
+    from clauster.routes import websockets as ws_module
+
+    cap = ws_module._STREAM_IDS_PER_KIND
+    redact.remember_known_values("iid-1", ENV)  # the record already holds ENV
+    learned: dict[str, set[str]] = {}
+    ws_module._learn_stream_ids("iid-1", f"[bridge:api] environment_id={ENV}", learned)
+    assert ENV not in _streamed("iid-1")  # held by the record: not stored twice
+    lines = "\n".join(_tagged_env(i) for i in range(cap + 2))
+    ws_module._learn_stream_ids("iid-1", lines, {})
+    assert len(_streamed("iid-1")) == cap  # all `cap` slots for new ids
+    # A value the stream stored before the record learned it stops counting once it does.
+    first_new = _tagged_env(0).rsplit("=", 1)[1]
+    redact.remember_known_values("iid-1", first_new)
+    ws_module._learn_stream_ids("iid-1", _tagged_env(50), {})
+    assert _tagged_env(50).rsplit("=", 1)[1] in _streamed("iid-1")
+
+
 def test_ws_bridge_log_reconnects_share_the_cap(runner_config, tmp_path: Path) -> None:
     """A client that reconnects as the tail moves on cannot store the cap again each time."""
     from clauster.routes import websockets as ws_module
@@ -528,17 +547,23 @@ def test_ws_bridge_log_reconnects_share_the_cap(runner_config, tmp_path: Path) -
         while ws.receive_text() != sentinel:
             pass
 
+    def _env(i: int) -> str:
+        return _tagged_env(i).rsplit("=", 1)[1]
+
     with _client(runner_config, instance) as client:
+        # The first connection takes all but one slot.
         with client.websocket_connect("/ws/bridge-log/alpha") as ws:
-            _append(log, "".join(f"{_tagged_env(i)}\n" for i in range(cap)) + "end1\n")
+            _append(log, "".join(f"{_tagged_env(i)}\n" for i in range(cap - 1)) + "end1\n")
             _read_until(ws, "end1")
-        assert len(_streamed(instance.instance_id)) == cap
-        # 70 KB more, then new markers: the next tail window no longer holds the first ones.
-        _append(log, filler * 70 + "".join(f"{_tagged_env(100 + i)}\n" for i in range(cap)))
-        _append(log, "end2\n")
+        assert len(_streamed(instance.instance_id)) == cap - 1
+        # 70 KB more, then two new markers: the next tail window no longer holds the first.
+        _append(log, filler * 70 + f"{_tagged_env(100)}\n{_tagged_env(101)}\nend2\n")
         with client.websocket_connect("/ws/bridge-log/alpha") as ws:
             _read_until(ws, "end2")
-    assert len(_streamed(instance.instance_id)) == cap  # 2 * cap without the shared cap
+    streamed = _streamed(instance.instance_id)
+    # The second connection did learn (it stored the first new id), then hit the shared cap:
+    # without it both new ids go in (cap + 1); a socket that learned nothing leaves cap - 1.
+    assert len(streamed) == cap and _env(100) in streamed and _env(101) not in streamed
 
 
 def test_a_fake_marker_first_cannot_shut_out_the_real_id() -> None:
