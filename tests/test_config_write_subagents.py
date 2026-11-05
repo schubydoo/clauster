@@ -374,7 +374,93 @@ _DOCUMENTED_VALUES: list[tuple[str, object]] = [
     ("mcpServers", [{"playwright": {"type": "stdio", "command": "npx", "args": ["-y", "x"]}}]),
     ("mcpServers", [{"remote": {"type": "ws", "url": "wss://example.com"}}, "slack"]),
     ("mcpServers", []),
+    ("tools", ["Read", "Grep"]),
+    ("tools", "Agent(worker, researcher), Read, Bash"),
 ]
+
+# Values the installed CLI (2.1.318) reads although the docs do not list them. The
+# maintainer's call on TASK-449.5: anything the CLI parses is accepted. One case per form,
+# next to what the CLI reads it as.
+_CLI_PARSED_VALUES: list[tuple[str, object]] = [
+    ("effort", 3),  # an integer level
+    ("effort", 0),
+    ("effort", "High"),  # level names are case-folded
+    ("effort", "MAX"),
+    ("effort", "med"),  # the CLI's alias for medium
+    ("effort", "3 tokens"),  # parseInt: 3
+    ("effort", 2.5),  # stringified, then parseInt: 2
+    ("isolation", "remote"),
+    ("maxTurns", "5"),
+    ("maxTurns", " 7 "),
+    ("maxTurns", "5 turns"),  # parseInt: 5
+    ("maxTurns", "2e1"),  # exponent notation: 20
+    ("maxTurns", "1,000"),  # a grouped integer: 1000
+    ("maxTurns", 5.0),  # a whole number
+    ("autoCompactWindow", "200000"),
+    ("autoCompactWindow", "200,000"),
+    ("autoCompactWindow", "2e5"),
+    ("autoCompactWindow", 200000.0),
+    ("background", "true"),
+    ("background", "false"),
+    ("omitClaudeMd", "true"),
+    ("omitClaudeMd", "false"),
+    ("skills", "api-conventions, error-handling"),  # split on commas, like `tools`
+    ("skills", ""),  # no skills
+    ("skills", None),
+    ("disallowedTools", ""),  # deny nothing
+    ("disallowedTools", []),
+    ("disallowedTools", None),
+    ("description", "   "),  # the CLI loads a whitespace-only description
+]
+
+
+@pytest.mark.parametrize(("key", "value"), _CLI_PARSED_VALUES)
+def test_validate_frontmatter_accepts_every_cli_parsed_value(key: str, value: object) -> None:
+    sub.validate_frontmatter({"name": "x", "description": "d", key: value})  # no raise
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("5", 5),
+        ("5 turns", 5),
+        ("2e1", 20),
+        ("1,000", 1000),
+        ("1" * 40, int("1" * 40)),  # over 32 chars: straight to parseInt
+        ("200_000", 200000),
+        ("1\u00a0000", 1000),
+        (5.0, 5),
+        (5.5, None),
+        (True, None),
+        ("x", None),
+        ("-3", None),
+        ("1e400", None),
+        (float("nan"), None),
+        ([5], None),
+    ],
+)
+def test_cli_positive_int_mirrors_the_cli(value: object, expected: int | None) -> None:
+    assert sub._cli_positive_int(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("High", "high"),
+        ("MED", "medium"),
+        (" high", None),
+        ("3 tokens", 3),
+        (-2, -2),
+        (2.5, 2),
+        (2.0, 2),
+        (float("inf"), None),
+        (True, None),
+        ("", None),
+        ({"a": 1}, None),
+    ],
+)
+def test_cli_effort_mirrors_the_cli(value: object, expected: object) -> None:
+    assert sub._cli_effort(value) == expected
 
 
 @pytest.mark.parametrize(("key", "value"), _DOCUMENTED_VALUES)
@@ -431,7 +517,10 @@ def test_validate_frontmatter_accepts_well_formed_env() -> None:
         {"name": "x", "description": "d", "tools": [1, 2]},  # non-string items
         {"name": "x", "description": "d", "tools": 5},  # wrong type entirely
         {"name": "x", "description": "d", "disallowedTools": [""]},  # empty item
-        {"name": "x", "description": "d", "skills": "not-a-list"},
+        {"name": "x", "description": "d", "skills": 5},
+        {"name": "x", "description": "d", "skills": {"a": 1}},
+        {"name": "x", "description": "d", "disallowedTools": 5},
+        {"name": "x", "description": "d", "tools": None},  # the CLI reads zero tools
         {"name": "x", "description": "d", "skills": [1]},
         {"name": "x", "description": "d", "model": ""},
         {"name": "x", "description": "d", "model": 5},
@@ -451,8 +540,12 @@ def test_validate_frontmatter_accepts_well_formed_env() -> None:
         {"name": "x", "description": "d", "hooks": {"NotAnEvent": []}},
         {"name": "x", "description": "d", "maxTurns": 0},
         {"name": "x", "description": "d", "maxTurns": -1},
-        {"name": "x", "description": "d", "maxTurns": "5"},
         {"name": "x", "description": "d", "maxTurns": True},
+        {"name": "x", "description": "d", "maxTurns": "turns"},  # parseInt gives NaN
+        {"name": "x", "description": "d", "maxTurns": "0"},
+        {"name": "x", "description": "d", "maxTurns": 5.5},  # a number must be whole
+        {"name": "x", "description": "d", "maxTurns": [5]},  # only via JS object coercion
+        {"name": "x", "description": "d", "maxTurns": "1e400"},  # Infinity is not whole
         {"name": "x", "description": "d", "initialPrompt": 5},
         {"name": "x", "description": "d", "memory": 5},
         # `memory` is a closed list now; a free string or a mapping was accepted before
@@ -461,12 +554,16 @@ def test_validate_frontmatter_accepts_well_formed_env() -> None:
         {"name": "x", "description": "d", "memory": {"k": "v"}},
         {"name": "x", "description": "d", "effort": ""},
         {"name": "x", "description": "d", "effort": "extreme"},
-        {"name": "x", "description": "d", "effort": "High"},  # documented values are lowercase
-        {"name": "x", "description": "d", "effort": 3},  # CLI reads an int; docs do not list it
+        {"name": "x", "description": "d", "effort": " high"},  # the CLI does not trim it
+        {"name": "x", "description": "d", "effort": True},
+        {"name": "x", "description": "d", "effort": None},
+        {"name": "x", "description": "d", "effort": ["high"]},
         {"name": "x", "description": "d", "background": "yes"},
-        {"name": "x", "description": "d", "omitClaudeMd": "true"},  # a string, not a bool
+        {"name": "x", "description": "d", "background": "True"},  # the CLI compares exactly
+        {"name": "x", "description": "d", "background": 1},
+        {"name": "x", "description": "d", "omitClaudeMd": "yes"},
         {"name": "x", "description": "d", "isolation": ""},
-        {"name": "x", "description": "d", "isolation": "remote"},  # CLI reads it; undocumented
+        {"name": "x", "description": "d", "isolation": "Worktree"},
         {"name": "x", "description": "d", "isolation": "container"},
         {"name": "x", "description": "d", "color": ""},
         {"name": "x", "description": "d", "color": "magenta"},
@@ -474,7 +571,7 @@ def test_validate_frontmatter_accepts_well_formed_env() -> None:
         {"name": "x", "description": "d", "autoCompactWindow": 99999},  # below the range
         {"name": "x", "description": "d", "autoCompactWindow": 1000001},  # above the range
         {"name": "x", "description": "d", "autoCompactWindow": "200k"},  # CLI reads 200
-        {"name": "x", "description": "d", "autoCompactWindow": 200000.0},
+        {"name": "x", "description": "d", "autoCompactWindow": 200000.5},
         {"name": "x", "description": "d", "autoCompactWindow": True},
         {"name": "x", "description": "d", "experimental": "1h"},  # not a map
         {"name": "x", "description": "d", "experimental": {"cacheTtl": "2h"}},
@@ -875,6 +972,154 @@ def test_read_redacts_secrets_in_the_documented_list_form(tmp_path: Path) -> Non
     assert "super-secret" not in json.dumps(doc["frontmatter"])
 
 
+_MAP_FORM = (
+    "---\nname: my-agent\ndescription: d\n"
+    "mcpServers:\n"
+    "  # inline, scoped to this agent\n"
+    '  playwright:\n    type: stdio\n    command: npx\n    args: ["-y", "@playwright/mcp"]\n'
+    '  remote: {type: http, url: "https://example.com/mcp"}\n'
+    "model: opus\n"
+    "---\nYou are a helper.\n"
+)
+_LIST_FORM = (
+    "---\nname: my-agent\ndescription: d\n"
+    "mcpServers:\n"
+    "  - playwright:\n      type: stdio\n      command: npx\n      args:\n"
+    "        - -y\n        - '@playwright/mcp'\n"
+    "  - remote:\n      type: http\n      url: https://example.com/mcp\n"
+    "model: opus\n"
+    "---\nYou are a helper.\n"
+)
+
+
+def _place(tmp_path: Path, name: str, content: str) -> Path:
+    agents_dir = sub.project_agents_dir(tmp_path)
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    path = agents_dir / f"{name}.md"
+    path.write_bytes(content.encode("utf-8"))
+    return path
+
+
+def test_read_converts_the_mcp_servers_mapping_to_the_list_form(tmp_path: Path) -> None:
+    # Maintainer call on TASK-449.5, "convert on save": a file in the old mapping form loads
+    # already rewritten in the list form, with a note, and only the mcpServers block changes.
+    path = _place(tmp_path, "my-agent", _MAP_FORM)
+    doc = sub.read_project_agent(tmp_path, "my-agent")
+    assert doc["content"] == _LIST_FORM
+    assert doc["converted"] == sub.MCP_SERVERS_CONVERSION_NOTE
+    assert "list form" in doc["converted"]
+    # The stale-write guard still keys on the bytes ON DISK, and the read wrote nothing.
+    assert doc["hash"] == cw.hash_bytes(_MAP_FORM.encode("utf-8"))
+    assert path.read_bytes() == _MAP_FORM.encode("utf-8")
+    # The display field describes the file as it is, so it keeps the mapping.
+    assert set(doc["frontmatter"]["mcpServers"]) == {"playwright", "remote"}
+
+
+def test_saving_the_converted_content_writes_the_list_form(tmp_path: Path) -> None:
+    # The next save is what fixes the file: the converted text validates and replaces the
+    # mapping on disk, against the hash the read returned.
+    path = _place(tmp_path, "my-agent", _MAP_FORM)
+    doc = sub.read_project_agent(tmp_path, "my-agent")
+    sub.write_project_agent(tmp_path, "my-agent", doc["content"], doc["hash"])
+    assert path.read_bytes() == _LIST_FORM.encode("utf-8")
+    frontmatter, body = sub.parse_frontmatter(path.read_text(encoding="utf-8"))
+    assert frontmatter["mcpServers"] == [
+        {"playwright": {"type": "stdio", "command": "npx", "args": ["-y", "@playwright/mcp"]}},
+        {"remote": {"type": "http", "url": "https://example.com/mcp"}},
+    ]
+    assert body == "You are a helper.\n"
+    again = sub.read_project_agent(tmp_path, "my-agent")
+    assert again["converted"] is None
+    assert again["content"] == _LIST_FORM
+
+
+def test_the_unconverted_mapping_is_still_refused_with_the_list_form_explained(
+    tmp_path: Path,
+) -> None:
+    # A direct API write of the mapping is refused, and the message says how to fix it.
+    with pytest.raises(cw.InvalidCandidateError, match="reads only the list form"):
+        sub.write_project_agent(tmp_path, "my-agent", _MAP_FORM, None)
+
+
+def test_conversion_keeps_crlf_line_endings(tmp_path: Path) -> None:
+    _place(tmp_path, "my-agent", _MAP_FORM.replace("\n", "\r\n"))
+    doc = sub.read_project_agent(tmp_path, "my-agent")
+    assert doc["content"] == _LIST_FORM.replace("\n", "\r\n")
+
+
+def test_conversion_of_a_block_that_ends_the_header(tmp_path: Path) -> None:
+    # The header slice has no newline before the closing fence, so a converted block in the
+    # last position must not add one (or the body would gain a blank line).
+    text = "---\nname: my-agent\ndescription: d\nmcpServers: {srv: {command: x}}\n---\nbody\n"
+    _place(tmp_path, "my-agent", text)
+    doc = sub.read_project_agent(tmp_path, "my-agent")
+    assert doc["content"] == (
+        "---\nname: my-agent\ndescription: d\nmcpServers:\n  - srv:\n      command: x\n---\nbody\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Two top-level mcpServers lines: which one YAML keeps is not the line scan's call.
+        "---\nname: my-agent\ndescription: d\nmcpServers: {a: {command: x}}\n"
+        "mcpServers: {b: {command: y}}\n---\nbody\n",
+        # An anchor defined inside the block and used after it: removing the block would
+        # break the alias, so the re-parse check refuses the rewrite.
+        "---\nname: my-agent\ndescription: d\nmcpServers:\n  srv: &cfg {command: x}\n"
+        "extra: *cfg\n---\nbody\n",
+    ],
+)
+def test_conversion_falls_back_to_the_raw_file_when_unsafe(tmp_path: Path, text: str) -> None:
+    _place(tmp_path, "my-agent", text)
+    doc = sub.read_project_agent(tmp_path, "my-agent")
+    assert doc["content"] == text
+    assert doc["converted"] is None
+
+
+def test_list_form_and_unparsable_files_are_not_converted(tmp_path: Path) -> None:
+    _place(tmp_path, "listed", _LIST_FORM.replace("my-agent", "listed"))
+    assert sub.read_project_agent(tmp_path, "listed")["converted"] is None
+    _place(tmp_path, "broken", "no frontmatter here\n")
+    doc = sub.read_project_agent(tmp_path, "broken")
+    assert (doc["content"], doc["converted"]) == ("no frontmatter here\n", None)
+
+
+def test_read_only_files_are_not_converted(tmp_path: Path) -> None:
+    # A plugin-marked file and a built-in override cannot be saved here, so the editor must
+    # show them exactly as they are.
+    plugin = _MAP_FORM.replace("model: opus", "model: opus\nnote: ${CLAUDE_PLUGIN_ROOT}")
+    _place(tmp_path, "my-agent", plugin)
+    doc = sub.read_project_agent(tmp_path, "my-agent")
+    assert (doc["editable"], doc["content"], doc["converted"]) == (False, plugin, None)
+    override = _MAP_FORM.replace("my-agent", "claude")
+    _place(tmp_path, "claude", override)
+    doc = sub.read_project_agent(tmp_path, "claude")
+    assert (doc["editable"], doc["content"], doc["converted"]) == (False, override, None)
+
+
+def test_conversion_helper_rejects_non_frontmatter_and_dump_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert sub._mcp_servers_as_list("no fence\n") is None
+
+    def _boom(*_args: object, **_kwargs: object) -> str:
+        raise yaml.representer.RepresenterError("cannot represent")
+
+    monkeypatch.setattr(sub.yaml, "dump", _boom)
+    assert sub._mcp_servers_as_list(_MAP_FORM) is None
+
+
+def test_conversion_is_dropped_when_the_rewrite_reads_back_as_other_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The last guard: a rewrite that parses but does not read back as the same servers is
+    # never handed to the editor. No real input is known to reach it (PyYAML round-trips the
+    # data it loaded), so the dumper is made to lose an entry.
+    monkeypatch.setattr(sub.yaml, "dump", lambda *_a, **_k: "mcpServers: []\n")
+    assert sub._mcp_servers_as_list(_MAP_FORM) is None
+
+
 def test_read_non_utf8_file_raises_invalid_candidate(tmp_path: Path) -> None:
     agents_dir = sub.project_agents_dir(tmp_path)
     agents_dir.mkdir(parents=True)
@@ -1242,6 +1487,32 @@ def test_route_saves_the_documented_mcp_list_and_refuses_the_mapping(
     agents = projects_root / "alpha" / ".claude" / "agents"
     assert not (agents / "map-agent.md").exists()
     assert (agents / "list-agent.md").read_bytes() == listed.encode("utf-8")
+
+
+def test_route_get_returns_the_converted_list_form_and_put_saves_it(
+    write_config, tmp_path, projects_root
+) -> None:
+    # Convert on save, end to end: GET hands the editor the list form plus the note, and a
+    # PUT of exactly that content against the returned hash writes the list form.
+    path = _place(projects_root / "alpha", "my-agent", _MAP_FORM)
+    with _client(write_config, tmp_path, _ON) as c:
+        got = c.get(_agent_url("my-agent"), params={"scope": "project", "project": "alpha"})
+        assert got.status_code == 200, got.text
+        doc = got.json()
+        assert doc["converted"] == sub.MCP_SERVERS_CONVERSION_NOTE
+        assert doc["content"] == _LIST_FORM
+        put = c.put(
+            _agent_url("my-agent"),
+            json={
+                "scope": "project",
+                "project": "alpha",
+                "confirm": "alpha",
+                "content": doc["content"],
+                "hash": doc["hash"],
+            },
+        )
+        assert put.status_code == 200, put.text
+    assert path.read_bytes() == _LIST_FORM.encode("utf-8")
 
 
 def test_route_path_escape_is_400(write_config, tmp_path) -> None:

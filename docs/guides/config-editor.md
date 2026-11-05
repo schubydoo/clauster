@@ -267,30 +267,45 @@ accepted, and it deletes those entries.
 
 The Subagents editor checks the frontmatter of a subagent file before it
 saves the file. It checks each field in the
-[Claude Code frontmatter reference](https://code.claude.com/docs/en/sub-agents#supported-frontmatter-fields)
-against the type and the values that the reference gives. If one field fails,
-Clauster refuses the whole save and writes nothing. Clauster never runs a
-hook command and never connects to an MCP server from this editor.
+[Claude Code frontmatter reference](https://code.claude.com/docs/en/sub-agents#supported-frontmatter-fields).
+It accepts every value that the installed Claude Code (2.1.318) reads for
+that field, also a value that the reference does not list. It refuses a value
+that Claude Code rejects or ignores, so a save never lands as a silent no-op.
+If one field fails, Clauster refuses the whole save and writes nothing.
+Clauster never runs a hook command and never connects to an MCP server from
+this editor.
 
 - `name` must be lowercase letters, digits and hyphens, at most 239
   characters, and the same as the name of the file. The name is also the
   file name, so this rule is narrower than the Claude Code rule. A file with
   a longer or other name does not show in the list.
-- `memory`, `effort`, `isolation`, `color` and `experimental.cacheTtl` accept
-  only the values in the reference. Clauster refuses any other value at save
-  time, also the few that Claude Code reads but does not document, for
-  example an integer `effort` or `isolation: remote`.
-- `autoCompactWindow` must be a plain integer from `100000` to `1000000`.
-  Write `200000`, not `200k`.
+- `memory`, `color` and `experimental.cacheTtl` accept only their listed
+  values, written exactly as listed.
+- `effort` accepts a level name in any case, the alias `med`, or an integer.
+  `isolation` accepts `worktree` and also `remote`, which Claude Code reads
+  but does not document.
+- `maxTurns` and `autoCompactWindow` accept a number or a string that Claude
+  Code reads as a whole number, for example `200000`, `"200,000"` or `2e5`.
+  `autoCompactWindow` must be from `100000` to `1000000`. Do not write
+  `200k`: Claude Code reads it as 200, which is out of range.
+- `background` and `omitClaudeMd` accept `true` and `false`, also as quoted
+  strings.
 - `mcpServers` must be a list. Each item is the name of a server that you
-  configured already, or a `name: definition` object. Claude Code ignores an
-  `mcpServers` mapping, so Clauster refuses that spelling.
+  configured already, or a `name: definition` object. Claude Code reads only
+  the list form and ignores a mapping.
 - `permissionMode` accepts `manual` as an alias for `default`. It refuses
   `bypassPermissions`, as every config-editor surface does. See the
   [bypassPermissions footgun gate](../security.md#bypasspermissions-footgun-gate).
 - A field that is not in the reference is saved as written. Claude Code
   ignores a field that it does not recognize. The one exception is `env`:
   Clauster still refuses an `env` that is not a map of names to plain values.
+
+If you open a subagent file that writes `mcpServers` as a mapping, the editor
+shows it already converted to the list form, with a note above the text. The
+file on disk does not change until you save. Read the converted text, then
+save to write the list form. A comment inside the old `mcpServers` block is
+not kept. If the editor cannot convert the block safely, it shows the file as
+it is, and the save tells you to rewrite `mcpServers` as a list.
 
 A file with the name of a built-in subagent, such as `claude.md`, overrides
 that built-in in Claude Code. The list shows the file as a read-only row next

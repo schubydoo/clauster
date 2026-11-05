@@ -2578,6 +2578,13 @@
                        {{ NO_AUTOFILL }} spellcheck="false" x-model="configMgmt.subagents.name"
                        :readonly="!configMgmt.subagents.isNew" placeholder="my-agent">
                 <label class="form-label small" for="cm-agent-content">Definition (Markdown + frontmatter)</label>
+                {# TASK-449.5: the backend rewrote the file's old `mcpServers` mapping as the list
+                   form on load. Say so before the operator saves, since the shown text is no
+                   longer byte-identical to the file on disk. #}
+                <div class="alert alert-info py-1 px-2 mb-2 small" role="status" id="cm-agent-converted"
+                     data-test="cm-agent-converted"
+                     x-show="configMgmt.subagents.converted" x-cloak
+                     x-text="configMgmt.subagents.converted"></div>
                 <textarea id="cm-agent-content" class="form-control form-control-sm font-monospace" rows="11"
                           data-test="cm-agent-content" spellcheck="false" aria-describedby="cm-agent-name-hint"
                           x-model="configMgmt.subagents.content" {{ NO_AUTOFILL }}></textarea>

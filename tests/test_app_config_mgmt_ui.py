@@ -219,6 +219,18 @@ def test_subagents_surface_present_when_enabled(write_config):
     assert "const AGENT_TEMPLATE =" in html
 
 
+def test_subagent_editor_shows_the_mcp_conversion_note(write_config):
+    # TASK-449.5: a file loaded with the old `mcpServers` mapping arrives rewritten as the
+    # list form plus a `converted` note. The editor must show that note before the save,
+    # and count the load as dirty so the converted text can be saved without an edit.
+    html = _html(write_config, _ON)
+    assert 'data-test="cm-agent-converted"' in html
+    assert 'x-show="configMgmt.subagents.converted"' in html
+    assert 'x-text="configMgmt.subagents.converted"' in html
+    assert 's.converted = typeof d.converted === "string" ? d.converted : "";' in html
+    assert "(s.content !== s.orig || !!s.converted)" in html
+
+
 def test_mcp_surface_present_when_enabled(write_config):
     # Slice D adds the MCP list surface (servers CRUD + project approvals panel).
     html = _html(write_config, _ON)
