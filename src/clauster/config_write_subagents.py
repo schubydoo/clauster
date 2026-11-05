@@ -883,7 +883,8 @@ def validate_agent_content(candidate: Any, *, expected_name: str | None = None) 
     validate_frontmatter(frontmatter, expected_name=expected_name)
     header = _FRONTMATTER_RE.match(candidate)
     if header is not None:  # pragma: no branch — always, once parse_frontmatter accepted it
-        _refuse_yaml11_only_spellings(cw.frontmatter_header(candidate, header))
+        with cw.refuse_check_failures("frontmatter"):  # it walks the composed tree itself
+            _refuse_yaml11_only_spellings(cw.frontmatter_header(candidate, header))
 
 
 #: The fields whose loaded value this module checks as a boolean or a number, and the

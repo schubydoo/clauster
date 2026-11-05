@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 
 from clauster import config_write as cw
@@ -2660,3 +2661,74 @@ def test_a_huge_hex_key_breaks_neither_the_list_nor_the_editor(tmp_path: Path) -
 def test_a_huge_hex_effort_is_refused_as_the_cli_ignores_it() -> None:
     with pytest.raises(cw.InvalidCandidateError, match="effort"):
         sk.validate_skill_md_content(_fm("effort: 0x" + "f" * 300))
+
+
+# --- Greptile on PR 1810: one file that crashes a check never breaks the listing ----------
+
+
+def _poison_the_checks(monkeypatch, crash: Exception) -> None:
+    real = cw._yaml12_refuses
+
+    def _boom(text, root):
+        if "poison" in text:
+            raise crash
+        return real(text, root)
+
+    monkeypatch.setattr(cw, "_yaml12_refuses", _boom)
+
+
+def test_route_list_survives_a_value_tagged_key(write_config, tmp_path, projects_root) -> None:
+    skills = projects_root / "alpha" / ".claude" / "skills"
+    for name, extra in (("bad", "metadata: {=: x}\n"), ("good", "")):
+        (skills / name).mkdir(parents=True)
+        (skills / name / sk.SKILL_FILENAME).write_bytes(
+            f"---\nname: {name}\ndescription: fine\n{extra}---\nbody\n".encode()
+        )
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.get(f"{_SKILLS_URL}?project=alpha")
+        assert resp.status_code == 200
+        listed = {item["name"]: item for item in resp.json()["skills"]}
+        assert set(listed) == {"bad", "good"}
+        assert listed["good"]["description"] == "fine"
+        assert c.get(f"{_FILE_URL}?project=alpha&name=bad").status_code == 200
+
+
+@pytest.mark.parametrize(
+    "crash",
+    [
+        yaml.constructor.ConstructorError("x", None, "y"),
+        ValueError("x"),
+        OverflowError("x"),
+        TypeError("x"),
+        RecursionError(),
+    ],
+    ids=lambda exc: type(exc).__name__,
+)
+def test_route_list_shows_a_file_that_crashes_a_check_as_refused(
+    write_config, tmp_path, projects_root, monkeypatch, crash: Exception
+) -> None:
+    _poison_the_checks(monkeypatch, crash)
+    skills = projects_root / "alpha" / ".claude" / "skills"
+    for name, extra in (("bad", "x: poison\n"), ("good", "")):
+        (skills / name).mkdir(parents=True)
+        (skills / name / sk.SKILL_FILENAME).write_bytes(
+            f"---\nname: {name}\ndescription: fine\n{extra}---\nbody\n".encode()
+        )
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.get(f"{_SKILLS_URL}?project=alpha")
+        assert resp.status_code == 200
+        listed = {item["name"]: item for item in resp.json()["skills"]}
+        assert set(listed) == {"bad", "good"}
+        assert listed["bad"]["frontmatter_error"]  # refused, with its reason
+        assert listed["good"]["description"] == "fine"
+        assert c.get(f"{_FILE_URL}?project=alpha&name=bad").status_code == 200
+
+
+def test_a_crash_in_the_skills_reading_of_the_view_is_a_refusal(monkeypatch) -> None:
+    def _boom(_header):
+        raise TypeError("x")
+
+    monkeypatch.setattr(cw, "yaml12_view", _boom)
+    with pytest.raises(cw.InvalidCandidateError, match="TypeError"):
+        sk.validate_skill_md_content(_fm("description: d"))
+    assert sk._ignorable_keys(_fm("effort: 1.5")) is None  # the editor read degrades, no 500

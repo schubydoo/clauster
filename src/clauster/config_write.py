@@ -47,6 +47,7 @@ The gate ordering the children must follow (each step aborts before the write)::
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import datetime
 import fnmatch
@@ -1087,6 +1088,9 @@ def _expands_beyond(value: Any, limit: int) -> bool:
 #: ``SafeConstructor.flatten_mapping`` splice the referenced mapping(s) in at *construction*
 #: time — the step a merge-key pyramid detonates in, before any object is returned.
 _YAML_MERGE_TAG = "tag:yaml.org,2002:merge"
+#: The tag of a plain ``=`` scalar (and of ``!!value``). PyYAML's ``flatten_mapping`` retags
+#: such a KEY as a string before it constructs it; anywhere else it has no constructor.
+_YAML_VALUE_TAG = "tag:yaml.org,2002:value"
 
 #: Cap on the key-value pairs a header is allowed to flatten to once its ``<<`` merge keys are
 #: followed — counted CUMULATIVELY across every mapping, not per mapping. A merge-key pyramid
@@ -1611,7 +1615,14 @@ def _duplicate_key(root: yaml.Node) -> yaml.Node | None:
                     if merges > 1:
                         return key_node
                 elif isinstance(key_node, yaml.ScalarNode):
-                    loaded = constructor.construct_object(key_node)
+                    # Read each key as PyYAML's `construct_mapping` does: it retags a `=` or
+                    # `!!value` key as a string first, and constructing it as it stands
+                    # raises ConstructorError (Greptile on PR 1810).
+                    loaded = (
+                        key_node.value
+                        if key_node.tag == _YAML_VALUE_TAG
+                        else constructor.construct_object(key_node)
+                    )
                     as_yaml12 = _yaml12_key(key_node)
                     if loaded in pyyaml_keys or as_yaml12 in yaml12_keys:
                         return key_node
@@ -1889,6 +1900,107 @@ def _first_json_unsafe(value: Any) -> str | None:
     return None
 
 
+#: What a check on an already-parsed header can raise when PyYAML's own loader and the
+#: check read a node differently: the classes the parse itself can raise (see
+#: :func:`load_frontmatter_yaml`), plus a number past a double (``OverflowError``) and a
+#: value of a type the check did not expect (``TypeError``).
+_CHECK_FAILURES = (
+    yaml.YAMLError,
+    ValueError,
+    OverflowError,
+    TypeError,
+    KeyError,
+    AttributeError,
+    IndexError,
+)
+
+
+@contextlib.contextmanager
+def refuse_check_failures(what: str) -> Iterator[None]:
+    """Turn a crash in a check of a parsed frontmatter header into a refusal.
+
+    The checks that compare PyYAML's reading with the CLI's walk the composed node tree
+    themselves, so a node shape PyYAML's loader treats specially can make one raise after the
+    parse catch: a 500 on the write, on the editor read, and on every listing that holds the
+    file (three rounds of Greptile on PR 1810). Every such check runs inside this, and
+    :class:`InvalidCandidateError` passes through unchanged. Fails closed: it only turns a
+    crash into a refusal. The message names the class only, never the payload, which can
+    quote the document (invariant 4).
+    """
+    try:
+        yield
+    except InvalidCandidateError:
+        raise
+    except RecursionError as exc:
+        raise InvalidCandidateError(f"{what} is nested too deeply to check") from exc
+    except _CHECK_FAILURES as exc:
+        raise InvalidCandidateError(
+            f"{what} has YAML this editor cannot compare with what Claude Code reads "
+            f"({type(exc).__name__}). Quote the unusual keys and values, or remove them"
+        ) from exc
+
+
+def _refuse_after_load(
+    header: str, root: yaml.Node | None, value: Any, *, what: str, line_offset: int
+) -> None:
+    """Refuse a parsed header no consumer can walk, or one the CLI reads differently.
+
+    The post-load half of :func:`load_frontmatter_yaml`, which documents each rejection;
+    it runs inside :func:`refuse_check_failures`.
+    """
+    if _is_self_referential(value):
+        # Well-formed YAML that no consumer can finish walking — see :func:`_is_self_referential`.
+        # Rejecting here is the fail-closed direction: it stops the write, so such a document
+        # never reaches disk. A document an EARLIER release wrote still reads back — `_read_agent`,
+        # `_list_agents` and `list_skills` each catch this error around the parse and degrade the
+        # derived frontmatter field while still surfacing `content`, so the operator can see and
+        # repair the file. That is why no second guard is needed in `redact_secrets`.
+        raise InvalidCandidateError(f"{what} contains a self-referential YAML alias")
+    if _expands_beyond(value, MAX_EXPANDED_CHARS):
+        # Acyclic, so the check above passes it, and a few hundred bytes long, so every byte
+        # cap passes it — but a `&a`/`*a` pyramid expands to more than any consumer can walk or
+        # serialize (#1393). Same fail-closed shape and same degradation on read as the cycle
+        # rejection above; see :func:`_expands_beyond` for why memoizing the consumers is not
+        # enough on its own.
+        # Names the cap, like every sibling cap on this tier (`content is N bytes, over the
+        # M byte cap`). The counted SIZE is deliberately not named: `_expands_beyond`
+        # short-circuits the moment it passes the limit, so it does not have one to report,
+        # and finishing the count to produce a nicer message is the work this guard exists to
+        # refuse. Nothing here comes from the document — invariant 4.
+        raise InvalidCandidateError(
+            f"{what} expands past the {MAX_EXPANDED_CHARS} character cap through its YAML aliases"
+        )
+    if (reason := _first_json_unsafe(value)) is not None:
+        # Parses and fits every size guard, but a scalar in it cannot cross the JSON
+        # response path (#1415): the route would 500 where this tier's contract is 422.
+        # Rejecting at the seam covers KEY positions too, which a coerce-just-before-the-
+        # response fix misses — a huge int in a key hits `str(k)` in `redact_secrets` before
+        # any serializer. The reason is a static class label, never the offending scalar —
+        # invariant 4.
+        raise InvalidCandidateError(f"{what} contains {reason}")
+    if (where := _yaml12_refuses(header, root)) is not None:
+        # Positions only — invariant 4.
+        raise InvalidCandidateError(
+            f"{what} has syntax at line {where[0] + 1 + line_offset}, column {where[1] + 1} "
+            "that YAML 1.1 and the YAML 1.2 that Claude Code reads see differently: a lone "
+            "carriage return, a '#' with no space before it, a space or tab before a '#' "
+            "inside a value, a quoted value that goes on at column 0, or a repeated key"
+        )
+    if root is not None and isinstance(value, (dict, list)):
+        # The graph composed above; the load already bounded nesting, aliases and merges.
+        # Positions only in the message, never the scalar — invariant 4.
+        nested = _first_nested_yaml11_number(root)
+        if nested is not None:
+            mark = nested.start_mark
+            raise InvalidCandidateError(
+                f"{what} has a nested value at line {mark.line + 1 + line_offset}, column "
+                f"{mark.column + 1} that YAML 1.1 reads as a boolean or a number and the YAML "
+                "1.2 that Claude Code reads does not, or not as the same number (yes, on, "
+                "010, 0b101, 1_000 and 1:30 are such spellings). Quote it, or write true, "
+                "false or a plain decimal"
+            )
+
+
 def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> Any:
     """``safe_load`` a frontmatter ``header``, mapping every failure to a rejection.
 
@@ -1910,7 +2022,9 @@ def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> An
       / ``!!float`` an ``IndexError`` — both constructors index the scalar before
       parsing it. Every *other* tag already fails as a ``ConstructorError``, which is a
       ``YAMLError``. Caught only around the ``safe_load`` call itself, so nothing beyond
-      the parse is swallowed.
+      the parse is swallowed. The checks that walk the composed tree themselves run inside
+      :func:`refuse_check_failures`, which maps the same classes (and ``OverflowError`` and
+      ``TypeError``) to a refusal that names the class.
 
     The bullets record where each class was SEEN, not a proof of exhaustiveness — the
     fuzz harness (``fuzz/parse_frontmatter_fuzzer.py``) is what hunts for members this
@@ -1976,19 +2090,20 @@ def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> An
         # below reads this one composed graph. ``compose`` raises the same
         # ``YAMLError``/``RecursionError`` ``safe_load`` would, mapped below.
         root = yaml.compose(header, Loader=yaml.SafeLoader)
-        if root is not None and _merge_expands_beyond(root, MAX_MERGE_EXPANDED_PAIRS):
-            raise InvalidCandidateError(
-                f"{what} expands past the {MAX_MERGE_EXPANDED_PAIRS} pair cap "
-                f"through its YAML merge keys"
-            )
-        # Only a merge key can hide such an alias: without one, an alias to an enclosing
-        # node is a cycle, and `_is_self_referential` refuses it after the load, with its
-        # own message.
-        if root is not None and _has_enclosing_alias(root) and _has_merge_key(root):
-            raise InvalidCandidateError(
-                f"{what} has an alias to a node that encloses it, which the YAML 1.2 "
-                "that Claude Code reads refuses. Remove the self-reference"
-            )
+        with refuse_check_failures(what):
+            if root is not None and _merge_expands_beyond(root, MAX_MERGE_EXPANDED_PAIRS):
+                raise InvalidCandidateError(
+                    f"{what} expands past the {MAX_MERGE_EXPANDED_PAIRS} pair cap "
+                    f"through its YAML merge keys"
+                )
+            # Only a merge key can hide such an alias: without one, an alias to an enclosing
+            # node is a cycle, and `_is_self_referential` refuses it after the load, with its
+            # own message.
+            if root is not None and _has_enclosing_alias(root) and _has_merge_key(root):
+                raise InvalidCandidateError(
+                    f"{what} has an alias to a node that encloses it, which the YAML 1.2 "
+                    "that Claude Code reads refuses. Remove the self-reference"
+                )
         value = yaml.safe_load(header)
     except yaml.YAMLError as exc:
         raise InvalidCandidateError(
@@ -2014,57 +2129,8 @@ def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> An
         raise InvalidCandidateError(
             f"{what} has a YAML tag its value does not satisfy ({type(exc).__name__})"
         ) from exc
-    if _is_self_referential(value):
-        # Well-formed YAML that no consumer can finish walking — see :func:`_is_self_referential`.
-        # Rejecting here is the fail-closed direction: it stops the write, so such a document
-        # never reaches disk. A document an EARLIER release wrote still reads back — `_read_agent`,
-        # `_list_agents` and `list_skills` each catch this error around the parse and degrade the
-        # derived frontmatter field while still surfacing `content`, so the operator can see and
-        # repair the file. That is why no second guard is needed in `redact_secrets`.
-        raise InvalidCandidateError(f"{what} contains a self-referential YAML alias")
-    if _expands_beyond(value, MAX_EXPANDED_CHARS):
-        # Acyclic, so the check above passes it, and a few hundred bytes long, so every byte
-        # cap passes it — but a `&a`/`*a` pyramid expands to more than any consumer can walk or
-        # serialize (#1393). Same fail-closed shape and same degradation on read as the cycle
-        # rejection above; see :func:`_expands_beyond` for why memoizing the consumers is not
-        # enough on its own.
-        # Names the cap, like every sibling cap on this tier (`content is N bytes, over the
-        # M byte cap`). The counted SIZE is deliberately not named: `_expands_beyond`
-        # short-circuits the moment it passes the limit, so it does not have one to report,
-        # and finishing the count to produce a nicer message is the work this guard exists to
-        # refuse. Nothing here comes from the document — invariant 4.
-        raise InvalidCandidateError(
-            f"{what} expands past the {MAX_EXPANDED_CHARS} character cap through its YAML aliases"
-        )
-    if (reason := _first_json_unsafe(value)) is not None:
-        # Parses and fits every size guard, but a scalar in it cannot cross the JSON
-        # response path (#1415): the route would 500 where this tier's contract is 422.
-        # Rejecting at the seam covers KEY positions too, which a coerce-just-before-the-
-        # response fix misses — a huge int in a key hits `str(k)` in `redact_secrets` before
-        # any serializer. The reason is a static class label, never the offending scalar —
-        # invariant 4.
-        raise InvalidCandidateError(f"{what} contains {reason}")
-    if (where := _yaml12_refuses(header, root)) is not None:
-        # Positions only — invariant 4.
-        raise InvalidCandidateError(
-            f"{what} has syntax at line {where[0] + 1 + line_offset}, column {where[1] + 1} "
-            "that YAML 1.1 and the YAML 1.2 that Claude Code reads see differently: a lone "
-            "carriage return, a '#' with no space before it, a space or tab before a '#' "
-            "inside a value, a quoted value that goes on at column 0, or a repeated key"
-        )
-    if root is not None and isinstance(value, (dict, list)):
-        # The graph composed above; the load already bounded nesting, aliases and merges.
-        # Positions only in the message, never the scalar — invariant 4.
-        nested = _first_nested_yaml11_number(root)
-        if nested is not None:
-            mark = nested.start_mark
-            raise InvalidCandidateError(
-                f"{what} has a nested value at line {mark.line + 1 + line_offset}, column "
-                f"{mark.column + 1} that YAML 1.1 reads as a boolean or a number and the YAML "
-                "1.2 that Claude Code reads does not, or not as the same number (yes, on, "
-                "010, 0b101, 1_000 and 1:30 are such spellings). Quote it, or write true, "
-                "false or a plain decimal"
-            )
+    with refuse_check_failures(what):
+        _refuse_after_load(header, root, value, what=what, line_offset=line_offset)
     return value
 
 

@@ -2893,3 +2893,44 @@ def test_delete_path_verify_gets_none_when_the_bytes_are_unreadable(tmp_path, mo
     assert sub.fw.delete_path(tmp_path, "f.txt", verify=_record) is True
     assert seen["current"] is None
     assert not target.exists()
+
+
+# --- Greptile on PR 1810: one file that crashes a check never breaks the listing ----------
+
+
+def test_route_list_survives_a_value_tagged_key_and_a_crashing_check(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    real = cw._yaml12_refuses
+
+    def _boom(text, root):
+        if "poison" in text:
+            raise OverflowError("x")
+        return real(text, root)
+
+    monkeypatch.setattr(cw, "_yaml12_refuses", _boom)
+    agents = projects_root / "alpha" / ".claude" / "agents"
+    agents.mkdir(parents=True)
+    for name, extra in (("eq-key", "metadata: {=: x}\n"), ("crash", "x: poison\n"), ("good", "")):
+        (agents / f"{name}.md").write_bytes(
+            f"---\nname: {name}\ndescription: fine\n{extra}---\nbody\n".encode()
+        )
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.get(f"{_LIST_URL}?project=alpha")
+        assert resp.status_code == 200
+        listed = {a["name"]: a for a in resp.json()["agents"]}
+        assert {"eq-key", "crash", "good"} <= set(listed)
+        assert listed["good"]["description"] == "fine"
+        assert listed["eq-key"]["description"] == "fine"
+        assert listed["crash"]["description"] is None  # refused, still listed
+        for name in ("eq-key", "crash"):
+            assert c.get(f"{_agent_url(name)}?project=alpha").status_code == 200
+
+
+def test_a_crash_in_the_subagent_spelling_walk_is_a_refusal(monkeypatch) -> None:
+    def _boom(_header):
+        raise TypeError("x")
+
+    monkeypatch.setattr(sub, "_refuse_yaml11_only_spellings", _boom)
+    with pytest.raises(cw.InvalidCandidateError, match="TypeError"):
+        sub.validate_agent_content(_content("my-agent"), expected_name="my-agent")

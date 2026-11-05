@@ -2416,3 +2416,116 @@ def test_the_yaml12_view_reads_a_huge_hex_or_oct_number_as_infinity() -> None:
         "b": -math.inf,
         "c": 16,
     }
+
+
+# --- Greptile on PR 1810: a `=` key, and one wrapper around every composed-tree check -----
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [
+        pytest.param("metadata: {=: x}", {"metadata": {"=": "x"}}, id="flow"),
+        pytest.param("metadata:\n  =: x", {"metadata": {"=": "x"}}, id="block"),
+        pytest.param("=: x", {"=": "x"}, id="top-level"),
+        pytest.param("metadata: [{=: x}]", {"metadata": [{"=": "x"}]}, id="in-a-list"),
+        pytest.param("metadata: {!!value k: x}", {"metadata": {"k": "x"}}, id="bang-value"),
+        pytest.param(
+            "metadata: {!<tag:yaml.org,2002:value> k: x}", {"metadata": {"k": "x"}}, id="verbatim"
+        ),
+        pytest.param(
+            "base: &b {=: 1}\nmetadata: {<<: *b}",
+            {"base": {"=": 1}, "metadata": {"=": 1}},
+            id="merge-source",
+        ),
+    ],
+)
+def test_a_value_tagged_key_reads_as_pyyaml_reads_it(parse, extra: str, expected: dict) -> None:
+    # PyYAML's construct_mapping retags a `=` (or `!!value`) KEY as a string; the duplicate-key
+    # check constructed the node as it stood and raised ConstructorError: a 500.
+    frontmatter, _body = parse(f"---\nname: a\ndescription: d\n{extra}\n---\nb\n")
+    assert {k: v for k, v in frontmatter.items() if k not in ("name", "description")} == expected
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+def test_a_value_tagged_key_still_counts_as_a_repeated_key(parse) -> None:
+    with pytest.raises(cw.InvalidCandidateError, match="repeated key"):
+        parse("---\nname: a\ndescription: d\nmetadata: {=: x, '=': y}\n---\nb\n")
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "metadata: {a: =}",
+        "metadata: {? !!value [a] : x}",
+        "base: &b {a: 1}\nmetadata: {<<: *b, c: 2}",
+        "metadata: {!!merge <<: {a: 1}}",
+        "metadata: !!set {a, b}",
+        "metadata: !!omap [{a: 1}, {a: 2}]",
+        "metadata: !!pairs [{a: 1}, {a: 2}]",
+        "metadata: {a: !!binary aGk=}",
+        "metadata: {? !!binary aGk= : x}",
+        "metadata: {2024-01-01: x}",
+        "metadata: {2024-01-01: x, !!timestamp 2024-01-01: y}",
+        "metadata: {? [a] : x}",
+        "metadata: {? {a: 1} : x}",
+        "? [a]\n: x",
+        "metadata: {~: x, null: y}",
+        "metadata: {.nan: x}",
+        "metadata: {!!bool yes: x}",
+        "metadata: {!!int x: y}",
+        "metadata: {!!str 1: x, 1: y}",
+        "metadata: {!!yaml k: x}",
+        "metadata: {: x}",
+        "a: &k key\nmetadata: {*k : x}",
+    ],
+)
+def test_a_tag_or_node_shape_pyyaml_loads_specially_never_escapes_the_seam(parse, extra) -> None:
+    # The self-pass on the third round: every PyYAML tag and node shape the seam's own node
+    # walks might read differently from PyYAML's loader. Each loads or is refused; none raises
+    # anything else.
+    try:
+        parse(f"---\nname: a\ndescription: d\n{extra}\n---\nb\n")
+    except cw.InvalidCandidateError:
+        pass
+
+
+_CHECK_CRASHES = [
+    pytest.param(yaml.constructor.ConstructorError("x", None, "SECRET-1"), id="ConstructorError"),
+    pytest.param(ValueError("SECRET-1"), id="ValueError"),
+    pytest.param(OverflowError("SECRET-1"), id="OverflowError"),
+    pytest.param(TypeError("SECRET-1"), id="TypeError"),
+    pytest.param(KeyError("SECRET-1"), id="KeyError"),
+]
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize("crash", _CHECK_CRASHES)
+@pytest.mark.parametrize("check", ["_yaml12_refuses", "_merge_expands_beyond"])
+def test_a_crash_in_any_composed_tree_check_is_a_refusal(
+    parse, crash: Exception, check: str, monkeypatch
+) -> None:
+    def _boom(*_args, **_kwargs):
+        raise crash
+
+    monkeypatch.setattr(cw, check, _boom)
+    with pytest.raises(cw.InvalidCandidateError, match=type(crash).__name__) as caught:
+        parse("---\nname: a\ndescription: d\n---\nb\n")
+    assert "SECRET" not in str(caught.value)  # the class name only, never the payload
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+def test_a_recursion_error_in_a_check_is_a_refusal(parse, monkeypatch) -> None:
+    def _boom(*_args, **_kwargs):
+        raise RecursionError
+
+    monkeypatch.setattr(cw, "_first_nested_yaml11_number", _boom)
+    with pytest.raises(cw.InvalidCandidateError, match="nested too deeply to check"):
+        parse("---\nname: a\ndescription: d\nx: {y: 1}\n---\nb\n")
+
+
+def test_the_check_wrapper_passes_a_refusal_through_unchanged() -> None:
+    with pytest.raises(cw.InvalidCandidateError, match="^the original$"):
+        with cw.refuse_check_failures("frontmatter"):
+            raise cw.InvalidCandidateError("the original")
