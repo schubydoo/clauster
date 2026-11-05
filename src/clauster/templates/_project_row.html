@@ -144,7 +144,9 @@
                            bypassPermissions is offered only where the per-project ceiling
                            allows it and only for the Desktop/bridge launch (the typed-confirm
                            footgun guard); the "(Desktop only)" caveat is a contextual hint
-                           appended here, not baked into the canonical label. #}
+                           appended here, not baked into the canonical label. inherit (no flag,
+                           so a bypassPermissions default in user/managed settings would take
+                           effect) is gated by the same ceiling (TASK-335, config.CEILING_GATED_MODES). #}
                         <select id="perm-{{ p.name }}" class="form-select form-select-sm" x-model="lperm"
                                 aria-describedby="perm-effect-{{ p.name }}"
                                 {# Lead each rendered item with the separator (not trailing it) so a
@@ -152,10 +154,12 @@
                                    Each effect string already ends with its own period — don't append
                                    another, or the tail renders a double period. #}
                                 {% set ns = namespace(first=true) %}
-                                title="What the agent may do without asking — {% for mode, lbl in permission_labels.items() %}{% if mode != 'bypassPermissions' or p.allow_bypass_permissions %}{% if not ns.first %} · {% endif %}{{ mode }} = {{ lbl.effect }}{% set ns.first = false %}{% endif %}{% endfor %}">
+                                title="What the agent may do without asking — {% for mode, lbl in permission_labels.items() %}{% if mode not in ('bypassPermissions', 'inherit') or p.allow_bypass_permissions %}{% if not ns.first %} · {% endif %}{{ mode }} = {{ lbl.effect }}{% set ns.first = false %}{% endif %}{% endfor %}">
                           {% for mode, lbl in permission_labels.items() %}
-                          {% if mode != 'bypassPermissions' %}
+                          {% if mode not in ('bypassPermissions', 'inherit') %}
                           <option value="{{ mode }}">{{ lbl.long }}</option>
+                          {% elif mode == 'inherit' %}
+                          {% if p.allow_bypass_permissions %}<option value="inherit">{{ lbl.long }}</option>{% endif %}
                           {% elif p.allow_bypass_permissions %}
                           <option value="bypassPermissions" :disabled="lmode !== 'desktop'">{{ lbl.long }} {{ bypass_desktop_hint }}</option>
                           {% endif %}

@@ -23,7 +23,7 @@ import clauster.routes.instances as instances_module
 from clauster import claude_cli
 from clauster.app import create_app
 from clauster.claustrum_client import ClaustrumClient, ClaustrumError
-from clauster.config import PERMISSION_MODES, ClausterConfig, load_config
+from clauster.config import CEILING_GATED_MODES, PERMISSION_MODES, ClausterConfig, load_config
 from clauster.hosted import HostedSessionError
 from clauster.models import InstanceStatus, RemoteControlInstance
 
@@ -730,33 +730,50 @@ def test_resume_hosted_daemon_error_is_502(write_config, projects_root, monkeypa
 _BYPASS_CEILING = "projects:\n  alpha:\n    allow_bypass_permissions: true\n"
 
 
-def _resume_bypass_row(write_config, monkeypatch, *, extra_config: str, project: str = "alpha"):
+def _resume_bypass_row(
+    write_config,
+    monkeypatch,
+    *,
+    extra_config: str,
+    project: str = "alpha",
+    mode: str = "bypassPermissions",
+):
     monkeypatch.setattr(instances_module, "is_trusted", lambda *a, **k: True)
     monkeypatch.setattr(claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
     manager = _StubManager()
     row = manager.seed()
     row.project = project
-    row.permission_mode = "bypassPermissions"
+    row.permission_mode = mode
     app = _app(write_config, manager=manager, daemon=_StubDaemon(), extra_config=extra_config)
     with TestClient(app) as client:
         r = client.post(f"/api/instances/{_HID}/resume")
     return r, manager
 
 
+@pytest.mark.parametrize("mode", sorted(CEILING_GATED_MODES))
 def test_resume_hosted_bypass_row_after_ceiling_tightened_is_403(
-    write_config, projects_root, monkeypatch
+    write_config, projects_root, monkeypatch, mode
 ):
-    r, manager = _resume_bypass_row(write_config, monkeypatch, extra_config="")
+    # bypassPermissions and inherit (TASK-335: no flag, so a bypass default from user or
+    # managed settings would take effect) are both re-gated on resume.
+    r, manager = _resume_bypass_row(write_config, monkeypatch, extra_config="", mode=mode)
     assert r.status_code == 403
     # The same wording the spawn path returns — one shared source, no drift.
-    assert r.json() == {"detail": ClausterConfig.bypass_denied_detail("alpha")}
+    assert r.json() == {
+        "detail": ClausterConfig.bypass_denied_detail("alpha", permission_mode=mode)
+    }
     assert manager.resumed == []  # refused before the engine respawns anything
     assert _HID in manager.instances  # the dead row stays put, still forgettable
 
 
-def test_resume_hosted_bypass_row_with_ceiling_resumes(write_config, projects_root, monkeypatch):
+@pytest.mark.parametrize("mode", sorted(CEILING_GATED_MODES))
+def test_resume_hosted_bypass_row_with_ceiling_resumes(
+    write_config, projects_root, monkeypatch, mode
+):
     # Positive control: the ceiling is the only thing the 403 above depends on.
-    r, manager = _resume_bypass_row(write_config, monkeypatch, extra_config=_BYPASS_CEILING)
+    r, manager = _resume_bypass_row(
+        write_config, monkeypatch, extra_config=_BYPASS_CEILING, mode=mode
+    )
     assert r.status_code == 200
     assert manager.resumed[0]["id"] == _HID
 
@@ -771,11 +788,12 @@ def test_resume_hosted_bypass_row_for_a_gone_project_is_404_not_403(
     assert manager.resumed == []
 
 
-@pytest.mark.parametrize("mode", [m for m in PERMISSION_MODES if m != "bypassPermissions"])
+@pytest.mark.parametrize("mode", [m for m in PERMISSION_MODES if m not in CEILING_GATED_MODES])
 def test_resume_hosted_non_bypass_row_ignores_the_ceiling(
     write_config, projects_root, monkeypatch, mode
 ):
-    # The ceiling gates bypass only: every other stored mode resumes with no ceiling set.
+    # The ceiling gates bypass and inherit only: every other stored mode resumes with no
+    # ceiling set.
     monkeypatch.setattr(instances_module, "is_trusted", lambda *a, **k: True)
     monkeypatch.setattr(claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
     manager = _StubManager()

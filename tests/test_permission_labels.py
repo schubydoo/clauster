@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from clauster.app import create_app
 from clauster.config import (
     BYPASS_DESKTOP_HINT,
+    CEILING_GATED_MODES,
     PERMISSION_LABELS,
     PERMISSION_MODES,
     load_config,
@@ -69,9 +70,16 @@ def test_launch_select_options_render_the_canonical_long_form(write_config) -> N
     # The picker <option> text is the canonical "long" form for every non-gated mode.
     page = _client(write_config).get("/").text
     for mode, labels in PERMISSION_LABELS.items():
-        if mode == "bypassPermissions":
+        if mode in CEILING_GATED_MODES:
             continue  # gated; only rendered when the ceiling allows it (asserted below)
         assert f'<option value="{mode}">{labels["long"]}</option>' in page
+
+
+def test_inherit_option_renders_the_canonical_long_form_with_ceiling(write_config) -> None:
+    # inherit is ceiling-gated (TASK-335) but carries no Desktop hint: with the ceiling on
+    # it renders the plain canonical long label.
+    page = _client(write_config, _BYPASS_CEILING).get("/").text
+    assert f'<option value="inherit">{PERMISSION_LABELS["inherit"]["long"]}</option>' in page
 
 
 def test_bypass_option_appends_the_desktop_hint_outside_the_label(write_config) -> None:
@@ -85,14 +93,15 @@ def test_bypass_option_appends_the_desktop_hint_outside_the_label(write_config) 
 
 
 def test_no_bypass_option_without_ceiling(write_config) -> None:
-    # Fail-closed: no ceiling -> the gated option is absent from the picker entirely.
+    # Fail-closed: no ceiling -> the gated options are absent from the picker entirely.
     page = _client(write_config).get("/").text
     assert '<option value="bypassPermissions"' not in page
+    assert '<option value="inherit"' not in page
 
 
 def test_perm_tooltip_ends_cleanly(write_config) -> None:
-    # The effect tooltip joins modes with " · " and must end cleanly. When bypass is
-    # filtered out (the common no-ceiling case) the trailing item is whichever mode the
+    # The effect tooltip joins modes with " · " and must end cleanly. When the gated
+    # modes are filtered out (the common no-ceiling case) the trailing item is whichever mode the
     # canonical map lists last, whose effect already ends in a period — so the tooltip
     # must end with that effect string verbatim: no dangling " · " separator AND no
     # doubled-up trailing period. Derived from the map (not a hardcoded mode) so adding
@@ -104,7 +113,7 @@ def test_perm_tooltip_ends_cleanly(write_config) -> None:
     assert m is not None
     tooltip = m.group(0)
     assert ' · "' not in tooltip  # no dangling separator before the closing quote
-    last_mode = [mode for mode in PERMISSION_LABELS if mode != "bypassPermissions"][-1]
+    last_mode = [mode for mode in PERMISSION_LABELS if mode not in CEILING_GATED_MODES][-1]
     last_effect = PERMISSION_LABELS[last_mode]["effect"]
     assert last_effect.endswith(".")  # the effect supplies its own period
     assert tooltip.endswith(f'{last_effect}"')  # ends with the effect itself — no extra "."

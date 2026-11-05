@@ -46,7 +46,8 @@ Interactive Session mode, this *recaps* the prior conversation rather than truly
 - Per-card **Open in Claude** link and **QR code** to attach from anywhere.
 - Spawn modes (`same-dir`, `worktree`, `session`) and permission modes
   (`default`, `plan`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`), plus
-  `inherit` — force no mode at all and let the session start in its own default.
+  `inherit` — force no mode at all and let the session start in its own default
+  (gated by `allow_bypass_permissions`, like `bypassPermissions`).
 - Create or clone projects into `projects_root` with progress streamed over a
   WebSocket.
 

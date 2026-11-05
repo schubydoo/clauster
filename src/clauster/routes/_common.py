@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 def enforce_bypass_ceiling(
     config: ClausterConfig, project: str, permission_mode: str | None
 ) -> None:
-    """Reject ``bypassPermissions`` when a project's config ceiling forbids it.
+    """Reject ``bypassPermissions`` or ``inherit`` when a project's config ceiling forbids it.
 
     The runner enforces this hard ceiling for the bridge channel
     (:class:`~clauster.runner.PermissionModeNotAllowed`, mapped to 403). The
@@ -46,7 +46,10 @@ def enforce_bypass_ceiling(
     wording can diverge.
     """
     if config.bypass_denied(project, permission_mode):
-        raise HTTPException(status_code=403, detail=config.bypass_denied_detail(project))
+        raise HTTPException(
+            status_code=403,
+            detail=config.bypass_denied_detail(project, permission_mode=permission_mode),
+        )
 
 
 async def list_projects(engine: ClausterEngine) -> list[Project]:

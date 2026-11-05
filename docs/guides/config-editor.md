@@ -316,9 +316,10 @@ A shape that the rows cannot show opens in Raw JSON. A save with an unknown key
 or a wrong type is refused whole, with a `422` that names the key.
 
 `bypassPermissions` is not offered, and a save that sets it as `defaultMode` is
-refused at every scope, so Clauster never writes it. If a session starts with
-**No forced mode** (`inherit`), a hand-written `bypassPermissions` in User or
-managed settings still takes effect. See the `inherit` caveat under the
+refused at every scope, so Clauster never writes it. A hand-written
+`bypassPermissions` in User or managed settings takes effect for a session that
+starts with **No forced mode** (`inherit`). For this reason, a project offers
+`inherit` only when it sets `allow_bypass_permissions: true`. See the
 [bypassPermissions footgun gate](../security.md#bypasspermissions-footgun-gate).
 
 The box under the rows edits `autoMode`, the rules for the auto mode classifier.

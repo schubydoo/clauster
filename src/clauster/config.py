@@ -92,6 +92,13 @@ PERMISSION_MODES: tuple[str, ...] = (
     "bypassPermissions",
     INHERIT_PERMISSION_MODE,
 )
+# The modes the per-project `allow_bypass_permissions` ceiling gates (TASK-335). The
+# ceiling has to gate `inherit` as well as `bypassPermissions`: with no flag passed, a
+# `permissions.defaultMode: bypassPermissions` in user, managed or `--settings` settings
+# takes effect, and clauster cannot read every one of those sources (server-managed and
+# MDM/registry policy among them), so the gate refuses the mode itself instead of
+# probing files.
+CEILING_GATED_MODES: frozenset[str] = frozenset({"bypassPermissions", INHERIT_PERMISSION_MODE})
 
 # Canonical permission-mode labels — the SINGLE source of truth for every label
 # surface (#685). Each mode carries three forms:
@@ -137,9 +144,9 @@ PERMISSION_LABELS: dict[str, dict[str, str]] = {
     # Listed LAST deliberately: the six above are ordered by how much they let the
     # agent do, and "don't force a mode" isn't a point on that axis — it opts out of
     # the choice entirely. It never REQUESTS anything itself — but with no flag
-    # passed, an on-disk settings.json `permissions.defaultMode` takes effect,
-    # including a hand-edited `bypassPermissions` clauster refuses to write. See
-    # the caveat in docs/security.md.
+    # passed, a settings.json `permissions.defaultMode` takes effect, including a
+    # `bypassPermissions` in user or managed settings that clauster refuses to write.
+    # So it is offered only where the bypass ceiling is on (CEILING_GATED_MODES).
     INHERIT_PERMISSION_MODE: {
         "short": "No forced mode",
         "long": "No forced mode (session default)",
@@ -299,11 +306,10 @@ class InstanceDefaults(BaseModel):
         default="default",
         description="Default permission mode for new bridges. `inherit` is a Clauster "
         "sentinel, not a claude mode: it passes **no** `--permission-mode` flag, so the "
-        "session starts in whatever mode it would pick on its own. Caveat: with no flag "
-        "passed, an existing `permissions.defaultMode` in a settings file takes effect — "
-        "including a hand-edited `bypassPermissions` Clauster refuses to write itself. "
-        "See the `inherit` caveat in the security guide before using it on a project "
-        "with `allow_bypass_permissions: false`.",
+        "session starts in whatever mode it would pick on its own. With no flag passed, a "
+        "`permissions.defaultMode: bypassPermissions` in user or managed settings takes "
+        "effect, so `inherit` is gated like `bypassPermissions`: a project accepts it only "
+        "with `allow_bypass_permissions: true`, and refuses it with a 403 otherwise.",
     )
     verbose: bool = Field(
         default=False,
@@ -348,9 +354,10 @@ class ProjectConfig(BaseModel):
     allow_bypass_permissions: bool = Field(
         default=False,
         description="The **hard ceiling** for the bypassPermissions footgun gate. A "
-        "project can never be spawned with `--permission-mode bypassPermissions` unless "
-        "this is set here in `clauster.yml`. The dashboard's per-session typed-confirm "
-        "is the second layer.",
+        "project can never be spawned with `--permission-mode bypassPermissions`, or with "
+        "the `inherit` mode (no flag, so a `bypassPermissions` default in user or managed "
+        "settings would take effect), unless this is set here in `clauster.yml`. The "
+        "dashboard's per-session typed-confirm for bypassPermissions is the second layer.",
     )
 
 
@@ -1500,25 +1507,36 @@ class ClausterConfig(BaseModel):
         return bool(pc and pc.allow_bypass_permissions)
 
     def bypass_denied(self, project_name: str, permission_mode: str | None) -> bool:
-        """Whether ``bypassPermissions`` is requested but the project's ceiling forbids it.
+        """Whether a mode that can end in bypass is requested but the ceiling forbids it.
 
         The single decision every spawn channel shares: it is the one place that
-        combines "is bypass being asked for" with the per-project hard ceiling
+        combines "can this mode end in bypass" with the per-project hard ceiling
         (:meth:`allows_bypass`). Each channel calls this and raises its own
         exception type, so a new spawn path cannot diverge from the ceiling by
-        hand-rolling the check. Returns ``True`` only when the effective mode is
-        ``bypassPermissions`` and the project does not allow it (fail closed:
+        hand-rolling the check. Returns ``True`` when the effective mode is in
+        :data:`CEILING_GATED_MODES` (``bypassPermissions``, or ``inherit``, which
+        passes no flag and so lets a ``bypassPermissions`` default from user or
+        managed settings through) and the project does not allow it (fail closed:
         callers raise when this is ``True``).
         """
-        return permission_mode == "bypassPermissions" and not self.allows_bypass(project_name)
+        return permission_mode in CEILING_GATED_MODES and not self.allows_bypass(project_name)
 
     @staticmethod
-    def bypass_denied_detail(project_name: str) -> str:
-        """Return the operator-facing 403 detail for a denied bypassPermissions request.
+    def bypass_denied_detail(project_name: str, *, permission_mode: str | None) -> str:
+        """Return the operator-facing 403 detail for a request :meth:`bypass_denied` refused.
 
-        One source for the wording every out-of-runner channel returns (the hosted
-        and background-agent 403s), so the two cannot drift apart.
+        One source for the wording every channel returns (the bridge refusal and the
+        hosted and background-agent 403s), so they cannot drift apart. ``inherit``
+        gets its own reason, because it does not name bypass itself.
         """
+        if permission_mode == INHERIT_PERMISSION_MODE:
+            return (
+                f"The inherit permission mode is not enabled for project {project_name!r}: "
+                "it passes no --permission-mode flag, so a permissions.defaultMode of "
+                "bypassPermissions in user or managed settings would take effect. Pick an "
+                "explicit mode, or set projects.<name>.allow_bypass_permissions: true in "
+                "clauster.yml."
+            )
         return (
             f"bypassPermissions is not enabled for project {project_name!r}. Set "
             "projects.<name>.allow_bypass_permissions: true in clauster.yml first."

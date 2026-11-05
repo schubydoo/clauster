@@ -29,6 +29,18 @@ run a database migration by hand. (The separate `clauster migrate` command is a
 *legacy* helper that only upgrades an older flat-file `state.json`; on a 0.12+
 deployment it has nothing to do.)
 
+## After 1.3.3: `inherit` needs `allow_bypass_permissions`
+
+The `inherit` permission mode (**No forced mode**) passes no `--permission-mode`
+flag, so a `permissions.defaultMode: bypassPermissions` in user or managed settings
+takes effect. Clauster now gates `inherit` with the same per-project ceiling as
+`bypassPermissions`. On a project without `allow_bypass_permissions: true`, the
+launch picker does not offer it, and every launch or resume that asks for it gets a
+`403`. If `instance_defaults.permission_mode` is `inherit`, pick an explicit mode
+there, or set the ceiling on each project that must use `inherit`. For the reasons,
+see the [bypassPermissions footgun
+gate](docs/security.md#bypasspermissions-footgun-gate).
+
 ## After 1.2.1: every browser logs in once more
 
 Up to 1.2.1, every instance named its login cookie `clauster_session`. Browsers
