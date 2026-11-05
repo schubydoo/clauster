@@ -1879,6 +1879,18 @@ def test_metrics_batch_returns_all_cached(write_config, tmp_path):
     assert "alpha" not in body  # project names are no longer keys
 
 
+def test_metrics_session_breakdown_rides_the_batch_not_the_project_total(write_config, tmp_path):
+    # Backlog TASK-342: the per-session figures describe ONE bridge, so they ride the
+    # instance-keyed batch the rows read, and stay off the project-folded endpoint.
+    client = _client(write_config, tmp_path)
+    one = {"pid": 11, "procs": 2, "cpu_percent": 1.5, "rss_bytes": 7}
+    iid = _cache_sample(
+        client, "alpha", {"cpu_percent": 2.0, "rss_bytes": 10, "procs": 3, "sessions": {"u": one}}
+    )
+    assert client.get("/api/metrics").json()[iid]["sessions"] == {"u": one}
+    assert "sessions" not in client.get("/api/projects/alpha/metrics").json()
+
+
 def test_metrics_batch_keeps_bridges_of_one_project_apart(write_config, tmp_path):
     # #1090: two bridges of ONE project each report their own figure. Folded per project
     # the Server-Mode row wore the Interactive Session's CPU/RAM as its own.

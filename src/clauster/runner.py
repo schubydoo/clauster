@@ -23,6 +23,7 @@ import subprocess
 import sys
 import time
 import unicodedata
+from collections import Counter
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -783,10 +784,18 @@ class SessionRunner:
         not wear the CPU/RAM of the other bridges sharing its project. A cache entry whose
         instance vanished from the registry between refreshes is dropped, never
         misattributed; :meth:`metrics_snapshots` folds the same entries per project for
-        callers that genuinely want a project total.
+        callers that genuinely want a project total. Each sample's per-session ``sessions``
+        breakdown (backlog TASK-342) is copied too, so a caller cannot mutate the cache.
         """
         return {
-            iid: dict(sample)
+            iid: {
+                **sample,
+                **(
+                    {"sessions": {k: dict(v) for k, v in sample["sessions"].items()}}
+                    if "sessions" in sample
+                    else {}
+                ),
+            }
             for iid, sample in self._metrics_cache.items()
             if iid in self._instances  # forgotten since the last refresh
         }
@@ -803,7 +812,9 @@ class SessionRunner:
         ``disk_*`` rates summed when any bridge reports them (``None`` when none do),
         plus ``bridges``: how many live bridges the figure covers. A cache entry whose
         instance vanished from the registry between refreshes is dropped, never
-        misattributed.
+        misattributed. The per-session ``sessions`` breakdown is left out: it describes
+        one bridge, and a project figure carrying the first bridge's sessions would credit
+        them to the whole project.
         """
         out: dict[str, dict] = {}
         for iid, sample in self._metrics_cache.items():
@@ -812,7 +823,8 @@ class SessionRunner:
                 continue
             agg = out.get(inst.project)
             if agg is None:
-                out[inst.project] = {**sample, "bridges": 1}
+                folded = {k: v for k, v in sample.items() if k != "sessions"}
+                out[inst.project] = {**folded, "bridges": 1}
                 continue
             agg["bridges"] += 1
             agg["procs"] += sample["procs"]
@@ -832,10 +844,15 @@ class SessionRunner:
         sum. Returns the sample dict on success, or ``None`` when the bridge is not running,
         has no pid, fails the create-time guard (recycled pid), or the sampler returns
         nothing. Exceptions propagate to the gather caller, which isolates them per bridge.
+
+        The sample also breaks the total down per live session (backlog TASK-342), keyed by
+        the session's ``local_uuid``; see :meth:`_session_pids_for`.
         """
         pid = inst.bridge_pid
         if inst.status is not InstanceStatus.RUNNING or pid is None:
             return None
+        # Read on the loop, before the thread hop: `_sessions` is the poll loop's list.
+        sessions = self._session_pids_for(inst)
         start = inst.bridge_proc_start
         if start is not None:
             # Via the shared identity core rather than a hand-rolled epoch compare, so this
@@ -864,7 +881,36 @@ class SessionRunner:
             pid,
             interval=self._config.metrics.sample_interval_seconds,
             normalize_cpu=self._config.metrics.normalize_cpu,
+            sessions=sessions,
         )
+
+    def _session_pids_for(self, inst: RemoteControlInstance) -> dict[int, str]:
+        """Map the pid of each live session under ``inst`` to its ``local_uuid`` (TASK-342).
+
+        The pid is the one ``claude agents --json`` reports for the session, which for a
+        standard bridge is the bridge's own child ``claude`` process. The source is the same
+        TRACKED join that lists the sessions under the bridge row, so a sub-row can only
+        carry a figure for a session the row already shows. The sampler then reports a pid
+        only when it is inside this bridge's process tree, so a stale pid that left the tree
+        gets no figure.
+
+        Empty for a pty bridge: it hosts one session, and the bridge figure already is that
+        session. A pid that two sessions both name, a ``local_uuid`` two pids both carry,
+        and a session with no ``local_uuid`` are left out, because no figure could be put
+        on one row without guessing.
+        """
+        if inst.resume_mode == "pty":
+            return {}
+        pairs = [
+            (s.pid, s.local_uuid)
+            for s in self._sessions
+            if s.attribution is Attribution.TRACKED
+            and s.parent_instance == inst.instance_id
+            and s.local_uuid
+        ]
+        pids = Counter(p for p, _ in pairs)
+        uuids = Counter(u for _, u in pairs)
+        return {p: u for p, u in pairs if pids[p] == 1 and uuids[u] == 1}
 
     async def _refresh_metrics_cache(self) -> None:
         """Re-sample every running bridge into ``_metrics_cache`` (delegates to PollLoop).

@@ -642,6 +642,30 @@ def tracked_session_server(
 
 
 @pytest.fixture
+def session_child_server(
+    tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
+) -> Iterator[Server]:
+    """Like ``tracked_session_server``, with a real session child under each bridge.
+
+    ``FAKE_CLAUDE_SESSION_CHILD_FILE`` makes the fake bridge start one child process and
+    write its pid to ``<state_dir>/../session-child.pid``, the way a real standard bridge
+    runs each session as its own ``claude`` child. A test lists that pid in
+    ``agents.json`` to get a session that the metrics sampler can place inside the
+    bridge's process tree (backlog TASK-342). Metrics refresh every second.
+    """
+    tmp = tmp_path_factory.mktemp("e2e-session-child")
+    yield from _start_server(
+        tmp,
+        mutable_projects_tree,
+        extra="  agents_json_poll_interval_seconds: 1\nmetrics:\n  poll_seconds: 1\n",
+        extra_env={
+            "FAKE_CLAUDE_AGENTS_FILE": str(tmp / "agents.json"),
+            "FAKE_CLAUDE_SESSION_CHILD_FILE": str(tmp / "session-child.pid"),
+        },
+    )
+
+
+@pytest.fixture
 def adoptable_external_server(
     tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
 ) -> Iterator[Server]:

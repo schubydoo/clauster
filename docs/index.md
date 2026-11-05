@@ -68,7 +68,8 @@ Interactive Session mode, this *recaps* the prior conversation rather than truly
   and tokens, and MCP tool input). Every write is lost-update-guarded and
   trust-gated; every write is audit-logged to `config_audit.log`.
 - Approximate per-project cost / token badge rolled up from session transcripts.
-- Live per-bridge resource metrics (CPU / memory / disk) while a bridge runs.
+- Live per-bridge resource metrics (CPU / memory / disk) while a bridge runs, and
+  CPU / memory for each live session under a standard bridge.
 
 ### Safety
 

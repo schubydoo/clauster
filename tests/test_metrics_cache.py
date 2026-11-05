@@ -8,10 +8,11 @@ import os
 import subprocess
 import sys
 import threading
+from pathlib import Path
 
 import pytest
 
-from clauster.models import InstanceStatus, RemoteControlInstance
+from clauster.models import Attribution, InstanceStatus, RemoteControlInstance, WorkingSession
 from clauster.runner import SessionRunner
 from conftest import _raise_cancelled
 
@@ -382,3 +383,71 @@ async def test_snapshots_by_instance_returns_copies(runner_config):
     runner._metrics_cache[inst.instance_id] = {"procs": 1, "cpu_percent": 1.0, "rss_bytes": 10}
     runner.metrics_snapshots_by_instance()[inst.instance_id]["rss_bytes"] = 999
     assert runner._metrics_cache[inst.instance_id]["rss_bytes"] == 10
+
+
+# ----- per-session breakdown (backlog TASK-342) ---------------------------------
+
+
+def _session(pid, uuid, parent, attribution=Attribution.TRACKED):
+    s = WorkingSession(pid=pid, cwd=Path("/p"), kind="interactive", started_at=0, local_uuid=uuid)
+    s.parent_instance = parent
+    s.attribution = attribution
+    return s
+
+
+async def test_session_pids_come_from_this_bridges_tracked_sessions(runner_config):
+    """Only this bridge's TRACKED sessions, each with one pid and one uuid, are asked for."""
+    runner = _runner(runner_config)
+    inst = _running(runner, project="alpha", pid=100)
+    other = _running(runner, project="alpha", pid=200)
+    runner._sessions = [
+        _session(101, "u-a", inst.instance_id),
+        _session(102, "u-b", inst.instance_id),
+        _session(201, "u-other", other.instance_id),  # another bridge's session
+        _session(103, "u-ext", None, Attribution.EXTERNAL),
+        _session(104, "u-ext2", inst.instance_id, Attribution.HOSTED),
+        _session(105, "", inst.instance_id),  # no uuid → no key to report under
+        _session(106, "u-dup", inst.instance_id),  # one uuid on two pids → ambiguous
+        _session(107, "u-dup", inst.instance_id),
+        _session(108, "u-c", inst.instance_id),  # one pid named by two sessions
+        _session(108, "u-d", inst.instance_id),
+    ]
+    assert runner._session_pids_for(inst) == {101: "u-a", 102: "u-b"}
+    assert runner._session_pids_for(other) == {201: "u-other"}
+
+
+async def test_session_pids_empty_for_a_pty_bridge(runner_config):
+    """A pty bridge is one session; its bridge figure already is that session."""
+    runner = _runner(runner_config)
+    inst = _running(runner, project="alpha", pid=100)
+    inst.resume_mode = "pty"
+    runner._sessions = [_session(101, "u-a", inst.instance_id)]
+    assert runner._session_pids_for(inst) == {}
+
+
+async def test_refresh_hands_the_sampler_this_bridges_session_pids(runner_config, monkeypatch):
+    """The sampler gets the session map, and the breakdown lands in the per-instance cache."""
+    runner = _runner(runner_config)
+    inst = _running(runner, project="alpha", pid=100)
+    runner._sessions = [_session(101, "u-a", inst.instance_id)]
+    seen = {}
+
+    def _sample(pid, **kw):
+        seen[pid] = kw["sessions"]
+        return {
+            "procs": 3,
+            "cpu_percent": 4.0,
+            "rss_bytes": 300,
+            "sessions": {"u-a": {"pid": 101, "procs": 2, "cpu_percent": 3.0, "rss_bytes": 200}},
+        }
+
+    monkeypatch.setattr("clauster.runner.metrics.sample_tree", _sample)
+    await runner._refresh_metrics_cache()
+    assert seen == {100: {101: "u-a"}}
+    by_iid = runner.metrics_snapshots_by_instance()
+    assert by_iid[inst.instance_id]["sessions"]["u-a"]["rss_bytes"] == 200
+    # Copied all the way down: a caller cannot reach into the cache through the breakdown.
+    by_iid[inst.instance_id]["sessions"]["u-a"]["rss_bytes"] = 1
+    assert runner._metrics_cache[inst.instance_id]["sessions"]["u-a"]["rss_bytes"] == 200
+    # The project fold describes the project, so one bridge's sessions are not on it.
+    assert "sessions" not in runner.metrics_snapshot("alpha")

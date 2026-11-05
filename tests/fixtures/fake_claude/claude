@@ -155,6 +155,30 @@ def run_bridge(args):
             f"Authorization: Bearer sk-FAKEFAKEFAKEFAKEFAKE\x1b[0m"
         )
 
+    # A session child, like the real bridge's per-session `claude` process: spawned and
+    # its pid written to the file, so a test can list it in `agents --json` (TASK-342).
+    # It exits when the bridge does, or when it is orphaned.
+    child = None
+    child_file = os.environ.get("FAKE_CLAUDE_SESSION_CHILD_FILE")
+    if child_file:
+        import subprocess
+
+        child = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import os, time\n"
+                "p = os.getppid()\n"
+                "for _ in range(2400):\n"
+                "    if os.getppid() != p:\n"
+                "        break\n"
+                "    time.sleep(0.25)\n",
+            ]
+        )
+        with open(child_file + ".tmp", "w") as fh:
+            fh.write(str(child.pid))
+        os.replace(child_file + ".tmp", child_file)
+
     stopped = {"v": False}
 
     def handler(_signum, _frame):
@@ -169,6 +193,9 @@ def run_bridge(args):
         if stopped["v"]:
             break
         time.sleep(0.25)
+    if child is not None:
+        child.kill()
+        child.wait()
     return 0
 
 

@@ -73,7 +73,10 @@
             running row's <code>% CPU · MB</code> is the live usage of that session's bridge
             processes: CPU is summed across cores (so it can pass 100%) unless
             <code>metrics.normalize_cpu</code> makes it a share of the whole host, memory is
-            summed RSS, and ⬇ / ⬆, when shown, are disk read and write rates.</li>
+            summed RSS, and ⬇ / ⬆, when shown, are disk read and write rates. Each live
+            session listed under a bridge shows its own <code>% CPU · MB</code> too: the
+            session and the tools it started, as a part of the bridge figure. A session
+            that Clauster cannot place in the bridge's processes shows no figure.</li>
         </ul></li>
       <li><strong>Projects</strong> — every discovered project. Launch a new session, create
         or clone a project, and open a project's read-only transcript here.</li>

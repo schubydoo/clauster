@@ -1532,6 +1532,28 @@ def test_dashboard_bridge_session_row_has_live_transcript_button(write_config):
     assert "return UUID.test(u) ? u : null;" in page
 
 
+def test_dashboard_bridge_session_row_has_its_own_metrics_chip(write_config):
+    # Backlog TASK-342: each live session under a bridge shows its own CPU/RAM, from the
+    # bridge row's instance-keyed sample, and only while a figure exists for it.
+    page = _client(write_config).get("/").text
+    row = page[page.index('data-test="bridge-session-row"') :]
+    row = row[: row.index("</template>")]
+    chip = row[row.rindex("<span", 0, row.index('data-test="bridge-session-metrics"')) :]
+    chip = chip[: chip.index("</span>")]
+    assert 'x-show="bridgeSessionMetricsLabel(i.rk, s)"' in chip  # absent → no chip, never 0
+    assert 'x-text="bridgeSessionMetricsLabel(i.rk, s)"' in chip  # x-text, never x-html
+    assert ':title="bridgeSessionMetricsTitle(i.rk, s)"' in chip
+    assert "tabindex" not in chip  # no new tab stop on every session row
+    # The explanation is in reading order for a screen reader, as on the bridge chip.
+    assert '<span class="visually-hidden" x-text="bridgeSessionMetricsTitle(i.rk, s)">' in row
+    # The lookup matches the session on uuid AND pid, own properties only.
+    assert "Object.prototype.hasOwnProperty.call(per, id)" in page
+    assert "return e && e.pid === s.pid ? e : null;" in page
+    # The help legend tells touch users what the session figure is.
+    legend = page[page.index('data-test="help-metrics-legend"') :].split("</li>", 1)[0]
+    assert "part of the bridge figure" in legend
+
+
 def test_dashboard_bridge_session_transcript_selects_the_session(write_config):
     # TASK-269: the button reuses the project list load, then selects the session, so a
     # live session engages the existing tail. A stale load (closed or reopened) is
