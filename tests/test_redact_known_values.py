@@ -750,15 +750,32 @@ def test_cost_is_linear_on_hostile_text() -> None:
     """Long runs of anchor hits and of the value itself must stay cheap (no quadratic walk)."""
     redact.remember_known_values("iid-1", ENV, SESSION, BRIDGE)
     blocks = "".join(_random_part(ENV)[i : i + 4] for i in range(0, 20, 4))
-    body = _random_part(ENV)
-    split_copies = ("env_" + body[:10] + " " + body[10:] + " x ") * 70_000  # 2.2 MB
-    for text in (
-        blocks * 40_000,
-        (ENV + " ") * 20_000,
-        ("A" * 1000 + "\n") * 500,
-        split_copies,  # each copy's runs used to send `find` to the end of the text
-    ):
+    for text in (blocks * 40_000, (ENV + " ") * 20_000, ("A" * 1000 + "\n") * 500):
         start = time.perf_counter()
         spans = redact._known_spans(text)
-        assert time.perf_counter() - start < 5.0
+        assert time.perf_counter() - start < 30.0  # a blow-up, not a fine bound: CI can be slow
         assert isinstance(spans, list)
+
+
+def _cpu_seconds(text: str) -> float:
+    """The least CPU time of two runs of the known-value search over ``text``."""
+    best = float("inf")
+    for _ in range(2):
+        start = time.process_time()
+        redact._known_spans(text)
+        best = min(best, time.process_time() - start)
+    return best
+
+
+def test_cost_grows_linearly_on_split_copies() -> None:
+    """Split copies of a value once sent `find` to the end of the text for each run.
+
+    That cost grew with the square of the length (0.5 MB in 1 s, 2 MB in 14 s). This compares
+    how the cost GROWS, not a wall-clock time, so a loaded host or a slow runner cannot fail
+    it: 4 times the text must cost less than 8 times the CPU time (linear is about 4).
+    """
+    redact.remember_known_values("iid-1", ENV, SESSION, BRIDGE)
+    body = _random_part(ENV)
+    unit = "env_" + body[:10] + " " + body[10:] + " x "
+    small, large = _cpu_seconds(unit * 8_000), _cpu_seconds(unit * 32_000)
+    assert large < 8 * max(small, 1e-3), (small, large)

@@ -1527,12 +1527,14 @@ def test_reaper_credentials_error_503(write_config, tmp_path, monkeypatch):
     from clauster import environments as envmod
 
     def _raise(**k):
-        raise envmod.CredentialsError("no token")
+        raise envmod.CredentialsError(f"no token xyz{_KNOWN_ENV}")
 
     monkeypatch.setattr(envmod, "load_credentials", _raise)
+    redact.remember_known_values("iid-reaper", _KNOWN_ENV)
     r = _reaper_client(write_config, tmp_path).get("/api/environments/ghosts")
     assert r.status_code == 503
     assert "credentials" in r.json()["detail"]
+    assert _KNOWN_ENV[6:] not in r.json()["detail"]  # the error text is redacted (#1621)
 
 
 #: A stored id the reaper error texts weld in, to prove they pass through redaction (#1621).

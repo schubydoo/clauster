@@ -881,7 +881,7 @@ class HostedSession:
         self._capture_session_uuid(frame)
         if self._suppressed_by_history(seq, frame):
             return
-        self._emit({"type": "frame", "frame": _redact_obj(frame)})
+        self._emit({"type": "frame", "frame": _redact_obj(_drop_delta_text(frame))})
 
     async def _handle_control_request(self, frame: dict[str, Any]) -> None:
         """Auto-ack the MCP handshake/transport subtypes; park anything else (fail-closed).
@@ -2201,4 +2201,40 @@ def _redact_obj(obj: Any, _depth: int = 0) -> Any:
         if isinstance(obj, dict):
             return {k: _redact_obj(v, _depth + 1) for k, v in obj.items()}
         return [_redact_obj(v, _depth + 1) for v in obj]
+    return obj
+
+
+def _drop_delta_text(frame: dict[str, Any]) -> dict[str, Any]:
+    """Empty the text of a partial-message delta frame, keeping the frame's shape (#1621).
+
+    ``--include-partial-messages`` streams each reply as many small ``content_block_delta``
+    events before the frame that holds the whole message. Redaction masks each string on its
+    own, so a value split across deltas cannot be matched: a known id would reach the browser
+    in pieces. So every string in the event's ``delta`` becomes ``""``, except a ``type``
+    (``text_delta``, ``input_json_delta``, ...). The ``index``, the keys and every other event
+    stay, so the stream stays well formed. The dashboard renders the whole message, which
+    keeps its masking. A client that reads delta text gets empty deltas.
+    """
+    event = frame.get("event")
+    if frame.get("type") != "stream_event" or not isinstance(event, dict):
+        return frame
+    delta = event.get("delta")
+    if event.get("type") != "content_block_delta" or not isinstance(delta, dict):
+        return frame
+    return {**frame, "event": {**event, "delta": _blank_strings(delta)}}
+
+
+def _blank_strings(obj: Any, _depth: int = 0) -> Any:
+    """Return ``obj`` with every string ``""``, except a string under a ``type`` key."""
+    if isinstance(obj, str):
+        return ""
+    if isinstance(obj, dict | list):
+        if _depth >= _REDACT_MAX_DEPTH:
+            return _REDACT_TOO_DEEP  # carries no input bytes, like `_redact_obj`'s cap
+        if isinstance(obj, dict):
+            return {
+                k: v if k == "type" and isinstance(v, str) else _blank_strings(v, _depth + 1)
+                for k, v in obj.items()
+            }
+        return [_blank_strings(v, _depth + 1) for v in obj]
     return obj

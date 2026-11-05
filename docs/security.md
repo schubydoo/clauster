@@ -321,8 +321,7 @@ Clauster masks secrets in two ways. Only the first one is a guarantee.
    wrap, a hanging indent, a box border, padding, an escape sequence or an
    invisible character cannot split a value past the mask. Each piece of a
    split value is masked where it stands. A leak of a known value blocks a
-   release. One gap is still open (hosted partial-message frames, see the
-   limits below).
+   release.
 2. **Shapes (best effort).** Every other secret is masked by its shape: ids and
    UUIDs that Clauster did not learn, and third-party tokens that Claude prints.
    [Log redaction](#log-redaction) below describes these masks and their known
@@ -334,7 +333,7 @@ Clauster masks secrets in two ways. Only the first one is a guarantee.
       The random part is the value without its `env_`, `session_` or `cse_`
       prefix. Such a run shows where the rest of the value is not visible (it
       scrolled off the screen, the program drew over it, it is not printed yet,
-      or a shape mask already hides it), and in the cases of the next three
+      or a shape mask already hides it), and in the cases of the next two
       items. Apart from those cases, a run of 7 or more characters never shows,
       whole or put back together across rows.
     - The bridge-log stream and the hosted `stderr` and `text` events are
@@ -344,14 +343,17 @@ Clauster masks secrets in two ways. Only the first one is a guarantee.
       random part. The on-disk mirror, a transcript turn, `error_detail`,
       clone-job errors and agent text are masked as one block, so a line break
       inside them does not split a value.
-    - Open gap: hosted sessions also stream reply text as many small
-      partial-message frames, before the frame that holds the whole message.
-      Each partial frame is masked on its own, so a value split across them is
-      not masked there. The dashboard does not show these frames, but they reach
-      its WebSocket. The frame with the whole message is masked.
     - A `_` or `-` between two pieces of a value is not ignored, because a value
       can hold these characters. Each piece is masked only when it holds 7 or
       more characters of the random part.
+    - Hosted sessions stream each reply as many small partial-message frames
+      (`content_block_delta` events) before the frame that holds the whole
+      message. A value split across those frames cannot be matched, so Clauster
+      empties their text before they reach the WebSocket, the event ring and
+      the replay. The rest of each frame stays: its type, its index and the type
+      of its delta. The frame with the whole message is masked as usual, and the
+      dashboard shows that frame. A client that reads the delta text from the
+      WebSocket gets empty deltas.
     - The guarantee starts when Clauster learns the value. The bridge-log stream
       reads the environment, session and bridge ids from the marker lines itself:
       from the top of the log when it opens, and from each line before it sends

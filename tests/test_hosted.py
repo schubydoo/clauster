@@ -3337,7 +3337,9 @@ async def test_manager_reattach_daemon_error_is_recorded(fake_claustrum, tmp_pat
     assert "reattach failed" in (inst.error_detail or "")
 
 
-async def test_manager_reattach_error_text_is_redacted(fake_claustrum, tmp_path, monkeypatch):
+async def test_manager_reattach_error_text_is_redacted(
+    fake_claustrum, tmp_path, monkeypatch, caplog
+):
     # The error text reaches the browser in the instance record, so it is redacted like every
     # other error_detail (#1621): here a known id welded into the exception text.
     from clauster import redact
@@ -3354,9 +3356,12 @@ async def test_manager_reattach_error_text_is_redacted(fake_claustrum, tmp_path,
 
     monkeypatch.setattr(client, "reattach", _boom)
     mgr = HostedManager(store)
-    await mgr.reattach_all(client)
+    with caplog.at_level(logging.WARNING, logger="clauster.hosted"):
+        await mgr.reattach_all(client)
     detail = mgr.get_instance(pid).error_detail or ""
     assert "reattach failed" in detail and known[6:] not in detail
+    # The warning line is redacted too: a log handler need not be the redacting one.
+    assert "reattach of" in caplog.text and known[6:] not in caplog.text
 
 
 async def test_concurrent_persist_serializes_writes_no_lost_update(fake_claustrum, tmp_path):
@@ -4044,3 +4049,107 @@ def test_redact_obj_leaves_a_realistic_frame_untruncated():
     out = _redact_obj(frame)
     assert hosted._REDACT_TOO_DEEP not in json.dumps(out)
     assert "env_01" not in out["message"]["content"][0]["text"]
+
+
+# ----- partial-message delta frames carry no text (#1621) ------------------------------------
+
+_KNOWN_ID = "env_01Xk3PqR8sTvW2yZ4bNc6dFg"
+
+
+def _leaks_known(seen: str) -> bool:
+    """Whether a reader of ``seen`` can read 7 characters in a row of the known id's body."""
+    import re
+
+    squeezed = re.sub(r"[^A-Za-z0-9_-]+", "", seen)
+    body = _KNOWN_ID[len("env_") :]
+    return any(body[i : i + 7] in squeezed for i in range(len(body) - 6))
+
+
+def _delta_texts(frames: list[dict]) -> str:
+    """The text a client builds from the delta frames, in order: what it reassembles."""
+    out = []
+    for frame in frames:
+        delta = (
+            (frame.get("event") or {}).get("delta")
+            if frame.get("type") == "stream_event"
+            else None
+        )
+        if isinstance(delta, dict):
+            out += [v for k, v in delta.items() if k != "type" and isinstance(v, str)]
+    return "".join(out)
+
+
+def _delta(index: int, delta: dict) -> dict:
+    event = {"type": "content_block_delta", "index": index, "delta": delta}
+    return {"type": "stream_event", "event": event, "session_id": "s", "uuid": "u"}
+
+
+async def test_delta_frames_reach_no_subscriber_with_their_text(fake_claustrum):
+    """A known id split across partial-message deltas must not reach socket, ring or replay."""
+    from clauster import redact
+
+    redact.remember_known_values("iid-1", _KNOWN_ID)
+    pieces = [_KNOWN_ID[i : i + 5] for i in range(0, len(_KNOWN_ID), 5)]
+    lines = [_delta(0, {"type": "text_delta", "text": p}) for p in pieces]
+    lines.append(_delta(1, {"type": "input_json_delta", "partial_json": f'{{"a": "{_KNOWN_ID}'}))
+    lines.append(_delta(2, {"type": "thinking_delta", "thinking": _KNOWN_ID}))
+    whole = {"type": "assistant", "message": {"content": [{"type": "text", "text": _KNOWN_ID}]}}
+    lines.append(whole)
+    # Positive control: the delta frames, read in order, hold the id; no single one does.
+    assert _leaks_known(_delta_texts(lines))
+    assert not any(_leaks_known(json.dumps(line)) for line in lines[: len(pieces)])
+    fake = await fake_claustrum()
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        session = HostedSession(client, _PID, _BIN)
+        await session.start()
+        live = session.subscribe()
+        for line in lines:
+            await fake.emit(_PID, "stdout", (json.dumps(line) + "\n").encode())
+        sent = [(await _drain_until(live, "frame"))["frame"] for _ in lines]
+        replay = session.subscribe(after_seq=0)
+        replayed = []
+        while not replay.empty():
+            event = replay.get_nowait()
+            if event.get("type") == "frame":
+                replayed.append(event["frame"])
+        for view in (sent, _frames(session), replayed):
+            assert len(view) == len(lines)
+            # What a client reassembles (the delta text in order), and each frame alone.
+            assert not _leaks_known(_delta_texts(view))
+            assert not any(_leaks_known(json.dumps(frame)) for frame in view)
+        # The shape stays: event type, index, delta type and keys, and the other fields.
+        first = sent[0]
+        assert first["type"] == "stream_event" and first["uuid"] == "u"
+        assert first["event"] == {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": ""},
+        }
+        json_delta = sent[len(pieces)]["event"]["delta"]
+        assert json_delta == {"type": "input_json_delta", "partial_json": ""}
+        # The whole-message frame keeps its text, masked as before.
+        final = sent[-1]["message"]["content"][0]["text"]
+        assert final and "<redacted>" in final
+
+
+def test_drop_delta_text_leaves_other_frames_alone():
+    stop_event = {"type": "message_delta", "delta": {"stop_reason": "end_turn"}}
+    stop = {"type": "stream_event", "event": stop_event}
+    assert hosted._drop_delta_text(stop) is stop  # not a content delta: stop reason kept
+    plain = {"type": "assistant", "message": {"content": []}}
+    assert hosted._drop_delta_text(plain) is plain
+    odd = {"type": "stream_event", "event": "not a dict"}
+    assert hosted._drop_delta_text(odd) is odd
+    no_delta = {"type": "stream_event", "event": {"type": "content_block_delta"}}
+    assert hosted._drop_delta_text(no_delta) is no_delta
+    nested = _delta(0, {"type": "citations_delta", "citation": {"type": "x", "cited_text": "t"}})
+    out = hosted._drop_delta_text(nested)["event"]["delta"]
+    assert out == {"type": "citations_delta", "citation": {"type": "x", "cited_text": ""}}
+    listed = hosted._drop_delta_text(_delta(0, {"type": "t", "parts": ["a", 1, {"type": 3}]}))
+    assert listed["event"]["delta"] == {"type": "t", "parts": ["", 1, {"type": 3}]}
+    deep: dict = {"type": "text_delta"}
+    node = deep
+    for _ in range(hosted._REDACT_MAX_DEPTH + 5):
+        node["x"] = {}
+        node = node["x"]
+    assert hosted._REDACT_TOO_DEEP in json.dumps(hosted._drop_delta_text(_delta(0, deep)))
