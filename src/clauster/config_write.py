@@ -1283,7 +1283,8 @@ def js_integer(digits: str) -> int | None:
     the write and on every read of the stored file, Greptile on PR 1810).
     """
     sign = "-" if digits.startswith("-") else ""
-    significant = digits.lstrip("+-").lstrip("0") or "0"
+    unsigned = digits[1:] if digits.startswith(("+", "-")) else digits
+    significant = unsigned.lstrip("0") or "0"
     if len(significant) > 309:  # 1.8e308 has 309 digits: anything longer is Infinity
         return None
     value = int(sign + significant)
@@ -1317,7 +1318,14 @@ def _yaml12_scalar(node: yaml.ScalarNode) -> Any:
     if _YAML12_OCT_RE.fullmatch(text) or _YAML12_HEX_RE.fullmatch(text):
         sign = -1 if text.startswith("-") else 1
         digits = text.lstrip("+-")
-        return sign * int(digits[2:], 8 if digits[1] == "o" else 16)
+        # Bases 8 and 16 have no digit limit, but past the double range JavaScript
+        # holds Infinity, and every later reader of this value assumes a double.
+        value = sign * int(digits[2:], 8 if digits[1] == "o" else 16)
+        try:
+            float(value)
+        except OverflowError:
+            return math.inf if value > 0 else -math.inf
+        return value
     if _YAML12_FLOAT_RE.fullmatch(text) or _YAML12_INF_RE.fullmatch(text):
         return float(text.replace(".inf", "inf").replace(".Inf", "inf").replace(".INF", "inf"))
     if _YAML12_NAN_RE.fullmatch(text):
@@ -1564,8 +1572,9 @@ def _yaml12_key(node: yaml.ScalarNode) -> object:
         return "null"
     if isinstance(value, (int, float)):
         # A JavaScript number is a double: 2**53 + 1 and 2**53 are one key there. An int here
-        # fits a double (`_yaml12_scalar` reads a longer one as float Infinity), and a NaN key
-        # never gets here (the seam refused it as JSON-unsafe before this check runs).
+        # fits a double (`_yaml12_scalar` reads a longer decimal, octal or hex number as
+        # float Infinity), and a NaN key never gets here (the seam refused it as
+        # JSON-unsafe before this check runs).
         number = float(value)
         if math.isinf(number):
             return "Infinity" if number > 0 else "-Infinity"

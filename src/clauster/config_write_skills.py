@@ -438,6 +438,10 @@ def _cli_effort(value: Any) -> str | int | None:
     if value is None or value == "" or isinstance(value, bool):
         return None
     if isinstance(value, int):
+        try:
+            float(value)  # past the double range JavaScript holds Infinity: ignored
+        except OverflowError:
+            return None
         return value
     if isinstance(value, float) and value.is_integer():
         return int(value)

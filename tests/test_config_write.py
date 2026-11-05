@@ -2368,6 +2368,7 @@ def test_a_huge_leading_zero_number_in_a_nested_value_is_refused_not_a_500(parse
     # PyYAML reads `0999...` (5000 digits) as a string; YAML 1.2 reads a decimal number,
     # and int() past Python's digit limit raised ValueError after the load: a 500.
     huge = "0" + "9" * 5000
+    assert cw.yaml12_view(f"y: {huge}") == {"y": math.inf}  # JavaScript Infinity
     with pytest.raises(cw.InvalidCandidateError, match="nested value"):
         parse(f"---\nname: a\ndescription: d\nx:\n  y: {huge}\n---\nb\n")
 
@@ -2380,3 +2381,38 @@ def test_a_subagent_number_field_with_huge_digits_is_refused_not_a_500(line: str
     text = f"---\nname: x\ndescription: d\n{line}\n---\nbody\n"
     with pytest.raises(cw.InvalidCandidateError):
         config_write_subagents.validate_agent_content(text, expected_name="x")
+
+
+_HUGE_HEX = "0x" + "f" * 300  # bases 8 and 16 have no int() digit limit, but pass a double
+_HUGE_OCT = "0o" + "7" * 400
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize(
+    "extra",
+    [
+        pytest.param(f"x:\n  {_HUGE_HEX}: 1\n", id="nested-hex-key"),
+        pytest.param(f"x:\n  {_HUGE_OCT}: 1\n", id="nested-oct-key"),
+        pytest.param(f"x:\n  y: {_HUGE_HEX}\n", id="nested-hex-value"),
+        pytest.param("x:\n  y: " + "9" * 309 + "\n", id="nested-decimal-past-a-double"),
+    ],
+)
+def test_a_nested_number_past_the_double_range_is_refused_not_a_500(parse, extra: str) -> None:
+    # YAML 1.1 reads a Python int; the CLI's YAML 1.2 reads Infinity, so they disagree. The
+    # key spellings raised OverflowError in the duplicate-key check: a 500.
+    with pytest.raises(cw.InvalidCandidateError, match="nested value"):
+        parse(f"---\nname: a\ndescription: d\n{extra}---\nb\n")
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+def test_a_huge_top_level_hex_key_and_the_largest_nested_decimal_still_load(parse) -> None:
+    parse(f"---\nname: a\ndescription: d\n{_HUGE_HEX}: 1\n---\nb\n")  # no raise
+    parse("---\nname: a\ndescription: d\nx:\n  y: " + "9" * 308 + "\n---\nb\n")
+
+
+def test_the_yaml12_view_reads_a_huge_hex_or_oct_number_as_infinity() -> None:
+    assert cw.yaml12_view(f"a: {_HUGE_HEX}\nb: -{_HUGE_OCT}\nc: 0x10") == {
+        "a": math.inf,
+        "b": -math.inf,
+        "c": 16,
+    }

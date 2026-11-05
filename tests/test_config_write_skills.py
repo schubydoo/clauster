@@ -2618,6 +2618,7 @@ def test_effort_reads_a_number_past_the_double_range_as_ignored() -> None:
     # effort reader refuses (not an integer).
     assert sk._cli_effort("9" * 400) is None
     assert sk._cli_effort("9" * 5000) is None
+    assert sk._cli_effort(10**400) is None  # a YAML 1.2 hex or octal number this large
     assert sk._cli_effort("12 tokens") == 12
 
 
@@ -2644,3 +2645,18 @@ def test_js_integer_never_converts_more_digits_than_a_double_holds() -> None:
     assert cw.js_integer("9" * 309) is None  # 309 digits, but past 1.8e308
     assert cw.js_integer("-" + "0" * 5000 + "12") == -12
     assert cw.js_integer("+7") == 7
+
+
+def test_a_huge_hex_key_breaks_neither_the_list_nor_the_editor(tmp_path: Path) -> None:
+    # An OverflowError in the duplicate-key check failed the whole listing (review on PR 1810).
+    _skill(tmp_path, _fm("x:\n  0x" + "f" * 300 + ": 1"), name="bad")
+    _skill(tmp_path, _fm("description: fine"), name="good")
+    listing = {item["name"]: item for item in sk.list_skills(tmp_path)}
+    assert "nested value" in listing["bad"]["frontmatter_error"]
+    assert listing["good"]["description"] == "fine"
+    sk.read_skill_file_for_edit(tmp_path, "bad")  # no raise
+
+
+def test_a_huge_hex_effort_is_refused_as_the_cli_ignores_it() -> None:
+    with pytest.raises(cw.InvalidCandidateError, match="effort"):
+        sk.validate_skill_md_content(_fm("effort: 0x" + "f" * 300))
