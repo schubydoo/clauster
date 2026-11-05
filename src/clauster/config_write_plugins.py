@@ -111,7 +111,9 @@ predicate here — every mutation goes through the CLI, always.
 Every read that leaves this module (plugin list, marketplace list, declared
 marketplaces) is redacted (:func:`redact_plugin_display`): a ``url`` marketplace
 source's ``headers`` and ``headersHelper``, and a plugin MCP server's ``env`` and
-``headers``, are the documented places a credential lives on this surface.
+``headers`` (and ``args``), are the documented places a credential lives on this
+surface. A query-string token in a URL (``?sig=...``) is not detected: the
+credential-URL rule matches only the user part (``scheme://user@host``).
 """
 
 from __future__ import annotations
@@ -136,10 +138,18 @@ RunFn = Callable[..., subprocess.CompletedProcess]
 #: so this is a little more generous than the MCP CLI's 30s local-JSON-edit bound.
 DEFAULT_TIMEOUT_SECONDS = 60.0
 
-#: "not declared" is ``marketplace remove --scope``'s message for a name the chosen
-#: scope's settings file does not declare (``Marketplace 'x' is not declared in user
-#: settings``, confirmed on 2.1.318): absent at that scope, so a 404 like "not found".
-_NOT_FOUND_RE = re.compile(r"not found|not installed|not declared", re.IGNORECASE)
+_NOT_FOUND_RE = re.compile(r"not found|not installed", re.IGNORECASE)
+
+#: ``marketplace remove --scope``'s message for a name the chosen scope's settings file
+#: does not declare (``Marketplace 'x' is not declared in user settings``, confirmed on
+#: 2.1.318): absent at that scope, so a 404 like "not found" — for that verb only.
+_NOT_DECLARED_RE = re.compile(r"not declared", re.IGNORECASE)
+
+#: Verbs whose failure is never a 404, whatever the message says. ``marketplace-add``
+#: fetches its source, so "not found" there is a git/network failure. The two reads
+#: name no entity at all, and the dashboard shows a 404 on a read as "this config
+#: surface is unavailable", which would hide a real CLI failure behind a wrong state.
+_NEVER_NOT_FOUND_OPS = frozenset({"marketplace-add", "list", "marketplace-list"})
 
 #: Identifier charset for a single name segment (plugin name, marketplace name):
 #: no leading ``-`` (would be parsed as a CLI option by ``claude``'s argument
@@ -161,8 +171,10 @@ _CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
 #: entry's) and a plugin MCP server's ``env``/``headers`` routinely hold a literal
 #: credential under a benign name (``Cookie``, ``X-Registry``) that the key-name heuristic
 #: in :func:`clauster.config_write.redact_secrets` cannot see — the same reason the
-#: settings surface masks every ``env`` value.
-_MASK_ALL_LEAVES_KEYS = frozenset({"env", "headers"})
+#: settings surface masks every ``env`` value. A plugin MCP server's ``args`` is masked
+#: too: ``--api-key VALUE`` puts the secret in a list element with no key at all. This
+#: read is display-only, so over-masking there costs nothing.
+_MASK_ALL_LEAVES_KEYS = frozenset({"env", "headers", "args"})
 
 #: String fields masked whole: a ``headersHelper`` is a command line, and a command can
 #: carry a token in its own arguments.
@@ -206,6 +218,27 @@ def redact_plugin_display(data: Any) -> Any:
     hides a value from the dashboard; this surface never writes a read value back.
     """
     return cw.redact_secrets(_mask_credential_fields(data))
+
+
+def redact_named_map(value: dict[str, Any]) -> dict[str, Any]:
+    """Redact each entry of a map keyed by a user-chosen name, one entry at a time.
+
+    :func:`clauster.config_write.redact_secrets` treats a secret-shaped key as marking
+    its whole subtree secret, so a marketplace named ``auth-tools`` or an MCP server
+    named ``github-token`` would lose its type and location to over-masking. Redacting
+    per entry keeps the name out of the hint, as ``config_write_mcp`` does for its
+    server maps. The name itself is never masked (it is an identifier, not a value).
+    """
+    return {k: redact_plugin_display(v) for k, v in value.items()}
+
+
+def _redact_plugin_entry(entry: Any) -> Any:
+    """Redact one ``plugin list --json`` entry, its ``mcpServers`` map entry by entry."""
+    if not isinstance(entry, dict) or not isinstance(entry.get("mcpServers"), dict):
+        return redact_plugin_display(entry)
+    out = redact_plugin_display({k: v for k, v in entry.items() if k != "mcpServers"})
+    out["mcpServers"] = redact_named_map(entry["mcpServers"])
+    return out
 
 
 class PluginCliError(cw.ConfigWriteError):
@@ -353,13 +386,17 @@ def _raise_for_failure(op: str, ident: str, proc: subprocess.CompletedProcess) -
     ``fatal: repository '…' not found`` — a git/network *failure*, not an absent
     clauster-side entity. Classifying that as 404 would be misleading, so an add
     failure always surfaces as a generic :class:`PluginCliError` (→ 400), with the
-    redacted stderr kept in the detail so the operator can still diagnose it.
-    Every other nonzero exit is likewise a generic 400.
+    redacted stderr kept in the detail so the operator can still diagnose it. The
+    ``list``/``marketplace-list`` reads are excluded for the same reason (see
+    :data:`_NEVER_NOT_FOUND_OPS`). Every other nonzero exit is likewise a generic 400.
     """
     if proc.returncode == 0:
         return
     detail = cw.redact_secret_lines((proc.stderr or proc.stdout or "").strip())
-    if _NOT_FOUND_RE.search(detail) and not op.endswith("add"):
+    absent = (op not in _NEVER_NOT_FOUND_OPS and bool(_NOT_FOUND_RE.search(detail))) or (
+        op == "marketplace-remove" and bool(_NOT_DECLARED_RE.search(detail))
+    )
+    if absent:
         if op.startswith("marketplace"):
             raise MarketplaceNotFoundError(detail)
         raise PluginNotFoundError(detail)
@@ -498,7 +535,7 @@ def cli_list_plugins(
         raise PluginCliError(f"claude plugin list returned invalid JSON: {exc}") from exc
     if not isinstance(data, list):
         raise PluginCliError("claude plugin list returned a non-list JSON value")
-    return redact_plugin_display(data)
+    return [_redact_plugin_entry(entry) for entry in data]
 
 
 def cli_plugin_details(
@@ -680,7 +717,7 @@ def _read_declared_marketplaces(path: Path) -> dict[str, Any]:
         EXTRA_MARKETPLACES_KEY if EXTRA_MARKETPLACES_KEY in data else EXTRA_MARKETPLACES_ALIAS_KEY
     )
     marketplaces = data.get(key)
-    return redact_plugin_display(marketplaces) if isinstance(marketplaces, dict) else {}
+    return redact_named_map(marketplaces) if isinstance(marketplaces, dict) else {}
 
 
 def read_project_marketplaces(project_dir: Path) -> dict[str, Any]:

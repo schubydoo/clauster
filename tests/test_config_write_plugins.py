@@ -1687,10 +1687,12 @@ def test_cli_list_plugins_masks_plugin_mcp_server_credentials(tmp_path: Path) ->
             "mcpServers": {
                 "deploy": {
                     "command": "node",
-                    "args": ["server.js"],
+                    "args": ["server.js", "--key", "ARGSECRET123"],
                     "env": {"REGION": "eu-west-1", "DEPLOY_KEY": "AKIA-literal"},
                     "headers": {"X-Registry": "literal-value"},
-                }
+                },
+                # A secret-shaped NAME must not over-mask the entry's type and location.
+                "github-token": {"type": "http", "url": "https://mcp.example.com/x"},
             },
         }
     ]
@@ -1699,10 +1701,41 @@ def test_cli_list_plugins_masks_plugin_mcp_server_credentials(tmp_path: Path) ->
     server = got["mcpServers"]["deploy"]
     assert server["env"] == {"REGION": cw.REDACTION_SENTINEL, "DEPLOY_KEY": cw.REDACTION_SENTINEL}
     assert server["headers"] == {"X-Registry": cw.REDACTION_SENTINEL}
-    assert server["command"] == "node" and server["args"] == ["server.js"]
+    assert server["args"] == [cw.REDACTION_SENTINEL] * 3
+    assert server["command"] == "node"
+    assert got["mcpServers"]["github-token"] == {
+        "type": "http",
+        "url": "https://mcp.example.com/x",
+    }
     # What the dashboard renders stays intact.
     assert got["id"] == "deployer@acme-tools" and got["enabled"] is True
     assert got["installPath"] == payload[0]["installPath"]
+
+
+@pytest.mark.parametrize(
+    ("fn_name", "stderr"),
+    [
+        ("cli_list_plugins", "Error: settings file not found"),
+        ("cli_list_marketplaces", "Marketplace 'x' is not declared in user settings"),
+    ],
+)
+def test_failing_reads_are_never_404(tmp_path: Path, fn_name: str, stderr: str) -> None:
+    # The dashboard shows a 404 on a read as "this config surface is unavailable", the
+    # same state as config-write being off: a real CLI failure must stay a 400.
+    run, _calls = _fake_run(rc=1, stderr=stderr)
+    with pytest.raises(plugins.PluginCliError) as exc_info:
+        getattr(plugins, fn_name)(str(FAKE_CLAUDE), tmp_path, run=run)
+    assert not isinstance(
+        exc_info.value, plugins.PluginNotFoundError | plugins.MarketplaceNotFoundError
+    )
+
+
+@pytest.mark.parametrize("fn_name", ["cli_enable_plugin", "cli_uninstall_plugin"])
+def test_not_declared_is_a_404_only_for_marketplace_remove(tmp_path: Path, fn_name: str) -> None:
+    run, _calls = _fake_run(rc=1, stderr="Plugin 'x@m' is not declared in user settings")
+    with pytest.raises(plugins.PluginCliError) as exc_info:
+        getattr(plugins, fn_name)(str(FAKE_CLAUDE), tmp_path, "x@m", "user", run=run)
+    assert not isinstance(exc_info.value, plugins.PluginNotFoundError)
 
 
 def test_cli_list_marketplaces_masks_url_credentials(tmp_path: Path) -> None:
@@ -1830,6 +1863,24 @@ def test_redact_plugin_display_masks_malformed_credential_fields_too() -> None:
         "env": cw.REDACTION_SENTINEL,
         "headersHelper": "",
     }
+
+
+def test_read_marketplaces_secret_shaped_name_does_not_mask_the_entry(tmp_path: Path) -> None:
+    declared = {"auth-tools": {"source": {"source": "github", "repo": "acme/auth-tools"}}}
+    _write_project_settings(tmp_path, {"extraKnownMarketplaces": declared})
+    assert plugins.read_project_marketplaces(tmp_path) == declared
+
+
+def test_read_marketplaces_empty_canonical_key_still_wins(tmp_path: Path) -> None:
+    # Presence decides, not truthiness: `{}` under the canonical key ignores the alias.
+    _write_project_settings(
+        tmp_path,
+        {
+            "extraKnownMarketplaces": {},
+            "additionalMarketplaces": {"ignored": {"source": {"source": "github", "repo": "a/b"}}},
+        },
+    )
+    assert plugins.read_project_marketplaces(tmp_path) == {}
 
 
 def test_read_marketplaces_reads_the_additional_marketplaces_alias(tmp_path: Path) -> None:

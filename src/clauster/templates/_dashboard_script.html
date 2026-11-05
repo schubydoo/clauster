@@ -3172,7 +3172,7 @@
       // "url", "directory", "file", "claudeai") and its location in `repo`, `url` or
       // `path` (the backend has already masked any credentials in a url).
       configMgmtMarketSource(m) {
-        const where = m.repo || m.url || m.path || "";
+        const where = [m.repo, m.url, m.path].find((v) => typeof v === "string" && v) || "";
         const kind = typeof m.source === "string" ? m.source : "";
         return where ? (kind ? kind + " · " + where : where) : kind;
       },

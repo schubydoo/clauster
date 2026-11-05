@@ -452,7 +452,7 @@ def config_mgmt_plugins_server(
         extra_env={
             "FAKE_CLAUDE_PLUGIN_LIST_STDOUT": '[{"id": "hello@market", "enabled": true}]',
             "FAKE_CLAUDE_PLUGIN_MARKETPLACE_LIST_STDOUT": (
-                '[{"name": "market", "source": "owner/repo"}]'
+                '[{"name": "market", "source": "github", "repo": "owner/repo"}]'
             ),
         },
     )

@@ -1088,6 +1088,7 @@ def test_config_mgmt_plugins_tab_lists_and_acts(
     # Both CLI-driven lists rendered.
     browser.expect_text('[data-test="cm-plugins-table"]', "hello@market")
     browser.expect_text('[data-test="cm-marketplaces-table"]', "market")
+    browser.expect_text('[data-test="cm-marketplaces-table"]', "github · owner/repo")
 
     # Actions are disabled until the scope token is typed, then a Disable posts.
     browser.expect_visible('[data-test="cm-plugin-confirm"]')

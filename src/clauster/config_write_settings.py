@@ -112,6 +112,7 @@ from pathlib import Path
 from typing import Any
 
 from . import config_write as cw
+from . import config_write_plugins as cwp
 from .claude_json import locked_replace_json_file
 
 #: Top-level ``settings.json`` keys owned by a DEDICATED config-write surface.
@@ -202,12 +203,21 @@ def _redact_misc(misc: dict[str, Any]) -> dict[str, Any]:
 
     Runs the normal structural :func:`~clauster.config_write.redact_secrets`
     heuristic over every key, then unconditionally masks every ``env`` value on
-    top -- the #822-lesson override described in the module docstring.
+    top -- the #822-lesson override described in the module docstring -- and
+    redacts ``extraKnownMarketplaces`` (and its ``additionalMarketplaces`` alias)
+    with :func:`clauster.config_write_plugins.redact_named_map`.
     """
     redacted = cw.redact_secrets(misc)
     env = misc.get(ENV_KEY)
     if isinstance(env, dict):
         redacted[ENV_KEY] = dict.fromkeys(env, cw.REDACTION_SENTINEL)
+    # A marketplace declaration's `headers`/`headersHelper` hold credentials under plain
+    # names (`Cookie`), so it gets the Plugins surface's masking, not only the key-name
+    # heuristic. A resent sentinel keeps the stored value through `merge_redacted`.
+    for key in (cwp.EXTRA_MARKETPLACES_KEY, cwp.EXTRA_MARKETPLACES_ALIAS_KEY):
+        declared = misc.get(key)
+        if isinstance(declared, dict):
+            redacted[key] = cwp.redact_named_map(declared)
     return redacted
 
 

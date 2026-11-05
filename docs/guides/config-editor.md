@@ -512,12 +512,18 @@ checked against Claude Code 2.1.318.
   scope. A plugin that the project enables cannot be disabled at user scope. To
   turn it off for yourself only, disable it at the Local scope.
 - **Each marketplace row shows the source type and its location**, for example
-  `github · owner/repo`. A credential in a git URL is masked.
-- **Clauster masks credentials in what it reads.** It masks every `headers` and
-  `env` value, every `headersHelper` command, and every credential in a URL. This
-  applies to the marketplace list, to the marketplaces that a scope declares
-  (`extraKnownMarketplaces`), and to the MCP server definitions in the plugin
-  list. A masked value is never written back.
+  `github · owner/repo`. A URL that carries a user name or password, such as
+  `https://user:token@host/repo.git`, shows as `********`.
+- **Clauster masks credentials in what it reads.** It masks every `headers`,
+  `env` and MCP server `args` value, every `headersHelper` command, and every URL
+  that carries a user name or password. This applies to the marketplace list, to
+  the marketplaces that a scope declares (`extraKnownMarketplaces`), and to the
+  MCP server definitions in the plugin list. A masked value is never written
+  back. A token in a URL query string, such as `?sig=...`, is not detected. Do
+  not put a credential there.
+- **The Settings tab masks `extraKnownMarketplaces` in the same way.** If you
+  save the Raw JSON with a masked value unchanged, Clauster keeps the stored
+  value.
 - **The `additionalMarketplaces` spelling is read too.** Claude Code 2.1.232 and
   later accept it as another name for `extraKnownMarketplaces`. When a file sets
   both, the canonical key wins, as it does in Claude Code.

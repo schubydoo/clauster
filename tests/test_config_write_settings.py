@@ -265,6 +265,35 @@ def test_write_resent_sentinel_keeps_stored_apikeyhelper(tmp_path: Path) -> None
     assert on_disk["model"] == "sonnet"
 
 
+@pytest.mark.parametrize("key", ["extraKnownMarketplaces", "additionalMarketplaces"])
+def test_marketplace_header_credentials_masked_on_read_and_kept_on_resend(
+    tmp_path: Path, key: str
+) -> None:
+    # TASK-449.7: a plain-named header (`Cookie`) and a `headersHelper` command are not
+    # secret-shaped by key name, so the generic heuristic alone showed them verbatim.
+    stored = {
+        "hosted": {
+            "source": {
+                "source": "url",
+                "url": "https://plugins.example.com/m.json",
+                "headers": {"Cookie": "session=C123"},
+                "headersHelper": "/bin/h --t SEK",
+            }
+        }
+    }
+    _s, h0 = cws.read_project_settings(tmp_path)
+    cws.write_project_settings(tmp_path, {key: stored}, h0)
+    settings, h1 = cws.read_project_settings(tmp_path)
+    assert "C123" not in json.dumps(settings) and "SEK" not in json.dumps(settings)
+    source = settings[key]["hosted"]["source"]
+    assert source["headers"] == {"Cookie": cw.REDACTION_SENTINEL}
+    assert source["url"] == "https://plugins.example.com/m.json"
+    # Resending the read view unchanged keeps the stored credentials.
+    cws.write_project_settings(tmp_path, {key: settings[key], "model": "sonnet"}, h1)
+    on_disk = json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    assert on_disk[key] == stored
+
+
 def test_write_sentinel_for_absent_key_is_dropped(tmp_path: Path) -> None:
     # A resent sentinel for a var that was never actually stored has nothing to
     # keep — it is dropped, never written as the literal "********" string.
