@@ -6,6 +6,8 @@ and passing either now makes the bridge exit at once. Clauster's toggle (#780, d
 
 * No argv builder or spawn entry point takes a sandbox input at all, and every builder's
   output over its whole input domain carries neither flag (standard, pty, hosted).
+* The instance responses keep the deprecated ``sandbox_mode`` key for ``/api/v1`` clients,
+  fixed at ``"default"`` whatever an old record stored.
 * An old caller or record that still carries a sandbox value keeps working: the API spawn
   and resume, the pty spawn and resume, and a persisted row whose ``sandbox_mode`` column
   says "on" all load and launch with no flag.
@@ -91,8 +93,22 @@ def test_no_spawn_entry_point_takes_a_sandbox_input(fn):
     assert not [p for p in inspect.signature(fn).parameters if "sandbox" in p]
 
 
-def test_the_instance_model_has_no_sandbox_field():
+def test_the_instance_sandbox_mode_key_is_a_deprecated_constant():
+    # The /api/v1 instance responses keep the key, but no input can make it say "on"/"off":
+    # it is a computed constant, not a stored field.
     assert not [f for f in RemoteControlInstance.model_fields if "sandbox" in f]
+    built = RemoteControlInstance(project="alpha", label="alpha", sandbox_mode="on")
+    loaded = RemoteControlInstance.model_validate(
+        {"project": "alpha", "label": "alpha", "sandbox_mode": "off"}
+    )
+    for inst in (built, loaded):
+        assert inst.sandbox_mode == "default"
+        assert inst.model_dump()["sandbox_mode"] == "default"
+        assert json.loads(inst.model_dump_json())["sandbox_mode"] == "default"
+    schema = RemoteControlInstance.model_json_schema(mode="serialization")
+    prop = schema["properties"]["sandbox_mode"]
+    assert prop["deprecated"] is True
+    assert SANDBOX_REMOVED_NOTE in prop["description"]
 
 
 def test_standard_argv_never_carries_a_sandbox_flag(runner_config):
@@ -150,7 +166,7 @@ def test_api_standard_spawn_and_resume_ignore_a_legacy_sandbox_value(
             resp = client.post("/api/instances", json={"project": "alpha", "sandbox": value})
         assert resp.status_code == 201, resp.text
         body = resp.json()
-        assert "sandbox_mode" not in body
+        assert body["sandbox_mode"] == "default"
         assert SANDBOX_REMOVED_NOTE in body["warnings"]
         assert SANDBOX_REMOVED_NOTE in caplog.text
         assert body["resume_mode"] == "standard"
@@ -237,4 +253,27 @@ def test_a_legacy_record_dict_with_sandbox_mode_rebuilds_a_card(runner_config):
     inst = runner._stopped_from_persisted("alpha")
     assert inst is not None
     assert inst.status is InstanceStatus.STOPPED
-    assert "sandbox_mode" not in inst.model_dump()
+    assert inst.model_dump()["sandbox_mode"] == "default"
+
+
+@pytest.mark.parametrize("prefix", ["/api/v1", "/api"])
+def test_v1_instance_response_keeps_sandbox_mode_default_for_an_old_on_row(runner_config, prefix):
+    # /api/v1 is a versioned public API: an instance response still carries `sandbox_mode`,
+    # always "default", even for a row an older build stored with "on".
+    config, claude_json = runner_config
+    seed = SessionRunner(config, claude_json=claude_json)
+    seed.persistence.state_store().save(
+        {"iid-old": {"project_name": "alpha", "label": "alpha", "resume_mode": "standard"}}
+    )
+    with seed.persistence._engine.begin() as conn:
+        conn.execute(text("UPDATE instances SET sandbox_mode = 'on'"))
+    seed.persistence.dispose()
+
+    with _runner_client(runner_config) as client:
+        listed = client.get(f"{prefix}/instances")
+        assert listed.status_code == 200, listed.text
+        [row] = [i for i in listed.json() if i["instance_id"] == "iid-old"]
+        assert row["sandbox_mode"] == "default"
+        one = client.get(f"{prefix}/instances/iid-old")
+        assert one.status_code == 200, one.text
+        assert one.json()["sandbox_mode"] == "default"

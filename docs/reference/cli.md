@@ -349,7 +349,9 @@ for these rules.
 does not fail. It ignores the value and prints a warning on stderr. The
 [MCP `spawn_session` tool](../mcp.md) and `POST /api/instances` also accept a
 `sandbox` value and ignore it. When the spawn itself succeeds, they return the
-same note in `warnings`. The instance JSON no longer has a `sandbox_mode` field.
+same note in `warnings`. The instance JSON keeps a deprecated `sandbox_mode`
+key, which is always `"default"` (see
+[Deprecated instance fields](../public-api.md#deprecated-instance-fields)).
 
 ## `clauster usage` — transcript cost summary {#clauster-usage-transcript-cost-summary}
 

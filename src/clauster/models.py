@@ -23,7 +23,7 @@ from typing import Any, TypeGuard
 from pydantic import BaseModel, Field, computed_field
 
 from . import redact
-from .config import PermissionMode, ResumeMode, SessionChannel, SpawnMode
+from .config import SANDBOX_REMOVED_NOTE, PermissionMode, ResumeMode, SessionChannel, SpawnMode
 
 
 def new_instance_id() -> str:
@@ -256,6 +256,23 @@ class RemoteControlInstance(BaseModel):
             fields["starter_session_id"],
             fields["bridge_id"],
         )
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description=(
+            "Deprecated, always 'default'. Kept so that /api/v1 instance responses keep the "
+            "key: " + SANDBOX_REMOVED_NOTE + "."
+        ),
+        json_schema_extra={"deprecated": True},
+    )
+    @property
+    def sandbox_mode(self) -> str:
+        """Return the constant ``"default"``: the deprecated key of the removed sandbox option.
+
+        A computed field, not a stored one, so that no input (an old record dict with
+        ``"on"``, a constructor kwarg) can ever make it say anything else. The store does not
+        read the old ``instances.sandbox_mode`` column at all.
+        """
+        return "default"
 
     @computed_field  # type: ignore[prop-decorator]
     @property
