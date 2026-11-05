@@ -26,7 +26,6 @@ import socket
 import subprocess
 import sys
 import time
-import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
 from typing import NamedTuple
@@ -675,39 +674,45 @@ def session_child_server(
     try:
         yield server
     finally:
-        # Capture the exact processes while the server can still name its bridges, then
-        # stop the server (its own `finally`), then kill and wait for the captured ones.
-        captured = _bridge_trees(server, tmp / "session-child.pid")
-        server_gen.close()
-        _reap_bridge_trees(captured)
+        # Capture the server's process tree while it is up, then stop the server (its own
+        # `finally`), then kill and wait for what was captured. Nested, so neither a failed
+        # capture nor a failed server stop skips the reap.
+        captured: list[psutil.Process] = []
+        try:
+            captured = _server_descendants(server, tmp / "session-child.pid")
+        finally:
+            try:
+                server_gen.close()
+            finally:
+                _reap_bridge_trees(captured)
 
 
-def _bridge_trees(server: Server, child_pid_file: Path) -> list[psutil.Process]:
-    """Return the processes to stop: each bridge the server reports, its whole tree,
-    and the session child named in ``child_pid_file``. Exact pids only, never a name
-    match: this host also runs the live dogfood service and its bridges."""
-    procs: dict[int, psutil.Process] = {}
-    pids: list[int] = []
-    with contextlib.suppress(OSError, ValueError):
-        with urllib.request.urlopen(server.url + "/api/instances", timeout=10) as res:  # noqa: S310
-            pids += [r["bridge_pid"] for r in json.load(res) if r.get("bridge_pid")]
+def _server_descendants(server: Server, child_pid_file: Path) -> list[psutil.Process]:
+    """Return every process the test server started: its bridges and their trees.
+
+    Taken from the server process's own tree, so nothing outside it can be named: not a
+    stale ``bridge_pid`` of a stopped row, and never the live dogfood service or its
+    bridges that share this host. The session child is a grandchild of the server, so it
+    is in the tree; a pid file that names a live process outside it fails the test,
+    which proves the capture is complete rather than empty by accident.
+    """
+    assert server.proc is not None
+    procs = psutil.Process(server.proc.pid).children(recursive=True)
     if child_pid_file.exists():
-        with contextlib.suppress(ValueError):
-            pids.append(int(child_pid_file.read_text(encoding="utf-8")))
-    for pid in pids:
-        with contextlib.suppress(psutil.Error):
-            root = psutil.Process(pid)
-            for p in [root, *root.children(recursive=True)]:
-                procs.setdefault(p.pid, p)
-    return list(procs.values())
+        child = int(child_pid_file.read_text(encoding="utf-8"))
+        if child not in {p.pid for p in procs} and psutil.pid_exists(child):
+            pytest.fail(f"session child {child} is running outside the server's tree")
+    return procs
 
 
 def _reap_bridge_trees(procs: list[psutil.Process], timeout: float = 15.0) -> None:
     """Kill ``procs`` and wait for every one to exit; fail loudly if any survives.
 
     The server is already stopped, so each bridge is an orphan that the OS reaps (no
-    zombie for ``wait_procs`` to wait on). psutil's ``kill`` refuses a pid that a new
-    process now holds, so a recycled pid is never signalled.
+    zombie for ``wait_procs`` to wait on). That needs a reaping init, which a CI runner
+    and this host have; in a container whose PID 1 does not reap, this would fail with
+    a zombie, which is a false alarm, not a leak. psutil's ``kill`` refuses a pid that a
+    new process now holds, so a recycled pid is never signalled.
     """
     for p in procs:
         with contextlib.suppress(psutil.Error):
