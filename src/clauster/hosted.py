@@ -1533,7 +1533,9 @@ class HostedManager:
             except ClaustrumError as exc:
                 instance.status = InstanceStatus.ERROR
                 instance.error_detail = redact_for_disk(f"reattach failed: {exc}")
-                logger.warning("hosted: reattach of %s failed: %s", process_id, exc)
+                logger.warning(
+                    "hosted: reattach of %s failed: %s", process_id, redact_for_disk(str(exc))
+                )
                 continue
             if not result.get("found"):
                 # The new daemon doesn't know this process. If -keep-children left the

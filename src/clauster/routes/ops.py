@@ -239,7 +239,9 @@ def _gather_ghosts(
     try:
         creds = environments.load_credentials(now_ms=int(time.time() * 1000))
     except environments.CredentialsError as exc:
-        raise HTTPException(status_code=503, detail=f"credentials unavailable: {exc}") from exc
+        raise HTTPException(
+            status_code=503, detail=redact.redact_for_disk(f"credentials unavailable: {exc}")
+        ) from exc
     client = environments.EnvironmentsClient(creds)
     try:
         envs = client.list_environments()

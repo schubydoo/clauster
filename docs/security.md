@@ -337,8 +337,9 @@ Clauster masks secrets in two ways. Only the first one is a guarantee.
       or a shape mask already hides it), and in the cases of the next three
       items. Apart from those cases, a run of 7 or more characters never shows,
       whole or put back together across rows.
-    - The bridge-log stream is masked one line at a time, and a hosted-session
-      frame one string at a time. If a value is split across lines or strings
+    - The bridge-log stream and the hosted `stderr` and `text` events are
+      masked one line at a time, and a hosted-session frame one string at a
+      time. If a value is split across lines or strings
       there, each piece is masked only when it holds 7 or more characters of the
       random part. The on-disk mirror, a transcript turn, `error_detail`,
       clone-job errors and agent text are masked as one block, so a line break
@@ -378,7 +379,9 @@ Clauster masks secrets in two ways. Only the first one is a guarantee.
       buttons), `starter_session_id` in the session detail of `clauster mcp`,
       `bridge_session_id` of a background job, and the ids that the
       [ghost-environment reaper](#ghost-environment-reaper) lists for you to
-      select. Free text in these responses is masked.
+      select. Free text in the instance record and in a background-job record
+      is masked. The reaper lists the name and the directory of each
+      environment as the API returns them.
     - When `logs.redact_session_url` is false (the default), the debug log on
       disk keeps every id verbatim. See [Hybrid by default](#hybrid-by-default).
 

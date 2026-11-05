@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from clauster import redact
 from clauster.app import create_app
 from clauster.config import ClausterConfig, load_config
 from clauster.runner import SessionRunner
@@ -1534,6 +1535,10 @@ def test_reaper_credentials_error_503(write_config, tmp_path, monkeypatch):
     assert "credentials" in r.json()["detail"]
 
 
+#: A stored id the reaper error texts weld in, to prove they pass through redaction (#1621).
+_KNOWN_ENV = "env_01Xk3PqR8sTvW2yZ4bNc6dFg"
+
+
 def test_reaper_list_api_error_502(write_config, tmp_path, monkeypatch):
     from clauster import environments as envmod
 
@@ -1549,12 +1554,14 @@ def test_reaper_list_api_error_502(write_config, tmp_path, monkeypatch):
             pass
 
         def list_environments(self, **k):
-            raise envmod.EnvironmentsAPIError(500, "upstream boom")
+            raise envmod.EnvironmentsAPIError(500, f"upstream boom xyz{_KNOWN_ENV}")
 
     monkeypatch.setattr(envmod, "EnvironmentsClient", FakeClient)
+    redact.remember_known_values("iid-reaper", _KNOWN_ENV)
     r = _reaper_client(write_config, tmp_path).get("/api/environments/ghosts")
     assert r.status_code == 502
     assert "environments API error" in r.json()["detail"]
+    assert _KNOWN_ENV[6:] not in r.json()["detail"]  # the error text is redacted (#1621)
 
 
 def test_reaper_per_env_error_is_reported_not_fatal(
@@ -1580,10 +1587,11 @@ def test_reaper_per_env_error_is_reported_not_fatal(
 
         def archive_environment(self, env_id):
             if env_id == "env_ghost1":
-                raise envmod.EnvironmentsAPIError(409, "work queued")
+                raise envmod.EnvironmentsAPIError(409, f"work queued xyz{_KNOWN_ENV}")
             # env_ghost2 archives fine
 
     monkeypatch.setattr(envmod, "EnvironmentsClient", FakeClient)
+    redact.remember_known_values("iid-reaper", _KNOWN_ENV)
     body = (
         _reaper_client(write_config, tmp_path)
         .post(
@@ -1599,6 +1607,7 @@ def test_reaper_per_env_error_is_reported_not_fatal(
     assert body["reaped"] == ["env_ghost2"]  # the healthy one still went through
     assert "env_ghost1" in body["errors"]  # the failure is surfaced, not swallowed
     assert "409" in body["errors"]["env_ghost1"]
+    assert _KNOWN_ENV[6:] not in body["errors"]["env_ghost1"]  # redacted (#1621)
 
 
 def test_reaper_fails_closed_on_live_set_failure(
@@ -1622,12 +1631,14 @@ def test_reaper_fails_closed_on_live_set_failure(
     monkeypatch.setattr(envmod, "EnvironmentsClient", FakeClient)
 
     def _boom(*a, **k):
-        raise RuntimeError("agents --json failed")
+        raise RuntimeError(f"agents --json failed xyz{_KNOWN_ENV}")
 
     monkeypatch.setattr(envmod, "live_bridge_directories", _boom)
+    redact.remember_known_values("iid-reaper", _KNOWN_ENV)
     r = _reaper_client(write_config, tmp_path).get("/api/environments/ghosts")
     assert r.status_code == 503
     assert "could not determine live bridges" in r.json()["detail"]
+    assert _KNOWN_ENV[6:] not in r.json()["detail"]  # the error text is redacted (#1621)
 
 
 def test_project_usage_serializes_rollup(write_config, tmp_path, monkeypatch):

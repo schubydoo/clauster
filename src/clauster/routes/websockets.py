@@ -79,15 +79,18 @@ _STREAM_IDS_PER_KIND = 4
 
 
 def _read_log_head(path: Path) -> str:
-    """Return the first :data:`_LOG_HEAD_BYTES` of ``path`` as text, or ``""`` if unreadable."""
+    """Return the whole lines in the first :data:`_LOG_HEAD_BYTES` of ``path``, or ``""``.
+
+    Text after the last newline is dropped: the read limit, or a bridge still writing the
+    line, may have cut an id there, and a cut id must not take the first slot of its kind. The
+    stream reads that line later, once it is whole.
+    """
     try:
         with path.open("rb") as fh:
             head = fh.read(_LOG_HEAD_BYTES)
     except OSError:
         return ""
-    if len(head) == _LOG_HEAD_BYTES:  # the read stopped mid-line: a cut id must not count
-        head = head[: head.rfind(b"\n") + 1]
-    return head.decode("utf-8", errors="replace")
+    return head[: head.rfind(b"\n") + 1].decode("utf-8", errors="replace")
 
 
 def _learn_stream_ids(instance_id: str, text: str, learned: dict[str, set[str]]) -> None:

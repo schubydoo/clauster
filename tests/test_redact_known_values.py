@@ -568,6 +568,28 @@ def test_log_head_cut_at_the_limit_drops_the_partial_line(tmp_path: Path, monkey
     log = tmp_path / "x.log"
     log.write_bytes(b"first line\nenvironment_id=env_01Xk3PqR8sTvW2yZ4bNc6dFg\n")
     assert ws_module._read_log_head(log) == "first line\n"
+    # A short file whose last line the bridge is still writing: that line is dropped too.
+    monkeypatch.setattr(ws_module, "_LOG_HEAD_BYTES", 256 * 1024)
+    log.write_bytes(b"first line\nenvironment_id=env_01Xk3PqR8sTvW2yZ")
+    assert ws_module._read_log_head(log) == "first line\n"
+
+
+def test_stream_bridge_id_must_end_where_the_uuid_ends() -> None:
+    from clauster.routes import websockets as ws_module
+
+    learned: dict[str, set[str]] = {}
+    ws_module._learn_stream_ids("iid-1", f"[bridge:init] bridgeId={BRIDGE}a dir=x", learned)
+    assert learned == {}  # a 37-character hex run is not a bridge id: store nothing
+
+
+def test_stream_accepts_a_tag_that_touches_the_id() -> None:
+    from clauster.routes import websockets as ws_module
+
+    env2 = "env_01Tq4Wr6Ey8Uz2Ix9Oc3Pv5Ab7"
+    learned: dict[str, set[str]] = {}
+    ws_module._learn_stream_ids("iid-1", f"environment_id={ENV}", learned)
+    ws_module._learn_stream_ids("iid-1", f"[bridge:a]environment_id={env2}", learned)
+    assert learned["env"] == {ENV, env2}
 
 
 def test_ws_bridge_log_sends_every_line_in_order_across_slices(
