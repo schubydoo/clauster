@@ -274,10 +274,12 @@ hook command and never connects to an MCP server from this editor.
 
 - `name` must be lowercase letters, digits and hyphens, at most 239
   characters, and the same as the name of the file. The name is also the
-  file name, so this rule is narrower than the Claude Code rule.
+  file name, so this rule is narrower than the Claude Code rule. A file with
+  a longer or other name does not show in the list.
 - `memory`, `effort`, `isolation`, `color` and `experimental.cacheTtl` accept
-  only the documented values. Claude Code ignores any other value, so
-  Clauster refuses it at save time.
+  only the values in the reference. Clauster refuses any other value at save
+  time, also the few that Claude Code reads but does not document, for
+  example an integer `effort` or `isolation: remote`.
 - `autoCompactWindow` must be a plain integer from `100000` to `1000000`.
   Write `200000`, not `200k`.
 - `mcpServers` must be a list. Each item is the name of a server that you
@@ -287,7 +289,12 @@ hook command and never connects to an MCP server from this editor.
   `bypassPermissions`, as every config-editor surface does. See the
   [bypassPermissions footgun gate](../security.md#bypasspermissions-footgun-gate).
 - A field that is not in the reference is saved as written. Claude Code
-  ignores a field that it does not recognize.
+  ignores a field that it does not recognize. The one exception is `env`:
+  Clauster still refuses an `env` that is not a map of names to plain values.
+
+A file with the name of a built-in subagent, such as `claude.md`, overrides
+that built-in in Claude Code. The list shows the file as read-only. Clauster
+shows its content, but does not edit or delete it.
 
 ## Troubleshooting and limits
 

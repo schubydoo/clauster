@@ -116,7 +116,8 @@ _NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 #: write, a 500 instead of a 400/422. The longest name this surface puts on disk is the
 #: atomic writer's temp file, ``<name>.md.<8 random chars>.tmp`` (``tempfile.mkstemp``),
 #: 16 characters over the name, so 239 + 16 is 255. The name is ASCII (see
-#: :data:`_NAME_RE`), so characters and bytes agree.
+#: :data:`_NAME_RE`), so characters and bytes agree. ⚠️ This is the POSIX bound. On Windows
+#: without long paths, the 260-character limit on the WHOLE path can bind first.
 MAX_NAME_CHARS = 239
 
 #: Claude Code's built-in subagents — compiled into the CLI, never files on disk.
@@ -388,10 +389,18 @@ def _validate_experimental(value: Any, label: str) -> None:
     """
     if not isinstance(value, dict):
         raise cw.InvalidCandidateError(f"{label} must be an object")
-    if "cacheTtl" in value and value["cacheTtl"] not in _CACHE_TTL_VALUES:
-        raise cw.InvalidCandidateError(
-            f"{label} 'cacheTtl' must be one of {list(_CACHE_TTL_VALUES)}"
-        )
+    for key, ttl in value.items():
+        # Claude Code finds the key after it drops `-`/`_` and lowercases it (so `cachettl`
+        # and `cache_ttl` are `cacheTtl` too), then ignores a bad value. Normalize the same
+        # way, or a misspelled key with a bad value would slip past as an unknown key.
+        if not isinstance(key, str) or key.replace("-", "").replace("_", "").lower() != (
+            "cachettl"
+        ):
+            continue
+        if ttl not in _CACHE_TTL_VALUES:
+            raise cw.InvalidCandidateError(
+                f"{label} {key!r} must be one of {list(_CACHE_TTL_VALUES)}"
+            )
 
 
 #: ``manual`` is the documented frontmatter alias of ``default`` (Claude Code maps it
@@ -654,7 +663,9 @@ def _list_agents(root: Path, source: str) -> list[dict[str, Any]]:
             {
                 "name": name,
                 "source": "plugin" if read_only else source,
-                "editable": not read_only,
+                # A file named like a built-in overrides it in Claude Code, but PUT and DELETE
+                # refuse a built-in name, so LIST must not offer an Edit it cannot honor.
+                "editable": not read_only and not is_builtin_agent(name),
                 "description": description,
             }
         )
@@ -689,6 +700,19 @@ def _is_pair_list(value: Any) -> bool:
     return bool(value) and all(isinstance(entry, tuple) and len(entry) == 2 for entry in value)
 
 
+def _is_builtin_override_file(root: Path, name: str) -> bool:
+    """Whether a regular, non-symlink ``<name>.md`` sits in ``root`` for a built-in ``name``.
+
+    The symlink test runs first, through lstat, so a link is never followed here: a
+    symlinked file named like a built-in keeps reading as the synthetic built-in doc. A
+    built-in name that is not a valid file name (``Explore``) has no file to find.
+    """
+    if not is_valid_agent_name(name):
+        return False
+    candidate = root / f"{name}.md"
+    return not candidate.is_symlink() and candidate.is_file()
+
+
 def _read_agent(root: Path, name: str, source: str) -> dict[str, Any]:
     """Return the full detail doc for one subagent, or raise a typed read error.
 
@@ -698,8 +722,13 @@ def _read_agent(root: Path, name: str, source: str) -> dict[str, Any]:
     :class:`AgentNotFoundError` (→ 404). ``frontmatter`` is a **derived, redacted**
     display field (:func:`~clauster.config_write.redact_secrets`); ``content`` is the
     raw, unredacted file text — the value a subsequent write must re-submit.
+
+    A built-in name with a regular FILE behind it is the exception: Claude Code lets a user
+    or project agent override a built-in of the same name, so that file is real
+    configuration. It reads like any other file, but never as editable, because write and
+    delete still refuse every built-in name.
     """
-    if is_builtin_agent(name):
+    if is_builtin_agent(name) and not _is_builtin_override_file(root, name):
         return {
             "name": name,
             "source": "built-in",
@@ -768,7 +797,7 @@ def _read_agent(root: Path, name: str, source: str) -> dict[str, Any]:
     return {
         "name": name,
         "source": "plugin" if read_only else source,
-        "editable": not read_only,
+        "editable": not read_only and not is_builtin_agent(name),
         "exists": True,
         "content": text,
         "frontmatter": frontmatter,

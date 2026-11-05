@@ -261,6 +261,49 @@ def test_new_builtin_names_are_read_only(tmp_path: Path, name: str) -> None:
     assert not sub.project_agents_dir(tmp_path).exists()
 
 
+@pytest.mark.parametrize("name", ["claude", "explore"])
+def test_on_disk_override_of_a_builtin_is_readable_but_not_editable(
+    tmp_path: Path, name: str
+) -> None:
+    # Claude Code lets a user/project file override a built-in of the same name (docs:
+    # "A user or project subagent named `Explore` overrides the built-in"). Adding `claude`
+    # to the built-ins must not hide an existing claude.md: LIST and GET both show the
+    # file, both as read-only, matching PUT/DELETE, which still refuse the name.
+    agents_dir = sub.project_agents_dir(tmp_path)
+    agents_dir.mkdir(parents=True)
+    content = _content(name)
+    (agents_dir / f"{name}.md").write_text(content, encoding="utf-8", newline="\n")
+
+    rows = [r for r in sub.list_project_agents(tmp_path) if r["name"] == name]
+    assert {(r["source"], r["editable"]) for r in rows} == {
+        ("project", False),
+        ("built-in", False),
+    }
+    doc = sub.read_project_agent(tmp_path, name)
+    assert (doc["source"], doc["editable"], doc["exists"]) == ("project", False, True)
+    assert doc["content"] == content
+    with pytest.raises(sub.ReadOnlyAgentError):
+        sub.write_project_agent(tmp_path, name, content, doc["hash"])
+    with pytest.raises(sub.ReadOnlyAgentError):
+        sub.delete_project_agent(tmp_path, name)
+    assert (agents_dir / f"{name}.md").read_text(encoding="utf-8") == content
+
+
+def test_symlink_named_like_a_builtin_still_reads_as_the_builtin(tmp_path: Path) -> None:
+    # The override lookup must not follow a link: a symlinked claude.md keeps the
+    # content-less synthetic doc, and its target is never read.
+    agents_dir = sub.project_agents_dir(tmp_path)
+    agents_dir.mkdir(parents=True)
+    outside = tmp_path / "outside.md"
+    outside.write_text(_content("claude"), encoding="utf-8")
+    try:
+        (agents_dir / "claude.md").symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks unavailable on this host")
+    doc = sub.read_project_agent(tmp_path, "claude")
+    assert (doc["source"], doc["exists"], doc["content"]) == ("built-in", False, "")
+
+
 @pytest.mark.parametrize(
     "name",
     ["my-agent", "general-purposeish", "explorer", "claude-helper", "comment-thread-analyst"],
@@ -326,6 +369,7 @@ _DOCUMENTED_VALUES: list[tuple[str, object]] = [
     # Only `cacheTtl` is documented inside the map; other keys pass through, like unknown
     # top-level keys do.
     ("experimental", {"futureOption": 1}),
+    ("experimental", {"cache_ttl": "5m", 7: "non-string key"}),
     ("mcpServers", ["github"]),
     ("mcpServers", [{"playwright": {"type": "stdio", "command": "npx", "args": ["-y", "x"]}}]),
     ("mcpServers", [{"remote": {"type": "ws", "url": "wss://example.com"}}, "slack"]),
@@ -435,6 +479,11 @@ def test_validate_frontmatter_accepts_well_formed_env() -> None:
         {"name": "x", "description": "d", "experimental": "1h"},  # not a map
         {"name": "x", "description": "d", "experimental": {"cacheTtl": "2h"}},
         {"name": "x", "description": "d", "experimental": {"cacheTtl": 5}},
+        # Claude Code matches the key with `-`/`_` dropped and case folded, then ignores a
+        # bad value, so these spellings get the same closed-list check.
+        {"name": "x", "description": "d", "experimental": {"cachettl": "2h"}},
+        {"name": "x", "description": "d", "experimental": {"CACHE_TTL": "bogus"}},
+        {"name": "x", "description": "d", "experimental": {"cache-ttl": "1d"}},
         {"name": "x" * (sub.MAX_NAME_CHARS + 1), "description": "d"},  # filename too long
         {"name": "x", "description": "d", "env": 42},  # not a mapping
         {"name": "x", "description": "d", "env": {"": "v"}},  # empty var name
