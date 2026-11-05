@@ -914,7 +914,8 @@ def _compute_effective_settings(
     scope's layer, and a :data:`DESKTOP_ONLY_KEYS` key is left out of every layer. Returns
     ``{key: {"value": ..., "source": <highest scope>, "sources": [<scopes>]}}`` for the
     union of keys across every scope that was read; ``sources`` lists, highest first,
-    each scope whose value is part of the merged result.
+    each scope that still supplies at least one leaf entry of the merged value (an
+    empty object or list counts as one entry), and ``source`` is the first of them.
     """
     by_scope: dict[cw.Scope, dict[str, Any] | None] = {
         "local": local_misc,
@@ -939,17 +940,48 @@ def _compute_effective_settings(
 
     # ``layers`` is in precedence order (local, project, user). Walk it reversed so
     # each higher scope merges OVER the lower ones, as Claude Code applies them.
-    effective: dict[str, dict[str, Any]] = {}
+    # Each key carries a provenance tree beside its value (see _tag_scope), so a scope is
+    # named only while one of its leaf entries survives the merge.
+    merged: dict[str, tuple[Any, Any]] = {}
     for scope, misc in reversed(layers):
         for key, value in misc.items():
-            below = effective.get(key)
-            if below is None:
-                effective[key] = {"value": value, "source": scope, "sources": [scope]}
-                continue
-            merged = _merge_setting(below["value"], value, key)
-            sources = [scope] if merged == value else [scope, *below["sources"]]
-            effective[key] = {"value": merged, "source": scope, "sources": sources}
-    return {key: effective[key] for key in sorted(effective)}
+            tagged = _tag_scope(value, scope)
+            below = merged.get(key)
+            merged[key] = (
+                (value, tagged)
+                if below is None
+                else _merge_setting(below[0], below[1], value, tagged, key)
+            )
+    effective: dict[str, dict[str, Any]] = {}
+    for key in sorted(merged):
+        value, prov = merged[key]
+        supplied = _prov_scopes(prov)
+        sources = [scope for scope in _SCOPE_PRECEDENCE if scope in supplied]
+        effective[key] = {"value": value, "source": sources[0], "sources": sources}
+    return effective
+
+
+def _tag_scope(value: Any, scope: str) -> Any:
+    """Return the provenance tree of ``value`` set by ``scope``.
+
+    The tree mirrors the value: an object maps each key to its subtree, a list holds one
+    subtree per entry, and a leaf (a scalar, or an empty object or list) is the frozenset
+    of the scopes that supply it.
+    """
+    if isinstance(value, dict) and value:
+        return {k: _tag_scope(v, scope) for k, v in value.items()}
+    if isinstance(value, list) and value:
+        return [_tag_scope(v, scope) for v in value]
+    return frozenset({scope})
+
+
+def _prov_scopes(prov: Any) -> frozenset[str]:
+    """Return every scope named by a leaf of the provenance tree ``prov``."""
+    if isinstance(prov, dict):
+        return frozenset().union(*(_prov_scopes(p) for p in prov.values()))
+    if isinstance(prov, list):
+        return frozenset().union(*(_prov_scopes(p) for p in prov))
+    return prov
 
 
 #: Keys whose object value Claude Code merges one entry deep: a higher scope's entry
@@ -967,7 +999,9 @@ def _js_kind(value: Any) -> str:
     return type(value).__name__
 
 
-def _merge_setting(lower: Any, higher: Any, key: Any) -> Any:
+def _merge_setting(
+    lower: Any, lower_prov: Any, higher: Any, higher_prov: Any, key: Any
+) -> tuple[Any, Any]:
     """Merge one settings value from a higher scope over a lower one, as Claude Code does.
 
     Mirrors the merge customizer in Claude Code 2.1.318 (and the settings docs, "Lists
@@ -980,23 +1014,50 @@ def _merge_setting(lower: Any, higher: Any, key: Any) -> Any:
     also takes ``modelPicker`` whole, but only user settings may set it, so among the
     three scopes here it never merges.) A masked value is never collapsed into another,
     because two masks can stand for different stored values.
+
+    Returns the merged value and its provenance tree (see :func:`_tag_scope`), built by
+    the same rule: a replaced value keeps only the higher tree, a combined list keeps each
+    surviving entry's tree, and a repeated plain entry names the scopes of both copies.
     """
     if isinstance(lower, list) and isinstance(higher, list):
         if key == "fallbackModel":
-            return higher
+            return higher, higher_prov
         out: list[Any] = []
-        for item in [*lower, *higher]:
+        provs: list[Any] = []
+        for item, prov in [*_entries(lower, lower_prov), *_entries(higher, higher_prov)]:
             plain = not isinstance(item, (dict, list)) and item != cw.REDACTION_SENTINEL
             # Typed equality as in JavaScript: ``1 == True`` must not merge two entries,
             # while ``1`` and ``1.0`` are the same number.
-            if not (plain and any(_js_kind(o) == _js_kind(item) and o == item for o in out)):
+            same = (
+                next(
+                    (i for i, o in enumerate(out) if _js_kind(o) == _js_kind(item) and o == item),
+                    None,
+                )
+                if plain
+                else None
+            )
+            if same is None:
                 out.append(item)
-        return out
+                provs.append(prov)
+            else:
+                provs[same] = provs[same] | prov  # both copies are plain leaves
+        return out, (provs if out else higher_prov)
     if isinstance(lower, dict) and isinstance(higher, dict):
+        low = lower_prov if isinstance(lower_prov, dict) else {}
+        high = higher_prov if isinstance(higher_prov, dict) else {}
         if key in _SHALLOW_MERGE_KEYS:
-            return {**lower, **higher}
-        merged = dict(lower)
-        for k, v in higher.items():
-            merged[k] = _merge_setting(lower[k], v, k) if k in lower else v
-        return merged
-    return higher
+            merged, prov = {**lower, **higher}, {**low, **high}
+        else:
+            merged, prov = dict(lower), dict(low)
+            for k, v in higher.items():
+                if k in lower:
+                    merged[k], prov[k] = _merge_setting(lower[k], low[k], v, high[k], k)
+                else:
+                    merged[k], prov[k] = v, high[k]
+        return merged, (prov if merged else higher_prov)
+    return higher, higher_prov
+
+
+def _entries(items: list[Any], prov: Any) -> list[tuple[Any, Any]]:
+    """Pair each list entry with its provenance subtree (an empty list has none)."""
+    return list(zip(items, prov, strict=True)) if isinstance(prov, list) else []

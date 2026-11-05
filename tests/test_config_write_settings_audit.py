@@ -619,6 +619,75 @@ def test_effective_override_that_replaces_everything_names_one_scope() -> None:
     assert eff["env"] == {"value": {"A": "2"}, "source": "local", "sources": ["local"]}
 
 
+# Sources name a scope only while one of its entries survives in the merged value: an
+# object merges key by key, a list combines (an entry that two scopes repeat names both),
+# and a scalar, fallbackModel or a type change replaces the lower value whole.
+
+
+def test_effective_sources_drop_a_scope_whose_object_entries_were_all_overwritten() -> None:
+    eff = _eff(
+        user={"env": {"A": "one"}}, project={"env": {"B": "two"}}, local={"env": {"B": "three"}}
+    )
+    assert eff["env"] == {
+        "value": {"A": "one", "B": "three"},
+        "source": "local",
+        "sources": ["local", "user"],
+    }
+
+
+def test_effective_sources_follow_the_leaves_of_a_nested_object() -> None:
+    eff = _eff(
+        user={"x": {"a": {"p": 1, "q": 1}}},
+        project={"x": {"a": {"p": 2}}},
+        local={"x": {"a": {"q": 3}}},
+    )
+    assert eff["x"] == {
+        "value": {"a": {"p": 2, "q": 3}},
+        "source": "local",
+        "sources": ["local", "project"],
+    }
+
+
+def test_effective_sources_name_every_scope_whose_list_entries_survive() -> None:
+    # Lists combine; "a" is in both files, so both supply it after the dedupe.
+    eff = _eff(user={"claudeMdExcludes": ["a"]}, project={"claudeMdExcludes": ["a", "b"]})
+    assert eff["claudeMdExcludes"] == {
+        "value": ["a", "b"],
+        "source": "project",
+        "sources": ["project", "user"],
+    }
+
+
+def test_effective_sources_drop_a_list_that_a_scalar_or_chain_replaced() -> None:
+    eff = _eff(user={"x": {"l": ["a"], "k": 1}}, local={"x": {"l": "s"}})
+    assert eff["x"]["value"] == {"l": "s", "k": 1}
+    assert eff["x"]["sources"] == ["local", "user"]  # user still supplies x.k
+    eff = _eff(user={"x": {"l": ["a"]}}, local={"x": {"l": "s"}})
+    assert eff["x"]["sources"] == ["local"]
+
+
+def test_effective_source_is_the_highest_scope_that_still_supplies_a_value() -> None:
+    # An empty object adds no entry, so the lower scope alone supplies the value.
+    eff = _eff(user={"env": {"A": "1"}}, local={"env": {}})
+    assert eff["env"] == {"value": {"A": "1"}, "source": "user", "sources": ["user"]}
+    # When every scope is empty, the highest one is named.
+    eff = _eff(user={"env": {}}, project={"env": {}})
+    assert eff["env"] == {"value": {}, "source": "project", "sources": ["project"]}
+
+
+def test_effective_shallow_merge_key_replaces_a_whole_entry() -> None:
+    eff = _eff(
+        user={"extraKnownMarketplaces": {"m": {"a": 1}, "n": {}}},
+        project={"extraKnownMarketplaces": {"m": {"b": 2}}},
+    )
+    assert eff["extraKnownMarketplaces"]["sources"] == ["project", "user"]  # user keeps "n"
+    eff = _eff(
+        user={"extraKnownMarketplaces": {"m": {"a": 1}}},
+        project={"extraKnownMarketplaces": {"m": {"b": 2}}},
+    )
+    assert eff["extraKnownMarketplaces"]["sources"] == ["project"]
+
+
 def test_effective_scalar_over_object_replaces_it() -> None:
     eff = _eff(user={"statusLine": {"type": "command"}}, project={"statusLine": "x"})
     assert eff["statusLine"]["value"] == "x"
