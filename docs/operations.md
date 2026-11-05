@@ -68,7 +68,16 @@ panel uses, from the CLI:
 clauster doctor -c /etc/clauster/clauster.yml
 ```
 
-It prints one line per check and exits non-zero if any check **fails**. Checks:
+It prints one line per check and exits non-zero if any check **fails**.
+
+The dashboard shows the same result as the **System readiness** pill in the header.
+The pill is always present. It counts the warnings or blocking checks when there are
+any, and shows `N checks passed` when every check passes. If the checks did not load
+(an HTTP error, a failed request, or an empty result), it shows `Checks not run`.
+That state is not a pass. Select the pill to see each check row and to run the checks
+again.
+
+Checks:
 
 | Check | What it verifies | Failure vs warning |
 | --- | --- | --- |

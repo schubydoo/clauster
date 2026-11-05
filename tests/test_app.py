@@ -1103,8 +1103,8 @@ def test_dashboard_surfaces_crashed_instance_error_detail(write_config):
 def test_dashboard_has_readiness_panel(write_config):
     # Readiness is now a header pill (severity-aware: "blocking" vs "check(s)") that
     # opens a collapsible panel titled "Before you start a session". The pill logic
-    # + the /api/doctor wiring must ship (Alpine x-show hides it until a check needs
-    # attention).
+    # + the /api/doctor wiring must ship. TASK-291: the pill shows in every state
+    # (see test_readiness_pill_shows_every_state).
     resp = _client(write_config).get("/")
     assert "Before you start a session" in resp.text  # the collapsible panel title
     assert "readinessBlockers()" in resp.text  # severity split: blocking vs warning
@@ -1112,6 +1112,33 @@ def test_dashboard_has_readiness_panel(write_config):
     assert "blocking" in resp.text  # the solid-red pill copy
     assert "loadReadiness" in resp.text
     assert "/api/doctor" in resp.text
+
+
+def test_readiness_pill_shows_every_state(write_config):
+    # TASK-291: the header pill used to render only with an issue, so "all passed" and
+    # "the checks never ran" looked the same. It must now render unconditionally (no
+    # x-show gate), with a passed count and a distinct "Checks not run" state, and a
+    # failed load must clear the earlier rows. The browser behaviour is pinned in
+    # tests/e2e/test_readiness_e2e.py; this guards the shipped markup + script.
+    page = _client(write_config).get("/").text
+    pill = re.search(r'<button[^>]*data-test="readiness-pill"[^>]*>', page, re.S)
+    assert pill, "the readiness pill hook is missing"
+    assert "x-show" not in pill.group(0)  # never hidden: every state is visible
+    assert ':data-state="readinessState()"' in pill.group(0)
+    assert "readinessState()" in page and "readinessPillText()" in page
+    assert '" checks passed"' in page  # the calm all-green summary
+    assert '"Checks not run"' in page  # the did-not-run state, never a pass
+    assert "_readinessFailed(" in page
+    # A failed run drops the stale rows, so an old pass cannot survive a failed re-check.
+    failed = page[page.index("_readinessFailed(why) {") :]
+    assert "this.readiness.checks = [];" in failed[: failed.index("},")]
+    # "passed" needs a non-empty list and ok=true; the unavailable branch precedes it.
+    state = page[page.index("readinessState() {") :]
+    state = state[: state.index("},")]
+    assert '!r.checks.length || !r.ok) return "unavailable"' in state
+    assert state.index('"unavailable"') < state.index('return "passed"')
+    for hook in ("readiness-panel", "readiness-summary", "readiness-unavailable", "readiness-row"):
+        assert f'data-test="{hook}"' in page
 
 
 def test_readiness_vocab_is_unified_and_scoped(write_config):

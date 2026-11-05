@@ -674,17 +674,20 @@
              so it surfaces at header level (click to expand the checks). -->
         <!-- Severity-aware: solid red + "blocking" only when a check actually blocks a
              start; warnings get a quieter outline pill (you can still launch). -->
-        <button type="button" class="btn btn-sm" x-cloak
-                x-show="readiness.loaded && readinessIssues().length > 0"
-                :class="readinessBlockers().length ? 'btn-danger' : 'btn-outline-warning'"
+        <!-- TASK-291: the pill shows in every state, so "all passed" and "the checks did
+             not run" never look the same. Passed is a calm ghost pill ("N checks passed");
+             a run that failed or returned no rows is an outline-warning "Checks not run",
+             never a check mark. readinessState() holds the rules. -->
+        <button type="button" class="btn btn-sm" x-cloak data-test="readiness-pill"
+                :data-state="readinessState()"
+                :class="readinessPillClass()"
+                :disabled="readinessState() === 'checking'"
+                :aria-expanded="readiness.showPanel ? 'true' : 'false'"
                 @click="toggleReadinessPanel()"
-                :title="readinessBlockers().length
-                  ? 'System readiness — a check is blocking; no session will start until it is fixed (affects every launch on this host)'
-                  : 'System readiness — warnings only; sessions can still start (affects every launch on this host)'">
-          <svg class="ico me-1" aria-hidden="true"><use href="#ic-alert"/></svg><span
-                x-text="readinessBlockers().length
-                  ? (readinessBlockers().length + ' blocking')
-                  : (readinessWarnings().length + (readinessWarnings().length === 1 ? ' check' : ' checks'))"></span></button>
+                :title="readinessPillTitle()">
+          <svg class="ico me-1 text-success" aria-hidden="true" x-show="readinessState() === 'passed'"><use href="#ic-check"/></svg><svg
+               class="ico me-1" aria-hidden="true" x-show="['blocking', 'warning', 'unavailable'].includes(readinessState())"><use href="#ic-alert"/></svg><span
+                x-text="readinessPillText()">Checking…</span></button>
         <button type="button" class="btn btn-icon btn-ghost-secondary" aria-label="Edit configuration"
                 title="Edit configuration" :disabled="configEditor.loading" @click="openConfig()">
           <svg class="icon" width="20" height="20" aria-hidden="true"><use href="#ic-edit"/></svg>
@@ -734,21 +737,35 @@
       </div>
 
       <!-- ===== Readiness detail (collapsed; opened by the header pill) ===== -->
-      <div class="mb-3" x-show="readiness.loaded && readiness.showPanel" x-cloak>
+      <div class="mb-3" x-show="readiness.loaded && readiness.showPanel" x-cloak data-test="readiness-panel">
         <div class="card">
-          <div class="card-status-start bg-warning"></div>
+          <div class="card-status-start" :class="readinessStripeClass()"></div>
           <div class="card-header">
-            <h3 class="card-title">Before you start a session</h3>
+            <div>
+              <h3 class="card-title">Before you start a session</h3>
+              <div class="text-secondary small" data-test="readiness-summary" role="status"
+                   x-show="readiness.checks.length > 0" x-text="readinessSummary()"></div>
+            </div>
             <div class="card-actions btn-list">
               <button type="button" class="btn btn-sm btn-ghost-secondary" @click="toggleReadinessAll()"
+                      data-test="readiness-toggle-all" x-show="readinessIssues().length > 0"
                       x-text="readiness.showAll ? 'Show only issues' : 'Show all checks'">Show all checks</button>
-              <button type="button" class="btn btn-sm btn-ghost-secondary" @click="loadReadiness()"><svg class="ico me-1" aria-hidden="true"><use href="#ic-restart"/></svg>Re-check</button>
+              <button type="button" class="btn btn-sm btn-ghost-secondary" @click="loadReadiness()"
+                      :disabled="readiness.busy"><svg class="ico me-1" aria-hidden="true"><use href="#ic-restart"/></svg><span
+                      x-text="readiness.busy ? 'Checking…' : 'Re-check'">Re-check</span></button>
               <button type="button" class="btn btn-sm btn-ghost-secondary" @click="closeReadinessPanel()">Close</button>
             </div>
           </div>
+          <div class="card-body py-2" data-test="readiness-unavailable" role="status"
+               x-show="readinessState() === 'unavailable'">
+            <svg class="ico me-1 text-warning" aria-hidden="true"><use href="#ic-alert"/></svg>The
+            readiness checks did not run<span x-show="readiness.error">: <span x-text="readiness.error"></span></span>.
+            Readiness is unknown, which is not a pass. Select Re-check to try again, or run
+            <code>clauster doctor</code> on the host.
+          </div>
           <div class="list-group list-group-flush">
-            <template x-for="c in (readiness.showAll ? readiness.checks : readinessIssues())" :key="c.name">
-              <div class="list-group-item d-flex align-items-start">
+            <template x-for="c in readinessRows()" :key="c.name">
+              <div class="list-group-item d-flex align-items-start" data-test="readiness-row" :data-status="c.status">
                 <span class="me-2 fw-bold check-glyph" :class="checkClass(c.status)"
                       aria-hidden="true"><svg class="ico" x-show="c.status === 'ok'"><use href="#ic-check"/></svg><svg class="ico" x-show="c.status === 'warn'"><use href="#ic-alert"/></svg><svg class="ico" x-show="c.status !== 'ok' && c.status !== 'warn'"><use href="#ic-x"/></svg></span>
                 <span class="fw-medium text-capitalize me-3 check-name"
