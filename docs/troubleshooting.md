@@ -598,6 +598,37 @@ card shows an error like `reattach failed: ...` (server log:
 down, so there was nothing to reattach to. The transcript is not lost — start
 a new Direct Session for the project and resume from the captured session.
 
+### "stream lost: internal error (...)" on a Direct Session
+
+**What you see:** a Direct Session card shows the red `Error` badge, and its
+view shows `stream lost: internal error (<ExceptionName>)` (server log:
+`hosted: pump for process <id> failed`, followed by a traceback).
+
+**Most likely cause:** a bug in Clauster. Clauster could not process one line of
+the session output and stopped reading that session. The view does not show the
+exception message, because it can contain session output. The server log has
+the full traceback. Its formatter masks known token and id shapes, but the
+message can still quote session output. Please report the traceback as a bug.
+
+Clauster then ends the agent at once with a forced kill (SIGKILL on Linux and
+macOS; claustrum ends the job object on Windows), with no grace period, because
+nothing can read its output or answer its prompts any more. A tool command that
+the agent runs at that time also stops. An open permission prompt shows
+`— session ended`, and Clauster sends no answer for it to the agent. The
+transcript of `claude` keeps the conversation up to the last line that `claude`
+wrote before the kill. If the card offers **Resume**, use it to continue the
+conversation in a new agent.
+
+A `stream lost:` line with any other text than `internal error (...)` means
+that the claustrum daemon refused a request for the session, or that Clauster
+lost its connection to the daemon. Clauster handles the session the same way:
+it ends the agent and resolves open prompts. If Clauster cannot confirm the
+kill, the server log shows `hosted: could not end agent <id> after pump
+failure`. That can mean that the connection was gone and the kill failed, or
+that the daemon received the kill but its reply did not arrive. Before you
+resume such a session, make sure that its `claude` process is not still running
+on the host.
+
 ### "output lost (N frames)" after a restart
 
 **What you see:** a reattached Direct Session's view opens with a yellow

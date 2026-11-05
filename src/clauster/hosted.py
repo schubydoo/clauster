@@ -781,10 +781,20 @@ class HostedSession:
         except asyncio.CancelledError:
             raise
         except ClaustrumError as exc:  # daemon loss mid-pump (CL-4b)
-            # A daemon-side failure surfaced through the reader; report it, don't swallow.
-            self.status = InstanceStatus.ERROR
-            self._resolve_parked()  # resolve any parked request so it isn't left stranded
-            self._emit({"type": "lost", "reason": str(exc)})
+            # A daemon-side failure surfaced through the reader or a stdin write; report it,
+            # don't swallow. An RpcError comes from a healthy daemon whose agent still runs,
+            # so this path ends the agent too; on a lost connection that kill just fails.
+            await self._fail_closed(str(exc))
+        except Exception as exc:  # any other failure while routing a frame (#1342)
+            # Fail visibly instead of letting the task die with the session still shown as
+            # running and nothing on its stream. CancelledError is a BaseException, so it
+            # is not caught here.
+            # The reason names only the exception class: its message can quote frame
+            # content and the lost event goes to the browser unredacted. The full
+            # traceback goes to the server log; its formatter masks known token and id
+            # shapes only, which is the same guarantee every other server log line has.
+            logger.exception("hosted: pump for process %s failed", self._process_id)
+            await self._fail_closed(f"internal error ({type(exc).__name__})")
         finally:
             # The pump owns the subscription it drains; drop it whenever the pump exits on its
             # own (natural exit, daemon loss, or cancel) so a subscriber is never left on the
@@ -793,6 +803,44 @@ class HostedSession:
             if self._stream is not None and self._source is source:
                 self._stream.unsubscribe(source)
                 self._source = None
+
+    async def _fail_closed(self, reason: str) -> None:
+        """Latch ERROR, resolve parked requests, emit ``lost``, then SIGKILL the agent.
+
+        The pump's failure path (#1342). Status changes BEFORE any emit, so a fault inside
+        ``_emit`` itself still leaves a truthful row, and the kill sits in a ``finally`` so
+        that fault cannot skip it. Parked requests resolve as "interrupted": no
+        control_response is written, so a still-parked request is never answered with an
+        allow (fail closed).
+
+        **Why the agent is killed.** Nothing reads its output or answers its prompts any
+        more. An ERROR row is also one :meth:`stop` treats as already ended, and one Resume
+        and Forget accept: a live agent would let Resume start a second agent on the same
+        conversation, and let Stop or Forget drop it unkilled. Its transcript survives, so
+        Resume reloads the conversation.
+
+        **Why one SIGKILL, not stop()'s INT-then-grace-then-KILL.** No await sits between
+        the ERROR assignment and the kill's socket write (``kill`` → ``call`` → ``_send``
+        writes before its first ``drain``), so the kill is on the wire before any Resume
+        can act on the ERROR row, and a later cancel (Stop, Forget, Resume's detach)
+        cannot drop it. A grace window would reopen exactly that race. Keep it that way:
+        no await may be added before the kill.
+
+        A kill the daemon cannot take (the connection is gone) is logged, not raised.
+        """
+        self.status = InstanceStatus.ERROR
+        try:
+            self._resolve_parked()
+            self._emit({"type": "lost", "reason": reason})
+        finally:
+            try:
+                await self._client.kill(self._process_id, signal="KILL")
+            except ClaustrumError as kill_exc:
+                logger.warning(
+                    "hosted: could not end agent %s after pump failure: %s",
+                    self._process_id,
+                    kill_exc,
+                )
 
     async def _on_line(self, stream: Any, line: str, seq: Any = None) -> None:
         """Route one reassembled output line: stderr/non-JSON as text, else by frame type.
@@ -815,11 +863,10 @@ class HostedSession:
             # raises RecursionError on every supported interpreter (the message changed from
             # "maximum recursion depth exceeded" on <=3.13 to "Stack overflow" on 3.14+, but
             # not the type), and it is not a ValueError — so without this arm it escapes into
-            # `_pump`, which catches only CancelledError/ClaustrumError. The pump task
-            # would die and the session go dark with no `lost` event (a fail-silent that
-            # invariant 1 forbids). The scanner's depth ceiling is low — on the order of a
-            # thousand nested levels — and the agent output line is unbounded, so a hostile
-            # line reaches it on every platform.
+            # `_pump`, whose catch-all then ends the whole session as ERROR for one bad
+            # line (#1342; before that catch-all the pump died silently). The scanner's
+            # depth ceiling is low — on the order of a thousand nested levels — and the
+            # agent output line is unbounded, so a hostile line reaches it on every platform.
             # Degrading to opaque text isolates the bad frame instead of the stream.
             self._emit({"type": "text", "text": sanitize_line(line)})
             return
@@ -2119,7 +2166,7 @@ def _coerce_seq(value: Any) -> int:
 
 # Depth cap for the recursive walk in :func:`_redact_obj`. `json.loads` in `_on_line`
 # parses frames nested far deeper than this walker can descend, so an unguarded
-# recursion raised RecursionError inside `_pump` — which catches only CancelledError
+# recursion raised RecursionError inside `_pump` — which then caught only CancelledError
 # and ClaustrumError. The pump task died and the hosted session went dark with no
 # `lost` event: a fail-*silent*, which invariant 1 forbids. Real stream-json frames
 # nest a handful of levels; this cap is orders of magnitude above that and far below

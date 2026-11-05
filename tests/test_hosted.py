@@ -21,7 +21,12 @@ from pydantic import ValidationError
 
 import clauster.hosted as hosted
 from clauster import procutil
-from clauster.claustrum_client import ClaustrumClient, ClaustrumError, DaemonUnreachable
+from clauster.claustrum_client import (
+    ClaustrumClient,
+    ClaustrumError,
+    DaemonUnreachable,
+    RpcError,
+)
 from clauster.hosted import (
     HostedManager,
     HostedSession,
@@ -362,9 +367,8 @@ async def test_deeply_nested_stdout_line_does_not_kill_the_pump(fake_claustrum):
 
     ``json.loads`` raises RecursionError — not a ValueError — on a deeply-nested line on
     every supported interpreter, so without ``_on_line``'s arm it would escape into
-    ``_pump``, which catches only CancelledError/ClaustrumError. The pump task would die
-    and the session go dark with **no** ``lost`` event: the fail-silent invariant 1
-    forbids. The scanner's ceiling is version-dependent (~994 on the 3.11 floor), so a
+    ``_pump``, whose catch-all would then end the whole session as ERROR for one hostile
+    line. The scanner's ceiling is version-dependent (~994 on the 3.11 floor), so a
     ~40 KB line reaches it everywhere. The message changed to "Stack overflow" on 3.14+,
     but the type is RecursionError throughout.
     """
@@ -1041,8 +1045,211 @@ async def test_pump_surfaces_daemon_loss_as_error_and_resolves_parked(fake_claus
         assert session.pending_requests == []  # resolved on loss, not stranded
         lost = await _drain_until(queue, "lost")
         assert "daemon vanished" in lost["reason"]
+        # The fake daemon is healthy here, so the agent is ended too (#1342).
+        assert [(k["id"], k.get("signal")) for k in fake.killed] == [(_PID, "KILL")]
         resolved = await _drain_until(session.subscribe(), "control_resolved")
         assert resolved["request_id"] == "perm-1"
+
+
+_POISON = (json.dumps({"type": "assistant", "poison": True}) + "\n").encode()
+
+
+def _poison_redactor(monkeypatch, message: str = "boom") -> None:
+    """Make ``_redact_obj`` raise on a frame marked ``poison``: an unanticipated bug.
+
+    It stands for any exception class nobody wrote an arm for. The frame-routing path
+    is where one would come from, so the fault is injected there and not on the source.
+    """
+    real = hosted._redact_obj
+
+    def _redact(obj, _depth=0):
+        if isinstance(obj, dict) and obj.get("poison"):
+            raise RuntimeError(message)
+        return real(obj, _depth)
+
+    monkeypatch.setattr(hosted, "_redact_obj", _redact)
+
+
+async def test_pump_unexpected_error_fails_visibly_and_never_allows_parked(
+    fake_claustrum, monkeypatch, caplog
+):
+    """An exception the pump has no arm for ends the session visibly, not silently (#1342).
+
+    Before the catch-all the task died, the row stayed "running", and a parked prompt kept
+    a live Allow button. Now: status is ERROR, the parked request resolves as interrupted
+    with no control_response written (the agent is never sent an allow), a ``lost`` event
+    names only the exception class, and the agent is ended. The exception message can
+    quote frame content, and the lost event reaches the browser unredacted.
+    """
+    marker = "frame-content-marker"
+    _poison_redactor(monkeypatch, f"bad frame {marker}")
+    async with _session(fake_claustrum) as (fake, session):
+        queue = session.subscribe()
+        frame = {
+            "request_id": "perm-1",
+            "type": "control_request",
+            "request": {"subtype": "can_use_tool", "tool_name": "Bash"},
+        }
+        await fake.emit(_PID, "stdout", (json.dumps(frame) + "\n").encode())
+        await _drain_until(queue, "control_request")
+        stream = session._stream
+        pump = session._pump_task
+        with caplog.at_level(logging.ERROR, logger="clauster.hosted"):
+            await fake.emit(_PID, "stdout", _POISON)
+            lost = await _drain_until(queue, "lost")
+            await wait_until(pump.done)
+
+        assert session.status == "error"
+        assert lost["reason"] == "internal error (RuntimeError)"
+        assert session.pending_requests == []
+        resolved = [e for e in session._ring if e["type"] == "control_resolved"]
+        assert [(e["request_id"], e["behavior"]) for e in resolved] == [("perm-1", "interrupted")]
+        assert not [f for f in _stdin_frames(fake) if f.get("type") == "control_response"]
+        assert marker not in json.dumps(list(session._ring))
+        # Nothing supervises the agent any more, so it is ended with one SIGKILL.
+        assert [(k["id"], k.get("signal")) for k in fake.killed] == [(_PID, "KILL")]
+        # The task ended on its own terms (nothing left to "never retrieved") and released
+        # the stream subscription it drains.
+        assert pump.exception() is None
+        assert not stream._subscribers
+        # The full traceback reaches the server log.
+        assert "pump for process" in caplog.text and "RuntimeError" in caplog.text
+        # And the dead session refuses to act, so a late Allow click cannot land.
+        with pytest.raises(HostedSessionError):
+            await session.respond_control("perm-1", {"behavior": "allow"})
+        with pytest.raises(HostedSessionError):
+            await session.send_message("hello")
+
+
+async def test_pump_unexpected_error_survives_a_failing_kill(fake_claustrum, monkeypatch, caplog):
+    """A kill the daemon cannot take is logged; the session still ends visibly as ERROR."""
+    _poison_redactor(monkeypatch)
+    async with _session(fake_claustrum) as (fake, session):
+        queue = session.subscribe()
+
+        async def _no_kill(*_args, **_kwargs):
+            raise DaemonUnreachable("daemon gone")
+
+        monkeypatch.setattr(session._client, "kill", _no_kill)
+        pump = session._pump_task
+        with caplog.at_level(logging.WARNING, logger="clauster.hosted"):
+            await fake.emit(_PID, "stdout", _POISON)
+            await _drain_until(queue, "lost")
+            await wait_until(pump.done)
+        assert session.status == "error"
+        assert pump.exception() is None
+        assert "could not end agent" in caplog.text
+
+
+async def test_pump_cancellation_still_propagates_without_a_lost_event(fake_claustrum):
+    """The catch-all must not swallow cancellation (#1342).
+
+    ``detach``/``stop`` cancel the pump to tear it down. A catch-all that also caught
+    CancelledError would turn every clean clauster shutdown into an ERROR row and a
+    ``lost`` event, and would stop the cancel from ending the task.
+    """
+    async with _session(fake_claustrum) as (_fake, session):
+        pump = session._pump_task
+        await asyncio.sleep(0)  # let the pump reach its first source.get()
+        pump.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pump
+        assert session.status == "running"
+        assert not [e for e in session._ring if e["type"] == "lost"]
+
+
+def _rpc_error_on_stdin(monkeypatch, client) -> None:
+    """Make every stdin write fail the way a healthy daemon refuses one (an RpcError)."""
+
+    async def _refuse(*_args, **_kwargs):
+        raise RpcError(-32602, "Process not running")
+
+    monkeypatch.setattr(client, "stdin", _refuse)
+
+
+_AUTO_ACK = (
+    json.dumps(
+        {"type": "control_request", "request_id": "init-1", "request": {"subtype": "initialize"}}
+    )
+    + "\n"
+).encode()
+
+
+@pytest.mark.parametrize("arm", ["catch_all", "claustrum_error"])
+async def test_manager_pump_failure_ends_the_agent_before_resume_can_add_one(
+    fake_claustrum, tmp_path, monkeypatch, arm
+):
+    """The ERROR reaches the row, and the KILL is sent before a Resume can spawn.
+
+    ``_resume_locked`` accepts an ERROR row and only detaches the old session, and
+    ``stop()`` treats ERROR as already ended. So both pump failure arms must end the
+    agent, and the kill must already be on the wire when a Resume can first see the
+    ERROR. ``catch_all`` is an unanticipated exception (#1342). ``claustrum_error`` is an
+    RpcError from a healthy daemon on the auto-ack stdin write: the agent is just as alive.
+    The Resume is scheduled from inside the failure path, right after the status flips, so
+    it runs at the pump's first suspension: one ``await`` before the kill fails this test.
+    The fake records whether the old agent was still running when the new one spawned.
+    The fake handles requests in order and marks a process stopped on any signal, so
+    this pins the send order; the ``fake.killed`` assertion pins the single SIGKILL.
+    """
+    fake = await fake_claustrum()
+    running_at_spawn: list[dict[str, bool]] = []
+    real_spawn = fake._m_process_spawn
+
+    async def _spawn_spy(request_id, params, writer):
+        running_at_spawn.append({p: proc.running for p, proc in fake._processes.items()})
+        await real_spawn(request_id, params, writer)
+
+    monkeypatch.setattr(fake, "_m_process_spawn", _spawn_spy)
+    store = HostedStateStore(tmp_path)
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        try:
+            pid = (await _spawn(mgr, client)).claustrum_process_id
+            uuid = "11111111-2222-4333-8444-555555555555"
+            init = {"type": "system", "subtype": "init", "session_id": uuid}
+            await fake.emit(pid, "stdout", (json.dumps(init) + "\n").encode())
+            await wait_until(lambda: mgr.session(pid).claude_session_uuid == uuid)
+
+            session = mgr.session(pid)
+            real_resolve = session._resolve_parked
+            status_at_resolve: list[str] = []
+            resume_task: list[asyncio.Future] = []
+
+            def _resolve_then_resume(*args, **kwargs):
+                real_resolve(*args, **kwargs)
+                status_at_resolve.append(session.status)
+                if resume_task:
+                    return  # schedule exactly one Resume, however often this runs
+                # Status is ERROR now, so a Resume may start at the pump's next suspension.
+                resume_task.append(
+                    asyncio.ensure_future(
+                        mgr.resume(client, pid, cwd="/tmp/proj", claude_binary=_BIN)
+                    )
+                )
+
+            monkeypatch.setattr(session, "_resolve_parked", _resolve_then_resume)
+            if arm == "catch_all":
+                _poison_redactor(monkeypatch)
+                await fake.emit(pid, "stdout", _POISON)
+            else:
+                _rpc_error_on_stdin(monkeypatch, client)
+                await fake.emit(pid, "stdout", _AUTO_ACK)
+            await wait_until(lambda: resume_task)
+            resumed = await asyncio.wait_for(resume_task[0], timeout=2.0)
+
+            assert status_at_resolve == ["error"]
+            assert session.status == "error"
+            assert resumed.status is InstanceStatus.RUNNING
+            assert resumed.claustrum_process_id != pid
+            assert "--resume" in fake.spawned[-1]["args"]
+            assert [(k["id"], k.get("signal")) for k in fake.killed] == [(pid, "KILL")]
+            # Two spawns: the original, then the resume. The fake handled the KILL before
+            # the resume's spawn, because the kill was written first.
+            assert len(running_at_spawn) == 2
+            assert running_at_spawn[1][pid] is False
+        finally:
+            await mgr.aclose()
 
 
 async def test_stop_kill_escalation_waits_for_exit_and_latches(fake_claustrum):
@@ -3783,7 +3990,7 @@ def test_redact_obj_truncates_past_the_depth_cap_instead_of_raising():
 
     ``json.loads`` in ``_on_line`` parses frames nested far deeper than this recursive
     walker could descend, so a deeply-nested frame raised RecursionError inside
-    ``_pump`` — which catches only ``CancelledError``/``ClaustrumError``. The pump task
+    ``_pump`` — which then caught only ``CancelledError``/``ClaustrumError``. The pump task
     died and the session went dark with **no** ``lost`` event: a fail-silent, which
     invariant 1 forbids. The redactor must still return a value (invariant 4: nothing
     unredacted may reach a subscriber), so the over-deep subtree is replaced wholesale.
