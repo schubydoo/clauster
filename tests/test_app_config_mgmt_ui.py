@@ -367,10 +367,40 @@ def test_skills_surface_present_when_enabled(write_config):
     assert 'data-test="cm-skill-new"' in html
     assert 'data-test="cm-skill-editor"' in html
     assert 'data-test="cm-skill-content"' in html
-    # Skills are user/project only — registered in the no-local list. Match the array
-    # membership rather than exact spacing/ordering so a reformat can't break this.
+    # Skills has a Local scope for its visibility map (TASK-249), so it is NOT in the
+    # no-local list; subagents still are. Match the array membership rather than exact
+    # spacing/ordering so a reformat can't break this.
     no_local = re.search(r"configMgmtNoLocalSurfaces:\s*\[([^\]]*)\]", html)
-    assert no_local and '"skills"' in no_local.group(1)
+    assert no_local and '"skills"' not in no_local.group(1)
+    assert '"subagents"' in no_local.group(1)
+    # At Local scope the folder list and its New button hide behind a note.
+    assert 'data-test="cm-skill-local-note"' in html
+
+
+def test_skill_visibility_panel_present_when_enabled(write_config):
+    # TASK-249: the Skills tab reads and writes `skillOverrides` through its own panel.
+    html = _html(write_config, _ON)
+    for hook in (
+        "cm-skill-ov",
+        "cm-skill-ov-unavailable",
+        "cm-skill-ov-table",
+        "cm-skill-ov-add-name",
+        "cm-skill-ov-add-value",
+        "cm-skill-ov-add",
+        "cm-skill-ov-confirm",
+        "cm-skill-ov-save",
+    ):
+        assert f'data-test="{hook}"' in html, hook
+    assert '"/api/config-write/skills/overrides' in html
+    # Each of the four values is an option, plus "No override", which removes the key.
+    for value in ("on", "name-only", "user-invocable-only", "off"):
+        assert f'<option value="{value}">{value}</option>' in html
+    assert '<option value="">No override</option>' in html
+    # The save sends a name as typed: no client-side name rule, and an own-key map so
+    # `__proto__` reaches the backend rule. A trim or a name regex here would be a second
+    # copy of the backend check.
+    assert "Object.fromEntries(this.configMgmt.skills.ov.rows" in html
+    assert "ov.addName.trim()" not in html
 
 
 def test_plugins_surface_present_when_enabled(write_config):
@@ -494,7 +524,7 @@ def test_skill_editor_shows_the_conversion_note(write_config):
     assert 's.converted = "";' in new_skill
     cancel = _between(html, "configMgmtCancelSkill() {", "configMgmtSkillDirty()")
     assert 's.converted = "";' in cancel
-    reload = _between(html, "async _loadSkills(myGen) {", "configMgmtNewSkill()")
+    reload = _between(html, "async _loadSkills(myGen, keepOvEdits) {", "_skillOvRow(")
     assert 'c.skills.converted = "";' in reload
     switch = _between(
         html,
