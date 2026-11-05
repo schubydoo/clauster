@@ -114,18 +114,24 @@ def test_bridge_session_row_shows_its_own_cpu_and_ram(
     # metrics poll can repaint it.
     browser.set_viewport(320, 2000)
     try:
-        fits = browser.eval_json(
+        layout = browser.eval_json(
             "(() => { const row = document.querySelector("
-            "'section.zone-active [data-test=\"bridge-session-row\"]');"
-            " row.querySelector('[data-test=\"bridge-session-metrics\"]').textContent ="
-            " '1234% CPU · 12345 MB';"
+            "'section.zone-active [data-test=\"bridge-session-row\"]:nth-of-type(1)');"
+            " const chip = row.querySelector('[data-test=\"bridge-session-metrics\"]');"
+            " chip.textContent = '1234% CPU · 12345 MB';"
             " const box = row.getBoundingClientRect();"
+            " const vw = document.documentElement.clientWidth;"
             " const sel = 'a, button, [data-test=\"bridge-session-metrics\"]';"
-            " return [...row.querySelectorAll(sel)]"
-            ".filter((el) => el.offsetParent !== null)"
-            ".every((el) => { const r = el.getBoundingClientRect();"
-            " return r.left >= box.left - 0.5 && r.right <= box.right + 0.5; }); })()"
+            " const shown = [...row.querySelectorAll(sel)]"
+            ".filter((el) => el.getClientRects().length > 0);"
+            " return { chip: shown.includes(chip),"
+            " links: shown.filter((el) => el.tagName === 'A').length,"
+            " fits: shown.every((el) => { const r = el.getBoundingClientRect();"
+            " return r.left >= box.left - 0.5 && r.right <= box.right + 0.5"
+            " && r.right <= vw + 0.5; }) }; })()"
         )
-        assert fits is True
+        # The check measured the widened chip and the Open link, so `fits` is not vacuous.
+        assert layout["chip"] is True and layout["links"] >= 1, layout
+        assert layout["fits"] is True, layout
     finally:
         browser.set_viewport(1280, 2000)
