@@ -190,15 +190,46 @@ The surface tabs:
 | Settings | `settings.json` — friendly rows for `env` variables, with a Raw JSON escape hatch for other keys, plus a read-only merged ("effective") view showing which scope each value comes from. |
 | Permissions | The `permissions` object, as rows or raw JSON, and the auto mode classifier rules (`autoMode`). See [The Permissions tab](#the-permissions-tab). |
 | Hooks | The `hooks` key, as rows or raw JSON. |
-| MCP | MCP server definitions (add / edit / delete), plus per-server **approvals** for committed `.mcp.json` servers — Approve / Reject each, or reset all choices behind a typed confirm. |
+| MCP | MCP server definitions (add / edit / delete), as fields or raw JSON, plus per-server **approvals** for committed `.mcp.json` servers — Approve / Reject each, or reset all choices behind a typed confirm. |
 | Subagents | Subagent definition files: list, edit, create, delete. |
 | Skills | Skills: list, a per-skill `SKILL.md` editor, create, delete. |
 | Plugins | Installed plugins (install / uninstall / enable / disable / update) and the marketplaces they come from (add / remove). |
 
 ### MCP server definitions
 
-The MCP tab edits each server as one JSON object, in the same shape as an
-`mcpServers` entry in `.mcp.json`. The editor accepts each field that the
+The MCP tab edits each server in one of two modes. Use the **Fields** and
+**Raw JSON** buttons above the definition to switch between them:
+
+- **Fields** is the default. Select the `type` first. The form then shows the
+  fields for that type: `command`, `args` and `env` for `stdio`, or `url`,
+  `headers` and `headersHelper` for `http`, `streamable-http`, `sse` and `ws`.
+  The form also shows the `oauth` fields (`clientId`, `callbackPort`,
+  `authServerMetadataUrl` and `scopes`) for `http`, `streamable-http` and `sse`,
+  and `timeout` and `alwaysLoad` for every type. Clauster builds the JSON
+  entry from the form, so you do not write JSON for a typical server.
+- **Raw JSON** shows the server as one JSON object, in the same shape as an
+  `mcpServers` entry in `.mcp.json`, without the server name around it. Use it
+  for the fields that the form does not show, such as `role`, `tools` or
+  `oauth.xaa`. A server that has such a field opens in Raw JSON, and a note
+  names the fields. A value with a line break, for example a `python -c`
+  script in `args`, also opens in Raw JSON, because each field is one line. So
+  does an `env` or header name that is empty or has spaces around it, because
+  the form trims each name.
+
+The switch from Fields to Raw JSON is refused while an `env` or header row has
+a value but no name, or shares its name with another row. One entry cannot
+hold these rows, so the switch would lose values. A note names the rows. The
+same rows also keep **Save** off.
+
+In both modes, a masked value shows as `********`. If you leave the mask in
+place, the save keeps the stored value. If you change the `type` or a URL of a
+remote server, or the `command` or `args` of a stdio server, the save cannot
+keep a masked value (see the list below). The save also cannot keep a mask that
+has no stored value behind it, for example in a row that you renamed. In both
+cases, the editor names each masked value and keeps **Save** off until you
+type each of these values again.
+
+The editor accepts each field that the
 [Claude Code MCP documentation](https://code.claude.com/docs/en/mcp) lists for
 a transport, and each field that the installed `claude` CLI reads and keeps
 for that transport even when the documentation does not list it:
