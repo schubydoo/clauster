@@ -291,3 +291,62 @@ def test_bridge_session_row_opens_its_live_transcript(
     with transcript.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(line) + "\n")
     browser.expect_text(modal, "tail 269", timeout_ms=STATUS_TIMEOUT)
+
+
+def test_bridge_session_transcript_close_keeps_focus_on_worktree_bridge_row(
+    browser: AgentBrowser, tracked_session_server: Server, mutable_projects_tree: Path
+) -> None:
+    """Closing the viewer after its session ended keeps focus on the bridge row (TASK-269).
+
+    A worktree bridge hides its row's Transcript button, and the sessions toggle hides
+    once the last session ends. So when the session that opened the viewer ends while
+    it is open, the only shown control left on the row is the Logs toggle, and closing
+    the viewer must focus it, never the page body.
+    """
+    server = tracked_session_server
+    alpha = (mutable_projects_tree / "alpha").resolve()  # a git repo: worktree spawn offered
+    browser.goto(server.url)
+    browser.expect_visible('[data-project="alpha"]')
+    open_desktop_launch(browser, "alpha")
+    browser.click('[data-project="alpha"] [data-test="launch-more-options"]')
+    browser.expect_visible("#spawn-alpha")
+    browser.select("#spawn-alpha", "worktree")
+    trust_and_start(browser, "alpha")
+    browser.expect_text("section.zone-active", "Running", timeout_ms=STATUS_TIMEOUT)
+
+    # One session in a per-session worktree, attributed to the bridge by containment.
+    worktree = alpha / ".claude" / "worktrees" / "wt-269"
+    worktree.mkdir(parents=True)
+    agents_file = server.state_dir.parent / "agents.json"
+    agents = [
+        {
+            "pid": _bridge_pid(server, "alpha"),
+            "cwd": str(worktree),
+            "kind": "interactive",
+            "state": "running",
+            "startedAt": 1735689600000,
+            "sessionId": _SESSION_269,
+        }
+    ]
+    agents_file.write_text(json.dumps(agents), encoding="utf-8")
+
+    toggle = 'section.zone-active [data-test="bridge-sessions-toggle"]'
+    button = 'section.zone-active [data-test="bridge-session-transcript"]'
+    browser.expect_visible(toggle, timeout_ms=STATUS_TIMEOUT)
+    browser.expect_hidden('section.zone-active [data-test="transcript-trigger-session"]')
+    browser.click(toggle)
+    # The expanded list pushes the rows below it down: wait for it before the click.
+    browser.expect_visible(button, timeout_ms=STATUS_TIMEOUT)
+    browser.click(button)
+    modal = '[data-test="transcript-modal"]'
+    browser.expect_visible(modal)
+    browser.expect_visible('[data-test="transcript-jump-missing"]', timeout_ms=STATUS_TIMEOUT)
+
+    # The session ends while the viewer is open: its row (and the opener) leave the DOM.
+    agents_file.write_text("[]", encoding="utf-8")
+    browser.expect_count(button, 0, timeout_ms=STATUS_TIMEOUT)
+    browser.expect_hidden(toggle, timeout_ms=STATUS_TIMEOUT)
+    browser.click(f"{modal} .btn-close")
+    browser.expect_hidden(modal)
+    focused = browser.eval_json("[(document.activeElement || {dataset: {}}).dataset.test || null]")
+    assert focused == ["bridge-logs-toggle"]

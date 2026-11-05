@@ -3234,17 +3234,29 @@
         this._stopTranscriptTail();  // #614: kill the live-tail poll loop on close
         t.live = false; t.tailRaw = []; t.tailOffset = 0; t.tailKey = 0; t.tailError = ""; t.tailTruncated = false;  // clear live state on close
         document.body.style.overflow = "";  // release the scroll lock
-        // Restore focus to the opener. A live session row's button (TASK-269) leaves the
-        // DOM when that session ends while the modal is open, so fall back to a control
-        // that is still shown on the same bridge row.
-        let back = t.trigger;
-        if (!(back && back.isConnected) && t.triggerRow && t.triggerRow.isConnected) {
-          back = [...t.triggerRow.querySelectorAll(
-            '[data-test="bridge-sessions-toggle"], [data-test="transcript-trigger-session"]',
-          )].find((el) => el.offsetParent !== null) || null;
-        }
+        const back = this._transcriptFocusTarget(t);  // restore focus to the opener
         t.triggerRow = null;
         if (back && back.focus) back.focus();
+      },
+      // Where focus goes when the viewer closes: the opener while it is still in the DOM.
+      // A live session row's button (TASK-269) leaves the DOM when that session ends while
+      // the modal is open. Then fall back, in this order, to a shown and enabled control on
+      // the same bridge row: the sessions toggle, the row's Transcript button (hidden for a
+      // worktree bridge), and the Logs toggle (on every bridge row). Stop is never a
+      // target: one stray Enter would end the bridge. If the bridge row is gone too, focus
+      // the Active sessions heading, so keyboard focus never drops to the page body.
+      _transcriptFocusTarget(t) {
+        if (t.trigger && t.trigger.isConnected) return t.trigger;
+        if (!t.triggerRow) return t.trigger;  // a project-row opener: no fallback
+        const shown = (el) => !!el && el.isConnected && el.offsetParent !== null && !el.disabled;
+        if (t.triggerRow.isConnected) {
+          const order = ["bridge-sessions-toggle", "transcript-trigger-session", "bridge-logs-toggle"];
+          for (const name of order) {
+            const el = t.triggerRow.querySelector('[data-test="' + name + '"]');
+            if (shown(el)) return el;
+          }
+        }
+        return document.querySelector('[data-test="active-zone-heading"]');
       },
       // Open the viewer and load the project's session list (newest-first).
       async openTranscripts(name) {

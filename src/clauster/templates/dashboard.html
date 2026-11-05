@@ -772,7 +772,9 @@
       <!-- ZONE 2 · Active sessions — what's running now                 -->
       <!-- ============================================================= -->
       <div class="zone-head">
-        <h2>Active sessions</h2>
+        {# tabindex=-1: not a tab stop, but the transcript viewer's last-resort focus target
+           on close when the bridge row that opened it is gone (TASK-269). #}
+        <h2 tabindex="-1" data-test="active-zone-heading">Active sessions</h2>
         <span class="zone-sub">what Claude is running for you right now</span>
         <div class="zone-actions" x-show="hasLive()" x-cloak>
           <div class="btn-group btn-group-sm" role="group" aria-label="Filter sessions by where they run">

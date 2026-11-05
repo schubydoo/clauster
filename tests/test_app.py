@@ -1503,7 +1503,35 @@ def test_dashboard_bridge_session_transcript_selects_the_session(write_config):
     assert page.count('t.jumpMissing = "";') == 2
     # Focus goes back to the bridge row when the session's own button left the DOM.
     assert 't.triggerRow = t.trigger && t.trigger.closest ? t.trigger.closest(".sess-row")' in fn
-    assert "if (!(back && back.isConnected) && t.triggerRow && t.triggerRow.isConnected) {" in page
+    assert "const back = this._transcriptFocusTarget(t);" in page
+
+
+def test_dashboard_transcript_close_focus_fallback_order(write_config):
+    # TASK-269: when the session row's button left the DOM, closing the viewer must never
+    # drop keyboard focus to the body. The fallback walks the bridge row in a fixed order
+    # (a worktree bridge hides its Transcript button, and the sessions toggle hides once
+    # the last session ends, so the always-present Logs toggle closes the gap), skips Stop,
+    # and ends on the focusable Active sessions heading when the bridge row is gone too.
+    page = _client(write_config).get("/").text
+    fn = page[page.index("_transcriptFocusTarget(t) {") :]
+    fn = fn[: fn.index("\n      },")]
+    assert fn.index("if (t.trigger && t.trigger.isConnected) return t.trigger;") < fn.index(
+        "if (!t.triggerRow) return t.trigger;"
+    )
+    order = '["bridge-sessions-toggle", "transcript-trigger-session", "bridge-logs-toggle"]'
+    assert f"const order = {order};" in fn
+    assert "stop-session" not in fn
+    # Shown and enabled: a hidden or disabled control can't take focus.
+    assert "el.isConnected && el.offsetParent !== null && !el.disabled" in fn
+    assert fn.index("if (t.triggerRow.isConnected) {") < fn.index("const order")
+    assert fn.rstrip().endswith(
+        "return document.querySelector('[data-test=\"active-zone-heading\"]');"
+    )
+    # Every fallback target exists on the page, and the heading is focusable by script
+    # but stays out of the tab order.
+    for name in ("bridge-sessions-toggle", "transcript-trigger-session", "bridge-logs-toggle"):
+        assert f'data-test="{name}"' in page
+    assert '<h2 tabindex="-1" data-test="active-zone-heading">Active sessions</h2>' in page
 
 
 def test_dashboard_transcript_content_uses_x_text_not_x_html(write_config):
