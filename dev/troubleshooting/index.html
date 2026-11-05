@@ -1536,6 +1536,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#stream-lost-internal-error-on-a-direct-session" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        "stream lost: internal error (...)" on a Direct Session
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#output-lost-n-frames-after-a-restart" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2315,6 +2326,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#stream-lost-internal-error-on-a-direct-session" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        "stream lost: internal error (...)" on a Direct Session
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#output-lost-n-frames-after-a-restart" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2901,6 +2923,32 @@ card shows an error like <code>reattach failed: ...</code> (server log:
 <p><strong>Most likely cause:</strong> the underlying daemon process ended while Clauster was
 down, so there was nothing to reattach to. The transcript is not lost — start
 a new Direct Session for the project and resume from the captured session.</p>
+<h3 id="stream-lost-internal-error-on-a-direct-session">"stream lost: internal error (...)" on a Direct Session<a class="headerlink" href="#stream-lost-internal-error-on-a-direct-session" title="Permanent link">&para;</a></h3>
+<p><strong>What you see:</strong> a Direct Session card shows the red <code>Error</code> badge, and its
+view shows <code>stream lost: internal error (&lt;ExceptionName&gt;)</code> (server log:
+<code>hosted: pump for process &lt;id&gt; failed</code>, followed by a traceback).</p>
+<p><strong>Most likely cause:</strong> a bug in Clauster. Clauster could not process one line of
+the session output and stopped reading that session. The view does not show the
+exception message, because it can contain session output. The server log has
+the full traceback. Its formatter masks known token and id shapes, but the
+message can still quote session output. Please report the traceback as a bug.</p>
+<p>Clauster then ends the agent at once with a forced kill (SIGKILL on Linux and
+macOS; claustrum ends the job object on Windows), with no grace period, because
+nothing can read its output or answer its prompts any more. A tool command that
+the agent runs at that time also stops. An open permission prompt shows
+<code>— session ended</code>, and Clauster sends no answer for it to the agent. The
+transcript of <code>claude</code> keeps the conversation up to the last line that <code>claude</code>
+wrote before the kill. If the card offers <strong>Resume</strong>, use it to continue the
+conversation in a new agent.</p>
+<p>A <code>stream lost:</code> line with any other text than <code>internal error (...)</code> means
+that the claustrum daemon refused a request for the session, or that Clauster
+lost its connection to the daemon. Clauster handles the session the same way:
+it ends the agent and resolves open prompts. If Clauster cannot confirm the
+kill, the server log shows <code>hosted: could not end agent &lt;id&gt; after pump
+failure</code>. That can mean that the connection was gone and the kill failed, or
+that the daemon received the kill but its reply did not arrive. Before you
+resume such a session, make sure that its <code>claude</code> process is not still running
+on the host.</p>
 <h3 id="output-lost-n-frames-after-a-restart">"output lost (N frames)" after a restart<a class="headerlink" href="#output-lost-n-frames-after-a-restart" title="Permanent link">&para;</a></h3>
 <p><strong>What you see:</strong> a reattached Direct Session's view opens with a yellow
 <code>output lost (N frames)</code> marker ahead of the replayed output (server log:
