@@ -1251,7 +1251,8 @@ def test_restore_masked_lines_is_linear_in_repeated_lines(
     assert restored == "TOKEN=x\n" * n and len(lines) == n
     # Linear: the group is looked at once (n + 1 elements), never once per line. The lower
     # bound makes the test fail loudly if the code stops using `set` for it, rather than
-    # pass on a count of zero.
+    # pass on a count of zero. It pins the per-line `set(held)` regression only: the
+    # counter sees `set()` calls and nothing else.
     assert n <= sum(taken) <= 2 * (n + 1)
 
 
@@ -1276,10 +1277,15 @@ def test_an_aliased_scalar_changed_at_one_place_only_cannot_be_rewritten(changed
     [
         # A merge key: the merged value is not one scalar's text, even when it loads alike.
         ("base: &b {x: 1}\nm: {<<: *b}\n", {"base": {"x": 2}, "m": {"x": 2}}),
-        # An ordered map is a list of pairs the walk does not pair with its nodes.
+        # Only the merge-key check refuses this one: without it the walk would pair the
+        # node pairs of `m` with its merged dict and rewrite `y`'s text for a new `x`.
+        ("base: &b {x: 1}\nm: {y: 3, <<: *b}\n", {"m": {"x": 2, "y": 3}}),
+        # The walk pairs the `!!omap` list, but each pair loads as a tuple, which no node
+        # branch takes.
         ("o: !!omap [{p: 1}]\n", {"o": [("p", 2)]}),
-        # A changed shape: a scalar where a list was.
+        # A changed shape: a scalar where a list was, and a list of another length.
         ("l: [a, b]\n", {"l": "a"}),
+        ("l: [a, b]\n", {"l": ["a"]}),
     ],
 )
 def test_changes_the_walk_cannot_place_on_one_scalar_are_refused(

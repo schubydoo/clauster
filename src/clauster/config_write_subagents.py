@@ -1582,8 +1582,9 @@ def _changed_scalars(
 
     Walks the composed header and its loaded value side by side. ``None`` when a change
     cannot be placed on the text of one scalar: a node reached at a second place (an
-    alias), a mapping with a merge key, a container whose shape changed, or a container the
-    walk cannot pair with its node (an ``!!omap``, ``!!pairs`` or ``!!set``) and that changed.
+    alias), a mapping with a merge key, a container whose shape changed, or a changed value
+    the walk cannot pair with a node: a ``!!set``, or an ``!!omap``/``!!pairs`` entry (the
+    list itself pairs, but each entry loads as a tuple, which no node branch takes).
 
     Linear in the size of the loaded header: each node is visited once per place it is
     reached, and a whole subtree is compared only where the walk stops descending, never
