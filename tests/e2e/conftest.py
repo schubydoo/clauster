@@ -676,33 +676,56 @@ def session_child_server(
     finally:
         # Capture the server's process tree while it is up, then stop the server (its own
         # `finally`), then kill and wait for what was captured. Nested, so neither a failed
-        # capture nor a failed server stop skips the reap.
+        # capture nor a failed server stop skips the reap; the completeness verdict is
+        # raised only after the reap, so it cannot leak what the capture did find.
         captured: list[psutil.Process] = []
+        gap: str | None = None
         try:
-            captured = _server_descendants(server, tmp / "session-child.pid")
+            captured = _server_descendants(server)
+            gap = _capture_gap(server, captured, tmp / "session-child.pid")
         finally:
             try:
                 server_gen.close()
             finally:
                 _reap_bridge_trees(captured)
+        if gap:
+            pytest.fail(gap)
 
 
-def _server_descendants(server: Server, child_pid_file: Path) -> list[psutil.Process]:
+def _server_descendants(server: Server) -> list[psutil.Process]:
     """Return every process the test server started: its bridges and their trees.
 
     Taken from the server process's own tree, so nothing outside it can be named: not a
     stale ``bridge_pid`` of a stopped row, and never the live dogfood service or its
-    bridges that share this host. The session child is a grandchild of the server, so it
-    is in the tree; a pid file that names a live process outside it fails the test,
-    which proves the capture is complete rather than empty by accident.
+    bridges that share this host. Empty when the server already exited: its children
+    were reparented away, and only a name match could find them, which is never used.
     """
     assert server.proc is not None
-    procs = psutil.Process(server.proc.pid).children(recursive=True)
-    if child_pid_file.exists():
-        child = int(child_pid_file.read_text(encoding="utf-8"))
-        if child not in {p.pid for p in procs} and psutil.pid_exists(child):
-            pytest.fail(f"session child {child} is running outside the server's tree")
-    return procs
+    if server.proc.poll() is not None:
+        return []
+    with contextlib.suppress(psutil.Error):
+        return psutil.Process(server.proc.pid).children(recursive=True)
+    return []
+
+
+def _capture_gap(
+    server: Server, captured: list[psutil.Process], child_pid_file: Path
+) -> str | None:
+    """Return why the capture may have missed a process, or None when it is complete.
+
+    The session child is a grandchild of the server, so it must be in the captured tree.
+    A pid file that names a live process outside it fails the test, which proves the
+    capture is complete rather than empty by accident.
+    """
+    assert server.proc is not None
+    if server.proc.poll() is not None:
+        return "the server exited during the test; its bridges could not be stopped"
+    if not child_pid_file.exists():
+        return None
+    child = int(child_pid_file.read_text(encoding="utf-8"))
+    if child not in {p.pid for p in captured} and psutil.pid_exists(child):
+        return f"session child {child} is running outside the server's tree"
+    return None
 
 
 def _reap_bridge_trees(procs: list[psutil.Process], timeout: float = 15.0) -> None:
