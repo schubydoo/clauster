@@ -71,7 +71,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-from . import bridge_log, config, pointers, procutil, redact, usage
+from . import bridge_log, pointers, procutil, redact, usage
 from .bridge_launch import BridgeLaunch
 from .claude_cli import ClaudeNotFound, resolve_binary
 from .claude_json import ClaudeJsonUnparseable
@@ -79,7 +79,6 @@ from .config import (
     ClausterConfig,
     PermissionMode,
     ResumeMode,
-    SandboxMode,
     SpawnMode,
 )
 from .discovery import invalidate_discovery_cache
@@ -209,7 +208,6 @@ class SpawnCoordinator:
         resume: bool = False,
         resume_target: RemoteControlInstance | None = None,
         custom_name: str | None = None,
-        sandbox: SandboxMode | None = None,
         resume_session_id: str | None = None,
         trust: bool = False,
     ) -> RemoteControlInstance:
@@ -227,7 +225,6 @@ class SpawnCoordinator:
             resume=resume,
             resume_target=resume_target,
             custom_name=custom_name,
-            sandbox=sandbox,
             resume_session_id=resume_session_id,
             trust=trust,
         )
@@ -243,7 +240,6 @@ class SpawnCoordinator:
         resume: bool = False,
         resume_target: RemoteControlInstance | None = None,
         custom_name: str | None = None,
-        sandbox: SandboxMode | None = None,
         resume_session_id: str | None = None,
         trust: bool = False,
     ) -> SpawnOutcome:
@@ -269,17 +265,6 @@ class SpawnCoordinator:
         project name); it is validated by ``_normalize_custom_name`` before any
         spawn side effect. The pty (Interactive Session) launch form has no
         equivalent flag, so it's ignored there (see #780 disposition).
-
-        ``sandbox`` (#780) is the per-launch OS-level filesystem/network isolation
-        toggle for a *standard* bridge — tri-state ``"default"``/``"on"``/``"off"``
-        (``None`` == ``"default"``). It is validated before any spawn side effect (a bad
-        value still 422s), but the toggle is DISABLED for 1.0 (#1037,
-        ``config.SANDBOX_TOGGLE_ENABLED``): every requested value is coerced to
-        ``"default"``, so NEITHER ``--sandbox`` nor ``--no-sandbox`` currently reaches the
-        bridge. #1046 re-enables it, at which point ``"on"`` appends ``--sandbox`` and
-        ``"off"`` appends ``--no-sandbox``, while ``"default"`` keeps appending neither
-        (claude's own off-by-default / ``sandbox.*`` settings win). Like ``custom_name``
-        it is standard-only; the pty form is out of scope for #780.
 
         Concurrent spawns of the *same* project are serialized by a per-project lock:
         a double-click, retry, or second browser tab must not both pass the
@@ -332,7 +317,6 @@ class SpawnCoordinator:
                 resume=resume,
                 resume_target=resume_target,
                 custom_name=custom_name,
-                sandbox=sandbox,
                 resume_session_id=resume_session_id,
                 trust=trust,
             )
@@ -672,7 +656,6 @@ class SpawnCoordinator:
         resume: bool = False,
         resume_target: RemoteControlInstance | None = None,
         custom_name: str | None = None,
-        sandbox: SandboxMode | None = None,
         resume_session_id: str | None = None,
         trust: bool = False,
     ) -> SpawnOutcome:
@@ -693,15 +676,6 @@ class SpawnCoordinator:
         defaults = self._config.instance_defaults
         spawn_mode = spawn_mode or defaults.spawn_mode
         permission_mode = permission_mode or defaults.permission_mode
-        # None == "default" (append neither sandbox flag); normalize up front so the value
-        # validated below is always one of SANDBOX_MODES. The toggle is DISABLED for 1.0
-        # (#1037, config.SANDBOX_TOGGLE_ENABLED): the requested value is still validated (a bad
-        # value 422s below) but coerced to "default" so nothing on/off is recorded, resumed, or
-        # emitted while `--sandbox` doesn't reach the server-mode worker. Re-enabled via #1046.
-        requested_sandbox: SandboxMode = sandbox or "default"
-        sandbox_mode: SandboxMode = (
-            requested_sandbox if config.SANDBOX_TOGGLE_ENABLED else "default"
-        )
         # Resolve resume_mode early so we can apply the per-mode policy checks below
         # before spending side-effect budget (trust writes, log file creation, etc.).
         # For a resume the prior instance is the SPECIFIC one being revived
@@ -711,9 +685,7 @@ class SpawnCoordinator:
         effective_resume_mode: ResumeMode = (
             "pty" if self._is_pty_mode(prior_for_mode, requested=resume_mode) else "standard"
         )
-        self._validate_spawn_options(
-            proj, spawn_mode, permission_mode, resume_mode, requested_sandbox
-        )
+        self._validate_spawn_options(proj, spawn_mode, permission_mode, resume_mode)
         if resume_session_id is not None:
             await self._validate_resume_session_id(
                 proj,
@@ -812,11 +784,6 @@ class SpawnCoordinator:
         # — no equivalent flag), so label must match that or it'd lie about a running
         # pty session's name.
         label = resolved_name if effective_resume_mode == "standard" else name
-        # Sandbox is a standard-only flag (#780); a pty bridge records "default" so its
-        # persisted/displayed state never implies a toggle that was never applied.
-        effective_sandbox: SandboxMode = (
-            sandbox_mode if effective_resume_mode == "standard" else "default"
-        )
         instance = RemoteControlInstance(
             project=name,
             label=label,
@@ -831,7 +798,6 @@ class SpawnCoordinator:
             # resume_mode was resolved above (effective_resume_mode) so the per-mode
             # policy checks could run before any side effects. Assign it now.
             resume_mode=effective_resume_mode,
-            sandbox_mode=effective_sandbox,
         )
         if resume and resume_target is not None:
             # A resume REVIVES the same logical session: keep its instance_id so the
@@ -872,7 +838,6 @@ class SpawnCoordinator:
         try:
             # resolved_name (not the bare project name) becomes --name here (#780) —
             # the standard subcommand form is the only one with an equivalent flag.
-            # effective_sandbox is standard-only too (see above).
             proc = await asyncio.to_thread(
                 self._launch._popen,
                 proj.path,
@@ -881,7 +846,6 @@ class SpawnCoordinator:
                 spawn_mode,
                 permission_mode,
                 raw_path,
-                effective_sandbox,
             )
         except (OSError, ClaudeNotFound) as exc:
             # Binary unresolvable / not executable: fail the instance cleanly
@@ -990,10 +954,6 @@ class SpawnCoordinator:
             # live standard bridge in the same project (#777).
             resume_target=existing,
             custom_name=carried_name,
-            # Forward the recorded sandbox tri-state so the choice survives a resume,
-            # parity with custom_name (#780). Inert while the toggle is disabled (#1037):
-            # the recorded value is always "default" until #1046 re-enables it.
-            sandbox=existing.sandbox_mode,
         )
 
     # ----- pty / Interactive Session mode (true conversation resume) ------

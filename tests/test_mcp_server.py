@@ -452,6 +452,31 @@ def test_spawn_session_threads_options_and_defaults_trust_false(server, fake_eng
     assert fake_engine.hydrated_before_op is True  # hydrate ran before the spawn
 
 
+@pytest.mark.parametrize("value", ["on", "off", "default", "bogus", 5, True])
+def test_spawn_session_ignores_the_removed_sandbox_option(server, fake_engine, caplog, value):
+    # An old MCP client may still send `sandbox`: any value is accepted (never an isError),
+    # never reaches the engine, and comes back as a warning plus a log line.
+    from clauster.config import SANDBOX_REMOVED_NOTE
+    from clauster.runner import SpawnOutcome
+
+    fake_engine.start_result = SpawnOutcome(
+        instance=_bridge("alpha"), created=True, warnings=["w"]
+    )
+    with caplog.at_level("WARNING", logger="clauster.mcp"):
+        body = _payload(_call(server, "spawn_session", {"project": "alpha", "sandbox": value}))
+    assert body["warnings"] == ["w", SANDBOX_REMOVED_NOTE]
+    assert "sandbox" not in fake_engine.calls
+    assert SANDBOX_REMOVED_NOTE in caplog.text
+
+
+def test_spawn_session_without_sandbox_adds_no_warning(server, fake_engine):
+    from clauster.runner import SpawnOutcome
+
+    fake_engine.start_result = SpawnOutcome(instance=_bridge("alpha"), created=True)
+    body = _payload(_call(server, "spawn_session", {"project": "alpha"}))
+    assert body["warnings"] == []
+
+
 def test_spawn_session_requires_project(server, fake_engine):
     resp = _call(server, "spawn_session", {})
     assert resp["result"]["isError"] is True

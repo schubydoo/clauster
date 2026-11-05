@@ -67,6 +67,19 @@ still **404**. A prefix that used to 404 now 409s; a bare project name with two 
 used to return **200** (silently picking the last-registered row) and now 409s
 deliberately.
 
+### Deprecated instance fields {#deprecated-instance-fields}
+
+Every instance response still has the key `sandbox_mode`, so that a `/api/v1`
+client keeps working. The key is deprecated, and its value is always `"default"`.
+It never shows `"on"` or `"off"`. This holds for an instance that an older
+Clauster stored with `"on"` or `"off"`.
+
+The per-launch sandbox option is removed and was ignored. To sandbox sessions,
+set `sandbox.enabled` in a Claude Code settings file. See
+[Sandboxing sessions](reference/cli.md#sandboxing-sessions). A `sandbox` value in
+a `POST /instances` body is accepted and ignored, and a successful response
+carries the same note in `warnings`.
+
 ## Authenticating
 
 Every `/api/v1` request needs the same credential any other `/api/*` route

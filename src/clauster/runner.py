@@ -65,12 +65,10 @@ from .claude_cli import resolve_binary as resolve_binary
 from .config import (
     PERMISSION_MODES,
     RESUME_MODES,
-    SANDBOX_MODES,
     SPAWN_MODES,
     ClausterConfig,
     PermissionMode,
     ResumeMode,
-    SandboxMode,
     SpawnMode,
 )
 from .db.persistence import Persistence
@@ -187,7 +185,7 @@ class NotTrusted(SpawnError):
 
 
 class InvalidSpawnOption(SpawnError):
-    """Bad spawn/permission/resume/sandbox mode, name, or resume_session_id (mapped to 422).
+    """Bad spawn/permission/resume mode, name, or resume_session_id (mapped to 422).
 
     Also raised for a worktree spawn on a non-git project, an unusable ``custom_name``
     (too long, or control/format characters — #780), and a ``resume_session_id`` that is
@@ -1433,7 +1431,6 @@ class SessionRunner:
         resume: bool = False,
         resume_target: RemoteControlInstance | None = None,
         custom_name: str | None = None,
-        sandbox: SandboxMode | None = None,
         resume_session_id: str | None = None,
         trust: bool = False,
     ) -> RemoteControlInstance:
@@ -1455,7 +1452,6 @@ class SessionRunner:
             resume=resume,
             resume_target=resume_target,
             custom_name=custom_name,
-            sandbox=sandbox,
             resume_session_id=resume_session_id,
             trust=trust,
         )
@@ -1470,7 +1466,6 @@ class SessionRunner:
         resume: bool = False,
         resume_target: RemoteControlInstance | None = None,
         custom_name: str | None = None,
-        sandbox: SandboxMode | None = None,
         resume_session_id: str | None = None,
         trust: bool = False,
     ) -> SpawnOutcome:
@@ -1479,7 +1474,7 @@ class SessionRunner:
         Public façade member: ``routes/*``, ``engine.py``, and ``mcp_server.py`` call
         ``runner.spawn_detailed`` directly, and this delegator preserves that exact
         signature. The full spawn contract — the fail-closed gate order, the two bridge
-        modes, ``custom_name``/``sandbox``/``resume_session_id``/``trust`` handling, the
+        modes, ``custom_name``/``resume_session_id``/``trust`` handling, the
         per-project + cross-process lock, and the :class:`SpawnOutcome` semantics — lives on
         :meth:`clauster.spawn_coordinator.SpawnCoordinator.spawn_detailed`. The coordinator
         takes the SAME shared spawn lock + bridge flock from the one :class:`RunnerState`.
@@ -1492,7 +1487,6 @@ class SessionRunner:
             resume=resume,
             resume_target=resume_target,
             custom_name=custom_name,
-            sandbox=sandbox,
             resume_session_id=resume_session_id,
             trust=trust,
         )
@@ -1646,7 +1640,6 @@ class SessionRunner:
         resume: bool = False,
         resume_target: RemoteControlInstance | None = None,
         custom_name: str | None = None,
-        sandbox: SandboxMode | None = None,
         resume_session_id: str | None = None,
         trust: bool = False,
     ) -> SpawnOutcome:
@@ -1664,7 +1657,6 @@ class SessionRunner:
             resume=resume,
             resume_target=resume_target,
             custom_name=custom_name,
-            sandbox=sandbox,
             resume_session_id=resume_session_id,
             trust=trust,
         )
@@ -1694,11 +1686,10 @@ class SessionRunner:
         spawn_mode: str,
         permission_mode: str,
         resume_mode: str | None = None,
-        sandbox: str | None = None,
     ) -> None:
         """Reject an unrecognized spawn option, or one this ``proj`` forbids.
 
-        Screens ``spawn_mode`` / ``permission_mode`` / ``resume_mode`` / ``sandbox``
+        Screens ``spawn_mode`` / ``permission_mode`` / ``resume_mode``
         against their allowed sets (:class:`InvalidSpawnOption`), then applies the two
         project-scoped policy gates that are the reason ``proj`` is passed at all: a
         ``worktree`` spawn on a non-git project (:class:`InvalidSpawnOption`), and a
@@ -1716,10 +1707,6 @@ class SessionRunner:
         if resume_mode is not None and resume_mode not in RESUME_MODES:
             raise InvalidSpawnOption(
                 f"invalid resume_mode {resume_mode!r}; expected one of {RESUME_MODES}"
-            )
-        if sandbox is not None and sandbox not in SANDBOX_MODES:
-            raise InvalidSpawnOption(
-                f"invalid sandbox {sandbox!r}; expected one of {SANDBOX_MODES}"
             )
         if spawn_mode == "worktree" and not proj.is_git_repo:
             raise InvalidSpawnOption(
@@ -1886,7 +1873,6 @@ class SessionRunner:
         name: str,
         spawn_mode: SpawnMode,
         permission_mode: PermissionMode,
-        sandbox: SandboxMode = "default",
     ) -> list[str]:
         """Build the `claude remote-control` argv (delegates to :class:`BridgeLaunch`).
 
@@ -1894,7 +1880,7 @@ class SessionRunner:
         via ``_popen``, calls the collaborator's copy) — patching this façade method
         on ``SessionRunner`` does not intercept a spawn and would pass vacuously.
         """
-        return self._launch._build_cmd(log_path, name, spawn_mode, permission_mode, sandbox)
+        return self._launch._build_cmd(log_path, name, spawn_mode, permission_mode)
 
     @staticmethod
     def _stderr_path_for(log_path: Path) -> Path:
@@ -1923,12 +1909,9 @@ class SessionRunner:
         spawn_mode: SpawnMode,
         permission_mode: PermissionMode,
         debug_path: Path | None = None,
-        sandbox: SandboxMode = "default",
     ) -> subprocess.Popen:
         """Launch the detached standard bridge subprocess (delegates to :class:`BridgeLaunch`)."""
-        return self._launch._popen(
-            cwd, log_path, name, spawn_mode, permission_mode, debug_path, sandbox
-        )
+        return self._launch._popen(cwd, log_path, name, spawn_mode, permission_mode, debug_path)
 
     # ----- pty / Interactive Session mode (true conversation resume) ------
 

@@ -299,32 +299,37 @@ def test_state_bridge_boot_id_round_trips_and_stays_absent_when_unset(persistenc
     assert "bridge_boot_id" not in loaded["iid-legacy"]
 
 
-def test_state_sandbox_mode_survives_a_reopen_and_stays_absent_when_unset(tmp_path):
-    # #1101: the runner writes `sandbox_mode` into every record, but the store had no column
-    # for it and dropped it on save, so a restart rebuilt each STOPPED card as "default". Each
-    # value must survive a fresh Persistence on the same state dir (the restart), and a row
-    # saved without one must stay absent so `_saved_sandbox` reads it as "default".
+def test_state_store_leaves_an_old_sandbox_mode_column_alone(tmp_path):
+    # The per-launch sandbox option is removed: the store neither reads nor writes the
+    # `sandbox_mode` column 0014 added (#1101). A row an older build wrote with "on" must
+    # load (without the key) and survive a save unchanged on disk, so an older Clauster that
+    # still maps the column reads exactly what it wrote, and a new row stays NULL.
     p1 = Persistence(tmp_path)
     try:
-        p1.state_store().save(
-            {
-                "iid-on": {"project_name": "alpha", "sandbox_mode": "on"},
-                "iid-off": {"project_name": "alpha", "sandbox_mode": "off"},
-                "iid-default": {"project_name": "alpha", "sandbox_mode": "default"},
-                "iid-unset": {"project_name": "alpha"},
-            }
-        )
+        p1.state_store().save({"iid-old": {"project_name": "alpha", "label": "Alpha"}})
+        with p1._engine.begin() as conn:
+            conn.execute(text("UPDATE instances SET sandbox_mode = 'on'"))
     finally:
         p1.dispose()
     p2 = Persistence(tmp_path)
     try:
-        loaded = p2.state_store().load()
+        store = p2.state_store()
+        loaded = store.load()
+        assert loaded == {"iid-old": {"project_name": "alpha", "label": "Alpha"}}
+        # A record that still carries the key (a pre-removal runner's dict) is not written.
+        store.save(
+            {
+                "iid-old": {**loaded["iid-old"], "sandbox_mode": "off"},
+                "iid-new": {"project_name": "alpha", "sandbox_mode": "on"},
+            }
+        )
+        with p2._engine.connect() as conn:
+            rows = conn.execute(
+                text("SELECT instance_id, sandbox_mode FROM instances ORDER BY instance_id")
+            ).all()
     finally:
         p2.dispose()
-    assert loaded["iid-on"]["sandbox_mode"] == "on"
-    assert loaded["iid-off"]["sandbox_mode"] == "off"
-    assert loaded["iid-default"]["sandbox_mode"] == "default"
-    assert "sandbox_mode" not in loaded["iid-unset"]
+    assert rows == [("iid-new", None), ("iid-old", "on")]
 
 
 # ----- fail-closed read + raising save -----------------------------------
@@ -1096,16 +1101,12 @@ def test_instance_sandbox_mode_migration_adds_and_drops_nullable_column(tmp_path
 
 
 @pytest.mark.real_migration  # defensive: the DB file exists, so the stub runs the real upgrade
-def test_pre_sandbox_row_reads_back_as_default_through_persistence(tmp_path, monkeypatch):
+def test_pre_sandbox_row_loads_through_persistence(tmp_path):
     # #1101: a database written by a pre-0014 build is upgraded by Persistence on the next
-    # boot. Its existing row must load with `sandbox_mode` absent (NULL dropped by `_present`)
-    # and rebuild as "default" — the value every row fell back to before the column existed —
-    # even with the toggle enabled, while a new value saved afterwards survives a reopen.
+    # boot. Its existing row must load with no `sandbox_mode` key (the store no longer reads
+    # the column, now that the per-launch sandbox option is removed) and save back cleanly.
     from alembic import command
 
-    from clauster.rediscovery import Rediscovery
-
-    monkeypatch.setattr("clauster.config.SANDBOX_TOGGLE_ENABLED", True)
     engine = create_db_engine(tmp_path)
     try:
         with engine.connect() as conn:
@@ -1118,24 +1119,19 @@ def test_pre_sandbox_row_reads_back_as_default_through_persistence(tmp_path, mon
     finally:
         engine.dispose()
 
+    expected = {"iid-old": {"project_name": "alpha", "label": "Alpha", "resume_mode": "standard"}}
     p1 = Persistence(tmp_path)  # the real upgrade_to_head runs 0014 over the seeded row
     try:
         store = p1.state_store()
-        loaded = store.load()
-        assert loaded == {
-            "iid-old": {"project_name": "alpha", "label": "Alpha", "resume_mode": "standard"}
-        }
-        assert Rediscovery._saved_sandbox(loaded["iid-old"]) == "default"
-        store.save({"iid-old": {**loaded["iid-old"], "sandbox_mode": "off"}})
+        assert store.load() == expected
+        store.save(expected)
     finally:
         p1.dispose()
     p2 = Persistence(tmp_path)
     try:
-        reloaded = p2.state_store().load()["iid-old"]
+        assert p2.state_store().load() == expected
     finally:
         p2.dispose()
-    assert reloaded["sandbox_mode"] == "off"
-    assert Rediscovery._saved_sandbox(reloaded) == "off"
 
 
 def test_the_migration_chain_has_exactly_one_head():

@@ -103,6 +103,10 @@ start them, watch them, and pick them up from your phone.
   (see the [redaction guarantee](https://schubydoo.github.io/clauster/latest/security/#redaction-guarantee)
   and its limits; the on-disk bridge log stays verbatim unless you set
   `logs.redact_session_url`), and an auth model that fails closed on a network bind.
+  Clauster has no per-launch sandbox option: to sandbox sessions, set
+  `sandbox.enabled` in a Claude Code settings file, which the in-app Settings tab can
+  edit when `config_write.enabled` is on (see [Sandboxing sessions](https://schubydoo.github.io/clauster/latest/reference/cli/#sandboxing-sessions)
+  for the host requirements).
 - **Interactive Sessions** — an opt-in pty mode with true resume and a read-only live
   terminal view.
 - **Extras** — outbound notifications and webhooks, a Prometheus endpoint, a

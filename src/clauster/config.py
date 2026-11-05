@@ -56,24 +56,31 @@ SessionChannel = Literal["remote-control", "hosted"]
 # Never rename the wire tokens above — only the display names are user-facing.
 SPAWN_MODES: tuple[str, ...] = ("same-dir", "worktree", "session")
 RESUME_MODES: tuple[str, ...] = ("standard", "pty")
-# Per-launch sandbox toggle for the STANDARD (server-mode) bridge (#780). Tri-state:
-# "default" appends NEITHER flag (claude's own setting wins — zero behavior change),
-# "on" appends `--sandbox`, "off" appends `--no-sandbox`. These are undocumented/hidden
-# flags on `claude remote-control` (absent from --help) but empirically accepted on
-# claude 2.1.198 — a genuinely-unknown flag errors "Unknown argument", whereas
-# `--sandbox`/`--no-sandbox` parse and connect. Version-coupled: revisit if a future
-# claude removes them.
-SandboxMode = Literal["default", "on", "off"]
-SANDBOX_MODES: tuple[str, ...] = ("default", "on", "off")
-# The per-launch sandbox toggle (#780) is DISABLED for the 1.0 release (#1037). Evidence from
-# the pre-RC dogfood: `--sandbox` reaches the remote-control bridge but is NOT passed to the
-# server-mode session worker that actually runs Bash, so the security-labeled control silently
-# did nothing (fully unsandboxed, no warning) — a "fail closed visibly" violation. Rather than
-# ship a toggle that lies, clauster stops emitting the flag and coerces every requested/persisted
-# value to "default". The plumbing (this enum, the API/CLI/MCP params, the runner threading) is
-# kept intact so re-enabling behind dependency preflight + platform gating in #1046 is a one-line
-# flip of this flag. Left as a plain bool (not Final/Literal) so it stays runtime-togglable.
-SANDBOX_TOGGLE_ENABLED = False
+# The per-launch sandbox option (#780, disabled since #1037) is REMOVED. Claude Code 2.1.300
+# dropped `--sandbox` / `--no-sandbox` from `claude remote-control` (they never reached the
+# session worker), and passing either now makes the bridge exit at once, so no spawn path
+# builds either flag. Sessions are sandboxed through `sandbox.enabled` in a Claude Code
+# settings file instead. An old API body, MCP call or `clauster start --sandbox` may still
+# carry a value: it is accepted and ignored with SANDBOX_REMOVED_NOTE, never refused. The
+# old `instances.sandbox_mode` column stays in the schema, unread and unwritten, so an older
+# Clauster can still open the database.
+LEGACY_SANDBOX_VALUES: tuple[str, ...] = ("default", "on", "off")
+SANDBOX_REMOVED_NOTE = (
+    "the per-launch sandbox option is removed and was ignored; to sandbox sessions, set "
+    "sandbox.enabled in a Claude Code settings file (with config_write enabled, the dashboard "
+    "Settings tab can edit it)"
+)
+
+
+def removed_sandbox_note(value: object) -> str | None:
+    """Return :data:`SANDBOX_REMOVED_NOTE` when a caller still sent a ``sandbox`` value.
+
+    ``None`` (the field is absent) returns ``None``. Any other value, of any type, is
+    accepted and ignored: the caller logs the note and shows it as a spawn warning.
+    """
+    return None if value is None else SANDBOX_REMOVED_NOTE
+
+
 # The sentinel that means "force nothing" (#1231): every spawn channel OMITS
 # `--permission-mode` entirely for this value, so the session starts in whatever
 # permission mode the plan/CLI would give it on its own. It is NOT a claude mode

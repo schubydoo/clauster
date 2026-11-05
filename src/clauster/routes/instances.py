@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import logging
 from collections.abc import Awaitable
 from typing import TYPE_CHECKING, TypeVar, cast
 
@@ -37,7 +38,7 @@ from fastapi.responses import Response
 
 from .. import __version__, claude_cli
 from ..claustrum_client import ClaustrumError
-from ..config import PERMISSION_MODES
+from ..config import PERMISSION_MODES, removed_sandbox_note
 from ..dependencies import (
     ClaustrumDaemonDep,
     ConfigDep,
@@ -67,6 +68,8 @@ if TYPE_CHECKING:
     from ..engine import ClausterEngine
     from ..hosted import HostedManager
     from ..runner import SessionRunner
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -410,11 +413,13 @@ async def api_spawn(
     # side effect, surfaced here as a 422 via _spawn_or_http's InvalidSpawnOption
     # mapping.
     name = body.get("name")
-    # Optional per-launch sandbox toggle (#780) — tri-state "default"/"on"/"off" for a
-    # standard bridge. DISABLED for 1.0 (#1037): still accepted + enum-validated by
-    # runner.spawn_detailed (422 on a bad value), but inert — the runner emits no
-    # --sandbox flag and coerces persisted values to "default" until #1046 re-enables it.
-    sandbox = body.get("sandbox")
+    # The removed per-launch sandbox option (#780, see config.SANDBOX_REMOVED_NOTE). An old
+    # client may still send `sandbox`: any value is accepted and ignored, never a 422, and
+    # the caller gets the note as a warning so the ignored request is not silent.
+    sandbox_note = removed_sandbox_note(body.get("sandbox"))
+    if sandbox_note is not None:
+        logger.warning("POST /api/instances: %s", sandbox_note)
+    extra_warnings = [sandbox_note] if sandbox_note is not None else []
     # Optional past-conversation fork for a pty launch (#303) — the transcripts
     # API's session uuid, spawned as `--resume <uuid> --fork-session`. Format,
     # pty-only, and revive-exclusivity rules are enforced by runner.spawn_detailed
@@ -427,7 +432,6 @@ async def api_spawn(
         ("permission_mode", permission_mode),
         ("resume_mode", resume_mode),
         ("name", name),
-        ("sandbox", sandbox),
         ("resume_session_id", resume_session_id),
         ("channel", channel),
     ):
@@ -445,6 +449,7 @@ async def api_spawn(
                 engine=engine,
             ),
             created=True,
+            warnings=extra_warnings,
         )
     if channel != "remote-control":
         raise HTTPException(status_code=422, detail=f"unknown channel: {channel!r}")
@@ -455,7 +460,6 @@ async def api_spawn(
             permission_mode=permission_mode,
             resume_mode=resume_mode,
             custom_name=name,
-            sandbox=sandbox,
             resume_session_id=resume_session_id,
         )
     )
@@ -467,7 +471,7 @@ async def api_spawn(
         outcome.instance,
         created=outcome.created,
         reason=outcome.reason,
-        warnings=outcome.warnings,
+        warnings=[*outcome.warnings, *extra_warnings],
     )
 
 

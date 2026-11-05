@@ -37,18 +37,15 @@ import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
-from typing import cast
 
-from . import config, pointers, procutil
+from . import pointers, procutil
 from .config import (
     PERMISSION_MODES,
     RESUME_MODES,
-    SANDBOX_MODES,
     SPAWN_MODES,
     ClausterConfig,
     PermissionMode,
     ResumeMode,
-    SandboxMode,
     SpawnMode,
 )
 from .field_decode import (
@@ -417,24 +414,6 @@ class Rediscovery:
             return None
         return value
 
-    @staticmethod
-    def _saved_sandbox(saved: dict) -> SandboxMode:
-        """Coerce a persisted ``sandbox_mode`` against the allowed set (#780).
-
-        Absent (a row saved before the ``sandbox_mode`` column, #1101) or corrupt values fall
-        back to ``"default"`` — the safe no-flag behavior — so a rebuilt STOPPED card offers
-        the same sandbox choice on resume that the original launch used, without failing the
-        model on a hand-edited value.
-
-        While the toggle is DISABLED for 1.0 (#1037), every persisted value coerces to
-        ``"default"`` so an existing STOPPED card that recorded ``"on"``/``"off"`` resumes
-        safely with no flag — matching the (now inert) live behavior.
-        """
-        if not config.SANDBOX_TOGGLE_ENABLED:
-            return "default"
-        sb = saved.get("sandbox_mode")
-        return cast(SandboxMode, sb) if sb in SANDBOX_MODES else "default"
-
     def _stopped_from_persisted(self, name: str) -> RemoteControlInstance | None:
         """Rebuild a STOPPED, resumable instance from a gone bridge's persisted record.
 
@@ -461,11 +440,6 @@ class Rediscovery:
             spawn_mode=spawn_mode,
             permission_mode=permission_mode,
             resume_mode=resume_mode,
-            # Carry the persisted sandbox choice (#780) so a resume of this STOPPED card
-            # re-applies the same --sandbox/--no-sandbox (or neither). pty is out of scope:
-            # `_saved_sandbox` does not coerce a pty record, but the resume path in
-            # spawn_coordinator sends only "default" to a pty bridge.
-            sandbox_mode=self._saved_sandbox(saved),
             # Carried so a Resume of this card lands back in the worktree the session
             # actually ran in, not one derived from an id it was rediscovered under (#1241).
             worktree_name=self._recovered_worktree_name(saved.get("worktree_name")),
@@ -1201,7 +1175,6 @@ class Rediscovery:
                 spawn_mode=spawn_mode,
                 permission_mode=permission_mode,
                 resume_mode=resume_mode,
-                sandbox_mode=self._saved_sandbox(saved),
                 worktree_name=self._recovered_worktree_name(saved.get("worktree_name")),
                 # Seeded from the row, not hardcoded False: `stop()` records the intent and
                 # THEN signals, so a poll landing in that grace window adopts a still-live
@@ -1367,7 +1340,6 @@ class Rediscovery:
             spawn_mode=spawn_mode,
             permission_mode=permission_mode,
             resume_mode=resume_mode,
-            sandbox_mode=self._saved_sandbox(saved),
             worktree_name=self._recovered_worktree_name(saved.get("worktree_name")),
             intentional_stop=bool(saved.get("intentional_stop", False)),
             status=InstanceStatus.STOPPED,
@@ -1535,8 +1507,8 @@ class Rediscovery:
             #
             # `saved` supplies only the label and the modes, which are not an identity (the
             # same trade the pty leg makes). `unclaimed_only` keeps them sourced from the
-            # same rows as before #1302. The row's sandbox choice and worktree name are
-            # facts of THAT row's session, so they are not carried onto this card.
+            # same rows as before #1302. The row's worktree name is a fact of THAT row's
+            # session, so it is not carried onto this card.
             #
             # Deliberately NOT pinned to `resume_mode="standard"`, unlike the pty leg: a
             # mode-less pre-#1088 row coerces to the host's CONFIGURED default, so on a
@@ -1589,9 +1561,6 @@ class Rediscovery:
                 spawn_mode=spawn_mode,
                 permission_mode=permission_mode,
                 resume_mode=resume_mode,
-                # Not `saved`'s choice: that row is not this bridge (see above), and nothing
-                # here tells which sandbox flag this bridge was launched with.
-                sandbox_mode="default",
                 bridge_proc_start=bridge_proc_start,
                 bridge_start_ticks=bridge_start_ticks,
                 bridge_boot_id=boot_id,
@@ -1780,8 +1749,6 @@ class Rediscovery:
         # and that is exactly the shape #1399's review caught three times. `adopt`'s standard
         # external bridge has no keeper and states so by passing None.
         keeper_start_ticks: int | None,
-        # Keyword-required, no default (#1101), so each caller states the choice it means.
-        sandbox_mode: SandboxMode,
         # Keyword-required, no default (#1302): None mints a random id. Never a persisted
         # row's id, because nothing ties a pointer to a row.
         instance_id: str | None,
@@ -1815,7 +1782,6 @@ class Rediscovery:
             spawn_mode=spawn_mode,
             permission_mode=permission_mode,
             resume_mode=resume_mode,
-            sandbox_mode=sandbox_mode,
             keeper_pid=keeper_pid,
             # The keeper pid's start identity travels with it (#1178 / #1402) — a
             # pointer-walk survivor must regain the full PID-reuse defense, not the
@@ -2007,9 +1973,7 @@ class Rediscovery:
             spawn_mode=spawn_mode,
             permission_mode=permission_mode,
             resume_mode="standard",
-            # Clauster did not launch this bridge, so it cannot know its sandbox flag, and the
-            # adopted card gets a fresh id rather than any saved row's choice.
-            sandbox_mode="default",
+            # The adopted card gets a fresh id rather than any saved row's.
             instance_id=None,
             bridge_proc_start=procutil._expected_epoch(ptr.proc_start),
             bridge_start_ticks=_pointer_start_ticks(ptr.proc_start),

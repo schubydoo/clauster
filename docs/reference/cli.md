@@ -309,7 +309,7 @@ fully serialized.)
 
 ```text
 clauster start <project> [--mode standard|pty] [--spawn-mode …] [--permission-mode …] \
-               [--name NAME] [--sandbox default|on|off] [--trust] [--json]
+               [--name NAME] [--trust] [--json]
 clauster stop  <instance> [--json]        # stop a bridge by id / unique prefix / identity
 ```
 
@@ -322,11 +322,36 @@ interchangeable); `--trust` accepts the workspace-trust dialog before starting
 (otherwise an untrusted directory is refused). Sending a conversation turn to a
 running hosted session is not a headless command — it needs the live server.
 
-`--sandbox` is **disabled in this release** ([#1037](https://github.com/schubydoo/clauster/issues/1037)):
-it is still accepted and validated, but inert (coerced to `default`) — the flag
-never reached the server-mode session worker, so it silently did nothing. It
-returns behind dependency-preflight + platform gating in
-[#1046](https://github.com/schubydoo/clauster/issues/1046).
+### Sandboxing sessions {#sandboxing-sessions}
+
+Clauster has no per-launch sandbox option. Claude Code 2.1.300 removed the
+`--sandbox` and `--no-sandbox` flags from `claude remote-control`, and a bridge
+that gets either flag exits at once. So no Clauster launch passes either flag, in
+any bridge mode.
+
+To sandbox sessions, set `sandbox.enabled` to `true` in a Claude Code settings
+file, for example `~/.claude/settings.json` (user scope) or the project's
+`.claude/settings.local.json` (local scope). Every session that reads that file
+starts in the sandbox, not only the sessions that Clauster starts. If
+`config_write.enabled` is on, you can edit the key in the Raw JSON box on the
+Settings tab of the
+[Claude Code config editor](../guides/config-editor.md#managing-claude-code-config).
+The user scope there also needs `config_write.allow_user_scope`.
+
+The sandbox has host requirements. On Linux and WSL2 it needs `bubblewrap` and
+`socat`, and native Windows has no sandbox. If a requirement is missing, Claude
+Code runs the session without the sandbox. To make it exit at startup instead,
+also set `sandbox.failIfUnavailable` to `true`. Claude Code's
+[sandboxing guide](https://code.claude.com/docs/en/sandboxing) is the authority
+for these rules.
+
+`clauster start` still accepts `--sandbox default|on|off`, so that an old script
+does not fail. It ignores the value and prints a warning on stderr. The
+[MCP `spawn_session` tool](../mcp.md) and `POST /api/instances` also accept a
+`sandbox` value and ignore it. When the spawn itself succeeds, they return the
+same note in `warnings`. The instance JSON keeps a deprecated `sandbox_mode`
+key, which is always `"default"` (see
+[Deprecated instance fields](../public-api.md#deprecated-instance-fields)).
 
 ## `clauster usage` — transcript cost summary {#clauster-usage-transcript-cost-summary}
 

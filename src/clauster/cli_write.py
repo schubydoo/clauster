@@ -26,6 +26,7 @@ import sys
 from typing import TYPE_CHECKING, Any
 
 from .cli_read import ambiguous_id_message
+from .config import removed_sandbox_note
 from .engine import ClausterEngine
 from .runner import (
     InvalidSpawnOption,
@@ -36,7 +37,7 @@ from .runner import (
 )
 
 if TYPE_CHECKING:
-    from .config import ClausterConfig, PermissionMode, ResumeMode, SandboxMode, SpawnMode
+    from .config import ClausterConfig, PermissionMode, ResumeMode, SpawnMode
     from .models import RemoteControlInstance
     from .runner import SpawnOutcome
 
@@ -54,11 +55,19 @@ def cmd_start(
     permission_mode: PermissionMode | None,
     resume_mode: ResumeMode | None,
     custom_name: str | None,
-    sandbox: SandboxMode | None,
+    sandbox: str | None,
     trust: bool,
     as_json: bool,
 ) -> int:
-    """Start (or hand back an already-live) bridge for ``project``; print the instance."""
+    """Start (or hand back an already-live) bridge for ``project``; print the instance.
+
+    ``sandbox`` is the removed ``--sandbox`` option: it still parses so an old script keeps
+    working, but any value is ignored with a warning on stderr (see
+    ``config.SANDBOX_REMOVED_NOTE``). The warning comes first, so a failed start still says so.
+    """
+    sandbox_note = removed_sandbox_note(sandbox)
+    if sandbox_note is not None:
+        print(f"warning: --sandbox: {sandbox_note}", file=sys.stderr)
 
     async def _go() -> SpawnOutcome:
         """Reattach to live bridges, then start (or hand back) the one for ``project``."""
@@ -70,7 +79,6 @@ def cmd_start(
                 permission_mode=permission_mode,
                 resume_mode=resume_mode,
                 custom_name=custom_name,
-                sandbox=sandbox,
                 trust=trust,
             )
 

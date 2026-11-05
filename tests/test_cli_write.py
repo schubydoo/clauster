@@ -3,7 +3,8 @@
 Each command is driven through ``clauster.__main__.main`` (so the argparse wiring
 and dispatch arms are covered) with a fake engine swapped into ``cli_write`` — the
 facade itself is tested in ``test_engine.py``, so here we assert the command layer:
-argument plumbing (mode/spawn-mode/permission-mode/name/sandbox/trust), the status
+argument plumbing (mode/spawn-mode/permission-mode/name/trust, and the removed
+``--sandbox``, which still parses but only warns), the status
 line vs ``--json`` output, the created-vs-already-running branch, warnings, and the
 error → exit-code mapping (unknown/untrusted/bad-option → 2, capacity/failure → 1).
 """
@@ -16,6 +17,7 @@ import pytest
 
 from clauster import cli_write
 from clauster.__main__ import main
+from clauster.config import LEGACY_SANDBOX_VALUES, SANDBOX_REMOVED_NOTE
 from clauster.models import InstanceStatus, RemoteControlInstance
 from clauster.runner import (
     CapacityExceeded,
@@ -128,11 +130,14 @@ def test_start_forwards_all_options_and_hydrates_first(cfg, capsys):
         "permission_mode": "plan",
         "resume_mode": "pty",
         "custom_name": "mybridge",
-        "sandbox": "on",
         "trust": True,
     }
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
+    out = captured.out
     assert "started" in out and "abc1234" in out and "mode=pty" in out and "running" in out
+    # `--sandbox` is removed: it still parses but is NOT forwarded (asserted above), and the
+    # operator is told why on stderr.
+    assert f"warning: --sandbox: {SANDBOX_REMOVED_NOTE}" in captured.err
 
 
 def test_start_defaults_pass_none_through(cfg):
@@ -143,9 +148,26 @@ def test_start_defaults_pass_none_through(cfg):
         "permission_mode": None,
         "resume_mode": None,
         "custom_name": None,
-        "sandbox": None,
         "trust": False,
     }
+
+
+@pytest.mark.parametrize("value", LEGACY_SANDBOX_VALUES)
+def test_start_removed_sandbox_option_parses_and_warns(cfg, capsys, value):
+    # Every value an old script could pass still parses, and each one is ignored with a
+    # warning, even when the start itself then fails (the warning comes first).
+    _FakeEngine.raise_on_start = UnknownProject("no such project")
+    assert main(["start", "-c", cfg, "alpha", "--sandbox", value]) == 2
+    assert "sandbox" not in _FakeEngine.start_kw
+    err = capsys.readouterr().err
+    assert f"warning: --sandbox: {SANDBOX_REMOVED_NOTE}" in err
+    assert "sandbox.enabled" in err
+
+
+def test_start_without_sandbox_prints_no_sandbox_warning(cfg, capsys):
+    _FakeEngine.outcome = SpawnOutcome(instance=_inst(), created=True)
+    assert main(["start", "-c", cfg, "alpha"]) == 0
+    assert "sandbox" not in capsys.readouterr().err
 
 
 def test_start_json(cfg, capsys):

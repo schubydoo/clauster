@@ -2857,42 +2857,6 @@ async def test_rediscover_overlays_persisted_state(runner_config, monkeypatch):
     assert runner.get_instance(_IID_ALPHA).status is InstanceStatus.STOPPED
 
 
-async def test_rediscover_pointer_survivor_leaves_the_rows_sandbox_choice_alone(
-    runner_config, monkeypatch
-):
-    # #1101: a pointer-walk survivor used to be rebuilt under its persisted instance_id and
-    # saved back over that row, so a survivor built with "default" overwrote the stored "on".
-    # Since #1302 the survivor gets a fresh id and "default" (the row is not its identity),
-    # and the pid-less row keeps its own STOPPED card with its stored choice, on disk too.
-    monkeypatch.setattr("clauster.config.SANDBOX_TOGGLE_ENABLED", True)
-    config, claude_json = runner_config
-    _db_save(
-        config.state_dir,
-        {_IID_ALPHA: {"project_name": "alpha", "label": "alpha", "sandbox_mode": "on"}},
-    )
-    runner = SessionRunner(config, claude_json=claude_json)
-
-    class FakePtr:
-        pid, proc_start, environment_id, session_id = 4242, "1000", "env_x", "session_x"
-
-    monkeypatch.setattr(
-        "clauster.pointers.pointer_for_project",
-        lambda path: FakePtr() if path.name == "alpha" else None,
-    )
-    monkeypatch.setattr("clauster.pointers.is_live", lambda ptr: True)
-    monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", lambda j: 12345.0)
-
-    await runner.rediscover()
-
-    [survivor] = [i for i in runner.list_instances() if i.status is InstanceStatus.RUNNING]
-    assert survivor.instance_id != _IID_ALPHA
-    assert survivor.sandbox_mode == "default"
-    stopped = runner.get_instance(_IID_ALPHA)
-    assert stopped.status is InstanceStatus.STOPPED
-    assert stopped.sandbox_mode == "on"
-    assert runner.persistence.state_store().load()[_IID_ALPHA]["sandbox_mode"] == "on"
-
-
 async def test_rediscover_standard_rebinds_newest_debug_log(runner_config, monkeypatch):
     """A rediscovered standard survivor re-binds its live tail to the newest log it wrote.
 
