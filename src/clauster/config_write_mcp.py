@@ -610,15 +610,46 @@ def read_project_servers(project_dir: Path) -> tuple[dict[str, Any], str]:
     they ever leave this function, so the browser never reads a stored secret. A
     missing file reads as an empty server map.
     """
-    path = project_dir / ".mcp.json"
+    # claude_json is ignored for project scope; the project's own path is passed as filler.
+    servers, file_hash, _notes = read_servers_view(
+        "project", claude_json=project_dir, project_dir=project_dir
+    )
+    return servers, file_hash if file_hash is not None else cw.hash_bytes(b"")
+
+
+def _read_bytes_or_empty(path: Path) -> bytes:
+    """Return the bytes of ``path``, or ``b""`` when it does not exist."""
     try:
-        raw = path.read_bytes()
+        return path.read_bytes()
     except FileNotFoundError:
-        raw = b""
-    data = cw.load_settings_json_obj(raw)
-    servers = data.get(MCP_SERVERS_KEY)
+        return b""
+
+
+def read_servers_view(
+    scope: cw.Scope, *, claude_json: Path, project_dir: Path
+) -> tuple[dict[str, Any], str | None, list[dict[str, str]]]:
+    """Return ``(display_servers, hash, conversions)`` for ``scope`` from ONE file read.
+
+    The display map (converted on load, then redacted), the stale-hash token (project
+    scope only; ``None`` for user and local, whose writers lock and re-read) and the
+    convert-on-load notes all come from the same bytes. Reading the file once matters:
+    with two reads, a write between them (another dashboard request, or Claude Code
+    itself) made the notes disagree with the entries, and a missing note left an
+    unchanged converted entry unsavable in the dashboard. ``project_dir`` is ignored for
+    user scope, ``claude_json`` for project scope.
+    """
+    file_hash: str | None = None
+    if scope == "local":
+        servers = cw.read_nested_subtree(
+            claude_json, PROJECTS_KEY, str(project_dir), MCP_SERVERS_KEY
+        )
+    else:
+        raw = _read_bytes_or_empty(claude_json if scope == "user" else project_dir / ".mcp.json")
+        servers = cw.load_settings_json_obj(raw).get(MCP_SERVERS_KEY)
+        if scope != "user":
+            file_hash = cw.hash_bytes(raw)
     servers = servers if isinstance(servers, dict) else {}
-    return _redact_server_map(servers), cw.hash_bytes(raw)
+    return _redact_server_map(servers), file_hash, _conversion_notes(servers)
 
 
 def read_user_servers(claude_json: Path) -> dict[str, Any]:
@@ -628,14 +659,7 @@ def read_user_servers(claude_json: Path) -> dict[str, Any]:
     file under its own ``flock`` at write time); read is for display only, with the
     Foundation's structural redaction applied so no stored secret is surfaced.
     """
-    try:
-        raw = claude_json.read_bytes()
-    except FileNotFoundError:
-        raw = b""
-    data = cw.load_settings_json_obj(raw)
-    servers = data.get(MCP_SERVERS_KEY)
-    servers = servers if isinstance(servers, dict) else {}
-    return _redact_server_map(servers)
+    return read_servers_view("user", claude_json=claude_json, project_dir=claude_json.parent)[0]
 
 
 def _unbacked_sentinel(incoming: Any, stored: Any, path: str) -> str | None:
@@ -884,9 +908,7 @@ def read_project_local_servers(claude_json: Path, project_dir: Path) -> dict[str
     the Foundation's structural redaction applied so no stored secret is surfaced. A
     missing project entry (or a missing file) reads as an empty server map.
     """
-    servers = cw.read_nested_subtree(claude_json, PROJECTS_KEY, str(project_dir), MCP_SERVERS_KEY)
-    servers = servers if isinstance(servers, dict) else {}
-    return _redact_server_map(servers)
+    return read_servers_view("local", claude_json=claude_json, project_dir=project_dir)[0]
 
 
 def read_conversion_notes(
@@ -894,28 +916,12 @@ def read_conversion_notes(
 ) -> list[dict[str, str]]:
     """Return the convert-on-load notes for ``scope``: one ``{name, field, message}`` each.
 
-    The readers above already return the converted display copy; this names what they
-    changed, so the dashboard can show it before the operator saves. Reads the raw map of
-    the same file the matching reader reads (``project_dir`` is ignored for user scope).
-    A note never carries a stored value, only field names and a count.
+    A convenience over :func:`read_servers_view` for callers that need only the notes.
+    The GET route does NOT use it: it takes the entries and the notes from one
+    :func:`read_servers_view` call, so they always describe the same file contents. A
+    note never carries a stored value, only field names and a count.
     """
-    if scope == "user":
-        try:
-            raw = claude_json.read_bytes()
-        except FileNotFoundError:
-            raw = b""
-        servers = cw.load_settings_json_obj(raw).get(MCP_SERVERS_KEY)
-    elif scope == "local":
-        servers = cw.read_nested_subtree(
-            claude_json, PROJECTS_KEY, str(project_dir), MCP_SERVERS_KEY
-        )
-    else:
-        try:
-            raw = (project_dir / ".mcp.json").read_bytes()
-        except FileNotFoundError:
-            raw = b""
-        servers = cw.load_settings_json_obj(raw).get(MCP_SERVERS_KEY)
-    return _conversion_notes(servers) if isinstance(servers, dict) else []
+    return read_servers_view(scope, claude_json=claude_json, project_dir=project_dir)[2]
 
 
 def write_project_local_servers(

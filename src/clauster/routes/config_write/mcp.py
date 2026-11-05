@@ -47,61 +47,28 @@ async def api_config_write_mcp_read(
     if scope not in ("project", "user", "local"):
         raise HTTPException(status_code=422, detail="scope must be 'project', 'user', or 'local'")
 
-    def _notes(project_dir: Path) -> list[dict[str, str]]:
-        """Name what the reader converted on load (TASK-449.8), for display before a save."""
-        return config_write_mcp.read_conversion_notes(
+    # User scope needs no project; its path argument is ignored by the reader.
+    project_dir: Path = (
+        runner.claude_json.parent if scope == "user" else _base.resolve_cw_project(config, project)
+    )
+    try:
+        # ONE read of the scope's file yields the entries, the hash and the convert-on-load
+        # notes, so the notes can never describe different contents than the entries
+        # (TASK-449.8). A corrupt/non-object/non-UTF-8 file raises InvalidCandidateError;
+        # map it to a clean 422, never an unhandled 500.
+        servers, file_hash, conversions = await asyncio.to_thread(
+            config_write_mcp.read_servers_view,
             scope,  # type: ignore[arg-type]
             claude_json=runner.claude_json,
             project_dir=project_dir,
         )
-
-    if scope == "user":
-        try:
-            servers = await asyncio.to_thread(
-                config_write_mcp.read_user_servers, runner.claude_json
-            )
-            conversions = await asyncio.to_thread(_notes, runner.claude_json.parent)
-        except config_write.ConfigWriteError as exc:
-            # A corrupt/non-object/non-UTF-8 ~/.claude.json raises InvalidCandidateError
-            # from _load_json_obj — same as the project read below; map it to a clean 422
-            # rather than letting it escape as an unhandled 500.
-            raise _base.map_config_write_error(exc) from exc
-        return {"scope": "user", "servers": servers, "hash": None, "conversions": conversions}
-    if scope == "local":
-        project_dir = _base.resolve_cw_project(config, project)
-        try:
-            servers = await asyncio.to_thread(
-                config_write_mcp.read_project_local_servers, runner.claude_json, project_dir
-            )
-            conversions = await asyncio.to_thread(_notes, project_dir)
-        except config_write.ConfigWriteError as exc:
-            raise _base.map_config_write_error(exc) from exc
-        return {
-            "scope": "local",
-            "project": project,
-            "servers": servers,
-            "hash": None,
-            "conversions": conversions,
-        }
-    project_dir = _base.resolve_cw_project(config, project)
-    try:
-        servers, file_hash = await asyncio.to_thread(
-            config_write_mcp.read_project_servers, project_dir
-        )
-        conversions = await asyncio.to_thread(_notes, project_dir)
     except config_write.ConfigWriteError as exc:
-        # A corrupt/non-object on-disk .mcp.json raises InvalidCandidateError from
-        # _load_json_obj. Map it through the same helper as the PUT route so a
-        # hand-edited or partially-written file is reported as a clean 422, never
-        # an unhandled 500.
         raise _base.map_config_write_error(exc) from exc
-    return {
-        "scope": "project",
-        "project": project,
-        "servers": servers,
-        "hash": file_hash,
-        "conversions": conversions,
-    }
+    result: dict = {"scope": scope, "servers": servers, "hash": file_hash}
+    if scope != "user":
+        result["project"] = project
+    result["conversions"] = conversions
+    return result
 
 
 @router.put("/api/config-write/mcp")

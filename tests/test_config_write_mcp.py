@@ -2387,3 +2387,75 @@ def test_route_edit_to_a_new_host_with_a_mask_is_422(
     assert "Retype the credential" in resp.json()["detail"]
     assert mcp_json.read_bytes() == before
     assert not argv_file.exists()
+
+
+# --- TASK-449.8: one file read per MCP GET -----------------------------------------
+# The entries, the hash and the conversion notes must describe the SAME file contents.
+# With two reads, a write in between made the notes disagree with the entries, and a
+# missing note left an unchanged converted entry unsavable in the dashboard.
+
+_LEGACY_MAP = {"mcpServers": {"s": {"transport": "sse", "url": "https://x.example/sse"}}}
+_LEGACY_LOCAL = {"transport": "sse", "url": "https://x.example/sse"}
+
+
+def _flip_after_first_read(monkeypatch, target: Path, second: bytes) -> list[int]:
+    """Make ``target`` read as itself once, then as ``second``; return the read counter."""
+    real = Path.read_bytes
+    count = [0]
+
+    def read_bytes(self: Path) -> bytes:
+        if self == target:
+            count[0] += 1
+            if count[0] > 1:
+                return second
+        return real(self)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    return count
+
+
+@pytest.mark.parametrize("scope", ["project", "user", "local"])
+def test_route_read_takes_entries_hash_and_notes_from_one_read(
+    write_config, tmp_path, projects_root, monkeypatch, scope: str
+) -> None:
+    isolated = Path(os.environ["HOME"]) / ".claude.json"
+    alpha = (projects_root / "alpha").resolve()
+    if scope == "project":
+        target = projects_root / "alpha" / ".mcp.json"
+        target.write_text(json.dumps(_LEGACY_MAP), encoding="utf-8")
+    elif scope == "user":
+        target = isolated
+        target.write_text(json.dumps(_LEGACY_MAP), encoding="utf-8")
+    else:
+        target = isolated
+        target.write_text(
+            json.dumps({"projects": {str(alpha): {"mcpServers": {"s": _LEGACY_LOCAL}}}}),
+            encoding="utf-8",
+        )
+    original = target.read_bytes()
+    with _client(write_config, tmp_path, _ON) as c:
+        # Any second read of the file would see a clean entry and so lose the note.
+        clean = b'{"mcpServers": {"s": {"type": "sse", "url": "https://x.example/sse"}}}'
+        count = _flip_after_first_read(monkeypatch, target.resolve(), clean)
+        params = {"scope": scope} if scope == "user" else {"scope": scope, "project": "alpha"}
+        resp = c.get("/api/config-write/mcp", params=params)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert count[0] == 1  # exactly one read of the scope's file per request
+    assert body["servers"]["s"] == {"type": "sse", "url": "https://x.example/sse"}
+    assert [(n["name"], n["field"]) for n in body["conversions"]] == [("s", "transport")]
+    if scope == "project":
+        assert body["hash"] == cw.hash_bytes(original)  # the hash of the bytes it showed
+    else:
+        assert body["hash"] is None
+
+
+def test_read_servers_view_matches_the_individual_readers(tmp_path: Path) -> None:
+    (tmp_path / ".mcp.json").write_text(json.dumps(_LEGACY_MAP), encoding="utf-8")
+    servers, file_hash, notes = mcp.read_servers_view(
+        "project", claude_json=tmp_path / "cj", project_dir=tmp_path
+    )
+    assert (servers, file_hash) == mcp.read_project_servers(tmp_path)
+    assert notes == mcp.read_conversion_notes(
+        "project", claude_json=tmp_path / "cj", project_dir=tmp_path
+    )
