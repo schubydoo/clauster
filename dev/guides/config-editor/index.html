@@ -2054,7 +2054,7 @@ on; the User scope additionally requires <code>config_write.allow_user_scope</co
 </tr>
 <tr>
 <td>Settings</td>
-<td><code>settings.json</code> — friendly rows for <code>env</code> variables, with a Raw JSON escape hatch for other keys, plus a read-only merged ("effective") view showing which scopes each value comes from. See <a href="#the-settings-tab">The Settings tab</a>.</td>
+<td><code>settings.json</code> — a row for each key, typed by its value, with a Raw JSON escape hatch, plus a read-only merged ("effective") view showing which scopes each value comes from. See <a href="#the-settings-tab">The Settings tab</a>.</td>
 </tr>
 <tr>
 <td>Permissions</td>
@@ -2233,9 +2233,36 @@ row tells the first two apart:</p>
 except the keys that another tab writes. These are <code>permissions</code> and <code>autoMode</code>
 (the Permissions tab), <code>hooks</code> (the Hooks tab) and <code>enabledPlugins</code> (the Plugins
 tab). A save that names one of them is refused (<code>422</code>), and the error names the
-tab to use. The <code>env</code> variables show as rows, and every other key is in Raw JSON.
-Clauster checks the shape of <code>env</code> only. It does not run or interpret any other
-value. Claude Code reads the values when a session starts.</p>
+tab to use. Clauster checks the shape of <code>env</code> only. It does not run or interpret
+any other value. Claude Code reads the values when a session starts.</p>
+<p>The tab has two modes, Rows and Raw JSON. In Rows mode, each top-level key of the
+file is one row, and the editor follows the JSON type of the value:</p>
+<ul>
+<li>A Boolean is a switch.</li>
+<li>A number is a number box. A save sends a number, and an empty box blocks the
+  save.</li>
+<li>A string is a list of values when the settings reference gives the key a set
+  of preset values, for example <code>tui</code> or <code>theme</code>. Clauster sends that set when the
+  tab loads. Any other string is a text box, and a value outside the set is text
+  too. To set a value that the list does not hold, such as a custom theme or a
+  <code>timeFormat</code> pattern, use Raw JSON.</li>
+<li>An object, a list or <code>null</code> is a read-only row. Use <strong>Edit in Raw JSON</strong> to
+  change it. A save writes it back unchanged.</li>
+<li><code>env</code> has its own table of variables below the rows.</li>
+</ul>
+<p>Each value saves with the JSON type that it had when it loaded, unless you change
+it. For example, the string <code>"1"</code> stays a string. To add a key, type its name in
+<strong>Add a key</strong>, or pick one of the suggestions. The suggestions are the documented
+keys of one value (a switch, a number, a choice or text) that Claude Code reads at
+the current scope. A documented key gets its editor, and a new switch starts off.
+A documented key that holds an object or a list is added in Raw JSON, and the tab
+says so. Any other name gets a text box, and Clauster sends it as you typed it. If
+you type a key that another tab edits, the tab names that tab and links to it.
+The browser does not decide whether Claude Code reads a key at a scope. The server
+checks every key when you save, and the error gives its reason. Raw JSON shows
+the same keys as JSON. A switch between the two modes keeps every value. While a
+number box is empty or two <code>env</code> variables have the same name, the tab stays in
+Rows mode, and a note above the rows says why.</p>
 <p>No other tab writes these keys in a settings file, so the Settings tab shows them:</p>
 <ul>
 <li><code>enabledMcpjsonServers</code> and <code>disabledMcpjsonServers</code>. The MCP tab shows an
@@ -2275,10 +2302,11 @@ example:</p>
 <li><code>diffTool</code> and <code>autoConnectIde</code> belong in <code>~/.claude.json</code>, which the Claude
   Code <code>/config</code> command writes.</li>
 </ul>
-<p>If a file already holds such a key, remove the key in Raw JSON before you save
-the file again at that scope. The auto mode key <code>disableAutoMode</code> and the hook
-keys <code>disableAllHooks</code>, <code>allowedHttpHookUrls</code> and <code>httpHookAllowedEnvVars</code> work
-in every settings file, so the tab accepts them at every scope.</p>
+<p>If a file already holds such a key, remove the key (its <strong>Remove</strong> button in
+Rows mode, or Raw JSON) before you save the file again at that scope. The auto
+mode key <code>disableAutoMode</code> and the hook keys <code>disableAllHooks</code>,
+<code>allowedHttpHookUrls</code> and <code>httpHookAllowedEnvVars</code> work in every settings file,
+so the tab accepts them at every scope.</p>
 <p>The settings reference gives <code>bashEditDiffEnabled</code> and
 <code>sandbox.allowNestedUserNamespaces</code> User scope, but Claude Code also reads
 <code>false</code> for them from a project or local file, so the tab accepts <code>false</code> at
@@ -2977,7 +3005,7 @@ space at the start or the end is part of the name.</p>
 <tr>
 <td>A Settings save returns <code>422</code> with "Claude Code reads … only from"</td>
 <td>The file holds a key (or a <code>true</code> value) that Claude Code ignores at this scope</td>
-<td>Remove the key in Raw JSON, or save it at the scope that the message names. For a <code>true</code> value, set it to <code>false</code></td>
+<td>Remove the key (in Rows mode or Raw JSON), or save it at the scope that the message names. For a <code>true</code> value, set it to <code>false</code></td>
 </tr>
 </tbody>
 </table>
