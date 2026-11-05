@@ -66,7 +66,7 @@ Interactive Session mode, this *recaps* the prior conversation rather than truly
   project scope (plus local for all but subagents; for skills, local sets visibility
   only), with secret-shaped values masked on the surfaces
   that carry them (settings `env`, MCP, `autoMode`, hook headers, URL credentials
-  and tokens, and MCP tool input). Every write is lost-update-guarded and
+  and tokens, MCP tool input, subagent frontmatter, and skill files). Every write is lost-update-guarded and
   trust-gated; every write is audit-logged to `config_audit.log`.
 - Approximate per-project cost / token badge rolled up from session transcripts.
 - Live per-bridge resource metrics (CPU / memory / disk) while a bridge runs, and

@@ -1078,9 +1078,10 @@ def test_read_redacts_secret_shaped_frontmatter_values(tmp_path: Path) -> None:
     agents_dir.mkdir(parents=True)
     (agents_dir / "my-agent.md").write_text(content, encoding="utf-8", newline="\n")
     doc = sub.read_project_agent(tmp_path, "my-agent")
-    # the raw content round-trips unredacted (needed for a correct re-save)...
-    assert "super-secret" in doc["content"]
-    # ...but the derived frontmatter display field masks the secret-shaped value.
+    # TASK-427: the editor content masks it too (a save keeps the stored value)...
+    assert "super-secret" not in doc["content"]
+    assert f'Authorization: "{cw.REDACTION_SENTINEL}"' in doc["content"]
+    # ...and so does the derived frontmatter display field.
     assert (
         doc["frontmatter"]["mcpServers"]["srv"]["headers"]["Authorization"]
         == cw.REDACTION_SENTINEL
@@ -1089,8 +1090,8 @@ def test_read_redacts_secret_shaped_frontmatter_values(tmp_path: Path) -> None:
 
 def test_read_redacts_secrets_in_the_documented_list_form(tmp_path: Path) -> None:
     # The list spelling is the one this surface now writes. Its display field must mask an
-    # inline server's secret exactly as the mapping spelling does, while `content` still
-    # round-trips raw for the re-save.
+    # inline server's secret exactly as the mapping spelling does, and so must `content`
+    # (TASK-427), whose unchanged re-save keeps the stored value.
     content = (
         "---\nname: my-agent\ndescription: d\nmcpServers:\n  - github\n"
         "  - srv:\n      type: http\n      url: https://example.com/mcp\n"
@@ -1099,7 +1100,10 @@ def test_read_redacts_secrets_in_the_documented_list_form(tmp_path: Path) -> Non
     )
     sub.write_project_agent(tmp_path, "my-agent", content, None)
     doc = sub.read_project_agent(tmp_path, "my-agent")
-    assert "super-secret" in doc["content"]
+    assert "super-secret" not in doc["content"]
+    sub.write_project_agent(tmp_path, "my-agent", doc["content"], doc["hash"])
+    path = sub.project_agents_dir(tmp_path) / "my-agent.md"
+    assert path.read_text(encoding="utf-8") == content
     servers = doc["frontmatter"]["mcpServers"]
     assert servers[0] == "github"
     assert servers[1]["srv"]["headers"]["Authorization"] == cw.REDACTION_SENTINEL
@@ -1194,9 +1198,16 @@ def test_conversion_keeps_every_value_spelled_as_written(tmp_path: Path) -> None
         "      T: '1e5'\n      H: 0x1F\n---\nbody\n"
     )
     _place(tmp_path, "my-agent", text)
-    content = sub.read_project_agent(tmp_path, "my-agent")["content"]
+    # The conversion itself: the editor view masks these `env` values (TASK-427), so the
+    # spellings are checked on the converted text before it is masked.
+    content = sub._mcp_servers_as_list(text)
+    assert content is not None
     for spelling in ("DEBUG: 'yes'", 'MODE: "0755"', "PORT: '1:30'", "T: '1e5'", "H: 0x1F"):
         assert f"        {spelling}\n" in content
+    # The view keeps the non-string `H` and masks every string `env` value.
+    shown = sub.read_project_agent(tmp_path, "my-agent")["content"]
+    assert "        H: 0x1F\n" in shown
+    assert shown.count(f'"{cw.REDACTION_SENTINEL}"') == 4
     assert "  - srv:\n" in content
 
 
@@ -1292,7 +1303,9 @@ def test_read_only_files_are_not_converted(tmp_path: Path) -> None:
     plugin = _MAP_FORM.replace("model: opus", "model: opus\nnote: ${CLAUDE_PLUGIN_ROOT}")
     _place(tmp_path, "my-agent", plugin)
     doc = sub.read_project_agent(tmp_path, "my-agent")
-    assert (doc["editable"], doc["content"], doc["converted"]) == (False, plugin, None)
+    # Not converted, but still masked (TASK-427): the `${...}` value shows as the mask.
+    shown = plugin.replace("${CLAUDE_PLUGIN_ROOT}", f'"{cw.REDACTION_SENTINEL}"')
+    assert (doc["editable"], doc["content"], doc["converted"]) == (False, shown, None)
     override = _MAP_FORM.replace("my-agent", "claude")
     _place(tmp_path, "claude", override)
     doc = sub.read_project_agent(tmp_path, "claude")
@@ -1631,12 +1644,14 @@ _INLINE_CONVERTED = (
     "model: opus\n"
     "---\nYou are a helper.\n"
 )
+# What the editor shows (TASK-427): an inline `env` value is masked, as on the MCP tab.
+_INLINE_SHOWN = _INLINE_CONVERTED.replace("DEBUG: '1'", f'DEBUG: "{cw.REDACTION_SENTINEL}"')
 
 
 def test_read_converts_the_inline_fields_claude_code_ignores(tmp_path: Path) -> None:
     path = _place(tmp_path, "my-agent", _INLINE_LEGACY)
     doc = sub.read_project_agent(tmp_path, "my-agent")
-    assert doc["content"] == _INLINE_CONVERTED
+    assert doc["content"] == _INLINE_SHOWN
     note = doc["converted"]
     assert note == (
         "Inline MCP server 'legacy': 'transport' is converted to \"type\": 'sse' (Claude Code "
@@ -1654,8 +1669,10 @@ def test_read_converts_the_inline_fields_claude_code_ignores(tmp_path: Path) -> 
     with pytest.raises(cw.InvalidCandidateError, match="'transport' is not"):
         sub.write_project_agent(tmp_path, "my-agent", _INLINE_LEGACY, doc["hash"])
     sub.write_project_agent(tmp_path, "my-agent", doc["content"], doc["hash"])
+    # The masked `env` value is kept, spelled as it was stored.
+    assert path.read_bytes() == _INLINE_CONVERTED.encode("utf-8")
     again = sub.read_project_agent(tmp_path, "my-agent")
-    assert (again["content"], again["converted"]) == (_INLINE_CONVERTED, None)
+    assert (again["content"], again["converted"]) == (_INLINE_SHOWN, None)
 
 
 def test_mapping_and_inline_conversion_share_one_note(tmp_path: Path) -> None:
@@ -1676,14 +1693,18 @@ def test_mapping_and_inline_conversion_share_one_note(tmp_path: Path) -> None:
 def test_inline_conversion_keeps_crlf_line_endings(tmp_path: Path) -> None:
     _place(tmp_path, "my-agent", _INLINE_LEGACY.replace("\n", "\r\n"))
     doc = sub.read_project_agent(tmp_path, "my-agent")
-    assert doc["content"] == _INLINE_CONVERTED.replace("\n", "\r\n")
+    assert doc["content"] == _INLINE_SHOWN.replace("\n", "\r\n")
 
 
 def test_inline_conversion_skips_read_only_files(tmp_path: Path) -> None:
     plugin = _INLINE_LEGACY.replace("model: opus", "model: opus\nnote: ${CLAUDE_PLUGIN_ROOT}")
     _place(tmp_path, "my-agent", plugin)
     doc = sub.read_project_agent(tmp_path, "my-agent")
-    assert (doc["editable"], doc["content"], doc["converted"]) == (False, plugin, None)
+    # Not converted, but still masked (TASK-427).
+    shown = plugin
+    for value in ("x", "y", "'1'", "${CLAUDE_PLUGIN_ROOT}"):
+        shown = shown.replace(f": {value}\n", f': "{cw.REDACTION_SENTINEL}"\n')
+    assert (doc["editable"], doc["content"], doc["converted"]) == (False, shown, None)
 
 
 @pytest.mark.parametrize(
@@ -2653,7 +2674,10 @@ def test_read_agent_masks_a_secret_inside_an_omap_reached_through_a_tuple(
 
     assert "sk-live-DEADBEEF" not in json.dumps(doc["frontmatter"])
     assert cw.REDACTION_SENTINEL in json.dumps(doc["frontmatter"])
-    assert doc["content"] == raw.decode()  # `content` is verbatim by contract, as always
+    # TASK-427: a mask cannot be placed inside an `!!omap` (nothing binds it back on save),
+    # so the editor shows nothing rather than the secret, and the file is not editable.
+    assert (doc["content"], doc["editable"]) == ("", False)
+    assert doc["converted"] == sub.MASK_UNAVAILABLE_NOTE
 
 
 def test_read_agent_masks_a_binary_spelled_secret_reached_as_bytes(
@@ -2677,7 +2701,13 @@ def test_read_agent_masks_a_binary_spelled_secret_reached_as_bytes(
 
     assert "sk-live-DEADBEEF" not in json.dumps(doc["frontmatter"])
     assert doc["frontmatter"]["api_token"] == cw.REDACTION_SENTINEL
-    assert doc["content"] == raw.decode()  # `content` is verbatim by contract, as always
+    # TASK-427: `content` masks it in place, and an unchanged save puts the stored
+    # `!!binary` spelling back byte for byte.
+    assert doc["content"] == raw.decode().replace(
+        "!!binary c2stbGl2ZS1ERUFEQkVFRg==", f'"{cw.REDACTION_SENTINEL}"'
+    )
+    sub._write_agent(root, "my-agent", doc["content"], doc["hash"])
+    assert (root / "my-agent.md").read_bytes() == raw
 
 
 def test_read_agent_omap_inner_key_is_a_secret_hint_the_way_a_dict_key_is() -> None:

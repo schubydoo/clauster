@@ -170,17 +170,17 @@ Common mechanics across the modal:
 - **Typed confirmation** — every document save asks you to type the scope
   name; destructive list actions (delete, reset, plugin install) have their
   own typed confirms.
-- **Secret masking** — the Settings, MCP, Hooks, and Skills surfaces, and the
-  `autoMode` box on the Permissions tab, mask secret-shaped values on read. The
-  MCP surface also masks every `env` and `headers` value, the `headersHelper`
-  command, and the strings in `oauth`, whatever their key names. On Settings,
-  MCP, Hooks and `autoMode`, a masked value left untouched keeps the stored secret
-  on write. The Skills editor masks on read but restores nothing on write, so a
-  save writes the mask over the stored value. The CLAUDE.md and Subagents
-  surfaces, and the `permissions` rules, return the raw content, because they
-  round-trip the exact text on write. Do not put a secret anywhere in a subagent
-  file, for example in an inline `mcpServers` block in the frontmatter. For what
-  the Hooks tab masks, see [The Hooks tab](#the-hooks-tab). The
+- **Secret masking** — the Settings, MCP, Hooks, Subagents, and Skills
+  surfaces, and the `autoMode` box on the Permissions tab, mask secret-shaped
+  values on read. The MCP surface also masks every `env` and `headers` value,
+  the `headersHelper` command, and the strings in `oauth`, whatever their key
+  names. A masked value left untouched keeps the stored secret on write. If
+  Clauster cannot match a mask to its stored value, it refuses the save and
+  writes nothing. The CLAUDE.md surface and the `permissions` rules return the
+  raw content, because they round-trip the exact text on write. For what the
+  Subagents and Skills editors mask, see
+  [Masked values in subagent and skill files](#masked-values-in-subagent-and-skill-files).
+  For what the Hooks tab masks, see [The Hooks tab](#the-hooks-tab). The
   Plugins surface is read-only for these values, and it masks them too. See
   [Plugins and marketplaces](#plugins-and-marketplaces).
 
@@ -472,6 +472,64 @@ still holds masks but their number no longer matches the number of masked
 entries on disk, the save is refused. Restore the masks as they loaded, or type
 the full entry again. If you remove every mask from a list, the save is
 accepted, and it deletes those entries.
+
+### Masked values in subagent and skill files
+
+The Subagents editor shows each secret value in the frontmatter as `********`.
+Each field is masked as the tab that owns its shape masks it:
+
+- In an inline `mcpServers` definition, every `env` and `headers` value, a
+  `headersHelper` command, and a URL with a user name or password are masked,
+  as on the MCP tab. A server name is not a secret, so a server called
+  `oauth-gw` keeps its `type` and `url` visible.
+- In `hooks`, the parts of a hook URL and the `headers` values that the
+  [Hooks tab](#the-hooks-tab) masks are masked.
+- Every non-empty `env` value is masked.
+- In every field, a value with a secret-shaped key, a `${...}` reference, or a
+  URL with a user name or password is masked.
+
+The Markdown body after the frontmatter is never masked or changed. Comments in
+the frontmatter are not masked either. Do not put a secret in the body or in a
+comment. If the frontmatter is not valid YAML, the editor cannot read its
+fields. It then masks the frontmatter line by line, as the Skills editor does,
+and that misses a secret under a key that does not look secret. A masked value
+in such a file cannot be kept, so type the real values when you repair it. The
+file keeps its line endings. If the file holds masked values and its frontmatter is
+valid YAML only after Claude Code adds quotes to some values, the editor shows
+those values with the quotes, and a save writes them with the quotes.
+
+If you leave a mask in place, the save keeps the stored value. The save is
+refused, and nothing is written, in these cases:
+
+- A mask with no stored value behind it, for example in a new file, under a
+  renamed key, or in a server that you renamed.
+- A masked value in an `http`, `sse` or `ws` server when you changed its `type`
+  or any character of a URL in it. Clauster compares the URL text exactly and
+  never parses it.
+- A masked `env` value in a stdio server when you changed its `command` or any
+  element of its `args`.
+- A masked hook value when the [Hooks tab](#the-hooks-tab) rules cannot keep it.
+
+Type the real value again to save the change. If a secret is on a value with a
+YAML anchor, an alias, or a merge key, or inside an ordered map or a set, the
+editor cannot mask it in place. It then shows a note and not the file. Edit
+that file on the host.
+
+The Skills editor masks each file line by line: a `key: value` line with a
+secret-shaped key, a `${...}` reference, or a URL with a user name or password.
+The body of `SKILL.md` is masked too, because skills often hold commands. A
+masked line keeps its stored text on save only when every other character of
+the line is unchanged. Each stored line is kept at most once, in order, so a
+copied masked line is refused. If two stored lines look the same when masked, a
+save that adds or removes one of them is refused too. A
+masked line in the frontmatter is kept only while `hooks` and `mcpServers` are
+unchanged. Otherwise a changed URL on another line receives the stored
+credential. A new line that holds `********` is refused, so type the
+real value.
+
+A mask hides a stored value, but not its length. A refusal about a masked value
+never names a size, but repeated saves near a size limit can show how long a
+masked value is.
 
 ### Subagent frontmatter checks
 

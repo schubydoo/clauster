@@ -2955,7 +2955,7 @@ def test_write_skill_refuses_when_kept_files_alone_exceed_the_cap(
     before = _tree(skill_dir)
     monkeypatch.setattr(sk, "MAX_TOTAL_BYTES", len(_RUN_SH))
     with pytest.raises(
-        cw.InvalidCandidateError, match="hold at least .* no stored file was dropped"
+        cw.InvalidCandidateError, match="too large together.* no stored file was dropped"
     ):
         _save(tmp_path, {sk.SKILL_FILENAME: "x"})
     assert _tree(skill_dir) == before  # refused whole: no member dropped to fit

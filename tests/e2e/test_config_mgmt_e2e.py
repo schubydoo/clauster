@@ -535,6 +535,60 @@ def test_config_mgmt_new_subagent_round_trip(
     assert "an e2e agent" in saved.read_text(encoding="utf-8")
 
 
+def test_config_mgmt_subagent_masks_a_frontmatter_secret_and_keeps_it_on_save(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """The editor shows a frontmatter secret as the mask, and a save keeps it (TASK-427)."""
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+    agents = projects_root / "alpha" / ".claude" / "agents"
+    agents.mkdir(parents=True, exist_ok=True)
+    stored = "---\nname: masked-agent\ndescription: old\napi_token: fake-E2E\n---\nBody.\n"
+    path = agents / "masked-agent.md"
+    path.write_bytes(stored.encode("utf-8"))
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-subagents"]')
+    browser.click('[data-test="cm-agent-edit-masked-agent"]')
+    shown = '---\nname: masked-agent\ndescription: old\napi_token: "********"\n---\nBody.\n'
+    # The driver reads the value back without its final newline.
+    browser.expect_value('[data-test="cm-agent-content"]', shown.rstrip("\n"))
+
+    browser.fill('[data-test="cm-agent-content"]', shown.replace("old", "new"))
+    browser.fill('[data-test="cm-agent-confirm"]', "alpha")
+    browser.click('[data-test="cm-agent-save"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+    assert path.read_text(encoding="utf-8") == stored.replace("old", "new")
+
+
+def test_config_mgmt_subagent_it_cannot_mask_shows_why_and_keeps_save_off(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A secret behind a YAML anchor is not shown, the note says why, and Save stays off."""
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+    agents = projects_root / "alpha" / ".claude" / "agents"
+    agents.mkdir(parents=True, exist_ok=True)
+    (agents / "anchor-agent.md").write_bytes(
+        b"---\nname: anchor-agent\ndescription: d\napi_token: &t fake-ANCHOR\n"
+        b"other_token: *t\n---\nBody.\n"
+    )
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-subagents"]')
+    browser.click('[data-test="cm-agent-edit-anchor-agent"]')
+    browser.expect_visible('[data-test="cm-agent-converted"]')
+    browser.expect_text('[data-test="cm-agent-converted"]', "cannot mask")
+    browser.expect_value('[data-test="cm-agent-content"]', "")
+    browser.fill('[data-test="cm-agent-confirm"]', "alpha")
+    assert browser.eval_js("document.querySelector('[data-test=\"cm-agent-save\"]').disabled") in (
+        "true",
+        True,
+    )
+
+
 def test_config_mgmt_new_subagent_name_single_source(
     browser: AgentBrowser, config_mgmt_server: Server
 ) -> None:

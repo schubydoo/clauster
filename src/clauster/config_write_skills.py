@@ -108,6 +108,7 @@ makes to a kept member in the instant between the copy and the swap is lost.
 
 from __future__ import annotations
 
+import itertools
 import math
 import os
 import re
@@ -1247,17 +1248,21 @@ def _is_contained_regular_file(path: Path, root_resolved: Path) -> bool:
     return real == root_resolved or root_resolved in real.parents
 
 
-def _skill_md_hash(skills_root: Path, name: str) -> str:
-    """Return the hash of the current on-disk ``SKILL.md`` bytes (empty digest if absent)."""
+def _skill_md_bytes(skills_root: Path, name: str) -> bytes:
+    """Return the current on-disk ``SKILL.md`` bytes (``b""`` if absent)."""
     try:
         target = fw.resolve_contained_path(skills_root, f"{name}/{SKILL_FILENAME}")
     except fw.PathEscapeError as exc:
         raise cw.PathEscapeError(str(exc)) from exc
     try:
-        data = target.read_bytes()
+        return target.read_bytes()
     except FileNotFoundError:
-        data = b""
-    return cw.hash_bytes(data)
+        return b""
+
+
+def _skill_md_hash(skills_root: Path, name: str) -> str:
+    """Return the hash of the current on-disk ``SKILL.md`` bytes (empty digest if absent)."""
+    return cw.hash_bytes(_skill_md_bytes(skills_root, name))
 
 
 #: The Windows reparse-tag bit that marks a link: a symlink, a junction, a WSL symlink.
@@ -1553,11 +1558,17 @@ def _keep_stored_members(
                     continue  # the request replaces it
                 kept += info.st_size
                 if kept + sent > MAX_TOTAL_BYTES:
+                    # No byte count in the message: `sent` counts the text with its masked
+                    # values kept, and `kept` counts files the editor shows masked, so either
+                    # number would tell the length of a hidden value in one answer. Whether
+                    # the save is refused still answers yes or no, so repeated saves can find
+                    # that length; that residual is documented, not hidden (invariant 4 is
+                    # about the value, never its length).
                     raise cw.InvalidCandidateError(
                         f"skill {name!r} would be over the {MAX_TOTAL_BYTES} byte cap: the save "
-                        f"sends {sent} bytes, and the stored files it keeps hold at least "
-                        f"{kept}. Nothing was written, and no stored file was dropped to fit. "
-                        "Remove or shrink a stored file, then save again"
+                        "and the stored files it keeps are too large together. Nothing was "
+                        "written, and no stored file was dropped to fit. Remove or shrink a "
+                        "stored file, then save again"
                     )
                 _copy_stored_file(skill_dir / member, staging / member, info, member)
             else:
@@ -1786,6 +1797,223 @@ def _read_skill_file(
     return content, cw.hash_bytes(raw), exists, note
 
 
+def _not_a_stored_file(relative: str) -> cw.InvalidCandidateError:
+    """Return the refusal for a masked member whose stored entry is not a plain file."""
+    return cw.InvalidCandidateError(
+        f"{relative!r} holds the mask {cw.REDACTION_SENTINEL}, but its stored entry is a "
+        "symlink, not a regular file, too large, or unreadable, so no stored value can be "
+        "kept. Type the real values"
+    )
+
+
+def _read_stored_member(skills_root: Path, name: str, relative: str) -> str:
+    """Return the stored text of one skill member, or ``""`` when nothing is stored there.
+
+    Read outside the save's lock, so it must never block or follow a link: the entry is
+    checked with ``lstat`` first (a FIFO, a socket, a device or a symlink is refused before
+    any open), then opened with :data:`_OPEN_FLAGS` (``O_NOFOLLOW`` and ``O_NONBLOCK``, as
+    the save's own stored reads), and the open descriptor must be that same regular file.
+    The read is bounded by :data:`MAX_FILE_BYTES`. Anything else is refused (→ 422). Bytes
+    that are not UTF-8 read as ``""``: no mask can bind to them, so the restore then
+    refuses the mask.
+
+    A directory on the way to the member must not be a symlink either: its parent must
+    resolve to exactly the skill directory joined with the member's own parent parts, so a
+    ``sub -> ../other-skill`` link inside the skill cannot lend another file's text. A swap
+    of such a directory between this check and the open remains (closing it needs a
+    descriptor walk); the save's own walk refuses any symlink in the skill under its lock.
+    """
+    try:
+        fw.resolve_contained_path(skills_root, f"{name}/{relative}")  # containment only
+    except fw.PathEscapeError as exc:
+        raise cw.PathEscapeError(str(exc)) from exc
+    skill_dir = (skills_root / name).resolve()
+    parent = Path(relative).parent
+    # normcase: on Windows `resolve()` returns the on-disk case, and a case variant of a
+    # stored directory is the same directory there, not a link.
+    real_parent = os.path.normcase((skill_dir / parent).resolve())
+    if real_parent != os.path.normcase(skill_dir.joinpath(*parent.parts)):
+        raise _not_a_stored_file(relative)  # a symlinked directory inside the skill
+    # The UNRESOLVED path: resolving it would follow a symlink at the member itself.
+    path = skills_root / name / relative
+    try:
+        seen = os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return ""  # nothing is stored there, so no mask can be bound to it
+    except OSError as exc:
+        raise _not_a_stored_file(relative) from exc
+    if not stat.S_ISREG(seen.st_mode) or seen.st_size > MAX_FILE_BYTES:
+        raise _not_a_stored_file(relative)
+    try:
+        fd = os.open(path, _OPEN_FLAGS)
+    except OSError as exc:
+        raise _not_a_stored_file(relative) from exc
+    try:
+        fh = os.fdopen(fd, "rb")
+    except BaseException:  # pragma: no cover - fdopen of a fresh descriptor does not fail
+        os.close(fd)  # os.fdopen did not take the descriptor, so close it here
+        raise
+    with fh:
+        info = os.fstat(fh.fileno())
+        if not stat.S_ISREG(info.st_mode) or not _same_object(info, seen):
+            raise _not_a_stored_file(relative)  # swapped since the lstat
+        data = fh.read(MAX_FILE_BYTES + 1)
+    if len(data) > MAX_FILE_BYTES:  # pragma: no cover - a file that grew since the lstat
+        raise _not_a_stored_file(relative)
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return ""
+
+
+#: The frontmatter fields whose masked values go to a destination named on another line.
+_DESTINATION_FIELDS = ("hooks", "mcpServers")
+
+
+def _header_lines(text: str) -> range:
+    """Return the 0-based lines of ``text`` that hold its frontmatter header (none if no fence).
+
+    Counted as :func:`~clauster.config_write.restore_masked_lines` counts lines, and after a
+    byte order mark, which Claude Code drops before it reads the fence.
+    """
+    core = text.removeprefix("\ufeff")
+    match = _FRONTMATTER_RE.match(core)
+    if match is None:
+        return range(0)
+    # Line 0 is the opening `---` fence; the header ends where group 1 ends.
+    return range(1, len(core[: match.end(1)].splitlines()))
+
+
+def _refuse_masks_with_changed_destinations(restored: str, stored: str, lines: set[int]) -> None:
+    """Refuse (→ 422) a mask kept in the frontmatter when ``hooks`` or ``mcpServers`` changed.
+
+    A hook or a server sends its masked header or URL token to the url beside it. A restored
+    line is bound only by its own text, so an edit to that url on another line (or through
+    an alias or a merge key) would otherwise send the stored credential somewhere new. So
+    when any frontmatter line is restored, both fields must load exactly as stored. This is
+    stricter than the Hooks tab, and it needs no knowledge of where a field's text sits.
+    """
+    if not lines.intersection(_header_lines(restored)):
+        return
+    try:
+        now = parse_frontmatter(restored.removeprefix("\ufeff"))[0]
+        then = parse_frontmatter(stored.removeprefix("\ufeff"))[0]
+        unchanged = all(cw.same_yaml_value(now.get(f), then.get(f)) for f in _DESTINATION_FIELDS)
+    except cw.InvalidCandidateError:
+        unchanged = False  # a header that cannot be compared is not unchanged
+    if not unchanged:
+        raise cw.InvalidCandidateError(
+            f"{SKILL_FILENAME} frontmatter keeps a masked value {cw.REDACTION_SENTINEL}, but "
+            "its 'hooks' or 'mcpServers' changed, so the stored value is not put back. "
+            "Retype the masked values in the frontmatter"
+        )
+
+
+def _keep_masked_lines(
+    skills_root: Path, name: str, files: dict[str, Any], *, skill_md: str
+) -> dict[str, Any]:
+    """Return ``files`` with each mask from the read view bound back to its stored line.
+
+    The read path masks every member line by line (:func:`~clauster.config_write.
+    redact_secret_lines`), body and scripts included, so the write path restores line by
+    line too (:func:`~clauster.config_write.restore_masked_lines`), against the stored
+    member at the same path. ``skill_md`` is the stored ``SKILL.md`` text, from the same
+    read the stale-hash guard checked, so its masks bind to the bytes the operator loaded.
+    A mask with no stored line to bind to is refused. A member without a mask is returned
+    as sent.
+
+    Memory stays bounded while it restores: two keys for one member (``d/x.sh`` and
+    ``./d/x.sh``) are refused before any member read, so one stored file is restored at
+    most once, and each restored member and the running total must stay under their caps
+    (checked before the restored ``SKILL.md`` is parsed again). The refusals name the cap,
+    never a size, so one refusal does not tell the length of the stored value a mask
+    hides. Repeated saves near a cap can still find that length (a documented residual).
+    """
+    if not any(cw.REDACTION_SENTINEL in content for content in files.values()):
+        return files
+    # Before any member read: each alias key would build its own restored copy.
+    named: set[tuple[str, ...]] = set()
+    for relative in files:
+        parts = Path(relative).parts
+        if parts in named:
+            # The same wording as `_build`'s refusal of a key that reaches a saved file.
+            raise cw.InvalidCandidateError(
+                f"{relative!r} names a file that is already in the save: another key "
+                "names it too. Nothing was written. Send each file once, under its stored "
+                "name"
+            )
+        named.add(parts)
+    out = dict(files)
+    total = sum(len(content.encode("utf-8")) for content in files.values())
+    for relative, content in files.items():
+        if cw.REDACTION_SENTINEL not in content:
+            continue
+        if relative == SKILL_FILENAME:
+            stored = skill_md
+        else:
+            stored = _read_stored_member(skills_root, name, relative)
+        restored, lines = cw.restore_masked_lines(content, stored, what=relative)
+        size = len(restored.encode("utf-8"))
+        cap = MAX_SKILL_MD_BYTES if relative == SKILL_FILENAME else MAX_FILE_BYTES
+        total += size - len(content.encode("utf-8"))
+        if size > cap or total > MAX_TOTAL_BYTES:
+            raise cw.InvalidCandidateError(
+                f"{relative!r} with its masked values kept would put the skill over its byte "
+                f"cap ({cap} bytes for this file, {MAX_TOTAL_BYTES} for the skill directory)"
+            )
+        if relative == SKILL_FILENAME:  # after the cap: this parses both texts
+            _refuse_masks_with_changed_destinations(restored, stored, lines)
+        out[relative] = restored
+    return out
+
+
+def _neutralized(sent: str) -> str:
+    """Return ``sent`` with each mask replaced by a plain stand-in no check refuses by itself.
+
+    A masked credential URL (``********@host``, the whole ``scheme://user@`` part masked)
+    becomes ``http://x@host``, the same length, so a URL check still sees a URL and its
+    columns stay exact. Every other mask becomes a distinct short token (``x0``, ``x1``,
+    ...), so two masked keys do not collide as one repeated key. A token is never longer
+    than the 8-character mask below ten million masks, so the text never grows.
+    """
+    text = sent.replace(f"{cw.REDACTION_SENTINEL}@", "http://x@")
+    counter = itertools.count()
+    return re.sub(re.escape(cw.REDACTION_SENTINEL), lambda _m: f"x{next(counter)}", text)
+
+
+def _validate_member(relative: str, content: str, *, sent: str) -> None:
+    """Validate one member as it will be written, without leaking a kept value (→ 422).
+
+    ``content`` may hold stored text put back behind a mask, and a check's message can
+    name a size or a column, which tells the length of that hidden text. So for a member
+    whose text the restore changed, a failure reports what the SENT text gives instead
+    (the operator's own, masked text). If the sent text passes, the stored value is the
+    cause, and the refusal says so without any number.
+
+    The sent text is checked with its masks neutralized (:func:`_neutralized`): a
+    frontmatter mask (``key: ********``) is itself not valid YAML (it reads as an alias),
+    so checking it as sent would always blame the operator's unchanged text.
+    """
+
+    def _run(text: str) -> None:
+        """Run the member's own check on ``text``."""
+        if relative == SKILL_FILENAME:
+            validate_skill_md_content(text)
+        else:
+            validate_script_body(text, relative)
+
+    try:
+        _run(content)
+    except cw.InvalidCandidateError as restored_exc:
+        # Raises the operator's own error, if their text has one apart from the masks.
+        _run(_neutralized(sent))
+        raise cw.InvalidCandidateError(
+            f"{relative!r} does not pass the checks once its masked values are kept: the "
+            "stored text behind a mask is not valid here. Type the real values, or fix the "
+            "stored file on the host"
+        ) from restored_exc
+
+
 def write_skill(
     base: Path,
     name: str,
@@ -1842,18 +2070,42 @@ def write_skill(
             f"skill directory is {total} bytes, over the {MAX_TOTAL_BYTES} byte cap"
         )
 
-    validate_skill_md_content(files[SKILL_FILENAME])
-    for relative in extra_files:
-        validate_script_body(files[relative], relative)
+    # A member that still holds a mask is validated after its stored lines are put back
+    # (below): a masked frontmatter line (`key: ********`) is not even valid YAML.
+    for relative, content in files.items():
+        if cw.REDACTION_SENTINEL in content:
+            continue
+        if relative == SKILL_FILENAME:
+            validate_skill_md_content(content)
+        else:
+            validate_script_body(content, relative)
 
     skills_root = _skills_root(base)
-    current_hash = _skill_md_hash(skills_root, name)
+    # Read once: the masks below bind to the same bytes this hash checks.
+    current = _skill_md_bytes(skills_root, name)
+    current_hash = cw.hash_bytes(current)
     existed = current_hash != cw.hash_bytes(b"")
     if expected_hash is None:
         if existed:
             raise cw.StaleConfigWriteError(f"skill {name!r} already exists; a hash is required")
     elif current_hash != expected_hash:
         raise cw.StaleConfigWriteError(f"skill {name!r} changed on disk since it was loaded")
+
+    # TASK-427: the editor shows every member masked (`redact_secret_lines`), so a save can
+    # send a mask back. Put the stored line back where the mask is bound to it, or refuse;
+    # never write the literal `********` over the stored value. Then validate what will be
+    # written: a kept line comes from the file on disk, not from the checked candidate.
+    try:
+        stored_md = current.decode("utf-8")
+    except UnicodeDecodeError:
+        stored_md = ""  # nothing readable is stored, so no mask can be bound to it
+    # The cap above measured the masked text; a kept line can be longer than its mask, so
+    # `_keep_masked_lines` checks the restored sizes against the caps as it goes.
+    sent_files = files
+    files = _keep_masked_lines(skills_root, name, files, skill_md=stored_md)
+    for relative, content in files.items():
+        if cw.REDACTION_SENTINEL in sent_files[relative]:  # the others were checked above
+            _validate_member(relative, content, sent=sent_files[relative])
 
     def _build(staging: Path) -> None:
         """Copy the stored members the request does not name, then write the named ones."""

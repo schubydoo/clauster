@@ -605,6 +605,105 @@ def redact_secret_lines(text: str) -> str:
     return "".join(out)
 
 
+def same_yaml_value(a: Any, b: Any) -> bool:
+    """Whether two loaded YAML values are equal with the same type at every level.
+
+    Python's ``==`` calls ``1``, ``1.0`` and ``True`` equal, and a list equal to nothing
+    but a list, so a check that a rewritten header still loads to what it must load to
+    uses this instead. Iterative over the containers ``yaml.safe_load`` builds.
+    """
+    stack = [(a, b)]
+    while stack:
+        x, y = stack.pop()
+        if type(x) is not type(y):
+            return False
+        if isinstance(x, dict):
+            if x.keys() != y.keys():
+                return False
+            stack.extend((v, y[k]) for k, v in x.items())
+        elif isinstance(x, list | tuple):
+            if len(x) != len(y):
+                return False
+            stack.extend(zip(x, y, strict=True))
+        elif isinstance(x, float) and x != x:  # NaN is not equal to itself
+            if y == y:
+                return False
+        elif x != y:
+            return False
+    return True
+
+
+def _split_eol(line: str) -> tuple[str, str]:
+    r"""Split ``line`` into its body and the ``\r\n`` or ``\n`` ending it ends with."""
+    if line.endswith("\r\n"):
+        return line[:-2], "\r\n"
+    if line.endswith("\n"):
+        return line[:-1], "\n"
+    return line, ""
+
+
+def restore_masked_lines(incoming: str, stored: str, *, what: str) -> tuple[str, set[int]]:
+    """Put the stored text back into each line of ``incoming`` that still holds a mask.
+
+    The write-side twin of :func:`redact_secret_lines`. A line that holds
+    :data:`REDACTION_SENTINEL` keeps a stored line only when the masked view of that stored
+    line is EXACTLY the incoming line. Every unmasked character of the line (a host, a path,
+    the key) must therefore be unchanged, and the text is compared, never parsed. The k-th
+    incoming line with a view takes the k-th stored line with it, so each stored line is
+    kept at most once: more masked lines than stored ones are refused, and the restored
+    text is never longer than the sent text plus the stored text (no request can multiply
+    one long stored line). When stored lines with different text share one view (two
+    ``token: ********`` lines), both sides must also hold the same number of them, since a
+    line added or removed among them would shift the pairing. Anything else is refused
+    (→ 422), because a mask that
+    cannot be bound to its stored value would otherwise be written as the literal
+    ``********`` over it. The cost is availability only: a new line whose text really is
+    ``********`` cannot be saved until it is changed, and the message says so.
+
+    Returns the restored text and the 0-based indexes of the lines that were restored. The
+    restored line keeps the incoming line ending. The message names a line number, never a
+    value (invariant 4).
+    """
+    by_view: dict[str, list[str]] = {}
+    for line in stored.splitlines(keepends=True):
+        body, _eol = _split_eol(line)
+        view = redact_secret_lines(body)
+        if REDACTION_SENTINEL in view:
+            by_view.setdefault(view, []).append(body)
+    lines = incoming.splitlines(keepends=True)
+    wanted: dict[str, int] = {}
+    for line in lines:
+        body, _eol = _split_eol(line)
+        if REDACTION_SENTINEL in body:
+            wanted[body] = wanted.get(body, 0) + 1
+    taken: dict[str, int] = {}
+    restored: set[int] = set()
+    out: list[str] = []
+    for index, line in enumerate(lines):
+        body, eol = _split_eol(line)
+        if REDACTION_SENTINEL not in body:
+            out.append(line)
+            continue
+        held = by_view.get(body, [])
+        if not held:
+            raise InvalidCandidateError(
+                f"{what} line {index + 1} holds the mask {REDACTION_SENTINEL}, but no stored "
+                "line matches it, so there is no stored value to keep. Type the real value, "
+                "or change the text if it really is that"
+            )
+        if wanted[body] > len(held) or (len(set(held)) > 1 and wanted[body] != len(held)):
+            raise InvalidCandidateError(
+                f"{what} line {index + 1} holds the mask {REDACTION_SENTINEL}, but the stored "
+                "lines that look like it were not sent back one for one (a line was added, "
+                "copied or removed among them). Retype the masked values on those lines"
+            )
+        k = taken.get(body, 0)
+        taken[body] = k + 1
+        out.append(held[k] + eol)
+        restored.add(index)
+    return "".join(out), restored
+
+
 #: Request-scoped sink for the redacted argv of the ``claude …`` commands a config-write
 #: spawns (#958 Part 6). A route sets this to a fresh list around the write; each CLI
 #: ``_run`` appends its ``[verb, *redacted-args]`` via :func:`record_cli_argv`, so the audit
