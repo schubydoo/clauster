@@ -607,6 +607,167 @@ def test_child_env_returns_independent_copy(monkeypatch):
     assert "MUTATED" not in os.environ  # mutating the child env never touches os.environ
 
 
+# --- the standalone binary's PyInstaller runtime env (issue 1708) ---
+
+_MEI = "/tmp/_MEI448abc"
+_PYI_STATE = {
+    "_PYI_ARCHIVE_FILE": "/usr/local/bin/clauster",
+    "_PYI_APPLICATION_HOME_DIR": _MEI,
+    "_PYI_PARENT_PROCESS_LEVEL": "1",
+    "_PYI_LINUX_PROCESS_NAME": "clauster",
+}
+
+
+def _as_frozen(monkeypatch, *, platform="linux", ld=None, ld_orig=None):
+    """Act as the one-file child with the env its bootloader set; ``None`` unsets a var."""
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(procutil.sys, "platform", platform)
+    for name, value in _PYI_STATE.items():
+        monkeypatch.setenv(name, value)
+    for name, value in (("LD_LIBRARY_PATH", ld), ("LD_LIBRARY_PATH_ORIG", ld_orig)):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+
+
+def _as_source(monkeypatch):
+    """Act as a source / PyPI / Docker install: no ``sys.frozen``."""
+    monkeypatch.delattr(sys, "frozen", raising=False)
+
+
+def test_child_env_frozen_strips_pyinstaller_state(monkeypatch):
+    _as_frozen(monkeypatch, ld=_MEI)
+    monkeypatch.setenv("PYINSTALLER_RESET_ENVIRONMENT", "1")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    env = procutil.child_env()
+    assert not [name for name in env if name.startswith("_PYI_")]
+    assert "PYINSTALLER_RESET_ENVIRONMENT" not in env
+    assert env["PATH"] == "/usr/bin"  # an ordinary variable still passes through
+
+
+def test_child_env_frozen_restores_library_path_from_orig(monkeypatch):
+    _as_frozen(monkeypatch, ld=f"{_MEI}:/opt/lib", ld_orig="/opt/lib")
+    env = procutil.child_env()
+    assert env["LD_LIBRARY_PATH"] == "/opt/lib"
+    assert "LD_LIBRARY_PATH_ORIG" not in env
+
+
+def test_child_env_frozen_drops_library_path_the_bootloader_added(monkeypatch):
+    # No *_ORIG means the user had no LD_LIBRARY_PATH: the whole value is the bundle's.
+    _as_frozen(monkeypatch, ld=_MEI)
+    env = procutil.child_env()
+    assert "LD_LIBRARY_PATH" not in env
+    assert "LD_LIBRARY_PATH_ORIG" not in env
+
+
+def test_child_env_frozen_restores_libpath_on_aix(monkeypatch):
+    # AIX rewrites LIBPATH instead; an LD_LIBRARY_PATH there is the user's own.
+    _as_frozen(monkeypatch, platform="aix7", ld="/user/ld", ld_orig="/stale")
+    monkeypatch.setenv("LIBPATH", f"{_MEI}:/usr/lib")
+    monkeypatch.setenv("LIBPATH_ORIG", "/usr/lib")
+    env = procutil.child_env()
+    assert env["LIBPATH"] == "/usr/lib"
+    assert "LIBPATH_ORIG" not in env
+    assert env["LD_LIBRARY_PATH"] == "/user/ld"
+    assert env["LD_LIBRARY_PATH_ORIG"] == "/stale"
+
+
+@pytest.mark.parametrize("platform", ["darwin", "win32"])
+def test_child_env_frozen_keeps_library_path_where_bootloader_never_sets_it(monkeypatch, platform):
+    # macOS rewrites the bundled binaries' load paths and Windows uses SetDllDirectoryW, so
+    # an LD_LIBRARY_PATH there is the user's own and must reach the child unchanged.
+    _as_frozen(monkeypatch, platform=platform, ld="/user/lib", ld_orig="/user/orig")
+    env = procutil.child_env()
+    assert env["LD_LIBRARY_PATH"] == "/user/lib"
+    assert env["LD_LIBRARY_PATH_ORIG"] == "/user/orig"
+    assert not [name for name in env if name.startswith("_PYI_")]  # stripped on every OS
+
+
+def test_child_env_source_install_passes_library_path_through(monkeypatch):
+    _as_source(monkeypatch)
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/user/lib")
+    monkeypatch.setenv("LD_LIBRARY_PATH_ORIG", "/user/orig")
+    monkeypatch.setenv("_PYI_SOMETHING", "not-ours-to-judge")
+    env = procutil.child_env()
+    assert env["LD_LIBRARY_PATH"] == "/user/lib"
+    assert env["LD_LIBRARY_PATH_ORIG"] == "/user/orig"
+    assert env["_PYI_SOMETHING"] == "not-ours-to-judge"
+
+
+def test_child_env_frozen_operator_library_path_wins(monkeypatch):
+    # claude.env reaches child_env as `extra`, applied AFTER the restore.
+    _as_frozen(monkeypatch, ld=f"{_MEI}:/opt/lib", ld_orig="/opt/lib")
+    env = procutil.child_env({"LD_LIBRARY_PATH": "/operator/lib"})
+    assert env["LD_LIBRARY_PATH"] == "/operator/lib"
+
+
+def test_child_env_frozen_still_scrubs_secrets(monkeypatch):
+    _as_frozen(monkeypatch, ld=_MEI)
+    monkeypatch.setenv("CLAUSTER_SESSION_SECRET", "must-not-leak")
+    env = procutil.child_env({"CLAUSTER_AUTH_PASSWORD_HASH": "nor-this"})
+    assert "CLAUSTER_SESSION_SECRET" not in env
+    assert "CLAUSTER_AUTH_PASSWORD_HASH" not in env
+
+
+def test_keeper_launch_env_is_child_env_on_a_source_install(monkeypatch):
+    _as_source(monkeypatch)
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/user/lib")
+    monkeypatch.setenv("CLAUSTER_SESSION_SECRET", "must-not-leak")
+    assert procutil.keeper_launch_env({"FOO": "bar"}) == procutil.child_env({"FOO": "bar"})
+
+
+def _bridge_env_from_keeper(monkeypatch, keeper_env):
+    """Replay the keeper's own spawn: its os.environ is ``keeper_env``, it calls child_env."""
+    monkeypatch.setattr(os, "environ", dict(keeper_env))
+    return procutil.child_env()
+
+
+@pytest.mark.parametrize(
+    ("ld", "ld_orig", "extra", "keeper_orig", "bridge_ld"),
+    [
+        (f"{_MEI}:/opt/lib", "/opt/lib", None, "/opt/lib", "/opt/lib"),
+        (_MEI, None, None, None, None),
+        (f"{_MEI}:/opt/lib", "/opt/lib", {"LD_LIBRARY_PATH": "/op/lib"}, "/op/lib", "/op/lib"),
+        (_MEI, None, {"LD_LIBRARY_PATH": "/op/lib"}, "/op/lib", "/op/lib"),
+    ],
+    ids=["user-path", "no-user-path", "operator-over-user", "operator-only"],
+)
+def test_keeper_launch_env_keeps_the_runtime_and_hands_the_bridge_the_clean_path(
+    monkeypatch, ld, ld_orig, extra, keeper_orig, bridge_ld
+):
+    # The keeper stays a sub-process of THIS bundle (same _PYI_* state, bundle-first library
+    # path), and *_ORIG carries the value its bridge must get back once it calls child_env.
+    _as_frozen(monkeypatch, ld=ld, ld_orig=ld_orig)
+    monkeypatch.setenv("CLAUSTER_SESSION_SECRET", "must-not-leak")
+    keeper = procutil.keeper_launch_env(extra)
+    assert {k: v for k, v in keeper.items() if k.startswith("_PYI_")} == _PYI_STATE
+    assert keeper["LD_LIBRARY_PATH"] == ld
+    assert keeper.get("LD_LIBRARY_PATH_ORIG") == keeper_orig
+    assert "CLAUSTER_SESSION_SECRET" not in keeper
+
+    bridge = _bridge_env_from_keeper(monkeypatch, keeper)
+    assert bridge.get("LD_LIBRARY_PATH") == bridge_ld
+    assert "LD_LIBRARY_PATH_ORIG" not in bridge
+    assert not [name for name in bridge if name.startswith("_PYI_")]
+
+
+def test_keeper_launch_env_without_any_library_path_adds_none(monkeypatch):
+    # Defensive: a one-file child always has one, but its absence must not invent one.
+    _as_frozen(monkeypatch, ld=None)
+    keeper = procutil.keeper_launch_env(None)
+    assert "LD_LIBRARY_PATH" not in keeper
+    assert "LD_LIBRARY_PATH_ORIG" not in keeper
+
+
+def test_keeper_launch_env_on_macos_only_keeps_pyi_state(monkeypatch):
+    _as_frozen(monkeypatch, platform="darwin", ld="/user/lib")
+    keeper = procutil.keeper_launch_env(None)
+    assert {k: v for k, v in keeper.items() if k.startswith("_PYI_")} == _PYI_STATE
+    assert keeper["LD_LIBRARY_PATH"] == "/user/lib"
+    assert "LD_LIBRARY_PATH_ORIG" not in keeper
+
+
 def test_is_secret_env_name_matches_known_and_shaped():
     assert procutil.is_secret_env_name("CLAUSTER_SESSION_SECRET") is True
     assert procutil.is_secret_env_name("CLAUSTER_AUTH_PASSWORD_HASH") is True
@@ -735,6 +896,27 @@ def test_resolve_nvm_default_node_bin_dir_resolves_node(monkeypatch, tmp_path):
     # NVM_DIR travels via the subprocess env, never interpolated into the script text.
     assert captured["env"]["NVM_DIR"] == str(tmp_path / ".nvm")
     assert captured["cmd"][0] == "/bin/bash"
+
+
+def test_resolve_nvm_default_node_bin_dir_runs_bash_with_the_child_env(monkeypatch, tmp_path):
+    # The nvm lookup is a spawn like any other: it goes through child_env, so the frozen
+    # binary's runtime state and Clauster's secrets never reach bash or nvm.sh (issue 1708).
+    _as_frozen(monkeypatch, ld=_MEI)
+    monkeypatch.setattr("shutil.which", lambda name: "/bin/bash")
+    monkeypatch.setenv("CLAUSTER_SESSION_SECRET", "must-not-leak")
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    procutil.resolve_nvm_default_node_bin_dir(nvm_dir=str(tmp_path / ".nvm"))
+    env = captured["env"]
+    assert env["NVM_DIR"] == str(tmp_path / ".nvm")
+    assert "CLAUSTER_SESSION_SECRET" not in env
+    assert "LD_LIBRARY_PATH" not in env
+    assert not [name for name in env if name.startswith("_PYI_")]
 
 
 def test_resolve_nvm_default_node_bin_dir_none_when_no_default_alias(monkeypatch):

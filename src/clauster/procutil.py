@@ -28,6 +28,8 @@ from pathlib import Path
 
 import psutil
 
+from . import deps
+
 _log = logging.getLogger("clauster.procutil")
 
 # The token sequence that identifies a managed bridge in a process cmdline.
@@ -1115,6 +1117,55 @@ def is_secret_env_name(name: str) -> bool:
     return name.startswith("CLAUSTER_") and any(tok in name for tok in _SECRET_ENV_TOKENS)
 
 
+# The standalone binary is a PyInstaller one-file build. Its bootloader unpacks the bundle
+# to a temporary ``_MEI…`` directory and, before Python starts, writes its own state into
+# the environment (verified against the 6.22.3 bootloader source, ``pyi_main.c`` and
+# ``pyi_utils_posix.c``): the ``_PYI_*`` variables, and — on Linux and the other POSIX
+# systems except macOS — the unpack directory prepended to ``LD_LIBRARY_PATH`` (``LIBPATH``
+# on AIX), with the user's own value saved in ``*_ORIG`` when there was one. A child that
+# inherits this loads the bundle's ``libstdc++`` instead of the system one, and a re-run of
+# the binary reads the ``_PYI_*`` state as "I am a sub-process of that bundle" and tries to
+# load Python from an unpack directory that may already be deleted (issue 1708).
+_PYI_ENV_PREFIX = "_PYI_"
+_PYI_RESET_ENV = "PYINSTALLER_RESET_ENVIRONMENT"
+
+
+def _bundle_library_path_var() -> str | None:
+    """Return the library-path variable the frozen bootloader rewrote, or ``None``.
+
+    macOS rewrites the bundled binaries' load paths instead, and Windows calls
+    ``SetDllDirectoryW``, so neither touches the environment: an ``LD_LIBRARY_PATH``
+    there is the user's own and must pass through.
+    """
+    if sys.platform.startswith("aix"):
+        return "LIBPATH"
+    if sys.platform in ("darwin", "win32"):
+        return None
+    return "LD_LIBRARY_PATH"
+
+
+def _drop_frozen_runtime(env: dict[str, str]) -> None:
+    """Remove the PyInstaller bootloader's state from ``env`` in place.
+
+    This is the PyInstaller-documented recipe for launching a system program: drop every
+    ``_PYI_*`` variable, then restore the library path from ``*_ORIG``, or remove it when
+    there is no ``*_ORIG`` (the user had none, so the whole value is the bundle's).
+    Without ``_PYI_*`` a re-run of the binary is a fresh top-level instance — the same
+    path ``PYINSTALLER_RESET_ENVIRONMENT=1`` selects — so that flag is not needed.
+    """
+    for name in [name for name in env if name.startswith(_PYI_ENV_PREFIX)]:
+        del env[name]
+    env.pop(_PYI_RESET_ENV, None)
+    var = _bundle_library_path_var()
+    if var is None:
+        return
+    original = env.pop(f"{var}_ORIG", None)
+    if original is None:
+        env.pop(var, None)
+    else:
+        env[var] = original
+
+
 def child_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     """Return a copy of the parent environment safe to hand a spawned child.
 
@@ -1125,13 +1176,51 @@ def child_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     AFTER scrubbing and is itself scrubbed, so the chokepoint never emits a
     Clauster secret — not even one a caller passes back in via ``extra``.
 
+    In the standalone binary it also removes the PyInstaller bootloader's runtime
+    state (:func:`_drop_frozen_runtime`), so a child sees the user's environment,
+    not the bundle's. That happens BEFORE the ``extra`` overlay, so an operator's
+    ``claude.env`` ``LD_LIBRARY_PATH`` still wins. A source, PyPI or Docker install
+    is not frozen and passes ``LD_LIBRARY_PATH`` through unchanged.
+
     Scope is deliberately Clauster-only — a spawned ``claude`` legitimately needs
     e.g. ``ANTHROPIC_API_KEY``, so this is not a general secret firewall; it
     removes only Clauster's own credentials, which no child has any reason to read.
     """
     env = {k: v for k, v in os.environ.items() if not is_secret_env_name(k)}
+    if deps.is_frozen():
+        _drop_frozen_runtime(env)
     if extra:
         env.update({k: v for k, v in extra.items() if not is_secret_env_name(k)})
+    return env
+
+
+def keeper_launch_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Return the environment for launching the PTY keeper (:data:`KEEPER_SUBCOMMAND`).
+
+    Off the standalone binary this is exactly :func:`child_env`. In the binary the
+    keeper is ``<exe> __pty-keeper__``, and it keeps THIS bundle's PyInstaller state so
+    its bootloader runs it as a sub-process of the bundle: one process, whose pid is the
+    one the runner records and the keeper writes to its sidecar. A fresh top-level
+    instance would be two processes (the bootloader that unpacks a second bundle, and
+    the Python child), and the runner's pid bookkeeping assumes one.
+
+    The keeper's own spawn of the bridge goes through :func:`child_env`, which restores
+    the library path from ``*_ORIG``. So ``*_ORIG`` here carries the value the BRIDGE
+    must get — the user's own, or the operator's ``claude.env`` override — while the
+    keeper itself runs with the bundle-first library path it inherited.
+    """
+    env = child_env(extra)
+    if not deps.is_frozen():
+        return env
+    env.update({k: v for k, v in os.environ.items() if k.startswith(_PYI_ENV_PREFIX)})
+    var = _bundle_library_path_var()
+    if var is None:
+        return env
+    for_bridge = env.pop(var, None)
+    if var in os.environ:
+        env[var] = os.environ[var]
+    if for_bridge is not None:
+        env[f"{var}_ORIG"] = for_bridge
     return env
 
 
@@ -1217,7 +1306,7 @@ def resolve_nvm_default_node_bin_dir(
     try:
         result = subprocess.run(
             [bash, "-c", script],
-            env={**os.environ, "NVM_DIR": nvm_home},
+            env=child_env({"NVM_DIR": nvm_home}),
             capture_output=True,
             text=True,
             timeout=timeout,

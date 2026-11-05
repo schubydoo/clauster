@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from clauster import procutil
@@ -77,6 +78,74 @@ def test_popen_keeper_appends_path_and_overlays_env(runner_config, monkeypatch, 
     local_bin = os.path.expanduser("~/.local/bin")  # USERPROFILE-resolved on Windows
     assert env["PATH"] == os.pathsep.join(["/usr/bin", local_bin])
     assert env["FOO"] == "bar"
+
+
+_MEI = "/tmp/_MEI448run"
+
+
+def _frozen_linux_bundle(monkeypatch, *, user_ld: str | None) -> None:
+    """Act as the standalone binary's one-file child, with the env its bootloader set."""
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    # Pin the Linux library-path rule without flipping sys.platform for the spawn code.
+    monkeypatch.setattr(procutil, "_bundle_library_path_var", lambda: "LD_LIBRARY_PATH")
+    monkeypatch.setenv("_PYI_ARCHIVE_FILE", "/usr/local/bin/clauster")
+    monkeypatch.setenv("_PYI_APPLICATION_HOME_DIR", _MEI)
+    monkeypatch.setenv("_PYI_PARENT_PROCESS_LEVEL", "1")
+    if user_ld is None:
+        monkeypatch.setenv("LD_LIBRARY_PATH", _MEI)
+        monkeypatch.delenv("LD_LIBRARY_PATH_ORIG", raising=False)
+    else:
+        monkeypatch.setenv("LD_LIBRARY_PATH", f"{_MEI}:{user_ld}")
+        monkeypatch.setenv("LD_LIBRARY_PATH_ORIG", user_ld)
+
+
+def test_frozen_standard_bridge_gets_the_users_env_not_the_bundles(
+    runner_config, monkeypatch, tmp_path
+):
+    # Issue 1708: the standard bridge, and every session and tool under it, must see the
+    # user's own LD_LIBRARY_PATH and no PyInstaller state.
+    _frozen_linux_bundle(monkeypatch, user_ld="/opt/lib")
+    env = _capture_env("popen", _runner_with_env(runner_config), monkeypatch, tmp_path)
+    assert env is not None
+    assert env["LD_LIBRARY_PATH"] == "/opt/lib"
+    assert "LD_LIBRARY_PATH_ORIG" not in env
+    assert not [name for name in env if name.startswith("_PYI_")]
+
+
+def test_frozen_standard_bridge_drops_a_bundle_only_library_path(
+    runner_config, monkeypatch, tmp_path
+):
+    _frozen_linux_bundle(monkeypatch, user_ld=None)
+    env = _capture_env("popen", _runner_with_env(runner_config), monkeypatch, tmp_path)
+    assert env is not None
+    assert "LD_LIBRARY_PATH" not in env
+
+
+def test_frozen_operator_library_path_reaches_both_bridge_kinds(
+    runner_config, monkeypatch, tmp_path
+):
+    # claude.env wins on both paths: directly for the standard bridge, and via the
+    # keeper's *_ORIG (what its own child_env restores) for the pty bridge.
+    _frozen_linux_bundle(monkeypatch, user_ld="/opt/lib")
+    runner = _runner_with_env(runner_config, env={"LD_LIBRARY_PATH": "/operator/lib"})
+    assert _capture_env("popen", runner, monkeypatch, tmp_path)["LD_LIBRARY_PATH"] == (
+        "/operator/lib"
+    )
+    keeper = _capture_env("keeper", runner, monkeypatch, tmp_path)
+    assert keeper["LD_LIBRARY_PATH_ORIG"] == "/operator/lib"
+
+
+def test_frozen_keeper_launch_stays_inside_this_bundle(runner_config, monkeypatch, tmp_path):
+    # The keeper is `<exe> __pty-keeper__`: it keeps this bundle's runtime so it runs as one
+    # process whose pid is the one the runner records; its OWN child_env cleans the bridge.
+    _frozen_linux_bundle(monkeypatch, user_ld="/opt/lib")
+    monkeypatch.setenv("CLAUSTER_SESSION_SECRET", "must-not-leak")
+    env = _capture_env("keeper", _runner_with_env(runner_config), monkeypatch, tmp_path)
+    assert env is not None
+    assert env["_PYI_APPLICATION_HOME_DIR"] == _MEI
+    assert env["LD_LIBRARY_PATH"] == f"{_MEI}:/opt/lib"
+    assert env["LD_LIBRARY_PATH_ORIG"] == "/opt/lib"
+    assert "CLAUSTER_SESSION_SECRET" not in env
 
 
 def test_bridge_env_drops_secret_named_config_env(runner_config, monkeypatch, tmp_path):

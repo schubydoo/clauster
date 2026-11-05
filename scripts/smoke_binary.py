@@ -15,6 +15,7 @@ Cross-OS, standard library only. Usage::
 from __future__ import annotations
 
 import http.client
+import json
 import os
 import socket
 import subprocess
@@ -147,8 +148,154 @@ def _check_boot(binary: Path) -> None:
                 proc.wait(timeout=5)
 
 
+# An LD_LIBRARY_PATH the user "had" before starting the binary. A spawned claude must get
+# exactly this back: not the binary's unpack dir prepended, and not dropped. The directory
+# does not exist, which is harmless on a library search path.
+_USER_LIB = os.path.join(os.sep, "smoke-1708-user-lib")
+
+
+def _write_config(tmp: Path, port: int) -> Path:
+    """Write a throwaway loopback config whose ``claude`` is the env-dumping fake."""
+    cfg = tmp / "clauster.yml"
+    cfg.write_text(
+        f"host: 127.0.0.1\n"
+        f"port: {port}\n"
+        f"projects_root: {tmp / 'projects'}\n"
+        f"state_dir: {tmp / 'state'}\n"
+        f"claude:\n  binary: {FAKE_CLAUDE}\n",
+        encoding="utf-8",
+    )
+    return cfg
+
+
+def _post_json(port: int, path: str, body: dict) -> str:
+    """POST ``body`` as JSON to the local server; return the status and any error detail."""
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    try:
+        conn.request(
+            "POST",
+            path,
+            body=json.dumps(body),
+            headers={"Content-Type": "application/json", "Origin": f"http://127.0.0.1:{port}"},
+        )
+        response = conn.getresponse()
+        payload = response.read().decode("utf-8", "replace")
+        return str(response.status) + ("" if response.status < 400 else f" {payload[:300]}")
+    finally:
+        conn.close()
+
+
+def _read_dumps(dump_dir: Path) -> list[dict]:
+    """Return every environment the fake claude recorded (one JSON file per run)."""
+    return [json.loads(p.read_text(encoding="utf-8")) for p in sorted(dump_dir.glob("env-*.json"))]
+
+
+def _assert_clean(dumps: list[dict], *, expect_ld: str | None, route: str) -> None:
+    """Fail unless every recorded child env is free of the binary's PyInstaller state."""
+    for dump in dumps:
+        env = dump["env"]
+        problems = [name for name in env if name.upper().startswith("_PYI_")]
+        if "LD_LIBRARY_PATH_ORIG" in env:
+            problems.append("LD_LIBRARY_PATH_ORIG")
+        if env.get("LD_LIBRARY_PATH") != expect_ld:
+            problems.append(f"LD_LIBRARY_PATH={env.get('LD_LIBRARY_PATH')!r}")
+        if problems:
+            raise SystemExit(
+                f"{route}: `claude {' '.join(dump['argv'])}` inherited the binary's runtime "
+                f"env (expected LD_LIBRARY_PATH={expect_ld!r}): {problems}"
+            )
+
+
+def _wait_for_argv(dump_dir: Path, wanted: set[str], timeout: float = 45.0) -> list[dict]:
+    """Wait until the fake claude has run once with each ``argv[0]`` in ``wanted``."""
+    deadline = time.monotonic() + timeout
+    while True:
+        dumps = _read_dumps(dump_dir)
+        seen = {d["argv"][0] for d in dumps if d["argv"]}
+        if wanted <= seen:
+            return dumps
+        if time.monotonic() > deadline:
+            raise SystemExit(
+                f"fake claude never ran as {sorted(wanted - seen)} (saw {sorted(seen)})"
+            )
+        time.sleep(0.3)
+
+
+def _check_child_env(binary: Path) -> None:
+    """Assert the BUILT binary hands every spawned claude a clean environment (issue 1708).
+
+    The PyInstaller bootloader prepends its temporary unpack dir to ``LD_LIBRARY_PATH``
+    and sets ``_PYI_*`` state before Python starts; a child that inherits them loads the
+    bundle's libraries, and a re-run of the binary from it can fail to start. The fake
+    claude dumps its env on every run. This boots the binary, starts a standard bridge
+    and (POSIX) a pty bridge — the pty one is spawned by the ``__pty-keeper__``
+    re-invocation, so the keeper's own spawn path is covered — then runs ``doctor``
+    without an ``LD_LIBRARY_PATH`` to cover the "remove it" case.
+    """
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+        tmp = Path(td)
+        home = tmp / "home"
+        dumps_dir = tmp / "dumps"
+        for d in (home, dumps_dir, tmp / "projects" / "std", tmp / "projects" / "ptyproj"):
+            d.mkdir(parents=True)
+        port = _free_port()
+        cfg = _write_config(tmp, port)
+        env = {
+            **os.environ,
+            "HOME": str(home),
+            "USERPROFILE": str(home),
+            "LD_LIBRARY_PATH": _USER_LIB,
+            "FAKE_CLAUDE_ENV_DUMP_DIR": str(dumps_dir),
+            # The fake bridge exits right after dumping, so nothing outlives the check.
+            "FAKE_CLAUDE_MODE": "crash",
+        }
+        env.pop("LD_LIBRARY_PATH_ORIG", None)
+        proc = subprocess.Popen(
+            [str(binary), "run", "-c", str(cfg)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+            start_new_session=(os.name != "nt"),
+        )
+        try:
+            _wait_healthy(port, proc)
+            wanted = {"--version", "remote-control"}
+            # Trust is written to the isolated HOME's ~/.claude.json, never the runner's.
+            print(f"trust projects: HTTP {_post_json(port, '/api/projects/trust-all', {})}")
+            status = _post_json(port, "/api/instances", {"project": "std"})
+            print(f"spawn standard bridge: HTTP {status}")
+            if os.name != "nt":  # the pty keeper needs a POSIX pty (ConPTY is an optional extra)
+                body = {"project": "ptyproj", "resume_mode": "pty"}
+                print(f"spawn pty bridge: HTTP {_post_json(port, '/api/instances', body)}")
+                wanted.add("--remote-control")
+            dumps = _wait_for_argv(dumps_dir, wanted)
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+        _assert_clean(dumps, expect_ld=_USER_LIB, route="run")
+        print(
+            f"child env clean with a user LD_LIBRARY_PATH: {len(dumps)} spawns, {sorted(wanted)}"
+        )
+
+        doctor_dumps = tmp / "doctor-dumps"
+        doctor_dumps.mkdir()
+        env = {**env, "FAKE_CLAUDE_ENV_DUMP_DIR": str(doctor_dumps)}
+        env.pop("LD_LIBRARY_PATH")
+        subprocess.run(
+            [str(binary), "doctor", "-c", str(cfg)], env=env, capture_output=True, timeout=120
+        )
+        dumps = _wait_for_argv(doctor_dumps, {"--version"}, timeout=5)
+        _assert_clean(dumps, expect_ld=None, route="doctor")
+        print(f"child env clean without an LD_LIBRARY_PATH: {len(dumps)} spawns")
+
+
 def main() -> int:
-    """Run the version + boot smoke checks against the binary in ``argv[1]``."""
+    """Run the version + boot + child-env smoke checks against the binary in ``argv[1]``."""
     if len(sys.argv) != 2:
         raise SystemExit("usage: smoke_binary.py <path-to-binary>")
     binary = Path(sys.argv[1]).resolve()
@@ -159,6 +306,7 @@ def main() -> int:
     _check_version(binary)
     _check_pty_keeper_routed(binary)
     _check_boot(binary)
+    _check_child_env(binary)
     print("smoke OK")
     return 0
 

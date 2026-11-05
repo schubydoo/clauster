@@ -269,7 +269,10 @@ class ClaudeConfig(BaseModel):
         description="Extra environment variables overlaid on the bridge subprocess. Applied "
         "AFTER Clauster's secret scrub, so a key matching a Clauster secret name "
         "(`CLAUSTER_*` with SECRET/PASSWORD/TOKEN/HASH) is dropped and can never "
-        "re-introduce a scrubbed credential. Applies to both standard and pty bridges.",
+        "re-introduce a scrubbed credential. Applies to both standard and pty bridges. "
+        "In the standalone binary it is also applied after Clauster removes the binary's "
+        "own runtime variables (`_PYI_*`, and its unpack directory in `LD_LIBRARY_PATH`), "
+        "so an `LD_LIBRARY_PATH` set here reaches the bridge.",
     )
 
     @model_validator(mode="before")
