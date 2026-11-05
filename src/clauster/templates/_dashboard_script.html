@@ -355,6 +355,9 @@
         session: "", turns: [], total: 0, nextCursor: null,
         error: "", trigger: null, gen: 0,
         order: "desc", q: "", queryTooShort: false,
+        // matching: the loaded page came from a q= search (drives "matching" in the
+        // position line; set per request in loadTranscriptTurnsFromStart).
+        matching: false,
         // --- live-tail (#614 Part 2): follow a running session's transcript ---
         // SINGLE-LIST design (#614 Part 2 follow-up): a live session is ONE unified,
         // tailing transcript — there is NO separate "live tail" box. `turns` is the one
@@ -3292,6 +3295,9 @@
         // the lock set — which would silently dead-button the next "Load more".
         t.error = ""; t.loading = true; t.loadingMore = false;
         t.turns = []; t.total = 0; t.nextCursor = null;
+        // Record whether THIS request filters, so the position line says "matching" for
+        // the search that was applied, not for a term still waiting on the debounce.
+        t.matching = (t.q || "").trim().length >= this.TRANSCRIPT_MIN_QUERY;
         try {
           const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(t.project) +
             "/transcripts/" + encodeURIComponent(t.session) + this._transcriptQuery(t, 0));
@@ -3337,6 +3343,8 @@
         const filtered = t.tailRaw.filter((turn) => this._liveMatch(turn));
         t.turns = t.order === "asc" ? filtered : filtered.reverse();
         t.total = filtered.length;
+        // Same rule as _liveMatch, so an ended (uncapped) list keeps "matching" honest.
+        t.matching = (t.q || "").trim().length >= this.TRANSCRIPT_MIN_QUERY;
         t.nextCursor = null;  // the live list isn't paged — it tails the whole file
       },
       // Debounced in-message search: re-fetch from the top once the term clears the
@@ -3385,9 +3393,30 @@
           if (!res.ok) { t.error = "Failed to load more turns."; return; }
           const d = await res.json();
           if (Array.isArray(d.turns)) t.turns.push(...d.turns);
+          if (typeof d.total === "number") t.total = d.total;  // keep "X of Y" on the latest count
           t.nextCursor = (d.next_cursor === undefined) ? null : d.next_cursor;
         } catch (e) { t.error = "Failed to load more turns."; }
         finally { if (t.gen === myGen) t.loadingMore = false; }
+      },
+      // Position line for the PAGED (non-live) list (backlog TASK-268): "· showing X of
+      // Y turns", with "matching" when a search filtered the page (total is the
+      // post-filter count). Empty while a page loads and for an empty result, so the
+      // polite live region announces only the settled position, and the empty states
+      // below carry the zero case.
+      transcriptPositionLabel() {
+        const t = this.transcripts;
+        if (t.loading || t.total === 0) return "";
+        return "· showing " + t.turns.length + " of " + t.total +
+          (t.matching ? " matching" : "") + (t.total === 1 ? " turn" : " turns");
+      },
+      // Load more label: how many turns the next clicks can still fetch. In newest-first
+      // order those are older turns, in oldest-first order newer ones.
+      transcriptLoadMoreLabel() {
+        const t = this.transcripts;
+        if (t.loadingMore) return "Loading…";
+        const left = Math.max(t.total - t.turns.length, 0);
+        if (left === 0) return "Load more";
+        return "Load more (" + left + (t.order === "asc" ? " newer)" : " older)");
       },
       // Return to the session list (clear the selected session, its turns, + the filters).
       backToTranscriptList() {
