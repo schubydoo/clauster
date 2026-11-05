@@ -1887,6 +1887,11 @@ again.</p>
 <td><strong>WARN</strong> if any discovered project is untrusted — advisory, recoverable from the UI (Trust &amp; start, or Trust all).</td>
 </tr>
 <tr>
+<td><code>bundle-env</code></td>
+<td>(Linux) whether a running bridge, background agent or the claustrum daemon still has an older standalone binary's runtime environment (<code>_PYI_*</code> variables, or a <code>_MEI…</code> directory in <code>LD_LIBRARY_PATH</code>). It reads <code>/proc</code> for processes of the same user only, and it names only the process and its pid, never a value.</td>
+<td><strong>WARN</strong> naming each such process: restart it (see <a href="../troubleshooting/#in-a-session-node-fails-with-glibc_238-not-found-or-clauster-cannot-load-libpython">troubleshooting</a>). <strong>WARN</strong> naming each process whose environment could not be read (another user's process, a read error, or an empty environment), because an unread process is not a clean one: <code>N clean, M could not be read: …</code>, or <code>check not completed: …</code> when none could be read. A process that exited during the check is left out. <strong>WARN</strong> <code>could not check: &lt;error type&gt;</code> if the probe itself failed. Never FAIL. On macOS and Windows the row says that it was not checked.</td>
+</tr>
+<tr>
 <td><code>version</code></td>
 <td>For a from-source checkout, whether <code>HEAD</code> is behind its last-fetched upstream.</td>
 <td><strong>WARN</strong> if behind; absent for PyPI/Docker installs.</td>

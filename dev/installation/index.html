@@ -1970,7 +1970,16 @@ directory under the system temporary directory (<code>/tmp</code> on Linux). A
 long-running service keeps those files alive by re-stamping them every hour,
 so an age-based cleanup of <code>/tmp</code> leaves them alone. If they are deleted
 another way, <a href="../operations/#healthz-liveness-and-readiness"><code>/healthz</code></a>
-answers <code>503</code> until you restart Clauster.</p>
+answers <code>503</code> until you restart Clauster.
+The unpack step also sets <code>_PYI_*</code> variables in the binary's own environment,
+and on Linux it adds the <code>_MEI…</code> directory to <code>LD_LIBRARY_PATH</code>. Clauster
+removes them, and puts back your own <code>LD_LIBRARY_PATH</code>, before it starts a
+bridge or any other program. So <code>node</code>, <code>npm</code> and <code>clauster</code> behave the same in
+a session as in your shell. On Windows the unpack step also sets a DLL search
+directory, which is not an environment variable. Clauster does not change it. A
+bridge, a pty keeper, a background agent or a claustrum daemon that an older
+release started keeps the old environment until you restart it. See
+<a href="../troubleshooting/#in-a-session-node-fails-with-glibc_238-not-found-or-clauster-cannot-load-libpython">the troubleshooting entry</a>.</p>
 </div>
 <div class="admonition note">
 <p class="admonition-title">Unsigned for the OS, on purpose</p>

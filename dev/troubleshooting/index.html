@@ -1424,6 +1424,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#in-a-session-node-fails-with-glibc_238-not-found-or-clauster-cannot-load-libpython" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        In a session, Node fails with GLIBC_2.38 not found, or clauster cannot load libpython
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -2214,6 +2225,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#in-a-session-node-fails-with-glibc_238-not-found-or-clauster-cannot-load-libpython" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        In a session, Node fails with GLIBC_2.38 not found, or clauster cannot load libpython
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -2818,12 +2840,60 @@ version:</p>
   something that is not a version, for example a bare commit SHA. Reinstall
   <code>claude</code> with the installer.</li>
 </ul>
+<h3 id="in-a-session-node-fails-with-glibc_238-not-found-or-clauster-cannot-load-libpython">In a session, Node fails with <code>GLIBC_2.38 not found</code>, or <code>clauster</code> cannot load libpython<a class="headerlink" href="#in-a-session-node-fails-with-glibc_238-not-found-or-clauster-cannot-load-libpython" title="Permanent link">&para;</a></h3>
+<p><strong>What you see:</strong> this applies to the standalone binary. On Linux, in a session
+that Clauster started, <code>node</code>, <code>npm</code> or a Node-based MCP server fails with a
+<code>GLIBC_2.38 not found</code> error for <code>libstdc++</code>. On any OS, <code>clauster</code> (or the recap
+hook) run from such a session fails to start, for example because it cannot load
+<code>libpython3.13.so.1.0</code>. On Linux, <code>clauster doctor</code> shows a <code>bundle-env</code> warning
+that names the process.</p>
+<p><strong>Most likely cause:</strong> an older Clauster release started the bridge, the
+background agent or the claustrum daemon. Older releases passed the binary's own
+runtime environment to every process they started: its <code>_MEI…</code> unpack directory
+in <code>LD_LIBRARY_PATH</code>, and the <code>_PYI_*</code> variables. The programs in the session
+then load the binary's bundled libraries, or look for an unpack directory that a
+Clauster restart already deleted. Current releases remove these variables before
+they start a process.</p>
+<p><strong>The fix:</strong> upgrade Clauster first. A process keeps the environment it started
+with, and bridges, pty keepers, background agents and the claustrum daemon all
+outlive a Clauster restart. So an upgrade alone does not change them. Restart
+each old one:</p>
+<ol>
+<li>For a standard bridge, click <strong>Stop</strong> on its dashboard card, then click
+   <strong>Resume</strong>.</li>
+<li>For an Interactive Session (pty) bridge, click <strong>Stop</strong> on its card, then
+   click <strong>Resume</strong>. Stop also ends the pty keeper that holds the bridge, and
+   Resume starts a new keeper.</li>
+<li>For a background agent, wait until it finishes its task, then click
+   <strong>Resume</strong>. If it waits for your input or a permission answer, answer it
+   first. Resume starts a new background job, with a new id, that continues the
+   conversation. If its row shows no <strong>Resume</strong>, the agent has no recorded
+   session, and you cannot resume it.
+   Do not click <strong>Stop</strong> first: Stop removes the agent from the list, and you
+   cannot resume it after that. Claude Code starts background agents from its
+   own supervisor process, which Clauster does not manage. If new agents still
+   get the warning, the likely cause is that the supervisor has the old
+   environment. End every background agent so that the supervisor can exit, then
+   start the agents again.</li>
+<li>For Direct Sessions, end each session, then stop the claustrum daemon process.
+   Its command line contains <code>-serve -socket &lt;state_dir&gt;/claustrum/daemon.sock</code>
+   (or the <code>claustrum.socket_path</code> that you configured). Then restart Clauster,
+   which starts a new daemon at startup. Every Direct Session gets its
+   environment from the daemon.</li>
+</ol>
+<p>To see if one process still has the old environment, run this on the Linux host.
+No output means that the process is clean:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>tr<span class="w"> </span><span class="s1">'\0'</span><span class="w"> </span><span class="s1">'\n'</span><span class="w"> </span>&lt;<span class="w"> </span>/proc/&lt;pid&gt;/environ<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>-E<span class="w"> </span><span class="s1">'^(LD_LIBRARY_PATH=(.*:)?[^:]*/_MEI|_PYI_)'</span>
+</code></pre></div>
+<p>Do not run this check on a pty keeper's own pid. A current keeper keeps these
+variables on purpose, and it removes them from the bridge that it starts. Check
+the bridge pid instead.</p>
 <h2 id="an-interactive-session-pty-bridge-is-wedged">An Interactive Session (pty) bridge is wedged<a class="headerlink" href="#an-interactive-session-pty-bridge-is-wedged" title="Permanent link">&para;</a></h2>
 <h3 id="the-live-log-tail-is-silent-or-frozen">The live log tail is silent or frozen<a class="headerlink" href="#the-live-log-tail-is-silent-or-frozen" title="Permanent link">&para;</a></h3>
 <p><strong>What you see:</strong> the dashboard's live log view stops updating.</p>
 <p><strong>Most likely cause:</strong> the WebSocket stream died, not the bridge. Check
 whether the on-disk log is still growing:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>tail<span class="w"> </span>-f<span class="w"> </span>~/.clauster/logs/&lt;label&gt;-*.log
+<div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a>tail<span class="w"> </span>-f<span class="w"> </span>~/.clauster/logs/&lt;label&gt;-*.log
 </code></pre></div>
 <p>If it grows, the bridge is fine — reload the dashboard to reconnect the
 stream. If it is silent too, treat it as a wedged bridge: stop and resume it
@@ -2835,9 +2905,9 @@ its keeper) still running with no project card that controls it.</p>
 survive a <code>systemctl restart</code> under the shipped unit's <code>KillMode=process</code>;
 normally Clauster reattaches to them at startup. One that was orphaned
 instead is cleaned up with:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a>clauster<span class="w"> </span>keepers<span class="w">                      </span><span class="c1"># list orphaned pty keepers (no project card)</span>
-<a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a>clauster<span class="w"> </span>keepers<span class="w"> </span>--kill<span class="w"> </span>&lt;pid&gt;<span class="w">         </span><span class="c1"># stop one by its keeper PID</span>
-<a id="__codelineno-16-3" name="__codelineno-16-3" href="#__codelineno-16-3"></a>clauster<span class="w"> </span>keepers<span class="w"> </span>--kill<span class="w"> </span>&lt;pid&gt;<span class="w"> </span>--force<span class="w"> </span><span class="c1"># stop a keeper still on a project card (recovery path)</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a>clauster<span class="w"> </span>keepers<span class="w">                      </span><span class="c1"># list orphaned pty keepers (no project card)</span>
+<a id="__codelineno-17-2" name="__codelineno-17-2" href="#__codelineno-17-2"></a>clauster<span class="w"> </span>keepers<span class="w"> </span>--kill<span class="w"> </span>&lt;pid&gt;<span class="w">         </span><span class="c1"># stop one by its keeper PID</span>
+<a id="__codelineno-17-3" name="__codelineno-17-3" href="#__codelineno-17-3"></a>clauster<span class="w"> </span>keepers<span class="w"> </span>--kill<span class="w"> </span>&lt;pid&gt;<span class="w"> </span>--force<span class="w"> </span><span class="c1"># stop a keeper still on a project card (recovery path)</span>
 </code></pre></div>
 <p><strong>Mechanism:</strong> <a href="../reference/cli/#clauster-keepers-stop-an-orphaned-pty-keeper"><code>clauster keepers</code></a>
 · <a href="../operations/#restart">the <code>KillMode</code> / restart caveat</a>.</p>
@@ -2886,7 +2956,7 @@ bridge's log, and Clauster lifts it onto the card. The exact fault is also
 logged on a line that begins with <code>clauster.pty_keeper:</code>. The three faults log
 <code>screen could not be rendered</code>, <code>rejected an escape sequence</code> (once for each
 error type), and <code>failed and was disabled</code>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a>grep<span class="w"> </span>clauster.pty_keeper<span class="w"> </span>~/.clauster/logs/&lt;label&gt;-*.keeper.log
+<div class="highlight"><pre><span></span><code><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a>grep<span class="w"> </span>clauster.pty_keeper<span class="w"> </span>~/.clauster/logs/&lt;label&gt;-*.keeper.log
 </code></pre></div>
 <h2 id="everything-looks-fine-but-the-session-never-responds">Everything looks fine but the session never responds<a class="headerlink" href="#everything-looks-fine-but-the-session-never-responds" title="Permanent link">&para;</a></h2>
 <h3 id="hosted-direct-session-cannot-connect-to-claustrum">Hosted / Direct Session: "cannot connect to claustrum"<a class="headerlink" href="#hosted-direct-session-cannot-connect-to-claustrum" title="Permanent link">&para;</a></h3>
@@ -2895,9 +2965,9 @@ error type), and <code>failed and was disabled</code>:</p>
 API returns <code>hosted channel unavailable: claustrum daemon not connected</code>.</p>
 <p><strong>Most likely cause:</strong> the claustrum daemon is not running (or not installed —
 it is an optional dependency), or its socket path is wrong.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:7621/healthz<span class="w">      </span><span class="c1"># the claustrum block names the reason</span>
-<a id="__codelineno-18-2" name="__codelineno-18-2" href="#__codelineno-18-2"></a>clauster<span class="w"> </span>deps<span class="w"> </span>list<span class="w">                         </span><span class="c1"># is claustrum installed?</span>
-<a id="__codelineno-18-3" name="__codelineno-18-3" href="#__codelineno-18-3"></a>tail<span class="w"> </span>~/.clauster/claustrum/daemon.log<span class="w">      </span><span class="c1"># what did the daemon last say?</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:7621/healthz<span class="w">      </span><span class="c1"># the claustrum block names the reason</span>
+<a id="__codelineno-19-2" name="__codelineno-19-2" href="#__codelineno-19-2"></a>clauster<span class="w"> </span>deps<span class="w"> </span>list<span class="w">                         </span><span class="c1"># is claustrum installed?</span>
+<a id="__codelineno-19-3" name="__codelineno-19-3" href="#__codelineno-19-3"></a>tail<span class="w"> </span>~/.clauster/claustrum/daemon.log<span class="w">      </span><span class="c1"># what did the daemon last say?</span>
 </code></pre></div>
 <p>Start with <code>/healthz</code>: its <code>claustrum</code> block carries an <code>error</code> describing why
 the last start attempt failed — including the commonest case, the binary not
@@ -2969,11 +3039,11 @@ Before that the server logged at <code>info</code> in every deployment.</p>
 </blockquote>
 <p>Set <code>log_level</code> (default <code>info</code>) to raise the server's own verbosity — it
 covers Clauster's loggers and uvicorn's alike:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a><span class="nt">log_level</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">debug</span><span class="w">   </span><span class="c1"># debug | info | warning | error</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a><span class="nt">log_level</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">debug</span><span class="w">   </span><span class="c1"># debug | info | warning | error</span>
 </code></pre></div>
 <p>For a one-shot run, or in a container or unit file, use the env override
 instead of editing the config:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a><span class="nv">CLAUSTER_LOG_LEVEL</span><span class="o">=</span>debug<span class="w"> </span>clauster<span class="w"> </span>run<span class="w"> </span>-c<span class="w"> </span>clauster.yml
+<div class="highlight"><pre><span></span><code><a id="__codelineno-21-1" name="__codelineno-21-1" href="#__codelineno-21-1"></a><span class="nv">CLAUSTER_LOG_LEVEL</span><span class="o">=</span>debug<span class="w"> </span>clauster<span class="w"> </span>run<span class="w"> </span>-c<span class="w"> </span>clauster.yml
 </code></pre></div>
 <p>Either way the level is read <strong>once at startup</strong>, so restart Clauster after
 changing it. What <code>debug</code> mostly adds is <strong>uvicorn's own</strong> debug records —
@@ -3069,6 +3139,11 @@ present in every run:</p>
 <td><code>workspace-trust</code></td>
 <td><code>N/M discovered projects trusted</code> (OK when all are)</td>
 <td>any untrusted discovered project — a session there will stall on the trust prompt (see above)</td>
+</tr>
+<tr>
+<td><code>bundle-env</code></td>
+<td>no running bridge, background agent or claustrum daemon has an older binary's environment (Linux only)</td>
+<td>a process that an older standalone binary started; restart it as <a href="#in-a-session-node-fails-with-glibc_238-not-found-or-clauster-cannot-load-libpython">described above</a>. <code>could not be read</code> or <code>check not completed</code> means doctor could not read that process's environment, so it does not know. Check the process with <a href="#in-a-session-node-fails-with-glibc_238-not-found-or-clauster-cannot-load-libpython">the <code>/proc</code> command</a>, run as the user that owns the process (or with <code>sudo</code>)</td>
 </tr>
 </tbody>
 </table>
