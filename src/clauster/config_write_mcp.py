@@ -742,7 +742,8 @@ def _check_destination(name: str, entry: Any, stored: Any) -> None:
     write a stdio ``command`` in the same scope can already run code here. So a masked
     value in a remote server keeps its stored value only when that server's ``type`` and
     the exact text of every url-bearing key (``url``, ``oauth.authServerMetadataUrl``, any
-    key ending in ``url`` at any depth) are unchanged. A removed url, or one added, is a
+    key ending in ``url`` at any depth outside the free-form maps in
+    :data:`_FREE_FORM_MAPS`) are unchanged. A removed url, or one added, is a
     change. The stored entry is first converted as on load, so a legacy ``transport``
     compares as its ``type``.
 

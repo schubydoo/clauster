@@ -2093,8 +2093,10 @@ def test_url_texts_walks_lists_and_restores_masks_by_path() -> None:
         ("url",): "https://x.example",
     }
     # Tuple paths: a key spelled with a dot cannot collide with a nested path.
-    assert mcp._url_texts({"oauth.authServerMetadataUrl": "a", "oauth": {"x": 1}}, {}) == {
-        ("oauth.authServerMetadataUrl",): "a"
+    dotted = {"oauth.authServerMetadataUrl": "A", "oauth": {"authServerMetadataUrl": "B"}}
+    assert mcp._url_texts(dotted, {}) == {
+        ("oauth.authServerMetadataUrl",): "A",
+        ("oauth", "authServerMetadataUrl"): "B",
     }
 
 
