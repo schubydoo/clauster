@@ -1244,24 +1244,57 @@ def test_restore_masked_lines_is_linear_in_repeated_lines(
 
     monkeypatch.setitem(cw.__dict__, "set", counting_set)
     n = 10_000
-    restored, lines = cw.restore_masked_lines(f"TOKEN={MASK}\n" * n, "TOKEN=x\n" * n, what="f")
+    # One stored line more than sent, so the group test must really look at the group (with
+    # equal counts it is not needed at all, and the counter would read zero).
+    stored = "TOKEN=x\n" * (n + 1)
+    restored, lines = cw.restore_masked_lines(f"TOKEN={MASK}\n" * n, stored, what="f")
     assert restored == "TOKEN=x\n" * n and len(lines) == n
-    assert sum(taken) <= 2 * n  # linear: one pass per group, not one per line
+    # Linear: the group is looked at once (n + 1 elements), never once per line. The lower
+    # bound makes the test fail loudly if the code stops using `set` for it, rather than
+    # pass on a count of zero.
+    assert n <= sum(taken) <= 2 * (n + 1)
+
+
+def _header_root(text: str) -> tuple[yaml.Node, object]:
+    """Return the composed header of ``text`` and its loaded frontmatter."""
+    value, _body = sub.parse_frontmatter(text)
+    match = sub._FRONTMATTER_RE.match(text)
+    assert match is not None
+    return yaml.compose(cw.cli_frontmatter_text(cw.frontmatter_header(text, match))), value
 
 
 @pytest.mark.parametrize("changed_key", ["a", "b"])
 def test_an_aliased_scalar_changed_at_one_place_only_cannot_be_rewritten(changed_key: str) -> None:
     # One node, two places: whichever place the walk reaches first, a change at only one of
     # them has no single text that loads to both values.
-    text = "---\nname: x\ndescription: d\na: &t v\nb: *t\n---\nbody\n"
-    value, _body = sub.parse_frontmatter(text)
-    match = sub._FRONTMATTER_RE.match(text)
-    assert match is not None
-    root = yaml.compose(cw.cli_frontmatter_text(cw.frontmatter_header(text, match)))
+    root, value = _header_root("---\nname: x\ndescription: d\na: &t v\nb: *t\n---\nbody\n")
     assert sub._changed_scalars(root, value, {**value, changed_key: "w"}) is None
 
 
+@pytest.mark.parametrize(
+    ("header", "change"),
+    [
+        # A merge key: the merged value is not one scalar's text, even when it loads alike.
+        ("base: &b {x: 1}\nm: {<<: *b}\n", {"base": {"x": 2}, "m": {"x": 2}}),
+        # An ordered map is a list of pairs the walk does not pair with its nodes.
+        ("o: !!omap [{p: 1}]\n", {"o": [("p", 2)]}),
+        # A changed shape: a scalar where a list was.
+        ("l: [a, b]\n", {"l": "a"}),
+    ],
+)
+def test_changes_the_walk_cannot_place_on_one_scalar_are_refused(
+    header: str, change: dict[str, object]
+) -> None:
+    root, value = _header_root(f"---\nname: x\ndescription: d\n{header}---\nbody\n")
+    assert isinstance(value, dict)
+    assert sub._changed_scalars(root, value, {**value, **change}) is None
+    # Unchanged, the same subtrees are skipped rather than refused.
+    assert sub._changed_scalars(root, value, dict(value)) == []
+
+
 def test_changed_scalars_is_linear_in_the_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    # This pins one regression: a `cw.same_yaml_value` call on a whole subtree at every
+    # level (the counter sees only that helper, not other comparisons).
     # The walk used to compare the whole subtree at every level above a change, so a deep
     # chain over a wide list cost depth x width. Counted: each comparison's leaves.
     depth, width = 200, 2000
