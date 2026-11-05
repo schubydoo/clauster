@@ -1436,7 +1436,9 @@ def test_inline_servers_refuse_yaml11_only_spellings(definition: str) -> None:
     if "command" not in definition and "url" not in definition:
         definition = "      command: x\n" + definition
     text = f"---\nname: x\ndescription: d\nmcpServers:\n  - srv:\n{definition}---\nbody\n"
-    with pytest.raises(cw.InvalidCandidateError, match="frontmatter 'mcpServers' inline server"):
+    # TASK-449.6: the shared seam's nested walker refuses this first, for every surface,
+    # so the message is the seam's (it names the line and column, never the value).
+    with pytest.raises(cw.InvalidCandidateError, match="nested value at line"):
         sub.validate_agent_content(text, expected_name="x")
 
 
@@ -1460,9 +1462,9 @@ def test_inline_servers_refuse_strings_yaml12_reads_as_numbers(item: str) -> Non
     # PyYAML reads each plain value as a string; the CLI's YAML 1.2 reads a number, which its
     # entry schema refuses, so it skips the server (probed: `env: {A: 1e3}`, `args: [0o17]`).
     text = f"---\nname: x\ndescription: d\nmcpServers:\n{item}---\nbody\n"
-    with pytest.raises(
-        cw.InvalidCandidateError, match="as a number, not a string, and drops that mcpServers"
-    ):
+    # TASK-449.6: the shared seam's nested walker refuses this first, for every surface,
+    # so the message is the seam's (it names the line and column, never the value).
+    with pytest.raises(cw.InvalidCandidateError, match="nested value at line"):
         sub.validate_agent_content(text, expected_name="x")
 
 
@@ -1545,22 +1547,25 @@ def test_shared_aliases_under_a_discarded_key_do_not_hang_a_save(tmp_path: Path)
     assert header is not None
     root = yaml.compose(header.group(1), Loader=yaml.SafeLoader)
     assert _naive_walk_visits(root) > 10**12  # the positive control: it IS a pyramid
+    # TASK-449.6: the shared seam now refuses a repeated key (the two YAML versions may keep
+    # different values), so this file is refused, and it must be refused just as fast: every
+    # composed-tree walk in the seam visits each node once.
     start = time.monotonic()
-    sub.validate_agent_content(text, expected_name="x")
+    with pytest.raises(cw.InvalidCandidateError, match="see differently"):
+        sub.validate_agent_content(text, expected_name="x")
     assert time.monotonic() - start < 0.5
-    sub.write_project_agent(tmp_path, "x", text, None)  # and the save goes through
-    # The walk still follows aliases: here the bad value sits in the bottom level of a
-    # pyramid that only the discarded `args: *p20` reaches, 21 alias levels down. The levels
-    # are discarded duplicates of a top-level key, which this walk does not enter itself.
-    levels = ["pyr: &p0 [1e3, a]"] + [f"pyr: &p{i} [*p{i - 1}, *p{i - 1}]" for i in range(1, 21)]
+    with pytest.raises(cw.InvalidCandidateError):
+        sub.write_project_agent(tmp_path, "x", text, None)
+    # The walks still follow aliases: here the bad value sits at the bottom of a chain of
+    # distinct keys that only `args: *p20` reaches, 21 alias levels down.
+    levels = ["p0: &p0 [1e3, a]"] + [f"p{i}: &p{i} [*p{i - 1}]" for i in range(1, 21)]
     deep = (
         "---\nname: x\ndescription: d\n"
         + "\n".join(levels)
-        + "\npyr: 0\nmcpServers:\n  - srv:\n      command: c\n      args: *p20\n"
-        "      args: []\n---\nbody\n"
+        + "\nmcpServers:\n  - srv:\n      command: c\n      args: *p20\n---\nbody\n"
     )
     start = time.monotonic()
-    with pytest.raises(cw.InvalidCandidateError, match="as a number, not a string"):
+    with pytest.raises(cw.InvalidCandidateError, match="nested value at line"):
         sub.validate_agent_content(deep, expected_name="x")
     assert time.monotonic() - start < 0.5
 
@@ -1584,7 +1589,8 @@ def test_a_long_merge_chain_behind_an_inline_server_is_walked_without_recursion(
     if bottom == "{command: c}":
         sub.validate_agent_content(text, expected_name="x")
     else:
-        with pytest.raises(cw.InvalidCandidateError, match="inline server 's'"):
+        # The shared seam's nested walker refuses it first (TASK-449.6), also iteratively.
+        with pytest.raises(cw.InvalidCandidateError, match="nested value at line"):
             sub.validate_agent_content(text, expected_name="x")
 
 
@@ -1593,8 +1599,10 @@ def test_each_kind_of_inline_check_keeps_its_own_walked_nodes() -> None:
     # b's definition must still get the definition checks: one shared walked set would skip
     # it and accept `alwaysLoad: yes`, which the CLI reads as a string.
     header = "mcpServers:\n  - a: {command: x, env: &n {alwaysLoad: yes}}\n  - b: *n\n"
-    with pytest.raises(cw.InvalidCandidateError, match="inline server 'b' 'alwaysLoad'"):
-        sub._refuse_yaml11_only_spellings(header)
+    # TASK-449.6: the shared seam's walker checks every nested value once, wherever it is
+    # reached, and needs no per-check sets: a nested `yes` is a mismatch in any position.
+    with pytest.raises(cw.InvalidCandidateError, match="nested value at line"):
+        cw.load_frontmatter_yaml(header, what="frontmatter")
 
 
 _INLINE_LEGACY = (

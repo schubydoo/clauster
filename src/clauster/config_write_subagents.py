@@ -84,7 +84,6 @@ CLAUDE.md, hooks, and permissions all use), so a save always re-submits the real
 
 from __future__ import annotations
 
-import functools
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -902,14 +901,6 @@ _FLOAT_TAG = "tag:yaml.org,2002:float"
 _MERGE_TAG = "tag:yaml.org,2002:merge"
 
 
-#: The boolean and number fields of an inline MCP definition, and of its ``oauth`` object,
-#: as :func:`clauster.config_write_mcp._validate_server_fields` checks them.
-_MCP_BOOLEAN_FIELDS = frozenset({"alwaysLoad", "bareElicitationCapability", "discoveryCache"})
-_MCP_NUMBER_FIELDS = frozenset({"timeout", "request_timeout_ms"})
-_MCP_OAUTH_BOOLEAN_FIELDS = frozenset({"xaa"})
-_MCP_OAUTH_NUMBER_FIELDS = frozenset({"callbackPort"})
-
-
 def _check_spelling(label: str, node: yaml.Node, *, boolean: bool, number: bool) -> None:
     """Refuse a checked field whose value PyYAML and the CLI's YAML 1.2 read differently."""
     if not isinstance(node, yaml.ScalarNode):
@@ -966,132 +957,6 @@ def _check_mapping(
         stack.extend(reversed(sources))
 
 
-class _InlineWalk:
-    """The composed nodes each inline-server check has walked already, by ``id``.
-
-    ``compose`` resolves an alias to the SAME node object, so an anchor shared ``N`` times per
-    level across ``L`` levels is ``N**L`` paths but one node. A walk that follows paths
-    without memory is then exponential in a file of a few hundred bytes. ``safe_load`` keeps
-    only the last of two duplicate keys, so a pyramid under a key that a later duplicate
-    overrides passes every check on the loaded data and reaches only this walk (Greptile on
-    TASK-479). One set per kind of check, shared across the whole header: each kind checks a
-    node the same way wherever it is reached, so checking it once is enough. The kinds stay
-    apart, because a node reached as a definition and as a value gets different checks.
-    """
-
-    __slots__ = ("definitions", "items", "oauth", "values")
-
-    def __init__(self) -> None:
-        """Start with nothing walked."""
-        self.items: set[int] = set()
-        self.definitions: set[int] = set()
-        self.oauth: set[int] = set()
-        self.values: set[int] = set()
-
-
-def _check_top_level_field(key: str, node: yaml.Node, *, walk: _InlineWalk) -> None:
-    """Check one top-level frontmatter field, and the inline servers under ``mcpServers``."""
-    _check_spelling(
-        f"frontmatter {key!r}", node, boolean=key in _BOOLEAN_FIELDS, number=key in _NUMBER_FIELDS
-    )
-    if key == "mcpServers" and isinstance(node, yaml.SequenceNode):
-        for item in node.value:
-            if isinstance(item, yaml.MappingNode):
-                _check_mapping(
-                    item, walk.items, visit=functools.partial(_check_inline_server, walk=walk)
-                )
-            else:
-                # A server-name reference (`- 0o17`) the CLI would read as a number.
-                _refuse_yaml12_number_strings(
-                    "frontmatter 'mcpServers' server name", item, seen=walk.values
-                )
-
-
-def _check_inline_server(name: str, node: yaml.Node, *, walk: _InlineWalk) -> None:
-    """Check the spelling of each value of one inline MCP definition, ``oauth`` included.
-
-    A boolean or number field must not use a YAML 1.1-only spelling, and a string value
-    must not be one that YAML 1.2 reads as a number (:func:`_refuse_yaml12_number_strings`).
-    """
-    if not isinstance(node, yaml.MappingNode):
-        return
-    label = f"frontmatter 'mcpServers' inline server {name!r}"
-
-    def check_field(key: str, value: yaml.Node) -> None:
-        _check_spelling(
-            f"{label} {key!r}",
-            value,
-            boolean=key in _MCP_BOOLEAN_FIELDS,
-            number=key in _MCP_NUMBER_FIELDS,
-        )
-        if key == "oauth" and isinstance(value, yaml.MappingNode):
-            _check_mapping(
-                value,
-                walk.oauth,
-                visit=lambda oauth_key, oauth_value: _check_spelling(
-                    f"{label} 'oauth' {oauth_key!r}",
-                    oauth_value,
-                    boolean=oauth_key in _MCP_OAUTH_BOOLEAN_FIELDS,
-                    number=oauth_key in _MCP_OAUTH_NUMBER_FIELDS,
-                ),
-            )
-        _refuse_yaml12_number_strings(f"{label} {key!r}", value, seen=walk.values)
-
-    _check_mapping(node, walk.definitions, visit=check_field)
-
-
-#: A plain scalar that the CLI reads as a number although PyYAML (YAML 1.1) reads a string:
-#: ``1e3``, ``1E3``, ``+1e3``, ``-.5`` and ``+.5e-3`` (YAML 1.1 wants a dot, a signed
-#: exponent, and no sign before a leading dot), ``0o17`` and a signed ``-0o17``/``+0o7``,
-#: and a leading-zero decimal that is not octal to YAML 1.1 (``09``). The CLI parses
-#: frontmatter with ``Bun.YAML.parse``. On 2.1.318 each of those spellings made the server
-#: invalid (probed as an ``args`` item, and ``1e3`` also as an ``env`` value), while
-#: ``0O17`` and ``0o8`` connect, so they do not match. The sign on the hex arm is there for
-#: symmetry only: a plain signed hex such as ``-0x1F`` is an int to PyYAML, so the type
-#: check refuses it first, and only an explicit ``!!str`` reaches this arm.
-_YAML12_NUMBER_RE = re.compile(
-    r"[-+]?[0-9]+|[-+]?0o[0-7]+|[-+]?0x[0-9a-fA-F]+"
-    r"|[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?"
-)
-_STR_TAG = "tag:yaml.org,2002:str"
-
-
-def _refuse_yaml12_number_strings(label: str, node: yaml.Node, *, seen: set[int]) -> None:
-    """Refuse a plain string value under ``node`` that the CLI's YAML 1.2 reads as a number.
-
-    Every value of an MCP entry that is not a boolean or a number is a string, and the CLI's
-    entry schema refuses a number there, so it drops that ``mcpServers`` item (probed on 2.1.318
-    with ``env: {A: 1e3}`` and ``args: [0o17]``; the quoted ``"1e3"`` connects). Only values
-    are checked, never keys. ⚠️ This is stricter than the CLI for an explicit ``!!str 1e3``,
-    which the composed node cannot tell from a plain ``1e3``. Quoting is the fix for both.
-
-    Iterative, and each node is checked once: ``seen`` (:attr:`_InlineWalk.values`) is
-    shared across the whole header, so a shared alias costs one visit, and a deep nesting
-    adds no stack frames. A ``<<`` value is walked like any other value, so its merged
-    mappings are checked too.
-    """
-    stack = [node]
-    while stack:
-        current = stack.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        if isinstance(current, yaml.ScalarNode):
-            if (
-                current.tag == _STR_TAG
-                and current.style is None
-                and _YAML12_NUMBER_RE.fullmatch(current.value)
-            ):
-                raise cw.InvalidCandidateError(
-                    f"{label}: Claude Code reads {current.value!r} as a number, not a string, "
-                    "and drops that mcpServers item. Quote it"
-                )
-        elif isinstance(current, yaml.SequenceNode):
-            stack.extend(current.value)
-        else:  # a mapping: a node is a scalar, a sequence or a mapping
-            stack.extend(value_node for _key_node, value_node in current.value)
-
-
 def _refuse_yaml11_only_spellings(header: str) -> None:
     """Refuse header text that PyYAML (YAML 1.1) and the CLI (YAML 1.2) read differently.
 
@@ -1105,18 +970,17 @@ def _refuse_yaml11_only_spellings(header: str) -> None:
     * a ``maxTurns``/``autoCompactWindow``/``effort`` number spelled the YAML 1.1 way
       (``010``, ``0b101``, ``1_000``, ``1:30``), which YAML 1.2 reads as another number or
       as a string;
-    * the same two spellings in the boolean and number fields of an inline ``mcpServers``
-      definition and its ``oauth`` object (``alwaysLoad: yes``, ``timeout: 1_000``). The
-      CLI's entry schema refuses a string there, so it would skip the whole server;
-    * a plain string value of an inline definition, or a server-name reference, that YAML
-      1.2 reads as a number (``env: {A: 1e3}``, ``args: [0o17]``), which the entry schema
-      refuses for the same reason.
 
     These are the TOP-LEVEL fields. The shared seam
     (:func:`~clauster.config_write.load_frontmatter_yaml`) already refused a NEL, LINE
-    SEPARATOR or PARAGRAPH SEPARATOR, an alias to an enclosing node, and every NESTED
-    boolean or number with a YAML 1.1-only spelling (a frontmatter hook's ``async: yes``)
-    before this runs (TASK-449.6).
+    SEPARATOR or PARAGRAPH SEPARATOR, an alias to an enclosing node, and every NESTED value
+    that the two read differently before this runs (TASK-449.6). That covers the boolean
+    and number fields of an inline ``mcpServers`` definition and its ``oauth`` object
+    (``alwaysLoad: yes``, ``timeout: 1_000``), and a plain string value or server-name
+    reference that YAML 1.2 reads as a number (``env: {A: 1e3}``, ``args: [0o17]``,
+    ``- -0o17``), which the CLI's entry schema refuses, so it would skip the whole server.
+    The inline walk TASK-479 added here did the same, server by server; the seam's walker
+    replaces it, so the composed tree is walked once, memoized and iteratively.
 
     ``header`` already loaded as a mapping, so composing the text the CLI parses (the header,
     or its retry text: :func:`~clauster.config_write.cli_frontmatter_text`) yields a mapping
@@ -1124,7 +988,14 @@ def _refuse_yaml11_only_spellings(header: str) -> None:
     """
     root = yaml.compose(cw.cli_frontmatter_text(header), Loader=yaml.SafeLoader)
     _check_mapping(
-        root, set(), visit=functools.partial(_check_top_level_field, walk=_InlineWalk())
+        root,
+        set(),
+        visit=lambda key, node: _check_spelling(
+            f"frontmatter {key!r}",
+            node,
+            boolean=key in _BOOLEAN_FIELDS,
+            number=key in _NUMBER_FIELDS,
+        ),
     )
 
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import time
 from pathlib import Path
 
 import pytest
@@ -2545,3 +2546,39 @@ def test_mixed_type_hook_keys_are_a_422_on_every_path(tmp_path: Path, hooks: str
     (item,) = sk.list_skills(tmp_path)
     assert "unknown" in item["frontmatter_error"]
     assert sk.read_skill_file_for_edit(tmp_path, "s")[3] is None
+
+
+# --- TASK-449.6: the seam's composed-tree walks are memoized and iterative -----------------
+
+
+@pytest.mark.timeout(20)
+def test_a_skill_with_a_long_merge_chain_is_read_without_recursion() -> None:
+    # 1500 `<<` links load fine in PyYAML and pass the merge-size cap; the YAML 1.2 view and
+    # every seam walk follow the whole chain without a stack frame per link.
+    links = ["x0: &a0 {k: v}"] + [f"x{i}: &a{i} {{<<: *a{i - 1}}}" for i in range(1, 1500)]
+    content = "---\ndescription: d\nmetadata:\n  " + "\n  ".join(links) + "\n---\nb\n"
+    assert len(content.encode("utf-8")) < sk.MAX_SKILL_MD_BYTES
+    start = time.monotonic()
+    sk.validate_skill_md_content(content)  # no raise
+    assert time.monotonic() - start < 10.0  # linear; generous for loaded CI runners
+    view = cw.yaml12_view(content.split("---\n")[1])
+    assert view["metadata"]["x1499"] == {"k": "v"}
+
+
+@pytest.mark.timeout(20)
+def test_a_skill_alias_pyramid_under_a_discarded_key_is_refused_quickly(tmp_path: Path) -> None:
+    # PyYAML keeps only the last of two `metadata` keys, so the loaded data is tiny; only a
+    # walk of the composed tree sees the pyramid. Each seam walk visits a node once, and the
+    # repeated key is refused.
+    levels = ["metadata: &p0 [a, a, a, a]"] + [
+        f"metadata: &p{i} [*p{i - 1}, *p{i - 1}, *p{i - 1}, *p{i - 1}]" for i in range(1, 21)
+    ]
+    content = "---\ndescription: d\n" + "\n".join(levels) + "\nmetadata: {}\n---\nb\n"
+    assert len(content.encode("utf-8")) < 1500
+    start = time.monotonic()
+    with pytest.raises(cw.InvalidCandidateError, match="see differently"):
+        sk.validate_skill_md_content(content)
+    _skill(tmp_path, content)
+    (item,) = sk.list_skills(tmp_path)
+    assert item["frontmatter_error"]
+    assert time.monotonic() - start < 5.0  # a walk per alias path would take hours

@@ -1235,7 +1235,11 @@ _YAML12_NULL_RE = re.compile(r"(?:~|null|Null|NULL)?")
 _YAML12_BOOLS = {"true": True, "True": True, "TRUE": True}
 _YAML12_BOOLS.update({"false": False, "False": False, "FALSE": False})
 _YAML12_INT_RE = re.compile(r"[-+]?[0-9]+")
-_YAML12_OCT_RE = re.compile(r"0o[0-7]+")
+# A sign is allowed on octal: the core schema has none, but Claude Code's YAML 1.2 loader
+# reads `-0o17` and `+0o7` as numbers (probed on 2.1.318 in TASK-479: each made an inline
+# MCP server invalid, as a number does). Signed hex was not probed, so it stays a string
+# here, which makes PyYAML's int reading of `-0x1F` a mismatch: refused, failing closed.
+_YAML12_OCT_RE = re.compile(r"[-+]?0o[0-7]+")
 _YAML12_HEX_RE = re.compile(r"0x[0-9a-fA-F]+")
 _YAML12_FLOAT_RE = re.compile(r"[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?")
 _YAML12_INF_RE = re.compile(r"[-+]?\.(?:inf|Inf|INF)")
@@ -1263,10 +1267,10 @@ def _yaml12_scalar(node: yaml.ScalarNode) -> Any:
         return _YAML12_BOOLS[text]
     if _YAML12_INT_RE.fullmatch(text):
         return int(text, 10)
-    if _YAML12_OCT_RE.fullmatch(text):
-        return int(text[2:], 8)
-    if _YAML12_HEX_RE.fullmatch(text):
-        return int(text[2:], 16)
+    if _YAML12_OCT_RE.fullmatch(text) or _YAML12_HEX_RE.fullmatch(text):
+        sign = -1 if text.startswith("-") else 1
+        digits = text.lstrip("+-")
+        return sign * int(digits[2:], 8 if digits[1] == "o" else 16)
     if _YAML12_FLOAT_RE.fullmatch(text) or _YAML12_INF_RE.fullmatch(text):
         return float(text.replace(".inf", "inf").replace(".Inf", "inf").replace(".INF", "inf"))
     if _YAML12_NAN_RE.fullmatch(text):
@@ -1274,17 +1278,46 @@ def _yaml12_scalar(node: yaml.ScalarNode) -> Any:
     return text
 
 
-def _yaml12_node(node: yaml.Node, memo: dict[int, Any]) -> Any:
-    """Build the YAML 1.2 value of ``node``, sharing one value per anchored node."""
-    if id(node) in memo:
-        return memo[id(node)]
-    if isinstance(node, yaml.ScalarNode):
-        value = _yaml12_scalar(node)
-    elif isinstance(node, yaml.SequenceNode):
-        value = memo[id(node)] = []
-        value.extend(_yaml12_node(child, memo) for child in node.value)
-    else:
-        value = memo[id(node)] = {}
+def _yaml12_node(root: yaml.Node) -> Any:
+    """Build the YAML 1.2 value of ``root``, one value per composed node, iteratively.
+
+    Two passes, neither recursive, so a 1500-link ``<<`` chain or a deep nesting adds no
+    stack frames: a depth-first walk lists every collection node once, children before
+    parents (an alias resolves to the same node, so a shared anchor is listed once and an
+    alias pyramid costs its node count, not its path count); then each collection is filled
+    in that order, so a merge source is complete before the mapping that merges it.
+    """
+    if isinstance(root, yaml.ScalarNode):
+        return _yaml12_scalar(root)
+    memo: dict[int, Any] = {}
+    order: list[yaml.CollectionNode] = []
+    stack: list[tuple[yaml.Node, bool]] = [(root, False)]
+    while stack:
+        node, leaving = stack.pop()
+        if leaving:
+            order.append(node)  # type: ignore[arg-type]
+            continue
+        if not isinstance(node, yaml.CollectionNode) or id(node) in memo:
+            continue
+        memo[id(node)] = [] if isinstance(node, yaml.SequenceNode) else {}
+        stack.append((node, True))
+        children = (
+            node.value
+            if isinstance(node, yaml.SequenceNode)
+            else [part for pair in node.value for part in pair]
+        )
+        stack.extend((child, False) for child in reversed(children))
+
+    def value_of(node: yaml.Node) -> Any:
+        if isinstance(node, yaml.ScalarNode):
+            return _yaml12_scalar(node)
+        return memo[id(node)]  # a collection: composing yields no other node kind
+
+    for node in order:
+        built = memo[id(node)]
+        if isinstance(node, yaml.SequenceNode):
+            built.extend(value_of(child) for child in node.value)
+            continue
         merged: dict[Any, Any] = {}
         own: dict[Any, Any] = {}
         for key_node, value_node in node.value:
@@ -1293,18 +1326,16 @@ def _yaml12_node(node: yaml.Node, memo: dict[int, Any]) -> Any:
                     value_node.value if isinstance(value_node, yaml.SequenceNode) else [value_node]
                 )
                 # The first source wins a clash, as in PyYAML's flatten_mapping, so the
-                # sources are applied last to first.
-                # Each source is a mapping: PyYAML's load already refused any other merge.
+                # sources are applied last to first. Each source is a mapping: PyYAML's load
+                # already refused any other merge.
                 for source in reversed(sources):
-                    merged.update(_yaml12_node(source, memo))
+                    merged.update(value_of(source))
                 continue
-            key = _yaml12_node(key_node, memo)
             # A mapping or list key cannot be hashed: PyYAML's load already refused it.
-            own[key] = _yaml12_node(value_node, memo)
-        value.update(merged)
-        value.update(own)
-    memo[id(node)] = value
-    return value
+            own[value_of(key_node)] = value_of(value_node)
+        built.update(merged)
+        built.update(own)
+    return memo[id(root)]
 
 
 _YAML_TYPED_TAGS = frozenset(
@@ -1635,7 +1666,7 @@ def yaml12_view(header: str) -> Any:
     """
     try:
         root = yaml.compose(cli_frontmatter_text(header), Loader=yaml.SafeLoader)
-        return None if root is None else _yaml12_node(root, {})
+        return None if root is None else _yaml12_node(root)
     except RecursionError as exc:
         raise InvalidCandidateError("frontmatter is nested too deeply to parse") from exc
 

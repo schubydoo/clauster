@@ -2267,3 +2267,7 @@ def test_keys_one_reading_merges_past_the_obvious_cases_are_refused(parse, keys:
 def test_the_yaml12_key_of_a_huge_integer_is_infinity() -> None:
     node = yaml.compose("1" + "0" * 400 + ": a\n", Loader=yaml.SafeLoader).value[0][0]
     assert cw._yaml12_key(node) == "Infinity"
+
+
+def test_yaml12_view_of_a_scalar_header_is_the_scalar() -> None:
+    assert cw.yaml12_view("just text") == "just text"
