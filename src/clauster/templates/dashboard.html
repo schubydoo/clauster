@@ -2625,6 +2625,10 @@
                      in Raw JSON) explains itself. -->
                 <div class="alert alert-warning py-1 small" data-test="cm-mcp-fields-error" role="alert"
                      x-show="configMgmt.mcp.fieldsError" x-cloak x-text="configMgmt.mcp.fieldsError"></div>
+                <!-- A refused Raw JSON click: it names the rows that would lose a value and
+                     clears itself once they are fixed. -->
+                <div class="alert alert-warning py-1 small" data-test="cm-mcp-raw-blocked" role="alert"
+                     x-show="configMgmtMcpRawBlockedText()" x-cloak x-text="configMgmtMcpRawBlockedText()"></div>
 
                 <!-- FIELDS -->
                 <div x-show="configMgmt.mcp.mode === 'fields'" data-test="cm-mcp-fields" x-cloak>

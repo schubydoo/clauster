@@ -855,6 +855,100 @@ def test_config_mgmt_mcp_fields_renamed_masked_header_asks_for_value(
         browser.expect_disabled('[data-test="cm-mcp-save"]')
 
 
+def _env_row(idx: int, field: str) -> str:
+    """The selector of one env row's ``key`` or ``value`` input (0-based row index)."""
+    return f'[data-test="cm-mcp-env-row-{idx}"] [data-test="cm-mcp-env-{field}"]'
+
+
+def test_config_mgmt_mcp_raw_switch_refused_while_rows_would_lose_values(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Raw JSON is refused while an env row has no name or shares one, and no value is lost.
+
+    The form writes one value per name and drops an unnamed row, so a switch would replace
+    the rows with less. The refusal names the rows; once they are fixed, the switch and the
+    switch back keep every value.
+    """
+    with _alpha_mcp_json(config_mgmt_server, None):
+        _open_mcp_new(browser, config_mgmt_server, "rows-272")
+        browser.fill('[data-test="cm-mcp-command"]', "echo")
+        for count in (1, 2, 3):
+            browser.click('[data-test="cm-mcp-env-add"]')
+            browser.expect_count('[data-test="cm-mcp-env-key"]', count)
+        rows = [("FOO", "a-272"), ("FOO", "b-272"), ("", "c-272")]
+        for idx, (key, value) in enumerate(rows):
+            if key:
+                browser.fill(_env_row(idx, "key"), key)
+            browser.fill(_env_row(idx, "value"), value)
+
+        browser.click('[data-test="cm-mcp-mode-raw"]')
+        browser.expect_visible('[data-test="cm-mcp-raw-blocked"]')
+        text = browser.get_text('[data-test="cm-mcp-fields-warn"]')
+        assert "environment variable 3" in text and "rows 1, 2" in text
+        browser.expect_visible('[data-test="cm-mcp-fields"]')
+        browser.expect_hidden('[data-test="cm-mcp-raw"]')
+        for idx, (key, value) in enumerate(rows):
+            browser.expect_value(_env_row(idx, "key"), key)
+            browser.expect_value(_env_row(idx, "value"), value)
+
+        # Any edit that changes the problems hides the refusal note for good, even while
+        # another row (the unnamed one) still needs a fix.
+        browser.fill(_env_row(1, "key"), "BAR")
+        browser.expect_hidden('[data-test="cm-mcp-raw-blocked"]')
+        browser.fill(_env_row(2, "key"), "BAZ")
+        browser.expect_hidden('[data-test="cm-mcp-fields-warn"]')
+        browser.click('[data-test="cm-mcp-mode-raw"]')
+        browser.expect_visible('[data-test="cm-mcp-entry"]')
+        entry = json.loads(browser.get_value('[data-test="cm-mcp-entry"]'))
+        assert entry["env"] == {"FOO": "a-272", "BAR": "b-272", "BAZ": "c-272"}
+        browser.click('[data-test="cm-mcp-mode-fields"]')
+        browser.expect_count('[data-test="cm-mcp-env-key"]', 3)
+        browser.expect_value(_env_row(2, "value"), "c-272")
+
+
+def test_config_mgmt_mcp_multiline_arg_opens_in_raw_json_and_round_trips(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A line break in an argument keeps the server in Raw JSON, and a save keeps it exact.
+
+    The fields are single-line inputs, which would drop the line break on the next save.
+    """
+    script = "print(1)\nprint(2)"
+    stored = {"command": "python", "args": ["-c", script]}
+    with _alpha_mcp_json(config_mgmt_server, {"py-272": stored}) as mcp_json:
+        _open_modal(browser, config_mgmt_server)
+        browser.select('[data-test="cm-project"]', "alpha")
+        browser.click('[data-test="cm-surface-mcp"]')
+        browser.click('[data-test="cm-mcp-edit-py-272"]')
+        browser.expect_visible('[data-test="cm-mcp-raw"]')
+        browser.expect_hidden('[data-test="cm-mcp-fields"]')
+        assert "args[1]" in browser.get_text('[data-test="cm-mcp-fields-error"]')
+        browser.click('[data-test="cm-mcp-mode-fields"]')
+        browser.expect_visible('[data-test="cm-mcp-raw"]')
+        browser.expect_hidden('[data-test="cm-mcp-fields"]')
+
+        # Edit another field in Raw JSON and save: the script keeps its line break.
+        browser.fill('[data-test="cm-mcp-entry"]', json.dumps({**stored, "timeout": 5000}))
+        _save_mcp(browser)
+        data = json.loads(mcp_json.read_text(encoding="utf-8"))
+        assert data["mcpServers"]["py-272"] == {**stored, "timeout": 5000}
+        assert data["mcpServers"]["py-272"]["args"][1] == script
+
+
+def test_config_mgmt_mcp_padded_env_name_opens_in_raw_json(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """An env name with spaces around it opens in Raw JSON: the form would trim it."""
+    with _alpha_mcp_json(config_mgmt_server, {"pad-272": {"command": "echo", "env": {" A": "1"}}}):
+        _open_modal(browser, config_mgmt_server)
+        browser.select('[data-test="cm-project"]', "alpha")
+        browser.click('[data-test="cm-surface-mcp"]')
+        browser.click('[data-test="cm-mcp-edit-pad-272"]')
+        browser.expect_visible('[data-test="cm-mcp-raw"]')
+        browser.expect_hidden('[data-test="cm-mcp-fields"]')
+        assert 'env " A"' in browser.get_text('[data-test="cm-mcp-fields-error"]')
+
+
 def test_config_mgmt_mcp_unshown_field_opens_in_raw_json(
     browser: AgentBrowser, config_mgmt_server: Server
 ) -> None:

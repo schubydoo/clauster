@@ -316,7 +316,8 @@
           // TASK-272 fields editor: `mode` is "fields" or "raw"; `f` holds the form (see
           // _mcpBlankFields); `fieldsError` says why an entry can't be shown as fields;
           // `base` is the loaded (masked) entry, the baseline for the retype check.
-          mode: "fields", f: mcpBlankFields(), fieldsError: "", base: null, seq: 0,
+          // `rawBlocked`: the row problems at a refused Raw JSON click ("" when none).
+          mode: "fields", f: mcpBlankFields(), fieldsError: "", base: null, seq: 0, rawBlocked: "",
           // Convert-on-load notes from the read (TASK-449.8): [{name, field, message}] for
           // stored fields Claude Code ignores. Shown before a save; a save writes the fix.
           conversions: [],
@@ -2891,6 +2892,7 @@
         m.editing = true; m.isNew = true;
         m.name = ""; m.entryText = ""; m.orig = ""; m.confirm = "";
         m.f = mcpBlankFields(); m.mode = "fields"; m.fieldsError = ""; m.base = null;
+        m.rawBlocked = "";
       },
       // Editing reuses the already-loaded (masked) list entry — no fetch, so no race.
       configMgmtOpenMcp(name) {
@@ -2909,7 +2911,7 @@
         // server that opens in Raw JSON never leaves the previous server's fields behind.
         m.f = mcpBlankFields();
         const err = this._mcpFieldsFromEntry(m.base);
-        m.mode = err ? "raw" : "fields"; m.fieldsError = err;
+        m.mode = err ? "raw" : "fields"; m.fieldsError = err; m.rawBlocked = "";
       },
       // The convert-on-load notes for one server (empty when nothing was converted).
       configMgmtMcpConversionsFor(name) {
@@ -2987,6 +2989,37 @@
         if (bad.length) {
           return "The fields can't show the value of " + bad.join(", ") + ". Edit this server in Raw JSON.";
         }
+        // Every field is a single-line text <input>, which drops line breaks: a multi-line
+        // value (a `python -c` script in args, say) would be rewritten on the next save, so
+        // the entry stays in Raw JSON, as the Hooks rows do.
+        const lineBreak = (v) => /[\r\n]/.test(v);
+        const multi = [];
+        for (const k of ["command", "url", "headersHelper"]) if (has(k) && lineBreak(entry[k])) multi.push(k);
+        (entry.args || []).forEach((a, i) => { if (lineBreak(a)) multi.push("args[" + i + "]"); });
+        for (const map of ["env", "headers"]) {
+          for (const [k, v] of Object.entries(entry[map] || {})) {
+            if (lineBreak(k) || lineBreak(v)) multi.push(map + "." + k.replace(/[\r\n]+/g, " "));
+          }
+        }
+        for (const k of ["clientId", "authServerMetadataUrl", "scopes"]) {
+          if (own(oauth, k) && lineBreak(oauth[k])) multi.push("oauth." + k);
+        }
+        if (multi.length) {
+          return "The fields can't show the line break in " + multi.join(", ") +
+            ". Edit this server in Raw JSON.";
+        }
+        // The form trims a row name and drops an unnamed row, so an empty name, or one with
+        // spaces around it, would be renamed or lost: those entries stay in Raw JSON too.
+        const oddNames = [];
+        for (const map of ["env", "headers"]) {
+          for (const k of Object.keys(entry[map] || {})) {
+            if (k === "" || k !== k.trim()) oddNames.push(map + " \"" + k + "\"");
+          }
+        }
+        if (oddNames.length) {
+          return "The fields can't show an empty name or a name with spaces around it (" +
+            oddNames.join(", ") + "). Edit this server in Raw JSON.";
+        }
         const f = mcpBlankFields();
         const pair = (k, v) => ({ id: ++m.seq, key: k, value: v, loaded: true });
         f.type = has("type") ? entry.type : "stdio";
@@ -3053,31 +3086,47 @@
         if (f.alwaysLoad || f.present.alwaysLoad) out.alwaysLoad = !!f.alwaysLoad;
         return out;
       },
+      // The env or header rows of the current type that _mcpFieldsEntry cannot write without
+      // losing a value: a row with a value but no name (dropped), and rows that share a
+      // name (only the last one is kept). One message per problem, naming the rows.
+      _mcpRowLossProblems() {
+        const f = this.configMgmt.mcp.f;
+        const stdio = this.configMgmtMcpFormTransport() === "stdio";
+        const rows = stdio ? f.env : f.headers;
+        const label = stdio ? "environment variable" : "header";
+        const unnamed = [], byName = new Map();
+        rows.forEach((r, i) => {
+          const k = (r.key || "").trim();
+          if (!k) { if (r.value) unnamed.push(i + 1); return; }
+          if (!byName.has(k)) byName.set(k, []);
+          byName.get(k).push(i + 1);
+        });
+        const msgs = [];
+        if (unnamed.length) {
+          msgs.push(unnamed.length === 1
+            ? "Give " + label + " " + unnamed[0] + " a name, or remove it."
+            : "Give " + label + "s " + unnamed.join(", ") + " a name, or remove them.");
+        }
+        for (const [k, idx] of byName) {
+          if (idx.length > 1) {
+            msgs.push("The " + label + " rows " + idx.join(", ") + " share the name " + k +
+              ". Rename or remove all but one.");
+          }
+        }
+        return msgs;
+      },
       // Problems in the form that would lose a row or that the backend refuses. Warns AND
       // blocks the save (configMgmtCanSaveMcp), like the hooks and env rows.
       configMgmtMcpFieldsWarning() {
         const m = this.configMgmt.mcp, f = m.f;
         if (!m.editing || m.mode !== "fields") return "";
         const transport = this.configMgmtMcpFormTransport();
-        const msgs = [];
-        const checkPairs = (rows, label) => {
-          const seen = new Set(), dupes = new Set();
-          let unnamed = false;
-          for (const r of rows) {
-            const k = (r.key || "").trim();
-            if (!k) { if (r.value) unnamed = true; continue; }
-            if (seen.has(k)) dupes.add(k); else seen.add(k);
-          }
-          if (unnamed) msgs.push("Give every " + label + " a name, or remove it.");
-          if (dupes.size) msgs.push("Each " + label + " name must be unique: " + [...dupes].join(", ") + ".");
-        };
+        const msgs = this._mcpRowLossProblems();
         if (transport === "stdio") {
           const blank = [];
           f.args.forEach((r, i) => { if (r.value === "" && !r.loaded) blank.push(i + 1); });
           if (blank.length) msgs.push("Type a value for argument " + blank.join(", ") + ", or remove it.");
-          checkPairs(f.env, "environment variable");
         } else {
-          checkPairs(f.headers, "header");
           if (transport !== "ws" && this._mcpText(f.callbackPort) !== "") {
             const p = this._hookTimeoutInt(f.callbackPort);
             if (p === null || p > 65535) msgs.push("The OAuth callback port must be a whole number from 1 to 65535.");
@@ -3208,13 +3257,27 @@
       configMgmtMcpIsMasked(value) {
         return value === CONFIG_MASK;
       },
+      // Why the last Raw JSON click was refused. `rawBlocked` holds the row problems at that
+      // click; any edit that changes them hides the note for good, so it never comes back
+      // on its own. The rows themselves are named by the fields warning below the form.
+      configMgmtMcpRawBlockedText() {
+        const m = this.configMgmt.mcp;
+        if (!m.rawBlocked || m.mode !== "fields") return "";
+        if (this._mcpRowLossProblems().join(" ") !== m.rawBlocked) return "";
+        return "Raw JSON would lose the values of the rows named below, so the editor stays " +
+          "in Fields. Fix those rows, then switch.";
+      },
       configMgmtMcpMode(mode) {
         const m = this.configMgmt.mcp;
         if (m.mode === mode) return;
         if (mode === "raw") {
-          // Materialize the form so Raw JSON shows the current edits.
+          // Materialize the form so Raw JSON shows the current edits. Refuse while a row
+          // can't be written without losing its value (the same rows block Save): the
+          // reduced JSON would replace the rows, and switching back could not restore them.
+          const problems = this._mcpRowLossProblems();
+          if (problems.length) { m.rawBlocked = problems.join(" "); return; }
           m.entryText = JSON.stringify(this._mcpFieldsEntry(), null, 2);
-          m.mode = "raw"; m.fieldsError = ""; return;
+          m.mode = "raw"; m.fieldsError = ""; m.rawBlocked = ""; return;
         }
         let entry;
         if (m.isNew && m.entryText.trim() === "") entry = { type: "stdio" };

@@ -272,6 +272,7 @@ def test_mcp_editor_has_fields_and_raw_json_modes(write_config):
         "cm-mcp-mode-fields",
         "cm-mcp-mode-raw",
         "cm-mcp-fields-error",
+        "cm-mcp-raw-blocked",
         "cm-mcp-fields",
         "cm-mcp-type",
         "cm-mcp-stdio",
@@ -322,6 +323,8 @@ def test_mcp_save_is_blocked_by_the_fields_and_retype_warnings(write_config):
         in html
     )
     assert 'x-show="configMgmtMcpRetypeWarning()"' in html
+    # The Raw JSON switch refuses the same lossy rows (Greptile on PR 1815).
+    assert 'if (problems.length) { m.rawBlocked = problems.join(" "); return; }' in html
     # A fields save builds the entry from the form; a raw save parses the textarea.
     assert 'if (m.mode === "fields") entry = this._mcpFieldsEntry();' in html
 

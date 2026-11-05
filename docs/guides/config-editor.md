@@ -211,7 +211,15 @@ The MCP tab edits each server in one of two modes. Use the **Fields** and
   `mcpServers` entry in `.mcp.json`, without the server name around it. Use it
   for the fields that the form does not show, such as `role`, `tools` or
   `oauth.xaa`. A server that has such a field opens in Raw JSON, and a note
-  names the fields.
+  names the fields. A value with a line break, for example a `python -c`
+  script in `args`, also opens in Raw JSON, because each field is one line. So
+  does an `env` or header name that is empty or has spaces around it, because
+  the form trims each name.
+
+The switch from Fields to Raw JSON is refused while an `env` or header row has
+a value but no name, or shares its name with another row. One entry cannot
+hold these rows, so the switch would lose values. A note names the rows. The
+same rows also keep **Save** off.
 
 In both modes, a masked value shows as `********`. If you leave the mask in
 place, the save keeps the stored value. If you change the `type` or a URL of a
