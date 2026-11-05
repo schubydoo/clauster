@@ -855,6 +855,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#the-hooks-tab" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The Hooks tab
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -1549,6 +1560,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#the-hooks-tab" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The Hooks tab
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -1791,14 +1813,15 @@ on; the User scope additionally requires <code>config_write.allow_user_scope</co
 <li><strong>Typed confirmation</strong> — every document save asks you to type the scope
   name; destructive list actions (delete, reset, plugin install) have their
   own typed confirms.</li>
-<li><strong>Secret masking</strong> — the Settings, MCP, and Skills surfaces, and the <code>autoMode</code>
-  box on the Permissions tab, mask secret-shaped values on read. On Settings, MCP
-  and <code>autoMode</code>, a masked value left untouched keeps the stored secret on write.
-  The Skills editor masks on read but restores nothing on write, so a save writes
-  the mask over the stored value. The CLAUDE.md, Hooks, and Subagents surfaces,
-  and the <code>permissions</code> rules, return the raw content, because they round-trip
-  the exact text on write. Do not put a secret anywhere in a subagent
-  file, for example in an inline <code>mcpServers</code> block in the frontmatter.</li>
+<li><strong>Secret masking</strong> — the Settings, MCP, Hooks, and Skills surfaces, and the
+  <code>autoMode</code> box on the Permissions tab, mask secret-shaped values on read. On
+  Settings, MCP, Hooks and <code>autoMode</code>, a masked value left untouched keeps the
+  stored secret on write. The Skills editor masks on read but restores nothing on
+  write, so a save writes the mask over the stored value. The CLAUDE.md and
+  Subagents surfaces, and the <code>permissions</code> rules, return the raw content, because
+  they round-trip the exact text on write. Do not put a secret anywhere in a
+  subagent file, for example in an inline <code>mcpServers</code> block in the frontmatter.
+  For what the Hooks tab masks, see <a href="#the-hooks-tab">The Hooks tab</a>.</li>
 </ul>
 <p>The surface tabs:</p>
 <table>
@@ -1966,6 +1989,106 @@ servers with the same name.</p>
 that built-in in Claude Code. The list shows the file as a read-only row next
 to the built-in row. Clauster does not edit or delete that file, so change it
 on the host.</p>
+<h3 id="the-hooks-tab">The Hooks tab<a class="headerlink" href="#the-hooks-tab" title="Permanent link">&para;</a></h3>
+<p>The Hooks tab edits the <code>hooks</code> key of the settings file for the scope. It
+accepts every hook event, every matcher form, every hook type, and every handler
+field that the <a href="https://code.claude.com/docs/en/hooks">Claude Code hooks reference</a>
+documents. It also accepts the fields that the Claude Code CLI reads but the
+reference does not list: <code>rewakeMessage</code>, <code>rewakeSummary</code>, and <code>cloud</code>. Any
+other field for that hook type stops the save with a validation error (<code>422</code>),
+and nothing is written. A <code>timeout</code> must be a number of seconds above 0, as the
+CLI requires.
+Clauster stores each hook as data and never runs it. It does not run a command,
+send a request to a URL, call an MCP tool, or send a prompt to a model.</p>
+<p>In Rows view, each row is one hook: the event, the matcher, the type, the main
+field of that type, and the timeout.</p>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>What Claude Code does when the hook fires</th>
+<th>Handler column</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>command</code></td>
+<td>Runs a shell command</td>
+<td>Command</td>
+</tr>
+<tr>
+<td><code>http</code></td>
+<td>Sends the event data as an HTTP POST to a URL</td>
+<td>URL</td>
+</tr>
+<tr>
+<td><code>mcp_tool</code></td>
+<td>Calls a tool on a configured MCP server</td>
+<td>Server and tool</td>
+</tr>
+<tr>
+<td><code>prompt</code></td>
+<td>Asks a model to allow or block the action</td>
+<td>Prompt</td>
+</tr>
+<tr>
+<td><code>agent</code></td>
+<td>Starts a subagent that checks a condition</td>
+<td>Prompt</td>
+</tr>
+</tbody>
+</table>
+<p>If any hook at the scope uses another field, for example <code>headers</code>, <code>args</code>,
+<code>async</code>, <code>model</code>, or an MCP tool <code>input</code>, the whole tab opens in Raw JSON. The
+same happens if any value contains a line break, because a row cannot show it.</p>
+<p>An <code>http</code> hook sends data off the host, so the tab shows where the data goes: the
+scheme, the host, the port, the plain path segments, and the plain query keys of
+its URL.
+These parts of the URL show as <code>********</code>:</p>
+<ul>
+<li><code>user:password@</code> credentials.</li>
+<li>Path segments and query keys that look like a token: a <code>${VAR}</code> reference, a
+  segment of 20 or more characters, or a segment whose letters and digits number
+  8 or more and mix both, with punctuation such as <code>;</code>, <code>:</code> or <code>=</code> not counted
+  (for example the three segments after <code>/services/</code> in a Slack webhook).</li>
+<li>Every query value (for example <code>?token=</code> or <code>?sig=</code>), and the fragment.</li>
+<li>The whole URL, if it contains a tab or a line break, if its port is not a number,
+  or if it is not a valid <code>http</code> or <code>https</code> URL.</li>
+</ul>
+<p>Every non-empty <code>headers</code> value also shows as <code>********</code>, and so do
+secret-shaped values in an MCP tool <code>input</code>.</p>
+<p>If you leave a mask in place, the save keeps the stored value. These rules decide
+when Clauster keeps it:</p>
+<ul>
+<li>The URL, the headers, and the <code>input</code> must be unchanged, including every visible
+  part of the URL. If you change any of them, type every masked value in that hook
+  again. You can change other fields, for example <code>timeout</code>, without retyping.</li>
+<li>If several hooks at the scope send to one destination with different masked
+  values (for example two Slack webhooks), Clauster keeps them only as a set. Each
+  hook keeps its own value when the hooks come back exactly as they were read, in
+  any order. A save that changes any field of one of them (the <code>timeout</code> too),
+  adds or removes one, or moves one to another event or matcher needs every masked
+  value among them typed again.</li>
+</ul>
+<p>Otherwise the save is refused (<code>422</code>) and nothing is written. These rules stop a
+stored token from going to a new host or path, or into a hook that you edited. If
+you edit a hook until it is identical, mask for mask, to another stored hook with
+the same URL, it becomes a copy of that hook. Clauster cannot tell the text
+<code>********</code> in any other hook field from a mask, so a save that holds it there is
+also refused. Change that value to save.</p>
+<p>Some secrets are not masked. The tab does not mask a <code>command</code>, its <code>args</code>, a
+<code>prompt</code>, a <code>model</code>, an <code>if</code> rule, a <code>statusMessage</code>, or a <code>matcher</code>. A URL path
+segment or query key shorter than 20 characters is not masked either if it has
+fewer than 8 letters and digits, or only letters, or only digits. Do not put a
+secret in them. For an <code>http</code> hook, put the secret in a header as a <code>$VAR</code> that
+<code>allowedEnvVars</code> lists.</p>
+<p>Clauster treats a hook that refers to <code>CLAUDE_PLUGIN_ROOT</code> in any field as a
+plugin hook. While one is in the settings file, every save of the Hooks tab at
+that scope is refused (<code>422</code>). Remove it in Raw JSON. To change a plugin hook,
+change the plugin.</p>
+<p>The <code>disableAllHooks</code>, <code>allowedHttpHookUrls</code>, and <code>httpHookAllowedEnvVars</code>
+settings are top-level keys, not part of the <code>hooks</code> key, so the Hooks tab does
+not edit them.</p>
 <h2 id="troubleshooting-and-limits">Troubleshooting and limits<a class="headerlink" href="#troubleshooting-and-limits" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
