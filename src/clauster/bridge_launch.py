@@ -35,7 +35,6 @@ from .config import (
     INHERIT_PERMISSION_MODE,
     ClausterConfig,
     PermissionMode,
-    SandboxMode,
     SpawnMode,
 )
 
@@ -81,7 +80,6 @@ class BridgeLaunch:
         name: str,
         spawn_mode: SpawnMode,
         permission_mode: PermissionMode,
-        sandbox: SandboxMode = "default",
     ) -> list[str]:
         """Build the `claude remote-control` argv. Pure (no side effects) so it's unit-testable.
 
@@ -89,11 +87,10 @@ class BridgeLaunch:
         already resolved it to either the operator's custom bridge name or the
         project name (#780, via :func:`_normalize_custom_name`).
 
-        ``sandbox`` (#780) adds the OS-level filesystem/network isolation flag:
-        ``"on"`` → ``--sandbox``, ``"off"`` → ``--no-sandbox``, ``"default"`` → neither
-        (claude's own off-by-default / ``sandbox.*`` settings apply — zero change).
-        These are real, documented flags on ``claude remote-control`` (verified on
-        claude 2.1.198; see the docs at code.claude.com/docs/en/remote-control).
+        It never emits ``--sandbox`` / ``--no-sandbox``: Claude Code 2.1.300 removed both
+        from ``claude remote-control`` and exits on either (see
+        ``config.SANDBOX_REMOVED_NOTE``). A session is sandboxed by ``sandbox.enabled``
+        in a Claude Code settings file, which the bridge reads on its own.
         """
         defaults = self._config.instance_defaults
         cmd = [
@@ -112,16 +109,6 @@ class BridgeLaunch:
         # the six real modes, already screened by _validate_spawn_options.
         if permission_mode != INHERIT_PERMISSION_MODE:
             cmd += ["--permission-mode", permission_mode]
-        # Sandbox toggle (#780) — append only for an explicit on/off; "default" leaves it
-        # to claude's own setting. Placed before the config-driven flags below, order is
-        # immaterial to claude's parser. Disabled for 1.0 (#1037) not here but at the source:
-        # `sandbox` is coerced to "default" on the way in (fresh spawn) and on persisted read,
-        # so nothing but "default" reaches this builder until #1046 re-enables the toggle —
-        # keeping this low-level emission intact and directly tested for that re-enable.
-        if sandbox == "on":
-            cmd += ["--sandbox"]
-        elif sandbox == "off":
-            cmd += ["--no-sandbox"]
         # Brand auto-generated session names when configured. Multi-session modes only
         # (same-dir/worktree) — `session` is single-session, so the prefix is out of scope.
         if defaults.session_name_prefix and spawn_mode in ("same-dir", "worktree"):
@@ -176,13 +163,12 @@ class BridgeLaunch:
         spawn_mode: SpawnMode,
         permission_mode: PermissionMode,
         debug_path: Path | None = None,
-        sandbox: SandboxMode = "default",
     ) -> subprocess.Popen:
         """Launch the detached bridge subprocess with a resolved binary and scrubbed env."""
         # The bridge writes its --debug-file to `debug_path` (the private raw parse-
         # source when on-disk redaction is on); the captured-stderr sibling stays keyed
         # off the public `log_path`. They coincide when redaction is off.
-        cmd = self._build_cmd(debug_path or log_path, name, spawn_mode, permission_mode, sandbox)
+        cmd = self._build_cmd(debug_path or log_path, name, spawn_mode, permission_mode)
         # Exec the RESOLVED absolute path, not the bare configured name: Windows
         # CreateProcess only auto-appends .exe (never the .cmd/.ps1 shim npm installs
         # for `claude`), so a bare name that the version probe resolves via

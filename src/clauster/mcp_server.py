@@ -100,7 +100,7 @@ from typing import IO, TYPE_CHECKING, Any
 import yaml
 
 from . import __version__
-from .config import ClausterConfig, load_config
+from .config import ClausterConfig, load_config, removed_sandbox_note
 
 if TYPE_CHECKING:
     from .models import BackgroundJob, RemoteControlInstance, WorkingSession
@@ -375,8 +375,9 @@ _WRITE_TOOLS: list[dict[str, Any]] = [
                 "custom_name": {"type": "string", "description": "Display name (standard only)."},
                 "sandbox": {
                     "type": "string",
-                    "description": "default | on | off (standard only). Disabled in this release "
-                    "(#1037) — accepted but inert; returns via #1046.",
+                    "description": "Removed. Accepted and ignored, with a warning in the "
+                    "result. To sandbox sessions, set sandbox.enabled in a Claude Code "
+                    "settings file.",
                 },
                 "trust": {
                     "type": "boolean",
@@ -543,6 +544,11 @@ async def _tool_spawn_session(config: ClausterConfig, args: dict[str, Any]) -> d
     trust = args.get("trust", False)
     if not isinstance(trust, bool):
         raise ValueError("spawn_session 'trust' must be a boolean")
+    # The removed per-launch sandbox option: an old client's value is ignored, not refused,
+    # and the note rides in `warnings` so the agent sees that it was ignored.
+    sandbox_note = removed_sandbox_note(args.get("sandbox"))
+    if sandbox_note is not None:
+        _log.warning("spawn_session: %s", sandbox_note)
     with ClausterEngine(config) as engine:
         await engine.hydrate()
         outcome = await engine.start(
@@ -551,13 +557,12 @@ async def _tool_spawn_session(config: ClausterConfig, args: dict[str, Any]) -> d
             permission_mode=_optional_str("spawn_session", args, "permission_mode"),
             resume_mode=_optional_str("spawn_session", args, "resume_mode"),
             custom_name=_optional_str("spawn_session", args, "custom_name"),
-            sandbox=_optional_str("spawn_session", args, "sandbox"),
             trust=trust,
         )
     return {
         "created": outcome.created,
         "reason": outcome.reason,
-        "warnings": list(outcome.warnings),
+        "warnings": [*outcome.warnings, *([sandbox_note] if sandbox_note is not None else [])],
         "session": _summarize_instance(outcome.instance, kind="bridge"),
     }
 

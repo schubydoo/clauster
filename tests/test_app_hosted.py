@@ -213,6 +213,24 @@ def test_spawn_hosted_dispatches_to_manager(write_config, projects_root, monkeyp
     assert Path(manager.spawn_calls[0]["cwd"]).resolve() == (projects_root / "alpha").resolve()
 
 
+def test_spawn_hosted_ignores_the_removed_sandbox_option(write_config, monkeypatch):
+    # A hosted spawn never took a sandbox value; an old client that still sends one gets the
+    # removal note as a warning, and the manager is called with exactly its own parameters.
+    from clauster.config import SANDBOX_REMOVED_NOTE
+
+    monkeypatch.setattr(instances_module, "is_trusted", lambda *a, **k: True)
+    monkeypatch.setattr(claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
+    manager = _StubManager()
+    app = _app(write_config, manager=manager, daemon=_StubDaemon())
+    with TestClient(app) as client:
+        r = client.post(
+            "/api/instances", json={"project": "alpha", "channel": "hosted", "sandbox": "on"}
+        )
+    assert r.status_code == 201, r.text
+    assert r.json()["warnings"] == [SANDBOX_REMOVED_NOTE]
+    assert len(manager.spawn_calls) == 1
+
+
 def test_spawn_hosted_without_daemon_is_503(write_config, projects_root):
     app = _app(write_config, daemon=None)  # claustrum disabled → no daemon
     with TestClient(app) as client:

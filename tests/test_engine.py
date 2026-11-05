@@ -208,7 +208,6 @@ def test_start_delegates_options_to_spawn_detailed(tmp_path, projects_root):
             permission_mode="plan",
             resume_mode="pty",
             custom_name="mybridge",
-            sandbox="on",
         )
     )
 
@@ -221,7 +220,6 @@ def test_start_delegates_options_to_spawn_detailed(tmp_path, projects_root):
         "permission_mode": "plan",
         "resume_mode": "pty",
         "custom_name": "mybridge",
-        "sandbox": "on",
         "trust": False,
     }
 

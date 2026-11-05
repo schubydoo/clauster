@@ -221,8 +221,8 @@
                           </div>
                           {# Sandbox toggle (#780) removed for 1.0 (#1037): `--sandbox` never
                              propagated to the server-mode session worker, so the control silently
-                             did nothing. It returns behind dependency preflight + platform gating
-                             in #1046. #}
+                             did nothing. It does not return: Claude Code 2.1.300 removed the flag,
+                             and `sandbox.enabled` in a Claude Code settings file replaces it. #}
                           {# Spawn applies to BOTH modes (#779): standard maps to
                              `claude remote-control --spawn`; an Interactive Session honors
                              same-dir/worktree (worktree = `claude --worktree`, its own isolated

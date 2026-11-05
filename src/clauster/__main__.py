@@ -33,9 +33,9 @@ from . import __version__, claude_cli, deps, environments, ops, pty_keeper, pty_
 from .app import create_app
 from .auth import hash_password, make_hasher, mint_metrics_token, mint_token
 from .config import (
+    LEGACY_SANDBOX_VALUES,
     PERMISSION_MODES,
     RESUME_MODES,
-    SANDBOX_MODES,
     SPAWN_MODES,
     ClausterConfig,
     first_config_path,
@@ -307,8 +307,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     start_p.add_argument(
         "--sandbox",
-        choices=SANDBOX_MODES,
-        help="per-launch sandbox toggle for a standard bridge (disabled this release; see #1046)",
+        choices=LEGACY_SANDBOX_VALUES,
+        help="removed: accepted and ignored with a warning; to sandbox sessions, set "
+        "sandbox.enabled in a Claude Code settings file",
     )
     start_p.add_argument(
         "--trust",

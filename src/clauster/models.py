@@ -23,7 +23,7 @@ from typing import Any, TypeGuard
 from pydantic import BaseModel, Field, computed_field
 
 from . import redact
-from .config import PermissionMode, ResumeMode, SandboxMode, SessionChannel, SpawnMode
+from .config import PermissionMode, ResumeMode, SessionChannel, SpawnMode
 
 
 def new_instance_id() -> str:
@@ -137,11 +137,6 @@ class RemoteControlInstance(BaseModel):
     url: str | None = None  # https://claude.ai/code?environment=env_<ULID>
     spawn_mode: SpawnMode = "same-dir"
     permission_mode: PermissionMode = "default"
-    # Per-launch OS-level filesystem/network sandbox toggle for a standard bridge (#780).
-    # "default" = neither flag (claude's off-by-default / sandbox.* settings win); "on" =
-    # --sandbox; "off" = --no-sandbox. Recorded so a resume re-applies the same choice.
-    # Always "default" for pty bridges (out of scope for #780).
-    sandbox_mode: SandboxMode = "default"
     # How this bridge was launched. "pty" bridges (Interactive Session) run the flag
     # form under a PTY keeper for true conversation resume; their `bridge_pid` is the
     # bridge the keeper spawned and `keeper_pid` is the keeper holding its terminal.

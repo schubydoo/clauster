@@ -5475,7 +5475,7 @@
           if (effective === "standard" && customName) reqBody.name = customName;
           // Sandbox toggle (#780) removed for 1.0 (#1037): it never reached the session
           // worker, so the launch popover no longer offers it and no `sandbox` field is
-          // sent. Returns behind preflight + platform gating in #1046.
+          // sent. Claude Code 2.1.300 removed the flag; `sandbox.enabled` replaces it.
           // Resume picker (#303) — pty/Interactive Session only, SAME `=== 'pty'` gate
           // as the template's x-show so the two can't diverge; "" means a fresh
           // conversation, so omit the field entirely.

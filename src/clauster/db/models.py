@@ -112,9 +112,9 @@ class Instance(Base, TimestampMixin):
     spawn_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
     permission_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
     resume_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    # The standard bridge's sandbox choice (#780). Without the column the value the runner
-    # wrote was dropped on save, so a restart rebuilt every STOPPED card as "default" (#1101).
-    # NULL for a row from an older build, which rebuilds as "default" exactly as before.
+    # The standard bridge's old sandbox choice (#780/#1101). Unused: the per-launch sandbox
+    # option is removed, and the state store neither reads nor writes this column. It stays
+    # mapped so the schema matches migration 0014 and an older Clauster can still read it.
     sandbox_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # Liveness identity (#1088/#1091). Before these, "which instances are live and what are
     # their pids" existed ONLY in the creating process's memory, so a fresh process could not

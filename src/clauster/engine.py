@@ -41,7 +41,7 @@ from .runner import SessionRunner
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from .config import ClausterConfig, PermissionMode, ResumeMode, SandboxMode, SpawnMode
+    from .config import ClausterConfig, PermissionMode, ResumeMode, SpawnMode
     from .models import Project, RemoteControlInstance, WorkingSession
     from .runner import SpawnOutcome
 
@@ -154,7 +154,6 @@ class ClausterEngine(AbstractContextManager["ClausterEngine"]):
         permission_mode: PermissionMode | None = None,
         resume_mode: ResumeMode | None = None,
         custom_name: str | None = None,
-        sandbox: SandboxMode | None = None,
         trust: bool = False,
     ) -> SpawnOutcome:
         """Spawn (or hand back an already-live) bridge for ``project``; return the outcome.
@@ -188,7 +187,6 @@ class ClausterEngine(AbstractContextManager["ClausterEngine"]):
             permission_mode=permission_mode,
             resume_mode=resume_mode,
             custom_name=custom_name,
-            sandbox=sandbox,
             trust=trust,
         )
 
