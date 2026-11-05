@@ -108,6 +108,7 @@ def test_the_instance_sandbox_mode_key_is_a_deprecated_constant():
     schema = RemoteControlInstance.model_json_schema(mode="serialization")
     prop = schema["properties"]["sandbox_mode"]
     assert prop["deprecated"] is True
+    assert prop["const"] == "default"
     assert SANDBOX_REMOVED_NOTE in prop["description"]
 
 
@@ -259,7 +260,9 @@ def test_a_legacy_record_dict_with_sandbox_mode_rebuilds_a_card(runner_config):
 @pytest.mark.parametrize("prefix", ["/api/v1", "/api"])
 def test_v1_instance_response_keeps_sandbox_mode_default_for_an_old_on_row(runner_config, prefix):
     # /api/v1 is a versioned public API: an instance response still carries `sandbox_mode`,
-    # always "default", even for a row an older build stored with "on".
+    # always "default", even for a row an older build stored with "on". The seed bites only
+    # if a rebuild path carries the stored value onto the card again (the old #1101 shape);
+    # the constant itself is pinned by the model test above.
     config, claude_json = runner_config
     seed = SessionRunner(config, claude_json=claude_json)
     seed.persistence.state_store().save(

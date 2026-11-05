@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, TypeGuard
+from typing import Any, Literal, TypeGuard
 
 from pydantic import BaseModel, Field, computed_field
 
@@ -265,7 +265,7 @@ class RemoteControlInstance(BaseModel):
         json_schema_extra={"deprecated": True},
     )
     @property
-    def sandbox_mode(self) -> str:
+    def sandbox_mode(self) -> Literal["default"]:
         """Return the constant ``"default"``: the deprecated key of the removed sandbox option.
 
         A computed field, not a stored one, so that no input (an old record dict with
