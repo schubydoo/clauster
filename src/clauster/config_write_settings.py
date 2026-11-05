@@ -191,13 +191,16 @@ _READ_FROM: dict[str, tuple[frozenset[str], str, str]] = {
 }
 
 #: Keys (dotted for a nested key) that Claude Code reads only from some settings files,
-#: from the Scope column of https://code.claude.com/docs/en/settings-reference (checked
-#: 2026-11-04 against Claude Code 2.1.318), plus three undocumented keys whose own schema
-#: text in the 2.1.318 bundle names their scope. A write that names one at a scope where it is
-#: ignored is refused whole (422) with a message naming the scope that works, as the
-#: Permissions tab does for ``autoMode`` (PR 1801). ``autoMode`` itself is carved above.
-#: A value-level caveat (for example a ``mask`` entry in ``sandbox.credentials.envVars``)
-#: is not enforced here: the key is read at that scope, only some of its values are not.
+#: from the Scope column of https://code.claude.com/docs/en/settings-reference, plus three
+#: undocumented keys whose own schema text in the 2.1.318 bundle names their scope. Each
+#: entry was checked against the 2.1.318 bundle code on 2026-11-05 (TASK-490). A write that
+#: names one at a scope where it is ignored is refused whole (422) with a message naming the
+#: scope that works, as the Permissions tab does for ``autoMode`` (PR 1801). ``autoMode``
+#: itself is carved above. A value-level caveat is not enforced here, because the key is
+#: read at that scope and only some of its values are not: a ``mask`` entry in
+#: ``sandbox.credentials.envVars``, and ``true`` for ``bashEditDiffEnabled`` or
+#: ``sandbox.allowNestedUserNamespaces`` (the docs say user only, but 2.1.318 honors a
+#: ``false`` from project and local settings, so those two keys pass at every scope).
 SCOPE_LIMITED_KEYS: dict[str, str] = {
     **dict.fromkeys(
         (
@@ -205,7 +208,6 @@ SCOPE_LIMITED_KEYS: dict[str, str] = {
             "askUserQuestionTimeout",
             "autoContinueAtUsageLimit",
             "axScreenReader",
-            "bashEditDiffEnabled",
             "desktopSessionCleanupPeriodDays",
             "dialogExpiry",
             "feedbackDrafts",
@@ -219,7 +221,6 @@ SCOPE_LIMITED_KEYS: dict[str, str] = {
             # --settings value is ignored.
             "remoteTools.allowUnattendedServing",
             "sandbox.allowAppleEvents",
-            "sandbox.allowNestedUserNamespaces",
             "sandbox.credentials.allowPlaintextInject",
             "sandbox.credentials.awsPairs",
             "sandbox.credentials.sigv4",

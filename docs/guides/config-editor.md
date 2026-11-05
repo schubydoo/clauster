@@ -378,10 +378,13 @@ example:
 If a file already holds such a key, remove the key in Raw JSON before you save
 the file again at that scope. Clauster checks keys, not values. For example,
 Claude Code drops a `mask` entry of `sandbox.credentials.envVars` from a project
-file, but Clauster does not refuse that entry. The auto mode key
-`disableAutoMode` and the hook keys `disableAllHooks`, `allowedHttpHookUrls` and
-`httpHookAllowedEnvVars` work in every settings file, so the tab accepts them at
-every scope.
+file, but Clauster does not refuse that entry. The settings reference gives
+`bashEditDiffEnabled` and `sandbox.allowNestedUserNamespaces` User scope, but
+Claude Code also reads `false` for them from a project or local file. Only
+`true` has no effect there, so the tab accepts both keys at every scope. The
+auto mode key `disableAutoMode` and the hook keys `disableAllHooks`,
+`allowedHttpHookUrls` and `httpHookAllowedEnvVars` work in every settings file,
+so the tab accepts them at every scope.
 
 At Project and Local scope, the merged ("effective") view shows the value that
 Claude Code applies from the three files. Local settings override project

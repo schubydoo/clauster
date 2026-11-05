@@ -306,6 +306,35 @@ def test_any_file_auto_mode_and_hook_keys_pass_through(
     _write(scope, tmp_path, {key: value})
 
 
+# The docs give these two keys User scope, but Claude Code 2.1.318 honors a false from
+# project and local settings too: its Bash edit-diff gate returns off when the merged
+# settings hold bashEditDiffEnabled: false, and its sandbox config takes
+# allowNestedUserNamespaces: false from the merged settings (only true is read from
+# trusted sources alone). So the key is read at every scope and is not refused (TASK-490).
+_READ_AT_EVERY_SCOPE = ("bashEditDiffEnabled", "sandbox.allowNestedUserNamespaces")
+
+
+@pytest.mark.parametrize("path", _READ_AT_EVERY_SCOPE)
+@pytest.mark.parametrize("scope", _SCOPES)
+def test_key_whose_false_is_read_from_every_file_saves_at_every_scope(
+    tmp_path: Path, path: str, scope: str
+) -> None:
+    assert path not in cws.SCOPE_LIMITED_KEYS
+    _write(scope, tmp_path, _nested(path, False))
+
+
+@pytest.mark.parametrize("path", _READ_AT_EVERY_SCOPE)
+def test_key_whose_false_is_read_from_every_file_stays_in_the_merged_view(path: str) -> None:
+    # A key the scope ignores is left out of that layer, so this also proves the local
+    # and project values are not treated as ignored.
+    top = path.split(".")[0]
+    merged = cws._compute_effective_settings(
+        user_misc={}, project_misc=_nested(path, False), local_misc=_nested(path, False)
+    )
+    assert merged[top]["value"] == _nested(path, False)[top]
+    assert merged[top]["sources"] == ["local"]
+
+
 def test_route_refuses_an_ignored_key_with_its_message(write_config, tmp_path, projects_root):
     fake = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
     cfg = write_config(
