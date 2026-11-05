@@ -828,6 +828,8 @@ def test_validate_skill_overrides_accepts_empty() -> None:
         {"__proto__": "on"},
         {"good-name": "bogus-value"},
         {"good-name": True},
+        {"good-name": ["off"]},  # unhashable: must not leak a bare TypeError
+        {"good-name": {}},
         {5: "on"},
     ],
 )
@@ -1464,11 +1466,12 @@ def test_route_overrides_refused_key_names_it_and_writes_nothing(
 
 
 @pytest.mark.parametrize("bad", [[], {}, ["off"], None, 1, True])
-def test_route_overrides_non_string_value_is_422_not_500(
+def test_route_overrides_non_string_value_names_the_key(
     write_config, tmp_path, projects_root, bad
 ) -> None:
     # The panel sends a stored value it cannot show back unchanged, so the backend must
-    # refuse a hand-edited list or object with its message, not fail on an unhashable `in`.
+    # refuse a hand-edited list or object with a message that names the key, not a bare
+    # "unhashable type" from the membership test.
     with _client(write_config, tmp_path, _ON) as c:
         h0 = c.get(f"{_OVERRIDES_URL}?project=alpha").json()["hash"]
         resp = _overrides_put(c, {"odd": bad}, h0)

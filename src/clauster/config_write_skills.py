@@ -1645,8 +1645,9 @@ def validate_skill_overrides(candidate: Any) -> None:
     for name, value in candidate.items():
         if not isinstance(name, str) or name == "__proto__" or not cli_shows_name(name):
             raise cw.InvalidCandidateError(f"skillOverrides has an invalid skill name: {name!r}")
-        # isinstance first: a list or object value is unhashable, so `in` on the frozenset
-        # would raise TypeError (a 500) instead of this 422 that names the key.
+        # isinstance first: a list or object value is unhashable, so `in` raises TypeError,
+        # which validate_candidate reports as a bare "unhashable type" 422. This check keeps
+        # the message that names the key and the allowed values.
         if not isinstance(value, str) or value not in SKILL_OVERRIDE_VALUES:
             raise cw.InvalidCandidateError(
                 f"skillOverrides[{name!r}] must be one of {sorted(SKILL_OVERRIDE_VALUES)} "
