@@ -555,10 +555,16 @@ def _unmasked_slot_path(incoming: Any, shown: Any, path: str) -> str | None:
             for k, v in incoming.items()
         )
     elif isinstance(incoming, list):
+        # The orphan check ran first, so ``incoming`` has the stored (and shown) length.
         if isinstance(shown, list) and _has_sentinel(incoming):
-            for i, sub in enumerate(shown):
-                if _has_sentinel(sub) and not (i < len(incoming) and _has_sentinel(incoming[i])):
-                    return f"{path}.{i}"
+            if any(
+                _has_sentinel(s) and not _has_sentinel(v)
+                for s, v in zip(shown, incoming, strict=False)
+            ):
+                raise cw.InvalidCandidateError(
+                    f"{path} holds masked entries that all look the same, so after you "
+                    f"change one, type the real value of every masked entry in {path}"
+                )
         pairs = (
             (i, v, shown[i] if isinstance(shown, list) and i < len(shown) else _MISSING)
             for i, v in enumerate(incoming)

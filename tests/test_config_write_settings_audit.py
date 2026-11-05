@@ -153,7 +153,7 @@ def test_mask_moved_onto_a_clear_list_entry_is_refused(tmp_path: Path) -> None:
     h = _seed(settings, {"mirrors": ["plain", "https://user:tok@host/x"]})
     view, _ = cws.read_user_settings(settings)
     assert view == {"mirrors": ["plain", S]}
-    with pytest.raises(cw.InvalidCandidateError, match=r"mirrors\.[01] holds a masked value"):
+    with pytest.raises(cw.InvalidCandidateError, match="mirrors holds masked entries"):
         cws.write_user_settings(settings, {"mirrors": [S, "plain"]}, h)
     assert json.loads(settings.read_text(encoding="utf-8"))["mirrors"][1].startswith("https://")
 
@@ -171,7 +171,10 @@ def test_identical_masks_in_a_list_cannot_be_partly_replaced(
 ) -> None:
     settings = tmp_path / "settings.json"
     h = _seed(settings, {"mirrors": stored})
-    with pytest.raises(cw.InvalidCandidateError, match=r"mirrors\.1 holds a masked value"):
+    with pytest.raises(
+        cw.InvalidCandidateError,
+        match="mirrors holds masked entries that all look the same.*every masked entry in mirrors",
+    ):
         cws.write_user_settings(settings, {"mirrors": sent}, h)
     # Retyping every masked entry is accepted.
     cws.write_user_settings(settings, {"mirrors": ["https://u:two@h/y", "plain"]}, h)
