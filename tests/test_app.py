@@ -1401,13 +1401,20 @@ def test_dashboard_transcript_position_indicator(write_config):
     assert page.index('data-test="transcript-position"') < page.index(
         '<div x-show="!transcripts.loading">'
     )
+    # The separator dot is outside the region, so an announcement starts with "showing".
+    assert '<span aria-hidden="true"' in page
+    assert "x-show=\"!transcripts.live && transcriptPositionLabel() !== ''\">·</span>" in page
     assert "transcriptPositionLabel() {" in page
-    assert 'if (t.loading || t.total === 0) return "";' in page
-    assert '"· showing " + t.turns.length + " of " + t.total +' in page
-    assert '(t.matching ? " matching" : "")' in page
-    # "matching" follows the APPLIED search, recorded per request (and per live re-derive).
-    assert "matching: false," in page
-    assert page.count('t.matching = (t.q || "").trim().length >= this.TRANSCRIPT_MIN_QUERY;') == 2
+    assert 'if (t.loading || (t.total === 0 && t.error)) return "";' in page
+    assert 'const noun = (t.appliedQ ? " matching" : "")' in page
+    # A search with no hits is announced too: the visual empty states are not live regions.
+    assert 'if (t.total === 0) return "0" + noun;' in page
+    assert 'return "showing " + t.turns.length + " of " + t.total + noun;' in page
+    # "matching" and Load more follow the APPLIED search, recorded per request (and per
+    # live re-derive), never the box text that may wait on the debounce or be too short.
+    assert 'appliedQ: "",' in page
+    assert page.count("t.appliedQ = this._transcriptTerm();") == 2
+    assert 'if (t.appliedQ) qs += "&q=" + encodeURIComponent(t.appliedQ);' in page
     # Load more names what is left, in the direction of the current sort.
     assert '<span x-text="transcriptLoadMoreLabel()">Load more</span>' in page
     assert "const left = Math.max(t.total - t.turns.length, 0);" in page

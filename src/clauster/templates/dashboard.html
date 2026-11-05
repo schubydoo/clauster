@@ -3027,7 +3027,8 @@
                  non-live re-fetch. #}
               {# Position line (backlog TASK-268): the paged viewer says how much of the
                  session is on screen ("showing X of Y turns"; "matching" under a search,
-                 where total is the post-filter count). It sits OUTSIDE the loading gate so
+                 where total is the post-filter count; "0 matching turns" for a search
+                 with no hits). It sits OUTSIDE the loading gate so
                  the polite live region stays in the accessibility tree: its text clears
                  while a page loads and is announced when the page lands, which happens
                  only on a user action (open, Load more, search, sort). The live list keeps
@@ -3036,6 +3037,10 @@
                 <code x-text="transcripts.session"></code>
                 <span x-show="transcripts.live" x-cloak
                       x-text="'· ' + transcripts.total + (transcripts.total === 1 ? ' turn' : ' turns')"></span>
+                {# The separator stays out of the live region, so an announcement starts
+                   with "showing" and not with "middle dot". #}
+                <span aria-hidden="true"
+                      x-show="!transcripts.live && transcriptPositionLabel() !== ''">·</span>
                 <span data-test="transcript-position" role="status" aria-live="polite"
                       x-show="!transcripts.live" x-text="transcriptPositionLabel()"></span>
               </div>

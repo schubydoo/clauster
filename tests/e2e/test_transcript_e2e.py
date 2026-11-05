@@ -98,7 +98,7 @@ def test_transcript_modal_shows_empty_state_without_transcripts(
 
 
 def _seed_long_session(home: Path, project_path: Path, name: str, turns: int) -> None:
-    """Write a ``turns``-long transcript; every tenth turn carries the word ``needle``."""
+    """Write a ``turns``-long transcript: even turns say ``even``, every tenth ``needle``."""
     from clauster.pointers import sanitize_cwd  # pure cwd→dirname mapping
 
     tdir = home / ".claude" / "projects" / sanitize_cwd(project_path)
@@ -108,7 +108,9 @@ def _seed_long_session(home: Path, project_path: Path, name: str, turns: int) ->
             "timestamp": f"2026-07-16T00:{i // 60:02d}:{i % 60:02d}Z",
             "message": {
                 "role": "user" if i % 2 == 0 else "assistant",
-                "content": f"turn {i}" + (" needle" if i % 10 == 0 else ""),
+                "content": f"turn {i}"
+                + (" even" if i % 2 == 0 else "")
+                + (" needle" if i % 10 == 0 else ""),
             },
         }
         for i in range(turns)
@@ -153,10 +155,31 @@ def test_transcript_position_indicator_tracks_paging_search_and_sort(
     browser.expect_hidden(more, timeout_ms=STATUS_TIMEOUT)
 
     # A search counts only the matching turns (12 of the 120 carry "needle").
-    browser.scroll_into_view('[data-test="transcript-search"]')
-    browser.fill('[data-test="transcript-search"]', "needle")
+    search = '[data-test="transcript-search"]'
+    browser.scroll_into_view(search)
+    browser.fill(search, "needle")
     browser.expect_text(position, "showing 12 of 12 matching turns", timeout_ms=STATUS_TIMEOUT)
     browser.expect_hidden(more, timeout_ms=STATUS_TIMEOUT)
+
+    # A search with no hits says so in the live region, not only in the visual empty state.
+    browser.fill(search, "zzz")
+    browser.expect_visible('[data-test="transcript-no-matches"]', timeout_ms=STATUS_TIMEOUT)
+    browser.expect_text(position, "0 matching turns", timeout_ms=STATUS_TIMEOUT)
+
+    # Load more continues the search on screen, even when the box now holds a term that
+    # is too short to search: the 60 "even" turns stay 60, never the unfiltered 120.
+    browser.fill(search, "even")
+    browser.expect_text(position, "showing 50 of 60 matching turns", timeout_ms=STATUS_TIMEOUT)
+    browser.expect_text(more, "Load more (10 older)", timeout_ms=STATUS_TIMEOUT)
+    browser.fill(search, "e")
+    # The "keep typing" hint opens above the list and moves the button: wait for it.
+    browser.expect_visible('[data-test="transcript-query-short"]', timeout_ms=STATUS_TIMEOUT)
+    browser.scroll_into_view(more)
+    browser.click(more)
+    browser.expect_text(position, "showing 60 of 60 matching turns", timeout_ms=STATUS_TIMEOUT)
+    browser.expect_hidden(more, timeout_ms=STATUS_TIMEOUT)
+
+    browser.scroll_into_view(search)
     browser.click('[data-test="transcript-search-clear"]')
     browser.expect_text(position, "showing 50 of 120 turns", timeout_ms=STATUS_TIMEOUT)
 
