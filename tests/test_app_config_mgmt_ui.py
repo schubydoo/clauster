@@ -260,7 +260,9 @@ def test_mcp_surface_present_when_enabled(write_config):
     assert 'data-test="cm-mcp-conversions"' in html
     assert 'data-test="cm-mcp-entry-conversions"' in html
     # The template's own call (the bare name also matches the method definition).
-    assert "configMgmtMcpConversionsFor(configMgmt.mcp.name)" in html
+    assert (
+        "!configMgmt.mcp.isNew && configMgmtMcpConversionsFor(configMgmt.mcp.name).length" in html
+    )
 
 
 def test_mcp_delete_confirm_suppresses_approvals_confirms(write_config):

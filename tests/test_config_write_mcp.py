@@ -1933,6 +1933,7 @@ def test_saving_one_converted_entry_fixes_it_and_leaves_siblings(tmp_path: Path)
         # Never converted on load, so the message must not promise a reload fix.
         ({"transport": "${T}", "url": "u"}, "set 'type' by hand"),
         ({"transport": 5, "url": "u"}, "set 'type' by hand"),
+        ({"transport": ["sse"], "url": "u"}, "set 'type' by hand"),  # unhashable: no 500
     ],
 )
 def test_a_write_still_carrying_ignored_fields_explains_the_conversion(

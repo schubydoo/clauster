@@ -497,7 +497,7 @@ def _convert_legacy_entry(entry: Any) -> tuple[Any, list[dict[str, str]]]:
       it with its message: a value that is not a plain transport word is never moved into
       ``type``, where it could be masked on display and become unsavable.
     * ``env`` on a remote (http/sse/ws) server is dropped. Claude Code never read it, so
-      nothing is lost; the note counts the values, which the display showed masked.
+      nothing is lost; the note gives the number of dropped values, never a value.
 
     The stored file is NOT changed here; this only shapes the display copy and the notes.
     """

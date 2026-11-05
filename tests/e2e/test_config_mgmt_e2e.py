@@ -600,6 +600,7 @@ def test_config_mgmt_mcp_converted_entry_shows_note_and_saves_unedited(
     browser.expect_disabled('[data-test="cm-mcp-save"]')
     browser.expect_hidden('[data-test="cm-mcp-entry-conversions"]')
     browser.click('[data-test="cm-mcp-cancel"]')
+    browser.expect_visible('[data-test="cm-mcp-edit-legacy"]')  # a reload may run first
     browser.click('[data-test="cm-mcp-edit-legacy"]')
     browser.expect_visible('[data-test="cm-mcp-entry-conversions"]')
     browser.fill('[data-test="cm-mcp-confirm"]', "alpha")
