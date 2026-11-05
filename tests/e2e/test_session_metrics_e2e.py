@@ -17,6 +17,7 @@ import time
 import urllib.request
 from typing import TYPE_CHECKING
 
+import psutil
 import pytest
 from _helpers import STATUS_TIMEOUT, open_desktop_launch, trust_and_start
 
@@ -75,10 +76,14 @@ def test_bridge_session_row_shows_its_own_cpu_and_ram(
         }
 
     # Both pids are the bridge's own (the bridge, and its child), so reconcile attributes
-    # both sessions TRACKED and lists both rows. startedAt orders the rows.
+    # both sessions TRACKED and lists both rows. startedAt orders the rows. It is the
+    # child's real start, as the CLI stamps it: the sampler refuses a first figure for a
+    # process that started far from its session's startedAt (a reused pid).
+    child = _session_child_pid(server)
+    started = int(psutil.Process(child).create_time() * 1000)
     agents = [
-        session(_session_child_pid(server), _CHILD_SESSION, 1735689600000),
-        session(_bridge_pid(server, "gamma"), _BRIDGE_SESSION, 1735689700000),
+        session(child, _CHILD_SESSION, started),
+        session(_bridge_pid(server, "gamma"), _BRIDGE_SESSION, started + 1000),
     ]
     (server.state_dir.parent / "agents.json").write_text(json.dumps(agents), encoding="utf-8")
 
