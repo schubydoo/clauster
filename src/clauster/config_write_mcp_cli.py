@@ -345,6 +345,7 @@ def cli_remove_server(
     name has nothing to remove, and that's fine) — an explicit remove call leaves it
     ``False`` so a caller asking to remove something absent gets a clean 404.
     """
+    mcp.validate_removable_server_name(name)  # last check before the name reaches argv
     proc = _run(binary, ["remove", name, "--scope", scope], cwd=project_dir, run=run)
     try:
         _raise_for_failure("remove", name, proc)

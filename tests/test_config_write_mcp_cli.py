@@ -375,6 +375,24 @@ def test_cli_remove_server_not_found_ignored_when_requested(tmp_path: Path) -> N
     )  # no raise
 
 
+@pytest.mark.parametrize("name", ["--scope", "-e", "-", "a b", "x;y"])
+def test_cli_remove_server_refuses_option_like_name_before_spawn(
+    tmp_path: Path, name: str
+) -> None:
+    # A remove validates no entry, so the name check is the only guard before argv.
+    run, calls = _fake_run(rc=0)
+    with pytest.raises(cw.InvalidCandidateError):
+        mcp_cli.cli_remove_server(str(FAKE_CLAUDE), tmp_path, name, "project", run=run)
+    assert calls == []
+
+
+def test_cli_remove_server_still_accepts_a_legacy_dotted_name(tmp_path: Path) -> None:
+    # Earlier clauster versions stored dotted names; they must stay removable.
+    run, calls = _fake_run(rc=0)
+    mcp_cli.cli_remove_server(str(FAKE_CLAUDE), tmp_path, "srv.v2", "project", run=run)
+    assert calls[0]["argv"][-4:] == ["remove", "srv.v2", "--scope", "project"]
+
+
 # --- cli_edit_server: remove (ignore-missing) + re-add -----------------------------
 
 
@@ -1181,6 +1199,26 @@ def test_route_server_remove_success(write_config, tmp_path, projects_root, monk
             "project": "alpha",
             "ok": True,
         }
+
+
+def test_route_server_remove_option_like_name_is_422(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    argv_file = tmp_path / "argv.json"
+    monkeypatch.setenv("FAKE_CLAUDE_MCP_ARGV_FILE", str(argv_file))
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.post(
+            "/api/config-write/mcp/server",
+            json={
+                "scope": "project",
+                "project": "alpha",
+                "confirm": "alpha",
+                "op": "remove",
+                "name": "--scope",
+            },
+        )
+    assert resp.status_code == 422
+    assert not argv_file.exists()  # `claude mcp remove` never spawned
 
 
 def test_route_server_bad_scope_is_422(write_config, tmp_path, projects_root) -> None:

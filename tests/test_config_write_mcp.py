@@ -339,6 +339,81 @@ def test_read_passes_a_non_object_entry_through(tmp_path: Path) -> None:
     assert servers == {"odd": "not-an-object"}
 
 
+@pytest.mark.parametrize(
+    ("entry", "where"),
+    [
+        ({"type": "http", "url": cw.REDACTION_SENTINEL}, "new.url"),
+        ({"command": "x", "env": {"K": cw.REDACTION_SENTINEL}}, "new.env.K"),
+        ({"command": "x", "args": [cw.REDACTION_SENTINEL]}, "new.args[0]"),
+        (
+            {"type": "http", "url": "https://x/mcp", "oauth": {"clientId": cw.REDACTION_SENTINEL}},
+            "new.oauth.clientId",
+        ),
+    ],
+)
+def test_entry_writer_refuses_a_sentinel_with_nothing_stored(
+    tmp_path: Path, entry: dict, where: str
+) -> None:
+    # Pasting the masked view of one server into "New" used to drop every sentinel and
+    # write a server without its url/env, reporting success. Refuse it whole instead.
+    with pytest.raises(cw.InvalidCandidateError, match=where.replace("[", r"\[")):
+        mcp.write_project_server_entry(tmp_path, "new", entry, op="add")
+    assert not (tmp_path / ".mcp.json").exists()
+
+
+def test_whole_map_writer_refuses_a_sentinel_with_nothing_stored(tmp_path: Path) -> None:
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"a": {"command": "x", "env": {"K": "v"}}}}), encoding="utf-8"
+    )
+    before = (tmp_path / ".mcp.json").read_bytes()
+    _s, h = mcp.read_project_servers(tmp_path)
+    m = cw.REDACTION_SENTINEL
+    bad = {"a": {"command": "x", "env": {"K": m, "NEW": m}}}
+    with pytest.raises(cw.InvalidCandidateError, match=r"a\.env\.NEW"):
+        mcp.write_project_servers(tmp_path, bad, h)
+    cj = tmp_path / "claude.json"
+    with pytest.raises(cw.InvalidCandidateError, match="nothing is stored"):
+        mcp.write_user_servers(cj, {"u": {"type": "http", "url": m}})
+    with pytest.raises(cw.InvalidCandidateError, match="nothing is stored"):
+        mcp.write_project_local_servers(cj, tmp_path, {"l": {"command": "x", "args": [m]}})
+    assert (tmp_path / ".mcp.json").read_bytes() == before
+    assert not cj.exists()
+
+
+def test_entry_writer_refuses_a_sentinel_under_a_non_object_stored_value(tmp_path: Path) -> None:
+    # The stored `env` is not an object, so nothing backs the sentinel nested under it.
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"s": {"command": "x", "env": "oops"}}}), encoding="utf-8"
+    )
+    entry = {"command": "x", "env": {"K": cw.REDACTION_SENTINEL}}
+    with pytest.raises(cw.InvalidCandidateError, match=r"s\.env\.K"):
+        mcp.write_project_server_entry(tmp_path, "s", entry, op="edit")
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"type": ["http"], "url": "u"},  # unhashable: was a TypeError (500), now a 422
+        {"type": {"t": 1}, "url": "u"},
+        {"type": "http", "transport": "sse", "url": "u"},
+    ],
+)
+def test_entry_transport_rejects_bad_or_disagreeing_values(entry: dict) -> None:
+    with pytest.raises(cw.InvalidCandidateError):
+        mcp.validate_mcp_servers({"srv": entry})
+
+
+def test_unbacked_sentinel_walks_nested_lists() -> None:
+    m = cw.REDACTION_SENTINEL
+    assert mcp._unbacked_sentinel({"a": [[m]]}, {"a": [[]]}, "") == "a[0][0]"
+    assert mcp._unbacked_sentinel({"a": [[m]]}, {"a": [["kept"]]}, "") is None
+
+
+def test_entry_transport_compares_normalized_aliases() -> None:
+    entry = {"type": "http", "transport": "streamable-http", "url": "https://x/mcp"}
+    assert mcp.entry_transport(entry) == "http"
+
+
 def test_user_and_local_reads_mask_headers_helper(tmp_path: Path) -> None:
     cj = tmp_path / "claude.json"
     entry = {"type": "ws", "url": "wss://x/s", "headersHelper": "print-token"}

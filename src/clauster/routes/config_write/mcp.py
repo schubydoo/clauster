@@ -127,6 +127,13 @@ async def api_config_write_mcp_server(config: ConfigDep, runner: RunnerDep, body
     name = body.get("name")
     if not isinstance(name, str) or not name:
         raise HTTPException(status_code=422, detail="body must include a non-empty 'name' string")
+    if op == "remove":
+        # A remove validates no entry, so check the name here: it becomes a positional
+        # argument of `claude mcp remove`, and `--scope` would parse as an option.
+        try:
+            config_write_mcp.validate_removable_server_name(name)
+        except config_write.InvalidCandidateError as exc:
+            raise _base.map_config_write_error(exc) from exc
 
     entry = None
     if op in ("add", "edit"):
@@ -147,7 +154,8 @@ async def api_config_write_mcp_server(config: ConfigDep, runner: RunnerDep, body
         )
     # An OAuth client-secret is only deliverable through the CLI (which passes it via
     # MCP_CLIENT_SECRET in the child env). An entry that must bypass the CLI — inline
-    # env/headers, or a url carrying a query/userinfo/fragment — takes the direct
+    # env/headers, a headersHelper, a masked value, a credential-shaped oauth value, or a
+    # url carrying a query/userinfo/fragment (see entry_needs_direct_write) — takes the direct
     # writer, which has nowhere to put it. Refuse rather than write the entry and
     # silently drop the secret: the operator would believe it was stored and only
     # discover otherwise when the server fails to authenticate.

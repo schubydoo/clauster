@@ -96,6 +96,21 @@ MCP_SERVERS_KEY = "mcpServers"
 #: on which names they accept.
 _SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]*$")
 
+#: The charset a ``remove`` accepts for an EXISTING server name: the earlier, wider
+#: :data:`_SERVER_NAME_RE` (dots allowed), so a server stored before TASK-449.8 tightened the
+#: add/edit charset can still be removed. It still forbids a leading ``-``, because the name
+#: becomes a positional argument of ``claude mcp remove``.
+_REMOVABLE_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
+
+
+def validate_removable_server_name(name: str) -> None:
+    """Refuse a ``remove`` target name that ``claude mcp remove`` could parse as an option."""
+    if not _REMOVABLE_NAME_RE.match(name):
+        raise cw.InvalidCandidateError(
+            f"server name {name!r} must match {_REMOVABLE_NAME_RE.pattern} (no leading '-')"
+        )
+
+
 #: Names Claude Code refuses for a configured server. The first three are the built-in
 #: servers the docs list as reserved (``claude mcp add`` rejects them and a file entry is
 #: skipped at load; the other documented reserved names contain a space, which
@@ -198,24 +213,29 @@ def entry_transport(entry: dict[str, Any]) -> str:
     normalizes to ``http``. ``sdk`` is refused: only an SDK host application can register
     an in-process server, and Claude Code skips one found in a config file.
     """
-    declared = {entry[k] for k in ("type", "transport") if k in entry}
+    # A list, not a set: a value can be unhashable (a list or an object), and building a set
+    # from it would raise TypeError (a 500) instead of the 422 below.
+    declared = [entry[k] for k in ("type", "transport") if k in entry]
     if not declared:
         return "stdio"
     if not all(isinstance(v, str) for v in declared):
         raise cw.InvalidCandidateError("server 'type'/'transport' must be a string")
-    if len(declared) > 1:
+    normalized = set()
+    for value in declared:
+        if value == "sdk":
+            raise cw.InvalidCandidateError(
+                "server type 'sdk' is registered by an SDK host application at runtime; "
+                "Claude Code skips it in a config file"
+            )
+        transport = _TRANSPORT_ALIASES.get(value)
+        if transport is None:
+            raise cw.InvalidCandidateError(
+                f"unknown server transport {value!r} (want stdio/http/streamable-http/sse/ws)"
+            )
+        normalized.add(transport)
+    if len(normalized) > 1:
         raise cw.InvalidCandidateError("server 'type' and 'transport' disagree")
-    (value,) = declared
-    if value == "sdk":
-        raise cw.InvalidCandidateError(
-            "server type 'sdk' is registered by an SDK host application at runtime; "
-            "Claude Code skips it in a config file"
-        )
-    transport = _TRANSPORT_ALIASES.get(value)
-    if transport is None:
-        raise cw.InvalidCandidateError(
-            f"unknown server transport {value!r} (want stdio/http/streamable-http/sse/ws)"
-        )
+    (transport,) = normalized
     return transport
 
 
@@ -450,6 +470,54 @@ def read_user_servers(claude_json: Path) -> dict[str, Any]:
     return _redact_server_map(servers)
 
 
+def _unbacked_sentinel(incoming: Any, stored: Any, path: str) -> str | None:
+    """Return the path of the first sentinel in ``incoming`` with no stored value behind it.
+
+    :func:`~clauster.config_write.merge_redacted` drops such a sentinel (there is nothing to
+    keep), which is right for a settings value but loses data here: pasting the masked view
+    of one server into "New", or a stored value removed since the read, would write the
+    entry without its ``url``/``env``/``headersHelper`` and report success. The path is
+    dotted (``srv.env.TOKEN``, ``srv.args[1]``) and names no value.
+    """
+    if incoming == cw.REDACTION_SENTINEL:
+        return None if stored is not None else path
+    if isinstance(incoming, dict):
+        stored_dict = stored if isinstance(stored, dict) else {}
+        for k, v in incoming.items():
+            sub = f"{path}.{k}" if path else str(k)
+            if v == cw.REDACTION_SENTINEL and k not in stored_dict:
+                return sub
+            found = _unbacked_sentinel(v, stored_dict.get(k), sub)
+            if found:
+                return found
+    elif isinstance(incoming, list):
+        stored_list = stored if isinstance(stored, list) else []
+        for i, v in enumerate(incoming):
+            held = stored_list[i] if i < len(stored_list) else None
+            if v == cw.REDACTION_SENTINEL and i >= len(stored_list):
+                return f"{path}[{i}]"
+            found = _unbacked_sentinel(v, held, f"{path}[{i}]")
+            if found:
+                return found
+    return None
+
+
+def _merge_kept(incoming: Any, stored: Any, path: str = "") -> Any:
+    """Merge ``incoming`` over ``stored``, refusing a sentinel that has nothing to keep (→ 422).
+
+    Runs inside the locked writers, over the value read under the lock, so a stored value
+    removed by a concurrent edit is caught too. Raising here aborts the transaction before
+    anything is written.
+    """
+    missing = _unbacked_sentinel(incoming, stored, path)
+    if missing:
+        raise cw.InvalidCandidateError(
+            f"{missing} is the masked value '********' but nothing is stored to keep; "
+            "type the real value"
+        )
+    return cw.merge_redacted(incoming, stored)
+
+
 def write_project_servers(
     project_dir: Path, incoming: dict[str, Any], expected_hash: str | None
 ) -> None:
@@ -472,9 +540,7 @@ def write_project_servers(
     """
     cw.validate_candidate(incoming, validate_mcp_servers)
     path = project_dir / ".mcp.json"
-    cw.write_settings_subtree(
-        path, MCP_SERVERS_KEY, incoming, expected_hash, merge=cw.merge_redacted
-    )
+    cw.write_settings_subtree(path, MCP_SERVERS_KEY, incoming, expected_hash, merge=_merge_kept)
 
 
 def write_user_servers(claude_json: Path, incoming: dict[str, Any]) -> None:
@@ -491,7 +557,7 @@ def write_user_servers(claude_json: Path, incoming: dict[str, Any]) -> None:
     def _mutate(current: Any) -> dict[str, Any]:
         """Merge ``incoming`` over the stored map, restoring any redacted secrets."""
         stored = current if isinstance(current, dict) else {}
-        return cw.merge_redacted(incoming, stored)
+        return _merge_kept(incoming, stored)
 
     cw.write_subtree(claude_json, MCP_SERVERS_KEY, _mutate)
 
@@ -533,7 +599,7 @@ def write_project_local_servers(
     def _mutate(current: Any) -> dict[str, Any]:
         """Merge ``incoming`` over the stored project-local map, restoring redacted secrets."""
         stored = current if isinstance(current, dict) else {}
-        return cw.merge_redacted(incoming, stored)
+        return _merge_kept(incoming, stored)
 
     cw.write_nested_subtree(claude_json, PROJECTS_KEY, str(project_dir), MCP_SERVERS_KEY, _mutate)
 
@@ -560,7 +626,7 @@ def _fold_entry(stored: Any, name: str, entry: dict[str, Any]) -> dict[str, Any]
     sibling never round-trips through the redacted display copy.
     """
     servers = dict(stored) if isinstance(stored, dict) else {}
-    servers[name] = cw.merge_redacted(entry, servers.get(name))
+    servers[name] = _merge_kept(entry, servers.get(name), path=name)
     return servers
 
 

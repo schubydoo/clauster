@@ -123,7 +123,7 @@ _NOT_FOUND_RE = re.compile(r"not found|not installed", re.IGNORECASE)
 #: no leading ``-`` (would be parsed as a CLI option by ``claude``'s argument
 #: parser — verified live: an unescaped ``-evil`` positional is rejected as
 #: "unknown option"), conservative identifier chars only. Mirrors
-#: ``config_write_mcp._SERVER_NAME_RE`` exactly (same threat, same fix).
+#: ``config_write_mcp._REMOVABLE_NAME_RE`` exactly (same threat, same fix).
 _NAME_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
 
 #: A marketplace **source** (``owner/repo``, a URL, or a filesystem path) has a much

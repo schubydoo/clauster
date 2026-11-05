@@ -210,13 +210,19 @@ Every transport also accepts `timeout` (milliseconds, a positive integer),
 `alwaysLoad` and `bareElicitationCapability` (both `true` or `false`). The
 `oauth` object accepts `clientId`, `callbackPort` (1 to 65535),
 `authServerMetadataUrl` (an `https://` URL) and `scopes` (a space-separated
-string).
+string). An `http` or `sse` entry that an earlier Clauster stored with `env`
+stays editable, but Claude Code ignores `env` on a remote server.
 
 The editor refuses the whole entry when a field is unknown or has the wrong
 type. It also refuses these values, because Claude Code refuses or skips them:
 
 - A server name with a character other than a letter, a number, a hyphen or an
-  underscore, or a name that starts with a hyphen.
+  underscore, or a name that starts with a hyphen. Earlier Clauster versions
+  accepted a dot. You can still delete a stored server with a dot in its name,
+  but a save that includes it is refused. Claude Code skips that server.
+- A masked value (`********`) when nothing is stored behind it, for example in
+  a new server that you copied from the masked view of another one. Type the
+  real value instead.
 - A reserved name, such as `workspace`, `claude-in-chrome` or `computer-use`.
 - An entry with a `url` and no `type`. Claude Code reads such an entry as a
   stdio server and skips it.
@@ -231,7 +237,10 @@ system keychain or a credentials file. The `POST /api/config-write/mcp/server`
 route takes an optional `client_secret` for an `http` or `sse` server. The
 dashboard does not send one. Clauster passes it to
 `claude mcp add-json --client-secret` through the `MCP_CLIENT_SECRET`
-environment variable, never on the command line.
+environment variable, never on the command line. The route refuses a
+`client_secret` for an entry that holds a masked value, because Clauster then
+writes the file directly and cannot deliver the secret. To change the secret of
+a stored server, delete the server and add it again with every value typed in.
 
 Three entries can look broken when they are not. The **Source** badge on each
 row tells the first two apart:
