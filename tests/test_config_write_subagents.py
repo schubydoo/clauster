@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -183,12 +184,87 @@ def test_is_valid_agent_name_rejects(name: object) -> None:
     assert not sub.is_valid_agent_name(name)
 
 
-@pytest.mark.parametrize("name", ["general-purpose", "Explore", "Plan", "PLAN", "explore"])
+def test_is_valid_agent_name_length_cap() -> None:
+    # The name is also the filename, so it stops short of Claude Code's documented 256:
+    # the atomic writer's `<name>.md.<8 chars>.tmp` temp file must fit in 255 bytes.
+    assert sub.MAX_NAME_CHARS == 239
+    assert sub.is_valid_agent_name("a" * sub.MAX_NAME_CHARS)
+    assert not sub.is_valid_agent_name("a" * (sub.MAX_NAME_CHARS + 1))
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the 260-character MAX_PATH limit for the WHOLE path, not NAME_MAX, binds first",
+)
+def test_longest_name_writes_and_reads(tmp_path: Path) -> None:
+    # Positive control for the cap: the longest accepted name really fits on disk,
+    # temp file included (a cap of 252 failed here with ENAMETOOLONG on the mkstemp).
+    name = "a" * sub.MAX_NAME_CHARS
+    sub.write_project_agent(tmp_path, name, _content(name), None)
+    assert sub.read_project_agent(tmp_path, name)["exists"] is True
+
+
+@pytest.mark.parametrize("op", ["read", "write", "delete"])
+def test_over_long_name_is_a_typed_error_not_an_oserror(tmp_path: Path, op: str) -> None:
+    # Before the cap, a 300-character name reached the filesystem and raised a bare
+    # OSError (ENAMETOOLONG), which escaped the route's ConfigWriteError mapper as a 500.
+    name = "a" * 300
+    with pytest.raises(cw.PathEscapeError):
+        if op == "read":
+            sub.read_project_agent(tmp_path, name)
+        elif op == "write":
+            sub.write_project_agent(tmp_path, name, _content(name), None)
+        else:
+            sub.delete_project_agent(tmp_path, name)
+
+
+def test_builtin_agent_names_match_the_documented_list() -> None:
+    # AC: BUILTIN_AGENT_NAMES matches current Claude Code. The "Built-in subagents" section
+    # of https://code.claude.com/docs/en/sub-agents lists Explore, Plan, general-purpose
+    # and, under "Other", claude, statusline-setup and claude-code-guide.
+    assert sub.BUILTIN_AGENT_NAMES == {
+        "general-purpose",
+        "explore",
+        "plan",
+        "claude",
+        "statusline-setup",
+        "claude-code-guide",
+    }
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "general-purpose",
+        "Explore",
+        "Plan",
+        "PLAN",
+        "explore",
+        "claude",
+        "Claude",
+        "statusline-setup",
+        "claude-code-guide",
+    ],
+)
 def test_is_builtin_agent_matches_case_insensitively(name: str) -> None:
     assert sub.is_builtin_agent(name)
 
 
-@pytest.mark.parametrize("name", ["my-agent", "general-purposeish", "explorer"])
+@pytest.mark.parametrize("name", ["claude", "statusline-setup", "claude-code-guide"])
+def test_new_builtin_names_are_read_only(tmp_path: Path, name: str) -> None:
+    doc = sub.read_project_agent(tmp_path, name)
+    assert (doc["source"], doc["editable"], doc["exists"]) == ("built-in", False, False)
+    with pytest.raises(sub.ReadOnlyAgentError):
+        sub.write_project_agent(tmp_path, name, _content(name), None)
+    with pytest.raises(sub.ReadOnlyAgentError):
+        sub.delete_project_agent(tmp_path, name)
+    assert not sub.project_agents_dir(tmp_path).exists()
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["my-agent", "general-purposeish", "explorer", "claude-helper", "comment-thread-analyst"],
+)
 def test_is_builtin_agent_does_not_match_others(name: str) -> None:
     assert not sub.is_builtin_agent(name)
 
@@ -209,22 +285,75 @@ def test_validate_frontmatter_accepts_every_known_field() -> None:
             "disallowedTools": ["Bash"],
             "model": "opus",
             "permissionMode": "plan",
-            "mcpServers": {"srv": {"command": "x"}},
+            "mcpServers": [{"srv": {"command": "x"}}, "github"],
             "hooks": {"PreToolUse": [{"hooks": [{"type": "command", "command": "echo hi"}]}]},
             "maxTurns": 5,
+            "autoCompactWindow": 200000,
             "skills": ["skill-one"],
             "initialPrompt": "start here",
-            "memory": "some memory",
+            "memory": "project",
             "effort": "high",
             "background": True,
+            "omitClaudeMd": True,
             "isolation": "worktree",
             "color": "blue",
+            "experimental": {"cacheTtl": "1h"},
         }
     )  # no raise
 
 
-def test_validate_frontmatter_accepts_dict_memory() -> None:
-    sub.validate_frontmatter({"name": "x", "description": "d", "memory": {"k": "v"}})
+# Every documented value of every closed-list field (TASK-449.5), from the "Frontmatter
+# reference" table of https://code.claude.com/docs/en/sub-agents. One case per value, so a
+# value dropped from a rule fails by name.
+_DOCUMENTED_VALUES: list[tuple[str, object]] = [
+    *[("model", m) for m in ("sonnet", "opus", "haiku", "fable", "inherit", "claude-opus-5-5")],
+    *[
+        ("permissionMode", m)
+        for m in ("default", "acceptEdits", "auto", "dontAsk", "plan", "manual")
+    ],
+    *[("memory", m) for m in ("user", "project", "local")],
+    *[("effort", e) for e in ("low", "medium", "high", "xhigh", "max")],
+    ("isolation", "worktree"),
+    *[
+        ("color", c)
+        for c in ("red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan")
+    ],
+    *[("autoCompactWindow", n) for n in (100000, 200000, 1000000)],
+    *[("omitClaudeMd", b) for b in (True, False)],
+    *[("background", b) for b in (True, False)],
+    *[("experimental", {"cacheTtl": t}) for t in ("5m", "1h")],
+    ("experimental", {}),
+    # Only `cacheTtl` is documented inside the map; other keys pass through, like unknown
+    # top-level keys do.
+    ("experimental", {"futureOption": 1}),
+    ("mcpServers", ["github"]),
+    ("mcpServers", [{"playwright": {"type": "stdio", "command": "npx", "args": ["-y", "x"]}}]),
+    ("mcpServers", [{"remote": {"type": "ws", "url": "wss://example.com"}}, "slack"]),
+    ("mcpServers", []),
+]
+
+
+@pytest.mark.parametrize(("key", "value"), _DOCUMENTED_VALUES)
+def test_validate_frontmatter_accepts_every_documented_value(key: str, value: object) -> None:
+    sub.validate_frontmatter({"name": "x", "description": "d", key: value})  # no raise
+
+
+def test_documented_values_save_through_the_write_path(tmp_path: Path) -> None:
+    # AC: every documented field SAVES with its documented type. The cases above go through
+    # the validator; this writes one file carrying all the new fields as YAML text, so the
+    # YAML spelling an operator types (a bare int, a nested map, a list of mixed entries)
+    # is the thing that is checked.
+    content = (
+        "---\nname: my-agent\ndescription: d\n"
+        "autoCompactWindow: 200000\nomitClaudeMd: true\nmemory: local\neffort: xhigh\n"
+        "isolation: worktree\ncolor: cyan\npermissionMode: manual\nmodel: fable\n"
+        "experimental:\n  cacheTtl: 5m\n"
+        "mcpServers:\n  - github\n  - playwright:\n      type: stdio\n      command: npx\n"
+        "---\nbody\n"
+    )
+    sub.write_project_agent(tmp_path, "my-agent", content, None)
+    on_disk = (sub.project_agents_dir(tmp_path) / "my-agent.md").read_bytes()
+    assert on_disk == content.encode("utf-8")
 
 
 def test_validate_frontmatter_passes_unknown_keys_through() -> None:
@@ -266,6 +395,15 @@ def test_validate_frontmatter_accepts_well_formed_env() -> None:
         {"name": "x", "description": "d", "permissionMode": "not-a-real-mode"},
         {"name": "x", "description": "d", "mcpServers": "nope"},
         {"name": "x", "description": "d", "mcpServers": {"srv": "not-an-object"}},
+        # The mapping spelling: Claude Code ignores a non-list `mcpServers` entirely.
+        {"name": "x", "description": "d", "mcpServers": {"srv": {"command": "x"}}},
+        {"name": "x", "description": "d", "mcpServers": [""]},  # blank server name
+        {"name": "x", "description": "d", "mcpServers": [5]},  # neither name nor map
+        {"name": "x", "description": "d", "mcpServers": [{}]},  # empty inline entry
+        {"name": "x", "description": "d", "mcpServers": [{"srv": "not-an-object"}]},
+        {"name": "x", "description": "d", "mcpServers": [{"": {"command": "x"}}]},
+        {"name": "x", "description": "d", "mcpServers": [{1: {"command": "x"}}]},
+        {"name": "x", "description": "d", "permissionMode": "Manual"},  # case matters
         {"name": "x", "description": "d", "hooks": {"NotAnEvent": []}},
         {"name": "x", "description": "d", "maxTurns": 0},
         {"name": "x", "description": "d", "maxTurns": -1},
@@ -273,10 +411,31 @@ def test_validate_frontmatter_accepts_well_formed_env() -> None:
         {"name": "x", "description": "d", "maxTurns": True},
         {"name": "x", "description": "d", "initialPrompt": 5},
         {"name": "x", "description": "d", "memory": 5},
+        # `memory` is a closed list now; a free string or a mapping was accepted before
+        # and Claude Code ignores both.
+        {"name": "x", "description": "d", "memory": "some memory"},
+        {"name": "x", "description": "d", "memory": {"k": "v"}},
         {"name": "x", "description": "d", "effort": ""},
+        {"name": "x", "description": "d", "effort": "extreme"},
+        {"name": "x", "description": "d", "effort": "High"},  # documented values are lowercase
+        {"name": "x", "description": "d", "effort": 3},  # CLI reads an int; docs do not list it
         {"name": "x", "description": "d", "background": "yes"},
+        {"name": "x", "description": "d", "omitClaudeMd": "true"},  # a string, not a bool
         {"name": "x", "description": "d", "isolation": ""},
+        {"name": "x", "description": "d", "isolation": "remote"},  # CLI reads it; undocumented
+        {"name": "x", "description": "d", "isolation": "container"},
         {"name": "x", "description": "d", "color": ""},
+        {"name": "x", "description": "d", "color": "magenta"},
+        {"name": "x", "description": "d", "color": 5},
+        {"name": "x", "description": "d", "autoCompactWindow": 99999},  # below the range
+        {"name": "x", "description": "d", "autoCompactWindow": 1000001},  # above the range
+        {"name": "x", "description": "d", "autoCompactWindow": "200k"},  # CLI reads 200
+        {"name": "x", "description": "d", "autoCompactWindow": 200000.0},
+        {"name": "x", "description": "d", "autoCompactWindow": True},
+        {"name": "x", "description": "d", "experimental": "1h"},  # not a map
+        {"name": "x", "description": "d", "experimental": {"cacheTtl": "2h"}},
+        {"name": "x", "description": "d", "experimental": {"cacheTtl": 5}},
+        {"name": "x" * (sub.MAX_NAME_CHARS + 1), "description": "d"},  # filename too long
         {"name": "x", "description": "d", "env": 42},  # not a mapping
         {"name": "x", "description": "d", "env": {"": "v"}},  # empty var name
         {"name": "x", "description": "d", "env": {"K": ["a"]}},  # non-scalar value
@@ -627,12 +786,17 @@ def test_read_existing_agent_round_trip(tmp_path: Path) -> None:
 
 
 def test_read_redacts_secret_shaped_frontmatter_values(tmp_path: Path) -> None:
+    # The mapping spelling of `mcpServers` is now refused on WRITE (Claude Code ignores it),
+    # but a file already on disk in that spelling must still read with its secrets masked,
+    # so this one is placed on disk directly.
     content = (
         "---\nname: my-agent\ndescription: d\n"
         "mcpServers:\n  srv:\n    headers:\n      Authorization: Bearer super-secret\n"
         "---\nbody\n"
     )
-    sub.write_project_agent(tmp_path, "my-agent", content, None)
+    agents_dir = sub.project_agents_dir(tmp_path)
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "my-agent.md").write_text(content, encoding="utf-8", newline="\n")
     doc = sub.read_project_agent(tmp_path, "my-agent")
     # the raw content round-trips unredacted (needed for a correct re-save)...
     assert "super-secret" in doc["content"]
@@ -641,6 +805,25 @@ def test_read_redacts_secret_shaped_frontmatter_values(tmp_path: Path) -> None:
         doc["frontmatter"]["mcpServers"]["srv"]["headers"]["Authorization"]
         == cw.REDACTION_SENTINEL
     )
+
+
+def test_read_redacts_secrets_in_the_documented_list_form(tmp_path: Path) -> None:
+    # The list spelling is the one this surface now writes. Its display field must mask an
+    # inline server's secret exactly as the mapping spelling does, while `content` still
+    # round-trips raw for the re-save.
+    content = (
+        "---\nname: my-agent\ndescription: d\nmcpServers:\n  - github\n"
+        "  - srv:\n      type: http\n      url: https://example.com/mcp\n"
+        "      headers:\n        Authorization: Bearer super-secret\n"
+        "---\nbody\n"
+    )
+    sub.write_project_agent(tmp_path, "my-agent", content, None)
+    doc = sub.read_project_agent(tmp_path, "my-agent")
+    assert "super-secret" in doc["content"]
+    servers = doc["frontmatter"]["mcpServers"]
+    assert servers[0] == "github"
+    assert servers[1]["srv"]["headers"]["Authorization"] == cw.REDACTION_SENTINEL
+    assert "super-secret" not in json.dumps(doc["frontmatter"])
 
 
 def test_read_non_utf8_file_raises_invalid_candidate(tmp_path: Path) -> None:
@@ -991,6 +1174,25 @@ def test_route_bad_content_shape_is_422_and_writes_nothing(
         )
         assert resp.status_code == 422
     assert not (projects_root / "alpha" / ".claude" / "agents").exists()
+
+
+def test_route_saves_the_documented_mcp_list_and_refuses_the_mapping(
+    write_config, tmp_path, projects_root
+) -> None:
+    # End to end through the PUT route: the documented list spelling saves, the mapping
+    # spelling Claude Code ignores is a 422 that writes nothing.
+    body = {"scope": "project", "project": "alpha", "confirm": "alpha"}
+    mapping = _content("map-agent", mcpServers="{srv: {command: npx}}")
+    listed = _content("list-agent", mcpServers="[github, {srv: {command: npx}}]")
+    with _client(write_config, tmp_path, _ON) as c:
+        bad = c.put(_agent_url("map-agent"), json={**body, "content": mapping})
+        assert bad.status_code == 422
+        assert "mcpServers" in bad.json()["detail"]
+        ok = c.put(_agent_url("list-agent"), json={**body, "content": listed})
+        assert ok.status_code == 200, ok.text
+    agents = projects_root / "alpha" / ".claude" / "agents"
+    assert not (agents / "map-agent.md").exists()
+    assert (agents / "list-agent.md").read_bytes() == listed.encode("utf-8")
 
 
 def test_route_path_escape_is_400(write_config, tmp_path) -> None:

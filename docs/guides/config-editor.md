@@ -194,9 +194,11 @@ Three entries can look broken when they are not. The **Source** badge on each
 row tells the first two apart:
 
 - **A built-in subagent is listed with no description, and cannot be edited or
-  deleted.** Claude Code compiles `general-purpose`, `explore` and `plan` into
-  the CLI, so there is no file anywhere to edit. Every install shows these
-  three, at both scopes, before you add anything of your own.
+  deleted.** Claude Code compiles `general-purpose`, `explore`, `plan`,
+  `claude`, `statusline-setup` and `claude-code-guide` into the CLI, so there
+  is no file anywhere to edit. Every install shows these six, at both scopes,
+  before you add anything of your own. You also cannot create a subagent with
+  one of these names in Clauster.
 - **A plugin-provided subagent is listed, but cannot be edited or deleted.** A
   plugin owns that file, so Clauster refuses to change it. To change it, change
   the plugin. When the plugin supplies it as a symlink, Clauster never follows
@@ -260,6 +262,32 @@ still holds masks but their number no longer matches the number of masked
 entries on disk, the save is refused. Restore the masks as they loaded, or type
 the full entry again. If you remove every mask from a list, the save is
 accepted, and it deletes those entries.
+
+### Subagent frontmatter checks
+
+The Subagents editor checks the frontmatter of a subagent file before it
+saves the file. It checks each field in the
+[Claude Code frontmatter reference](https://code.claude.com/docs/en/sub-agents#supported-frontmatter-fields)
+against the type and the values that the reference gives. If one field fails,
+Clauster refuses the whole save and writes nothing. Clauster never runs a
+hook command and never connects to an MCP server from this editor.
+
+- `name` must be lowercase letters, digits and hyphens, at most 239
+  characters, and the same as the name of the file. The name is also the
+  file name, so this rule is narrower than the Claude Code rule.
+- `memory`, `effort`, `isolation`, `color` and `experimental.cacheTtl` accept
+  only the documented values. Claude Code ignores any other value, so
+  Clauster refuses it at save time.
+- `autoCompactWindow` must be a plain integer from `100000` to `1000000`.
+  Write `200000`, not `200k`.
+- `mcpServers` must be a list. Each item is the name of a server that you
+  configured already, or a `name: definition` object. Claude Code ignores an
+  `mcpServers` mapping, so Clauster refuses that spelling.
+- `permissionMode` accepts `manual` as an alias for `default`. It refuses
+  `bypassPermissions`, as every config-editor surface does. See the
+  [bypassPermissions footgun gate](../security.md#bypasspermissions-footgun-gate).
+- A field that is not in the reference is saved as written. Claude Code
+  ignores a field that it does not recognize.
 
 ## Troubleshooting and limits
 

@@ -29,8 +29,8 @@ the logic. ``permissionMode`` reuses the same recognized-mode vocabulary as
 :mod:`clauster.config_write_permissions` (``bypassPermissions`` stays footgun-gated,
 never settable here).
 
-**Plugin / built-in agents are read-only.** Claude Code ships three built-in
-subagents (``general-purpose``, ``Explore``, ``Plan``) that are compiled in, not
+**Plugin / built-in agents are read-only.** Claude Code ships built-in subagents
+(:data:`BUILTIN_AGENT_NAMES`) that are compiled in, not
 files — there is nothing on disk to edit or delete, so a write/delete targeting one
 of :data:`BUILTIN_AGENT_NAMES` is refused (:class:`ReadOnlyAgentError`) before any
 I/O. Plugin-provided subagents live in the *plugin's own* ``agents/`` directory
@@ -110,10 +110,23 @@ MAX_BYTES = 64 * 1024
 #: :func:`clauster.config_file_writer.resolve_contained_path`.
 _NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 
+#: Longest accepted subagent name. Claude Code caps a ``name`` at 256 characters, but the
+#: name is also this surface's filename, and 255 bytes is the common filename limit
+#: (``NAME_MAX``): a longer name raised a bare ``OSError`` (``ENAMETOOLONG``) on read and
+#: write, a 500 instead of a 400/422. The longest name this surface puts on disk is the
+#: atomic writer's temp file, ``<name>.md.<8 random chars>.tmp`` (``tempfile.mkstemp``),
+#: 16 characters over the name, so 239 + 16 is 255. The name is ASCII (see
+#: :data:`_NAME_RE`), so characters and bytes agree.
+MAX_NAME_CHARS = 239
+
 #: Claude Code's built-in subagents — compiled into the CLI, never files on disk.
 #: Matched case-insensitively against a candidate name (``Explore``/``Plan`` are
-#: capitalized in Claude Code's own vocabulary; ``general-purpose`` is lowercase).
-BUILTIN_AGENT_NAMES = frozenset({"general-purpose", "explore", "plan"})
+#: capitalized in Claude Code's own vocabulary; the rest are lowercase). The list is the
+#: "Built-in subagents" section of https://code.claude.com/docs/en/sub-agents, including
+#: its "Other" helper agents, and each one is an agent type in the installed CLI (2.1.318).
+BUILTIN_AGENT_NAMES = frozenset(
+    {"general-purpose", "explore", "plan", "claude", "statusline-setup", "claude-code-guide"}
+)
 
 #: Marker identifying subagent content as **plugin-owned** — mirrors
 #: ``clauster.config_write_hooks._PLUGIN_ROOT_MARKER``: this interpolation only
@@ -143,7 +156,11 @@ class ReadOnlyAgentError(cw.ConfigWriteError):
 
 def is_valid_agent_name(name: object) -> bool:
     """Whether ``name`` is a safe, Claude-Code-shaped subagent identifier."""
-    return isinstance(name, str) and _NAME_RE.fullmatch(name) is not None
+    return (
+        isinstance(name, str)
+        and len(name) <= MAX_NAME_CHARS
+        and _NAME_RE.fullmatch(name) is not None
+    )
 
 
 def is_builtin_agent(name: str) -> bool:
@@ -317,10 +334,70 @@ def _validate_positive_int(value: Any, label: str) -> None:
         raise cw.InvalidCandidateError(f"{label} must be a positive integer")
 
 
-def _validate_string_or_mapping(value: Any, label: str) -> None:
-    """Reject ``value`` unless it is a string or a mapping."""
-    if not isinstance(value, str | dict):
-        raise cw.InvalidCandidateError(f"{label} must be a string or an object")
+#: The signature every entry in :data:`_OPTIONAL_FRONTMATTER_RULES` satisfies:
+#: ``(value, label) -> None``, raising :class:`~clauster.config_write.InvalidCandidateError`.
+_FrontmatterRule = Callable[[Any, str], None]
+
+
+def _one_of(*allowed: str) -> _FrontmatterRule:
+    """Return a rule that rejects any value other than one of the ``allowed`` strings.
+
+    Used for the frontmatter fields whose documented values are a closed list. Claude Code
+    silently ignores a value outside the list, so the write would land and do nothing;
+    refusing it here tells the operator at save time instead.
+    """
+
+    def _check(value: Any, label: str) -> None:
+        """Reject ``value`` unless it is exactly one of the closed list."""
+        if not isinstance(value, str) or value not in allowed:
+            raise cw.InvalidCandidateError(f"{label} must be one of {list(allowed)}")
+
+    return _check
+
+
+#: Claude Code's documented ``autoCompactWindow`` range for a subagent, in tokens.
+_AUTO_COMPACT_WINDOW_MIN = 100_000
+_AUTO_COMPACT_WINDOW_MAX = 1_000_000
+
+
+def _validate_auto_compact_window(value: Any, label: str) -> None:
+    """Reject ``value`` unless it is an int token count inside the documented range."""
+    # `bool` subclasses int, so exclude it as _validate_positive_int does. A string such as
+    # `200k` is refused too: Claude Code reads it as 200, out of range, and ignores the field.
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or not _AUTO_COMPACT_WINDOW_MIN <= value <= _AUTO_COMPACT_WINDOW_MAX
+    ):
+        raise cw.InvalidCandidateError(
+            f"{label} must be an integer from {_AUTO_COMPACT_WINDOW_MIN} "
+            f"to {_AUTO_COMPACT_WINDOW_MAX}"
+        )
+
+
+#: The documented values of ``experimental.cacheTtl``.
+_CACHE_TTL_VALUES = ("5m", "1h")
+
+
+def _validate_experimental(value: Any, label: str) -> None:
+    """Reject ``value`` unless it is a mapping whose ``cacheTtl``, if set, is documented.
+
+    Only ``cacheTtl`` is documented inside the map. Any other key passes through
+    untouched, the same forward-compatible policy :func:`validate_frontmatter` applies to
+    unknown top-level keys (Claude Code ignores an unknown ``experimental`` key too).
+    """
+    if not isinstance(value, dict):
+        raise cw.InvalidCandidateError(f"{label} must be an object")
+    if "cacheTtl" in value and value["cacheTtl"] not in _CACHE_TTL_VALUES:
+        raise cw.InvalidCandidateError(
+            f"{label} 'cacheTtl' must be one of {list(_CACHE_TTL_VALUES)}"
+        )
+
+
+#: ``manual`` is the documented frontmatter alias of ``default`` (Claude Code maps it
+#: before the lookup). It is local to this surface: the settings ``defaultMode`` vocabulary
+#: in :mod:`clauster.config_write_permissions` is a different field with its own audit.
+_MANUAL_MODE_ALIAS = "manual"
 
 
 def _validate_permission_mode(value: Any, label: str) -> None:
@@ -331,17 +408,43 @@ def _validate_permission_mode(value: Any, label: str) -> None:
         # Fail closed: bypassPermissions stays behind the existing footgun gate,
         # never settable through a subagent's frontmatter either.
         raise cw.InvalidCandidateError(f"{label} cannot be 'bypassPermissions' (footgun-gated)")
-    if value not in RECOGNIZED_MODES:
+    if value not in RECOGNIZED_MODES and value != _MANUAL_MODE_ALIAS:
         raise cw.InvalidCandidateError(
             f"unknown frontmatter permissionMode {value!r} "
-            f"(want one of {sorted(RECOGNIZED_MODES)})"
+            f"(want one of {sorted(RECOGNIZED_MODES | {_MANUAL_MODE_ALIAS})})"
         )
 
 
 def _validate_mcp_servers(value: Any, label: str) -> None:
-    """Reject ``value`` unless it maps server names to objects — never connected to."""
-    if not isinstance(value, dict) or not all(isinstance(v, dict) for v in value.values()):
-        raise cw.InvalidCandidateError(f"{label} must be an object mapping server name to object")
+    """Reject ``value`` unless it is the documented LIST of server entries — never connected.
+
+    Each entry is either a non-empty string naming an already-configured server, or a
+    non-empty mapping of server name to an inline definition object. Claude Code reads
+    only the list form: it ignores an ``mcpServers`` mapping entirely (verified in the
+    2.1.318 agent-file loader), so a mapping is refused here rather than written as a
+    silent no-op. An inline definition is checked to be an object and nothing more — it is
+    never resolved, spawned or connected to here.
+    """
+    if not isinstance(value, list):
+        raise cw.InvalidCandidateError(
+            f"{label} must be a list of server names or {{name: definition}} objects"
+        )
+    for entry in value:
+        if isinstance(entry, str):
+            if not entry.strip():
+                raise cw.InvalidCandidateError(f"{label} server names must be non-empty")
+            continue
+        if not isinstance(entry, dict) or not entry:
+            raise cw.InvalidCandidateError(
+                f"{label} entries must be a server name or a {{name: definition}} object"
+            )
+        for server_name, definition in entry.items():
+            if not isinstance(server_name, str) or not server_name.strip():
+                raise cw.InvalidCandidateError(f"{label} server names must be non-empty strings")
+            if not isinstance(definition, dict):
+                raise cw.InvalidCandidateError(
+                    f"{label} inline server {server_name!r} must be an object"
+                )
 
 
 def _validate_hooks_block(value: Any, label: str) -> None:
@@ -367,22 +470,24 @@ def _validate_env(value: Any, label: str) -> None:
             )
 
 
-#: The signature every entry in :data:`_OPTIONAL_FRONTMATTER_RULES` satisfies:
-#: ``(value, label) -> None``, raising :class:`~clauster.config_write.InvalidCandidateError`.
-_FrontmatterRule = Callable[[Any, str], None]
-
 #: Optional frontmatter keys → the structural check their value must pass, in the order
 #: they are checked. Table-driven (#1155) so the recognized-key set reads as one list
 #: rather than a branch per key. Every entry is a pure *shape* check: nothing here ever
 #: resolves a tool name, spawns a hook command, or connects to an MCP server. An
 #: UNRECOGNIZED key is absent from this table and passes through untouched — see
 #: :func:`validate_frontmatter` for why.
+#:
+#: The key set and each closed value list follow the "Frontmatter reference" table of
+#: https://code.claude.com/docs/en/sub-agents. Where the installed CLI reads more than the
+#: docs list (an integer ``effort``, ``isolation: remote``), the documented list wins.
 _OPTIONAL_FRONTMATTER_RULES: tuple[tuple[str, _FrontmatterRule], ...] = (
     # Claude Code accepts either a comma-separated string or an array for these two —
     # this repo's own shipped subagents use the string form.
     ("tools", _validate_string_or_string_list),
     ("disallowedTools", _validate_string_or_string_list),
     ("skills", _validate_string_list),
+    # An alias (`sonnet`, `opus`, `haiku`, `fable`), `inherit`, or a full model id. The
+    # id set is open-ended, so this stays a non-empty-string check.
     ("model", _validate_non_empty_string),
     ("permissionMode", _validate_permission_mode),
     ("mcpServers", _validate_mcp_servers),
@@ -391,17 +496,19 @@ _OPTIONAL_FRONTMATTER_RULES: tuple[tuple[str, _FrontmatterRule], ...] = (
     # rejection) rather than duplicated. STRUCTURE ONLY — no command is ever executed.
     ("hooks", _validate_hooks_block),
     ("maxTurns", _validate_positive_int),
+    ("autoCompactWindow", _validate_auto_compact_window),
     ("initialPrompt", _validate_string),
-    ("memory", _validate_string_or_mapping),
-    ("effort", _validate_non_empty_string),
+    ("memory", _one_of("user", "project", "local")),
+    ("effort", _one_of("low", "medium", "high", "xhigh", "max")),
     ("background", _validate_bool),
-    ("isolation", _validate_non_empty_string),
-    ("color", _validate_non_empty_string),
+    ("omitClaudeMd", _validate_bool),
+    ("isolation", _one_of("worktree")),
+    ("color", _one_of("red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan")),
+    ("experimental", _validate_experimental),
     # Dropping the unknown-key allowlist made ``env`` reachable for the first time (it was
-    # never in the old recognized-key set). Claude Code loads it as a name→value
-    # environment map, so a non-mapping payload (``env: 42``) or a non-scalar value would
-    # land on disk here and only fail later when Claude Code tries to load the subagent —
-    # validate the shape at write time instead.
+    # never in the old recognized-key set). ⚠️ It is NOT a documented subagent field, and
+    # the 2.1.318 agent-file loader never reads it, so Claude Code ignores it. The shape
+    # check is kept so an existing file's `env` still gets the scalar-map guard it had.
     ("env", _validate_env),
 )
 
@@ -440,7 +547,7 @@ def validate_frontmatter(candidate: Any, *, expected_name: str | None = None) ->
     if not is_valid_agent_name(name):
         raise cw.InvalidCandidateError(
             "frontmatter 'name' must be lowercase letters, digits, and hyphens "
-            "(no leading hyphen, no path separators)"
+            f"(no leading hyphen, no path separators, at most {MAX_NAME_CHARS} characters)"
         )
     if expected_name is not None and name != expected_name:
         raise cw.InvalidCandidateError(
