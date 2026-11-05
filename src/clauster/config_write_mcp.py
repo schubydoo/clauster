@@ -386,6 +386,18 @@ def _validate_server_entry(name: Any, entry: Any) -> None:
         )
     if name in _RESERVED_SERVER_NAMES:
         raise cw.InvalidCandidateError(f"server name {name!r} is reserved by Claude Code")
+    _validate_server_fields(name, entry)
+
+
+def _validate_server_fields(name: str, entry: Any) -> None:
+    """Validate the fields of one MCP server ``entry`` for its transport, or raise (→ 422).
+
+    The part of :func:`_validate_server_entry` after the name checks. A subagent's inline
+    ``mcpServers`` definitions reuse it, because the 2.1.318 agent-file loader reads each
+    one with the same entry schema as ``.mcp.json``, but it applies a different name rule
+    (see :mod:`clauster.config_write_subagents`). ``name`` appears only in messages here.
+    **Shape only: nothing is resolved, spawned or connected.**
+    """
     if not isinstance(entry, dict):
         raise cw.InvalidCandidateError(f"server {name!r} must be an object")
 

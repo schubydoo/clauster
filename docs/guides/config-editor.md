@@ -389,8 +389,9 @@ this editor.
 - `tools` must name at least one tool. `disallowedTools` refuses a `*` entry,
   because Claude Code then applies no denylist at all.
 - `mcpServers` must be a list. Each item is the name of a server that you
-  configured already, or a `name: definition` object. Claude Code reads only
-  the list form and ignores a mapping.
+  configured already, or one `name: definition` object. Claude Code reads only
+  the list form and ignores a mapping. See
+  [Inline MCP servers](#inline-mcp-servers) for the checks on a definition.
 - `permissionMode` accepts `manual` as an alias for `default`. It refuses
   `bypassPermissions`, as every config-editor surface does. See the
   [bypassPermissions footgun gate](../security.md#bypasspermissions-footgun-gate).
@@ -407,6 +408,45 @@ the editor cannot convert the block safely, it shows the file as it is, and
 the save tells you to rewrite `mcpServers` as a list. Two examples are a
 mapping written on one line, such as `mcpServers: {github: {...}}`, and two
 servers with the same name.
+
+#### Inline MCP servers
+
+Claude Code reads an inline server definition in the same shape as an entry in
+`.mcp.json`. The Subagents editor therefore checks each definition with the
+field rules of the MCP tab, which
+[MCP server definitions](#mcp-server-definitions) describes. It accepts the
+same fields for each transport. It refuses the same values, for example
+`transport`, `env` on an `http`, `sse` or `ws` server, a `url` with no `type`,
+and `"type": "sdk"`. The YAML spelling rules above also apply to the true or
+false fields and the number fields of a definition, for example `alwaysLoad`
+and `timeout`.
+
+The name rule is not the same as on the MCP tab. Claude Code accepts any
+inline server name that is not reserved, so the editor accepts a name with a
+dot, a space or a leading hyphen. The editor refuses these items, because
+Claude Code skips them:
+
+- A reserved name, such as `workspace`, `claude-in-chrome`, `computer-use`,
+  `Claude Preview` or `Claude Browser`.
+- An item that defines more than one server. Write each server as its own
+  `- name:` item.
+- Two inline servers with the same name. Claude Code connects only one of them.
+
+If an inline server in the file has `transport`, or has `env` on an `http`,
+`sse` or `ws` server, the editor converts it as the MCP tab does. The note
+above the text names each change. The file on disk does not change until you
+save.
+
+- If `type` is not set, a `transport` value of `stdio`, `http`,
+  `streamable-http`, `sse` or `ws` becomes `type`. If `type` is set, Clauster
+  removes `transport`.
+- Clauster removes `env` from an `http`, `sse` or `ws` server, with the lines
+  under it. Claude Code never read these values. The note gives their number.
+
+Only those lines change, so every other value and comment stays as you wrote
+it. If the editor cannot convert a server safely, it shows the file as it is,
+and the save tells you what to change. An example is a definition written on
+one line, such as `- srv: {transport: sse, url: ...}`.
 
 A file with the name of a built-in subagent, such as `claude.md`, overrides
 that built-in in Claude Code. The list shows the file as a read-only row next
