@@ -393,6 +393,16 @@ you save. Clauster checks no other values, so it does not refuse a `mask` entry
 of `sandbox.credentials.envVars` in a project file, although Claude Code drops
 that entry.
 
+Some keys are Desktop-only: only Claude Desktop reads them, and the Claude Code
+CLI ignores them. The tab keeps the scope that the settings reference gives
+each one. `sshConfigs` works at User scope only. `sshHostAllowlist`,
+`browserExternalPageTools`, `disableBrowserExternalNavigation`,
+`disableDesktopLocalSessions` and `disableMobileSimulatorTools` work only in
+managed settings, so the tab refuses them at every scope. The refusal says that
+only Claude Desktop reads the key. If the file that you load holds a
+Desktop-only key, a note above the editor names it, and the merged view leaves
+it out.
+
 At Project and Local scope, the merged ("effective") view shows the value that
 Claude Code applies from the three files. Local settings override project
 settings, and project settings override user settings. Claude Code merges an

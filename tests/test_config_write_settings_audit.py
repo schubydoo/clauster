@@ -253,11 +253,90 @@ def test_every_scope_limited_key_is_refused_exactly_where_it_is_ignored(
     if scope in read_at:
         _write(scope, tmp_path, candidate)  # accepted
         return
-    with pytest.raises(cw.InvalidCandidateError, match=f"Claude Code reads {path} only from"):
+    if path in cws.DESKTOP_ONLY_KEYS:
+        expected = f"Only Claude Desktop reads {path}, from "
+    else:
+        expected = f"Claude Code reads {path} only from"
+    with pytest.raises(cw.InvalidCandidateError, match=expected):
         _write(scope, tmp_path, candidate)
     # Refused before any directory or file is created.
     assert not (tmp_path / ".claude").exists()
     assert not (tmp_path / "home").exists()
+
+
+# --- keys only Claude Desktop reads (TASK-490) ------------------------------------------
+
+_MANAGED_DESKTOP_KEYS = (
+    "browserExternalPageTools",
+    "disableBrowserExternalNavigation",
+    "disableDesktopLocalSessions",
+    "disableMobileSimulatorTools",
+    "sshHostAllowlist",
+)
+
+
+def test_desktop_only_keys_keep_the_scope_the_docs_give_them() -> None:
+    # The docs say User or managed for sshConfigs and Managed for the other five.
+    assert set(cws.DESKTOP_ONLY_KEYS) == {*_MANAGED_DESKTOP_KEYS, "sshConfigs"}
+    assert cws.SCOPE_LIMITED_KEYS["sshConfigs"] == "user"
+    assert cws.DESKTOP_ONLY_KEYS["sshConfigs"] == "user or managed settings"
+    for key in _MANAGED_DESKTOP_KEYS:
+        assert cws.SCOPE_LIMITED_KEYS[key] == "managed"
+        assert cws.DESKTOP_ONLY_KEYS[key] == "managed settings"
+
+
+@pytest.mark.parametrize("key", _MANAGED_DESKTOP_KEYS)
+@pytest.mark.parametrize("scope", _SCOPES)
+def test_managed_desktop_key_refusal_says_only_desktop_reads_it(
+    tmp_path: Path, key: str, scope: str
+) -> None:
+    with pytest.raises(cw.InvalidCandidateError) as exc:
+        _write(scope, tmp_path, {key: []})
+    msg = str(exc.value)
+    assert msg.startswith(f"Only Claude Desktop reads {key}, from managed settings, and the ")
+    assert "Claude Code CLI ignores it." in msg
+    assert "which clauster does not write; remove it." in msg
+
+
+@pytest.mark.parametrize("scope", ["project", "local"])
+def test_ssh_configs_saves_at_user_scope_only(tmp_path: Path, scope: str) -> None:
+    configs = [{"id": "dev", "name": "Dev", "sshHost": "dev.example"}]
+    _write("user", tmp_path, {"sshConfigs": configs})
+    with pytest.raises(cw.InvalidCandidateError) as exc:
+        _write(scope, tmp_path, {"sshConfigs": configs})
+    msg = str(exc.value)
+    assert msg.startswith("Only Claude Desktop reads sshConfigs, from user or managed settings")
+    assert "switch to User scope" in msg
+
+
+def test_desktop_only_keys_are_named_and_left_out_of_the_merged_view() -> None:
+    user = {"sshConfigs": [{"id": "d"}], "model": "opus"}
+    assert cws.desktop_only_keys(user) == ["sshConfigs"]
+    assert cws.desktop_only_keys({"model": "opus"}) == []
+    # A hand-edited project file can hold a managed one too; neither is a CLI value.
+    merged = cws._compute_effective_settings(
+        user_misc=user, project_misc={"sshHostAllowlist": ["*"]}, local_misc={}
+    )
+    assert merged == {"model": {"value": "opus", "source": "user", "sources": ["user"]}}
+
+
+def test_settings_read_route_names_the_desktop_only_keys(
+    write_config, tmp_path, projects_root
+) -> None:
+    fake = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
+    cfg = write_config(
+        f"claude:\n  binary: {fake}\nstate_dir: {tmp_path}/.s\nconfig_write:\n  enabled: true\n"
+    )
+    _seed(
+        cw.project_settings_path(projects_root / "alpha"),
+        {"sshHostAllowlist": ["*"], "model": "opus"},
+    )
+    with TestClient(create_app(load_config(cfg))) as c:
+        r = c.get("/api/config-write/settings?project=alpha")
+        assert r.status_code == 200
+        assert r.json()["desktop_only"] == ["sshHostAllowlist"]
+        r2 = c.get("/api/config-write/settings?project=alpha&scope=local")
+        assert r2.json()["desktop_only"] == []
 
 
 def test_scope_limited_keys_do_not_overlap_the_carve() -> None:

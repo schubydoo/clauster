@@ -2094,6 +2094,13 @@
               <!-- Shape error shows in either mode so a rejected 'Rows' click explains itself. -->
               <div class="alert alert-warning py-1 small" data-test="cm-settings-env-error" role="alert"
                    x-show="configMgmt.settings.envError" x-cloak x-text="configMgmt.settings.envError"></div>
+              <!-- TASK-490: keys of this file that only Claude Desktop reads (the server lists them). -->
+              <div class="alert alert-info py-1 small" data-test="cm-settings-desktop-only"
+                   x-show="configMgmt.settings.desktopOnly.length" x-cloak>
+                Desktop-only: <code x-text="configMgmt.settings.desktopOnly.join(', ')"></code>.
+                Only Claude Desktop reads these keys. The Claude Code CLI ignores them, so the merged
+                view leaves them out.
+              </div>
 
               <!-- ROWS: friendly env key/value editor (#765) -->
               <div x-show="configMgmt.settings.mode === 'rows'" data-test="cm-settings-rows" x-cloak>

@@ -47,7 +47,12 @@ async def api_config_write_settings_read(
             )
         except config_write.ConfigWriteError as exc:
             raise _base.map_config_write_error(exc) from exc
-        return {"scope": "user", "settings": settings_view, "hash": file_hash}
+        return {
+            "scope": "user",
+            "settings": settings_view,
+            "hash": file_hash,
+            "desktop_only": config_write_settings.desktop_only_keys(settings_view),
+        }
     if scope == "local":
         project_dir = _base.resolve_cw_project(config, project)
         try:
@@ -61,6 +66,7 @@ async def api_config_write_settings_read(
             "project": project,
             "settings": settings_view,
             "hash": file_hash,
+            "desktop_only": config_write_settings.desktop_only_keys(settings_view),
         }
     project_dir = _base.resolve_cw_project(config, project)
     try:
@@ -74,6 +80,7 @@ async def api_config_write_settings_read(
         "project": project,
         "settings": settings_view,
         "hash": file_hash,
+        "desktop_only": config_write_settings.desktop_only_keys(settings_view),
     }
 
 

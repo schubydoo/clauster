@@ -692,6 +692,7 @@ def test_route_project_write_read_round_trip(write_config, tmp_path, projects_ro
             "project": "alpha",
             "settings": {},
             "hash": cw.hash_bytes(b""),
+            "desktop_only": [],
         }
         resp = c.put(
             _URL,

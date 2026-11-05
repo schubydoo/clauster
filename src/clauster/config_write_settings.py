@@ -329,6 +329,21 @@ SCOPE_LIMITED_VALUES: dict[str, tuple[Any, str]] = {
     "sandbox.allowNestedUserNamespaces": (True, "user"),
 }
 
+#: Top-level keys that only Claude Desktop reads, mapped to where it reads them (the docs'
+#: Scope column). The 2.1.318 CLI has no read site for any of them (TASK-490). Each keeps the
+#: docs' scope in :data:`SCOPE_LIMITED_KEYS`, so ``sshConfigs`` saves at User scope only and
+#: the others are refused at every scope clauster writes. A refusal says that only Desktop
+#: reads the key, the read view names the ones a file holds (:func:`desktop_only_keys`), and
+#: the merged view, which shows what the CLI applies, leaves them out at every scope.
+DESKTOP_ONLY_KEYS: dict[str, str] = {
+    "browserExternalPageTools": "managed settings",
+    "disableBrowserExternalNavigation": "managed settings",
+    "disableDesktopLocalSessions": "managed settings",
+    "disableMobileSimulatorTools": "managed settings",
+    "sshConfigs": "user or managed settings",
+    "sshHostAllowlist": "managed settings",
+}
+
 #: The file each scope writes, for a refusal message.
 _SCOPE_LABEL: dict[str, str] = {
     "user": "user settings (~/.claude/settings.json)",
@@ -427,15 +442,30 @@ def _ignored_paths(data: dict[str, Any], scope: cw.Scope) -> list[str]:
     return sorted(keys + values)
 
 
-def _scope_rule(path: str) -> tuple[str, str, str]:
-    """Return the label, the read-from phrase and the fix hint for an ignored ``path``."""
+def desktop_only_keys(view: dict[str, Any]) -> list[str]:
+    """Return the :data:`DESKTOP_ONLY_KEYS` that the settings ``view`` holds, sorted."""
+    return sorted(DESKTOP_ONLY_KEYS.keys() & view.keys())
+
+
+def _scope_refusal(path: str, scope: cw.Scope) -> str:
+    """Return the refusal sentence for a ``path`` that is ignored at ``scope``."""
+    where_label = _SCOPE_LABEL[scope]
+    if path in DESKTOP_ONLY_KEYS:
+        fix = _READ_FROM[SCOPE_LIMITED_KEYS[path]][2]
+        return (
+            f"Only Claude Desktop reads {path}, from {DESKTOP_ONLY_KEYS[path]}, and the "
+            f"Claude Code CLI ignores it. It has no effect in {where_label}; {fix}."
+        )
     if path in SCOPE_LIMITED_KEYS:
         _, where, fix = _READ_FROM[SCOPE_LIMITED_KEYS[path]]
-        return path, where, fix
-    value, kind = SCOPE_LIMITED_VALUES[path]
-    _, where, fix = _READ_FROM[kind]
-    # Every value-level entry is a true whose false Claude Code reads at every scope.
-    return f"{path}: {json.dumps(value)}", where, f"set it to false or remove it, or {fix}"
+        label = path
+    else:
+        value, kind = SCOPE_LIMITED_VALUES[path]
+        _, where, fix = _READ_FROM[kind]
+        label = f"{path}: {json.dumps(value)}"
+        # Every value-level entry is a true whose false Claude Code reads at every scope.
+        fix = f"set it to false or remove it, or {fix}"
+    return f"Claude Code reads {label} only from {where} and ignores it in {where_label}; {fix}."
 
 
 def reject_scope_ignored(candidate: dict[str, Any], scope: cw.Scope) -> None:
@@ -448,14 +478,7 @@ def reject_scope_ignored(candidate: dict[str, Any], scope: cw.Scope) -> None:
     """
     paths = _ignored_paths(candidate, scope)
     if paths:
-        rules = [_scope_rule(path) for path in paths]
-        raise cw.InvalidCandidateError(
-            " ".join(
-                f"Claude Code reads {label} only from {where} "
-                f"and ignores it in {_SCOPE_LABEL[scope]}; {fix}."
-                for label, where, fix in rules
-            )
-        )
+        raise cw.InvalidCandidateError(" ".join(_scope_refusal(path, scope) for path in paths))
 
 
 def _without_paths(data: dict[str, Any], paths: list[str]) -> dict[str, Any]:
@@ -888,7 +911,7 @@ def _compute_effective_settings(
     (:func:`_merge_setting`): objects merge key by key, lists combine, and a scalar
     from a higher scope replaces a lower one. A key or value Claude Code ignores at a
     scope (:data:`SCOPE_LIMITED_KEYS`, :data:`SCOPE_LIMITED_VALUES`) is left out of that
-    scope's layer. Returns
+    scope's layer, and a :data:`DESKTOP_ONLY_KEYS` key is left out of every layer. Returns
     ``{key: {"value": ..., "source": <highest scope>, "sources": [<scopes>]}}`` for the
     union of keys across every scope that was read; ``sources`` lists, highest first,
     each scope whose value is part of the merged result.
@@ -903,6 +926,9 @@ def _compute_effective_settings(
         misc = by_scope[scope]
         if misc is not None:
             layer = _without_paths(misc, _ignored_paths(misc, scope))
+            # Only Claude Desktop reads these, so they are no part of what the CLI applies.
+            for key in DESKTOP_ONLY_KEYS:
+                layer.pop(key, None)
             # Claude Code reads the alias as the canonical key in each file before it
             # merges: a null alias is dropped, and an alias is ignored where the file
             # also sets the canonical key to a non-null value.

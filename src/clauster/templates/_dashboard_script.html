@@ -247,6 +247,9 @@
         settings: {
           text: "", orig: "", hash: null,
           showEffective: false, effective: null, effectiveError: "",
+          // TASK-490: the keys of the loaded file that only Claude Desktop reads (the
+          // server names them), so the tab can say the CLI ignores them.
+          desktopOnly: [],
           // #765: a friendly key/value editor for the `env` map layered over the
           // raw JSON. In rows mode `envRows` is the source of truth for `env`; the
           // raw text stays the escape hatch for every other key. `envSeq` mints a
@@ -1961,8 +1964,10 @@
           // Clear the text/orig/hash too: the catch path in _loadJsonSurface keeps them.
           const s = c.settings;
           s.envRows = []; s.envError = ""; s.text = ""; s.orig = ""; s.hash = null;
+          s.desktopOnly = [];
           return;
         }
+        c.settings.desktopOnly = Array.isArray(d.desktop_only) ? d.desktop_only : [];
         // Rebuild the friendly env rows from the freshly loaded JSON. If the stored
         // shape can't be shown as str->str rows, fall back to the raw view (rather
         // than silently dropping to an empty row set) so nothing is hidden.
