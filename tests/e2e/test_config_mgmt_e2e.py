@@ -703,6 +703,136 @@ def test_config_mgmt_hooks_rows_round_trip(
     }
 
 
+def test_config_mgmt_hooks_rows_http_and_mcp_tool_round_trip(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A row's type select swaps in the type's fields; http and mcp_tool rows save (TASK-449.4)."""
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-hooks"]')
+    browser.expect_visible('[data-test="cm-view-hooks"]')
+    browser.click('[data-test="cm-hooks-add"]')
+    browser.expect_visible('[data-test="cm-hook-command"]')
+    browser.select('[data-test="cm-hook-event"]', "PostToolUse")
+    browser.select('[data-test="cm-hook-type"]', "http")
+    browser.expect_visible('[data-test="cm-hook-url"]')
+    browser.fill('[data-test="cm-hook-url"]', "https://hooks.example.com/in")
+    browser.click('[data-test="cm-hooks-add"]')
+    browser.expect_visible('[data-test="cm-hook-row-1"]')
+    browser.select('[data-test="cm-hook-row-1"] [data-test="cm-hook-event"]', "Stop")
+    browser.select('[data-test="cm-hook-row-1"] [data-test="cm-hook-type"]', "mcp_tool")
+    browser.expect_visible('[data-test="cm-hook-row-1"] [data-test="cm-hook-server"]')
+    browser.fill('[data-test="cm-hook-row-1"] [data-test="cm-hook-server"]', "scanner")
+    browser.fill('[data-test="cm-hook-row-1"] [data-test="cm-hook-tool"]', "scan")
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    browser.click('[data-test="cm-save"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+    on_disk = json.loads(
+        (projects_root / "alpha" / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    assert on_disk["hooks"] == {
+        "PostToolUse": [{"hooks": [{"type": "http", "url": "https://hooks.example.com/in"}]}],
+        "Stop": [{"hooks": [{"type": "mcp_tool", "server": "scanner", "tool": "scan"}]}],
+    }
+
+
+def test_config_mgmt_hooks_http_headers_fall_back_to_raw_masked(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """An http hook with headers opens in Raw with the header value masked, never in a row."""
+    _seed_alpha_settings(
+        config_mgmt_server,
+        {
+            "hooks": {
+                "Stop": [
+                    {
+                        "hooks": [
+                            {
+                                "type": "http",
+                                "url": "https://h.example/x",
+                                "headers": {"Authorization": "Bearer sk-e2e-secret"},
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+    )
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-hooks"]')
+    browser.expect_visible('[data-test="cm-view-hooks"]')
+    browser.expect_visible('[data-test="cm-hooks-rows-error"]')
+    browser.expect_visible('[data-test="cm-hooks-text"]')
+    text = browser.get_value('[data-test="cm-hooks-text"]')
+    assert "https://h.example/x" in text
+    assert "sk-e2e-secret" not in text
+
+
+def test_config_mgmt_hooks_failed_load_clears_previous_rows(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A failed load never leaves the previous target's hooks editable or saveable."""
+    _seed_alpha_settings(
+        config_mgmt_server,
+        {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo alpha"}]}]}},
+    )
+    user_settings = (
+        Path(config_mgmt_server.state_dir).parent / "home" / ".claude" / "settings.json"
+    )
+    user_settings.parent.mkdir(parents=True, exist_ok=True)
+    user_settings.write_text("{not json", encoding="utf-8")  # the User-scope read fails (422)
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-hooks"]')
+    browser.expect_value('[data-test="cm-hook-command"]', "echo alpha")  # alpha loaded
+    browser.click('[data-test="cm-scope-user"]')
+    browser.expect_visible('[data-test="cm-error"]')
+    browser.expect_count('[data-test="cm-hook-command"]', 0)  # alpha's hook is gone
+    browser.fill('[data-test="cm-confirm"]', "USER SCOPE")
+    browser.expect_disabled('[data-test="cm-save"]')  # nothing to save over
+
+
+def test_config_mgmt_hooks_loaded_row_shows_its_type_and_event(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A loaded row's Type and Event selects show the stored values, not the first option."""
+    _seed_alpha_settings(
+        config_mgmt_server,
+        {"hooks": {"Stop": [{"hooks": [{"type": "http", "url": "https://h.example/x"}]}]}},
+    )
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-hooks"]')
+    browser.expect_visible('[data-test="cm-hook-url"]')
+    browser.expect_value('[data-test="cm-hook-type"]', "http")
+    browser.expect_value('[data-test="cm-hook-event"]', "Stop")
+    browser.expect_value('[data-test="cm-hook-url"]', "https://h.example/x")
+
+
+def test_config_mgmt_hooks_type_switch_never_drops_a_hidden_hook(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Switching a filled command row to http with no URL blocks Save, not a silent delete."""
+    _seed_alpha_settings(
+        config_mgmt_server,
+        {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "notify.sh"}]}]}},
+    )
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-hooks"]')
+    browser.expect_visible('[data-test="cm-hook-command"]')
+    browser.select('[data-test="cm-hook-type"]', "http")
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    browser.expect_visible('[data-test="cm-hooks-timeout-warn"]')
+    browser.expect_disabled('[data-test="cm-save"]')
+
+
 def _seed_alpha_settings(config_mgmt_server: Server, settings: dict) -> None:
     """Write alpha's .claude/settings.json directly (bypassing the write API) for a test."""
     cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
@@ -759,10 +889,17 @@ def test_config_mgmt_hooks_plugin_owned_command_falls_back_to_raw(
     browser.expect_visible('[data-test="cm-hooks-text"]')
 
 
+@pytest.mark.parametrize(
+    "timeout",
+    [
+        "1.5",  # not a whole number
+        "0",  # the CLI reads timeout as a number above 0, so rows need ≥ 1
+    ],
+)
 def test_config_mgmt_hooks_invalid_timeout_blocks_save(
-    browser: AgentBrowser, config_mgmt_server: Server
+    browser: AgentBrowser, config_mgmt_server: Server, timeout: str
 ) -> None:
-    """A non-integer timeout warns and disables Save rather than being silently dropped."""
+    """A timeout the rows can't save warns and disables Save rather than being dropped."""
     _open_modal(browser, config_mgmt_server)
     browser.select('[data-test="cm-project"]', "alpha")
     browser.click('[data-test="cm-surface-hooks"]')
@@ -770,7 +907,7 @@ def test_config_mgmt_hooks_invalid_timeout_blocks_save(
     browser.click('[data-test="cm-hooks-add"]')
     browser.expect_visible('[data-test="cm-hook-command"]')
     browser.fill('[data-test="cm-hook-command"]', "echo x")
-    browser.fill('[data-test="cm-hook-timeout"]', "1.5")  # not a whole number
+    browser.fill('[data-test="cm-hook-timeout"]', timeout)
     browser.fill('[data-test="cm-confirm"]', "alpha")
     browser.expect_visible('[data-test="cm-hooks-timeout-warn"]')
     browser.expect_disabled('[data-test="cm-save"]')
