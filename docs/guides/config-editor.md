@@ -362,8 +362,9 @@ says so. Any other name gets a text box, and Clauster sends it as you typed it. 
 you type a key that another tab edits, the tab names that tab and links to it.
 The browser does not decide whether Claude Code reads a key at a scope. The server
 checks every key when you save, and the error gives its reason. Raw JSON shows
-the same keys as JSON. A switch between the two modes keeps every value. While a number box is empty or two `env` variables have the
-same name, the tab stays in Rows mode, and a warning names the problem.
+the same keys as JSON. A switch between the two modes keeps every value. While a
+number box is empty or two `env` variables have the same name, the tab stays in
+Rows mode, and a note above the rows says why.
 
 No other tab writes these keys in a settings file, so the Settings tab shows them:
 
