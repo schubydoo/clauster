@@ -54,6 +54,9 @@ Interactive Session mode, this *recaps* the prior conversation rather than truly
 ### Visibility & editing
 
 - Live bridge debug-log tail over a WebSocket — ANSI-stripped and ID-redacted.
+- Read-only transcript viewer. Each live session under a bridge has a **Live
+  transcript** button that opens the session in the viewer and follows new turns,
+  next to its **Open** link to the Claude web app.
 - In-dashboard editor for a project's Claude Code config surfaces — `CLAUDE.md`,
   `settings.json` (env as friendly key/value rows or raw JSON), permissions (every
   documented `permissions` key as rows, or raw JSON, plus the auto mode classifier

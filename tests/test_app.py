@@ -1441,6 +1441,55 @@ def test_dashboard_live_session_row_has_transcript_button(write_config):
     assert "i.spawn_mode !== 'worktree'" in page  # worktree-spawn gated (mode-agnostic)
 
 
+def test_dashboard_bridge_session_row_has_live_transcript_button(write_config):
+    # Backlog TASK-269: each live session under a bridge gets an in-app Live transcript
+    # button next to its id, beside (not instead of) the claude.ai Open link.
+    page = _client(write_config).get("/").text
+    row = page[page.index('data-test="bridge-session-row"') :]
+    row = row[: row.index("</template>")]
+    button = row[row.rindex("<button", 0, row.index('data-test="bridge-session-transcript"')) :]
+    button = button[: button.index("</button>")]
+    # It opens the viewer for THIS session (its project + uuid), not the project list.
+    assert '@click="openBridgeSessionTranscript(i.project, bridgeSessionUuid(s))"' in button
+    assert 'x-show="bridgeSessionUuid(s)"' in button
+    # A <button> with a visible label that its accessible name repeats (WCAG 2.5.3).
+    assert button.startswith('<button type="button"')
+    assert "Live transcript</button>" in row
+    assert ":aria-label=\"'Live transcript of session ' + bridgeSessionShortId(s)\"" in button
+    # It sits next to the id, ahead of the uptime + Open group, and the Open link is
+    # unchanged: same external target, same claude.ai URL builder.
+    assert row.index('x-text="bridgeSessionShortId(s)"') < row.index(
+        'data-test="bridge-session-transcript"'
+    )
+    assert row.index('data-test="bridge-session-transcript"') < row.index('target="_blank"')
+    assert ':href="bridgeSessionUrl(s)"' in row
+    assert 'return u ? "https://claude.ai/code/" + u : null;' in page
+    # One UUID gate serves both destinations.
+    assert "bridgeSessionUuid(s) {" in page
+    assert "return UUID.test(u) ? u : null;" in page
+
+
+def test_dashboard_bridge_session_transcript_selects_the_session(write_config):
+    # TASK-269: the button reuses the project list load, then selects the session, so a
+    # live session engages the existing tail. A stale load (closed or reopened) is
+    # dropped, and a session the list lacks shows a status line instead of a blank view.
+    page = _client(write_config).get("/").text
+    fn = page[page.index("async openBridgeSessionTranscript(project, session) {") :]
+    fn = fn[: fn.index("\n      },")]
+    assert "if (t.open || t.loading) return;" in fn
+    assert "const listed = this.openTranscripts(project);" in fn
+    assert fn.index("const myGen = t.gen;") < fn.index("await listed;")
+    assert "if (t.gen !== myGen || !t.open || t.session || t.error) return;" in fn
+    assert "await this.openTranscriptSession(session);" in fn
+    assert 't.jumpMissing = session.split("-")[0];' in fn
+    # The note lives in the list view, is a status region, and is reset on every open
+    # and on every session pick.
+    assert 'data-test="transcript-jump-missing"' in page
+    assert 'x-show="transcripts.jumpMissing"' in page
+    assert 'jumpMissing: "",' in page
+    assert page.count('t.jumpMissing = "";') == 2
+
+
 def test_dashboard_transcript_content_uses_x_text_not_x_html(write_config):
     # CRITICAL safety (#431): turn content is server-redacted but still untrusted
     # agent/user output — rendering it as HTML would be stored XSS. The turn body MUST

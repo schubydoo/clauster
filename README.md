@@ -94,7 +94,8 @@ start them, watch them, and pick them up from your phone.
   default, offered only where `allow_bypass_permissions` is on), and open any session
   in Claude by deep link or QR code.
 - **Visibility** — live bridge-log tail over a WebSocket, a read-only transcript
-  viewer, and per-project cost and token totals.
+  viewer that follows a live session (the **Live transcript** button on each live
+  session under a bridge), and per-project cost and token totals.
 - **In-app editing** — edit a project's Claude Code config surfaces and an allowlist
   of operational `clauster.yml` settings, without reaching for SSH.
 - **Safety** — workspace-trust prompts before a first spawn, masking by exact match of

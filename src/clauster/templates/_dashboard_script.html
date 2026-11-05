@@ -359,6 +359,9 @@
         // more pages with it and the position line says "matching" when it is set
         // (backlog TASK-268); set per request in loadTranscriptTurnsFromStart.
         appliedQ: "",
+        // jumpMissing: the short id of the session a row's Live transcript button asked for when
+        // the list does not carry it yet ("" = none); the list view says so (TASK-269).
+        jumpMissing: "",
         // --- live-tail (#614 Part 2): follow a running session's transcript ---
         // SINGLE-LIST design (#614 Part 2 follow-up): a live session is ONE unified,
         // tailing transcript — there is NO separate "live tail" box. `turns` is the one
@@ -3242,6 +3245,7 @@
         t.trigger = document.activeElement;  // remember the opener to restore focus on close
         t.open = true; t.project = name; t.error = ""; t.loading = true;
         t.sessions = []; t.session = ""; t.turns = []; t.total = 0; t.nextCursor = null;
+        t.jumpMissing = "";
         t.order = "desc"; t.q = ""; t.appliedQ = ""; t.queryTooShort = false;  // fresh open: newest-first, unfiltered
         document.body.style.overflow = "hidden";  // lock background scroll while modal is up
         try {
@@ -3253,6 +3257,25 @@
           t.sessions = Array.isArray(d.sessions) ? d.sessions : [];
         } catch (e) { t.error = "Failed to load transcripts."; }
         finally { if (t.gen === myGen) t.loading = false; }
+      },
+      // Open the viewer straight onto one live bridge session (backlog TASK-269): the
+      // session sub-row's in-app counterpart to its claude.ai "Open" link. It reuses the
+      // project list load, then selects the session, which follows it live when the list
+      // badges it live. A session that the list does not carry (no .jsonl yet) leaves the
+      // list open with a status line, never a blank turn view.
+      async openBridgeSessionTranscript(project, session) {
+        const t = this.transcripts;
+        if (t.open || t.loading) return;  // same single-flight rule as openTranscripts
+        const listed = this.openTranscripts(project);
+        const myGen = t.gen;  // openTranscripts bumps gen before its first await
+        await listed;
+        // Closed or reopened mid-load, or the load failed: leave that view alone.
+        if (t.gen !== myGen || !t.open || t.session || t.error) return;
+        if (t.sessions.some((s) => s.session === session)) {
+          await this.openTranscriptSession(session);
+        } else {
+          t.jumpMissing = session.split("-")[0];  // the short id the session row shows
+        }
       },
       // Minimum search term length: a 1-char query matches almost everything, so we
       // gate it behind a "keep typing" hint rather than fetch on it (#612).
@@ -3280,6 +3303,7 @@
         const t = this.transcripts;
         // A fresh session always starts from the default order with no active filter.
         t.session = session; t.order = "desc"; t.q = ""; t.appliedQ = ""; t.queryTooShort = false;
+        t.jumpMissing = "";  // the operator picked a session: the "not found" note is spent
         // #614 Part 2: if this session is currently running, follow it. The list
         // already carries `live` per session (Part 1) — reuse it as the gate so the
         // tail only engages for a session that's actually being written right now.
@@ -4120,9 +4144,16 @@
       // truncated id from the CLI yields null (no Open link) rather than a dead
       // claude.ai/code/<garbage> link. The host is hardcoded — no redirect/injection surface.
       bridgeSessionUrl(s) {
+        const u = this.bridgeSessionUuid(s);
+        return u ? "https://claude.ai/code/" + u : null;
+      },
+      // The session's local RFC-4122 id, or null when it is missing or malformed. It names
+      // the session on claude.ai AND its transcript file (<uuid>.jsonl), so the Open link
+      // and the in-app Live transcript button share this one gate (backlog TASK-269).
+      bridgeSessionUuid(s) {
         const u = s.local_uuid || "";
         const UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
-        return UUID.test(u) ? "https://claude.ai/code/" + u : null;
+        return UUID.test(u) ? u : null;
       },
       async loadUsage(name) {
         if (USAGE_MODE === "off") return;  // badge disabled — don't even fetch usage

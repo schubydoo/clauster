@@ -621,6 +621,27 @@ def external_session_server(
 
 
 @pytest.fixture
+def tracked_session_server(
+    tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
+) -> Iterator[Server]:
+    """A bridge-capable clauster whose ``agents --json`` list a test writes after startup.
+
+    The fake re-reads ``FAKE_CLAUDE_AGENTS_FILE`` (``<state_dir>/../agents.json``) on
+    every call, so a test can start a bridge, learn its ``bridge_pid``, and then list a
+    session owned by that pid: reconcile attributes it TRACKED to the bridge, and the
+    dashboard shows it in the bridge's live-session list (backlog TASK-269). The 1s
+    poll makes it land within a poll. Function-scoped, like ``bridge_server``.
+    """
+    tmp = tmp_path_factory.mktemp("e2e-tracked")
+    yield from _start_server(
+        tmp,
+        mutable_projects_tree,
+        extra="  agents_json_poll_interval_seconds: 1\n",
+        extra_env={"FAKE_CLAUDE_AGENTS_FILE": str(tmp / "agents.json")},
+    )
+
+
+@pytest.fixture
 def adoptable_external_server(
     tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
 ) -> Iterator[Server]:

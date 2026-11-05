@@ -948,10 +948,22 @@
                      x-show="bridgeSessOpen[i.rk]" x-cloak>
                   <div class="list-group list-group-flush border rounded overflow-hidden">
                     <template x-for="s in bridgeSessions(i.rk)" :key="bridgeSessionKey(s)">
-                      <div class="list-group-item d-flex align-items-center gap-2 py-2 px-2" data-test="bridge-session-row">
+                      <div class="list-group-item d-flex flex-wrap align-items-center gap-2 py-2 px-2" data-test="bridge-session-row">
                         <span class="status-dot status-dot-animated bg-green flex-shrink-0" aria-hidden="true"
                               title="Live session"></span>
                         <code class="text-body text-break" x-text="bridgeSessionShortId(s)"></code>
+                        {# In-app counterpart to the claude.ai "Open" link (backlog TASK-269): opens
+                           Clauster's own read-only transcript viewer straight onto this session,
+                           which follows it live. A <button> (stays here) with the page icon, not
+                           the external-open arrow, so the two destinations read apart. Gated on
+                           the same UUID shape as Open: the transcript file is named by it. #}
+                        <button type="button" class="btn btn-sm btn-ghost-secondary py-0 flex-shrink-0"
+                                data-test="bridge-session-transcript"
+                                x-show="bridgeSessionUuid(s)" x-cloak
+                                @click="openBridgeSessionTranscript(i.project, bridgeSessionUuid(s))"
+                                :aria-label="'Live transcript of session ' + bridgeSessionShortId(s)"
+                                title="Watch this session's transcript live, here in Clauster">
+                          <svg class="ico me-1" aria-hidden="true"><use href="#ic-page"/></svg>Live transcript</button>
                         <span class="ms-auto d-flex align-items-center gap-2 flex-shrink-0">
                           <span class="badge bg-secondary-lt text-secondary" x-show="externalWhen(s)" x-cloak
                                 x-text="'up ' + externalWhen(s)"></span>
@@ -2931,6 +2943,14 @@
 
             <!-- session picker: shown until a session is selected -->
             <div x-show="!transcripts.loading && !transcripts.error && !transcripts.session" x-cloak>
+              {# A session row's Live transcript button (TASK-269) asked for a session that has
+                 no transcript in this list yet: say so instead of leaving the operator to
+                 wonder why the list opened rather than the session. #}
+              <div class="alert alert-info py-1 px-2 mb-2 small" data-test="transcript-jump-missing"
+                   role="status" x-show="transcripts.jumpMissing" x-cloak>
+                No transcript for session <code x-text="transcripts.jumpMissing"></code>
+                in this project yet.
+              </div>
               <div class="text-secondary small" data-test="transcript-empty"
                    x-show="transcripts.sessions.length === 0">
                 No transcripts for this project yet.
