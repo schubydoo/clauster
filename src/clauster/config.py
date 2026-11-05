@@ -67,7 +67,8 @@ RESUME_MODES: tuple[str, ...] = ("standard", "pty")
 LEGACY_SANDBOX_VALUES: tuple[str, ...] = ("default", "on", "off")
 SANDBOX_REMOVED_NOTE = (
     "the per-launch sandbox option is removed and was ignored; to sandbox sessions, set "
-    "sandbox.enabled in a Claude Code settings file (the dashboard Settings tab can edit it)"
+    "sandbox.enabled in a Claude Code settings file (with config_write enabled, the dashboard "
+    "Settings tab can edit it)"
 )
 
 

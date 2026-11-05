@@ -333,8 +333,10 @@ To sandbox sessions, set `sandbox.enabled` to `true` in a Claude Code settings
 file, for example `~/.claude/settings.json` (user scope) or the project's
 `.claude/settings.local.json` (local scope). Every session that reads that file
 starts in the sandbox, not only the sessions that Clauster starts. If
-`config_write.enabled` is on, you can edit the key on the Settings tab of the
+`config_write.enabled` is on, you can edit the key in the Raw JSON box on the
+Settings tab of the
 [Claude Code config editor](../guides/config-editor.md#managing-claude-code-config).
+The user scope there also needs `config_write.allow_user_scope`.
 
 The sandbox has host requirements. On Linux and WSL2 it needs `bubblewrap` and
 `socat`, and native Windows has no sandbox. If a requirement is missing, Claude
@@ -346,7 +348,8 @@ for these rules.
 `clauster start` still accepts `--sandbox default|on|off`, so that an old script
 does not fail. It ignores the value and prints a warning on stderr. The
 [MCP `spawn_session` tool](../mcp.md) and `POST /api/instances` also accept a
-`sandbox` value, ignore it, and return the same note in `warnings`.
+`sandbox` value and ignore it. When the spawn itself succeeds, they return the
+same note in `warnings`. The instance JSON no longer has a `sandbox_mode` field.
 
 ## `clauster usage` — transcript cost summary {#clauster-usage-transcript-cost-summary}
 
