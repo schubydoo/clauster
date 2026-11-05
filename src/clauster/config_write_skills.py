@@ -99,13 +99,19 @@ tagged value) is never converted: the save is refused instead.
 the hash of ``SKILL.md`` content only, not a whole-tree hash — mirroring
 :mod:`clauster.claude_md`'s single-file precedent. A concurrent edit that changes
 only a sibling script file (leaving ``SKILL.md`` untouched) is not caught by this
-guard; documented here rather than silently assumed.
+guard; documented here rather than silently assumed. Such an edit is not lost, though: a
+save keeps every member it does not name, and it re-checks the hash and copies the kept
+members inside the same lock as the swap (:func:`write_skill`). A process that writes the
+skill directory without that lock (a text editor, a shell) is outside it: a change it
+makes to a kept member in the instant between the copy and the swap is lost.
 """
 
 from __future__ import annotations
 
 import math
+import os
 import re
+import stat
 import unicodedata
 from collections.abc import Callable
 from decimal import Decimal
@@ -1254,6 +1260,351 @@ def _skill_md_hash(skills_root: Path, name: str) -> str:
     return cw.hash_bytes(data)
 
 
+#: The Windows reparse-tag bit that marks a link: a symlink, a junction, a WSL symlink.
+#: ``st_reparse_tag`` exists only on Windows, so elsewhere the test below is ``0 & bit``.
+_NAME_SURROGATE_BIT = 0x20000000
+
+#: How a stored member is opened: never through a final symlink, never blocking on a FIFO.
+_OPEN_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+    | getattr(os, "O_BINARY", 0)
+)
+
+#: How a file is made in staging: a new file only, never through a symlink at its path.
+_CREATE_FLAGS = (
+    os.O_WRONLY
+    | os.O_CREAT
+    | os.O_EXCL
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_BINARY", 0)
+)
+
+#: Bits a kept file or directory never takes from the stored tree: setuid and setgid.
+#: The sticky bit stays: on a world-writable directory it is what stops another user
+#: from renaming over or deleting the owner's files, so clearing it would widen access.
+_SET_ID_BITS = stat.S_ISUID | stat.S_ISGID
+
+
+def _create_exclusive(path: Path, data: bytes) -> None:
+    """Write ``data`` to a new file at ``path``; fail if anything is there, a symlink too.
+
+    ``O_EXCL`` with ``O_CREAT`` fails on any existing entry and never follows a symlink,
+    so a file or a symlink planted at ``path`` makes the write fail closed.
+    """
+    fd = os.open(path, _CREATE_FLAGS, 0o666)
+    try:
+        out = os.fdopen(fd, "wb")
+    except BaseException:
+        os.close(fd)  # os.fdopen did not take the descriptor, so close it here
+        raise
+    with out:
+        out.write(data)
+
+
+def _kept_mode(path: Path, info: os.stat_result, mode: int) -> int:
+    """Give ``path`` the stored group of ``info``, and return the mode it may then take.
+
+    A new file or directory gets the process's group (Linux) or its parent's (macOS), and
+    that group can hold every local account (``staff``). So the stored group is set back
+    when the user may; when not, the group bits are cleared, never handed to another group.
+    """
+    if os.lstat(path).st_gid != info.st_gid:
+        try:
+            os.chown(path, -1, info.st_gid, follow_symlinks=False)
+        except OSError:
+            mode &= ~stat.S_IRWXG
+    return mode
+
+
+def _make_private_dirs(staging: Path, directory: Path, relative: str) -> list[Path]:
+    """Create the missing directories from ``staging`` down to ``directory``, owner-only.
+
+    Return the new ones, relative to ``staging``. A component that exists and is not a
+    directory is refused, naming ``relative``, the request key being written.
+    """
+    created: list[Path] = []
+    current = staging
+    for part in directory.relative_to(staging).parts:
+        current = current / part
+        try:
+            current.mkdir(mode=0o700)
+        except FileExistsError as exc:
+            if not current.is_dir():
+                raise cw.InvalidCandidateError(
+                    f"{relative!r} is inside a path that the skill holds as a file"
+                ) from exc
+        else:
+            created.append(current.relative_to(staging))
+    return created
+
+
+def _default_dir_mode(staging: Path) -> int:
+    """Return the mode a new directory gets here (``0o777`` less the umask), read safely.
+
+    The probe directory lives in the owner-only staging tree, so no one else sees it, and
+    the umask is never changed (``os.umask`` is process-wide and not thread-safe).
+    """
+    probe = staging / ".mode-probe"
+    probe.mkdir()
+    try:
+        return stat.S_IMODE(probe.stat().st_mode)
+    finally:
+        probe.rmdir()
+
+
+def _same_object(a: os.stat_result, b: os.stat_result) -> bool:
+    """Whether two stat results describe the same file-system object."""
+    return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+
+
+def _changed(member: Path) -> cw.InvalidCandidateError:
+    """Return the refusal for a stored member that changed while the save copied it."""
+    return cw.InvalidCandidateError(
+        f"skill member {member.as_posix()!r} changed while it was saved. Nothing was "
+        "written. Save again"
+    )
+
+
+def _list_stored_dir(
+    path: Path, expected: os.stat_result, member: Path
+) -> list[tuple[str, os.stat_result]]:
+    """Return ``(name, lstat)`` for each entry of the stored directory ``path``.
+
+    The listing is of the directory the walk saw (``expected``), never of a symlink
+    swapped in since: on POSIX the directory is opened with ``O_NOFOLLOW``, its identity
+    is checked on the open descriptor, and the entries are read from that descriptor.
+    """
+    if os.scandir in os.supports_fd:
+        fd = os.open(path, _OPEN_FLAGS | getattr(os, "O_DIRECTORY", 0))
+        try:
+            if not _same_object(os.fstat(fd), expected):
+                raise _changed(member)
+            with os.scandir(fd) as entries:
+                return [(e.name, e.stat(follow_symlinks=False)) for e in entries]
+        finally:
+            os.close(fd)
+    # Windows has no descriptor listing: list by path, then make sure that the directory
+    # is still the one the walk saw. A swap and a swap back inside that instant remain.
+    with os.scandir(path) as entries:  # pragma: no cover - Windows only
+        listed = [(e.name, os.lstat(e.path)) for e in entries]
+    if not _same_object(os.lstat(path), expected):  # pragma: no cover - Windows only
+        raise _changed(member)
+    return listed  # pragma: no cover - Windows only
+
+
+def _copy_stored_file(src: Path, dst: Path, expected: os.stat_result, member: Path) -> None:
+    """Copy one stored file byte for byte, with its mode bits (POSIX) and times.
+
+    The open descriptor must be the very file the listing showed (``expected``), at the
+    size the listing showed, so a path component swapped for a symlink since the listing
+    is refused, never followed, and a file that grows cannot push the tree over the cap.
+    The setuid and setgid bits are cleared: the copy belongs to clauster's user, so they
+    would make it run as that user.
+    """
+    try:
+        fd = os.open(src, _OPEN_FLAGS)
+    except OSError as exc:
+        # The open fails when the entry is no longer the file that the listing showed: a
+        # symlink (ELOOP from O_NOFOLLOW), or on Windows a directory (PermissionError).
+        # That is the same change the identity check below refuses, so say so.
+        try:
+            now = os.lstat(src)
+        except (FileNotFoundError, NotADirectoryError):
+            raise _changed(member) from exc  # gone since the listing
+        except OSError:
+            raise exc from None  # unreadable is not changed: report the open's own error
+        if not stat.S_ISREG(now.st_mode) or not _same_object(now, expected):
+            raise _changed(member) from exc
+        raise
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or not _same_object(info, expected)
+            or info.st_size != expected.st_size
+        ):
+            raise _changed(member)
+        fh = os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)  # os.fdopen did not take the descriptor, so close it here
+        raise
+    with fh:
+        data = fh.read(info.st_size + 1)
+    if len(data) != info.st_size:  # pragma: no cover - a change between fstat and read
+        raise _changed(member)
+    _create_exclusive(dst, data)
+    # A kept file keeps its own mode and group, group and world write included: that is
+    # the operator's choice on their own file, and the copy never gets wider than it.
+    if fw._is_posix():  # pragma: skip-on-win  # pragma: no branch - Windows skips it
+        os.chmod(dst, _kept_mode(dst, info, stat.S_IMODE(info.st_mode) & ~_SET_ID_BITS))
+    os.utime(dst, ns=(info.st_atime_ns, info.st_mtime_ns))
+
+
+def _fold(parts: tuple[str, ...]) -> tuple[str, ...]:
+    """Return path parts folded loosely for case and Unicode normalization."""
+    return tuple(unicodedata.normalize("NFC", part).casefold() for part in parts)
+
+
+def _stored_spelling(skill_dir: Path, parts: tuple[str, ...]) -> tuple[str, ...] | None:
+    """Return the stored names of the entry the file system maps ``parts`` to, or None.
+
+    Component by component: a name stored exactly is that entry. Otherwise the file
+    system's own name rules decide, never a guess by OS: the component is looked up
+    (``RUN.sh`` reaches ``run.sh`` on APFS or NTFS), and the entry is the stored one only
+    when all of these hold. The object the lookup reached is the only entry in the
+    listing with its identity, so no hard link or ``st_ino`` of 0 can stand in for it. A
+    file has no other hard link anywhere (``st_nlink`` 1). Its name folds to the key. A
+    rule the fold does not model (an NTFS 8.3 short name) then never picks a name.
+    Anything else is None: the save keeps and counts the stored file, and the named
+    write refuses if the key then collides with that copy. A wrong None only refuses or
+    over-counts. A wrong match would delete a stored file. ``os.listdir`` follows a
+    stored symlink in a parent component, which does no harm: the walk refuses the link.
+    """
+    current = skill_dir
+    out: list[str] = []
+    for part in parts:
+        try:
+            names = os.listdir(current)
+            if part in names:
+                out.append(part)
+                current = current / part
+                continue
+            target = os.lstat(current / part)
+            same = [n for n in names if _same_object(os.lstat(current / n), target)]
+        except OSError:
+            return None
+        if (
+            len(same) != 1
+            or target.st_ino == 0
+            or (not stat.S_ISDIR(target.st_mode) and target.st_nlink != 1)
+            or _fold((same[0],)) != _fold((part,))
+        ):
+            return None
+        out.append(same[0])
+        current = current / same[0]
+    return tuple(out)
+
+
+def _replaced_by(skill_dir: Path, files: dict[str, Any]) -> Callable[[Path], bool]:
+    """Return a test of whether a stored file is one of the members the request names.
+
+    A key names a member by its parts, as :func:`~clauster.config_file_writer.resolve_
+    contained_path` reads it (``a//b`` names ``a/b``), or by the stored spelling that the
+    file system maps it to (:func:`_stored_spelling`). A stored name is never matched by
+    a fold alone: on a case-sensitive file system ``run.sh`` and ``RUN.sh`` (or an NFC
+    and an NFD name) are two members, even as hard links of one file, and NTFS keeps
+    ``ss.md`` and ``ß.md`` apart. Matching on a fold would drop a stored file.
+    """
+    named = {Path(relative).parts for relative in files}
+    spelled = set(named)
+    for parts in named:
+        if Path(*parts).is_absolute() or any(p in ("", ".", "..") for p in parts):
+            continue  # not a path the save can write: resolve_contained_path refuses it
+        stored = _stored_spelling(skill_dir, parts)
+        if stored is not None:
+            spelled.add(stored)
+
+    def _replaced(member: Path) -> bool:
+        """Whether the stored file ``member`` is one the save replaces."""
+        return member.parts in spelled
+
+    return _replaced
+
+
+def _keep_stored_members(
+    skill_dir: Path,
+    staging: Path,
+    replaced: Callable[[Path], bool],
+    *,
+    name: str,
+    sent: int,
+) -> list[tuple[Path, os.stat_result]]:
+    """Copy into ``staging`` every stored member of the skill that the request does not name.
+
+    A save keeps every member it does not name (TASK-496). The walk follows no symlink
+    inside the skill directory (``skill_dir`` itself is already resolved). A symlink, a
+    Windows junction, or a member that is neither a directory nor a regular file (a
+    FIFO, a socket, a device) is refused (→ 422) and nothing is written: clauster
+    cannot keep such a member byte for byte without following it, and dropping it would
+    delete the operator's data. The byte cap covers the kept files plus the ``sent`` bytes,
+    and the copy stops as soon as they pass it.
+    """
+    try:
+        root = os.lstat(skill_dir)
+    except FileNotFoundError:
+        return []  # a create: nothing is stored yet
+    dirs: list[tuple[Path, os.stat_result]] = [(Path(), root)]
+    pending = [(Path(), root)]
+    kept = 0
+    while pending:
+        rel, expected = pending.pop()
+        for entry_name, info in _list_stored_dir(skill_dir / rel, expected, rel):
+            member = rel / entry_name
+            reparse = getattr(info, "st_reparse_tag", 0)
+            link = stat.S_ISLNK(info.st_mode) or bool(reparse & _NAME_SURROGATE_BIT)
+            if not link and stat.S_ISDIR(info.st_mode):
+                (staging / member).mkdir(mode=0o700)  # its own mode comes at the promote
+                dirs.append((member, info))
+                pending.append((member, info))
+            elif not link and stat.S_ISREG(info.st_mode):
+                if replaced(member):
+                    continue  # the request replaces it
+                kept += info.st_size
+                if kept + sent > MAX_TOTAL_BYTES:
+                    raise cw.InvalidCandidateError(
+                        f"skill {name!r} would be over the {MAX_TOTAL_BYTES} byte cap: the save "
+                        f"sends {sent} bytes, and the stored files it keeps hold at least "
+                        f"{kept}. Nothing was written, and no stored file was dropped to fit. "
+                        "Remove or shrink a stored file, then save again"
+                    )
+                _copy_stored_file(skill_dir / member, staging / member, info, member)
+            else:
+                raise cw.InvalidCandidateError(
+                    f"skill member {member.as_posix()!r} is a symlink or not a regular "
+                    "file, so the save cannot keep it without following it. Nothing was "
+                    "written. Replace it with a regular file, then save again"
+                )
+    return dirs
+
+
+def _set_final_dir_modes(
+    staging: Path,
+    kept: list[tuple[Path, os.stat_result]],
+    created: list[Path],
+    default_mode: int,
+) -> None:
+    """Give every staging directory its final mode and times: the last step before promote.
+
+    Until now every directory is owner-only (on POSIX), so no other user could change
+    staging while the save wrote into it. A kept directory gets its stored mode and group,
+    without setuid or setgid (the sticky bit stays), and with owner rwx, so that a later
+    save can remove the old tree. A new directory gets ``default_mode``. The skill
+    directory itself never gets group or world write.
+
+    Deepest first and the root last. ``os.chmod`` and ``os.utime`` follow symlinks in the
+    path, so every directory above the one being changed must still be owner-only: then
+    no other user can swap a part of that path for a symlink and turn the call onto a
+    file outside staging. Until the root opens, no one can reach a directory below it.
+    """
+    stored = dict(kept)
+    modes = {
+        rel: (stat.S_IMODE(info.st_mode) & ~_SET_ID_BITS) | stat.S_IRWXU for rel, info in kept
+    }
+    for rel in created:
+        modes.setdefault(rel, default_mode)
+    modes[Path()] = modes.get(Path(), default_mode) & ~(stat.S_IWGRP | stat.S_IWOTH)
+    for rel in sorted(modes, key=lambda r: len(r.parts), reverse=True):
+        if fw._is_posix():  # pragma: skip-on-win  # pragma: no branch - Windows skips it
+            mode = modes[rel]
+            if rel in stored:
+                mode = _kept_mode(staging / rel, stored[rel], mode)
+            os.chmod(staging / rel, mode)
+        if rel in stored:
+            os.utime(staging / rel, ns=(stored[rel].st_atime_ns, stored[rel].st_mtime_ns))
+
+
 def list_skills(base: Path) -> list[dict[str, Any]]:
     """Return a listing of every valid-named skill directory under ``base``'s skills root.
 
@@ -1459,6 +1810,12 @@ def write_skill(
     and uncontested until ``replace_tree`` promotes it under one cross-process lock, so
     per-member locking would be pure redundant overhead — see the inline comment in
     ``_build``.
+
+    A named member replaces its stored copy. Every stored member the request does NOT
+    name is kept byte for byte, with its mode bits (TASK-496): a save never deletes a
+    member as a side effect, and only :func:`delete_skill` removes files. A stored
+    symlink or special file is refused, never followed (:func:`_keep_stored_members`), and
+    the byte cap counts the kept members too.
     """
     if not is_valid_skill_name(name):
         raise cw.PathEscapeError(f"invalid skill name: {name!r}")
@@ -1499,22 +1856,68 @@ def write_skill(
         raise cw.StaleConfigWriteError(f"skill {name!r} changed on disk since it was loaded")
 
     def _build(staging: Path) -> None:
-        """Write every skill member into the private staging tree, byte-exact."""
+        """Copy the stored members the request does not name, then write the named ones."""
+        # replace_tree runs this INSIDE its lock on the skill dir, the same lock
+        # delete_skill and every other write_skill take. So the re-check below, the
+        # copy of the kept members, and the promote are one critical section: no other
+        # clauster writer can change SKILL.md, add a member or delete one between the
+        # check and the swap. The check outside the lock (above) only fails fast.
+        if _skill_md_hash(skills_root, name) != current_hash:
+            raise cw.StaleConfigWriteError(f"skill {name!r} changed on disk while it was saved")
+        # Staging is owner-only (replace_tree), and every directory made below it stays
+        # owner-only until _set_final_dir_modes, the last step before the promote.
+        default_mode = _default_dir_mode(staging) if fw._is_posix() else 0
+        # TASK-496: keep every stored member the request does not name.
+        skill_dir = fw.resolve_contained_path(skills_root, name)
+        sent = sum(len(content.encode("utf-8")) for content in files.values())
+        try:
+            kept_dirs = _keep_stored_members(
+                skill_dir,
+                staging,
+                _replaced_by(skill_dir, files),
+                name=name,
+                sent=sent,
+            )
+        except OSError as exc:
+            # An unreadable member is the operator's own state, not a server fault: a
+            # refusal that names the cause, never a bare 500 and never a dropped file.
+            raise cw.InvalidCandidateError(
+                f"skill {name!r} could not be kept as stored: {exc.strerror or exc}. "
+                "Nothing was written"
+            ) from exc
         # Contained, direct writes -- NOT fw.write_file(), which additionally takes its
         # own cross-process flock per target. The staging dir is a fresh, private,
         # uncontested tree that no other writer can see until replace_tree promotes it
         # under a single cross-process lock, so taking a per-member lock here would be
         # pure redundant overhead (and would open/close a state-dir lock file per file
         # for nothing). replace_tree's own lock is the only contention point.
+        created: list[Path] = []
+        staging_root = staging.resolve()
         for relative, content in files.items():
             target = fw.resolve_contained_path(staging, relative)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            # write_BYTES, not write_text: text mode would translate "\n" to the
-            # platform newline (CRLF on Windows), but the read path (read_skill_file /
-            # list_skills) is byte-exact, so a text-mode write would break the
-            # round-trip off-POSIX. Members are stored verbatim, mirroring the #766
-            # primitive's own "wb" write.
-            target.write_bytes(content.encode("utf-8"))
+            if target.is_dir():
+                raise cw.InvalidCandidateError(f"{relative!r} is a directory in the skill")
+            created += _make_private_dirs(staging_root, target.parent, relative)
+            # Something here already is the kept copy of a stored file that the key
+            # reaches under another spelling, by a rule the matcher could not prove (an
+            # NTFS 8.3 name, a hard link, staging and skill dir with different case
+            # rules). Removing it could delete another file's copy, so refuse instead.
+            if os.path.lexists(target):
+                raise cw.InvalidCandidateError(
+                    f"{relative!r} names a file that is already in the save: another key, "
+                    "or a stored file under another spelling. The save cannot tell which "
+                    "file it replaces. Nothing was written. Send each file once, under its "
+                    "stored name"
+                )
+            # Bytes, not text: text mode would translate "\n" to the platform newline
+            # (CRLF on Windows), but the read path (read_skill_file / list_skills) is
+            # byte-exact. A new file only: anything planted at the path since the check
+            # above (a symlink included) makes the write fail closed, never follow.
+            try:
+                _create_exclusive(target, content.encode("utf-8"))
+            except FileExistsError as exc:
+                raise _changed(Path(relative)) from exc
+        _set_final_dir_modes(staging_root, kept_dirs, created, default_mode)
 
     try:
         fw.replace_tree(skills_root, name, _build)

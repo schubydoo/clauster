@@ -221,7 +221,18 @@ def replace_tree(root: Path, relative: str, build: Callable[[Path], None]) -> Pa
     is cleaned up and never promoted.
 
     Path-contained (:func:`resolve_contained_path` on ``relative``) and flock-guarded
-    (serializes concurrent replaces of the *same* target).
+    (serializes concurrent replaces of the *same* target). ``build`` runs INSIDE the
+    lock, so a caller may read the current tree in ``build`` (a stale-hash re-check, or
+    a copy of the members it keeps) and another writer of this target cannot change it
+    between that read and the promote. ``build`` must not take this target's lock itself;
+    the lock is not reentrant.
+
+    On Linux and macOS the staging directory is created owner-only (``0o700``), so no
+    other user can enter it, or anything below it, while ``build`` writes. It is promoted
+    with the mode it has when ``build`` returns: a caller that wants another final mode
+    sets it as the last step of ``build``, after every write. ⚠️ Windows ignores the mode:
+    there staging takes the access rules (ACL) of its parent directory, like any new
+    directory in it, so it is exactly as private as the skills directory it is made in.
 
     Atomicity:
 
@@ -248,14 +259,14 @@ def replace_tree(root: Path, relative: str, build: Callable[[Path], None]) -> Pa
     target = resolve_contained_path(root, relative)
     target.parent.mkdir(parents=True, exist_ok=True)
     staging = target.parent / f".{target.name}.staging-{uuid.uuid4().hex}"
-    staging.mkdir(parents=True)
-    try:
-        build(staging)
-    except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
+    staging.mkdir(mode=0o700)
 
     with _locked(target):
+        try:
+            build(staging)
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
         if target.exists():
             trash = target.parent / f".{target.name}.trash-{uuid.uuid4().hex}"
             os.replace(target, trash)

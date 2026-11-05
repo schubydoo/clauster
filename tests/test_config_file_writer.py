@@ -348,6 +348,23 @@ def test_replace_tree_create_promote_failure_removes_staging(tmp_path: Path, mon
     _no_orphans(tmp_path)  # P1: no orphaned .staging-*
 
 
+def test_replace_tree_runs_build_inside_the_target_lock(tmp_path: Path) -> None:
+    # TASK-496: write_skill re-checks SKILL.md and copies the kept members in `build`, so
+    # `build` must run while this target's lock is held, or a concurrent writer could
+    # change the tree between that read and the promote.
+    held: list[bool] = []
+
+    def _build(staging: Path) -> None:
+        lock = atomicio.inproc_path_lock((tmp_path / "skill").resolve())
+        acquired = lock.acquire(blocking=False)
+        if acquired:
+            lock.release()
+        held.append(not acquired)
+
+    fw.replace_tree(tmp_path, "skill", _build)
+    assert held == [True]
+
+
 def test_replace_tree_rejects_path_escape_before_building(tmp_path: Path) -> None:
     called = False
 
