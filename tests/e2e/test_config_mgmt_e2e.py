@@ -585,9 +585,10 @@ def test_config_mgmt_settings_add_and_remove_key_rows(
     # A refused add shows the warning, and the next successful add hides it again.
     _add_settings_key(browser, "env")
     browser.expect_text('[data-test="cm-settings-add-error"]', "env table below")
+    browser.expect_visible('[data-test="cm-settings-add-error"]')
     _add_settings_key(browser, "verbose")
     browser.expect_visible(_row("verbose", "cm-settings-bool"))
-    assert not browser.is_visible('[data-test="cm-settings-add-error"]')
+    browser.expect_hidden('[data-test="cm-settings-add-error"]')
     assert _checked(browser, _row("verbose", "cm-settings-bool")) is False
     browser.click(_row("verbose", "cm-settings-bool"))
     _add_settings_key(browser, "someFutureKey")

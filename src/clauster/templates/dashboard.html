@@ -2240,14 +2240,14 @@
                        data-test="cm-settings-add-error" role="alert"
                        x-show="configMgmt.settings.addError" x-cloak>
                     <div class="d-flex flex-wrap align-items-center gap-2">
-                    <span x-text="configMgmt.settings.addError"></span>
-                    <button type="button" class="btn btn-sm btn-ghost-primary" data-test="cm-settings-add-owner-link"
-                            x-show="configMgmtSurfaceKeyForLabel(configMgmt.settings.addOwner)" x-cloak
-                            @click="configMgmtOpenSurfaceByLabel(configMgmt.settings.addOwner)"
-                            x-text="'Open the ' + configMgmt.settings.addOwner + ' tab'"></button>
-                    <button type="button" class="btn btn-sm btn-ghost-primary" data-test="cm-settings-add-raw"
-                            x-show="configMgmt.settings.addRaw" x-cloak
-                            @click="configMgmtSettingsEditRaw()">Edit in Raw JSON</button>
+                      <span x-text="configMgmt.settings.addError"></span>
+                      <button type="button" class="btn btn-sm btn-ghost-primary" data-test="cm-settings-add-owner-link"
+                              x-show="configMgmtSurfaceKeyForLabel(configMgmt.settings.addOwner)" x-cloak
+                              @click="configMgmtOpenSurfaceByLabel(configMgmt.settings.addOwner)"
+                              x-text="'Open the ' + configMgmt.settings.addOwner + ' tab'"></button>
+                      <button type="button" class="btn btn-sm btn-ghost-primary" data-test="cm-settings-add-raw"
+                              x-show="configMgmt.settings.addRaw" x-cloak
+                              @click="configMgmtSettingsEditRaw()">Edit in Raw JSON</button>
                     </div>
                   </div>
                 </div>
