@@ -656,6 +656,10 @@ whole save:
   `0b101`, `1e3`, `0o17`, and a tagged value such as `!!int "10"`, which the
   two read differently. Write `true`, `false` or a plain decimal. If the value
   must stay text, quote it.
+- A `#` right after a quoted value or a closing `]` or `}`, such as `"a"#b`.
+  YAML 1.2 refuses it, so Claude Code reads a changed copy of the frontmatter.
+  Put a space before the `#`.
+- A lone carriage return (CR) that is not part of a CRLF line ending.
 
 Some frontmatter is not valid YAML, but Claude Code still reads it, and so does
 Clauster. When the first parse fails, Claude Code parses a changed copy of the
@@ -664,7 +668,7 @@ double quotes if the key has only letters, `_` and `-`, and the value holds a
 YAML symbol such as `[`, `{`, `#`, or a colon and a space. A value that is
 already quoted or is a flow list such as `[Read, Grep]` stays as it is. Each
 tab at the start of a line becomes two spaces. Clauster reads the same copy,
-so it checks the values that Claude Code sees. For example,
+so it checks the values that Claude Code sees in the known cases. For example,
 `argument-hint: [filename] [format]` saves, and its value is the text
 `[filename] [format]`. The editor does not remove fields on load from a file
 that Claude Code reads through this copy.
@@ -672,9 +676,11 @@ that Claude Code reads through this copy.
 A file that is not valid YAML even after these changes is refused. One example
 is a bad line that is indented under another key. Another example is a line in
 a file with Windows (CRLF) line endings, because Claude Code does not change
-those lines. A file that uses one anchor name twice, such as `&t` on two
-values, is also refused. YAML 1.2 allows that, but Clauster's parser does not,
-so it cannot read the values the same way.
+those lines. Clauster also refuses some files that YAML 1.2 reads but its own
+parser does not, because it cannot read the values the same way. The examples
+are a file that uses one anchor name twice, such as `&t` on two values, an
+anchor name with a dot or a non-ASCII letter, such as `&d.1`, and a list item
+that starts with `:`, such as `[:a]`.
 
 ### Skill frontmatter checks
 

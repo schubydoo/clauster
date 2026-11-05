@@ -62,6 +62,8 @@ from typing import Any, Literal
 import yaml
 from fastapi import HTTPException
 from yaml.composer import ComposerError
+from yaml.parser import ParserError
+from yaml.scanner import ScannerError
 
 from .claude_json import ClaudeJsonUnparseable, locked_replace_json_file, update_claude_json
 from .config import ClausterConfig
@@ -1390,14 +1392,26 @@ _CLI_REQUOTE_SPECIAL_RE = re.compile(r"[{}\[\]*&#!|>%@`]|: ")
 _CLI_LEADING_TABS_RE = re.compile(r"(?:\A|(?<=\n)|(?<=\r))\t+")
 
 
-def _is_duplicate_anchor(exc: yaml.YAMLError) -> bool:
-    """Whether ``exc`` is PyYAML refusing a second anchor of one name, which YAML 1.2 allows.
+def _is_yaml11_only_syntax_error(exc: yaml.YAMLError) -> bool:
+    """Whether ``exc`` is PyYAML refusing syntax that YAML 1.2 accepts.
 
-    YAML 1.2 does not require anchors to be unique, so the CLI's first parse succeeds where
-    PyYAML's composer fails. Such a header must not take the retry: the CLI reads it as
-    written, and the retry would quote its values into other strings.
+    Then the CLI's first parse succeeds where PyYAML's fails, so the header must not take
+    the retry: the CLI reads it as written, and the retry would quote its values into other
+    strings. The seam refuses such a header instead. The known cases, each checked against
+    eemeli/yaml (YAML 1.2): a second anchor of one name (YAML 1.2 does not require unique
+    anchors), an anchor or alias name with a character other than letters, digits, ``_``
+    and ``-`` (``&a.b``, ``&é``), and a flow item that starts with ``:`` (``[:a]``).
     """
-    return isinstance(exc, ComposerError) and exc.problem == "second occurrence"
+    if isinstance(exc, ComposerError):
+        return exc.problem == "second occurrence"
+    if isinstance(exc, ScannerError):
+        return exc.context in ("while scanning an anchor", "while scanning an alias")
+    if isinstance(exc, ParserError):
+        return (
+            exc.context == "while parsing a flow node"
+            and exc.problem == "expected the node content, but found ':'"
+        )
+    return False
 
 
 def _is_yaml_list(text: str) -> bool:
@@ -1411,7 +1425,7 @@ def _is_yaml_list(text: str) -> bool:
     try:
         return isinstance(yaml.compose(text, Loader=yaml.SafeLoader), yaml.SequenceNode)
     except yaml.YAMLError as exc:
-        return _is_duplicate_anchor(exc)
+        return _is_yaml11_only_syntax_error(exc)
     except RecursionError:
         return False
 
@@ -1441,6 +1455,36 @@ def _cli_retry_text(header: str) -> str:
     return _CLI_LEADING_TABS_RE.sub(lambda tabs: "  " * len(tabs.group()), "\n".join(lines))
 
 
+#: Tokens after which YAML 1.2 needs white space before a ``#`` comment. PyYAML reads
+#: ``"a"#b`` or ``[x]#b`` as a value and a comment; YAML 1.2 refuses both.
+_CLOSING_TOKENS = (yaml.FlowSequenceEndToken, yaml.FlowMappingEndToken)
+
+
+def _yaml12_refuses(text: str) -> tuple[int, int] | None:
+    r"""Return the (line, column) of syntax PyYAML accepts and YAML 1.2 refuses, or None.
+
+    The CLI's first parse then fails, so it reads the retry text, or no fields at all, while
+    PyYAML's reading of the header is what this tier would check. The known cases, checked
+    against eemeli/yaml: a lone carriage return (a line break to PyYAML; eemeli refuses the
+    header), and a ``#`` right after a quoted scalar or a closing ``]``/``}``. A ``\r`` at the
+    very end is the CRLF closing fence's (:func:`frontmatter_header`) and is allowed.
+    ``text`` already composed, so scanning it cannot fail.
+    """
+    body = text[:-1] if text.endswith("\r") else text
+    lone_cr = re.search(r"\r(?!\n)", body)
+    if lone_cr is not None:
+        # The first lone CR: every `\r` before it is part of a `\r\n`, so `\n` counts lines.
+        at = lone_cr.start()
+        return body.count("\n", 0, at), at - (body.rfind("\n", 0, at) + 1)
+    for token in yaml.scan(text, Loader=yaml.SafeLoader):
+        closes = isinstance(token, _CLOSING_TOKENS) or (
+            isinstance(token, yaml.ScalarToken) and token.style in ('"', "'")
+        )
+        if closes and text.startswith("#", token.end_mark.index):
+            return token.end_mark.line, token.end_mark.column
+    return None
+
+
 def cli_frontmatter_text(header: str) -> str:
     """Return the frontmatter text Claude Code actually parses: ``header``, or its retry text.
 
@@ -1453,10 +1497,12 @@ def cli_frontmatter_text(header: str) -> str:
     Every consumer that composes a frontmatter header must compose THIS text, so that the
     checks and the CLI read one document.
 
-    One syntax difference is known and handled: YAML 1.2 allows two anchors of one name and
-    PyYAML does not, so a duplicate anchor never takes the retry, and the seam refuses it.
-    Others are known and not handled (follow-ups): PyYAML accepts a duplicate key, which a
-    strict YAML 1.2 parser may refuse, and a flow collection that continues at column 0.
+    Syntax that YAML 1.2 accepts and PyYAML refuses never takes the retry
+    (:func:`_is_yaml11_only_syntax_error`); the seam refuses it. Syntax that PyYAML accepts
+    and YAML 1.2 refuses is refused by the seam where it is known (:func:`_yaml12_refuses`).
+    Known and not handled (follow-ups): a duplicate key, which a strict YAML 1.2 parser may
+    refuse, and a flow collection that continues at column 0. Other differences may exist:
+    this is a port checked against a stand-in parser, not Bun.YAML itself.
     """
     try:
         yaml.compose(header, Loader=yaml.SafeLoader)
@@ -1464,7 +1510,7 @@ def cli_frontmatter_text(header: str) -> str:
     except RecursionError:
         return header  # too deep to check; the seam maps the same error on its own parse
     except yaml.YAMLError as exc:
-        if _is_duplicate_anchor(exc):
+        if _is_yaml11_only_syntax_error(exc):
             return header
     retry = _cli_retry_text(header)
     try:
@@ -1814,6 +1860,14 @@ def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> An
         # any serializer. The reason is a static class label, never the offending scalar —
         # invariant 4.
         raise InvalidCandidateError(f"{what} contains {reason}")
+    if (where := _yaml12_refuses(header)) is not None:
+        # Positions only — invariant 4.
+        raise InvalidCandidateError(
+            f"{what} has syntax at line {where[0] + 1 + line_offset}, column {where[1] + 1} "
+            "that YAML 1.1 accepts and the YAML 1.2 that Claude Code reads refuses: a lone "
+            "carriage return, or a '#' right after a quoted value or a closing bracket. Put "
+            "a space before the '#', or use LF or CRLF line endings"
+        )
     if isinstance(value, (dict, list)):
         # Composing again is safe here: the load above already bounded nesting, aliases and
         # merges. Positions only in the message, never the scalar — invariant 4.

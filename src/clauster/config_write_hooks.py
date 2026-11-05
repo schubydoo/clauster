@@ -357,7 +357,7 @@ def _validate_hook_entry(entry: Any, where: str) -> None:
     unknown = set(entry) - _COMMON_FIELDS - required - optional
     if unknown:
         raise cw.InvalidCandidateError(
-            f"{where} has unknown keys for a {hook_type!r} hook: {sorted(unknown)}"
+            f"{where} has unknown keys for a {hook_type!r} hook: {sorted(unknown, key=repr)}"
         )
 
     for field in sorted(required):
@@ -395,7 +395,7 @@ def _validate_matcher_group(group: Any, where: str) -> None:
         raise cw.InvalidCandidateError(f"{where} must be an object")
     unknown = set(group) - _MATCHER_GROUP_KEYS
     if unknown:
-        raise cw.InvalidCandidateError(f"{where} has unknown keys: {sorted(unknown)}")
+        raise cw.InvalidCandidateError(f"{where} has unknown keys: {sorted(unknown, key=repr)}")
 
     if "matcher" in group and not isinstance(group["matcher"], str):
         # The matcher is an opaque pattern string; its content is never evaluated here.
@@ -434,7 +434,9 @@ def validate_hooks(candidate: Any) -> None:
     unknown = set(candidate) - RECOGNIZED_EVENTS
     if unknown:
         raise cw.InvalidCandidateError(
-            f"hooks has unknown event(s): {sorted(unknown)} "
+            # `key=repr`: frontmatter keys can mix types (`1:` and `foo:`), and a
+            # plain sort of an int and a str raises TypeError, a 500.
+            f"hooks has unknown event(s): {sorted(unknown, key=repr)} "
             f"(want one of {sorted(RECOGNIZED_EVENTS)})"
         )
 

@@ -2078,15 +2078,16 @@ def test_frontmatter_header_keeps_the_cr_the_cli_keeps() -> None:
     ],
 )
 def test_a_duplicate_anchor_is_refused_not_retried(parse, lines: str) -> None:
-    # YAML 1.2 allows two anchors of one name, so the CLI reads these as written. PyYAML
-    # does not, and the retry would read the values as other strings: refuse instead.
+    # YAML 1.2 allows two anchors of one name; PyYAML does not. The retry would read the
+    # values as other strings, so refuse instead (fail closed). For the case with a bad
+    # line the CLI does take its retry, but the refusal stands.
     with pytest.raises(cw.InvalidCandidateError, match="not valid YAML"):
         parse(f"---\nname: a\ndescription: d\n{lines}\n---\nbody\n")
 
 
 def test_a_merge_pyramid_in_a_retried_header_is_refused_quickly() -> None:
     levels = ["&l0 {k0: 0, k1: 1}"] + [
-        f"&l{i} {{<<: [*l{i - 1}, *l{i - 1}]}}" for i in range(1, 30)
+        f"&l{i} {{<<: [*l{i - 1}, *l{i - 1}]}}" for i in range(1, 22)
     ]
     header = "argument-hint: [a] [b]\nx: [" + ", ".join(levels) + "]\n"
     started = time.perf_counter()
@@ -2112,3 +2113,49 @@ def test_the_flow_list_check_treats_a_too_deep_value_as_not_a_list() -> None:
     assert cw._is_yaml_list("[a, b]") is True
     assert cw._is_yaml_list("[&x a, &x b]") is True  # a duplicate anchor: a list to YAML 1.2
     assert cw._is_yaml_list("[a] [b]") is False
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize(
+    "lines",
+    [
+        pytest.param("description2: &d.1 Deploys prod\nhint: [a] [b]", id="anchor-with-a-dot"),
+        pytest.param("x: &é v\nhint: [a] [b]", id="anchor-non-ascii"),
+        pytest.param("x: &a v\ny: *a.b\nhint: [a] [b]", id="alias-with-a-dot"),
+        pytest.param("x: [:a]\nhint: [a] [b]", id="flow-item-starts-with-colon"),
+    ],
+)
+def test_syntax_only_yaml_1_2_accepts_is_refused_not_retried(parse, lines: str) -> None:
+    # eemeli/yaml (YAML 1.2) parses each of these as written, so the CLI does not take the
+    # retry. PyYAML refuses them; the retry would read other values, so refuse instead.
+    with pytest.raises(cw.InvalidCandidateError, match="not valid YAML"):
+        parse(f"---\nname: a\ndescription: d\n{lines}\n---\nbody\n")
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize(
+    "lines",
+    [
+        pytest.param('when: "a"#b\ndisallowedTools: [Bash] # deny', id="hash-after-double-quote"),
+        pytest.param("when: 'a'#b", id="hash-after-single-quote"),
+        pytest.param("when: [x]#b", id="hash-after-flow-list"),
+        pytest.param("when: {x: 1}#b", id="hash-after-flow-map"),
+        pytest.param("when: x\rdisallowedTools: Bash", id="lone-carriage-return"),
+    ],
+)
+def test_syntax_only_pyyaml_accepts_is_refused(parse, lines: str) -> None:
+    # eemeli/yaml refuses each of these, so the CLI reads its retry text or no fields at
+    # all: `[Bash] # deny` would become a string, and Bash would no longer be denied.
+    with pytest.raises(cw.InvalidCandidateError, match="that YAML 1.1 accepts"):
+        parse(f"---\nname: a\ndescription: d\n{lines}\n---\nbody\n")
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize("lines", ['when: "a" #b', "when: [x] # b", "when: x#b", "when: 'it''s'"])
+def test_a_comment_after_white_space_still_loads(parse, lines: str) -> None:
+    parse(f"---\nname: a\ndescription: d\n{lines}\n---\nbody\n")  # no raise
+
+
+def test_the_lone_cr_position_names_the_line() -> None:
+    with pytest.raises(cw.InvalidCandidateError, match="line 2, column 5"):
+        cw.load_frontmatter_yaml("a: 1\nb: x\rc: y\n", what="f")

@@ -116,7 +116,7 @@ import yaml
 
 from . import config_file_writer as fw
 from . import config_write as cw
-from .config_write_hooks import validate_hooks
+from .config_write_hooks import RECOGNIZED_EVENTS, validate_hooks
 
 #: The skill's required entrypoint file (Claude Code's own convention).
 SKILL_FILENAME = "SKILL.md"
@@ -249,18 +249,9 @@ _EFFORT_ALIASES = {"med": "medium"}
 #: The shells ``shell`` accepts (the CLI's ``Va``), compared trimmed and lowercased.
 _SHELLS = ("bash", "powershell")
 
-#: The hook events the CLI knows (its ``bc``, 2.1.318).
-_HOOK_EVENTS = frozenset(
-    {
-        "PreToolUse", "PostToolUse", "PostToolUseFailure", "PostToolBatch", "Notification",
-        "UserPromptSubmit", "UserPromptExpansion", "SessionStart", "SessionEnd", "Stop",
-        "StopFailure", "SubagentStart", "SubagentStop", "PreCompact", "PostCompact",
-        "PreModelSwitch", "PostModelSwitch", "PermissionRequest", "PermissionDenied", "Setup",
-        "TeammateIdle", "TaskCreated", "TaskCompleted", "Elicitation", "ElicitationResult",
-        "ConfigChange", "WorktreeCreate", "WorktreeRemove", "InstructionsLoaded",
-        "CwdChanged", "FileChanged", "DirectoryAdded", "MessageDisplay",
-    }
-)  # fmt: skip
+#: The hook events the CLI knows (its ``bc``, 2.1.318): the hooks surface's own set, so
+#: the two cannot drift apart.
+_HOOK_EVENTS = RECOGNIZED_EVENTS
 #: The two events whose hooks guard a tool call (its ``XX``). Hooks for them anywhere but
 #: under ``hooks`` make the CLI load the skill with no hooks AND no ``allowed-tools``.
 _GUARD_EVENTS = frozenset({"PreToolUse", "PermissionRequest"})

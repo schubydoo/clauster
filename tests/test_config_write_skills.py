@@ -2521,3 +2521,27 @@ def test_a_reader_that_runs_out_of_stack_is_a_422(monkeypatch) -> None:
     monkeypatch.setattr(sk, "_FIELD_READERS", (("description", _deep),))
     with pytest.raises(cw.InvalidCandidateError, match="nested too deeply to check"):
         sk.validate_frontmatter({"description": "d"})
+
+
+@pytest.mark.parametrize(
+    "hooks",
+    [
+        pytest.param("hooks:\n  1: []\n  foo: []", id="mixed-event-keys"),
+        pytest.param("hooks:\n  ~: []\n  foo: []", id="null-and-text-event-keys"),
+        pytest.param("hooks: {Stop: [{1: x, foo: y, hooks: []}]}", id="mixed-group-keys"),
+        pytest.param(
+            "hooks: {Stop: [{hooks: [{type: command, command: x, 1: a, foo: b}]}]}",
+            id="mixed-entry-keys",
+        ),
+    ],
+)
+def test_mixed_type_hook_keys_are_a_422_on_every_path(tmp_path: Path, hooks: str) -> None:
+    # The hooks validator sorts unknown keys for its message; an int and a str do not sort,
+    # and that TypeError used to escape as a 500 (and a 500 for the whole Skills list).
+    content = _fm("description: d", hooks)
+    with pytest.raises(cw.InvalidCandidateError, match="unknown"):
+        sk.validate_skill_md_content(content)
+    _skill(tmp_path, content)
+    (item,) = sk.list_skills(tmp_path)
+    assert "unknown" in item["frontmatter_error"]
+    assert sk.read_skill_file_for_edit(tmp_path, "s")[3] is None
