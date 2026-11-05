@@ -27,13 +27,18 @@ Three surfaces, one entry shape (mirroring Claude Code's own ``.mcp.json``):
 * **user** scope ⇒ ``~/.claude.json`` ``mcpServers`` subtree, written through the
   locked subtree-merge writer (gated additionally on ``allow_user_scope``).
 
-A server entry is either a **stdio** server (``command`` + optional
-``args``/``env``) or a **remote** server (``type``/``transport`` of ``sse``/``http``
-+ ``url`` + optional ``headers``). Unknown keys or wrong types ⇒ 422, nothing
-written. Secret-shaped ``env`` values and token-bearing ``url``/``headers`` flow
-through the Foundation's :func:`~clauster.config_write.redact_secrets` /
-:func:`~clauster.config_write.merge_redacted` so the browser never reads a stored
-secret out and a returned ``"********"`` sentinel keeps the stored value.
+A server entry is a **stdio** server (``command`` + optional ``args``/``env``), a
+remote **http**/**sse** server (``url`` + optional ``headers``/``headersHelper``/
+``oauth``), or a remote **ws** server (``url`` + optional ``headers``/``headersHelper``).
+Every transport also takes ``timeout``, ``alwaysLoad``, ``bareElicitationCapability`` and
+``role``. The accepted fields per transport are the ones Claude Code documents at
+https://code.claude.com/docs/en/mcp plus the ones the live 2.1.318 CLI parses and keeps
+(TASK-449.8); see :data:`_STDIO_KEYS`, :data:`_HTTP_SSE_KEYS` and :data:`_WS_KEYS`.
+Unknown keys or wrong types ⇒ 422, nothing written. Every ``env``/``headers`` value,
+every ``headersHelper`` command, the ``oauth`` strings and a token-bearing ``url`` flow
+through :func:`_redact_entry` / :func:`~clauster.config_write.merge_redacted` so the
+browser never reads a stored secret out and a returned ``"********"`` sentinel keeps
+the stored value.
 
 **#769 additions** (CLI-driven writes + enable/disable, over this same Foundation):
 
@@ -67,7 +72,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from . import config_write as cw
 
@@ -82,26 +87,127 @@ MCP_SERVERS_KEY = "mcpServers"
 #: ``--scope``, ``--client-secret``, ``-e`` — would be consumed by the CLI's argument
 #: parser as a flag rather than the positional name (arg-injection / positional shift;
 #: verified against a live ``claude`` 2.1.198, which errors or mis-binds such a name).
-#: Constrain it to a conservative identifier charset that CANNOT begin with ``-``: an
-#: alphanumeric/underscore first char, then alphanumerics/underscore/dot/hyphen. This is
-#: validated structurally (validate-never-execute), so a bad name is a 422 with nothing
-#: written, and it is enforced for the direct (non-CLI) writers too so the two write
-#: paths never diverge on which names they accept.
-_SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
+#: Constrain it to the charset Claude Code itself accepts — letters, numbers, hyphens and
+#: underscores (https://code.claude.com/docs/en/mcp; the 2.1.318 CLI refuses a dotted name
+#: with "Names can only contain letters, numbers, hyphens, and underscores" and skips one
+#: found in a file) — and additionally forbid a leading ``-``. This is validated
+#: structurally (validate-never-execute), so a bad name is a 422 with nothing written, and
+#: it is enforced for the direct (non-CLI) writers too so the two write paths never diverge
+#: on which names they accept.
+_SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]*$")
+
+#: The charset a ``remove`` accepts for an EXISTING server name: the earlier, wider
+#: :data:`_SERVER_NAME_RE` (dots allowed), so a server stored before TASK-449.8 tightened the
+#: add/edit charset can still be removed. It still forbids a leading ``-``, because the name
+#: becomes a positional argument of ``claude mcp remove``.
+_REMOVABLE_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
+
+
+def validate_removable_server_name(name: str) -> None:
+    """Refuse a ``remove`` target name that ``claude mcp remove`` could parse as an option."""
+    if not _REMOVABLE_NAME_RE.match(name):
+        raise cw.InvalidCandidateError(
+            f"server name {name!r} must match {_REMOVABLE_NAME_RE.pattern} (no leading '-')"
+        )
+
+
+#: Names Claude Code refuses for a configured server. The first three are the built-in
+#: servers the docs list as reserved (``claude mcp add`` rejects them and a file entry is
+#: skipped at load; the other documented reserved names contain a space, which
+#: :data:`_SERVER_NAME_RE` already rejects). The rest are the JavaScript prototype names the
+#: 2.1.318 CLI's own name check refuses.
+_RESERVED_SERVER_NAMES = frozenset(
+    {
+        "workspace",
+        "claude-in-chrome",
+        "computer-use",
+        "constructor",
+        "prototype",
+        "__proto__",
+        "__defineGetter__",
+        "__defineSetter__",
+        "__lookupGetter__",
+        "__lookupSetter__",
+    }
+)
 
 #: The top-level ``~/.claude.json`` key holding per-project state, keyed by the
 #: resolved absolute project path (the same shape :mod:`clauster.trust` uses for
 #: ``hasTrustDialogAccepted``).
 PROJECTS_KEY = "projects"
 
-#: The two recognized remote transports (stdio servers carry no transport).
-_REMOTE_TRANSPORTS = frozenset({"sse", "http"})
+#: Every ``type`` value Claude Code reads, mapped to the transport it means. ``streamable-http``
+#: is the MCP specification's name for ``http`` and Claude Code accepts it as an alias
+#: (https://code.claude.com/docs/en/mcp, "Option 1"). An entry with no ``type`` is stdio.
+_TRANSPORT_ALIASES = {
+    "stdio": "stdio",
+    "http": "http",
+    "streamable-http": "http",
+    "sse": "sse",
+    "ws": "ws",
+}
+
+#: The rule for every key set below (maintainer decision, 2026-11-05): a key is accepted
+#: when Claude Code documents it OR the 2.1.318 CLI parses and keeps it (``claude mcp
+#: add-json`` stores it); a key the CLI rejects or silently drops is refused. Probed with a
+#: throwaway config dir, TASK-449.8.
+#:
+#: Keys every transport accepts: ``type``, the per-call tool ``timeout`` (ms), the
+#: tool-search exemption ``alwaysLoad``, ``bareElicitationCapability`` (the errors page:
+#: "accepted on stdio, sse, http, and ws entries"), and the CLI-parsed, undocumented
+#: ``role`` (only the value ``"comms"``; the CLI drops any other).
+#:
+#: ``transport`` is NOT accepted: clauster once took it as a synonym of ``type``, but Claude
+#: Code ignores the key, so an entry that relied on it loads as stdio and is skipped.
+#: ``env`` on a remote server is refused for the same reason (the CLI drops it).
+_COMMON_KEYS = frozenset({"type", "timeout", "alwaysLoad", "bareElicitationCapability", "role"})
 
 #: Allowed keys for a stdio server entry (``command`` required; rest optional).
-_STDIO_KEYS = frozenset({"command", "args", "env", "type", "transport"})
+_STDIO_KEYS = _COMMON_KEYS | {"command", "args", "env"}
 
-#: Allowed keys for a remote server entry (``url`` required; transport required).
-_REMOTE_KEYS = frozenset({"url", "headers", "env", "type", "transport"})
+#: Allowed keys for an http/sse server entry (``url`` required). ``request_timeout_ms`` is
+#: named in the changelog as a per-server ``.mcp.json`` field. ``tools`` (per-tool
+#: ``permission_policy``), ``toolPermissions``, ``displayName`` and ``discoveryCache`` are
+#: CLI-parsed and undocumented; the CLI keeps them on http/sse entries only.
+_HTTP_SSE_KEYS = _COMMON_KEYS | {
+    "url",
+    "headers",
+    "headersHelper",
+    "oauth",
+    "request_timeout_ms",
+    "tools",
+    "toolPermissions",
+    "displayName",
+    "discoveryCache",
+}
+
+#: Allowed keys for a ws server entry: "the same url, headers, headersHelper, timeout, and
+#: alwaysLoad fields as http". No ``oauth``: the docs say WebSocket does not support OAuth.
+_WS_KEYS = _COMMON_KEYS | {"url", "headers", "headersHelper"}
+
+#: ``type`` values the CLI uses internally and refuses in a config file (probed:
+#: ``claude mcp add-json`` answers "registered by the host application at runtime").
+_RUNTIME_ONLY_TYPES = frozenset({"sdk", "sse-ide", "ws-ide", "claudeai-proxy"})
+
+_KEYS_BY_TRANSPORT = {
+    "stdio": _STDIO_KEYS,
+    "http": _HTTP_SSE_KEYS,
+    "sse": _HTTP_SSE_KEYS,
+    "ws": _WS_KEYS,
+}
+
+#: Allowed keys of an http/sse server's ``oauth`` object (pre-configured OAuth client,
+#: fixed callback port, metadata-discovery override, pinned scopes, and the CLI-parsed,
+#: undocumented boolean ``xaa``). The client SECRET is never part of the entry: Claude Code
+#: keeps it in the keychain or a credentials file.
+_OAUTH_KEYS = frozenset({"clientId", "callbackPort", "authServerMetadataUrl", "scopes", "xaa"})
+
+#: The values the CLI keeps for ``tools[].permission_policy`` and ``toolPermissions``.
+_TOOL_POLICIES = frozenset({"always_allow", "always_ask", "always_deny"})
+TOOL_PERMISSION_VALUES = frozenset({"allow", "ask", "blocked"})
+
+#: The CLI's own length cap on ``oauth.authServerMetadataUrl``.
+_AUTH_METADATA_URL_MAX = 4096
 
 
 def _validate_str_dict(value: Any, label: str) -> None:
@@ -113,60 +219,200 @@ def _validate_str_dict(value: Any, label: str) -> None:
             raise cw.InvalidCandidateError(f"{label} must map string keys to string values")
 
 
-def _entry_transport(entry: dict[str, Any]) -> str | None:
-    """Return the remote transport declared by ``entry`` (``type``/``transport``), or None.
+def _is_positive_int(value: Any) -> bool:
+    """Whether ``value`` is a positive ``int`` (a ``bool`` is not a number here)."""
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
-    ``type`` and ``transport`` are accepted as synonyms (Claude Code has used both).
-    A non-string, or the two disagreeing, is a structural error. A stdio entry
-    declares neither (or the literal ``"stdio"``) ⇒ returns ``None``.
+
+def entry_transport(entry: dict[str, Any]) -> str:
+    """Return the transport ``entry`` declares: ``stdio``, ``http``, ``sse`` or ``ws``.
+
+    Reads ``type`` only, exactly as Claude Code does: an entry with no ``type`` is stdio,
+    and ``streamable-http`` normalizes to ``http``. A non-string or unknown value is a
+    structural error, and so is the legacy ``transport`` key (Claude Code ignores it, so an
+    entry relying on it would load as stdio). ``sdk``, ``sse-ide``, ``ws-ide`` and
+    ``claudeai-proxy`` are refused: the CLI registers them at runtime and refuses them in
+    a config file.
     """
-    declared = {entry[k] for k in ("type", "transport") if k in entry}
-    if not declared:
-        return None
-    if not all(isinstance(v, str) for v in declared):
-        raise cw.InvalidCandidateError("server 'type'/'transport' must be a string")
-    if len(declared) > 1:
-        raise cw.InvalidCandidateError("server 'type' and 'transport' disagree")
-    (value,) = declared
-    if value == "stdio":
-        return None
-    if value not in _REMOTE_TRANSPORTS:
-        raise cw.InvalidCandidateError(f"unknown server transport {value!r} (want stdio/sse/http)")
-    return value
+    if "transport" in entry:
+        # Promise a reload-and-save fix only where _convert_legacy_entry makes one: a set
+        # `type`, or a plain transport word. Any other value is never converted, so saying
+        # "reload" would send the operator round the same refusal again.
+        value = entry["transport"]
+        convertible = "type" in entry or (isinstance(value, str) and value in _TRANSPORT_ALIASES)
+        hint = (
+            "The editor converts a stored 'transport' to 'type' when it loads the server, "
+            "so reload the server and save it"
+            if convertible
+            else "Remove 'transport' and set 'type' by hand"
+        )
+        raise cw.InvalidCandidateError(
+            "'transport' is not a Claude Code server field (Claude Code ignores it); use "
+            f"'type'. {hint}"
+        )
+    if "type" not in entry:
+        return "stdio"
+    value = entry["type"]
+    if not isinstance(value, str):
+        raise cw.InvalidCandidateError("server 'type' must be a string")
+    if value in _RUNTIME_ONLY_TYPES:
+        raise cw.InvalidCandidateError(
+            f"server type {value!r} is registered at runtime (an SDK host, an IDE or a "
+            "claude.ai connector); Claude Code refuses it in a config file"
+        )
+    transport = _TRANSPORT_ALIASES.get(value)
+    if transport is None:
+        raise cw.InvalidCandidateError(
+            f"unknown server transport {value!r} (want stdio/http/streamable-http/sse/ws)"
+        )
+    return transport
+
+
+def _validate_oauth(name: str, oauth: Any) -> None:
+    """Structurally validate an http/sse server's ``oauth`` object, or raise (→ 422).
+
+    Mirrors the 2.1.318 CLI schema: ``clientId`` a string, ``callbackPort`` a TCP port,
+    ``authServerMetadataUrl`` an ``https://`` URL of at most 4096 characters, ``scopes`` a
+    non-empty space-separated string. ``authServerMetadataUrl`` may also be the redaction
+    sentinel: the read path masks every ``oauth`` string, and a returned sentinel means
+    "keep the stored value" (:func:`~clauster.config_write.merge_redacted`).
+    """
+    label = f"server {name!r} 'oauth'"
+    if not isinstance(oauth, dict):
+        raise cw.InvalidCandidateError(f"{label} must be an object")
+    unknown = set(oauth) - _OAUTH_KEYS
+    if unknown:
+        raise cw.InvalidCandidateError(f"{label} has unknown keys: {sorted(unknown)}")
+    if "clientId" in oauth and not isinstance(oauth["clientId"], str):
+        raise cw.InvalidCandidateError(f"{label} 'clientId' must be a string")
+    if "callbackPort" in oauth:
+        port = oauth["callbackPort"]
+        if not _is_positive_int(port) or port > 65535:
+            raise cw.InvalidCandidateError(
+                f"{label} 'callbackPort' must be an integer from 1 to 65535"
+            )
+    if "authServerMetadataUrl" in oauth:
+        url = oauth["authServerMetadataUrl"]
+        if url != cw.REDACTION_SENTINEL and (
+            not isinstance(url, str)
+            or not url.startswith("https://")
+            or len(url) <= len("https://")
+            or len(url) > _AUTH_METADATA_URL_MAX
+        ):
+            raise cw.InvalidCandidateError(
+                f"{label} 'authServerMetadataUrl' must be an https:// URL "
+                f"of at most {_AUTH_METADATA_URL_MAX} characters"
+            )
+    if "scopes" in oauth:
+        scopes = oauth["scopes"]
+        if not isinstance(scopes, str) or not scopes:
+            raise cw.InvalidCandidateError(
+                f"{label} 'scopes' must be a non-empty space-separated string"
+            )
+    if "xaa" in oauth and not isinstance(oauth["xaa"], bool):
+        raise cw.InvalidCandidateError(f"{label} 'xaa' must be true or false")
+
+
+def _validate_tool_policies(name: str, entry: dict[str, Any]) -> None:
+    """Validate the CLI-parsed per-tool fields ``tools`` and ``toolPermissions`` (http/sse)."""
+    if "tools" in entry:
+        tools = entry["tools"]
+        label = f"server {name!r} 'tools'"
+        if not isinstance(tools, list):
+            raise cw.InvalidCandidateError(f"{label} must be a list of objects")
+        for tool in tools:
+            if not isinstance(tool, dict) or not isinstance(tool.get("name"), str):
+                raise cw.InvalidCandidateError(f"{label} items need a string 'name'")
+            unknown = set(tool) - {"name", "permission_policy"}
+            if unknown:
+                raise cw.InvalidCandidateError(f"{label} item has unknown keys: {sorted(unknown)}")
+            if "permission_policy" in tool and not (
+                isinstance(tool["permission_policy"], str)
+                and tool["permission_policy"] in _TOOL_POLICIES
+            ):
+                raise cw.InvalidCandidateError(
+                    f"{label} 'permission_policy' must be one of {sorted(_TOOL_POLICIES)}"
+                )
+    if "toolPermissions" in entry:
+        perms = entry["toolPermissions"]
+        if not isinstance(perms, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) and v in TOOL_PERMISSION_VALUES
+            for k, v in perms.items()
+        ):
+            raise cw.InvalidCandidateError(
+                f"server {name!r} 'toolPermissions' must map tool names to one of "
+                f"{sorted(TOOL_PERMISSION_VALUES)}"
+            )
+
+
+def _validate_common_fields(name: str, entry: dict[str, Any]) -> None:
+    """Validate the shared scalar fields (``timeout``, the booleans, ``role``, ``displayName``).
+
+    ``discoveryCache`` and ``displayName`` are only in the http/sse key set, so the key
+    check has already refused them on stdio and ws before this runs.
+    """
+    if "timeout" in entry and not _is_positive_int(entry["timeout"]):
+        raise cw.InvalidCandidateError(
+            f"server {name!r} 'timeout' must be a positive integer (milliseconds)"
+        )
+    for key in ("alwaysLoad", "bareElicitationCapability", "discoveryCache"):
+        if key in entry and not isinstance(entry[key], bool):
+            raise cw.InvalidCandidateError(f"server {name!r} {key!r} must be true or false")
+    if "role" in entry and entry["role"] != "comms":
+        raise cw.InvalidCandidateError(f"server {name!r} 'role' must be \"comms\"")
+    if "displayName" in entry and not isinstance(entry["displayName"], str):
+        raise cw.InvalidCandidateError(f"server {name!r} 'displayName' must be a string")
 
 
 def _validate_server_entry(name: Any, entry: Any) -> None:
     """Structurally validate one ``name -> entry`` MCP server, or raise (→ 422).
 
-    Stdio entries require a non-empty string ``command`` (``args`` a list of
-    strings, ``env`` a string→string map); remote entries require a non-empty
-    string ``url`` (``headers`` a string→string map). Unknown keys are rejected.
-    The ``name`` must additionally match :data:`_SERVER_NAME_RE` (no leading ``-``,
-    identifier charset) so it can never be mis-parsed as a CLI option when it reaches
-    ``claude mcp``'s argv — see that constant. **Nothing here resolves, spawns, or
-    runs the command/url** — shape only.
+    The allowed keys depend on the transport (:func:`entry_transport`); unknown keys are
+    rejected. Stdio entries require a non-empty string ``command`` (``args`` a list of
+    strings, ``env`` a string→string map); remote entries require a non-empty string
+    ``url`` (``headers`` a string→string map, ``headersHelper`` a string, ``oauth`` per
+    :func:`_validate_oauth`). The ``name`` must additionally match
+    :data:`_SERVER_NAME_RE` (no leading ``-``, Claude Code's charset) and not be one of
+    :data:`_RESERVED_SERVER_NAMES`, so it can never be mis-parsed as a CLI option when it
+    reaches ``claude mcp``'s argv — see that constant. **Nothing here resolves, spawns, or
+    runs the command, url or headersHelper** — shape only.
     """
     if not isinstance(name, str) or not name:
         raise cw.InvalidCandidateError("server name must be a non-empty string")
     if not _SERVER_NAME_RE.match(name):
         raise cw.InvalidCandidateError(
             f"server name {name!r} must match {_SERVER_NAME_RE.pattern} "
-            "(identifier chars, no leading '-')"
+            "(letters, numbers, hyphens and underscores, no leading '-')"
         )
+    if name in _RESERVED_SERVER_NAMES:
+        raise cw.InvalidCandidateError(f"server name {name!r} is reserved by Claude Code")
     if not isinstance(entry, dict):
         raise cw.InvalidCandidateError(f"server {name!r} must be an object")
 
-    transport = _entry_transport(entry)
-    is_remote = transport is not None
-    allowed = _REMOTE_KEYS if is_remote else _STDIO_KEYS
-    unknown = set(entry) - allowed
+    transport = entry_transport(entry)
+    if transport == "stdio" and "type" not in entry and "url" in entry and "command" not in entry:
+        # Claude Code reads an entry with no `type` as stdio and skips this one with the
+        # same advice; say it here instead of the less helpful "unknown keys: ['url']".
+        raise cw.InvalidCandidateError(
+            f'server {name!r} has a \'url\' but no \'type\'; add "type": "http" (or "sse" / "ws")'
+        )
+    if transport != "stdio" and "env" in entry:
+        raise cw.InvalidCandidateError(
+            f"remote server {name!r} has 'env', which Claude Code ignores on a remote "
+            "server; remove it. The editor drops a stored remote 'env' when it loads the "
+            "server, so reload the server and save it"
+        )
+    unknown = set(entry) - _KEYS_BY_TRANSPORT[transport]
     if unknown:
-        raise cw.InvalidCandidateError(f"server {name!r} has unknown keys: {sorted(unknown)}")
+        raise cw.InvalidCandidateError(
+            f"{transport} server {name!r} has unknown keys: {sorted(unknown)}"
+        )
+    _validate_common_fields(name, entry)
 
     if "env" in entry:
         _validate_str_dict(entry["env"], f"server {name!r} 'env'")
 
-    if is_remote:
+    if transport != "stdio":
         url = entry.get("url")
         if not isinstance(url, str) or not url:
             raise cw.InvalidCandidateError(
@@ -174,6 +420,15 @@ def _validate_server_entry(name: Any, entry: Any) -> None:
             )
         if "headers" in entry:
             _validate_str_dict(entry["headers"], f"server {name!r} 'headers'")
+        if "headersHelper" in entry and not isinstance(entry["headersHelper"], str):
+            raise cw.InvalidCandidateError(f"server {name!r} 'headersHelper' must be a string")
+        if "oauth" in entry:
+            _validate_oauth(name, entry["oauth"])
+        if "request_timeout_ms" in entry and not _is_positive_int(entry["request_timeout_ms"]):
+            raise cw.InvalidCandidateError(
+                f"server {name!r} 'request_timeout_ms' must be a positive integer"
+            )
+        _validate_tool_policies(name, entry)
         return
 
     # stdio
@@ -208,14 +463,142 @@ def _redact_server_map(servers: dict[str, Any]) -> dict[str, Any]:
     whole subtree secret. That is right for config keys and wrong for this map: the keys here
     are user-chosen server NAMES, so a server called ``oauth-gw`` or ``github-token`` would
     have its own ``type``/``url`` masked to the sentinel. Those are structural fields, and
-    :func:`_entry_transport` rejects the sentinel as an unknown transport — which would 422
+    :func:`entry_transport` rejects the sentinel as an unknown transport — which would 422
     every add/edit/remove of every server in the scope, with the value the operator needs to
     retype displayed as ``********``.
 
     Redacting per entry keeps the name out of the hint chain while leaving everything inside
-    an entry (``env``, ``headers``, a nested ``{"auth": {"value": ...}}``) fully masked.
+    an entry (``env``, ``headers``, a nested ``{"auth": {"value": ...}}``) fully masked —
+    see :func:`_redact_entry`.
+
+    Each entry is first converted by :func:`_convert_legacy_entry` (convert on LOAD), so the
+    display copy carries no field Claude Code ignores and the next save writes it out fixed.
     """
-    return {name: cw.redact_secrets(entry) for name, entry in servers.items()}
+    return {
+        name: _redact_entry(_convert_legacy_entry(entry)[0]) for name, entry in servers.items()
+    }
+
+
+#: Why a field is converted on load; quoted in every conversion note.
+_IGNORED_REASON = "Claude Code ignores it"
+
+
+def _convert_legacy_entry(entry: Any) -> tuple[Any, list[dict[str, str]]]:
+    """Return ``(converted, notes)``: ``entry`` without the fields Claude Code ignores.
+
+    Earlier clauster versions accepted two fields Claude Code never reads. Converting them
+    when the entry is LOADED (the coordinator's rule for TASK-449.8) means the operator sees
+    the fixed entry, with a note, and the next save writes it out fixed. Writes that still
+    carry them are refused by the validator, which points back here.
+
+    * ``transport``: when ``type`` is absent and ``transport`` is a known transport word, it
+      becomes ``type``. When ``type`` is present, ``transport`` is dropped (Claude Code reads
+      only ``type``). Any other ``transport`` value is left alone, so the validator refuses
+      it with its message: a value that is not a plain transport word is never moved into
+      ``type``, where it could be masked on display and become unsavable.
+    * ``env`` on a remote (http/sse/ws) server is dropped. Claude Code never read it, so
+      nothing is lost; the note gives the number of dropped values, never a value.
+
+    The stored file is NOT changed here; this only shapes the display copy and the notes.
+    """
+    if not isinstance(entry, dict):
+        return entry, []
+    out = dict(entry)
+    notes: list[dict[str, str]] = []
+    if "transport" in out:
+        value = out["transport"]
+        if "type" in out:
+            del out["transport"]
+            notes.append(
+                {
+                    "field": "transport",
+                    "message": f"'transport' is removed because 'type' is set ({_IGNORED_REASON})",
+                }
+            )
+        elif isinstance(value, str) and value in _TRANSPORT_ALIASES:
+            del out["transport"]
+            out = {"type": value, **out}
+            notes.append(
+                {
+                    "field": "transport",
+                    "message": f"'transport' is converted to \"type\": {value!r} "
+                    f"({_IGNORED_REASON}, and reads 'type' only)",
+                }
+            )
+    declared = out.get("type")
+    is_remote = isinstance(declared, str) and _TRANSPORT_ALIASES.get(declared) in (
+        "http",
+        "sse",
+        "ws",
+    )
+    if is_remote and "env" in out:
+        env = out.pop("env")
+        count = len(env) if isinstance(env, dict) else 0
+        notes.append(
+            {
+                "field": "env",
+                "message": f"'env' on a remote server is removed ({_IGNORED_REASON}). "
+                f"It held {count} value(s), which Claude Code never read",
+            }
+        )
+    return out, notes
+
+
+def _conversion_notes(servers: dict[str, Any]) -> list[dict[str, str]]:
+    """Return one note per converted field across a raw server map, in map order."""
+    return [
+        {"name": name, **note}
+        for name, entry in servers.items()
+        for note in _convert_legacy_entry(entry)[1]
+    ]
+
+
+#: Entry fields whose every string value is masked on read, whatever its key name. Key-name
+#: detection cannot see a real secret under a benign key (``{"GH_PAT": "ghp_…"}``,
+#: ``{"X-Custom": "Bearer sk-…"}``), which is why the CLI write path already treats every
+#: ``env``/``headers`` value as potentially secret (``entry_needs_direct_write``).
+_ALWAYS_SECRET_MAPS = ("env", "headers")
+
+
+def _redact_entry(entry: Any) -> Any:
+    """Return the display copy of one server entry, with every secret-bearing field masked.
+
+    :func:`~clauster.config_write.redact_secrets` runs first (key-name, ``${VAR}`` and
+    credential-URL detection anywhere in the entry; its ``auth`` hint also masks every
+    ``oauth`` string). On top of that, every non-empty value under ``env`` and ``headers``
+    is masked, and so is a ``headersHelper`` command: the docs show an inline helper that
+    prints the token itself (``echo '{"Authorization": "Bearer …"}'``). The helper's OUTPUT
+    is never stored, so there is nothing else to mask for it. Each masked value round-trips
+    as the sentinel, which :func:`~clauster.config_write.merge_redacted` turns back into the
+    stored value. Whole keys are replaced on the copy, never a nested value in place (the
+    copy may share nested objects, see ``redact_secrets``).
+
+    ``toolPermissions`` is keyed by TOOL names, so a tool called ``get_token`` would act as
+    a secret hint and mask its own ``"allow"``; the validator then refuses the sentinel and
+    the entry could not be saved again. A value that is one of the three permission words is
+    shown as stored (it is not a secret); any other value keeps its redacted form.
+    """
+    out = cw.redact_secrets(entry)
+    if not isinstance(out, dict):
+        return out
+    perms = entry.get("toolPermissions")
+    if isinstance(perms, dict) and isinstance(out.get("toolPermissions"), dict):
+        shown = out["toolPermissions"]
+        out["toolPermissions"] = {
+            k: v if isinstance(v, str) and v in TOOL_PERMISSION_VALUES else shown[k]
+            for k, v in perms.items()
+        }
+    for key in _ALWAYS_SECRET_MAPS:
+        block = out.get(key)
+        if isinstance(block, dict):
+            out[key] = {
+                k: cw.REDACTION_SENTINEL if isinstance(v, str) and v else v
+                for k, v in block.items()
+            }
+    helper = out.get("headersHelper")
+    if isinstance(helper, str) and helper:
+        out["headersHelper"] = cw.REDACTION_SENTINEL
+    return out
 
 
 def read_project_servers(project_dir: Path) -> tuple[dict[str, Any], str]:
@@ -227,15 +610,46 @@ def read_project_servers(project_dir: Path) -> tuple[dict[str, Any], str]:
     they ever leave this function, so the browser never reads a stored secret. A
     missing file reads as an empty server map.
     """
-    path = project_dir / ".mcp.json"
+    # `claude_json` is unused at project scope, which always returns a hash.
+    servers, file_hash, _notes = read_servers_view(
+        "project", claude_json=project_dir / ".mcp.json", project_dir=project_dir
+    )
+    return servers, cast(str, file_hash)
+
+
+def _read_bytes_or_empty(path: Path) -> bytes:
+    """Return the bytes of ``path``, or ``b""`` when it does not exist."""
     try:
-        raw = path.read_bytes()
+        return path.read_bytes()
     except FileNotFoundError:
-        raw = b""
-    data = cw.load_settings_json_obj(raw)
-    servers = data.get(MCP_SERVERS_KEY)
+        return b""
+
+
+def read_servers_view(
+    scope: cw.Scope, *, claude_json: Path, project_dir: Path
+) -> tuple[dict[str, Any], str | None, list[dict[str, str]]]:
+    """Return ``(display_servers, hash, conversions)`` for ``scope`` from ONE file read.
+
+    The display map (converted on load, then redacted), the stale-hash token (project
+    scope only; ``None`` for user and local, whose writers lock and re-read) and the
+    convert-on-load notes all come from the same bytes. Reading the file once matters:
+    with two reads, a write between them (another dashboard request, or Claude Code
+    itself) made the notes disagree with the entries, and a missing note left an
+    unchanged converted entry unsavable in the dashboard. ``project_dir`` is ignored for
+    user scope, ``claude_json`` for project scope.
+    """
+    file_hash: str | None = None
+    if scope == "local":
+        servers = cw.read_nested_subtree(
+            claude_json, PROJECTS_KEY, str(project_dir), MCP_SERVERS_KEY
+        )
+    else:
+        raw = _read_bytes_or_empty(claude_json if scope == "user" else project_dir / ".mcp.json")
+        servers = cw.load_settings_json_obj(raw).get(MCP_SERVERS_KEY)
+        if scope != "user":
+            file_hash = cw.hash_bytes(raw)
     servers = servers if isinstance(servers, dict) else {}
-    return _redact_server_map(servers), cw.hash_bytes(raw)
+    return _redact_server_map(servers), file_hash, _conversion_notes(servers)
 
 
 def read_user_servers(claude_json: Path) -> dict[str, Any]:
@@ -245,14 +659,199 @@ def read_user_servers(claude_json: Path) -> dict[str, Any]:
     file under its own ``flock`` at write time); read is for display only, with the
     Foundation's structural redaction applied so no stored secret is surfaced.
     """
+    return read_servers_view("user", claude_json=claude_json, project_dir=claude_json.parent)[0]
+
+
+def _unbacked_sentinel(incoming: Any, stored: Any, path: str) -> str | None:
+    """Return the path of the first sentinel in ``incoming`` with no stored value behind it.
+
+    :func:`~clauster.config_write.merge_redacted` drops such a sentinel (there is nothing to
+    keep), which is right for a settings value but loses data here: pasting the masked view
+    of one server into "New", or a stored value removed since the read, would write the
+    entry without its ``url``/``env``/``headersHelper`` and report success. The path is
+    dotted (``srv.env.TOKEN``, ``srv.args[1]``) and names no value.
+
+    "Backed" is decided exactly as ``merge_redacted`` decides it: a sentinel under a dict key
+    is backed when the stored dict has that key (whatever its value, ``null`` included), and
+    one at a list index when the stored list is longer than that index. A stored value that
+    is not a container backs nothing beneath it. Only containers are walked.
+    """
+    if isinstance(incoming, dict):
+        stored_dict = stored if isinstance(stored, dict) else {}
+        for k, v in incoming.items():
+            sub = f"{path}.{k}" if path else str(k)
+            if v == cw.REDACTION_SENTINEL:
+                if k not in stored_dict:
+                    return sub
+                continue
+            found = _unbacked_sentinel(v, stored_dict.get(k), sub)
+            if found is not None:
+                return found
+    elif isinstance(incoming, list):
+        stored_list = stored if isinstance(stored, list) else []
+        for i, v in enumerate(incoming):
+            sub = f"{path}[{i}]"
+            if v == cw.REDACTION_SENTINEL:
+                if i >= len(stored_list):
+                    return sub
+                continue
+            found = _unbacked_sentinel(v, stored_list[i] if i < len(stored_list) else None, sub)
+            if found is not None:
+                return found
+    return None
+
+
+def _is_url_key(key: Any) -> bool:
+    """Whether ``key`` names a url-bearing field (``url``, ``authServerMetadataUrl``, ...)."""
+    return isinstance(key, str) and key.lower().endswith("url")
+
+
+#: Maps whose keys are free-form names chosen by the operator (an env variable, an HTTP
+#: header, a tool), not schema fields. A header named ``X-Callback-Url`` or a tool named
+#: ``fetch_url`` is not a destination, so :func:`_url_texts` does not look inside these.
+_FREE_FORM_MAPS = frozenset({"env", "headers", "toolPermissions"})
+
+
+def _url_texts(value: Any, stored: Any, path: tuple[Any, ...] = ()) -> dict[tuple[Any, ...], Any]:
+    """Return ``{path: text}`` for every url-bearing schema key in ``value``, at any depth.
+
+    A masked value takes the stored value at the same path, exactly as ``merge_redacted``
+    will write it, so a url that is itself masked and resent unchanged counts as unchanged.
+    Pass ``stored`` as ``value`` to list the stored entry's own urls. Paths are tuples of
+    keys and list indexes, so no key spelling can collide with a nested path.
+    """
+    out: dict[tuple[Any, ...], Any] = {}
+    if isinstance(value, dict):
+        held = stored if isinstance(stored, dict) else {}
+        for k, v in value.items():
+            sub = (*path, k)
+            if _is_url_key(k):
+                out[sub] = held.get(k) if v == cw.REDACTION_SENTINEL else v
+            elif k not in _FREE_FORM_MAPS:
+                out.update(_url_texts(v, held.get(k), sub))
+    elif isinstance(value, list):
+        held_list = stored if isinstance(stored, list) else []
+        for i, v in enumerate(value):
+            out.update(_url_texts(v, held_list[i] if i < len(held_list) else None, (*path, i)))
+    return out
+
+
+def _destination(entry: dict[str, Any], stored: dict[str, Any]) -> tuple[Any, ...] | None:
+    r"""Return where ``entry`` sends credentials: its transport plus the TEXT of its urls.
+
+    The urls are compared as exact text, never parsed. A parser here (``urlsplit``) and
+    the WHATWG parser Claude Code's Node runtime uses disagree on inputs such as
+    ``https://evil.example.com\@good.example.com/`` (Python reads host ``good``, Node
+    reads ``evil``), so any parsed comparison can be steered. Any change at all to a url,
+    host letter case and an added default port included, therefore counts as a new
+    destination.
+
+    A stdio entry hands its ``env`` to the program it runs, so its destination is the exact
+    ``command`` and the exact ``args`` list, element by element, in order. A masked element
+    takes the stored value at the same place, as ``merge_redacted`` will write it. An absent
+    ``args`` reads as ``[]``, the CLI's own default. ``None`` means the destination cannot
+    be decided.
+    """
     try:
-        raw = claude_json.read_bytes()
-    except FileNotFoundError:
-        raw = b""
-    data = cw.load_settings_json_obj(raw)
-    servers = data.get(MCP_SERVERS_KEY)
-    servers = servers if isinstance(servers, dict) else {}
-    return _redact_server_map(servers)
+        transport = entry_transport(entry)
+    except cw.InvalidCandidateError:
+        return None
+    if transport == "stdio":
+        command = entry.get("command")
+        if command == cw.REDACTION_SENTINEL:
+            command = stored.get("command")
+        args = entry.get("args", [])
+        held = stored.get("args", [])
+        held = held if isinstance(held, list) else []
+        if isinstance(args, list):
+            args = [
+                (held[i] if i < len(held) else None) if a == cw.REDACTION_SENTINEL else a
+                for i, a in enumerate(args)
+            ]
+        return "stdio", command, args
+    return transport, _url_texts(entry, stored)
+
+
+def _check_destination(name: str, entry: Any, stored: Any) -> None:
+    """Refuse a masked value whose server now points somewhere else (→ 422).
+
+    ``merge_redacted`` restores a sentinel by KEY. Without this check, changing a server's
+    ``url`` and resending a mask would make Claude Code send the stored credential to the
+    new host. That is mostly a guard against an accidental repoint: an operator who can
+    write a stdio ``command`` in the same scope can already run code here. So a masked
+    value in a remote server keeps its stored value only when that server's ``type`` and
+    the exact text of every url-bearing key (``url``, ``oauth.authServerMetadataUrl``, any
+    key ending in ``url`` at any depth outside the free-form maps in
+    :data:`_FREE_FORM_MAPS`) are unchanged. A removed url, or one added, is a
+    change. The stored entry is first converted as on load, so a legacy ``transport``
+    compares as its ``type``.
+
+    A stdio server is bound the same way (maintainer decision, 2026-11-05): a masked
+    ``env`` value keeps its stored value only while the ``command`` and every ``args``
+    element are exactly unchanged, because the env goes to whatever program those name.
+    Any other masked value in the entry (a masked ``args`` element or ``command``) is bound
+    by the same check, since it is handed to that program too.
+    A remote entry that turns into stdio, or the reverse, changes ``type`` and is refused.
+    """
+    if not isinstance(entry, dict) or not isinstance(stored, dict):
+        return
+    if not contains_sentinel(entry):
+        return
+    stored_entry = _convert_legacy_entry(stored)[0]
+    now = _destination(entry, stored_entry)
+    then = _destination(stored_entry, stored_entry)
+    if now is None or now != then:
+        if now is not None and then is not None and now[0] == then[0] == "stdio":
+            raise cw.InvalidCandidateError(
+                f"server {name!r} keeps a masked value '********' but its command or args "
+                "changed; the stored value is not handed to a new command. Retype the masked "
+                "env values, and any other masked value, for the new command"
+            )
+        raise cw.InvalidCandidateError(
+            f"server {name!r} keeps a masked value '********' but its type or a url changed; "
+            "the stored credential is not sent to a new destination. Retype the credential "
+            "for the new destination"
+        )
+
+
+def contains_sentinel(value: Any) -> bool:
+    """Whether the redaction sentinel appears anywhere in ``value`` (dicts and lists)."""
+    if value == cw.REDACTION_SENTINEL:
+        return True
+    if isinstance(value, dict):
+        return any(contains_sentinel(v) for v in value.values())
+    if isinstance(value, list):
+        return any(contains_sentinel(v) for v in value)
+    return False
+
+
+def _merge_kept(incoming: Any, stored: Any, path: str = "") -> Any:
+    """Merge ``incoming`` over ``stored``, refusing a mask that must not be restored (→ 422).
+
+    Two refusals, both before the merge: a sentinel that has nothing to keep
+    (:func:`_unbacked_sentinel`), and a sentinel in a server whose destination changed
+    (:func:`_check_destination`). ``path`` names the server when ``incoming`` is ONE entry
+    (the single-entry writers); an empty ``path`` means ``incoming`` is a whole server map,
+    and each of its entries is checked against its stored twin.
+
+    Runs inside the locked writers, over the value read under the lock, so a stored value
+    removed by a concurrent edit is caught too. Raising here aborts the transaction before
+    anything is written.
+    """
+    missing = _unbacked_sentinel(incoming, stored, path)
+    if missing is not None:
+        raise cw.InvalidCandidateError(
+            f"{missing} is the masked value '********' but nothing is stored to keep; "
+            "type the real value"
+        )
+    if path:
+        _check_destination(path, incoming, stored)
+    else:
+        # A whole server map; the writers validated it as an object before the lock.
+        stored_map = stored if isinstance(stored, dict) else {}
+        for name, entry in incoming.items():
+            _check_destination(str(name), entry, stored_map.get(name))
+    return cw.merge_redacted(incoming, stored)
 
 
 def write_project_servers(
@@ -277,9 +876,7 @@ def write_project_servers(
     """
     cw.validate_candidate(incoming, validate_mcp_servers)
     path = project_dir / ".mcp.json"
-    cw.write_settings_subtree(
-        path, MCP_SERVERS_KEY, incoming, expected_hash, merge=cw.merge_redacted
-    )
+    cw.write_settings_subtree(path, MCP_SERVERS_KEY, incoming, expected_hash, merge=_merge_kept)
 
 
 def write_user_servers(claude_json: Path, incoming: dict[str, Any]) -> None:
@@ -296,7 +893,7 @@ def write_user_servers(claude_json: Path, incoming: dict[str, Any]) -> None:
     def _mutate(current: Any) -> dict[str, Any]:
         """Merge ``incoming`` over the stored map, restoring any redacted secrets."""
         stored = current if isinstance(current, dict) else {}
-        return cw.merge_redacted(incoming, stored)
+        return _merge_kept(incoming, stored)
 
     cw.write_subtree(claude_json, MCP_SERVERS_KEY, _mutate)
 
@@ -311,9 +908,20 @@ def read_project_local_servers(claude_json: Path, project_dir: Path) -> dict[str
     the Foundation's structural redaction applied so no stored secret is surfaced. A
     missing project entry (or a missing file) reads as an empty server map.
     """
-    servers = cw.read_nested_subtree(claude_json, PROJECTS_KEY, str(project_dir), MCP_SERVERS_KEY)
-    servers = servers if isinstance(servers, dict) else {}
-    return _redact_server_map(servers)
+    return read_servers_view("local", claude_json=claude_json, project_dir=project_dir)[0]
+
+
+def read_conversion_notes(
+    scope: cw.Scope, *, claude_json: Path, project_dir: Path
+) -> list[dict[str, str]]:
+    """Return the convert-on-load notes for ``scope``: one ``{name, field, message}`` each.
+
+    A convenience over :func:`read_servers_view` for callers that need only the notes.
+    The GET route does NOT use it: it takes the entries and the notes from one
+    :func:`read_servers_view` call, so they always describe the same file contents. A
+    note never carries a stored value, only field names and a count.
+    """
+    return read_servers_view(scope, claude_json=claude_json, project_dir=project_dir)[2]
 
 
 def write_project_local_servers(
@@ -338,7 +946,7 @@ def write_project_local_servers(
     def _mutate(current: Any) -> dict[str, Any]:
         """Merge ``incoming`` over the stored project-local map, restoring redacted secrets."""
         stored = current if isinstance(current, dict) else {}
-        return cw.merge_redacted(incoming, stored)
+        return _merge_kept(incoming, stored)
 
     cw.write_nested_subtree(claude_json, PROJECTS_KEY, str(project_dir), MCP_SERVERS_KEY, _mutate)
 
@@ -356,16 +964,23 @@ class ServerNotFoundError(cw.ConfigWriteError):
     """A ``remove``/edit-remove targeted a server name that doesn't exist (→ 404)."""
 
 
-def _fold_entry(stored: Any, name: str, entry: dict[str, Any]) -> dict[str, Any]:
+def _fold_entry(
+    stored: Any, name: str, entry: dict[str, Any], *, verbatim: bool
+) -> dict[str, Any]:
     """Return the stored map with ``entry`` merged in under ``name``; siblings untouched.
 
     Runs inside the locked writer, over the map read under the lock. Only ``name`` goes
-    through :func:`~clauster.config_write.merge_redacted` (a ``"********"`` in ``entry``
-    keeps that server's stored secret). Every other server is copied as stored, so a
-    sibling never round-trips through the redacted display copy.
+    through :func:`_merge_kept` (a ``"********"`` in ``entry`` keeps that server's stored
+    secret, and one with nothing stored is refused). Every other server is copied as
+    stored, so a sibling never round-trips through the redacted display copy.
+
+    ``verbatim=True`` (the edit-rollback restore) stores ``entry`` exactly as given, with no
+    merge: it is the raw on-disk snapshot taken before ``claude mcp remove``, so nothing is
+    stored under ``name`` any more, and a literal ``"********"`` in it is stored data, not a
+    mask. Merging it would drop that leaf or refuse the restore and lose the server.
     """
     servers = dict(stored) if isinstance(stored, dict) else {}
-    servers[name] = cw.merge_redacted(entry, servers.get(name))
+    servers[name] = entry if verbatim else _merge_kept(entry, servers.get(name), path=name)
     return servers
 
 
@@ -403,7 +1018,7 @@ def write_project_server_entry(
         MCP_SERVERS_KEY,
         entry,
         file_hash,
-        merge=lambda incoming, stored: _fold_entry(stored, name, incoming),
+        merge=lambda incoming, stored: _fold_entry(stored, name, incoming, verbatim=not validate),
     )
 
 
@@ -416,7 +1031,11 @@ def write_user_server_entry(
     redacted = read_user_servers(claude_json)
     if op == "add" and name in redacted:
         raise ServerExistsError(f"MCP server {name!r} already exists in user scope")
-    cw.write_subtree(claude_json, MCP_SERVERS_KEY, lambda stored: _fold_entry(stored, name, entry))
+    cw.write_subtree(
+        claude_json,
+        MCP_SERVERS_KEY,
+        lambda stored: _fold_entry(stored, name, entry, verbatim=not validate),
+    )
 
 
 def write_project_local_server_entry(
@@ -439,7 +1058,7 @@ def write_project_local_server_entry(
         PROJECTS_KEY,
         str(project_dir),
         MCP_SERVERS_KEY,
-        lambda stored: _fold_entry(stored, name, entry),
+        lambda stored: _fold_entry(stored, name, entry, verbatim=not validate),
     )
 
 

@@ -169,14 +169,16 @@ Common mechanics across the modal:
   name; destructive list actions (delete, reset, plugin install) have their
   own typed confirms.
 - **Secret masking** — the Settings, MCP, Hooks, and Skills surfaces, and the
-  `autoMode` box on the Permissions tab, mask secret-shaped values on read. On
-  Settings, MCP, Hooks and `autoMode`, a masked value left untouched keeps the
-  stored secret on write. The Skills editor masks on read but restores nothing on
-  write, so a save writes the mask over the stored value. The CLAUDE.md and
-  Subagents surfaces, and the `permissions` rules, return the raw content, because
-  they round-trip the exact text on write. Do not put a secret anywhere in a
-  subagent file, for example in an inline `mcpServers` block in the frontmatter.
-  For what the Hooks tab masks, see [The Hooks tab](#the-hooks-tab).
+  `autoMode` box on the Permissions tab, mask secret-shaped values on read. The
+  MCP surface also masks every `env` and `headers` value, the `headersHelper`
+  command, and the strings in `oauth`, whatever their key names. On Settings,
+  MCP, Hooks and `autoMode`, a masked value left untouched keeps the stored secret
+  on write. The Skills editor masks on read but restores nothing on write, so a
+  save writes the mask over the stored value. The CLAUDE.md and Subagents
+  surfaces, and the `permissions` rules, return the raw content, because they
+  round-trip the exact text on write. Do not put a secret anywhere in a subagent
+  file, for example in an inline `mcpServers` block in the frontmatter. For what
+  the Hooks tab masks, see [The Hooks tab](#the-hooks-tab).
 
 The surface tabs:
 
@@ -190,6 +192,90 @@ The surface tabs:
 | Subagents | Subagent definition files: list, edit, create, delete. |
 | Skills | Skills: list, a per-skill `SKILL.md` editor, create, delete. |
 | Plugins | Installed plugins (install / uninstall / enable / disable / update) and the marketplaces they come from (add / remove). |
+
+### MCP server definitions
+
+The MCP tab edits each server as one JSON object, in the same shape as an
+`mcpServers` entry in `.mcp.json`. The editor accepts each field that the
+[Claude Code MCP documentation](https://code.claude.com/docs/en/mcp) lists for
+a transport, and each field that the installed `claude` CLI reads and keeps
+for that transport even when the documentation does not list it:
+
+| `type` | Required | Optional |
+| --- | --- | --- |
+| `stdio`, or no `type` | `command` | `args`, `env` |
+| `http` (alias `streamable-http`), `sse` | `url` | `headers`, `headersHelper`, `oauth`, `request_timeout_ms`, `tools`, `toolPermissions`, `displayName`, `discoveryCache` |
+| `ws` | `url` | `headers`, `headersHelper` |
+
+Every transport also accepts `timeout` (milliseconds, a positive integer),
+`alwaysLoad` and `bareElicitationCapability` (both `true` or `false`), and
+`role` (only `"comms"`). The `oauth` object accepts `clientId`, `callbackPort`
+(1 to 65535), `authServerMetadataUrl` (an `https://` URL), `scopes` (a
+space-separated string) and `xaa` (`true` or `false`). On `http` and `sse`,
+`tools` is a list of `{"name": …, "permission_policy": …}` objects, where the
+policy is `always_allow`, `always_ask` or `always_deny`. `toolPermissions` maps
+a tool name to `allow`, `ask` or `blocked`.
+
+The editor refuses the whole entry when a field is unknown or has the wrong
+type. It also refuses these values, because Claude Code refuses, skips or
+ignores them:
+
+- The `transport` key, and `env` on an `http`, `sse` or `ws` server. Earlier
+  Clauster versions accepted both, but Claude Code ignores them. Use `type`
+  instead of `transport`. When Clauster loads a stored server that has them, it
+  converts the server (see below).
+
+- A server name with a character other than a letter, a number, a hyphen or an
+  underscore, or a name that starts with a hyphen. Earlier Clauster versions
+  accepted a dot. You can still delete a stored server with a dot in its name,
+  but a save that includes it is refused. Claude Code skips that server.
+- A masked value (`********`) when nothing is stored behind it, for example in
+  a new server that you copied from the masked view of another one. Type the
+  real value instead.
+- A masked value in an `http`, `sse` or `ws` server when you changed its `type`,
+  or any character of its `url` or of another url field such as
+  `oauth.authServerMetadataUrl`. Clauster compares the text exactly, so a
+  change of letter case, an added default port or a new query string also
+  counts. Clauster does not send a stored credential to a new destination.
+  Type the credential again.
+- A masked value in a stdio server, usually an `env` value, when you changed
+  its `command` or any element of its `args`, including their order. Clauster
+  compares the text exactly. It does not hand a stored value to a new command.
+  Type the masked values again. A change to an unmasked `env` value keeps the
+  other masked values.
+- A reserved name, such as `workspace`, `claude-in-chrome` or `computer-use`.
+- An entry with a `url` and no `type`. Claude Code reads such an entry as a
+  stdio server and skips it.
+- `"type": "sdk"`, `"sse-ide"`, `"ws-ide"` or `"claudeai-proxy"`. Claude Code
+  registers these servers at runtime and refuses them in a configuration file.
+
+When the MCP tab loads a stored server that has a field Claude Code ignores,
+Clauster converts the server in the editor and shows a note above the list
+that names each change. It does not change the file until you save:
+
+- If `type` is not set, a `transport` value of `stdio`, `http`,
+  `streamable-http`, `sse` or `ws` becomes `type`. If `type` is set, Clauster
+  removes `transport`.
+- Clauster removes `env` from an `http`, `sse` or `ws` server. Claude Code never
+  read these values, so nothing is lost. The note gives the number of values.
+
+To write the fix, open the server and save it. You do not have to edit it
+first. A save through the API that still has these fields is refused, and the
+error message tells you to reload the server and save it.
+
+Clauster stores a `headersHelper` command but never runs it. Claude Code runs it
+when it connects to the server. For a server in `.mcp.json` or at local scope,
+Claude Code runs it only after you accept the trust dialog for that project.
+
+An OAuth client secret is not part of the entry. Claude Code keeps it in the
+system keychain or a credentials file. The `POST /api/config-write/mcp/server`
+route takes an optional `client_secret` for an `http` or `sse` server. The
+dashboard does not send one. Clauster passes it to
+`claude mcp add-json --client-secret` through the `MCP_CLIENT_SECRET`
+environment variable, never on the command line. The route refuses a
+`client_secret` for an entry that holds a masked value, because Clauster then
+writes the file directly and cannot deliver the secret. To change the secret of
+a stored server, delete the server and add it again with every value typed in.
 
 Three entries can look broken when they are not. The **Source** badge on each
 row tells the first two apart:

@@ -256,6 +256,13 @@ def test_mcp_surface_present_when_enabled(write_config):
     assert 'data-test="cm-mcp-approvals"' in html
     assert 'data-test="cm-mcp-approvals-save"' in html
     assert 'data-test="cm-mcp-reset-go"' in html
+    # TASK-449.8: the convert-on-load notes, in the list and in the editor.
+    assert 'data-test="cm-mcp-conversions"' in html
+    assert 'data-test="cm-mcp-entry-conversions"' in html
+    # The template's own call (the bare name also matches the method definition).
+    assert (
+        "!configMgmt.mcp.isNew && configMgmtMcpConversionsFor(configMgmt.mcp.name).length" in html
+    )
 
 
 def test_mcp_delete_confirm_suppresses_approvals_confirms(write_config):

@@ -2403,6 +2403,16 @@
                 <div class="text-secondary small" x-show="configMgmt.mcp.list.length === 0" x-cloak>
                   No MCP servers at this scope.
                 </div>
+                <div class="alert alert-warning small py-2" role="status" data-test="cm-mcp-conversions"
+                     x-show="configMgmt.mcp.conversions.length" x-cloak>
+                  <div class="mb-1">Clauster converted these stored fields when it loaded them. Open
+                    each server and save it to write the fix to the file:</div>
+                  <ul class="mb-0 ps-3">
+                    <template x-for="(n, i) in configMgmt.mcp.conversions" :key="'cv-' + i">
+                      <li><code x-text="n.name"></code>: <span x-text="n.message"></span></li>
+                    </template>
+                  </ul>
+                </div>
                 <table class="table table-sm mb-0" data-test="cm-mcp-table"
                        x-show="configMgmt.mcp.list.length" x-cloak>
                   <caption class="visually-hidden">MCP servers: name, definition, and actions</caption>
@@ -2418,6 +2428,7 @@
                         <td class="text-end">
                           <span class="d-inline-flex gap-1">
                             <button type="button" class="btn btn-sm btn-ghost-secondary"
+                                    :data-test="'cm-mcp-edit-' + srv.name"
                                     @click="configMgmtOpenMcp(srv.name)">Edit</button>
                             <button type="button" class="btn btn-sm btn-ghost-danger"
                                     @click="configMgmtAskDeleteMcp(srv.name)">Delete</button>
@@ -2533,6 +2544,15 @@
                 <input type="text" class="form-control form-control-sm mb-2" id="cm-mcp-name" data-test="cm-mcp-name"
                        {{ NO_AUTOFILL }} spellcheck="false" x-model="configMgmt.mcp.name"
                        :readonly="!configMgmt.mcp.isNew" placeholder="my-server">
+                <div class="alert alert-warning small py-2" role="status" data-test="cm-mcp-entry-conversions"
+                     x-show="!configMgmt.mcp.isNew && configMgmtMcpConversionsFor(configMgmt.mcp.name).length" x-cloak>
+                  <div class="mb-1">This definition is converted from the stored one. Save to write it:</div>
+                  <ul class="mb-0 ps-3">
+                    <template x-for="(n, i) in configMgmtMcpConversionsFor(configMgmt.mcp.name)" :key="'ecv-' + i">
+                      <li x-text="n.message"></li>
+                    </template>
+                  </ul>
+                </div>
                 <label class="form-label small" for="cm-mcp-entry">Definition (JSON)</label>
                 <textarea id="cm-mcp-entry" class="form-control form-control-sm font-monospace" rows="10"
                           data-test="cm-mcp-entry" spellcheck="false"

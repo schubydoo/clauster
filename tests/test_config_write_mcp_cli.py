@@ -193,6 +193,91 @@ def test_entry_needs_direct_write_false_for_empty_env_and_headers() -> None:
     assert not mcp_cli.entry_needs_direct_write({"command": "x", "env": {"K": ""}})
 
 
+# --- TASK-449.8: routing of the newly accepted fields ------------------------------
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        # A headersHelper is a shell command that may print a literal token.
+        {"type": "http", "url": "https://x/mcp", "headersHelper": "echo token"},
+        {"type": "ws", "url": "wss://x/s", "headersHelper": "/opt/h.sh"},
+        # A sentinel means "keep stored"; only the direct writer's merge honors it. The CLI
+        # would store the literal "********" (this was already true for a masked url).
+        {"type": "http", "url": cw.REDACTION_SENTINEL},
+        {"type": "http", "url": "https://x/mcp", "oauth": {"clientId": cw.REDACTION_SENTINEL}},
+        {"command": "x", "timeout": 1000, "env": {"K": cw.REDACTION_SENTINEL}},
+        # oauth values: a ${VAR} or a credential-bearing metadata URL stays off argv.
+        {"type": "http", "url": "https://x/mcp", "oauth": {"clientId": "${CLIENT_ID}"}},
+        {
+            "type": "http",
+            "url": "https://x/mcp",
+            "oauth": {"authServerMetadataUrl": "https://a.example.com/meta?key=k"},
+        },
+        {
+            "type": "http",
+            "url": "https://x/mcp",
+            "oauth": {"authServerMetadataUrl": "https://u:p@a.example.com/meta"},
+        },
+        # A non-permission value under a secret-shaped tool name keeps the key-name check.
+        {"type": "http", "url": "https://x/mcp", "toolPermissions": {"get_token": "sk-x"}},
+    ],
+)
+def test_entry_needs_direct_write_true_for_new_secret_bearing_shapes(entry: dict) -> None:
+    assert mcp_cli.entry_needs_direct_write(entry)
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        # A public OAuth client ID, port, scopes and a plain metadata URL may ride argv
+        # (the docs pass --client-id on the command line); the `oauth` key's own `auth`
+        # substring must not force the direct writer, which cannot deliver --client-secret.
+        {
+            "type": "http",
+            "url": "https://x/mcp",
+            "oauth": {
+                "clientId": "my-client",
+                "callbackPort": 8080,
+                "authServerMetadataUrl": "https://auth.example.com/.well-known/oauth",
+                "scopes": "a b",
+            },
+        },
+        {
+            "type": "sse",
+            "url": "https://x/sse",
+            "timeout": 600000,
+            "request_timeout_ms": 1000,
+            "alwaysLoad": True,
+            "bareElicitationCapability": True,
+        },
+        {"type": "ws", "url": "wss://x/s", "alwaysLoad": False},
+        # CLI-parsed fields; a secret-shaped TOOL name must not count as a secret hint.
+        {
+            "type": "http",
+            "url": "https://x/mcp",
+            "tools": [{"name": "get_token", "permission_policy": "always_ask"}],
+            "toolPermissions": {"get_token": "ask"},
+            "displayName": "Nice",
+            "discoveryCache": True,
+            "role": "comms",
+            "oauth": {"clientId": "c", "xaa": True},
+        },
+    ],
+)
+def test_entry_needs_direct_write_false_for_non_secret_new_fields(entry: dict) -> None:
+    assert not mcp_cli.entry_needs_direct_write(entry)
+
+
+def test_entry_needs_direct_write_finds_a_sentinel_nested_in_a_list() -> None:
+    # The predicate is public and `cli_add_server` calls it BEFORE validating, so it must
+    # find a sentinel at any depth, including inside a list under a key it does not know.
+    assert mcp_cli.entry_needs_direct_write(
+        {"command": "x", "extra": [{"v": cw.REDACTION_SENTINEL}]}
+    )
+    assert not mcp_cli.entry_needs_direct_write({"command": "x", "extra": [{"v": "plain"}]})
+
+
 # --- cli_add_server: argv shape, secret refusal, error classification --------------
 
 
@@ -301,6 +386,24 @@ def test_cli_remove_server_not_found_ignored_when_requested(tmp_path: Path) -> N
     mcp_cli.cli_remove_server(
         str(FAKE_CLAUDE), tmp_path, "srv", "local", ignore_missing=True, run=run
     )  # no raise
+
+
+@pytest.mark.parametrize("name", ["--scope", "-e", "-", "a b", "x;y"])
+def test_cli_remove_server_refuses_option_like_name_before_spawn(
+    tmp_path: Path, name: str
+) -> None:
+    # A remove validates no entry, so the name check is the only guard before argv.
+    run, calls = _fake_run(rc=0)
+    with pytest.raises(cw.InvalidCandidateError):
+        mcp_cli.cli_remove_server(str(FAKE_CLAUDE), tmp_path, name, "project", run=run)
+    assert calls == []
+
+
+def test_cli_remove_server_still_accepts_a_legacy_dotted_name(tmp_path: Path) -> None:
+    # Earlier clauster versions stored dotted names; they must stay removable.
+    run, calls = _fake_run(rc=0)
+    mcp_cli.cli_remove_server(str(FAKE_CLAUDE), tmp_path, "srv.v2", "project", run=run)
+    assert calls[0]["argv"][-4:] == ["remove", "srv.v2", "--scope", "project"]
 
 
 # --- cli_edit_server: remove (ignore-missing) + re-add -----------------------------
@@ -540,7 +643,7 @@ def test_validator_rejects_option_like_server_name(name: str) -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ["srv", "github", "context-mode", "my_server", "srv.v2", "A1", "_x"],
+    ["srv", "github", "context-mode", "my_server", "A1", "_x"],
 )
 def test_validator_accepts_sane_server_names(name: str) -> None:
     mcp.validate_mcp_servers({name: {"command": "x"}})  # no raise
@@ -747,11 +850,12 @@ def test_entry_writer_ignores_a_sibling_with_cli_only_keys(tmp_path: Path, scope
     cj, project_dir = _seed_scope(
         tmp_path, scope, {"lean-ctx": lean, "gh": {"command": "old", "env": {"T": "sk-gh"}}}
     )
-    edited = {"command": "new", "args": ["stdio"], "env": {"T": cw.REDACTION_SENTINEL}}
+    # Same command and args (a masked env is bound to them), a new timeout.
+    edited = {"command": "old", "timeout": 5000, "env": {"T": cw.REDACTION_SENTINEL}}
     _write_entry(cj, project_dir, scope, "gh", edited, "edit")
     stored = _stored_scope(cj, project_dir, scope)
     assert stored["lean-ctx"] == lean
-    assert stored["gh"] == {"command": "new", "args": ["stdio"], "env": {"T": "sk-gh"}}
+    assert stored["gh"] == {"command": "old", "timeout": 5000, "env": {"T": "sk-gh"}}
 
 
 @pytest.mark.parametrize("scope", ["project", "user", "local"])
@@ -1109,6 +1213,47 @@ def test_route_server_remove_success(write_config, tmp_path, projects_root, monk
             "project": "alpha",
             "ok": True,
         }
+
+
+def test_route_server_remove_option_like_name_is_422(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    argv_file = tmp_path / "argv.json"
+    monkeypatch.setenv("FAKE_CLAUDE_MCP_ARGV_FILE", str(argv_file))
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.post(
+            "/api/config-write/mcp/server",
+            json={
+                "scope": "project",
+                "project": "alpha",
+                "confirm": "alpha",
+                "op": "remove",
+                "name": "--scope",
+            },
+        )
+    assert resp.status_code == 422
+    assert not argv_file.exists()  # `claude mcp remove` never spawned
+
+
+def test_route_server_remove_name_is_checked_before_the_cli_helper(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    # The route's own check, not only cli_remove_server's: the helper is never reached.
+    called: list[str] = []
+    monkeypatch.setattr(mcp_cli, "cli_remove_server", lambda *a, **k: called.append("x"))
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.post(
+            "/api/config-write/mcp/server",
+            json={
+                "scope": "project",
+                "project": "alpha",
+                "confirm": "alpha",
+                "op": "remove",
+                "name": "-e",
+            },
+        )
+    assert resp.status_code == 422
+    assert called == []
 
 
 def test_route_server_bad_scope_is_422(write_config, tmp_path, projects_root) -> None:
@@ -1703,3 +1848,101 @@ def test_route_reset_project_choices_missing_project_dir_is_404(
             json={"project": "noexist", "confirm": "noexist"},
         )
         assert resp.status_code == 404
+
+
+# --- TASK-449.8: OAuth client secret + masked edits through the route ---------------
+
+
+def _post_server(c: TestClient, **body) -> object:
+    return c.post(
+        "/api/config-write/mcp/server",
+        json={"scope": "project", "project": "alpha", "confirm": "alpha", **body},
+    )
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"command": "node"},
+        {"type": "ws", "url": "wss://x.example.com/s"},
+    ],
+)
+def test_route_server_client_secret_only_for_http_or_sse(
+    write_config, tmp_path, projects_root, monkeypatch, entry
+) -> None:
+    # The docs: the OAuth client flags "only apply to HTTP and SSE transports", and ws has
+    # no OAuth at all. Refuse instead of spawning with a secret that would be ignored.
+    argv_file = tmp_path / "argv.json"
+    monkeypatch.setenv("FAKE_CLAUDE_MCP_ARGV_FILE", str(argv_file))
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = _post_server(
+            c,
+            op="add",
+            name="srv",
+            entry=entry,
+            client_secret="fake-4498",  # noqa: S106
+        )
+    assert resp.status_code == 422
+    assert "http or sse" in resp.json()["detail"]
+    assert not argv_file.exists()
+
+
+def test_route_server_oauth_client_with_secret_reaches_cli(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    # The documented pre-configured-OAuth add: an `oauth` object in the JSON plus
+    # --client-secret, the secret riding MCP_CLIENT_SECRET in the child env. The `oauth`
+    # key must not push the entry onto the direct writer (which would 422 the secret).
+    argv_file = tmp_path / "argv.json"
+    monkeypatch.setenv("FAKE_CLAUDE_MCP_ARGV_FILE", str(argv_file))
+    entry = {
+        "type": "http",
+        "url": "https://mcp.example.com/mcp",
+        "oauth": {"clientId": "my-client", "callbackPort": 8080, "scopes": "a b"},
+        "timeout": 600000,
+        "alwaysLoad": True,
+    }
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = _post_server(
+            c,
+            op="add",
+            name="srv",
+            entry=entry,
+            client_secret="fake-4498",  # noqa: S106
+        )
+    assert resp.status_code == 200, resp.text
+    record = json.loads(argv_file.read_text())
+    assert record["argv"][:3] == ["add-json", "srv", json.dumps(entry)]
+    assert "--client-secret" in record["argv"]
+    assert "fake-4498" not in json.dumps(record["argv"])
+    assert record["has_client_secret_env"] is True
+
+
+def test_route_server_edit_with_masked_value_keeps_stored_and_skips_cli(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    # The edit dialog sends back the display copy. A masked field arrives as the sentinel,
+    # which only the direct writer's merge turns back into the stored value; via the CLI it
+    # would be stored as the literal "********". Covers the pre-existing masked-url case and
+    # the new masked headersHelper/oauth fields.
+    stored = {
+        "type": "http",
+        "url": "https://user:pw-4498@mcp.example.com/mcp",
+        "headersHelper": "print-token-4498",
+        "oauth": {"clientId": "client-4498", "callbackPort": 8080},
+    }
+    mcp_json = projects_root / "alpha" / ".mcp.json"
+    mcp_json.write_text(json.dumps({"mcpServers": {"srv": stored}}), encoding="utf-8")
+    argv_file = tmp_path / "argv.json"
+    monkeypatch.setenv("FAKE_CLAUDE_MCP_ARGV_FILE", str(argv_file))
+    with _client(write_config, tmp_path, _ON) as c:
+        shown = c.get(
+            "/api/config-write/mcp", params={"scope": "project", "project": "alpha"}
+        ).json()["servers"]["srv"]
+        assert "4498" not in json.dumps(shown)
+        edited = {**shown, "timeout": 120000}
+        resp = _post_server(c, op="edit", name="srv", entry=edited)
+    assert resp.status_code == 200, resp.text
+    assert not argv_file.exists()  # no `claude mcp` spawn carried a sentinel
+    on_disk = json.loads(mcp_json.read_text(encoding="utf-8"))["mcpServers"]["srv"]
+    assert on_disk == {**stored, "timeout": 120000}

@@ -286,6 +286,9 @@
           editing: false, isNew: false,
           name: "", entryText: "", orig: "",
           confirm: "", busy: false, ops: 0, deletingName: "",
+          // Convert-on-load notes from the read (TASK-449.8): [{name, field, message}] for
+          // stored fields Claude Code ignores. Shown before a save; a save writes the fix.
+          conversions: [],
           approvals: {
             enabled: [], disabled: [], locked: [], orig: "", loading: false, ready: false,
             confirm: "", busy: false, ops: 0, resetConfirm: "", resetBusy: false,
@@ -2732,11 +2735,14 @@
           const res = await fetch(ROOT + "/api/config-write/mcp?" + this._configMgmtQuery());
           if (c.gen !== myGen) return;
           if (this._authExpired(res)) return;
-          if (!res.ok) { m.list = []; m.hash = null; c.error = this._configMgmtLoadErr(res); return; }
+          if (!res.ok) {
+            m.list = []; m.hash = null; m.conversions = []; c.error = this._configMgmtLoadErr(res); return;
+          }
           const d = await res.json();
           if (c.gen !== myGen) return;
           m.list = this._mcpServerRows(d.servers || {});
           m.hash = d.hash || null;
+          m.conversions = Array.isArray(d.conversions) ? d.conversions : [];
           // Approvals are a project-only concept (committed .mcp.json servers); other
           // scopes have none. Load them under the same gen so a switch drops both.
           if (c.scope === "project") await this._loadMcpApprovals(myGen);
@@ -2746,7 +2752,10 @@
             m.approvals.loading = false;  // non-project has no approvals fetch to gate
             m.approvals.ready = true;     // nothing to load = resolved (panel is hidden anyway)
           }
-        } catch (e) { if (c.gen === myGen) c.error = "Failed to load MCP servers."; }
+        } catch (e) {
+          // Clear the notes too: a stale note could name servers from another project.
+          if (c.gen === myGen) { m.conversions = []; c.error = "Failed to load MCP servers."; }
+        }
       },
       configMgmtNewMcp() {
         const c = this.configMgmt, m = c.mcp;
@@ -2762,7 +2771,14 @@
         const row = m.list.find(r => r.name === name);
         if (!row) return;
         m.editing = true; m.isNew = false; m.name = name;
-        m.entryText = JSON.stringify(row.entry, null, 2); m.orig = m.entryText; m.confirm = "";
+        m.entryText = JSON.stringify(row.entry, null, 2); m.confirm = "";
+        // A converted entry differs from the file on disk, so it must be savable unedited:
+        // an empty baseline makes it dirty, and the Save writes the conversion out.
+        m.orig = this.configMgmtMcpConversionsFor(name).length ? "" : m.entryText;
+      },
+      // The convert-on-load notes for one server (empty when nothing was converted).
+      configMgmtMcpConversionsFor(name) {
+        return (this.configMgmt.mcp.conversions || []).filter(n => n.name === name);
       },
       configMgmtCancelMcp() {
         const c = this.configMgmt, m = c.mcp;

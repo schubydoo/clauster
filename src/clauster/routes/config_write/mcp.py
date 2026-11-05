@@ -22,6 +22,7 @@ would raise an unhandled 500 on a ``None`` runner.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
@@ -45,38 +46,29 @@ async def api_config_write_mcp_read(
     config_write.require_capability(config, scope)  # type: ignore[arg-type]
     if scope not in ("project", "user", "local"):
         raise HTTPException(status_code=422, detail="scope must be 'project', 'user', or 'local'")
-    if scope == "user":
-        try:
-            servers = await asyncio.to_thread(
-                config_write_mcp.read_user_servers, runner.claude_json
-            )
-        except config_write.ConfigWriteError as exc:
-            # A corrupt/non-object/non-UTF-8 ~/.claude.json raises InvalidCandidateError
-            # from _load_json_obj — same as the project read below; map it to a clean 422
-            # rather than letting it escape as an unhandled 500.
-            raise _base.map_config_write_error(exc) from exc
-        return {"scope": "user", "servers": servers, "hash": None}
-    if scope == "local":
-        project_dir = _base.resolve_cw_project(config, project)
-        try:
-            servers = await asyncio.to_thread(
-                config_write_mcp.read_project_local_servers, runner.claude_json, project_dir
-            )
-        except config_write.ConfigWriteError as exc:
-            raise _base.map_config_write_error(exc) from exc
-        return {"scope": "local", "project": project, "servers": servers, "hash": None}
-    project_dir = _base.resolve_cw_project(config, project)
+
+    # User scope needs no project; its path argument is ignored by the reader.
+    project_dir: Path = (
+        runner.claude_json.parent if scope == "user" else _base.resolve_cw_project(config, project)
+    )
     try:
-        servers, file_hash = await asyncio.to_thread(
-            config_write_mcp.read_project_servers, project_dir
+        # ONE read of the scope's file yields the entries, the hash and the convert-on-load
+        # notes, so the notes can never describe different contents than the entries
+        # (TASK-449.8). A corrupt/non-object/non-UTF-8 file raises InvalidCandidateError;
+        # map it to a clean 422, never an unhandled 500.
+        servers, file_hash, conversions = await asyncio.to_thread(
+            config_write_mcp.read_servers_view,
+            scope,  # type: ignore[arg-type]
+            claude_json=runner.claude_json,
+            project_dir=project_dir,
         )
     except config_write.ConfigWriteError as exc:
-        # A corrupt/non-object on-disk .mcp.json raises InvalidCandidateError from
-        # _load_json_obj. Map it through the same helper as the PUT route so a
-        # hand-edited or partially-written file is reported as a clean 422, never
-        # an unhandled 500.
         raise _base.map_config_write_error(exc) from exc
-    return {"scope": "project", "project": project, "servers": servers, "hash": file_hash}
+    result: dict = {"scope": scope, "servers": servers, "hash": file_hash}
+    if scope != "user":
+        result["project"] = project
+    result["conversions"] = conversions
+    return result
 
 
 @router.put("/api/config-write/mcp")
@@ -127,6 +119,13 @@ async def api_config_write_mcp_server(config: ConfigDep, runner: RunnerDep, body
     name = body.get("name")
     if not isinstance(name, str) or not name:
         raise HTTPException(status_code=422, detail="body must include a non-empty 'name' string")
+    if op == "remove":
+        # A remove validates no entry, so check the name here: it becomes a positional
+        # argument of `claude mcp remove`, and `--scope` would parse as an option.
+        try:
+            config_write_mcp.validate_removable_server_name(name)
+        except config_write.InvalidCandidateError as exc:
+            raise _base.map_config_write_error(exc) from exc
 
     entry = None
     if op in ("add", "edit"):
@@ -147,18 +146,28 @@ async def api_config_write_mcp_server(config: ConfigDep, runner: RunnerDep, body
         )
     # An OAuth client-secret is only deliverable through the CLI (which passes it via
     # MCP_CLIENT_SECRET in the child env). An entry that must bypass the CLI — inline
-    # env/headers, or a url carrying a query/userinfo/fragment — takes the direct
+    # env/headers, a headersHelper, a masked value, a credential-shaped oauth value, or a
+    # url carrying a query/userinfo/fragment (see entry_needs_direct_write) — takes the direct
     # writer, which has nowhere to put it. Refuse rather than write the entry and
     # silently drop the secret: the operator would believe it was stored and only
     # discover otherwise when the server fails to authenticate.
     if client_secret is not None and entry is not None:
+        # The docs: the OAuth client flags "only apply to HTTP and SSE transports. They
+        # have no effect on stdio servers" (and WebSocket has no OAuth at all). Refuse
+        # rather than accept a secret that would be silently ignored.
+        if config_write_mcp.entry_transport(entry) not in ("http", "sse"):
+            raise HTTPException(
+                status_code=422,
+                detail="'client_secret' applies only to an http or sse server",
+            )
         if config_write_mcp_cli.entry_needs_direct_write(entry):
             raise HTTPException(
                 status_code=422,
                 detail=(
                     "'client_secret' cannot be stored for this entry: it carries a "
                     "value that must be kept off the CLI's argv (inline env/headers, "
-                    "or a url with a query string, userinfo, or fragment), so it is "
+                    "a headersHelper, a masked '********' value, or a url with a query "
+                    "string, userinfo, or fragment), so it is "
                     "written directly to the config file, which has no way to deliver "
                     "the secret. Put the credential in the entry's 'env' or 'headers' "
                     "instead."
