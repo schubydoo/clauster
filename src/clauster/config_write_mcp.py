@@ -236,7 +236,9 @@ def entry_transport(entry: dict[str, Any]) -> str:
     """
     if "transport" in entry:
         raise cw.InvalidCandidateError(
-            "'transport' is not a Claude Code server field (Claude Code ignores it); use 'type'"
+            "'transport' is not a Claude Code server field (Claude Code ignores it); use "
+            "'type'. The editor converts a stored 'transport' to 'type' when it loads the "
+            "server, so reload the server and save it"
         )
     if "type" not in entry:
         return "stdio"
@@ -384,6 +386,12 @@ def _validate_server_entry(name: Any, entry: Any) -> None:
         raise cw.InvalidCandidateError(
             f'server {name!r} has a \'url\' but no \'type\'; add "type": "http" (or "sse" / "ws")'
         )
+    if transport != "stdio" and "env" in entry:
+        raise cw.InvalidCandidateError(
+            f"remote server {name!r} has 'env', which Claude Code ignores on a remote "
+            "server; remove it. The editor drops a stored remote 'env' when it loads the "
+            "server, so reload the server and save it"
+        )
     unknown = set(entry) - _KEYS_BY_TRANSPORT[transport]
     if unknown:
         raise cw.InvalidCandidateError(
@@ -452,8 +460,87 @@ def _redact_server_map(servers: dict[str, Any]) -> dict[str, Any]:
     Redacting per entry keeps the name out of the hint chain while leaving everything inside
     an entry (``env``, ``headers``, a nested ``{"auth": {"value": ...}}``) fully masked —
     see :func:`_redact_entry`.
+
+    Each entry is first converted by :func:`_convert_legacy_entry` (convert on LOAD), so the
+    display copy carries no field Claude Code ignores and the next save writes it out fixed.
     """
-    return {name: _redact_entry(entry) for name, entry in servers.items()}
+    return {
+        name: _redact_entry(_convert_legacy_entry(entry)[0]) for name, entry in servers.items()
+    }
+
+
+#: Why a field is converted on load; quoted in every conversion note.
+_IGNORED_REASON = "Claude Code ignores it"
+
+
+def _convert_legacy_entry(entry: Any) -> tuple[Any, list[dict[str, str]]]:
+    """Return ``(converted, notes)``: ``entry`` without the fields Claude Code ignores.
+
+    Earlier clauster versions accepted two fields Claude Code never reads. Converting them
+    when the entry is LOADED (the coordinator's rule for TASK-449.8) means the operator sees
+    the fixed entry, with a note, and the next save writes it out fixed. Writes that still
+    carry them are refused by the validator, which points back here.
+
+    * ``transport``: when ``type`` is absent and ``transport`` is a known transport word, it
+      becomes ``type``. When ``type`` is present, ``transport`` is dropped (Claude Code reads
+      only ``type``). Any other ``transport`` value is left alone, so the validator refuses
+      it with its message: a value that is not a plain transport word is never moved into
+      ``type``, where it could be masked on display and become unsavable.
+    * ``env`` on a remote (http/sse/ws) server is dropped. Claude Code never read it, so
+      nothing is lost; the note counts the values, which the display showed masked.
+
+    The stored file is NOT changed here; this only shapes the display copy and the notes.
+    """
+    if not isinstance(entry, dict):
+        return entry, []
+    out = dict(entry)
+    notes: list[dict[str, str]] = []
+    if "transport" in out:
+        value = out["transport"]
+        if "type" in out:
+            del out["transport"]
+            notes.append(
+                {
+                    "field": "transport",
+                    "message": f"'transport' is removed because 'type' is set ({_IGNORED_REASON})",
+                }
+            )
+        elif isinstance(value, str) and value in _TRANSPORT_ALIASES:
+            del out["transport"]
+            out = {"type": value, **out}
+            notes.append(
+                {
+                    "field": "transport",
+                    "message": f"'transport' is converted to \"type\": {value!r} "
+                    f"({_IGNORED_REASON}, and reads 'type' only)",
+                }
+            )
+    declared = out.get("type")
+    is_remote = isinstance(declared, str) and _TRANSPORT_ALIASES.get(declared) in (
+        "http",
+        "sse",
+        "ws",
+    )
+    if is_remote and "env" in out:
+        env = out.pop("env")
+        count = len(env) if isinstance(env, dict) else 0
+        notes.append(
+            {
+                "field": "env",
+                "message": f"'env' on a remote server is removed ({_IGNORED_REASON}). "
+                f"It held {count} value(s), shown masked, which Claude Code never read",
+            }
+        )
+    return out, notes
+
+
+def _conversion_notes(servers: dict[str, Any]) -> list[dict[str, str]]:
+    """Return one note per converted field across a raw server map, in map order."""
+    return [
+        {"name": name, **note}
+        for name, entry in servers.items()
+        for note in _convert_legacy_entry(entry)[1]
+    ]
 
 
 #: Entry fields whose every string value is masked on read, whatever its key name. Key-name
@@ -653,6 +740,35 @@ def read_project_local_servers(claude_json: Path, project_dir: Path) -> dict[str
     servers = cw.read_nested_subtree(claude_json, PROJECTS_KEY, str(project_dir), MCP_SERVERS_KEY)
     servers = servers if isinstance(servers, dict) else {}
     return _redact_server_map(servers)
+
+
+def read_conversion_notes(
+    scope: cw.Scope, *, claude_json: Path, project_dir: Path
+) -> list[dict[str, str]]:
+    """Return the convert-on-load notes for ``scope``: one ``{name, field, message}`` each.
+
+    The readers above already return the converted display copy; this names what they
+    changed, so the dashboard can show it before the operator saves. Reads the raw map of
+    the same file the matching reader reads (``project_dir`` is ignored for user scope).
+    A note never carries a stored value, only field names and a count.
+    """
+    if scope == "user":
+        try:
+            raw = claude_json.read_bytes()
+        except FileNotFoundError:
+            raw = b""
+        servers = cw.load_settings_json_obj(raw).get(MCP_SERVERS_KEY)
+    elif scope == "local":
+        servers = cw.read_nested_subtree(
+            claude_json, PROJECTS_KEY, str(project_dir), MCP_SERVERS_KEY
+        )
+    else:
+        try:
+            raw = (project_dir / ".mcp.json").read_bytes()
+        except FileNotFoundError:
+            raw = b""
+        servers = cw.load_settings_json_obj(raw).get(MCP_SERVERS_KEY)
+    return _conversion_notes(servers) if isinstance(servers, dict) else []
 
 
 def write_project_local_servers(

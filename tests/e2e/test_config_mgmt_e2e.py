@@ -555,6 +555,56 @@ def test_config_mgmt_new_mcp_server_round_trip(
     assert data["mcpServers"]["my-server"]["env"]["FOO"] == "bar"
 
 
+def test_config_mgmt_mcp_converted_entry_shows_note_and_saves_unedited(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A stored field Claude Code ignores is converted on load, named, and fixed by a save.
+
+    The entry holds the legacy ``transport`` key and a remote ``env``. The list shows the
+    conversion note, the editor repeats it, and Save is enabled with no edit (the converted
+    definition differs from the file); saving writes the converted entry. A ``headers``
+    value (shown masked) sends the save to the direct writer, so the fake ``claude`` is
+    never needed and the masked value is restored from the stored one.
+    """
+    import json
+
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+    mcp_json = projects_root / "alpha" / ".mcp.json"
+    mcp_json.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "legacy": {
+                        "transport": "sse",
+                        "url": "https://x.example/sse",
+                        "headers": {"X-Api": "kept-4498"},
+                        "env": {"K": "v"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-mcp"]')
+    browser.expect_visible('[data-test="cm-mcp-conversions"]')
+    browser.click('[data-test="cm-mcp-edit-legacy"]')
+    browser.expect_visible('[data-test="cm-mcp-entry-conversions"]')
+    browser.fill('[data-test="cm-mcp-confirm"]', "alpha")
+    browser.click('[data-test="cm-mcp-save"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+    data = json.loads(mcp_json.read_text(encoding="utf-8"))
+    assert data["mcpServers"]["legacy"] == {
+        "type": "sse",
+        "url": "https://x.example/sse",
+        "headers": {"X-Api": "kept-4498"},
+    }
+
+
 def test_config_mgmt_skills_tab_loads(browser: AgentBrowser, config_mgmt_server: Server) -> None:
     """The skills surface renders its list controls once the skills load."""
     _open_modal(browser, config_mgmt_server)

@@ -222,7 +222,8 @@ ignores them:
 
 - The `transport` key, and `env` on an `http`, `sse` or `ws` server. Earlier
   Clauster versions accepted both, but Claude Code ignores them. Use `type`
-  instead of `transport`.
+  instead of `transport`. When Clauster loads a stored server that has them, it
+  converts the server (see below).
 
 - A server name with a character other than a letter, a number, a hyphen or an
   underscore, or a name that starts with a hyphen. Earlier Clauster versions
@@ -236,6 +237,20 @@ ignores them:
   stdio server and skips it.
 - `"type": "sdk"`, `"sse-ide"`, `"ws-ide"` or `"claudeai-proxy"`. Claude Code
   registers these servers at runtime and refuses them in a configuration file.
+
+When the MCP tab loads a stored server that has a field Claude Code ignores,
+Clauster converts the server in the editor and shows a note above the list
+that names each change. It does not change the file until you save:
+
+- If `type` is not set, a `transport` value of `stdio`, `http`,
+  `streamable-http`, `sse` or `ws` becomes `type`. If `type` is set, Clauster
+  removes `transport`.
+- Clauster removes `env` from an `http`, `sse` or `ws` server. Claude Code never
+  read these values, so nothing is lost. The note gives the number of values.
+
+To write the fix, open the server and save it. You do not have to edit it
+first. A save through the API that still has these fields is refused, and the
+error message tells you to reload the server and save it.
 
 Clauster stores a `headersHelper` command but never runs it. Claude Code runs it
 when it connects to the server. For a server in `.mcp.json` or at local scope,

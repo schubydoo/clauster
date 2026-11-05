@@ -243,7 +243,7 @@ def test_validate_accepts_every_documented_field(entry: dict) -> None:
         ({"command": "x", "tools": [{"name": "t"}]}, "unknown keys"),
         ({"type": "ws", "url": "wss://x", "discoveryCache": True}, "unknown keys"),
         # Claude Code ignores these, so refuse them (was accepted before TASK-449.8)
-        ({"type": "sse", "url": "u", "env": {"K": "v"}}, "unknown keys"),
+        ({"type": "sse", "url": "u", "env": {"K": "v"}}, "ignores"),
         ({"type": "sse", "transport": "sse", "url": "u"}, "transport"),
         ({"transport": "sse", "url": "u"}, "transport"),
         ({"type": "sse-ide", "url": "u"}, "runtime"),
@@ -274,7 +274,7 @@ def test_validate_accepts_every_documented_field(entry: dict) -> None:
         ({"type": "http", "url": "u", "oauth": {"scopes": ["a"]}}, "scopes"),
         # ws: no OAuth (the docs: WebSocket supports neither OAuth nor --transport)
         ({"type": "ws", "url": "wss://x", "oauth": {"clientId": "c"}}, "unknown keys"),
-        ({"type": "ws", "url": "wss://x", "env": {"K": "v"}}, "unknown keys"),
+        ({"type": "ws", "url": "wss://x", "env": {"K": "v"}}, "ignores"),
         ({"type": "ws"}, "url"),
         # documented error shapes
         ({"url": "https://x/mcp"}, "no 'type'"),
@@ -1602,6 +1602,7 @@ def test_route_local_scope_works_without_allow_user_scope(
             "project": "alpha",
             "servers": {},
             "hash": None,
+            "conversions": [],
         }
         wr = c.put(
             "/api/config-write/mcp",
@@ -1776,3 +1777,182 @@ def test_route_user_write_unparseable_claude_json_is_422_and_unchanged(
     assert resp.status_code == 422, resp.text
     assert "Clauster did not change it" in resp.json()["detail"]
     assert isolated.read_bytes() == _TRUNCATED_CJ
+
+
+# --- TASK-449.8: convert on LOAD the stored fields Claude Code ignores --------------
+# Earlier clauster versions accepted `transport` and a remote `env`. The readers convert
+# them in the display copy, the read names each conversion, and the next save fixes the
+# file. A write that still carries them is refused with a message that says so.
+
+
+@pytest.mark.parametrize(
+    ("stored", "shown", "fields"),
+    [
+        pytest.param(
+            {"transport": "sse", "url": "https://x/sse"},
+            {"type": "sse", "url": "https://x/sse"},
+            ["transport"],
+            id="transport-becomes-type",
+        ),
+        pytest.param(
+            {"type": "http", "transport": "sse", "url": "https://x/mcp"},
+            {"type": "http", "url": "https://x/mcp"},
+            ["transport"],
+            id="transport-dropped-when-type-set",
+        ),
+        pytest.param(
+            {"type": "sse", "url": "https://x/sse", "env": {"A": "a", "B": "b"}},
+            {"type": "sse", "url": "https://x/sse"},
+            ["env"],
+            id="remote-env-dropped",
+        ),
+        pytest.param(
+            {"transport": "ws", "url": "wss://x/s", "env": {"A": "a"}},
+            {"type": "ws", "url": "wss://x/s"},
+            ["transport", "env"],
+            id="both",
+        ),
+        pytest.param(
+            {"command": "x", "env": {"A": "a"}},
+            {"command": "x", "env": {"A": cw.REDACTION_SENTINEL}},
+            [],
+            id="stdio-env-kept",
+        ),
+        pytest.param(
+            # Not a plain transport word: never moved into `type`; the validator refuses it.
+            {"transport": "${T}", "url": "https://x/mcp"},
+            {"transport": cw.REDACTION_SENTINEL, "url": "https://x/mcp"},
+            [],
+            id="odd-transport-left-alone",
+        ),
+    ],
+)
+def test_reader_converts_ignored_fields_on_load(
+    tmp_path: Path, stored: dict, shown: dict, fields: list[str]
+) -> None:
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"s": stored}}), encoding="utf-8"
+    )
+    before = (tmp_path / ".mcp.json").read_bytes()
+    servers, _h = mcp.read_project_servers(tmp_path)
+    assert servers["s"] == shown
+    notes = mcp.read_conversion_notes("project", claude_json=tmp_path / "cj", project_dir=tmp_path)
+    assert [n["field"] for n in notes] == fields
+    assert all(n["name"] == "s" for n in notes)
+    assert (tmp_path / ".mcp.json").read_bytes() == before  # a read never writes
+
+
+def test_conversion_note_counts_masked_env_and_carries_no_value(tmp_path: Path) -> None:
+    stored = {"type": "http", "url": "https://x/mcp", "env": {"TOKEN": "sk-FAKE4498", "B": "b"}}
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"s": stored}}), encoding="utf-8"
+    )
+    (note,) = mcp.read_conversion_notes(
+        "project", claude_json=tmp_path / "cj", project_dir=tmp_path
+    )
+    assert note["field"] == "env"
+    assert "2 value(s), shown masked" in note["message"]
+    assert "never read" in note["message"]
+    assert "FAKE4498" not in json.dumps(note)
+
+
+def test_conversion_notes_for_user_and_local_scope(tmp_path: Path) -> None:
+    cj = tmp_path / "claude.json"
+    proj = tmp_path / "p"
+    cj.write_text(
+        json.dumps(
+            {
+                "mcpServers": {"u": {"transport": "http", "url": "https://x/mcp"}},
+                "projects": {
+                    str(proj): {
+                        "mcpServers": {"l": {"type": "sse", "url": "u", "env": {"K": "v"}}}
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    user = mcp.read_conversion_notes("user", claude_json=cj, project_dir=proj)
+    local = mcp.read_conversion_notes("local", claude_json=cj, project_dir=proj)
+    assert [(n["name"], n["field"]) for n in user] == [("u", "transport")]
+    assert [(n["name"], n["field"]) for n in local] == [("l", "env")]
+    assert mcp.read_user_servers(cj)["u"] == {"type": "http", "url": "https://x/mcp"}
+    assert mcp.read_project_local_servers(cj, proj)["l"] == {"type": "sse", "url": "u"}
+    # No file at all: no notes, no error.
+    assert mcp.read_conversion_notes("user", claude_json=tmp_path / "none", project_dir=proj) == []
+    assert mcp.read_conversion_notes("project", claude_json=cj, project_dir=tmp_path / "x") == []
+
+
+def test_saving_the_converted_view_fixes_the_file(tmp_path: Path) -> None:
+    # The whole-map save of the display copy writes the conversion out, while a masked
+    # secret elsewhere in the entry is still restored from the stored value.
+    stored = {
+        "legacy": {
+            "transport": "sse",
+            "url": "https://x/sse",
+            "headers": {"Authorization": "Bearer sk-FAKE4498"},
+            "env": {"OLD": "never-read"},
+        },
+        "fine": {"command": "x", "env": {"K": "v"}},
+    }
+    (tmp_path / ".mcp.json").write_text(json.dumps({"mcpServers": stored}), encoding="utf-8")
+    servers, h = mcp.read_project_servers(tmp_path)
+    mcp.write_project_servers(tmp_path, servers, h)
+    on_disk = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]
+    assert on_disk["legacy"] == {
+        "type": "sse",
+        "url": "https://x/sse",
+        "headers": {"Authorization": "Bearer sk-FAKE4498"},
+    }
+    assert on_disk["fine"] == {"command": "x", "env": {"K": "v"}}
+    assert (
+        mcp.read_conversion_notes("project", claude_json=tmp_path / "cj", project_dir=tmp_path)
+        == []
+    )
+
+
+def test_saving_one_converted_entry_fixes_it_and_leaves_siblings(tmp_path: Path) -> None:
+    stored = {
+        "a": {"type": "http", "transport": "http", "url": "https://x/mcp", "env": {"K": "v"}},
+        "b": {"transport": "sse", "url": "https://y/sse"},
+    }
+    (tmp_path / ".mcp.json").write_text(json.dumps({"mcpServers": stored}), encoding="utf-8")
+    servers, _h = mcp.read_project_servers(tmp_path)
+    mcp.write_project_server_entry(tmp_path, "a", servers["a"], op="edit")
+    on_disk = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]
+    assert on_disk["a"] == {"type": "http", "url": "https://x/mcp"}
+    assert on_disk["b"] == stored["b"]  # an untouched sibling is not rewritten
+
+
+@pytest.mark.parametrize(
+    ("entry", "match"),
+    [
+        ({"transport": "sse", "url": "u"}, "converts a stored 'transport'"),
+        ({"type": "sse", "url": "u", "env": {"K": "v"}}, "drops a stored remote 'env'"),
+    ],
+)
+def test_a_write_still_carrying_ignored_fields_explains_the_conversion(
+    entry: dict, match: str
+) -> None:
+    with pytest.raises(cw.InvalidCandidateError, match=match):
+        mcp.validate_mcp_servers({"s": entry})
+
+
+def test_route_read_returns_conversion_notes(write_config, tmp_path, projects_root) -> None:
+    (projects_root / "alpha" / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"s": {"transport": "sse", "url": "https://x/sse"}}}),
+        encoding="utf-8",
+    )
+    isolated = Path(os.environ["HOME"]) / ".claude.json"
+    isolated.write_text(
+        json.dumps({"mcpServers": {"u": {"type": "ws", "url": "wss://x", "env": {"K": "v"}}}}),
+        encoding="utf-8",
+    )
+    with _client(write_config, tmp_path, _ON) as c:
+        project = c.get("/api/config-write/mcp", params={"scope": "project", "project": "alpha"})
+        user = c.get("/api/config-write/mcp", params={"scope": "user"})
+        local = c.get("/api/config-write/mcp", params={"scope": "local", "project": "alpha"})
+    assert project.json()["servers"]["s"] == {"type": "sse", "url": "https://x/sse"}
+    assert [(n["name"], n["field"]) for n in project.json()["conversions"]] == [("s", "transport")]
+    assert [(n["name"], n["field"]) for n in user.json()["conversions"]] == [("u", "env")]
+    assert local.json()["conversions"] == []
