@@ -1273,6 +1273,27 @@ _YAML_STR_TAG = "tag:yaml.org,2002:str"
 _RESOLVER = yaml.resolver.Resolver()
 
 
+def js_integer(digits: str) -> int | None:
+    """Return the integer a JavaScript number holds for decimal ``digits``, or None.
+
+    ``digits`` is an optional sign and ASCII digits (as ``parseInt`` reads them). A
+    JavaScript number is a double, so a value past the double range is ``Infinity``, which
+    ``Number.isInteger`` rejects: None. Never calls ``int()`` on more digits than a double can
+    hold, so Python's 4300-digit conversion limit cannot raise ``ValueError`` here (a 500 on
+    the write and on every read of the stored file, Greptile on PR 1810).
+    """
+    sign = "-" if digits.startswith("-") else ""
+    significant = digits.lstrip("+-").lstrip("0") or "0"
+    if len(significant) > 309:  # 1.8e308 has 309 digits: anything longer is Infinity
+        return None
+    value = int(sign + significant)
+    try:
+        float(value)
+    except OverflowError:
+        return None
+    return value
+
+
 def _yaml12_scalar(node: yaml.ScalarNode) -> Any:
     """Return the value a YAML 1.2 core-schema loader gives the scalar ``node``."""
     implicit = _RESOLVER.resolve(
@@ -1290,7 +1311,9 @@ def _yaml12_scalar(node: yaml.ScalarNode) -> Any:
     if text in _YAML12_BOOLS:
         return _YAML12_BOOLS[text]
     if _YAML12_INT_RE.fullmatch(text):
-        return int(text, 10)
+        # Past the double range JavaScript holds Infinity; float() has no digit limit.
+        whole = js_integer(text)
+        return float(text) if whole is None else whole
     if _YAML12_OCT_RE.fullmatch(text) or _YAML12_HEX_RE.fullmatch(text):
         sign = -1 if text.startswith("-") else 1
         digits = text.lstrip("+-")
@@ -1540,11 +1563,12 @@ def _yaml12_key(node: yaml.ScalarNode) -> object:
     if value is None:
         return "null"
     if isinstance(value, (int, float)):
-        # A JavaScript number is a double: 2**53 + 1 and 2**53 are one key there.
-        try:
-            number = float(value)
-        except OverflowError:
-            return "Infinity" if value > 0 else "-Infinity"
+        # A JavaScript number is a double: 2**53 + 1 and 2**53 are one key there. An int here
+        # fits a double (`_yaml12_scalar` reads a longer one as float Infinity), and a NaN key
+        # never gets here (the seam refused it as JSON-unsafe before this check runs).
+        number = float(value)
+        if math.isinf(number):
+            return "Infinity" if number > 0 else "-Infinity"
         if number.is_integer() and abs(number) < 1e21:
             return str(int(number))
         return repr(number)

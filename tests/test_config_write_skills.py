@@ -1982,7 +1982,7 @@ def test_list_skills_shows_what_the_cli_reads(tmp_path: Path) -> None:
         "yes-flag": "---\ndescription: '  padded  '\ndisable-model-invocation: 'Yes'\n---\nb\n",
     }.items():
         (root / name).mkdir(parents=True)
-        (root / name / sk.SKILL_FILENAME).write_text(text)
+        (root / name / sk.SKILL_FILENAME).write_bytes(text.encode("utf-8"))
     listing = {item["name"]: item for item in sk.list_skills(tmp_path)}
     assert "frontmatter_error" not in listing["bare"]
     assert listing["bare"]["description"] is None
@@ -1995,7 +1995,7 @@ def test_list_skills_shows_what_the_cli_reads(tmp_path: Path) -> None:
 
 def test_list_skills_reports_a_yaml_version_mismatch(tmp_path: Path) -> None:
     (tmp_path / "skills" / "s").mkdir(parents=True)
-    (tmp_path / "skills" / "s" / sk.SKILL_FILENAME).write_text("---\neffort: 010\n---\nb\n")
+    (tmp_path / "skills" / "s" / sk.SKILL_FILENAME).write_bytes(b"---\neffort: 010\n---\nb\n")
     (item,) = sk.list_skills(tmp_path)
     assert "'effort' reads differently" in item["frontmatter_error"]
 
@@ -2079,7 +2079,7 @@ def test_load_redacts_after_converting(tmp_path: Path) -> None:
 
 def test_load_does_not_convert_a_supporting_file(tmp_path: Path) -> None:
     _skill(tmp_path, "---\ndescription: d\n---\nb\n")
-    (tmp_path / "skills" / "s" / "notes.md").write_text("---\nshell: zsh\n---\n")
+    (tmp_path / "skills" / "s" / "notes.md").write_bytes(b"---\nshell: zsh\n---\n")
     content, _, _, note = sk.read_skill_file_for_edit(tmp_path, "s", "notes.md")
     assert note is None and "shell: zsh" in content
 
@@ -2090,7 +2090,9 @@ def test_route_returns_the_converted_text_and_saves_it(
     raw = "---\ndescription: d\neffort: banana\n---\nBody.\n"
     path = projects_root / "alpha" / ".claude" / "skills" / "greeter" / sk.SKILL_FILENAME
     path.parent.mkdir(parents=True)
-    path.write_text(raw)
+    # Byte-exact LF: text mode writes CRLF on Windows, and the route returns the file's
+    # own line endings (Windows CI, PR 1810).
+    path.write_bytes(raw.encode("utf-8"))
     with _client(write_config, tmp_path, _ON) as c:
         view = c.get(f"{_FILE_URL}?project=alpha&name=greeter").json()
         assert view["converted"] and "'effort'" in view["converted"]
@@ -2582,3 +2584,63 @@ def test_a_skill_alias_pyramid_under_a_discarded_key_is_refused_quickly(tmp_path
     (item,) = sk.list_skills(tmp_path)
     assert item["frontmatter_error"]
     assert time.monotonic() - start < 5.0  # a walk per alias path would take hours
+
+
+# --- Greptile on PR 1810: digit-limit ValueError and nested mappings in text fields ------
+
+_HUGE = "9" * 5000  # past Python's 4300-digit int() limit
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        pytest.param(f'effort: "{_HUGE}"', id="quoted-huge-effort"),
+        pytest.param(f'effort: "{_HUGE} tokens"', id="huge-effort-with-text"),
+        pytest.param(f"description: 0{_HUGE}", id="leading-zero-huge-number"),
+    ],
+)
+def test_a_huge_number_is_refused_never_a_500(tmp_path: Path, line: str) -> None:
+    # JavaScript reads these digits as Infinity, which is not an integer, so the CLI ignores
+    # the effort; Python's int() raised ValueError instead, a 500 on write and on every read.
+    content = _fm(line)
+    with pytest.raises(cw.InvalidCandidateError):
+        sk.validate_skill_md_content(content)
+    _skill(tmp_path, content, name="bad")
+    _skill(tmp_path, _fm("description: fine"), name="good")
+    listing = {item["name"]: item for item in sk.list_skills(tmp_path)}
+    assert listing["bad"]["frontmatter_error"]
+    assert listing["good"]["description"] == "fine"
+    sk.read_skill_file_for_edit(tmp_path, "bad")  # no raise
+
+
+def test_effort_reads_a_number_past_the_double_range_as_ignored() -> None:
+    # 400 digits: int() copes, but JavaScript's parseInt gives Infinity, which the CLI's
+    # effort reader refuses (not an integer).
+    assert sk._cli_effort("9" * 400) is None
+    assert sk._cli_effort("9" * 5000) is None
+    assert sk._cli_effort("12 tokens") == 12
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "argument-hint: [[{a: 1}]]",
+        "argument-hint: [x, [y, [{a: 1}]]]",
+        "when_to_use: [[[{a: 1}]]]",
+    ],
+)
+def test_a_mapping_nested_in_lists_is_refused(line: str) -> None:
+    # The CLI would show `[object Object]`, however deep the mapping sits in the lists.
+    with pytest.raises(cw.InvalidCandidateError, match="must be text"):
+        sk.validate_skill_md_content(_fm(line))
+
+
+def test_nested_lists_of_text_still_save() -> None:
+    sk.validate_skill_md_content(_fm("argument-hint: [[a, b], [c, [d]]]"))  # no raise
+
+
+def test_js_integer_never_converts_more_digits_than_a_double_holds() -> None:
+    assert cw.js_integer("9" * 5000) is None
+    assert cw.js_integer("9" * 309) is None  # 309 digits, but past 1.8e308
+    assert cw.js_integer("-" + "0" * 5000 + "12") == -12
+    assert cw.js_integer("+7") == 7

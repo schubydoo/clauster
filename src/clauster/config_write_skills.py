@@ -423,9 +423,9 @@ def _cli_tool_entries(items: list[str]) -> list[str]:
 
 
 def _js_parse_int(text: str) -> int | None:
-    """Return what JavaScript ``parseInt(text, 10)`` returns, or None for ``NaN``."""
+    """Return what JavaScript ``parseInt(text, 10)`` returns, or None for ``NaN``/``Infinity``."""
     match = _JS_PARSE_INT_RE.match(text)
-    return int(match.group(1)) if match else None
+    return cw.js_integer(match.group(1)) if match else None
 
 
 def _cli_effort(value: Any) -> str | int | None:
@@ -457,6 +457,25 @@ def _label(key: str) -> str:
     return f"{SKILL_FILENAME} frontmatter {key!r}"
 
 
+def _holds_a_mapping(value: Any) -> bool:
+    """Whether ``value`` is a mapping or holds one at any depth of nested lists.
+
+    Iterative, and each list is walked once (an alias makes one list object appear many
+    times), so neither depth nor sharing costs stack frames or repeated work. Greptile on
+    PR 1810: ``[[{a: 1}]]`` passed a one-level check and then showed as ``[object Object]``.
+    """
+    seen: set[int] = set()
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            return True
+        if isinstance(item, list) and id(item) not in seen:
+            seen.add(id(item))
+            stack.extend(item)
+    return False
+
+
 def _read_text_field(key: str, value: Any) -> str | None:
     """Read a field the CLI turns into text with ``String()``: a scalar or a list of them.
 
@@ -467,9 +486,7 @@ def _read_text_field(key: str, value: Any) -> str | None:
     if value is None:
         return None
     try:
-        if isinstance(value, dict) or (
-            isinstance(value, list) and any(isinstance(item, dict) for item in value)
-        ):
+        if _holds_a_mapping(value):
             raise TypeError("dict")
         return _js_string(value)
     except TypeError:

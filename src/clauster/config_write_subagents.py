@@ -451,7 +451,8 @@ def _as_js_number(value: int) -> int | None:
 def _js_parse_int(text: str) -> int | None:
     """Return what JavaScript ``parseInt(text, 10)`` returns, or None for ``NaN``/``Infinity``."""
     match = _JS_PARSE_INT_RE.match(text)
-    return _as_js_number(int(match.group(1))) if match else None
+    # Bounded: int() on 5000 digits raises ValueError (Greptile on PR 1810).
+    return cw.js_integer(match.group(1)) if match else None
 
 
 def _integral(value: float) -> int | None:

@@ -2361,3 +2361,22 @@ def test_an_override_shaped_pyramid_saves_quickly_on_both_surfaces() -> None:
     config_write_skills.validate_skill_md_content(skill)
     config_write_subagents.validate_agent_content(agent, expected_name="x")
     assert time.perf_counter() - started < 5.0
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+def test_a_huge_leading_zero_number_in_a_nested_value_is_refused_not_a_500(parse) -> None:
+    # PyYAML reads `0999...` (5000 digits) as a string; YAML 1.2 reads a decimal number,
+    # and int() past Python's digit limit raised ValueError after the load: a 500.
+    huge = "0" + "9" * 5000
+    with pytest.raises(cw.InvalidCandidateError, match="nested value"):
+        parse(f"---\nname: a\ndescription: d\nx:\n  y: {huge}\n---\nb\n")
+
+
+@pytest.mark.parametrize(
+    "line",
+    [f'maxTurns: "{"9" * 5000}"', f'effort: "{"9" * 5000}"', f'autoCompactWindow: "{"9" * 5000}"'],
+)
+def test_a_subagent_number_field_with_huge_digits_is_refused_not_a_500(line: str) -> None:
+    text = f"---\nname: x\ndescription: d\n{line}\n---\nbody\n"
+    with pytest.raises(cw.InvalidCandidateError):
+        config_write_subagents.validate_agent_content(text, expected_name="x")
