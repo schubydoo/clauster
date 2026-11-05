@@ -463,6 +463,12 @@ def test_yaml12_booleans_and_quoted_strings_still_save(spelling: str) -> None:
         "maxTurns: 010",
         "maxTurns: 0b101",
         "maxTurns: 0_5",
+        "maxTurns: 1_000",  # 1000 here, the string "1_000" (parseInt: 1) there
+        # An alias to an enclosing node: PyYAML loads it, the CLI's YAML 1.2 refuses it and
+        # falls back to re-quoting values, so `plan # c` would arrive as one string.
+        "a: &a {<<: *a}\npermissionMode: plan # read only",
+        "a: &a {<<: *a}\n<<: *a",
+        "a: &a [1, *a]",
         "maxTurns: 1:30",
         "effort: 0b11",
         "maxTurns: 5.0_0",
@@ -470,7 +476,7 @@ def test_yaml12_booleans_and_quoted_strings_still_save(spelling: str) -> None:
 )
 def test_yaml11_only_spellings_are_refused(header: str) -> None:
     text = f"---\nname: x\ndescription: d\n{header}\n---\nbody\n"
-    with pytest.raises(cw.InvalidCandidateError, match="YAML 1.2|true or false"):
+    with pytest.raises(cw.InvalidCandidateError, match="YAML|true or false"):
         sub.validate_agent_content(text, expected_name="x")
 
 
@@ -511,6 +517,7 @@ def test_yaml11_only_line_breaks_are_refused_and_never_converted(
         {"name": "x", "description": "d", "disallowedTools": ["Bash", "﻿*"]},
         {"name": "x", "description": "d", "tools": "﻿"},
         {"name": "x", "description": "d", "tools": ["﻿"]},
+        {"name": "x", "description": "d", "disallowedTools": ["﻿"]},  # the CLI drops it
     ],
 )
 def test_tool_lists_trim_like_javascript(candidate: dict) -> None:

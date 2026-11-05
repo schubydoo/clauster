@@ -871,6 +871,34 @@ def _check_mapping(node: yaml.MappingNode, seen: set[int]) -> None:
             _check_spelling(key_node.value, value_node)
 
 
+def _refuse_enclosing_references(node: yaml.Node, path: set[int], done: set[int]) -> None:
+    """Refuse an alias that points at a node enclosing it (``a: &a {<<: *a}``).
+
+    PyYAML loads that header (it drops the merge key before it follows it), but the CLI's
+    YAML 1.2 loader refuses it ("Merge key cannot reference an enclosing node") and then
+    falls back to re-quoting values, so ``permissionMode: plan # c`` would reach the CLI as
+    the string ``"plan # c"``. ``path`` holds the nodes being walked through; ``done``
+    skips a node already checked, so a shared alias is walked once.
+    """
+    if id(node) in path:
+        raise cw.InvalidCandidateError(
+            "frontmatter has an alias to a node that encloses it, which the YAML 1.2 that "
+            "Claude Code reads refuses. Remove the self-reference"
+        )
+    if id(node) in done or not isinstance(node, yaml.CollectionNode):
+        return
+    path.add(id(node))
+    children = (
+        [part for pair in node.value for part in pair]
+        if isinstance(node, yaml.MappingNode)
+        else node.value
+    )
+    for child in children:
+        _refuse_enclosing_references(child, path, done)
+    path.discard(id(node))
+    done.add(id(node))
+
+
 def _refuse_yaml11_only_spellings(header: str) -> None:
     """Refuse header text that PyYAML (YAML 1.1) and the CLI (YAML 1.2) read differently.
 
@@ -896,7 +924,9 @@ def _refuse_yaml11_only_spellings(header: str) -> None:
                 f"frontmatter contains {char!r}, a line break to YAML 1.1 but not to the "
                 "YAML 1.2 that Claude Code reads. Remove it"
             )
-    _check_mapping(yaml.compose(header, Loader=yaml.SafeLoader), set())
+    root = yaml.compose(header, Loader=yaml.SafeLoader)
+    _refuse_enclosing_references(root, set(), set())
+    _check_mapping(root, set())
 
 
 # ---------------------------------------------------------------------------
