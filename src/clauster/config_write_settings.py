@@ -113,6 +113,7 @@ Only the non-owned top-level keys are ever written; ``permissions``/``autoMode``
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -196,11 +197,9 @@ _READ_FROM: dict[str, tuple[frozenset[str], str, str]] = {
 #: entry was checked against the 2.1.318 bundle code on 2026-11-05 (TASK-490). A write that
 #: names one at a scope where it is ignored is refused whole (422) with a message naming the
 #: scope that works, as the Permissions tab does for ``autoMode`` (PR 1801). ``autoMode``
-#: itself is carved above. A value-level caveat is not enforced here, because the key is
-#: read at that scope and only some of its values are not: a ``mask`` entry in
-#: ``sandbox.credentials.envVars``, and ``true`` for ``bashEditDiffEnabled`` or
-#: ``sandbox.allowNestedUserNamespaces`` (the docs say user only, but 2.1.318 honors a
-#: ``false`` from project and local settings, so those two keys pass at every scope).
+#: itself is carved above. A key that is read at every scope but has a value that is not
+#: is listed in :data:`SCOPE_LIMITED_VALUES` instead. A ``mask`` entry in
+#: ``sandbox.credentials.envVars`` is a value-level caveat that is not enforced.
 SCOPE_LIMITED_KEYS: dict[str, str] = {
     **dict.fromkeys(
         (
@@ -312,6 +311,19 @@ SCOPE_LIMITED_KEYS: dict[str, str] = {
     ),
 }
 
+#: Keys (dotted for a nested key) that Claude Code reads at every scope, but whose given
+#: value it reads only from some settings files: path -> (that value, kind as above). The
+#: docs give both keys user scope, but Claude Code 2.1.318 also honors ``false`` from project
+#: and local settings: its Bash edit-diff gate returns off when the merged settings hold
+#: ``bashEditDiffEnabled: false``, and its sandbox config takes a merged
+#: ``allowNestedUserNamespaces: false``. It reads ``true`` from user, ``--settings`` and
+#: managed settings only (TASK-490). So only that value is refused at the other scopes,
+#: and left out of their layer in the merged view.
+SCOPE_LIMITED_VALUES: dict[str, tuple[Any, str]] = {
+    "bashEditDiffEnabled": (True, "user"),
+    "sandbox.allowNestedUserNamespaces": (True, "user"),
+}
+
 #: The file each scope writes, for a refusal message.
 _SCOPE_LABEL: dict[str, str] = {
     "user": "user settings (~/.claude/settings.json)",
@@ -382,17 +394,44 @@ def _has_path(data: Any, dotted: str) -> bool:
     return True
 
 
+def _holds_value(data: Any, dotted: str, value: Any) -> bool:
+    """Whether ``data`` holds exactly ``value`` (same JSON type) at the dotted path."""
+    if not _has_path(data, dotted):
+        return False
+    for part in dotted.split("."):
+        data = data[part]
+    return type(data) is type(value) and data == value
+
+
 def _ignored_paths(data: dict[str, Any], scope: cw.Scope) -> list[str]:
-    """Return the :data:`SCOPE_LIMITED_KEYS` paths in ``data`` ignored at ``scope``."""
-    return sorted(
+    """Return the scope-limited paths in ``data`` that Claude Code ignores at ``scope``.
+
+    A path from :data:`SCOPE_LIMITED_KEYS` counts whatever its value; a path from
+    :data:`SCOPE_LIMITED_VALUES` counts only when it holds that value.
+    """
+    keys = [
         path
         for path, kind in SCOPE_LIMITED_KEYS.items()
         if scope not in _READ_FROM[kind][0] and _has_path(data, path)
-    )
+    ]
+    values = [
+        path
+        for path, (value, kind) in SCOPE_LIMITED_VALUES.items()
+        if scope not in _READ_FROM[kind][0] and _holds_value(data, path, value)
+    ]
+    return sorted(keys + values)
+
+
+def _scope_rule(path: str) -> tuple[str, str]:
+    """Return the label for an ignored ``path`` (with its value, if value-level) and kind."""
+    if path in SCOPE_LIMITED_KEYS:
+        return path, SCOPE_LIMITED_KEYS[path]
+    value, kind = SCOPE_LIMITED_VALUES[path]
+    return f"{path}: {json.dumps(value)}", kind
 
 
 def reject_scope_ignored(candidate: dict[str, Any], scope: cw.Scope) -> None:
-    """Refuse (422) a write naming a key Claude Code does not read at ``scope``.
+    """Refuse (422) a write naming a key (or value) Claude Code does not read at ``scope``.
 
     Saving such a key would show a setting that never takes effect, so the write fails
     closed, whole, with a message that names where Claude Code does read the key. A file
@@ -400,12 +439,13 @@ def reject_scope_ignored(candidate: dict[str, Any], scope: cw.Scope) -> None:
     """
     paths = _ignored_paths(candidate, scope)
     if paths:
+        rules = [_scope_rule(path) for path in paths]
         raise cw.InvalidCandidateError(
             " ".join(
-                f"Claude Code reads {path} only from {_READ_FROM[SCOPE_LIMITED_KEYS[path]][1]} "
+                f"Claude Code reads {label} only from {_READ_FROM[kind][1]} "
                 f"and ignores it in {_SCOPE_LABEL[scope]}; "
-                f"{_READ_FROM[SCOPE_LIMITED_KEYS[path]][2]}."
-                for path in paths
+                f"{_READ_FROM[kind][2]}."
+                for label, kind in rules
             )
         )
 
@@ -833,8 +873,9 @@ def _compute_effective_settings(
     clauster manages -- **local > project > user** (see module docstring for
     the full chain and the docs citation) -- and the merge is Claude Code's own
     (:func:`_merge_setting`): objects merge key by key, lists combine, and a scalar
-    from a higher scope replaces a lower one. A key Claude Code ignores at a scope
-    (:data:`SCOPE_LIMITED_KEYS`) is left out of that scope's layer. Returns
+    from a higher scope replaces a lower one. A key or value Claude Code ignores at a
+    scope (:data:`SCOPE_LIMITED_KEYS`, :data:`SCOPE_LIMITED_VALUES`) is left out of that
+    scope's layer. Returns
     ``{key: {"value": ..., "source": <highest scope>, "sources": [<scopes>]}}`` for the
     union of keys across every scope that was read; ``sources`` lists, highest first,
     each scope whose value is part of the merged result.
