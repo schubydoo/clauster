@@ -1431,6 +1431,11 @@ def test_inline_servers_refuse_yaml11_only_spellings(definition: str) -> None:
         "  - srv:\n      type: http\n      url: https://e.com\n      headers:\n        X: 1.0e3\n",
         "  - srv:\n      type: http\n      url: https://e.com\n      oauth: {clientId: 1e5}\n",
         "  - 0o17\n",  # a server-name reference
+        # Probed one by one as an `args` item on 2.1.318: each made the server invalid.
+        *[
+            f"  - srv:\n      command: x\n      args: [{v}]\n"
+            for v in ("+1e3", "1E3", "-0o17", "+0o7", "09")
+        ],
     ],
 )
 def test_inline_servers_refuse_strings_yaml12_reads_as_numbers(item: str) -> None:
@@ -1444,7 +1449,8 @@ def test_inline_servers_refuse_strings_yaml12_reads_as_numbers(item: str) -> Non
 def test_inline_servers_accept_quoted_number_strings() -> None:
     text = (
         "---\nname: x\ndescription: d\nmcpServers:\n  - srv:\n      command: x\n"
-        "      args: ['0o17', \"1e3\", --port]\n      env: {A: '1e3', B: 1e3x}\n---\nbody\n"
+        "      args: ['0o17', \"1e3\", --port, 0O17, 0o8, 1.2.3]\n"
+        "      env: {A: '1e3', B: 1e3x}\n---\nbody\n"
     )
     sub.validate_agent_content(text, expected_name="x")
 
@@ -1593,6 +1599,11 @@ def test_inline_conversion_falls_back_to_the_raw_file(tmp_path: Path, text: str)
         # Removing a `transport` that `type` does not back up would only lead to the next
         # refusal ("a 'url' but no 'type'"), so the fix is the rename the reload makes.
         ("{transport: sse, url: https://e.com}", "rename 'transport' to 'type' by hand."),
+        # Both fields at once: one manual fix must clear both refusals.
+        (
+            "{transport: http, url: https://e.com, env: {A: b}}",
+            "rename 'transport' to 'type' and remove 'env' by hand.",
+        ),
     ],
 )
 def test_unconverted_inline_field_says_how_to_fix_it_by_hand(

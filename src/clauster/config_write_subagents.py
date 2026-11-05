@@ -713,20 +713,20 @@ def _by_hand_hint(definition: Any) -> str:
 
     The MCP message promises a convert-on-load. Here that is a textual rewrite, which
     declines some shapes (a flow-style definition, a merge key), so the message also says
-    what to change when the reload did not convert it. The first note is the field the
-    validator refuses first (``transport`` before a remote ``env``), and the fix matches
-    what the conversion would do: a ``transport`` with no ``type`` becomes ``type``, so
-    removing it would only lead to the next refusal.
+    what to change when the reload did not convert it. It names every converted field, so
+    one manual fix clears them all, and each fix matches what the conversion would do: a
+    ``transport`` with no ``type`` becomes ``type``, because removing it would only lead to
+    the next refusal.
     """
-    notes = _convert_legacy_entry(definition)[1]
-    if not notes:
-        return ""
-    field = notes[0]["field"]
-    fix = (
+    fixes = [
         "rename 'transport' to 'type'"
-        if field == "transport" and "type" not in definition
-        else f"remove {field!r}"
-    )
+        if note["field"] == "transport" and "type" not in definition
+        else f"remove {note['field']!r}"
+        for note in _convert_legacy_entry(definition)[1]
+    ]
+    if not fixes:
+        return ""
+    fix = " and ".join(fixes)
     return f" If the editor did not convert it when it loaded the file, {fix} by hand."
 
 
@@ -1005,11 +1005,15 @@ def _check_inline_server(name: str, node: yaml.Node) -> None:
     _check_mapping(node, set(), visit=field)
 
 
-#: A plain scalar that YAML 1.2 core reads as a number although PyYAML (YAML 1.1) reads a
-#: string: ``1e3`` and ``1.0e3`` (YAML 1.1 wants a dot and a signed exponent), ``0o17``,
-#: and a leading-zero decimal that is not octal to YAML 1.1 (``09``).
+#: A plain scalar that the CLI reads as a number although PyYAML (YAML 1.1) reads a string:
+#: ``1e3``, ``1E3``, ``+1e3`` and ``1.0e3`` (YAML 1.1 wants a dot and a signed exponent),
+#: ``0o17`` and a signed ``-0o17``/``+0o7``, and a leading-zero decimal that is not octal to
+#: YAML 1.1 (``09``). The CLI parses frontmatter with ``Bun.YAML.parse``; each of those
+#: spellings was probed on 2.1.318 as an ``args`` item, and each made the server invalid.
+#: ``0O17`` and ``0o8`` connect, so they do not match. A signed hex such as ``-0x1F`` is an
+#: int to PyYAML already, so the type check refuses it before this.
 _YAML12_NUMBER_RE = re.compile(
-    r"[-+]?[0-9]+|0o[0-7]+|0x[0-9a-fA-F]+"
+    r"[-+]?[0-9]+|[-+]?0o[0-7]+|[-+]?0x[0-9a-fA-F]+"
     r"|[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?"
 )
 _STR_TAG = "tag:yaml.org,2002:str"
@@ -1028,7 +1032,7 @@ def _refuse_yaml12_number_strings(label: str, node: yaml.Node) -> None:
         if node.tag == _STR_TAG and node.style is None and _YAML12_NUMBER_RE.fullmatch(node.value):
             raise cw.InvalidCandidateError(
                 f"{label}: Claude Code reads {node.value!r} as a number, not a string, and "
-                "skips the server. Quote it"
+                "drops that mcpServers item. Quote it"
             )
     elif isinstance(node, yaml.SequenceNode):
         for child in node.value:
