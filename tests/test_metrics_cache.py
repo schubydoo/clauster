@@ -370,8 +370,9 @@ async def test_snapshots_by_instance_keep_bridges_of_one_project_apart(runner_co
     await runner._refresh_metrics_cache()
 
     by_iid = runner.metrics_snapshots_by_instance()
-    assert by_iid[server.instance_id] == samples[201]
-    assert by_iid[interactive.instance_id] == samples[202]
+    # The runner adds the (here empty) per-session breakdown to every sample.
+    assert by_iid[server.instance_id] == {**samples[201], "sessions": {}}
+    assert by_iid[interactive.instance_id] == {**samples[202], "sessions": {}}
     # ... while the project reader still sums them for the callers that want a total.
     assert runner.metrics_snapshot("alpha")["rss_bytes"] == 1000
 
@@ -387,12 +388,24 @@ async def test_snapshots_by_instance_returns_copies(runner_config):
 
 # ----- per-session breakdown (backlog TASK-342) ---------------------------------
 
+_T0 = 1_000_000.0  # a session start, in epoch seconds
 
-def _session(pid, uuid, parent, attribution=Attribution.TRACKED):
-    s = WorkingSession(pid=pid, cwd=Path("/p"), kind="interactive", started_at=0, local_uuid=uuid)
+
+def _session(pid, uuid, parent, attribution=Attribution.TRACKED, started=_T0):
+    s = WorkingSession(
+        pid=pid,
+        cwd=Path("/p"),
+        kind="interactive",
+        started_at=int(started * 1000),
+        local_uuid=uuid,
+    )
     s.parent_instance = parent
     s.attribution = attribution
     return s
+
+
+def _figure(pid, *, start=(_T0, 500), rss=200):
+    return {"pid": pid, "procs": 2, "cpu_percent": 3.0, "rss_bytes": rss, "start": start}
 
 
 async def test_session_pids_come_from_this_bridges_tracked_sessions(runner_config):
@@ -412,8 +425,10 @@ async def test_session_pids_come_from_this_bridges_tracked_sessions(runner_confi
         _session(108, "u-c", inst.instance_id),  # one pid named by two sessions
         _session(108, "u-d", inst.instance_id),
     ]
-    assert runner._session_pids_for(inst) == {101: "u-a", 102: "u-b"}
-    assert runner._session_pids_for(other) == {201: "u-other"}
+    mine = runner._session_pids_for(inst)
+    assert {p: s.local_uuid for p, s in mine.items()} == {101: "u-a", 102: "u-b"}
+    theirs = runner._session_pids_for(other)
+    assert {p: s.local_uuid for p, s in theirs.items()} == {201: "u-other"}
 
 
 async def test_session_pids_empty_for_a_pty_bridge(runner_config):
@@ -438,16 +453,106 @@ async def test_refresh_hands_the_sampler_this_bridges_session_pids(runner_config
             "procs": 3,
             "cpu_percent": 4.0,
             "rss_bytes": 300,
-            "sessions": {"u-a": {"pid": 101, "procs": 2, "cpu_percent": 3.0, "rss_bytes": 200}},
+            "sessions": {"u-a": _figure(101)},
         }
 
     monkeypatch.setattr("clauster.runner.metrics.sample_tree", _sample)
     await runner._refresh_metrics_cache()
     assert seen == {100: {101: "u-a"}}
     by_iid = runner.metrics_snapshots_by_instance()
-    assert by_iid[inst.instance_id]["sessions"]["u-a"]["rss_bytes"] == 200
+    entry = by_iid[inst.instance_id]["sessions"]["u-a"]
+    assert entry["rss_bytes"] == 200
+    assert "start" not in entry  # the identity is the runner's, not the API's
     # Copied all the way down: a caller cannot reach into the cache through the breakdown.
-    by_iid[inst.instance_id]["sessions"]["u-a"]["rss_bytes"] = 1
+    entry["rss_bytes"] = 1
     assert runner._metrics_cache[inst.instance_id]["sessions"]["u-a"]["rss_bytes"] == 200
     # The project fold describes the project, so one bridge's sessions are not on it.
     assert "sessions" not in runner.metrics_snapshot("alpha")
+
+
+async def test_session_figure_dropped_once_its_pid_names_another_process(runner_config):
+    """A pid reused inside the bridge tree never carries the old session's figure."""
+    runner = _runner(runner_config)
+    inst = _running(runner, project="alpha", pid=100)
+    tracked = {101: _session(101, "u-a", inst.instance_id)}
+    vet = runner._vet_session_figures
+    assert "u-a" in vet(inst.instance_id, tracked, {"u-a": _figure(101)})
+    # Same process (same ticks) on the next tick: still shown.
+    assert "u-a" in vet(inst.instance_id, tracked, {"u-a": _figure(101)})
+    # The pid now names a process that started at another tick: dropped, and it stays
+    # dropped, because the pin is not replaced by the newcomer.
+    reused = {"u-a": _figure(101, start=(_T0 + 9, 900))}
+    assert vet(inst.instance_id, tracked, reused) == {}
+    assert vet(inst.instance_id, tracked, reused) == {}
+
+
+async def test_session_figure_needs_an_identity(runner_config):
+    """A figure whose process start could not be read is left out, not shown unpinned."""
+    runner = _runner(runner_config)
+    inst = _running(runner, project="alpha", pid=100)
+    tracked = {101: _session(101, "u-a", inst.instance_id)}
+    figure = {"u-a": _figure(101, start=(None, None))}
+    assert runner._vet_session_figures(inst.instance_id, tracked, figure) == {}
+
+
+async def test_session_figure_must_match_the_tracked_session(runner_config):
+    """A figure for a uuid/pid pair the tracked list does not hold is left out."""
+    runner = _runner(runner_config)
+    inst = _running(runner, project="alpha", pid=100)
+    tracked = {101: _session(101, "u-a", inst.instance_id)}
+    vet = runner._vet_session_figures
+    assert vet(inst.instance_id, tracked, {"u-b": _figure(101)}) == {}
+    assert vet(inst.instance_id, tracked, {"u-a": _figure(999)}) == {}
+
+
+async def test_first_figure_checked_against_started_at_where_epoch_is_fixed(
+    runner_config, monkeypatch
+):
+    """On macOS/Windows a first figure must have started near the CLI's `startedAt`."""
+    monkeypatch.setattr("clauster.runner.procutil.start_time_is_drift_prone", lambda: False)
+    runner = _runner(runner_config)
+    inst = _running(runner, project="alpha", pid=100)
+    tracked = {101: _session(101, "u-a", inst.instance_id, started=_T0)}
+    vet = runner._vet_session_figures
+    # A process that started an hour after the session began is a reused pid.
+    late = {"u-a": _figure(101, start=(_T0 + 3600, None))}
+    assert vet(inst.instance_id, tracked, late) == {}
+    # One second off, as measured on a live bridge: the session's own process.
+    near = {"u-a": _figure(101, start=(_T0 + 1, None))}
+    assert "u-a" in vet(inst.instance_id, tracked, near)
+    assert "u-a" in vet(inst.instance_id, tracked, near)  # pinned on the epoch alone
+    moved = {"u-a": _figure(101, start=(_T0 + 2, None))}
+    assert vet(inst.instance_id, tracked, moved) == {}
+
+
+async def test_started_at_check_skipped_where_the_epoch_drifts(runner_config, monkeypatch):
+    """On Linux the epoch moves with the wall clock (#1399), so only the ticks decide."""
+    monkeypatch.setattr("clauster.runner.procutil.start_time_is_drift_prone", lambda: True)
+    runner = _runner(runner_config)
+    inst = _running(runner, project="alpha", pid=100)
+    tracked = {101: _session(101, "u-a", inst.instance_id, started=_T0)}
+    vet = runner._vet_session_figures
+    # An epoch far from startedAt (a corrected clock) does not block the first figure,
+    # and a later epoch shift with the same ticks keeps it.
+    assert "u-a" in vet(inst.instance_id, tracked, {"u-a": _figure(101, start=(_T0 + 90, 7))})
+    assert "u-a" in vet(inst.instance_id, tracked, {"u-a": _figure(101, start=(_T0 + 95, 7))})
+    # Without ticks an epoch cannot prove identity here: no figure.
+    assert vet(inst.instance_id, tracked, {"u-a": _figure(101, start=(_T0, None))}) == {}
+
+
+async def test_session_pins_are_forgotten_with_the_session_and_the_bridge(runner_config):
+    """Pins do not outlive the session they guard or the bridge they belong to."""
+    runner = _runner(runner_config)
+    inst = _running(runner, project="alpha", pid=100)
+    gone = _running(runner, project="beta", pid=200)
+    a = {101: _session(101, "u-a", inst.instance_id)}
+    runner._vet_session_figures(gone.instance_id, {}, {})
+    runner._vet_session_figures(inst.instance_id, a, {"u-a": _figure(101)})
+    assert runner._session_pins[inst.instance_id] == {("u-a", 101): (_T0, 500)}
+    # The session left the tracked list: its pin goes, so a later session that the CLI
+    # lists under the same uuid and pid is measured afresh.
+    runner._vet_session_figures(inst.instance_id, {}, {})
+    assert runner._session_pins[inst.instance_id] == {}
+    del runner._instances[gone.instance_id]
+    runner._vet_session_figures(inst.instance_id, {}, {})
+    assert gone.instance_id not in runner._session_pins

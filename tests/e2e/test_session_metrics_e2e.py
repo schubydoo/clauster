@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.e2e
 
 _CHILD_SESSION = "34200000-0000-4000-8000-000000000342"
-_BRIDGE_SESSION = "34200000-0000-4000-8000-000000000343"
+_BRIDGE_SESSION = "34300000-0000-4000-8000-000000000343"
 
 
 def _bridge_pid(server: Server, project: str) -> int:
@@ -90,13 +90,42 @@ def test_bridge_session_row_shows_its_own_cpu_and_ram(
     browser.expect_count(rows, 2, timeout_ms=STATUS_TIMEOUT)
     browser.expect_visible(f"{rows}:nth-of-type(2)", timeout_ms=STATUS_TIMEOUT)
 
+    # Rows by position (the `<template x-for>` sibling is another element type, so
+    # nth-of-type counts the rows only). Pin which session each position holds, so a
+    # change to the server's row order fails here rather than swapping the assertions.
     child_chip = f'{rows}:nth-of-type(1) [data-test="bridge-session-metrics"]'
     bridge_chip = f'{rows}:nth-of-type(2) [data-test="bridge-session-metrics"]'
     browser.expect_text(f"{rows}:nth-of-type(1) code", "34200000")
+    browser.expect_text(f"{rows}:nth-of-type(2) code", "34300000")
     browser.expect_visible(child_chip, timeout_ms=STATUS_TIMEOUT)
     browser.expect_text(child_chip, "% CPU · ", timeout_ms=STATUS_TIMEOUT)
     assert "part of the bridge figure" in (browser.get_attr(child_chip, "title") or "")
-    # The same metrics batch carried both rows: the bridge-pid session got no figure.
+    # Keep this AFTER the child chip's wait: expect_hidden also passes for a chip whose
+    # metrics never arrived. Here the same batch that showed the child chip carried this
+    # row too, so hidden means the bridge-pid session got no figure.
     browser.expect_hidden(bridge_chip)
     # The bridge row keeps its own total.
     browser.expect_visible('section.zone-active [data-test="metrics-chip"]')
+
+    # At phone width the extra chip must wrap, not push the Open link out of the row
+    # (the list clips its overflow, so a clipped link would just vanish). The fixture's
+    # idle session reads only a few characters, so the script widens the chip text to a
+    # busy session's figure first, and measures in the same task, before Alpine's next
+    # metrics poll can repaint it.
+    browser.set_viewport(320, 2000)
+    try:
+        fits = browser.eval_json(
+            "(() => { const row = document.querySelector("
+            "'section.zone-active [data-test=\"bridge-session-row\"]');"
+            " row.querySelector('[data-test=\"bridge-session-metrics\"]').textContent ="
+            " '1234% CPU · 12345 MB';"
+            " const box = row.getBoundingClientRect();"
+            " const sel = 'a, button, [data-test=\"bridge-session-metrics\"]';"
+            " return [...row.querySelectorAll(sel)]"
+            ".filter((el) => el.offsetParent !== null)"
+            ".every((el) => { const r = el.getBoundingClientRect();"
+            " return r.left >= box.left - 0.5 && r.right <= box.right + 0.5; }); })()"
+        )
+        assert fits is True
+    finally:
+        browser.set_viewport(1280, 2000)

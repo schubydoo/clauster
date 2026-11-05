@@ -337,6 +337,34 @@ _TREE_REAP_WAIT = 2.0
 # How long shutdown() waits for in-flight fire-and-forget notify sends to finish
 # before cancelling them — bounds shutdown while letting a quick send complete.
 _NOTIFY_DRAIN_GRACE = 2.0
+# How far a session process's start may sit from the `startedAt` that `claude agents --json`
+# reports for it before its first metrics figure is refused (TASK-342). Measured about 1s
+# on a live bridge (the CLI stamps the session just after the process starts); the slack
+# allows a loaded host. Used only where the epoch is fixed at exec (macOS, Windows).
+_SESSION_START_SLACK_SECONDS = 30.0
+# The epoch bound for one process measured twice where it is fixed at exec: the same
+# value comes back, so this only absorbs float noise.
+_SAME_START_EPOCH_SLACK = 0.05
+
+
+def _same_start(
+    pinned: tuple[float | None, int | None],
+    seen: tuple[float | None, int | None],
+    *,
+    drift_prone: bool,
+) -> bool:
+    """Whether two ``proc_start_pair`` identities name the same process (TASK-342).
+
+    Ticks decide when both sides have them: they are boot-relative, so no clock correction
+    moves them. Otherwise the epochs decide, but only where the epoch is fixed at exec; on a
+    drift-prone platform an epoch-only pair cannot prove identity, so the answer is no and
+    the figure is dropped rather than guessed.
+    """
+    if pinned[1] is not None and seen[1] is not None:
+        return pinned[1] == seen[1]
+    if drift_prone or pinned[0] is None or seen[0] is None:
+        return False
+    return abs(pinned[0] - seen[0]) <= _SAME_START_EPOCH_SLACK
 
 
 class SessionRunner:
@@ -486,6 +514,9 @@ class SessionRunner:
         # in unit tests and whenever the hosted channel is unused — poll_once then sees
         # no hosted sessions to claim and attributes exactly as before.
         self._hosted_instances: Callable[[], list[RemoteControlInstance]] | None = None
+        # Start identity of each session process a metrics figure was first measured on,
+        # per bridge, keyed by (local_uuid, pid) (TASK-342; see `_vet_session_figures`).
+        self._session_pins: dict[str, dict[tuple[str, int], tuple[float | None, int | None]]] = {}
         # Poll + metrics background loops (#1157): the two long-lived loops the server runs
         # while up — the liveness/cross-check/prune poll (`poll_once` / `_poll_forever`) and
         # the server-side metrics sampler (`_refresh_metrics_cache` / `_metrics_refresh_forever`).
@@ -852,7 +883,7 @@ class SessionRunner:
         if inst.status is not InstanceStatus.RUNNING or pid is None:
             return None
         # Read on the loop, before the thread hop: `_sessions` is the poll loop's list.
-        sessions = self._session_pids_for(inst)
+        tracked = self._session_pids_for(inst)
         start = inst.bridge_proc_start
         if start is not None:
             # Via the shared identity core rather than a hand-rolled epoch compare, so this
@@ -876,16 +907,21 @@ class SessionRunner:
                 boot_id=inst.bridge_boot_id,
             ):
                 return None  # PID reused onto an unrelated process — skip
-        return await asyncio.to_thread(
+        sample = await asyncio.to_thread(
             metrics.sample_tree,
             pid,
             interval=self._config.metrics.sample_interval_seconds,
             normalize_cpu=self._config.metrics.normalize_cpu,
-            sessions=sessions,
+            sessions={p: s.local_uuid for p, s in tracked.items()},
         )
+        if sample is not None:
+            sample["sessions"] = self._vet_session_figures(
+                inst.instance_id, tracked, sample.get("sessions", {})
+            )
+        return sample
 
-    def _session_pids_for(self, inst: RemoteControlInstance) -> dict[int, str]:
-        """Map the pid of each live session under ``inst`` to its ``local_uuid`` (TASK-342).
+    def _session_pids_for(self, inst: RemoteControlInstance) -> dict[int, WorkingSession]:
+        """Map the pid of each live session under ``inst`` to that session (TASK-342).
 
         The pid is the one ``claude agents --json`` reports for the session, which for a
         standard bridge is the bridge's own child ``claude`` process. The source is the same
@@ -901,16 +937,67 @@ class SessionRunner:
         """
         if inst.resume_mode == "pty":
             return {}
-        pairs = [
-            (s.pid, s.local_uuid)
+        mine = [
+            s
             for s in self._sessions
             if s.attribution is Attribution.TRACKED
             and s.parent_instance == inst.instance_id
             and s.local_uuid
         ]
-        pids = Counter(p for p, _ in pairs)
-        uuids = Counter(u for _, u in pairs)
-        return {p: u for p, u in pairs if pids[p] == 1 and uuids[u] == 1}
+        pids = Counter(s.pid for s in mine)
+        uuids = Counter(s.local_uuid for s in mine)
+        return {s.pid: s for s in mine if pids[s.pid] == 1 and uuids[s.local_uuid] == 1}
+
+    def _vet_session_figures(
+        self, iid: str, tracked: dict[int, WorkingSession], figures: dict[str, dict]
+    ) -> dict[str, dict]:
+        """Keep a session's figure only while its pid is still the process first measured.
+
+        ``claude agents --json`` names a session by pid, and a pid outlives its process: if
+        the session exits and the pid is reused inside the same bridge tree before the next
+        agents poll, the sampler would measure the new process under the old session. So
+        the first figure for a (session, pid) pins that process's start identity
+        (``procutil.proc_start_pair``), and a later figure whose identity differs is
+        dropped. The pin compares boot-relative ticks where they exist, which no clock
+        correction moves (see the ``bridge_start_ticks`` heal), and the epoch only where
+        it is fixed at exec (macOS, Windows). The pin stays after a mismatch, so a reused
+        pid is never adopted for that session.
+
+        Where the epoch is fixed at exec, a FIRST figure must also have started near the
+        session's own ``startedAt``, which closes the case of a pid reused before the
+        first measurement. On Linux that epoch moves with the wall clock (#1399), so the
+        check is skipped there; the pin still closes every reuse after the first figure.
+        A figure without any identity is dropped. Pins for sessions that left the tracked
+        list, and for bridges that left the registry, are forgotten.
+        """
+        drift_prone = procutil.start_time_is_drift_prone()
+        self._session_pins = {k: v for k, v in self._session_pins.items() if k in self._instances}
+        live = {(s.local_uuid, p) for p, s in tracked.items()}
+        pins = {k: v for k, v in self._session_pins.get(iid, {}).items() if k in live}
+        kept: dict[str, dict] = {}
+        for uuid, figure in figures.items():
+            entry = dict(figure)
+            epoch, ticks = entry.pop("start", (None, None))
+            session = tracked.get(entry["pid"])
+            if session is None or session.local_uuid != uuid:
+                continue
+            if epoch is None and ticks is None:
+                continue  # nothing to identify the process by
+            key = (uuid, session.pid)
+            prior = pins.get(key)
+            if prior is None:
+                if (
+                    not drift_prone
+                    and epoch is not None
+                    and abs(epoch - session.started_at / 1000) > _SESSION_START_SLACK_SECONDS
+                ):
+                    continue  # not the process the CLI saw start this session
+                pins[key] = prior = (epoch, ticks)
+            if not _same_start(prior, (epoch, ticks), drift_prone=drift_prone):
+                continue
+            kept[uuid] = entry
+        self._session_pins[iid] = pins
+        return kept
 
     async def _refresh_metrics_cache(self) -> None:
         """Re-sample every running bridge into ``_metrics_cache`` (delegates to PollLoop).

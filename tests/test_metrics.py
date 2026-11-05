@@ -12,7 +12,7 @@ from collections import namedtuple
 import psutil
 import pytest
 
-from clauster import metrics
+from clauster import metrics, procutil
 
 
 def test_sample_tree_live_process_returns_aggregate():
@@ -133,35 +133,60 @@ def test_sample_tree_children_btime_runtimeerror_samples_root_only(monkeypatch, 
 
 # ----- per-session breakdown (backlog TASK-342) ----------------------------------
 
-# A three-level tree: bridge stand-in → session stand-in → one tool process under it. Each
-# level sleeps, so the shape holds still while the sampler walks it.
-_GRANDCHILD = "import time; time.sleep(60)"
-_CHILD = (
+# A real tree: bridge stand-in → N session stand-ins → one tool process under each. Every
+# level sleeps, so the shape holds still while the sampler walks it. Each level is named by
+# its whole `-c` code, which only that level runs.
+_TOOL = "import time; time.sleep(60)"
+_SESSION = (
     "import subprocess, sys, time; "
-    f"subprocess.Popen([sys.executable, '-c', {_GRANDCHILD!r}]); time.sleep(60)"
-)
-_ROOT = (
-    "import subprocess, sys, time; "
-    f"subprocess.Popen([sys.executable, '-c', {_CHILD!r}]); time.sleep(60)"
+    f"subprocess.Popen([sys.executable, '-c', {_TOOL!r}]); time.sleep(61)"
 )
 
 
-@pytest.fixture
-def bridge_tree():
-    """Yield ``(root_pid, session_pid, session_procs)`` of a real three-level process tree.
+def _root_code(n: int) -> str:
+    return (
+        "import subprocess, sys, time; "
+        f"[subprocess.Popen([sys.executable, '-c', {_SESSION!r}]) for _ in range({n})]; "
+        "time.sleep(62)"
+    )
+
+
+def _code(p: psutil.Process) -> str:
+    with contextlib.suppress(psutil.Error, IndexError):
+        return p.cmdline()[-1]
+    return ""
+
+
+def _topmost(procs: list[psutil.Process], code: str) -> list[psutil.Process]:
+    # On Windows a venv's python.exe is a launcher that starts the real interpreter as a
+    # child with the same argv, so one level can be two processes: take the upper one.
+    out = []
+    for p in procs:
+        if _code(p) != code:
+            continue
+        with contextlib.suppress(psutil.Error):
+            parent = p.parent()
+            if parent is None or _code(parent) != code:
+                out.append(p)
+    return out
+
+
+@contextlib.contextmanager
+def _tree(n: int):
+    """Yield ``(root_pid, [(session_pid, session_procs), ...])`` of a real process tree.
 
     A dedicated tree, never the pytest worker: sampling the worker walks the dying
     subprocesses of sibling tests, which faulted the xdist worker on Windows (see the
     ``live_pid`` fixture in ``test_metrics_cache.py``).
     """
     root = subprocess.Popen(
-        [sys.executable, "-c", _ROOT], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        [sys.executable, "-c", _root_code(n)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     proc = psutil.Process(root.pid)
     try:
-        # Wait for the deepest level, then for the tree to hold still: on Windows a venv's
-        # python.exe is a launcher that starts the real interpreter as one more child, so
-        # the tree can be deeper than three and still be growing when the leaf first shows.
+        # Wait for every tool, then for the tree to hold still.
         deadline = time.monotonic() + 30
         seen: list[int] = []
         steady = 0
@@ -169,15 +194,13 @@ def bridge_tree():
             assert time.monotonic() < deadline, "process tree did not come up"
             time.sleep(0.1)
             with contextlib.suppress(psutil.Error):
-                now = sorted(p.pid for p in proc.children(recursive=True))
-                leaf = any(
-                    "subprocess" not in " ".join(p.cmdline())
-                    for p in proc.children(recursive=True)
-                )
-                steady = steady + 1 if (leaf and now == seen) else 0
+                procs = proc.children(recursive=True)
+                now = sorted(p.pid for p in procs)
+                ready = len(_topmost(procs, _TOOL)) == n
+                steady = steady + 1 if (ready and now == seen) else 0
                 seen = now
-        session = proc.children()[0]
-        yield root.pid, session.pid, len(session.children(recursive=True)) + 1
+        sessions = _topmost(proc.children(recursive=True), _SESSION)
+        yield root.pid, [(s.pid, len(s.children(recursive=True)) + 1) for s in sessions]
     finally:
         doomed = [proc]
         with contextlib.suppress(psutil.Error):
@@ -186,6 +209,34 @@ def bridge_tree():
             with contextlib.suppress(psutil.Error):
                 p.kill()
         root.wait()
+
+
+@pytest.fixture
+def bridge_tree():
+    """Yield ``(root_pid, session_pid, session_procs)`` for a bridge with one session."""
+    with _tree(1) as (root, [(session, procs)]):
+        yield root, session, procs
+
+
+@pytest.fixture
+def two_session_tree():
+    """Yield ``(root_pid, [(session_pid, session_procs), ...])`` for two sibling sessions."""
+    with _tree(2) as tree:
+        yield tree
+
+
+def _fixed_cpu(monkeypatch, per_read: float = 0.01) -> None:
+    # Each process reads 0.0 cpu-seconds in the first snapshot and `per_read` in the
+    # second, so every process contributes the same, exactly known delta.
+    reads: dict[int, int] = {}
+    times = namedtuple("times", ["user", "system"])
+
+    def cpu_times(self):
+        n = reads.get(self.pid, 0)
+        reads[self.pid] = n + 1
+        return times(user=per_read * n, system=0.0)
+
+    monkeypatch.setattr(psutil.Process, "cpu_times", cpu_times)
 
 
 def test_sample_tree_reports_a_session_subtree_inside_the_bridge_total(bridge_tree):
@@ -197,7 +248,53 @@ def test_sample_tree_reports_a_session_subtree_inside_the_bridge_total(bridge_tr
     # The session and the tool it started, not the bridge.
     assert entry["procs"] == session_procs >= 2
     assert 0 < entry["rss_bytes"] < s["rss_bytes"]  # a part of the total, never all of it
-    assert 0.0 <= entry["cpu_percent"] <= s["cpu_percent"]
+    # The identity the runner pins: the session process's own start.
+    epoch, ticks = entry["start"]
+    want_epoch, want_ticks = procutil.proc_start_pair(session)
+    assert ticks == want_ticks
+    assert epoch is not None and abs(epoch - want_epoch) < 2
+
+
+def test_sample_tree_session_cpu_is_its_own_subtree_exactly(bridge_tree, monkeypatch):
+    # 0.01 cpu-seconds per process over a 0.1s window is 10% each, so the figures are
+    # exact: the session gets its own processes' share, never the bridge total.
+    root, session, session_procs = bridge_tree
+    _fixed_cpu(monkeypatch)
+    s = metrics.sample_tree(root, interval=0.1, sessions={session: "u"})
+    assert s is not None
+    assert s["cpu_percent"] == 10.0 * s["procs"]
+    assert s["sessions"]["u"]["cpu_percent"] == 10.0 * session_procs
+    assert s["sessions"]["u"]["cpu_percent"] < s["cpu_percent"]
+
+
+def test_sample_tree_breakdown_follows_normalize_cpu(bridge_tree, monkeypatch):
+    root, session, session_procs = bridge_tree
+    _fixed_cpu(monkeypatch)
+    monkeypatch.setattr(psutil, "cpu_count", lambda: 4)
+    s = metrics.sample_tree(root, interval=0.1, normalize_cpu=True, sessions={session: "u"})
+    assert s is not None
+    assert s["cpu_normalized"] is True
+    assert s["cpu_percent"] == round(10.0 * s["procs"] / 4, 1)
+    assert s["sessions"]["u"]["cpu_percent"] == round(10.0 * session_procs / 4, 1)
+
+
+def test_sample_tree_keeps_sibling_sessions_apart(two_session_tree, monkeypatch):
+    # Two sessions under one bridge each get their own processes only.
+    root, sessions = two_session_tree
+    assert len(sessions) == 2
+    _fixed_cpu(monkeypatch)
+    s = metrics.sample_tree(
+        root, interval=0.1, sessions={pid: f"u{i}" for i, (pid, _) in enumerate(sessions)}
+    )
+    assert s is not None
+    for i, (pid, procs) in enumerate(sessions):
+        entry = s["sessions"][f"u{i}"]
+        assert entry["pid"] == pid
+        assert entry["procs"] == procs
+        assert entry["cpu_percent"] == 10.0 * procs
+    # Together the sessions are part of the bridge total, which also has the bridge itself.
+    assert sum(e["procs"] for e in s["sessions"].values()) < s["procs"]
+    assert sum(e["rss_bytes"] for e in s["sessions"].values()) < s["rss_bytes"]
 
 
 def test_sample_tree_leaves_out_a_session_pid_outside_the_tree(bridge_tree):
@@ -215,7 +312,7 @@ def test_sample_tree_leaves_out_a_session_pid_outside_the_tree(bridge_tree):
 def test_sample_tree_leaves_out_a_session_that_exits_mid_sample(bridge_tree, monkeypatch):
     # The session root fails its second read (it exited between the snapshots). Its
     # orphaned tool must not be reported as the whole session.
-    root, session, session_procs = bridge_tree
+    root, session, _procs = bridge_tree
     real = psutil.Process.memory_info
 
     def gone_for_session(self):
@@ -229,32 +326,70 @@ def test_sample_tree_leaves_out_a_session_that_exits_mid_sample(bridge_tree, mon
     assert s["sessions"] == {}
 
 
-def test_sample_tree_breakdown_follows_normalize_cpu(bridge_tree, monkeypatch):
+def test_sample_tree_counts_a_session_whose_tool_exits_mid_sample(bridge_tree, monkeypatch):
+    # A tool that exits between the snapshots drops out of the session figure; the session
+    # itself still reports, without it.
     root, session, session_procs = bridge_tree
-    monkeypatch.setattr(psutil, "cpu_count", lambda: 4)
-    s = metrics.sample_tree(root, interval=0.02, normalize_cpu=True, sessions={session: "u"})
+    tool = psutil.Process(session).children(recursive=True)[0].pid
+    real = psutil.Process.memory_info
+
+    def gone_for_tool(self):
+        if self.pid == tool:
+            raise psutil.NoSuchProcess(self.pid)
+        return real(self)
+
+    monkeypatch.setattr(psutil.Process, "memory_info", gone_for_tool)
+    s = metrics.sample_tree(root, interval=0.02, sessions={session: "u"})
     assert s is not None
-    assert s["cpu_normalized"] is True
-    assert s["sessions"]["u"]["cpu_percent"] <= s["cpu_percent"]
+    assert s["sessions"]["u"]["procs"] == session_procs - 1
 
 
-def test_sample_tree_skips_the_ppid_read_without_sessions(monkeypatch):
-    # A plain sample costs what it did before the breakdown existed: no ppid reads.
-    def boom(self):
-        raise AssertionError("ppid read without a breakdown")
+def test_sample_tree_leaves_out_a_session_whose_walk_fails(bridge_tree, monkeypatch):
+    # The session's own children walk fails (it exited, or a procfs with no btime line):
+    # no figure, and the bridge total is still returned.
+    root, session, _procs = bridge_tree
+    real = psutil.Process.children
 
-    monkeypatch.setattr(psutil.Process, "ppid", boom)
-    assert metrics.sample_tree(os.getpid(), interval=0.01, sessions={}) is not None
+    def walk(self, recursive=False):
+        if self.pid == session:
+            raise RuntimeError("line 'btime' not found in /proc/stat")
+        return real(self, recursive=recursive)
+
+    monkeypatch.setattr(psutil.Process, "children", walk)
+    s = metrics.sample_tree(root, interval=0.02, sessions={session: "u"})
+    assert s is not None
+    assert s["sessions"] == {}
+    assert s["procs"] > 1
 
 
-def test_session_owners_nearest_session_wins_and_figures_never_overlap():
-    # 1 = bridge. 10 = session A, 11 its tool. 20 = session B started inside A's tool,
-    # 21 its tool. 30 = a helper of the bridge itself, owned by no session.
-    parent = {10: 1, 11: 10, 20: 11, 21: 20, 30: 1}
-    owners = metrics._session_owners(1, parent, {10, 20})
-    assert owners == {10: 10, 11: 10, 20: 20, 21: 20}
+def test_sample_tree_walks_no_session_subtree_without_sessions(bridge_tree, monkeypatch):
+    # A plain sample costs what it did before the breakdown existed: one children walk,
+    # the bridge's own, and no identity reads.
+    root, _session, _procs = bridge_tree
+    real = psutil.Process.children
+    walked: list[int] = []
+
+    def walk(self, recursive=False):
+        walked.append(self.pid)
+        return real(self, recursive=recursive)
+
+    def boom(pid):
+        raise AssertionError("identity read without a breakdown")
+
+    monkeypatch.setattr(psutil.Process, "children", walk)
+    monkeypatch.setattr(procutil, "proc_start_pair", boom)
+    assert metrics.sample_tree(root, interval=0.01, sessions={}) is not None
+    assert walked == [root]
 
 
-def test_session_owners_terminates_on_a_ppid_cycle():
-    # A cycle can only come from pids recycled between reads; the walk is bounded.
-    assert metrics._session_owners(1, {5: 6, 6: 5}, {99}) == {}
+def test_own_members_nearest_session_wins_and_figures_never_overlap():
+    # 10 = session A with tool 11. 20 = session B started inside A's tool, with tool 21.
+    subtrees = {10: {10, 11, 20, 21}, 20: {20, 21}}
+    assert metrics._own_members(subtrees) == {10: {10, 11}, 20: {20, 21}}
+
+
+def test_own_members_mutual_containment_reports_neither_root():
+    # Only a recycled pid can make two roots contain each other; neither keeps its root,
+    # so neither gets a figure.
+    own = metrics._own_members({10: {10, 20}, 20: {20, 10}})
+    assert 10 not in own[10] and 20 not in own[20]

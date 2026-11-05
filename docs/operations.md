@@ -203,7 +203,9 @@ other's figures. Each live session listed under a standard bridge also shows its
 CPU and memory: the session process and the tools that it started, taken from the
 same sample, so the figure is a part of the bridge figure. The session's process is
 the pid that `claude agents --json` reports for it. A session shows no figure when
-Clauster does not find that pid inside the bridge's process tree. Clauster leaves
+Clauster does not find that pid inside the bridge's process tree, or when the process
+at that pid is not the one that Clauster first measured for the session (a reused
+pid). Clauster leaves
 the figure out in that case, and does not estimate it. The figures are in the
 `sessions` field of each `/api/metrics` entry, keyed by session id.
 `/api/projects/{name}/metrics` still returns the project **total**,

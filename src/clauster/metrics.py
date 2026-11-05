@@ -15,6 +15,8 @@ from collections.abc import Mapping
 
 import psutil
 
+from . import procutil
+
 _log = logging.getLogger("clauster.metrics")
 
 # Errors meaning "this process is gone / not inspectable" — treated as skip.
@@ -32,29 +34,20 @@ def _io_bytes(proc: psutil.Process) -> tuple[int, int] | None:
         return None
 
 
-def _session_owners(
-    root_pid: int, parent: dict[int, int], session_roots: set[int]
-) -> dict[int, int]:
-    """Map each process of the bridge tree to the session root that owns it.
+def _own_members(subtrees: dict[int, set[int]]) -> dict[int, set[int]]:
+    """Split overlapping session subtrees so that each process counts for one session only.
 
-    ``parent`` is the pid → ppid map read during the first snapshot. A process belongs to
-    the NEAREST session root on its ancestor chain, so a session started inside another
-    session counts once, under itself, and the per-session figures never overlap. A
-    process with no session root above it (the bridge itself, a helper the bridge started)
-    belongs to none. The walk is bounded by the map size, so a ppid loop built from a
-    recycled pid cannot spin.
+    ``subtrees`` maps a session root to the pids of its whole subtree, the root included. A
+    session started inside another session's subtree keeps its own processes, and the
+    outer session loses them, so a process belongs to the NEAREST session above it and
+    the per-session figures never overlap. Two roots that each contain the other (only a
+    recycled pid can build that) both lose their own root and so both report nothing.
     """
-    owners: dict[int, int] = {}
-    for start in parent:
-        cur = start
-        for _ in range(len(parent) + 1):
-            if cur in session_roots:
-                owners[start] = cur
-                break
-            if cur == root_pid or cur not in parent:
-                break
-            cur = parent[cur]
-    return owners
+    own: dict[int, set[int]] = {}
+    for sp, members in subtrees.items():
+        nested = [subtrees[o] for o in subtrees if o != sp and o in members]
+        own[sp] = members.difference(*nested)
+    return own
 
 
 def sample_tree(
@@ -82,10 +75,15 @@ def sample_tree(
     ``sessions`` maps a session's own pid (as ``claude agents --json`` names it) to the
     key it is reported under. The returned ``sessions`` dict carries, per key, the
     ``pid``/``procs``/``cpu_percent``/``rss_bytes`` of that session's subtree, measured in
-    the SAME two snapshots as the bridge total, so each figure is a part of it. A session
-    is reported only when its pid is a strict descendant of ``pid`` in this walk; a pid
-    outside the tree, equal to the root, or gone before the second snapshot is left out
-    rather than guessed. Pass an empty mapping when no breakdown is wanted.
+    the SAME two snapshots as the bridge total, so each figure is a part of it, plus
+    ``start``: the session process's ``procutil.proc_start_pair`` identity, read before
+    the snapshots, for the caller to pin. The subtree is psutil's own ``children`` walk
+    from the session pid, which drops a process older than the session (a pid reused
+    under a stale parent link, as Windows keeps for orphans). A session is reported
+    only when its pid is a strict descendant of ``pid`` in this walk; a pid outside the
+    tree, equal to the root, or gone before the second snapshot is left out rather than
+    guessed. Pass an empty mapping when no breakdown is wanted: the breakdown then
+    costs nothing.
 
     Blocks for ``interval`` seconds — call it off the event loop
     (``asyncio.to_thread``), as the dashboard endpoint does.
@@ -112,16 +110,28 @@ def sample_tree(
         )
         procs = [root]
 
-    # First snapshot: cumulative cpu time + io byte counters, keyed by pid. The ppid is read
-    # only when a per-session breakdown is asked for, so a plain sample costs what it did.
+    # Each session's subtree, walked from the session pid before the first snapshot. Only a
+    # pid inside the bridge's own walk is considered, so the figure is always a part of
+    # the bridge total.
+    in_tree = {p.pid for p in procs}
+    subtrees: dict[int, set[int]] = {}
+    starts: dict[int, tuple[float | None, int | None]] = {}
+    for sp in sessions:
+        if sp == pid or sp not in in_tree:
+            continue
+        try:
+            kids = psutil.Process(sp).children(recursive=True)
+        except (*_GONE, RuntimeError):  # gone, or a procfs with no btime line (see above)
+            continue
+        subtrees[sp] = {sp, *(k.pid for k in kids)} & in_tree
+        starts[sp] = procutil.proc_start_pair(sp)
+
+    # First snapshot: cumulative cpu time + io byte counters, keyed by pid.
     first: dict[int, tuple[float, tuple[int, int] | None]] = {}
-    parent: dict[int, int] = {}
     for p in procs:
         try:
             ct = p.cpu_times()
             first[p.pid] = (ct.user + ct.system, _io_bytes(p))
-            if sessions and p.pid != pid:
-                parent[p.pid] = p.ppid()
         except _GONE:
             continue
 
@@ -154,20 +164,22 @@ def sample_tree(
     cores = (psutil.cpu_count() or 1) if normalize_cpu else 1
 
     def _pct(delta: float) -> float:
+        """Turn a cpu-seconds delta over the window into this sample's CPU% figure."""
         return round(round(max(0.0, delta) / interval * 100, 1) / cores, 1)
 
-    # A session root must be measured in BOTH snapshots: one that exited mid-sample gets
-    # no figure at all, not a partial one made of the children it left behind.
-    roots = {sp for sp in sessions if sp in measured and sp in parent}
-    owners = _session_owners(pid, parent, roots) if roots else {}
     per_session: dict[str, dict] = {}
-    for sp in roots:
-        members = [q for q, owner in owners.items() if owner == sp and q in measured]
+    for sp, own in _own_members(subtrees).items():
+        members = [q for q in own if q in measured]
+        # The session root must be measured in BOTH snapshots: one that exited mid-sample
+        # gets no figure at all, not a partial one made of the children it left behind.
+        if sp not in members:
+            continue
         per_session[sessions[sp]] = {
             "pid": sp,
             "procs": len(members),
             "cpu_percent": _pct(sum(measured[q][0] for q in members)),
             "rss_bytes": sum(measured[q][1] for q in members),
+            "start": starts[sp],
         }
     return {
         "procs": len(procs),

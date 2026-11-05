@@ -1000,14 +1000,19 @@
                                 :aria-label="'Live transcript of session ' + bridgeSessionShortId(s)"
                                 title="Watch this session's transcript live, here in Clauster">
                           <svg class="ico me-1" aria-hidden="true"><use href="#ic-page"/></svg>Live transcript</button>
-                        <span class="ms-auto d-flex align-items-center gap-2 flex-shrink-0">
+                        {# flex-wrap + mw-100: with the metrics chip this group no longer fits
+                           one line at phone width. flex-shrink-0 keeps it whole beside the id
+                           when there is room; mw-100 caps it at the row width so its items
+                           wrap, where the list's overflow-hidden would otherwise clip the
+                           Open link. #}
+                        <span class="ms-auto d-flex flex-wrap justify-content-end align-items-center gap-2 flex-shrink-0 mw-100">
                           {# This session's own share of the bridge's metrics chip (backlog
                              TASK-342): the session process plus the tools it started, from
                              the same sample as the bridge figure. Absent, not zero, when the
                              backend could not place the session inside this bridge's tree.
                              The visually-hidden copy is the chip's explanation for a screen
                              reader, as on the bridge chip (#1306); it adds no tab stop. #}
-                          <span class="text-secondary small" data-test="bridge-session-metrics" x-cloak
+                          <span class="text-secondary small text-nowrap" data-test="bridge-session-metrics" x-cloak
                                 x-show="bridgeSessionMetricsLabel(i.rk, s)"
                                 :title="bridgeSessionMetricsTitle(i.rk, s)"
                                 x-text="bridgeSessionMetricsLabel(i.rk, s)"></span>
