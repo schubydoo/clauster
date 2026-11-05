@@ -286,6 +286,8 @@ def _apply_owner_only_acl(path: Path) -> str | None:
     (caller logs it). Split out from :func:`_restrict_windows_acl` so the caching + warning
     policy is testable apart from the subprocess mechanics.
     """
+    from . import procutil  # local: keeps this low-level module's import graph minimal
+
     icacls = shutil.which("icacls")
     if icacls is None:
         return "icacls not found on PATH"
@@ -302,7 +304,14 @@ def _apply_owner_only_acl(path: Path) -> str | None:
         f"{_WIN_SYSTEM_SID}:(OI)(CI)F",
     ]
     try:  # noqa: S603 — absolute icacls, list-argv, no shell
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=30, check=False)
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            env=procutil.child_env(),
+        )
     except (OSError, subprocess.SubprocessError) as exc:
         # subprocess.SubprocessError covers TimeoutExpired (a hung/wedged icacls hitting the
         # 30s cap) — which is NOT an OSError, so catching only OSError would let the timeout

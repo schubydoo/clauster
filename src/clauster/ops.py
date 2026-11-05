@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import http.client
 import json
+import logging
 import ntpath
 import os
 import re
@@ -23,9 +24,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO, Literal, TypedDict
+from typing import BinaryIO, Final, Literal, TypedDict
 from xml.sax.saxutils import escape as _xml_escape
 
+import psutil
 import yaml
 from pydantic import ValidationError
 
@@ -44,6 +46,8 @@ from .config_editor import _friendly_validation_message
 from .config_write import _yaml_error_where
 from .discovery import Project, discover_projects
 from .state import CURRENT_SCHEMA, CorruptStateFile, StateStore
+
+_log = logging.getLogger("clauster.ops")
 
 # ----- doctor -----------------------------------------------------------
 
@@ -318,6 +322,9 @@ def run_doctor(
             else "no projects discovered",
         )
     )
+
+    # long-lived processes still carrying an old binary's PyInstaller env (#1708)
+    checks.append(_check_bundle_env(config, projects))
 
     # port (warn-only; see the ``check_port`` paragraph in the docstring)
     if check_port:
@@ -990,6 +997,184 @@ def _check_node_toolchain(config: ClausterConfig) -> Check | None:
             "set it with `nvm alias default <version>`",
         )
     return Check("node-toolchain", OK, f"nvm default node on bridge PATH ({bin_dir})")
+
+
+_BUNDLE_ENV_HINT = "restart it to drop the old binary's environment"
+
+
+#: ``_proc_environ`` results that are not an environment. A GONE process exited after it was
+#: listed, so it hands nothing to anyone and is left out of the counts. An UNREADABLE one is
+#: still running (or cannot be told apart from running) but its environment was not read, so
+#: it is reported: counting it as clean would claim a check that never happened.
+_ENV_GONE: Final = "gone"
+_ENV_UNREADABLE: Final = "unreadable"
+_EnvironRead = dict[str, str] | Literal["gone", "unreadable"]
+
+
+def _proc_environ(pid: int, proc_root: Path = Path("/proc")) -> _EnvironRead:
+    """Return the environment ``pid`` started with, or why it could not be read.
+
+    Reads ``/proc/<pid>/environ`` for a process of THIS user only. ``_ENV_GONE`` when the
+    pid no longer exists (``FileNotFoundError`` / ``ProcessLookupError``, the kernel's
+    answer for an exited process). ``_ENV_UNREADABLE`` for another user's process, a
+    permission or other read error, or an empty environ (a process exiting as a zombie
+    reads empty; a bridge never runs with an empty environment). The values are returned
+    for the caller to classify and are never reported.
+    """
+    proc_dir = proc_root / str(pid)
+    try:
+        if proc_dir.stat().st_uid != os.getuid():
+            return _ENV_UNREADABLE
+        raw = (proc_dir / "environ").read_bytes()
+    except (FileNotFoundError, ProcessLookupError):
+        return _ENV_GONE
+    except (OSError, ValueError):
+        return _ENV_UNREADABLE
+    if not raw:
+        return _ENV_UNREADABLE
+    env: dict[str, str] = {}
+    for item in raw.split(b"\0"):
+        name, sep, value = item.partition(b"=")
+        if sep:
+            env[name.decode("utf-8", "replace")] = value.decode("utf-8", "replace")
+    return env
+
+
+def _carries_bundle_env(env: dict[str, str]) -> bool:
+    """Whether ``env`` holds a standalone binary's PyInstaller runtime state (issue 1708).
+
+    Any ``_PYI_*`` name, or an ``LD_LIBRARY_PATH`` entry that is a ``_MEI…`` unpack dir.
+    """
+    if any(name.startswith(procutil.PYI_ENV_PREFIX) for name in env):
+        return True
+    entries = env.get("LD_LIBRARY_PATH", "").split(":")
+    return any(PurePosixPath(e).name.startswith("_MEI") for e in entries if e)
+
+
+def _bundle_env_suspects(config: ClausterConfig, projects: list[Project]) -> list[tuple[str, int]]:
+    """Return ``(label, pid)`` for each live process Clauster tracks that hands out an env.
+
+    Standard bridges (from their bridge pointer), pty bridges (from the keeper sidecars),
+    background agents (from Claude Code's roster), and the claustrum daemon (by its
+    ``-socket`` argument), which every hosted session inherits its environment from. Each
+    pid must pass the identity gate its owner uses, so a recycled pid is not reported. A
+    pty KEEPER is deliberately not listed: a current keeper keeps the bundle's runtime on
+    purpose (``procutil.keeper_launch_env``), and what reaches the session is its bridge's
+    environment.
+    """
+    from . import pointers, pty_keeper, supervisor  # local: keeps ops' import graph as it was
+
+    found: list[tuple[str, int]] = []
+    for project in projects:
+        ptr = pointers.pointer_for_project(project.path)
+        if ptr is not None and procutil.is_live_standard_bridge(ptr.pid, ptr.proc_start):
+            found.append((f"bridge for {project.name}", ptr.pid))
+    for keeper in pty_keeper.iter_keepers((config.state_dir / "logs").expanduser()):
+        bridge_pid = keeper.bridge_pid
+        if not keeper.alive or bridge_pid is None:
+            continue
+        info = pty_keeper._read_sidecar(keeper.sidecar)
+        start, ticks, boot = (
+            info.get("bridge_proc_start"),
+            info.get("bridge_start_ticks"),
+            info.get("boot_id"),
+        )
+        if procutil.is_live_bridge(
+            bridge_pid,
+            start if isinstance(start, (int, float)) and not isinstance(start, bool) else None,
+            start_ticks=ticks if isinstance(ticks, int) and not isinstance(ticks, bool) else None,
+            boot_id=boot if isinstance(boot, str) else None,
+        ):
+            found.append((f"pty bridge for {keeper.project or 'an unknown project'}", bridge_pid))
+    for worker_id, worker in supervisor.load_roster_workers().items():
+        if not supervisor.valid_job_id(worker_id):  # a Claude-owned file: show only safe ids
+            continue
+        pid = worker.get("pid") if isinstance(worker, dict) else None
+        if isinstance(pid, int) and supervisor.worker_alive(pid, worker.get("procStart")):
+            found.append((f"background agent {worker_id}", pid))
+    if config.claustrum.enabled:
+        found.extend(("claustrum daemon", pid) for pid in _claustrum_daemon_pids(config))
+    return found
+
+
+def _claustrum_daemon_pids(config: ClausterConfig) -> list[int]:
+    """Return the pids of this deployment's claustrum daemon (``-serve -socket <its sock>``)."""
+    from .claustrum_client import ClaustrumError
+    from .claustrum_daemon import ClaustrumDaemon  # local: avoid a module-level cycle
+
+    try:
+        sock = str(ClaustrumDaemon(config).socket_path)
+    except ClaustrumError:
+        return []  # an unusable socket path: no daemon can be serving this deployment
+    pids = []
+    for proc in psutil.process_iter(["pid", "cmdline"]):
+        argv = proc.info.get("cmdline") or []
+        if "-serve" in argv and any(
+            a == "-socket" and b == sock for a, b in zip(argv, argv[1:], strict=False)
+        ):
+            pids.append(proc.info["pid"])
+    return pids
+
+
+def _check_bundle_env(
+    config: ClausterConfig,
+    projects: list[Project],
+    *,
+    read_environ: Callable[[int], _EnvironRead] = _proc_environ,
+) -> Check:
+    """Flag bridges and daemons that still carry an old standalone binary's env (#1708).
+
+    A release before the fix passed the binary's ``_PYI_*`` state and its ``_MEI…``
+    library path to everything it started. Bridges, pty keepers and the claustrum
+    daemon outlive a Clauster upgrade, so they keep handing that environment to every
+    session until they are restarted. Linux only (it reads ``/proc``).
+
+    Three counts, so the row never claims a check it did not do (invariant 1): leaked,
+    clean, and not readable. A process that exited after it was listed is left out. Any
+    leaked or unreadable process makes the row a WARN, and when no environment could be
+    read at all it says the check was not completed. It never FAILs, and it names only
+    the process and its pid, never an environment value.
+    """
+    if not sys.platform.startswith("linux"):
+        return Check("bundle-env", OK, f"not checked on {sys.platform}: it reads Linux /proc")
+    try:
+        suspects = _bundle_env_suspects(config, projects)
+        leaking: list[str] = []
+        unreadable: list[str] = []
+        clean = 0
+        for label, pid in suspects:
+            env = read_environ(pid)
+            if env == _ENV_GONE:
+                continue
+            if not isinstance(env, dict):
+                unreadable.append(f"{label} (pid {pid})")
+            elif _carries_bundle_env(env):
+                leaking.append(f"{label} (pid {pid})")
+            else:
+                clean += 1
+    except Exception as exc:  # noqa: BLE001 - an advisory probe must never break doctor
+        # The traceback names files and pids, never an environment value.
+        _log.debug("bundle-env probe failed", exc_info=True)
+        return Check("bundle-env", WARN, f"could not check: {type(exc).__name__}")
+    not_read = f"could not be read: {', '.join(unreadable)}" if unreadable else ""
+    if leaking:
+        detail = (
+            "started with an old standalone binary's environment: "
+            + ", ".join(leaking)
+            + f" — {_BUNDLE_ENV_HINT}"
+        )
+        return Check("bundle-env", WARN, detail + (f"; {not_read}" if not_read else ""))
+    if unreadable and not clean:
+        return Check(
+            "bundle-env",
+            WARN,
+            "check not completed: could not read the environment of " + ", ".join(unreadable),
+        )
+    if unreadable:
+        return Check("bundle-env", WARN, f"{clean} clean, {len(unreadable)} {not_read}")
+    if not clean:
+        return Check("bundle-env", OK, "no running bridge, agent or claustrum daemon to check")
+    return Check("bundle-env", OK, f"{clean} running process(es) have a clean environment")
 
 
 def _check_port(host: str, port: int) -> Check:

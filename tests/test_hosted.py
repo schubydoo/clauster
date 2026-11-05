@@ -1462,6 +1462,20 @@ async def test_spawn_stamps_neither_half_when_the_daemon_reports_no_pid(
             await mgr.aclose()
 
 
+async def test_manager_spawn_sends_no_env_so_the_agent_gets_the_daemons(fake_claustrum):
+    """A hosted agent's environment is the claustrum daemon's own (issue 1708).
+
+    The spawn RPC carries no ``env``, so the daemon starts the agent with ITS environment,
+    and Clauster builds that through ``procutil.child_env`` when it spawns the daemon
+    (``test_spawn_strips_the_frozen_binarys_runtime_state``). Together: an agent under a
+    daemon this Clauster started is clean. Sending an env here would bypass that.
+    """
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        await _spawn(mgr, client)
+        assert len(fake.spawned) == 1
+        assert "env" not in fake.spawned[0]
+
+
 async def test_manager_spawn_registers_running_instance(fake_claustrum):
     async with _manager(fake_claustrum) as (fake, client, mgr):
         inst = await _spawn(mgr, client)

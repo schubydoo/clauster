@@ -455,6 +455,61 @@ version:
   something that is not a version, for example a bare commit SHA. Reinstall
   `claude` with the installer.
 
+### In a session, Node fails with `GLIBC_2.38 not found`, or `clauster` cannot load libpython
+
+**What you see:** this applies to the standalone binary. On Linux, in a session
+that Clauster started, `node`, `npm` or a Node-based MCP server fails with a
+`GLIBC_2.38 not found` error for `libstdc++`. On any OS, `clauster` (or the recap
+hook) run from such a session fails to start, for example because it cannot load
+`libpython3.13.so.1.0`. On Linux, `clauster doctor` shows a `bundle-env` warning
+that names the process.
+
+**Most likely cause:** an older Clauster release started the bridge, the
+background agent or the claustrum daemon. Older releases passed the binary's own
+runtime environment to every process they started: its `_MEI…` unpack directory
+in `LD_LIBRARY_PATH`, and the `_PYI_*` variables. The programs in the session
+then load the binary's bundled libraries, or look for an unpack directory that a
+Clauster restart already deleted. Current releases remove these variables before
+they start a process.
+
+**The fix:** upgrade Clauster first. A process keeps the environment it started
+with, and bridges, pty keepers, background agents and the claustrum daemon all
+outlive a Clauster restart. So an upgrade alone does not change them. Restart
+each old one:
+
+1. For a standard bridge, click **Stop** on its dashboard card, then click
+   **Resume**.
+2. For an Interactive Session (pty) bridge, click **Stop** on its card, then
+   click **Resume**. Stop also ends the pty keeper that holds the bridge, and
+   Resume starts a new keeper.
+3. For a background agent, wait until it finishes its task, then click
+   **Resume**. If it waits for your input or a permission answer, answer it
+   first. Resume starts a new background job, with a new id, that continues the
+   conversation. If its row shows no **Resume**, the agent has no recorded
+   session, and you cannot resume it.
+   Do not click **Stop** first: Stop removes the agent from the list, and you
+   cannot resume it after that. Claude Code starts background agents from its
+   own supervisor process, which Clauster does not manage. If new agents still
+   get the warning, the likely cause is that the supervisor has the old
+   environment. End every background agent so that the supervisor can exit, then
+   start the agents again.
+4. For Direct Sessions, end each session, then stop the claustrum daemon process.
+   Its command line contains `-serve -socket <state_dir>/claustrum/daemon.sock`
+   (or the `claustrum.socket_path` that you configured). Then restart Clauster,
+   which starts a new daemon at startup. Every Direct Session gets its
+   environment from the daemon.
+
+To see if one process still has the old environment, run this on the Linux host.
+No output means that the process is clean:
+
+```sh
+tr '\0' '\n' < /proc/<pid>/environ | grep -E '^(LD_LIBRARY_PATH=(.*:)?[^:]*/_MEI|_PYI_)'
+```
+
+Do not run this check on a pty keeper's own pid. A current keeper keeps these
+variables on purpose, and it removes them from the bridge that it starts. Check
+the bridge pid instead.
+
 ## An Interactive Session (pty) bridge is wedged
 
 ### The live log tail is silent or frozen
@@ -712,6 +767,7 @@ present in every run:
 | `systemd` | `KillMode=process` (bridges survive a restart) | a restart would kill live pty bridges |
 | `node-toolchain` | node resolvable for npx MCP servers | nvm-only node invisible to bridges |
 | `workspace-trust` | `N/M discovered projects trusted` (OK when all are) | any untrusted discovered project — a session there will stall on the trust prompt (see above) |
+| `bundle-env` | no running bridge, background agent or claustrum daemon has an older binary's environment (Linux only) | a process that an older standalone binary started; restart it as [described above](#in-a-session-node-fails-with-glibc_238-not-found-or-clauster-cannot-load-libpython). `could not be read` or `check not completed` means doctor could not read that process's environment, so it does not know. Check the process with [the `/proc` command](#in-a-session-node-fails-with-glibc_238-not-found-or-clauster-cannot-load-libpython), run as the user that owns the process (or with `sudo`) |
 
 The rest belong to two **prefixed families** that grow as optional pieces are
 added, so read the prefix rather than expecting this page to enumerate them:

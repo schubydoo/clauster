@@ -25,6 +25,8 @@ on:
       - clauster.spec
       - pyinstaller_entry.py
       - scripts/smoke_binary.py
+      # The smoke drives this fake claude and reads the environments it records.
+      - tests/fixtures/fake_claude/**
       - .github/workflows/build-binaries.yml
       - pyproject.toml
       - uv.lock

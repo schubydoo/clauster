@@ -337,8 +337,10 @@ class BridgeLaunch:
             # Overlay the operator's PATH/env extensions onto the KEEPER's env: the
             # keeper inherits them into its own os.environ and re-emits them (still
             # secret-scrubbed) when it spawns the bridge via child_env(), so the pty
-            # bridge gets the same extended PATH/env as the standard path.
-            keeper_env = procutil.child_env(self._bridge_env_overlay())
+            # bridge gets the same extended PATH/env as the standard path. In the
+            # standalone binary the keeper also keeps this bundle's PyInstaller state, and
+            # its own child_env() strips that from the bridge (keeper_launch_env, #1708).
+            keeper_env = procutil.keeper_launch_env(self._bridge_env_overlay())
             # Detach the keeper so it outlives a Clauster restart. POSIX: its own session
             # (setsid). Windows: DETACHED_PROCESS drops the shared console so a clauster
             # exit / CTRL can't reach it, plus CREATE_NEW_PROCESS_GROUP for a clean group

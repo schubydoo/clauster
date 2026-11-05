@@ -14,8 +14,11 @@ Cross-OS, standard library only. Usage::
 
 from __future__ import annotations
 
+import contextlib
 import http.client
+import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -114,15 +117,7 @@ def _check_boot(binary: Path) -> None:
         tmp = Path(td)
         (tmp / "projects").mkdir()
         port = _free_port()
-        cfg = tmp / "clauster.yml"
-        cfg.write_text(
-            f"host: 127.0.0.1\n"
-            f"port: {port}\n"
-            f"projects_root: {tmp / 'projects'}\n"
-            f"state_dir: {tmp / 'state'}\n"
-            f"claude:\n  binary: {FAKE_CLAUDE}\n",
-            encoding="utf-8",
-        )
+        cfg = _write_config(tmp, port)
         # Isolate HOME/USERPROFILE so the runtime never reads/writes a real
         # ~/.claude.json on the runner.
         home = tmp / "home"
@@ -139,16 +134,333 @@ def _check_boot(binary: Path) -> None:
             _wait_healthy(port, proc)
             print(f"healthz OK on :{port}")
         finally:
-            proc.terminate()
+            _stop_server(proc)
+
+
+# An LD_LIBRARY_PATH the user "had" before starting the binary. A spawned claude must get
+# exactly this back: not the binary's unpack dir prepended, and not dropped. The directory
+# does not exist, which is harmless on a library search path.
+_USER_LIB = os.path.join(os.sep, "smoke-1708-user-lib")
+
+
+def _write_config(tmp: Path, port: int) -> Path:
+    """Write a throwaway loopback config whose ``claude`` is the env-dumping fake."""
+    cfg = tmp / "clauster.yml"
+    cfg.write_text(
+        f"host: 127.0.0.1\n"
+        f"port: {port}\n"
+        f"projects_root: {tmp / 'projects'}\n"
+        f"state_dir: {tmp / 'state'}\n"
+        f"claude:\n  binary: {FAKE_CLAUDE}\n",
+        encoding="utf-8",
+    )
+    return cfg
+
+
+def _request(port: int, method: str, path: str, body: dict | None = None) -> dict:
+    """Send a JSON request to the local server; fail at once on an HTTP error status."""
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    try:
+        conn.request(
+            method,
+            path,
+            body=None if body is None else json.dumps(body),
+            headers={"Content-Type": "application/json", "Origin": f"http://127.0.0.1:{port}"},
+        )
+        response = conn.getresponse()
+        payload = response.read().decode("utf-8", "replace")
+    finally:
+        conn.close()
+    if response.status >= 400:
+        raise SystemExit(f"{method} {path} failed: HTTP {response.status} {payload[:300]}")
+    parsed = json.loads(payload) if payload else {}
+    return parsed if isinstance(parsed, dict) else {"items": parsed}
+
+
+def _read_dumps(dump_dir: Path) -> list[dict]:
+    """Return every environment the fake claude recorded (one JSON file per run)."""
+    return [json.loads(p.read_text(encoding="utf-8")) for p in sorted(dump_dir.glob("env-*.json"))]
+
+
+def _assert_clean(dumps: list[dict], *, expect_ld: str | None, route: str) -> None:
+    """Fail unless every recorded child env is free of the binary's PyInstaller state."""
+    for dump in dumps:
+        env = dump["env"]
+        problems = [name for name in env if name.upper().startswith("_PYI_")]
+        if "LD_LIBRARY_PATH_ORIG" in env:
+            problems.append("LD_LIBRARY_PATH_ORIG")
+        if env.get("LD_LIBRARY_PATH") != expect_ld:
+            problems.append(f"LD_LIBRARY_PATH={env.get('LD_LIBRARY_PATH')!r}")
+        if problems:
+            raise SystemExit(
+                f"{route}: `claude {' '.join(dump['argv'])}` inherited the binary's runtime "
+                f"env (expected LD_LIBRARY_PATH={expect_ld!r}): {problems}"
+            )
+
+
+def _wait_for_argv(dump_dir: Path, wanted: set[str], timeout: float = 45.0) -> list[dict]:
+    """Wait until the fake claude has run once with each ``argv[0]`` in ``wanted``."""
+    deadline = time.monotonic() + timeout
+    while True:
+        dumps = _read_dumps(dump_dir)
+        seen = {d["argv"][0] for d in dumps if d["argv"]}
+        if wanted <= seen:
+            return dumps
+        if time.monotonic() > deadline:
+            raise SystemExit(
+                f"fake claude never ran as {sorted(wanted - seen)} (saw {sorted(seen)})"
+            )
+        time.sleep(0.3)
+
+
+def _pid_alive(pid: int) -> bool:
+    """Whether ``pid`` names a running, non-zombie process. POSIX only.
+
+    Signal 0 probes without signalling. Never call this on Windows: there ``os.kill``
+    with any signal but the two CTRL events TERMINATES the process.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    stat = Path(f"/proc/{pid}/stat")  # Linux: an unreaped zombie still answers signal 0
+    try:
+        return stat.read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except (FileNotFoundError, ProcessLookupError):
+        return not Path("/proc/self").is_dir()  # Linux: reaped since the probe
+    except (OSError, IndexError):
+        return True
+
+
+def _cmdline(pid: int) -> str:
+    """Return ``pid``'s command line, or ``""`` when it cannot be read. POSIX only."""
+    if Path("/proc/self").is_dir():
+        try:
+            raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        except OSError:
+            return ""
+        return raw.replace(b"\0", b" ").decode("utf-8", "replace")
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True, check=False
+        )
+    except OSError:
+        return ""
+    return result.stdout.strip()
+
+
+def _kill_leftovers(tmp: Path, dumps_dir: Path) -> None:
+    """SIGKILL every fake bridge and pty keeper this check started that is still up (POSIX).
+
+    The set comes from ground truth, not from what the check got far enough to record:
+    every run the fake claude dumped, and every pid in a keeper sidecar. A pid is only
+    killed while its command line still names the fake claude or the keeper AND this
+    check's temp dir (every bridge and keeper here carries a ``--debug-file`` or
+    ``--sidecar`` under it), so a recycled pid, or another Clauster's keeper, is left alone.
+    """
+    roots = {str(tmp), os.path.realpath(tmp)}
+    pids = {
+        int(path.stem.removeprefix("env-"))
+        for path in dumps_dir.glob("env-*.json")
+        if path.stem.removeprefix("env-").isdigit()
+    }
+    for sidecar in (tmp / "state").rglob("*.keeper.json"):
+        try:
+            info = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        pids.update(
+            v for v in (info.get("keeper_pid"), info.get("bridge_pid")) if isinstance(v, int)
+        )
+    for pid in sorted(pids):
+        line = _cmdline(pid) if _pid_alive(pid) else ""
+        ours = any(root in line for root in roots)
+        if ours and ("fake_claude" in line or "__pty-keeper__" in line):
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
+
+
+def _wait_until(predicate, timeout: float, what: str) -> None:
+    """Poll ``predicate`` until it is true, or fail naming ``what``."""
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() > deadline:
+            raise SystemExit(f"timed out after {timeout:.0f}s waiting for {what}")
+        time.sleep(0.2)
+
+
+def _stop_server(proc: subprocess.Popen) -> bool:
+    """Stop the booted binary; return True when it had to be killed by force.
+
+    ``proc`` is the one-file bootloader. On POSIX it forwards SIGTERM to the Python
+    server; a SIGKILL cannot be forwarded, so the fallback kills the process group (the
+    binary was started in its own session). On Windows ``terminate`` would end only the
+    bootloader and orphan the server, so the whole tree is ended with ``taskkill``.
+    """
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:  # taskkill refused: at least end the bootloader
+            proc.kill()
+            proc.wait(timeout=5)
+        return True
+    proc.terminate()
+    try:
+        proc.wait(timeout=15)
+        return False
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait(timeout=5)
+        return True
+
+
+def _keeper_survives_its_server(keeper: dict, server: subprocess.Popen) -> None:
+    """Prove the pty keeper outlives the server and still ends its bridge cleanly (POSIX).
+
+    The frozen keeper runs out of the server's unpack directory, which the server's
+    bootloader deletes on exit (``procutil.keeper_launch_env``). Stop the server, wait for
+    that directory to go (Linux, where ``/proc`` shows the keeper's env), then end the
+    bridge: the keeper must notice, record ``exited`` in its sidecar, and exit itself.
+    """
+    sidecar = Path(keeper["sidecar"])
+    keeper_pid, bridge_pid = keeper["keeper_pid"], keeper["bridge_pid"]
+    mei = None
+    environ = Path(f"/proc/{keeper_pid}/environ")
+    if environ.exists():
+        raw = environ.read_bytes().decode("utf-8", "replace")
+        pairs = (item.split("=", 1) for item in raw.split("\0") if "=" in item)
+        mei = dict(pairs).get("_PYI_APPLICATION_HOME_DIR")
+        if not mei:  # PyInstaller is pinned; a rename must not quietly weaken this check
+            raise SystemExit("the frozen keeper has no _PYI_APPLICATION_HOME_DIR in its env")
+    if _stop_server(server):
+        raise SystemExit("the server did not exit within 15s of SIGTERM and was killed")
+    if mei:
+        _wait_until(lambda: not os.path.isdir(mei), 20, "the server's unpack dir to be deleted")
+    if not _pid_alive(keeper_pid):
+        raise SystemExit("the pty keeper died with its server; it must outlive a restart")
+    os.kill(bridge_pid, signal.SIGINT)  # the fake bridge's clean-exit signal
+    _wait_until(lambda: not _pid_alive(keeper_pid), 20, "the keeper to exit after its bridge")
+    state = json.loads(sidecar.read_text(encoding="utf-8")).get("state")
+    if state != "exited":
+        raise SystemExit(f"keeper sidecar ended in state {state!r}, expected 'exited'")
+    detail = "unpack dir deleted first" if mei else "unpack dir not observable here"
+    print(f"pty keeper outlived its server and exited cleanly ({detail})")
+
+
+def _check_child_env(binary: Path) -> None:
+    """Assert the BUILT binary hands every spawned claude a clean environment (issue 1708).
+
+    The PyInstaller bootloader prepends its temporary unpack dir to ``LD_LIBRARY_PATH``
+    and sets ``_PYI_*`` state before Python starts; a child that inherits them loads the
+    bundle's libraries, and a re-run of the binary from it can fail to start. The fake
+    claude dumps its env on every run. This boots the binary, starts a standard bridge
+    and (POSIX) a pty bridge, whose spawn is the ``__pty-keeper__`` re-invocation's own,
+    and checks every dumped env. On POSIX it also pins the keeper's single-process design
+    (the pid the runner records IS the keeper that writes the sidecar) and that the keeper
+    outlives its server. Last, ``doctor`` without an ``LD_LIBRARY_PATH`` covers the
+    "remove it" case.
+    """
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+        tmp = Path(td)
+        home = tmp / "home"
+        dumps_dir = tmp / "dumps"
+        for d in (home, dumps_dir, tmp / "projects" / "std", tmp / "projects" / "ptyproj"):
+            d.mkdir(parents=True)
+        port = _free_port()
+        cfg = _write_config(tmp, port)
+        env = {
+            **os.environ,
+            "HOME": str(home),
+            "USERPROFILE": str(home),
+            "LD_LIBRARY_PATH": _USER_LIB,
+            "FAKE_CLAUDE_ENV_DUMP_DIR": str(dumps_dir),
+            "FAKE_CLAUDE_MODE": "ready",  # bridges stay up until they are stopped
+        }
+        env.pop("LD_LIBRARY_PATH_ORIG", None)
+        log_path = tmp / "server.log"
+        keeper: dict | None = None
+        with log_path.open("wb") as log:
+            proc = subprocess.Popen(
+                [str(binary), "run", "-c", str(cfg)],
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                env=env,
+                start_new_session=(os.name != "nt"),
+            )
+        try:
+            _wait_healthy(port, proc)
+            wanted = {"--version", "remote-control"}
+            # Trust is written to the isolated HOME's ~/.claude.json, never the runner's.
+            _request(port, "POST", "/api/projects/trust-all", {})
+            std = _request(port, "POST", "/api/instances", {"project": "std"})
+            if not isinstance(std.get("instance_id"), str):
+                raise SystemExit(f"the standard spawn returned no instance id: {std}")
+            if os.name != "nt":  # the pty keeper needs a POSIX pty (ConPTY is an optional extra)
+                pty = _request(
+                    port, "POST", "/api/instances", {"project": "ptyproj", "resume_mode": "pty"}
+                )
+                wanted.add("--remote-control")
+                sidecars = sorted((tmp / "state").rglob("ptyproj-*.keeper.json"))
+                if not sidecars:
+                    raise SystemExit("the pty spawn wrote no keeper sidecar")
+                info = json.loads(sidecars[-1].read_text(encoding="utf-8"))
+                if not isinstance(info.get("bridge_pid"), int):
+                    raise SystemExit(f"the pty keeper reported no bridge: {info}")
+                if pty.get("keeper_pid") != info.get("keeper_pid"):
+                    raise SystemExit(
+                        f"the runner recorded keeper pid {pty.get('keeper_pid')} but the keeper "
+                        f"wrote {info.get('keeper_pid')}: the frozen keeper is no longer one "
+                        "process (see procutil.keeper_launch_env)"
+                    )
+                keeper = {**info, "sidecar": str(sidecars[-1])}
+                print(f"pty keeper is one process: pid {info['keeper_pid']}")
+            dumps = _wait_for_argv(dumps_dir, wanted)
+            _request(port, "DELETE", f"/api/instances/{std['instance_id']}")
+            if keeper is not None:
+                _keeper_survives_its_server(keeper, proc)
+        except BaseException:
+            print(f"--- server log ({log_path.name}, last 4000 chars) ---")
+            print(log_path.read_text(encoding="utf-8", errors="replace")[-4000:])
+            raise
+        finally:
             try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=5)
+                if proc.poll() is None:
+                    _stop_server(proc)
+            finally:
+                if os.name != "nt":  # never leave a fake bridge or keeper on the runner
+                    _kill_leftovers(tmp, dumps_dir)
+        _assert_clean(dumps, expect_ld=_USER_LIB, route="run")
+        print(
+            f"child env clean with a user LD_LIBRARY_PATH: {len(dumps)} spawns, {sorted(wanted)}"
+        )
+
+        doctor_dumps = tmp / "doctor-dumps"
+        doctor_dumps.mkdir()
+        env = {**env, "FAKE_CLAUDE_ENV_DUMP_DIR": str(doctor_dumps)}
+        env.pop("LD_LIBRARY_PATH")
+        result = subprocess.run(
+            [str(binary), "doctor", "-c", str(cfg)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if not _read_dumps(doctor_dumps):
+            raise SystemExit(
+                f"`doctor` never ran claude (rc={result.returncode}):\n"
+                f"{result.stdout}{result.stderr}"
+            )
+        dumps = _wait_for_argv(doctor_dumps, {"--version"}, timeout=5)
+        _assert_clean(dumps, expect_ld=None, route="doctor")
+        print(f"child env clean without an LD_LIBRARY_PATH: {len(dumps)} spawns")
 
 
 def main() -> int:
-    """Run the version + boot smoke checks against the binary in ``argv[1]``."""
+    """Run the version + boot + child-env smoke checks against the binary in ``argv[1]``."""
     if len(sys.argv) != 2:
         raise SystemExit("usage: smoke_binary.py <path-to-binary>")
     binary = Path(sys.argv[1]).resolve()
@@ -159,6 +471,7 @@ def main() -> int:
     _check_version(binary)
     _check_pty_keeper_routed(binary)
     _check_boot(binary)
+    _check_child_env(binary)
     print("smoke OK")
     return 0
 

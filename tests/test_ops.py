@@ -2662,3 +2662,273 @@ def test_doctor_cli_has_no_server_check_when_the_port_is_free(write_config, tmp_
         port = s.getsockname()[1]
     cfg = write_config(f"port: {port}\nstate_dir: {tmp_path / '.s'}\n")
     assert "server" not in {c.name for c in run_doctor(str(cfg))[0]}
+
+
+# ----- doctor: an old binary's PyInstaller env in long-lived processes (issue 1708) -----
+
+_LEAKED = {"_PYI_ARCHIVE_FILE": "/usr/local/bin/clauster", "PATH": "/usr/bin"}
+_MEI_PATH = {"LD_LIBRARY_PATH": "/tmp/_MEI0042abc:/opt/lib", "PATH": "/usr/bin"}
+_CLEAN = {"LD_LIBRARY_PATH": "/opt/lib", "PATH": "/usr/bin"}
+
+
+@pytest.mark.parametrize(
+    ("env", "carries"),
+    [
+        (_LEAKED, True),
+        (_MEI_PATH, True),
+        ({"LD_LIBRARY_PATH": "/var/tmp/_MEIx"}, True),
+        (_CLEAN, False),
+        ({"LD_LIBRARY_PATH": "/opt/not_MEI:/usr/lib"}, False),
+        ({}, False),
+    ],
+)
+def test_carries_bundle_env(env, carries):
+    assert ops_mod._carries_bundle_env(env) is carries
+
+
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="/proc ownership is POSIX")
+def test_proc_environ_tells_gone_from_unreadable(tmp_path, monkeypatch):
+    (tmp_path / "7").mkdir()
+    (tmp_path / "7" / "environ").write_bytes(b"_PYI_X=1\0PATH=/usr/bin\0junk\0")
+    (tmp_path / "9").mkdir()
+    (tmp_path / "9" / "environ").write_bytes(b"")  # a zombie / exiting process reads empty
+    (tmp_path / "10").mkdir()  # the pid vanished between the stat and the read
+    assert ops_mod._proc_environ(7, tmp_path) == {"_PYI_X": "1", "PATH": "/usr/bin"}
+    assert ops_mod._proc_environ(8, tmp_path) == "gone"  # no such pid: it exited
+    assert ops_mod._proc_environ(9, tmp_path) == "unreadable"
+    assert ops_mod._proc_environ(10, tmp_path) == "gone"
+    other_uid = os.getuid() + 1
+    monkeypatch.setattr(ops_mod.os, "getuid", lambda: other_uid)
+    assert ops_mod._proc_environ(7, tmp_path) == "unreadable"  # another user's: not read
+
+
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="/proc ownership is POSIX")
+def test_proc_environ_a_permission_error_is_unreadable_not_gone(tmp_path, monkeypatch):
+    (tmp_path / "7").mkdir()
+    (tmp_path / "7" / "environ").write_bytes(b"PATH=/usr/bin\0")
+    real_read = Path.read_bytes
+
+    def _denied(self):
+        if self.name == "environ":
+            raise PermissionError(13, "Permission denied")
+        return real_read(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _denied)
+    assert ops_mod._proc_environ(7, tmp_path) == "unreadable"
+
+
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="/proc ownership is POSIX")
+def test_proc_environ_esrch_mid_read_is_gone(tmp_path, monkeypatch):
+    # The kernel answers ESRCH when the task dies between the lookup and the open.
+    (tmp_path / "7").mkdir()
+    (tmp_path / "7" / "environ").write_bytes(b"PATH=/usr/bin\0")
+
+    def _esrch(self):
+        raise ProcessLookupError(3, "No such process")
+
+    monkeypatch.setattr(Path, "read_bytes", _esrch)
+    assert ops_mod._proc_environ(7, tmp_path) == "gone"
+
+
+def _bundle_check(monkeypatch, suspects, envs, *, platform="linux"):
+    """Run the row with a fake /proc reader: ``envs`` maps pid -> env, "gone" or "unreadable"."""
+    monkeypatch.setattr(ops_mod.sys, "platform", platform)
+    monkeypatch.setattr(ops_mod, "_bundle_env_suspects", lambda config, projects: suspects)
+    return ops_mod._check_bundle_env(None, [], read_environ=lambda pid: envs[pid])
+
+
+def _assert_no_values(detail):
+    for value in ("/usr/local/bin/clauster", "_MEI0042abc", "/opt/lib", "/usr/bin"):
+        assert value not in detail  # names and pids only (redaction invariant)
+
+
+def test_bundle_env_check_names_each_leaking_process_and_never_a_value(monkeypatch):
+    suspects = [("bridge for a", 11), ("pty bridge for b", 22), ("bridge for c", 44)]
+    check = _bundle_check(monkeypatch, suspects, {11: _LEAKED, 22: _MEI_PATH, 44: _CLEAN})
+    assert check.status == WARN
+    assert "bridge for a (pid 11)" in check.detail
+    assert "pty bridge for b (pid 22)" in check.detail
+    assert "pid 44" not in check.detail
+    assert "restart it to drop the old binary's environment" in check.detail
+    assert "could not be read" not in check.detail
+    _assert_no_values(check.detail)
+
+
+def test_bundle_env_check_all_readable_and_clean_is_ok(monkeypatch):
+    suspects = [("bridge for a", 11), ("claustrum daemon", 33)]
+    check = _bundle_check(monkeypatch, suspects, {11: _CLEAN, 33: _CLEAN})
+    assert check.status == OK
+    assert check.detail == "2 running process(es) have a clean environment"
+
+
+def test_bundle_env_check_mixed_clean_and_unreadable_warns_and_names_the_unread(monkeypatch):
+    suspects = [("bridge for a", 11), ("bridge for b", 12), ("claustrum daemon", 33)]
+    check = _bundle_check(monkeypatch, suspects, {11: _CLEAN, 12: _CLEAN, 33: "unreadable"})
+    assert check.status == WARN  # an unread process might be the leaking one
+    assert check.detail == "2 clean, 1 could not be read: claustrum daemon (pid 33)"
+
+
+def test_bundle_env_check_all_unreadable_is_not_completed(monkeypatch):
+    # Invariant 1: reading nothing must never look like a pass.
+    suspects = [("bridge for a", 11), ("claustrum daemon", 33)]
+    check = _bundle_check(monkeypatch, suspects, {11: "unreadable", 33: "unreadable"})
+    assert check.status == WARN
+    assert check.detail == (
+        "check not completed: could not read the environment of "
+        "bridge for a (pid 11), claustrum daemon (pid 33)"
+    )
+
+
+def test_bundle_env_check_leaked_plus_unreadable_reports_both(monkeypatch):
+    suspects = [("bridge for a", 11), ("claustrum daemon", 33)]
+    check = _bundle_check(monkeypatch, suspects, {11: _LEAKED, 33: "unreadable"})
+    assert check.status == WARN
+    assert "old standalone binary's environment: bridge for a (pid 11)" in check.detail
+    assert "could not be read: claustrum daemon (pid 33)" in check.detail
+    _assert_no_values(check.detail)
+
+
+def test_bundle_env_check_leaves_out_a_process_that_exited(monkeypatch):
+    # A process gone since it was listed hands its environment to nobody: not a finding,
+    # not a clean result, and not an unreadable one either.
+    one_gone = _bundle_check(
+        monkeypatch, [("bridge for a", 11), ("bridge for b", 12)], {11: _CLEAN, 12: "gone"}
+    )
+    assert one_gone.status == OK
+    assert one_gone.detail == "1 running process(es) have a clean environment"
+    all_gone = _bundle_check(monkeypatch, [("bridge for a", 11)], {11: "gone"})
+    assert all_gone.status == OK and "no running bridge" in all_gone.detail
+
+
+def test_bundle_env_check_ok_when_nothing_runs(monkeypatch):
+    none = _bundle_check(monkeypatch, [], {})
+    assert none.status == OK and "no running bridge" in none.detail
+
+
+@pytest.mark.parametrize("platform", ["darwin", "win32"])
+def test_bundle_env_check_is_skipped_off_linux(monkeypatch, platform):
+    check = _bundle_check(monkeypatch, [("bridge for a", 11)], {11: _LEAKED}, platform=platform)
+    assert check.status == OK
+    assert check.detail == f"not checked on {platform}: it reads Linux /proc"
+
+
+def test_bundle_env_check_never_fails_doctor(monkeypatch):
+    monkeypatch.setattr(ops_mod.sys, "platform", "linux")
+
+    def _boom(config, projects):
+        raise RuntimeError("sidecar dir vanished")
+
+    monkeypatch.setattr(ops_mod, "_bundle_env_suspects", _boom)
+    check = ops_mod._check_bundle_env(None, [])
+    assert check.status == WARN
+    assert check.detail == "could not check: RuntimeError"
+
+
+def test_bundle_env_suspects_lists_each_live_tracked_process_and_nothing_else(
+    write_config, tmp_path, monkeypatch
+):
+    # Every conjunct of every identity gate has a case that fails ONLY that conjunct.
+    # A short mkdtemp state_dir, as test_claustrum_daemon's `make_daemon` does: the derived
+    # AF_UNIX socket path must stay under the kernel limit, and macOS's tmp_path does not.
+    import shutil
+    import tempfile
+
+    short_state = Path(tempfile.mkdtemp(prefix="cld-"))
+    config = load_config(
+        str(write_config(f"state_dir: {short_state}\nclaustrum:\n  enabled: true\n"))
+    )
+    try:
+        _assert_bundle_env_suspects(config, tmp_path, monkeypatch)
+    finally:
+        shutil.rmtree(short_state, ignore_errors=True)
+
+
+def _assert_bundle_env_suspects(config, tmp_path, monkeypatch):
+    import types
+
+    from clauster import pointers, procutil, pty_keeper, supervisor
+    from clauster.claustrum_daemon import ClaustrumDaemon
+    from clauster.models import Project, TrustState
+
+    projects = [
+        Project(name=n, path=Path(f"/p/{n}"), trust_state=TrustState.TRUSTED)
+        for n in ("std", "idle", "stale")
+    ]
+    ptrs = {
+        "std": types.SimpleNamespace(pid=101, proc_start="5"),
+        "stale": types.SimpleNamespace(pid=102, proc_start="5"),  # pointer, but not live
+    }
+    monkeypatch.setattr(pointers, "pointer_for_project", lambda path: ptrs.get(path.name))
+    monkeypatch.setattr(procutil, "is_live_standard_bridge", lambda pid, start: pid == 101)
+
+    def _keeper(name, *, alive, bridge_pid):
+        return types.SimpleNamespace(
+            alive=alive, bridge_pid=bridge_pid, project=name, sidecar=tmp_path / f"{name}.json"
+        )
+
+    keepers = [
+        _keeper("pty", alive=True, bridge_pid=202),
+        _keeper("deadkeeper", alive=False, bridge_pid=302),  # bridge alive, keeper gone
+        _keeper("recycled", alive=True, bridge_pid=502),  # bridge pid fails its identity
+        _keeper("nobridge", alive=True, bridge_pid=None),
+    ]
+    monkeypatch.setattr(pty_keeper, "iter_keepers", lambda log_dir: keepers)
+    sidecar_info = {
+        "bridge_proc_start": 1717000000.0,
+        "bridge_start_ticks": 770579,
+        "boot_id": "b-1",
+    }
+    monkeypatch.setattr(pty_keeper, "_read_sidecar", lambda path: sidecar_info)
+    seen_gate = []
+
+    def _is_live_bridge(pid, start, *, start_ticks, boot_id):
+        assert pid is not None, "a keeper without a bridge pid must never reach the gate"
+        seen_gate.append((pid, start, start_ticks, boot_id))
+        return pid in (202, 302)
+
+    monkeypatch.setattr(procutil, "is_live_bridge", _is_live_bridge)
+    workers = {
+        "ab12cd34": {"pid": 601, "procStart": "9"},
+        "ef567890": {"pid": 602, "procStart": "9"},  # not alive
+        "<b>x</b>": {"pid": 603, "procStart": "9"},  # alive, but not a job-id shape
+    }
+    monkeypatch.setattr(supervisor, "load_roster_workers", lambda: workers)
+    monkeypatch.setattr(supervisor, "worker_alive", lambda pid, start: pid in (601, 603))
+    sock = str(ClaustrumDaemon(config).socket_path)
+    procs = [
+        types.SimpleNamespace(
+            info={"pid": 401, "cmdline": ["claustrum", "-serve", "-socket", sock]}
+        ),
+        types.SimpleNamespace(
+            info={"pid": 402, "cmdline": ["claustrum", "-serve", "-socket", "/other.sock"]}
+        ),
+        types.SimpleNamespace(info={"pid": 404, "cmdline": ["claustrum", "-socket", sock]}),
+        types.SimpleNamespace(info={"pid": 403, "cmdline": None}),
+    ]
+    monkeypatch.setattr(ops_mod.psutil, "process_iter", lambda attrs: procs)
+    assert ops_mod._bundle_env_suspects(config, projects) == [
+        ("bridge for std", 101),
+        ("pty bridge for pty", 202),  # the bridge, never its keeper
+        ("background agent ab12cd34", 601),
+        ("claustrum daemon", 401),
+    ]
+    # The pty bridge is checked with the identity the keeper recorded, not a bare pid.
+    assert (202, 1717000000.0, 770579, "b-1") in seen_gate
+
+
+def test_doctor_reports_the_bundle_env_row(write_config, tmp_path):
+    names = {c.name for c in run_doctor(_cfg_file(write_config, tmp_path))[0]}
+    assert "bundle-env" in names
+
+
+def test_claustrum_daemon_pids_none_for_an_unusable_socket_path(monkeypatch):
+    # A socket path the daemon could never bind means no daemon serves this deployment;
+    # that is "nothing to check", not a doctor error.
+    from clauster import claustrum_daemon
+    from clauster.claustrum_client import ClaustrumError
+
+    def _raise(config):
+        raise ClaustrumError("socket path too long")
+
+    monkeypatch.setattr(claustrum_daemon, "ClaustrumDaemon", _raise)
+    assert ops_mod._claustrum_daemon_pids(None) == []

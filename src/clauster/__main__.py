@@ -29,7 +29,17 @@ if TYPE_CHECKING:
 import uvicorn
 import yaml
 
-from . import __version__, claude_cli, deps, environments, ops, pty_keeper, pty_screen, usage
+from . import (
+    __version__,
+    claude_cli,
+    deps,
+    environments,
+    ops,
+    procutil,
+    pty_keeper,
+    pty_screen,
+    usage,
+)
 from .app import create_app
 from .auth import hash_password, make_hasher, mint_metrics_token, mint_token
 from .config import (
@@ -1069,7 +1079,9 @@ def _register_windows_service(config_path: str | None, state_dir: str | None) ->
     # `shawl add` ("already exists"), stranding a half-registered service to delete by hand.
     for index, argv in enumerate(commands):
         try:
-            result = subprocess.run(argv, capture_output=True, text=True, check=False)  # noqa: S603
+            result = subprocess.run(  # noqa: S603
+                argv, capture_output=True, text=True, check=False, env=procutil.child_env()
+            )
         except OSError as exc:
             print(f"clauster: could not run {argv[0]!r}: {exc}", file=sys.stderr)
             _rollback_windows_service(created=index > 0)
@@ -1107,7 +1119,11 @@ def _rollback_windows_service(*, created: bool) -> None:
     )
     try:
         result = subprocess.run(  # noqa: S603, S607 - fixed argv, `sc` is a System32 binary
-            ["sc", "delete", "Clauster"], capture_output=True, text=True, check=False
+            ["sc", "delete", "Clauster"],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=procutil.child_env(),
         )
     except OSError:
         # The rollback itself couldn't even launch `sc` — surface the manual step, never let this

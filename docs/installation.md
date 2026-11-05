@@ -167,6 +167,15 @@ want the full supply-chain check.
     so an age-based cleanup of `/tmp` leaves them alone. If they are deleted
     another way, [`/healthz`](operations.md#healthz-liveness-and-readiness)
     answers `503` until you restart Clauster.
+    The unpack step also sets `_PYI_*` variables in the binary's own environment,
+    and on Linux it adds the `_MEI…` directory to `LD_LIBRARY_PATH`. Clauster
+    removes them, and puts back your own `LD_LIBRARY_PATH`, before it starts a
+    bridge or any other program. So `node`, `npm` and `clauster` behave the same in
+    a session as in your shell. On Windows the unpack step also sets a DLL search
+    directory, which is not an environment variable. Clauster does not change it. A
+    bridge, a pty keeper, a background agent or a claustrum daemon that an older
+    release started keeps the old environment until you restart it. See
+    [the troubleshooting entry](troubleshooting.md#in-a-session-node-fails-with-glibc_238-not-found-or-clauster-cannot-load-libpython).
 
 !!! note "Unsigned for the OS, on purpose"
     The binaries are Sigstore-signed but not yet OS code-signed, so the first run

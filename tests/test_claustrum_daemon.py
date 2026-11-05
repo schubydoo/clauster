@@ -791,6 +791,16 @@ async def test_spawn_scrubs_ambient_daemon_sentinel(make_daemon, monkeypatch):
     assert env.get("CLAUSTRUM_KEEP_THIS") == "ok"  # unrelated env preserved
 
 
+async def test_spawn_strips_the_frozen_binarys_runtime_state(make_daemon, monkeypatch):
+    """The daemon outlives clauster and spawns every hosted agent: it must not carry
+    the standalone binary's PyInstaller state (issue 1708), on any OS."""
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setenv("_PYI_ARCHIVE_FILE", "/usr/local/bin/clauster")
+    monkeypatch.setenv("_PYI_APPLICATION_HOME_DIR", "/tmp/_MEI448gone")
+    env = (await _capture_spawn_call(make_daemon, monkeypatch))["kwargs"]["env"]
+    assert not [name for name in env if name.startswith("_PYI_")]
+
+
 def test_af_unix_in_use_matches_os_name():
     # The seam mirrors os.name so the length gate is testable via a patchable boundary
     # instead of monkeypatching the global os.name (which crashes pathlib on Windows).
