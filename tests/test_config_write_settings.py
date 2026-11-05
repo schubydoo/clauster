@@ -1082,6 +1082,122 @@ def test_masked_whole_declaration_sent_under_a_new_key_is_rejected(tmp_path: Pat
     assert view["extraKnownMarketplaces"] == cw.REDACTION_SENTINEL
     with pytest.raises(cw.InvalidCandidateError):
         cws.write_project_settings(tmp_path, {"additionalMarketplaces": cw.REDACTION_SENTINEL}, h)
+    assert _on_disk(tmp_path) == {"extraKnownMarketplaces": "https://u:tok@h.example/m.git"}
+
+
+def test_masked_element_with_a_shortened_nested_list_is_rejected(tmp_path: Path) -> None:
+    # "Unchanged apart from its masks" covers a sentinel-free nested list too: an element
+    # that holds a mask may not come back with a nested list shortened.
+    stored = {
+        "inline": {
+            "source": {
+                "source": "settings",
+                "name": "inline",
+                "plugins": [
+                    {"name": "a", "tags": ["x", "y"], "mcpServers": {"s": {"env": {"K": "A"}}}}
+                ],
+            }
+        }
+    }
+    h = _store(tmp_path, {"extraKnownMarketplaces": stored})
+    view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
+    view["inline"]["source"]["plugins"][0]["tags"] = ["x"]
+    with pytest.raises(cw.InvalidCandidateError, match="masked value"):
+        cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": view}, h)
+    assert _on_disk(tmp_path)["extraKnownMarketplaces"] == stored
+
+
+@pytest.mark.parametrize(
+    "new_url",
+    [
+        pytest.param("https://evil.example.com/m.json", id="host"),
+        pytest.param("http://plugins.example.com/m.json", id="scheme"),
+        pytest.param("https://plugins.example.com:8443/m.json", id="port"),
+        pytest.param("https://plugins.example.com/other.json", id="path"),
+        pytest.param(None, id="url-removed"),
+    ],
+)
+def test_marketplace_url_change_refuses_masked_credentials(tmp_path: Path, new_url) -> None:
+    # A masked header kept by key while the url moves would send the stored credential
+    # to the new host. Refuse the write whole; the operator retypes it for the new host.
+    h = _store(tmp_path, {"extraKnownMarketplaces": _HOSTED})
+    view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
+    source = view["hosted"]["source"]
+    if new_url is None:
+        del source["url"]
+    else:
+        source["url"] = new_url
+    with pytest.raises(cw.InvalidCandidateError, match="retype the credential for the new host"):
+        cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": view}, h)
+    assert _on_disk(tmp_path)["extraKnownMarketplaces"] == _HOSTED
+
+
+def test_marketplace_url_unchanged_restores_masked_credentials(tmp_path: Path) -> None:
+    # Same destination (only the host's letter case and another field differ): the
+    # masked header and headersHelper are restored from the stored entry.
+    h = _store(tmp_path, {"extraKnownMarketplaces": _HOSTED})
+    view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
+    view["hosted"]["source"]["url"] = "https://Plugins.Example.com/m.json"
+    view["hosted"]["autoUpdate"] = True
+    cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": view}, h)
+    source = _on_disk(tmp_path)["extraKnownMarketplaces"]["hosted"]["source"]
+    assert source["headers"] == {"Cookie": "session=C123"}
+    assert source["headersHelper"] == "/bin/h --t SEK"
+    assert source["url"] == "https://Plugins.Example.com/m.json"
+
+
+def test_url_destination_compares_odd_values_by_their_raw_form() -> None:
+    assert cws._url_destination(123) == ("not-a-string", 123)
+    assert cws._url_destination("https://h.example:notaport/x") == (
+        "unparsed",
+        "https://h.example:notaport/x",
+    )
+    assert cws._url_destination("HTTPS://H.example:443/p") == ("https", "h.example", 443, "/p")
+
+
+def test_masked_credential_url_resent_unchanged_keeps_url_and_headers(tmp_path: Path) -> None:
+    # The url itself reads back masked (it carries user:pass), so it cannot have moved.
+    stored = {
+        "hosted": {
+            "source": {
+                "source": "url",
+                "url": "https://bot:tok@plugins.example.com/m.json",
+                "headers": {"Cookie": "session=C123"},
+            }
+        }
+    }
+    h = _store(tmp_path, {"extraKnownMarketplaces": stored})
+    view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
+    assert view["hosted"]["source"]["url"] == cw.REDACTION_SENTINEL
+    cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": view}, h)
+    assert _on_disk(tmp_path)["extraKnownMarketplaces"] == stored
+
+
+def test_list_shaped_declaration_resent_unchanged_is_accepted(tmp_path: Path) -> None:
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"extraKnownMarketplaces": [_HOSTED["hosted"]]}), "utf-8")
+    view, h = cws.read_project_settings(tmp_path)
+    cws.write_project_settings(
+        tmp_path, {"extraKnownMarketplaces": view["extraKnownMarketplaces"]}, h
+    )
+    assert _on_disk(tmp_path)["extraKnownMarketplaces"] == [_HOSTED["hosted"]]
+
+
+def test_marketplace_url_change_without_masks_is_accepted(tmp_path: Path) -> None:
+    # Retyping the credential for the new host is the documented way forward.
+    h = _store(tmp_path, {"extraKnownMarketplaces": _HOSTED})
+    moved = {
+        "hosted": {
+            "source": {
+                "source": "url",
+                "url": "https://new.example.com/m.json",
+                "headers": {"Cookie": "session=NEW"},
+            }
+        }
+    }
+    cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": moved}, h)
+    assert _on_disk(tmp_path)["extraKnownMarketplaces"] == moved
 
 
 def test_marketplace_moved_to_alias_with_masks_is_rejected(tmp_path: Path) -> None:

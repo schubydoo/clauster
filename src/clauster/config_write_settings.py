@@ -110,6 +110,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from . import config_write as cw
 from . import config_write_plugins as cwp
@@ -306,6 +307,56 @@ def _reject_orphan_marketplace_sentinels(incoming: dict[str, Any], stored: dict[
                 f"{where} holds a masked value that no longer matches its stored value (an "
                 "entry or key was renamed, moved or reordered, or a list changed length); "
                 "enter the real value again"
+            )
+        _reject_masks_sent_to_a_new_url(incoming[key], stored.get(key), key)
+
+
+def _source_url(entry: Any) -> Any:
+    """Return a marketplace entry's ``source.url``, or ``None`` when it has none."""
+    source = entry.get("source") if isinstance(entry, dict) else None
+    return source.get("url") if isinstance(source, dict) else None
+
+
+def _url_destination(url: Any) -> tuple[Any, ...]:
+    """Return the parts of ``url`` that decide where a request goes: scheme, host, port, path."""
+    if not isinstance(url, str):
+        return ("not-a-string", url)
+    try:
+        parts = urlsplit(url)
+        return (parts.scheme.lower(), (parts.hostname or "").lower(), parts.port, parts.path)
+    except ValueError:  # an unparseable port: compare the raw text instead
+        return ("unparsed", url)
+
+
+def _reject_masks_sent_to_a_new_url(incoming: Any, stored: Any, key: str) -> None:
+    """Refuse (422) a marketplace entry that keeps masked values while its url changes.
+
+    A masked ``headers`` value or ``headersHelper`` is restored from the stored entry by
+    key. If the entry's ``source.url`` now points somewhere else (scheme, host, port or
+    path), restoring would send the stored credential to the new host. So every masked
+    value in such an entry is refused whole, and the operator retypes the credential for
+    the new host. A url that is itself masked was resent unchanged, so it still matches.
+    """
+    if not isinstance(incoming, dict):
+        return
+    stored_map = stored if isinstance(stored, dict) else {}
+    for name, entry in incoming.items():
+        if not _has_sentinel(entry):
+            continue
+        new_url = _source_url(entry)
+        if new_url == cw.REDACTION_SENTINEL:
+            continue
+        old_url = _source_url(stored_map.get(name))
+        if new_url is None and old_url is None:
+            continue
+        if (
+            new_url is None
+            or old_url is None
+            or _url_destination(new_url) != _url_destination(old_url)
+        ):
+            raise cw.InvalidCandidateError(
+                f"{key}.{name}: the marketplace url changed, so its masked credentials cannot "
+                "be kept; retype the credential for the new host"
             )
 
 
