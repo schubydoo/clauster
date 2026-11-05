@@ -35,6 +35,7 @@ _ROW = '[data-test="readiness-row"]'
 _TOGGLE = '[data-test="readiness-toggle-all"]'
 _SUMMARY = '[data-test="readiness-summary"]'
 _UNAVAILABLE = '[data-test="readiness-unavailable"]'
+_RECHECK = '[data-test="readiness-recheck"]'
 # The real doctor run spawns `claude --version` and `git`; give a slow runner headroom.
 _DOCTOR_TIMEOUT_MS = 20_000
 _SETTLED = ("passed", "warning", "blocking")
@@ -77,6 +78,18 @@ def _stub_doctor(browser: AgentBrowser, status: int | None, body: dict | None = 
         "window.fetch=(u,o)=>String(u).endsWith('/api/doctor')?" + answer + ""
         ":window.__realFetch(u,o);"
         "await d.loadReadiness();return 1})()"
+    )
+
+
+def _stub_doctor_only(browser: AgentBrowser, status: int, body: dict) -> None:
+    """Answer ``/api/doctor`` with ``status``/``body`` without running the loader."""
+    browser.eval_js(
+        "(function(){"
+        "if(!window.__realFetch)window.__realFetch=window.fetch;"
+        "window.fetch=(u,o)=>String(u).endsWith('/api/doctor')"
+        "?Promise.resolve(new Response(" + json.dumps(json.dumps(body)) + ","
+        "{status:" + str(status) + ",headers:{'Content-Type':'application/json'}}))"
+        ":window.__realFetch(u,o);return 1})()"
     )
 
 
@@ -196,6 +209,39 @@ def test_rejected_request_shows_not_run(browser: AgentBrowser, open_server: str)
     browser.expect_visible(_UNAVAILABLE)
     browser.expect_text(_SUMMARY, "Checks not run: the request failed or timed out")
     browser.expect_count(_ROW, 0)
+
+
+def test_hung_request_without_abortsignal_timeout_reaches_not_run_and_recheck_works(
+    browser: AgentBrowser, open_server: str
+) -> None:
+    """A browser without ``AbortSignal.timeout`` still gets the deadline on a hung run.
+
+    The stubbed ``/api/doctor`` never answers; like a real ``fetch`` it rejects only when
+    its signal aborts. The deadline is shortened through ``readiness.timeoutMs``. The pill
+    must reach "Checks not run", and the busy flag must clear so a re-check runs.
+    """
+    browser.goto(open_server)
+    _settle(browser)
+    browser.eval_js(
+        "(function(){const d=" + _ROOT + ";"
+        "AbortSignal.timeout=undefined;d.readiness.timeoutMs=500;"
+        "if(!window.__realFetch)window.__realFetch=window.fetch;"
+        "window.fetch=(u,o)=>String(u).endsWith('/api/doctor')"
+        "?new Promise((res,rej)=>{const s=o&&o.signal;"
+        "if(s)s.addEventListener('abort',()=>rej(new DOMException('aborted','AbortError')))})"
+        ":window.__realFetch(u,o);"
+        "d.loadReadiness();return 1})()"
+    )
+    browser.expect_attr(_PILL, "data-state", "unavailable")
+    browser.expect_text(_PILL, "Checks not run")
+    _open_panel(browser)
+    browser.expect_text(_SUMMARY, "Checks not run: the request failed or timed out")
+
+    # busy cleared at the deadline, so the Re-check button runs a fresh check.
+    _stub_doctor_only(browser, 200, _ALL_OK)
+    browser.click(_RECHECK)
+    browser.expect_attr(_PILL, "data-state", "passed")
+    browser.expect_count(_ROW, 3)
 
 
 @pytest.mark.parametrize("theme", ["dark", "light"])

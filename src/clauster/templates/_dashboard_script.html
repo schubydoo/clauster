@@ -448,9 +448,10 @@
       // up front instead of failing silently when you click Start. loaded stays false
       // until /api/doctor answers, so the panel never flashes empty. TASK-291: the pill
       // shows in EVERY state — `error` holds why the checks did not run, so "did not
-      // run" never reads as "all passed"; `busy` single-flights a re-check.
+      // run" never reads as "all passed"; `busy` single-flights a re-check, and
+      // `timeoutMs` is the /api/doctor deadline (generous: doctor runs subprocess probes).
       readiness: { loaded: false, ok: true, checks: [], error: null, busy: false,
-                   showAll: false, showPanel: false },
+                   timeoutMs: 60000, showAll: false, showPanel: false },
       // #838: runtime claude account login state, refreshed by loadLoginStatus() on its
       // OWN path (the cache-only /api/login-status endpoint, decoupled from refresh() so
       // neither its latency nor a subprocess ever stalls the core poll). `known` stays
@@ -642,12 +643,13 @@
       async loadReadiness() {
         if (this.readiness.busy) return;
         this.readiness.busy = true;
+        // A hung doctor run must not leave the pill on "Checking…" for good: abort it at
+        // the deadline, and the catch below reports the run as not run. AbortController +
+        // setTimeout rather than AbortSignal.timeout, so every browser gets the deadline.
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), this.readiness.timeoutMs);
         try {
-          // A hung doctor run must not leave the pill on "Checking…" for good: abort it,
-          // and the catch below reports the run as not run.
-          const opts = typeof AbortSignal.timeout === "function"
-            ? { signal: AbortSignal.timeout(60000) } : {};
-          const r = await fetch(ROOT + "/api/doctor", opts);
+          const r = await fetch(ROOT + "/api/doctor", { signal: ctrl.signal });
           if (this._authExpired(r)) return;
           if (!r.ok) { this._readinessFailed("the server answered HTTP " + r.status); return; }
           const d = await r.json();
@@ -657,7 +659,7 @@
           this.readiness.loaded = true;
         } catch (e) {
           this._readinessFailed("the request failed or timed out");
-        } finally { this.readiness.busy = false; }
+        } finally { clearTimeout(timer); this.readiness.busy = false; }
       },
       // TASK-291: a failed check run drops any earlier result, so a stale "all passed"
       // can never stand in for a re-check that did not run (fail closed, visibly).

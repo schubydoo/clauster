@@ -768,6 +768,7 @@
                       data-test="readiness-toggle-all" x-show="readinessIssues().length > 0"
                       x-text="readiness.showAll ? 'Show only issues' : 'Show all checks'">Show all checks</button>
               <button type="button" class="btn btn-sm btn-ghost-secondary" @click="loadReadiness()"
+                      data-test="readiness-recheck"
                       :disabled="readiness.busy"><svg class="ico me-1" aria-hidden="true"><use href="#ic-restart"/></svg><span
                       x-text="readiness.busy ? 'Checking…' : 'Re-check'">Re-check</span></button>
               <button type="button" class="btn btn-sm btn-ghost-secondary" @click="closeReadinessPanel()">Close</button>

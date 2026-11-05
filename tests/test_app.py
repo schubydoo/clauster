@@ -1136,11 +1136,13 @@ def test_readiness_pill_shows_every_state(write_config):
     load = load[: load.index("_readinessFailed(why) {")]
     assert 'if (!r.ok) { this._readinessFailed("the server answered HTTP "' in load
     assert "} catch (e) {\n          this._readinessFailed(" in load
-    assert "finally { this.readiness.busy = false; }" in load
-    # A hung run cannot stay "Checking…" for good; the guard keeps an old browser working.
-    assert 'typeof AbortSignal.timeout === "function"' in load
-    assert "{ signal: AbortSignal.timeout(" in load
-    assert 'fetch(ROOT + "/api/doctor", opts)' in load
+    assert "finally { clearTimeout(timer); this.readiness.busy = false; }" in load
+    # A hung run cannot stay "Checking…" for good: one deadline for every browser (no
+    # AbortSignal.timeout feature test with a no-deadline fallback).
+    assert "setTimeout(() => ctrl.abort(), this.readiness.timeoutMs)" in load
+    assert 'fetch(ROOT + "/api/doctor", { signal: ctrl.signal })' in load
+    assert "AbortSignal.timeout(" not in load
+    assert "timeoutMs: 60000," in page
     # A failed run drops the stale rows, so an old pass cannot survive a failed re-check.
     failed = page[page.index("_readinessFailed(why) {") :]
     assert "this.readiness.checks = [];" in failed[: failed.index("},")]
