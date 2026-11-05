@@ -915,7 +915,8 @@ def _compute_effective_settings(
     ``{key: {"value": ..., "source": <highest scope>, "sources": [<scopes>]}}`` for the
     union of keys across every scope that was read; ``sources`` lists, highest first,
     each scope that still supplies at least one leaf entry of the merged value (an
-    empty object or list counts as one entry), and ``source`` is the first of them.
+    empty object or list is named only when the merged value is itself empty), and
+    ``source`` is the first of them.
     """
     by_scope: dict[cw.Scope, dict[str, Any] | None] = {
         "local": local_misc,
@@ -961,7 +962,7 @@ def _compute_effective_settings(
     return effective
 
 
-def _tag_scope(value: Any, scope: str) -> Any:
+def _tag_scope(value: Any, scope: cw.Scope) -> Any:
     """Return the provenance tree of ``value`` set by ``scope``.
 
     The tree mirrors the value: an object maps each key to its subtree, a list holds one
@@ -1059,5 +1060,8 @@ def _merge_setting(
 
 
 def _entries(items: list[Any], prov: Any) -> list[tuple[Any, Any]]:
-    """Pair each list entry with its provenance subtree (an empty list has none)."""
-    return list(zip(items, prov, strict=True)) if isinstance(prov, list) else []
+    """Pair each list entry with its provenance subtree (an empty list has none).
+
+    The pairing raises if the value and its tree ever fell out of step.
+    """
+    return list(zip(items, prov if items else [], strict=True))

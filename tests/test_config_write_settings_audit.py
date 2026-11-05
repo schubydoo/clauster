@@ -658,6 +658,29 @@ def test_effective_sources_name_every_scope_whose_list_entries_survive() -> None
     }
 
 
+def test_effective_sources_name_both_scopes_of_an_entry_only_repeated() -> None:
+    eff = _eff(user={"claudeMdExcludes": ["a"]}, project={"claudeMdExcludes": ["a"]})
+    assert eff["claudeMdExcludes"] == {
+        "value": ["a"],
+        "source": "project",
+        "sources": ["project", "user"],
+    }
+
+
+def test_effective_sources_of_two_empty_lists_name_the_higher_scope() -> None:
+    eff = _eff(user={"claudeMdExcludes": []}, project={"claudeMdExcludes": []})
+    assert eff["claudeMdExcludes"] == {"value": [], "source": "project", "sources": ["project"]}
+
+
+def test_effective_sources_name_a_scope_that_adds_a_new_object_key() -> None:
+    eff = _eff(user={"env": {"A": "1"}}, project={"env": {"B": "2"}})
+    assert eff["env"] == {
+        "value": {"A": "1", "B": "2"},
+        "source": "project",
+        "sources": ["project", "user"],
+    }
+
+
 def test_effective_sources_drop_a_list_that_a_scalar_or_chain_replaced() -> None:
     eff = _eff(user={"x": {"l": ["a"], "k": 1}}, local={"x": {"l": "s"}})
     assert eff["x"]["value"] == {"l": "s", "k": 1}
