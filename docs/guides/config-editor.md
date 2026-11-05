@@ -196,25 +196,33 @@ The surface tabs:
 ### MCP server definitions
 
 The MCP tab edits each server as one JSON object, in the same shape as an
-`mcpServers` entry in `.mcp.json`. The editor accepts the fields that the
+`mcpServers` entry in `.mcp.json`. The editor accepts each field that the
 [Claude Code MCP documentation](https://code.claude.com/docs/en/mcp) lists for
-each transport:
+a transport, and each field that the installed `claude` CLI reads and keeps
+for that transport even when the documentation does not list it:
 
 | `type` | Required | Optional |
 | --- | --- | --- |
 | `stdio`, or no `type` | `command` | `args`, `env` |
-| `http` (alias `streamable-http`), `sse` | `url` | `headers`, `headersHelper`, `oauth`, `request_timeout_ms` |
+| `http` (alias `streamable-http`), `sse` | `url` | `headers`, `headersHelper`, `oauth`, `request_timeout_ms`, `tools`, `toolPermissions`, `displayName`, `discoveryCache` |
 | `ws` | `url` | `headers`, `headersHelper` |
 
 Every transport also accepts `timeout` (milliseconds, a positive integer),
-`alwaysLoad` and `bareElicitationCapability` (both `true` or `false`). The
-`oauth` object accepts `clientId`, `callbackPort` (1 to 65535),
-`authServerMetadataUrl` (an `https://` URL) and `scopes` (a space-separated
-string). An `http` or `sse` entry that an earlier Clauster stored with `env`
-stays editable, but Claude Code ignores `env` on a remote server.
+`alwaysLoad` and `bareElicitationCapability` (both `true` or `false`), and
+`role` (only `"comms"`). The `oauth` object accepts `clientId`, `callbackPort`
+(1 to 65535), `authServerMetadataUrl` (an `https://` URL), `scopes` (a
+space-separated string) and `xaa` (`true` or `false`). On `http` and `sse`,
+`tools` is a list of `{"name": …, "permission_policy": …}` objects, where the
+policy is `always_allow`, `always_ask` or `always_deny`. `toolPermissions` maps
+a tool name to `allow`, `ask` or `blocked`.
 
 The editor refuses the whole entry when a field is unknown or has the wrong
-type. It also refuses these values, because Claude Code refuses or skips them:
+type. It also refuses these values, because Claude Code refuses, skips or
+ignores them:
+
+- The `transport` key, and `env` on an `http`, `sse` or `ws` server. Earlier
+  Clauster versions accepted both, but Claude Code ignores them. Use `type`
+  instead of `transport`.
 
 - A server name with a character other than a letter, a number, a hyphen or an
   underscore, or a name that starts with a hyphen. Earlier Clauster versions
@@ -226,7 +234,8 @@ type. It also refuses these values, because Claude Code refuses or skips them:
 - A reserved name, such as `workspace`, `claude-in-chrome` or `computer-use`.
 - An entry with a `url` and no `type`. Claude Code reads such an entry as a
   stdio server and skips it.
-- `"type": "sdk"`. Only an SDK host application can register that server.
+- `"type": "sdk"`, `"sse-ide"`, `"ws-ide"` or `"claudeai-proxy"`. Claude Code
+  registers these servers at runtime and refuses them in a configuration file.
 
 Clauster stores a `headersHelper` command but never runs it. Claude Code runs it
 when it connects to the server. For a server in `.mcp.json` or at local scope,

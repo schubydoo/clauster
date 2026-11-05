@@ -250,6 +250,17 @@ def test_entry_needs_direct_write_true_for_new_secret_bearing_shapes(entry: dict
             "bareElicitationCapability": True,
         },
         {"type": "ws", "url": "wss://x/s", "alwaysLoad": False},
+        # CLI-parsed fields; a secret-shaped TOOL name must not count as a secret hint.
+        {
+            "type": "http",
+            "url": "https://x/mcp",
+            "tools": [{"name": "get_token", "permission_policy": "always_ask"}],
+            "toolPermissions": {"get_token": "ask"},
+            "displayName": "Nice",
+            "discoveryCache": True,
+            "role": "comms",
+            "oauth": {"clientId": "c", "xaa": True},
+        },
     ],
 )
 def test_entry_needs_direct_write_false_for_non_secret_new_fields(entry: dict) -> None:
@@ -1219,6 +1230,27 @@ def test_route_server_remove_option_like_name_is_422(
         )
     assert resp.status_code == 422
     assert not argv_file.exists()  # `claude mcp remove` never spawned
+
+
+def test_route_server_remove_name_is_checked_before_the_cli_helper(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    # The route's own check, not only cli_remove_server's: the helper is never reached.
+    called: list[str] = []
+    monkeypatch.setattr(mcp_cli, "cli_remove_server", lambda *a, **k: called.append("x"))
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.post(
+            "/api/config-write/mcp/server",
+            json={
+                "scope": "project",
+                "project": "alpha",
+                "confirm": "alpha",
+                "op": "remove",
+                "name": "-e",
+            },
+        )
+    assert resp.status_code == 422
+    assert called == []
 
 
 def test_route_server_bad_scope_is_422(write_config, tmp_path, projects_root) -> None:

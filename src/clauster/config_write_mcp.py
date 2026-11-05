@@ -30,10 +30,10 @@ Three surfaces, one entry shape (mirroring Claude Code's own ``.mcp.json``):
 A server entry is a **stdio** server (``command`` + optional ``args``/``env``), a
 remote **http**/**sse** server (``url`` + optional ``headers``/``headersHelper``/
 ``oauth``), or a remote **ws** server (``url`` + optional ``headers``/``headersHelper``).
-Every transport also takes ``timeout``, ``alwaysLoad`` and ``bareElicitationCapability``.
-The accepted fields per transport are the ones Claude Code documents at
-https://code.claude.com/docs/en/mcp (audited against the live 2.1.318 CLI schema,
-TASK-449.8); see :data:`_STDIO_KEYS`, :data:`_HTTP_SSE_KEYS` and :data:`_WS_KEYS`.
+Every transport also takes ``timeout``, ``alwaysLoad``, ``bareElicitationCapability`` and
+``role``. The accepted fields per transport are the ones Claude Code documents at
+https://code.claude.com/docs/en/mcp plus the ones the live 2.1.318 CLI parses and keeps
+(TASK-449.8); see :data:`_STDIO_KEYS`, :data:`_HTTP_SSE_KEYS` and :data:`_WS_KEYS`.
 Unknown keys or wrong types ⇒ 422, nothing written. Every ``env``/``headers`` value,
 every ``headersHelper`` command, the ``oauth`` strings and a token-bearing ``url`` flow
 through :func:`_redact_entry` / :func:`~clauster.config_write.merge_redacted` so the
@@ -147,32 +147,47 @@ _TRANSPORT_ALIASES = {
     "ws": "ws",
 }
 
-#: Keys every transport accepts: the declared type, the per-call tool ``timeout`` (ms), the
-#: tool-search exemption ``alwaysLoad``, and ``bareElicitationCapability`` (the errors page:
-#: "accepted on stdio, sse, http, and ws entries"). ``transport`` is clauster's legacy synonym
-#: for ``type``; Claude Code does not document or read it.
-_COMMON_KEYS = frozenset(
-    {"type", "transport", "timeout", "alwaysLoad", "bareElicitationCapability"}
-)
+#: The rule for every key set below (maintainer decision, 2026-11-05): a key is accepted
+#: when Claude Code documents it OR the 2.1.318 CLI parses and keeps it (``claude mcp
+#: add-json`` stores it); a key the CLI rejects or silently drops is refused. Probed with a
+#: throwaway config dir, TASK-449.8.
+#:
+#: Keys every transport accepts: ``type``, the per-call tool ``timeout`` (ms), the
+#: tool-search exemption ``alwaysLoad``, ``bareElicitationCapability`` (the errors page:
+#: "accepted on stdio, sse, http, and ws entries"), and the CLI-parsed, undocumented
+#: ``role`` (only the value ``"comms"``; the CLI drops any other).
+#:
+#: ``transport`` is NOT accepted: clauster once took it as a synonym of ``type``, but Claude
+#: Code ignores the key, so an entry that relied on it loads as stdio and is skipped.
+#: ``env`` on a remote server is refused for the same reason (the CLI drops it).
+_COMMON_KEYS = frozenset({"type", "timeout", "alwaysLoad", "bareElicitationCapability", "role"})
 
 #: Allowed keys for a stdio server entry (``command`` required; rest optional).
 _STDIO_KEYS = _COMMON_KEYS | {"command", "args", "env"}
 
 #: Allowed keys for an http/sse server entry (``url`` required). ``request_timeout_ms`` is
-#: named in the changelog as a per-server ``.mcp.json`` field. ``env`` is undocumented for a
-#: remote server (the CLI drops it) and is kept only so a stored entry stays editable.
+#: named in the changelog as a per-server ``.mcp.json`` field. ``tools`` (per-tool
+#: ``permission_policy``), ``toolPermissions``, ``displayName`` and ``discoveryCache`` are
+#: CLI-parsed and undocumented; the CLI keeps them on http/sse entries only.
 _HTTP_SSE_KEYS = _COMMON_KEYS | {
     "url",
     "headers",
     "headersHelper",
     "oauth",
     "request_timeout_ms",
-    "env",
+    "tools",
+    "toolPermissions",
+    "displayName",
+    "discoveryCache",
 }
 
 #: Allowed keys for a ws server entry: "the same url, headers, headersHelper, timeout, and
 #: alwaysLoad fields as http". No ``oauth``: the docs say WebSocket does not support OAuth.
 _WS_KEYS = _COMMON_KEYS | {"url", "headers", "headersHelper"}
+
+#: ``type`` values the CLI uses internally and refuses in a config file (probed:
+#: ``claude mcp add-json`` answers "registered by the host application at runtime").
+_RUNTIME_ONLY_TYPES = frozenset({"sdk", "sse-ide", "ws-ide", "claudeai-proxy"})
 
 _KEYS_BY_TRANSPORT = {
     "stdio": _STDIO_KEYS,
@@ -182,9 +197,14 @@ _KEYS_BY_TRANSPORT = {
 }
 
 #: Allowed keys of an http/sse server's ``oauth`` object (pre-configured OAuth client,
-#: fixed callback port, metadata-discovery override, pinned scopes). The client SECRET is
-#: never part of the entry: Claude Code keeps it in the keychain or a credentials file.
-_OAUTH_KEYS = frozenset({"clientId", "callbackPort", "authServerMetadataUrl", "scopes"})
+#: fixed callback port, metadata-discovery override, pinned scopes, and the CLI-parsed,
+#: undocumented boolean ``xaa``). The client SECRET is never part of the entry: Claude Code
+#: keeps it in the keychain or a credentials file.
+_OAUTH_KEYS = frozenset({"clientId", "callbackPort", "authServerMetadataUrl", "scopes", "xaa"})
+
+#: The values the CLI keeps for ``tools[].permission_policy`` and ``toolPermissions``.
+_TOOL_POLICIES = frozenset({"always_allow", "always_ask", "always_deny"})
+TOOL_PERMISSION_VALUES = frozenset({"allow", "ask", "blocked"})
 
 #: The CLI's own length cap on ``oauth.authServerMetadataUrl``.
 _AUTH_METADATA_URL_MAX = 4096
@@ -207,35 +227,32 @@ def _is_positive_int(value: Any) -> bool:
 def entry_transport(entry: dict[str, Any]) -> str:
     """Return the transport ``entry`` declares: ``stdio``, ``http``, ``sse`` or ``ws``.
 
-    ``type`` and ``transport`` are accepted as synonyms (clauster's legacy spelling). A
-    non-string, the two disagreeing, or an unknown value is a structural error. An entry
-    that declares neither is stdio, exactly as Claude Code reads it. ``streamable-http``
-    normalizes to ``http``. ``sdk`` is refused: only an SDK host application can register
-    an in-process server, and Claude Code skips one found in a config file.
+    Reads ``type`` only, exactly as Claude Code does: an entry with no ``type`` is stdio,
+    and ``streamable-http`` normalizes to ``http``. A non-string or unknown value is a
+    structural error, and so is the legacy ``transport`` key (Claude Code ignores it, so an
+    entry relying on it would load as stdio). ``sdk``, ``sse-ide``, ``ws-ide`` and
+    ``claudeai-proxy`` are refused: the CLI registers them at runtime and refuses them in
+    a config file.
     """
-    # A list, not a set: a value can be unhashable (a list or an object), and building a set
-    # from it would raise TypeError (a 500) instead of the 422 below.
-    declared = [entry[k] for k in ("type", "transport") if k in entry]
-    if not declared:
+    if "transport" in entry:
+        raise cw.InvalidCandidateError(
+            "'transport' is not a Claude Code server field (Claude Code ignores it); use 'type'"
+        )
+    if "type" not in entry:
         return "stdio"
-    if not all(isinstance(v, str) for v in declared):
-        raise cw.InvalidCandidateError("server 'type'/'transport' must be a string")
-    normalized = set()
-    for value in declared:
-        if value == "sdk":
-            raise cw.InvalidCandidateError(
-                "server type 'sdk' is registered by an SDK host application at runtime; "
-                "Claude Code skips it in a config file"
-            )
-        transport = _TRANSPORT_ALIASES.get(value)
-        if transport is None:
-            raise cw.InvalidCandidateError(
-                f"unknown server transport {value!r} (want stdio/http/streamable-http/sse/ws)"
-            )
-        normalized.add(transport)
-    if len(normalized) > 1:
-        raise cw.InvalidCandidateError("server 'type' and 'transport' disagree")
-    (transport,) = normalized
+    value = entry["type"]
+    if not isinstance(value, str):
+        raise cw.InvalidCandidateError("server 'type' must be a string")
+    if value in _RUNTIME_ONLY_TYPES:
+        raise cw.InvalidCandidateError(
+            f"server type {value!r} is registered at runtime (an SDK host, an IDE or a "
+            "claude.ai connector); Claude Code refuses it in a config file"
+        )
+    transport = _TRANSPORT_ALIASES.get(value)
+    if transport is None:
+        raise cw.InvalidCandidateError(
+            f"unknown server transport {value!r} (want stdio/http/streamable-http/sse/ws)"
+        )
     return transport
 
 
@@ -280,17 +297,59 @@ def _validate_oauth(name: str, oauth: Any) -> None:
             raise cw.InvalidCandidateError(
                 f"{label} 'scopes' must be a non-empty space-separated string"
             )
+    if "xaa" in oauth and not isinstance(oauth["xaa"], bool):
+        raise cw.InvalidCandidateError(f"{label} 'xaa' must be true or false")
+
+
+def _validate_tool_policies(name: str, entry: dict[str, Any]) -> None:
+    """Validate the CLI-parsed per-tool fields ``tools`` and ``toolPermissions`` (http/sse)."""
+    if "tools" in entry:
+        tools = entry["tools"]
+        label = f"server {name!r} 'tools'"
+        if not isinstance(tools, list):
+            raise cw.InvalidCandidateError(f"{label} must be a list of objects")
+        for tool in tools:
+            if not isinstance(tool, dict) or not isinstance(tool.get("name"), str):
+                raise cw.InvalidCandidateError(f"{label} items need a string 'name'")
+            unknown = set(tool) - {"name", "permission_policy"}
+            if unknown:
+                raise cw.InvalidCandidateError(f"{label} item has unknown keys: {sorted(unknown)}")
+            if "permission_policy" in tool and not (
+                isinstance(tool["permission_policy"], str)
+                and tool["permission_policy"] in _TOOL_POLICIES
+            ):
+                raise cw.InvalidCandidateError(
+                    f"{label} 'permission_policy' must be one of {sorted(_TOOL_POLICIES)}"
+                )
+    if "toolPermissions" in entry:
+        perms = entry["toolPermissions"]
+        if not isinstance(perms, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) and v in TOOL_PERMISSION_VALUES
+            for k, v in perms.items()
+        ):
+            raise cw.InvalidCandidateError(
+                f"server {name!r} 'toolPermissions' must map tool names to one of "
+                f"{sorted(TOOL_PERMISSION_VALUES)}"
+            )
 
 
 def _validate_common_fields(name: str, entry: dict[str, Any]) -> None:
-    """Validate the fields every transport shares (``timeout`` and the two booleans)."""
+    """Validate the shared scalar fields (``timeout``, the booleans, ``role``, ``displayName``).
+
+    ``discoveryCache`` and ``displayName`` are only in the http/sse key set, so the key
+    check has already refused them on stdio and ws before this runs.
+    """
     if "timeout" in entry and not _is_positive_int(entry["timeout"]):
         raise cw.InvalidCandidateError(
             f"server {name!r} 'timeout' must be a positive integer (milliseconds)"
         )
-    for key in ("alwaysLoad", "bareElicitationCapability"):
+    for key in ("alwaysLoad", "bareElicitationCapability", "discoveryCache"):
         if key in entry and not isinstance(entry[key], bool):
             raise cw.InvalidCandidateError(f"server {name!r} {key!r} must be true or false")
+    if "role" in entry and entry["role"] != "comms":
+        raise cw.InvalidCandidateError(f"server {name!r} 'role' must be \"comms\"")
+    if "displayName" in entry and not isinstance(entry["displayName"], str):
+        raise cw.InvalidCandidateError(f"server {name!r} 'displayName' must be a string")
 
 
 def _validate_server_entry(name: Any, entry: Any) -> None:
@@ -319,8 +378,7 @@ def _validate_server_entry(name: Any, entry: Any) -> None:
         raise cw.InvalidCandidateError(f"server {name!r} must be an object")
 
     transport = entry_transport(entry)
-    declares_type = "type" in entry or "transport" in entry
-    if transport == "stdio" and not declares_type and "url" in entry and "command" not in entry:
+    if transport == "stdio" and "type" not in entry and "url" in entry and "command" not in entry:
         # Claude Code reads an entry with no `type` as stdio and skips this one with the
         # same advice; say it here instead of the less helpful "unknown keys: ['url']".
         raise cw.InvalidCandidateError(
@@ -352,6 +410,7 @@ def _validate_server_entry(name: Any, entry: Any) -> None:
             raise cw.InvalidCandidateError(
                 f"server {name!r} 'request_timeout_ms' must be a positive integer"
             )
+        _validate_tool_policies(name, entry)
         return
 
     # stdio
@@ -416,10 +475,22 @@ def _redact_entry(entry: Any) -> Any:
     as the sentinel, which :func:`~clauster.config_write.merge_redacted` turns back into the
     stored value. Whole keys are replaced on the copy, never a nested value in place (the
     copy may share nested objects, see ``redact_secrets``).
+
+    ``toolPermissions`` is keyed by TOOL names, so a tool called ``get_token`` would act as
+    a secret hint and mask its own ``"allow"``; the validator then refuses the sentinel and
+    the entry could not be saved again. A value that is one of the three permission words is
+    shown as stored (it is not a secret); any other value keeps its redacted form.
     """
     out = cw.redact_secrets(entry)
     if not isinstance(out, dict):
         return out
+    perms = entry.get("toolPermissions")
+    if isinstance(perms, dict) and isinstance(out.get("toolPermissions"), dict):
+        shown = out["toolPermissions"]
+        out["toolPermissions"] = {
+            k: v if isinstance(v, str) and v in TOOL_PERMISSION_VALUES else shown[k]
+            for k, v in perms.items()
+        }
     for key in _ALWAYS_SECRET_MAPS:
         block = out.get(key)
         if isinstance(block, dict):
@@ -478,26 +549,33 @@ def _unbacked_sentinel(incoming: Any, stored: Any, path: str) -> str | None:
     of one server into "New", or a stored value removed since the read, would write the
     entry without its ``url``/``env``/``headersHelper`` and report success. The path is
     dotted (``srv.env.TOKEN``, ``srv.args[1]``) and names no value.
+
+    "Backed" is decided exactly as ``merge_redacted`` decides it: a sentinel under a dict key
+    is backed when the stored dict has that key (whatever its value, ``null`` included), and
+    one at a list index when the stored list is longer than that index. A stored value that
+    is not a container backs nothing beneath it. Only containers are walked.
     """
-    if incoming == cw.REDACTION_SENTINEL:
-        return None if stored is not None else path
     if isinstance(incoming, dict):
         stored_dict = stored if isinstance(stored, dict) else {}
         for k, v in incoming.items():
             sub = f"{path}.{k}" if path else str(k)
-            if v == cw.REDACTION_SENTINEL and k not in stored_dict:
-                return sub
+            if v == cw.REDACTION_SENTINEL:
+                if k not in stored_dict:
+                    return sub
+                continue
             found = _unbacked_sentinel(v, stored_dict.get(k), sub)
-            if found:
+            if found is not None:
                 return found
     elif isinstance(incoming, list):
         stored_list = stored if isinstance(stored, list) else []
         for i, v in enumerate(incoming):
-            held = stored_list[i] if i < len(stored_list) else None
-            if v == cw.REDACTION_SENTINEL and i >= len(stored_list):
-                return f"{path}[{i}]"
-            found = _unbacked_sentinel(v, held, f"{path}[{i}]")
-            if found:
+            sub = f"{path}[{i}]"
+            if v == cw.REDACTION_SENTINEL:
+                if i >= len(stored_list):
+                    return sub
+                continue
+            found = _unbacked_sentinel(v, stored_list[i] if i < len(stored_list) else None, sub)
+            if found is not None:
                 return found
     return None
 
@@ -510,7 +588,7 @@ def _merge_kept(incoming: Any, stored: Any, path: str = "") -> Any:
     anything is written.
     """
     missing = _unbacked_sentinel(incoming, stored, path)
-    if missing:
+    if missing is not None:
         raise cw.InvalidCandidateError(
             f"{missing} is the masked value '********' but nothing is stored to keep; "
             "type the real value"
@@ -617,16 +695,23 @@ class ServerNotFoundError(cw.ConfigWriteError):
     """A ``remove``/edit-remove targeted a server name that doesn't exist (→ 404)."""
 
 
-def _fold_entry(stored: Any, name: str, entry: dict[str, Any]) -> dict[str, Any]:
+def _fold_entry(
+    stored: Any, name: str, entry: dict[str, Any], *, verbatim: bool
+) -> dict[str, Any]:
     """Return the stored map with ``entry`` merged in under ``name``; siblings untouched.
 
     Runs inside the locked writer, over the map read under the lock. Only ``name`` goes
-    through :func:`~clauster.config_write.merge_redacted` (a ``"********"`` in ``entry``
-    keeps that server's stored secret). Every other server is copied as stored, so a
-    sibling never round-trips through the redacted display copy.
+    through :func:`_merge_kept` (a ``"********"`` in ``entry`` keeps that server's stored
+    secret, and one with nothing stored is refused). Every other server is copied as
+    stored, so a sibling never round-trips through the redacted display copy.
+
+    ``verbatim=True`` (the edit-rollback restore) stores ``entry`` exactly as given, with no
+    merge: it is the raw on-disk snapshot taken before ``claude mcp remove``, so nothing is
+    stored under ``name`` any more, and a literal ``"********"`` in it is stored data, not a
+    mask. Merging it would drop that leaf or refuse the restore and lose the server.
     """
     servers = dict(stored) if isinstance(stored, dict) else {}
-    servers[name] = _merge_kept(entry, servers.get(name), path=name)
+    servers[name] = entry if verbatim else _merge_kept(entry, servers.get(name), path=name)
     return servers
 
 
@@ -664,7 +749,7 @@ def write_project_server_entry(
         MCP_SERVERS_KEY,
         entry,
         file_hash,
-        merge=lambda incoming, stored: _fold_entry(stored, name, incoming),
+        merge=lambda incoming, stored: _fold_entry(stored, name, incoming, verbatim=not validate),
     )
 
 
@@ -677,7 +762,11 @@ def write_user_server_entry(
     redacted = read_user_servers(claude_json)
     if op == "add" and name in redacted:
         raise ServerExistsError(f"MCP server {name!r} already exists in user scope")
-    cw.write_subtree(claude_json, MCP_SERVERS_KEY, lambda stored: _fold_entry(stored, name, entry))
+    cw.write_subtree(
+        claude_json,
+        MCP_SERVERS_KEY,
+        lambda stored: _fold_entry(stored, name, entry, verbatim=not validate),
+    )
 
 
 def write_project_local_server_entry(
@@ -700,7 +789,7 @@ def write_project_local_server_entry(
         PROJECTS_KEY,
         str(project_dir),
         MCP_SERVERS_KEY,
-        lambda stored: _fold_entry(stored, name, entry),
+        lambda stored: _fold_entry(stored, name, entry, verbatim=not validate),
     )
 
 

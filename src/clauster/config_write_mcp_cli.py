@@ -181,7 +181,16 @@ def entry_needs_direct_write(entry: dict[str, Any]) -> bool:
     oauth = entry.get("oauth")
     if isinstance(oauth, dict) and _oauth_needs_direct_write(oauth):
         return True
-    rest = {k: v for k, v in entry.items() if k != "oauth"}
+    # `toolPermissions` is keyed by tool names (`get_token` would read as a secret hint),
+    # and its values are the three permission words, never a secret; skip it when it holds
+    # only those, so it does not push an OAuth entry off the CLI path.
+    perms = entry.get("toolPermissions")
+    skip = {"oauth"}
+    if isinstance(perms, dict) and all(
+        isinstance(v, str) and v in mcp.TOOL_PERMISSION_VALUES for v in perms.values()
+    ):
+        skip.add("toolPermissions")
+    rest = {k: v for k, v in entry.items() if k not in skip}
     return cw.redact_secrets(rest) != rest
 
 

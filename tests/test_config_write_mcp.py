@@ -42,7 +42,7 @@ def test_validate_accepts_remote_entry() -> None:
     mcp.validate_mcp_servers(
         {"api": {"type": "http", "url": "https://x/mcp", "headers": {"H": "v"}}}
     )
-    mcp.validate_mcp_servers({"api": {"transport": "sse", "url": "https://x/sse"}})
+    mcp.validate_mcp_servers({"api": {"type": "sse", "url": "https://x/sse"}})
 
 
 def test_validate_accepts_explicit_stdio_type() -> None:
@@ -162,12 +162,31 @@ _OAUTH_FULL = {
             {"type": "http", "url": "https://x/mcp", "oauth": {}},
             id="oauth-empty",
         ),
+        # CLI-parsed, undocumented fields (2.1.318 `claude mcp add-json` stores each one):
         pytest.param(
-            # Undocumented for a remote server (the CLI drops it), kept so a stored entry
-            # written by an earlier clauster stays editable.
-            {"type": "sse", "url": "https://x/sse", "env": {"K": "v"}},
-            id="sse-legacy-env",
+            {
+                "type": "http",
+                "url": "https://x/mcp",
+                "tools": [{"name": "t1", "permission_policy": "always_ask"}, {"name": "t2"}],
+                "toolPermissions": {"t1": "ask", "t2": "blocked", "t3": "allow"},
+                "displayName": "Nice Name",
+                "discoveryCache": True,
+                "role": "comms",
+                "oauth": {"clientId": "c", "xaa": True},
+            },
+            id="http-cli-parsed-fields",
         ),
+        pytest.param(
+            {
+                "type": "sse",
+                "url": "https://x/sse",
+                "tools": [{"name": "t", "permission_policy": "always_deny"}],
+                "discoveryCache": False,
+            },
+            id="sse-cli-parsed-fields",
+        ),
+        pytest.param({"command": "x", "role": "comms"}, id="stdio-role"),
+        pytest.param({"type": "ws", "url": "wss://x/s", "role": "comms"}, id="ws-role"),
         pytest.param(
             # The read path masks every oauth string; the sentinel round-trips.
             {
@@ -201,7 +220,35 @@ def test_validate_accepts_every_documented_field(entry: dict) -> None:
         ({"type": "http", "url": "u", "request_timeout_ms": 0}, "request_timeout_ms"),
         ({"type": "http", "url": "u", "oauth": "x"}, "oauth"),
         ({"type": "http", "url": "u", "oauth": {"clientSecret": "s"}}, "unknown keys"),
-        ({"type": "http", "url": "u", "oauth": {"xaa": True}}, "unknown keys"),
+        ({"type": "http", "url": "u", "oauth": {"xaa": "yes"}}, "xaa"),
+        # CLI-parsed fields: wrong values, and transports where the CLI drops them
+        ({"type": "http", "url": "u", "role": "boss"}, "role"),  # CLI drops any non-"comms"
+        ({"type": "http", "url": "u", "displayName": 5}, "displayName"),
+        ({"type": "http", "url": "u", "discoveryCache": "on"}, "discoveryCache"),
+        ({"type": "http", "url": "u", "tools": {"t": 1}}, "tools"),
+        ({"type": "http", "url": "u", "tools": [{"permission_policy": "always_ask"}]}, "name"),
+        ({"type": "http", "url": "u", "tools": [{"name": "t", "extra": 1}]}, "unknown keys"),
+        (
+            {"type": "http", "url": "u", "tools": [{"name": "t", "permission_policy": "never"}]},
+            "permission_policy",
+        ),
+        (
+            {"type": "http", "url": "u", "tools": [{"name": "t", "permission_policy": ["x"]}]},
+            "permission_policy",
+        ),
+        ({"type": "http", "url": "u", "toolPermissions": {"t": "deny"}}, "toolPermissions"),
+        ({"type": "http", "url": "u", "toolPermissions": {"t": ["ask"]}}, "toolPermissions"),
+        ({"type": "http", "url": "u", "toolPermissions": ["t"]}, "toolPermissions"),
+        ({"command": "x", "displayName": "n"}, "unknown keys"),  # CLI drops it on stdio
+        ({"command": "x", "tools": [{"name": "t"}]}, "unknown keys"),
+        ({"type": "ws", "url": "wss://x", "discoveryCache": True}, "unknown keys"),
+        # Claude Code ignores these, so refuse them (was accepted before TASK-449.8)
+        ({"type": "sse", "url": "u", "env": {"K": "v"}}, "unknown keys"),
+        ({"type": "sse", "transport": "sse", "url": "u"}, "transport"),
+        ({"transport": "sse", "url": "u"}, "transport"),
+        ({"type": "sse-ide", "url": "u"}, "runtime"),
+        ({"type": "ws-ide", "url": "u"}, "runtime"),
+        ({"type": "claudeai-proxy", "url": "u"}, "runtime"),
         ({"type": "http", "url": "u", "oauth": {"clientId": 5}}, "clientId"),
         ({"type": "http", "url": "u", "oauth": {"callbackPort": 0}}, "callbackPort"),
         ({"type": "http", "url": "u", "oauth": {"callbackPort": 65536}}, "callbackPort"),
@@ -231,7 +278,7 @@ def test_validate_accepts_every_documented_field(entry: dict) -> None:
         ({"type": "ws"}, "url"),
         # documented error shapes
         ({"url": "https://x/mcp"}, "no 'type'"),
-        ({"type": "sdk", "name": "x"}, "SDK host"),
+        ({"type": "sdk", "name": "x"}, "runtime"),
     ],
 )
 def test_validate_rejects_bad_documented_field_values(entry: dict, match: str) -> None:
@@ -264,7 +311,6 @@ def test_validate_rejects_dotted_server_name() -> None:
         ({"type": "streamable-http", "url": "u"}, "http"),
         ({"type": "sse", "url": "u"}, "sse"),
         ({"type": "ws", "url": "u"}, "ws"),
-        ({"transport": "sse", "url": "u"}, "sse"),
     ],
 )
 def test_entry_transport_normalizes(entry: dict, want: str) -> None:
@@ -409,9 +455,43 @@ def test_unbacked_sentinel_walks_nested_lists() -> None:
     assert mcp._unbacked_sentinel({"a": [[m]]}, {"a": [["kept"]]}, "") is None
 
 
-def test_entry_transport_compares_normalized_aliases() -> None:
-    entry = {"type": "http", "transport": "streamable-http", "url": "https://x/mcp"}
-    assert mcp.entry_transport(entry) == "http"
+def test_unbacked_sentinel_matches_merge_redacted_for_a_stored_null() -> None:
+    # merge_redacted keeps a stored null under a present key, so that sentinel is backed.
+    m = cw.REDACTION_SENTINEL
+    assert mcp._unbacked_sentinel({"a": {"k": m}}, {"a": {"k": None}}, "") is None
+    assert mcp._unbacked_sentinel({"a": [m]}, {"a": [None]}, "") is None
+
+
+def test_tool_permissions_keyed_by_secret_shaped_tool_name_stay_editable(tmp_path: Path) -> None:
+    # A tool called `get_token` would act as a secret hint and mask its own "allow"; the
+    # validator would then refuse the sentinel and the server could never be saved again.
+    stored = {
+        "type": "http",
+        "url": "https://x/mcp",
+        "toolPermissions": {"get_token": "allow", "rotate_secret": "blocked"},
+    }
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"s": stored}}), encoding="utf-8"
+    )
+    servers, h = mcp.read_project_servers(tmp_path)
+    assert servers["s"]["toolPermissions"] == stored["toolPermissions"]
+    mcp.write_project_servers(tmp_path, servers, h)  # round-trips, no 422
+
+
+def test_rollback_restore_writes_a_literal_sentinel_verbatim(tmp_path: Path) -> None:
+    # The edit-rollback restore runs after `claude mcp remove`, so nothing is stored under
+    # the name. A literal "********" in the on-disk snapshot is data, not a mask: store it
+    # verbatim instead of refusing the restore and losing the server.
+    prior = {"command": "x", "args": [cw.REDACTION_SENTINEL], "autoApprove": ["t"]}
+    mcp.write_project_server_entry(tmp_path, "s", prior, op="edit", validate=False)
+    cj = tmp_path / "claude.json"
+    mcp.write_user_server_entry(cj, "s", prior, op="edit", validate=False)
+    mcp.write_project_local_server_entry(cj, tmp_path, "s", prior, op="edit", validate=False)
+    on_disk = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
+    assert on_disk["mcpServers"]["s"] == prior
+    cj_data = json.loads(cj.read_text(encoding="utf-8"))
+    assert cj_data["mcpServers"]["s"] == prior
+    assert cj_data["projects"][str(tmp_path)]["mcpServers"]["s"] == prior
 
 
 def test_user_and_local_reads_mask_headers_helper(tmp_path: Path) -> None:
