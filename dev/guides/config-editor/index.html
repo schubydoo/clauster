@@ -864,6 +864,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Subagent frontmatter checks">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#inline-mcp-servers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Inline MCP servers
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
         
           <li class="md-nav__item">
@@ -1591,6 +1608,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Subagent frontmatter checks">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#inline-mcp-servers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Inline MCP servers
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
         
           <li class="md-nav__item">
@@ -2117,8 +2151,9 @@ this editor.</p>
 <li><code>tools</code> must name at least one tool. <code>disallowedTools</code> refuses a <code>*</code> entry,
   because Claude Code then applies no denylist at all.</li>
 <li><code>mcpServers</code> must be a list. Each item is the name of a server that you
-  configured already, or a <code>name: definition</code> object. Claude Code reads only
-  the list form and ignores a mapping.</li>
+  configured already, or one <code>name: definition</code> object. Claude Code reads only
+  the list form and ignores a mapping. See
+  <a href="#inline-mcp-servers">Inline MCP servers</a> for the checks on a definition.</li>
 <li><code>permissionMode</code> accepts <code>manual</code> as an alias for <code>default</code>. It refuses
   <code>bypassPermissions</code>, as every config-editor surface does. See the
   <a href="../../security/#bypasspermissions-footgun-gate">bypassPermissions footgun gate</a>.</li>
@@ -2135,6 +2170,44 @@ the editor cannot convert the block safely, it shows the file as it is, and
 the save tells you to rewrite <code>mcpServers</code> as a list. Two examples are a
 mapping written on one line, such as <code>mcpServers: {github: {...}}</code>, and two
 servers with the same name.</p>
+<h4 id="inline-mcp-servers">Inline MCP servers<a class="headerlink" href="#inline-mcp-servers" title="Permanent link">&para;</a></h4>
+<p>Claude Code reads an inline server definition in the same shape as an entry in
+<code>.mcp.json</code>. The Subagents editor therefore checks each definition with the
+field rules of the MCP tab, which
+<a href="#mcp-server-definitions">MCP server definitions</a> describes. It accepts the
+same fields for each transport. It refuses the same values, for example
+<code>transport</code>, <code>env</code> on an <code>http</code>, <code>sse</code> or <code>ws</code> server, a <code>url</code> with no <code>type</code>,
+and <code>"type": "sdk"</code>. The YAML spelling rules above also apply to the true or
+false fields and the number fields of a definition, for example <code>alwaysLoad</code>
+and <code>timeout</code>. Quote a text value that looks like a number, for example
+<code>env: {PORT: "1e3"}</code> or <code>args: ["0o17"]</code>. Claude Code reads the unquoted value
+as a number and skips the server, so the editor refuses it.</p>
+<p>The name rule is not the same as on the MCP tab. Claude Code accepts any
+inline server name that is not reserved, so the editor accepts a name with a
+dot, a space or a leading hyphen. The editor refuses these items, because
+Claude Code skips them:</p>
+<ul>
+<li>A reserved name, such as <code>workspace</code>, <code>claude-in-chrome</code>, <code>computer-use</code>,
+  <code>Claude Preview</code> or <code>Claude Browser</code>.</li>
+<li>An item that defines more than one server. Write each server as its own
+  <code>- name:</code> item.</li>
+<li>Two inline servers with the same name. Claude Code connects only one of them.</li>
+</ul>
+<p>If an inline server in the file has <code>transport</code>, or has <code>env</code> on an <code>http</code>,
+<code>sse</code> or <code>ws</code> server, the editor converts it as the MCP tab does. The note
+above the text names each change. The file on disk does not change until you
+save.</p>
+<ul>
+<li>If <code>type</code> is not set, a <code>transport</code> value of <code>stdio</code>, <code>http</code>,
+  <code>streamable-http</code>, <code>sse</code> or <code>ws</code> becomes <code>type</code>. If <code>type</code> is set, Clauster
+  removes <code>transport</code>.</li>
+<li>Clauster removes <code>env</code> from an <code>http</code>, <code>sse</code> or <code>ws</code> server, with the lines
+  under it. Claude Code never read these values. The note gives their number.</li>
+</ul>
+<p>Only those lines change, so every other value and comment stays as you wrote
+it. If the editor cannot convert a server safely, it shows the file as it is,
+and the save tells you what to change. An example is a definition written on
+one line, such as <code>- srv: {transport: sse, url: ...}</code>.</p>
 <p>A file with the name of a built-in subagent, such as <code>claude.md</code>, overrides
 that built-in in Claude Code. The list shows the file as a read-only row next
 to the built-in row. Clauster does not edit or delete that file, so change it
