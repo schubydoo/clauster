@@ -980,7 +980,10 @@ def _refuse_yaml11_only_spellings(header: str) -> None:
     reference that YAML 1.2 reads as a number (``env: {A: 1e3}``, ``args: [0o17]``,
     ``- -0o17``), which the CLI's entry schema refuses, so it would skip the whole server.
     The inline walk TASK-479 added here did the same, server by server; the seam's walker
-    replaces it, so the composed tree is walked once, memoized and iteratively.
+    replaces it, so the composed tree is walked once, memoized and iteratively. The two
+    differ only where both YAML readings agree: the seam accepts a leading-zero value below
+    8 (``timeout: 07``, 7 to both) and an explicit ``!!str`` on a spelling PyYAML would
+    read as a number (``args: [!!str 10]``), which that walk refused.
 
     ``header`` already loaded as a mapping, so composing the text the CLI parses (the header,
     or its retry text: :func:`~clauster.config_write.cli_frontmatter_text`) yields a mapping

@@ -2271,3 +2271,93 @@ def test_the_yaml12_key_of_a_huge_integer_is_infinity() -> None:
 
 def test_yaml12_view_of_a_scalar_header_is_the_scalar() -> None:
     assert cw.yaml12_view("just text") == "just text"
+
+
+_MERGE_SPELLINGS = [
+    pytest.param("<<", id="plain"),
+    pytest.param("!!merge x", id="bang-bang-merge"),
+    pytest.param("!<tag:yaml.org,2002:merge> x", id="verbatim-tag"),
+    pytest.param("!!m%65rge x", id="percent-escaped"),
+]
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize("merge", _MERGE_SPELLINGS)
+def test_an_enclosing_merge_in_any_spelling_is_refused(parse, merge: str) -> None:
+    # Every spelling composes to the merge tag, so the seam checks the composed graph, not
+    # a `<<` in the text (a regression against main once the guard was text-gated).
+    text = (
+        f"---\nname: a\ndescription: d\npermissionMode: plan # c\na: &a {{{merge} : *a}}\n---\nb\n"
+    )
+    with pytest.raises(cw.InvalidCandidateError, match="encloses it"):
+        parse(text)
+
+
+@pytest.mark.timeout(20)
+@pytest.mark.parametrize("merge", _MERGE_SPELLINGS)
+def test_a_merge_pyramid_in_any_spelling_hits_the_pair_cap_quickly(merge: str) -> None:
+    levels = ["l0: &l0 {k0: 0, k1: 1}"] + [
+        f"l{i}: &l{i} {{{merge} : [*l{i - 1}, *l{i - 1}], k{i}: {i}}}" for i in range(1, 24)
+    ]
+    started = time.perf_counter()
+    with pytest.raises(cw.InvalidCandidateError, match="pair cap"):
+        cw.load_frontmatter_yaml("\n".join(levels) + "\n", what="frontmatter")
+    assert time.perf_counter() - started < 5.0
+
+
+def _override_pyramid(depth: int) -> list[str]:
+    """Return anchor lines of an alias pyramid whose top, ``P{depth}``, a merge reaches only.
+
+    Used behind an overridden merge key, so the loaded value stays tiny and every check on
+    it passes: only the walks of the composed graph meet the pyramid.
+    """
+    lines = ["  - &P0 [a, a, a, a]"]
+    lines += [
+        f"  - &P{i} [*P{i - 1}, *P{i - 1}, *P{i - 1}, *P{i - 1}]" for i in range(1, depth + 1)
+    ]
+    return lines
+
+
+@pytest.mark.timeout(20)
+def test_every_seam_walk_is_memoized_on_an_override_shaped_pyramid() -> None:
+    # Review of TASK-449.6: removing the visited set from any composed-tree walk left the
+    # suite green but hung on this 530-byte shape. The anchors sit in a list under an
+    # unknown key, which the CLI ignores, so nothing else refuses the file first.
+    header = (
+        "description: d\nanchors:\n"
+        + "\n".join(_override_pyramid(20))
+        + "\nmetadata: {<<: {x: *P20}, x: 1}\n"
+    )
+    root = yaml.compose(header, Loader=yaml.SafeLoader)
+    started = time.perf_counter()
+    cw._first_nested_yaml11_number(root)
+    cw._duplicate_key(root)
+    cw._has_enclosing_alias(root)
+    cw._has_merge_key(root)
+    cw.yaml12_view(header)
+    assert time.perf_counter() - started < 2.0
+
+
+def _inline_pyramid(depth: int) -> str:
+    """Return a flow list whose items anchor an alias pyramid ``depth`` levels deep."""
+    items = ["&P0 [a, a, a, a]"] + [
+        f"&P{i} [*P{i - 1}, *P{i - 1}, *P{i - 1}, *P{i - 1}]" for i in range(1, depth + 1)
+    ]
+    return "[" + ", ".join(items) + "]"
+
+
+@pytest.mark.timeout(20)
+def test_an_override_shaped_pyramid_saves_quickly_on_both_surfaces() -> None:
+    # The merge source is overridden, so the loaded value is tiny and passes every check on
+    # it. Only the walks of the composed graph meet the pyramid, and each must visit a node
+    # once (a walk per alias path would take hours).
+    pyramid = _inline_pyramid(20)
+    skill = f"---\ndescription: d\nmetadata: {{<<: {{x: {pyramid}}}, x: 1}}\n---\nb\n"
+    agent = (
+        "---\nname: x\ndescription: d\nmcpServers:\n"
+        f"  - srv: {{command: c, <<: {{args: {pyramid}}}, args: []}}\n---\nb\n"
+    )
+    started = time.perf_counter()
+    config_write_skills.validate_skill_md_content(skill)
+    config_write_subagents.validate_agent_content(agent, expected_name="x")
+    assert time.perf_counter() - started < 5.0

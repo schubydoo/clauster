@@ -1217,6 +1217,30 @@ def _has_enclosing_alias(root: yaml.Node) -> bool:
     return False
 
 
+def _has_merge_key(root: yaml.Node) -> bool:
+    """Whether any mapping in composed ``root`` has a merge key, however it is spelled.
+
+    ``<<``, ``!!merge x``, the verbatim ``!<tag:yaml.org,2002:merge>`` and a ``%``-escaped
+    tag all compose to the merge tag, so the composed graph is checked, not the text.
+    Iterative, and each node is walked once.
+    """
+    seen: set[int] = set()
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, yaml.CollectionNode) or id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, yaml.MappingNode):
+            for key_node, value_node in node.value:
+                if key_node.tag == _YAML_MERGE_TAG:
+                    return True
+                stack.extend((key_node, value_node))
+        else:
+            stack.extend(node.value)
+    return False
+
+
 class Yaml12Unknown:
     """A scalar :func:`yaml12_view` does not resolve: one with an explicit tag but ``!!str``.
 
@@ -1566,7 +1590,7 @@ def _duplicate_key(root: yaml.Node) -> yaml.Node | None:
     return None
 
 
-def _yaml12_refuses(text: str) -> tuple[int, int] | None:
+def _yaml12_refuses(text: str, root: yaml.Node | None) -> tuple[int, int] | None:
     """Return the (line, column) of syntax PyYAML accepts and YAML 1.2 refuses, or None.
 
     The CLI's first parse then fails, so it reads the retry text, or no fields at all, or
@@ -1582,7 +1606,8 @@ def _yaml12_refuses(text: str) -> tuple[int, int] | None:
     * a quoted value that continues on a line starting at column 0;
     * a key that repeats in its mapping (:func:`_duplicate_key`).
 
-    ``text`` already composed, so scanning it cannot fail.
+    ``text`` already composed (to ``root``, which the seam passes in so it composes once),
+    so scanning it cannot fail.
     """
     body = text[:-1] if text.endswith("\r") else text
     lone_cr = re.search(r"\r(?!\n)", body)
@@ -1604,7 +1629,7 @@ def _yaml12_refuses(text: str) -> tuple[int, int] | None:
             raw = text[token.start_mark.index : end.index]
             if any(line[:1] not in ("", " ", "\t", "\r") for line in raw.split("\n")[1:]):
                 return token.start_mark.line, token.start_mark.column
-    duplicate = _duplicate_key(yaml.compose(text, Loader=yaml.SafeLoader))
+    duplicate = None if root is None else _duplicate_key(root)
     if duplicate is not None:
         return duplicate.start_mark.line, duplicate.start_mark.column
     return None
@@ -1909,27 +1934,28 @@ def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> An
     # re-quoted value or a replaced tab can be off by the characters the retry added.
     header = cli_frontmatter_text(header)
     try:
-        if "<<" in header:
-            # A `<<` merge key flattens at *construction* time, so — unlike the alias pyramid
-            # #1393 whose blow-up is post-parse — a merge-key pyramid detonates inside
-            # ``safe_load`` itself, before any post-parse guard can run (#1417). Compose the
-            # node graph first (linear, no flattening) and refuse a mapping that would flatten
-            # past the pair cap. Gated on the `<<` substring: a header without one cannot carry
-            # a merge key, so the ordinary case skips the extra parse entirely. ``compose``
-            # raises the same ``YAMLError``/``RecursionError`` ``safe_load`` would, mapped below.
-            root = yaml.compose(header, Loader=yaml.SafeLoader)
-            if root is not None and _merge_expands_beyond(root, MAX_MERGE_EXPANDED_PAIRS):
-                raise InvalidCandidateError(
-                    f"{what} expands past the {MAX_MERGE_EXPANDED_PAIRS} pair cap "
-                    f"through its YAML merge keys"
-                )
-            # Only a merge key can hide such an alias: without one, an alias to an enclosing
-            # node is a cycle, and `_is_self_referential` refuses it after the load.
-            if root is not None and _has_enclosing_alias(root):
-                raise InvalidCandidateError(
-                    f"{what} has an alias to a node that encloses it, which the YAML 1.2 "
-                    "that Claude Code reads refuses. Remove the self-reference"
-                )
+        # A merge key flattens at *construction* time, so — unlike the alias pyramid #1393
+        # whose blow-up is post-parse — a merge-key pyramid detonates inside ``safe_load``
+        # itself, before any post-parse guard can run (#1417). Compose the node graph first
+        # (linear, no flattening) and refuse a mapping that would flatten past the pair cap.
+        # Not gated on a `<<` in the text any more (TASK-449.6): `!!merge x :`, the verbatim
+        # `!<tag:yaml.org,2002:merge>` and a `%`-escaped tag are merge keys too. Every walk
+        # below reads this one composed graph. ``compose`` raises the same
+        # ``YAMLError``/``RecursionError`` ``safe_load`` would, mapped below.
+        root = yaml.compose(header, Loader=yaml.SafeLoader)
+        if root is not None and _merge_expands_beyond(root, MAX_MERGE_EXPANDED_PAIRS):
+            raise InvalidCandidateError(
+                f"{what} expands past the {MAX_MERGE_EXPANDED_PAIRS} pair cap "
+                f"through its YAML merge keys"
+            )
+        # Only a merge key can hide such an alias: without one, an alias to an enclosing
+        # node is a cycle, and `_is_self_referential` refuses it after the load, with its
+        # own message.
+        if root is not None and _has_enclosing_alias(root) and _has_merge_key(root):
+            raise InvalidCandidateError(
+                f"{what} has an alias to a node that encloses it, which the YAML 1.2 "
+                "that Claude Code reads refuses. Remove the self-reference"
+            )
         value = yaml.safe_load(header)
     except yaml.YAMLError as exc:
         raise InvalidCandidateError(
@@ -1985,7 +2011,7 @@ def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> An
         # any serializer. The reason is a static class label, never the offending scalar —
         # invariant 4.
         raise InvalidCandidateError(f"{what} contains {reason}")
-    if (where := _yaml12_refuses(header)) is not None:
+    if (where := _yaml12_refuses(header, root)) is not None:
         # Positions only — invariant 4.
         raise InvalidCandidateError(
             f"{what} has syntax at line {where[0] + 1 + line_offset}, column {where[1] + 1} "
@@ -1993,10 +2019,10 @@ def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> An
             "carriage return, a '#' with no space before it, a space or tab before a '#' "
             "inside a value, a quoted value that goes on at column 0, or a repeated key"
         )
-    if isinstance(value, (dict, list)):
-        # Composing again is safe here: the load above already bounded nesting, aliases and
-        # merges. Positions only in the message, never the scalar — invariant 4.
-        nested = _first_nested_yaml11_number(yaml.compose(header, Loader=yaml.SafeLoader))
+    if root is not None and isinstance(value, (dict, list)):
+        # The graph composed above; the load already bounded nesting, aliases and merges.
+        # Positions only in the message, never the scalar — invariant 4.
+        nested = _first_nested_yaml11_number(root)
         if nested is not None:
             mark = nested.start_mark
             raise InvalidCandidateError(
