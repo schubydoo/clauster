@@ -168,14 +168,15 @@ Common mechanics across the modal:
 - **Typed confirmation** — every document save asks you to type the scope
   name; destructive list actions (delete, reset, plugin install) have their
   own typed confirms.
-- **Secret masking** — the Settings, MCP, and Skills surfaces, and the `autoMode`
-  box on the Permissions tab, mask secret-shaped values on read. On Settings, MCP
-  and `autoMode`, a masked value left untouched keeps the stored secret on write.
-  The Skills editor masks on read but restores nothing on write, so a save writes
-  the mask over the stored value. The CLAUDE.md, Hooks, and Subagents surfaces,
-  and the `permissions` rules, return the raw content, because they round-trip
-  the exact text on write. Do not put a secret anywhere in a subagent
-  file, for example in an inline `mcpServers` block in the frontmatter.
+- **Secret masking** — the Settings, MCP, Hooks, and Skills surfaces, and the
+  `autoMode` box on the Permissions tab, mask secret-shaped values on read. On
+  Settings, MCP, Hooks and `autoMode`, a masked value left untouched keeps the
+  stored secret on write. The Skills editor masks on read but restores nothing on
+  write, so a save writes the mask over the stored value. The CLAUDE.md and
+  Subagents surfaces, and the `permissions` rules, return the raw content, because
+  they round-trip the exact text on write. Do not put a secret anywhere in a
+  subagent file, for example in an inline `mcpServers` block in the frontmatter.
+  For what the Hooks tab masks, see [The Hooks tab](#the-hooks-tab).
 
 The surface tabs:
 
@@ -322,6 +323,87 @@ A file with the name of a built-in subagent, such as `claude.md`, overrides
 that built-in in Claude Code. The list shows the file as a read-only row next
 to the built-in row. Clauster does not edit or delete that file, so change it
 on the host.
+
+### The Hooks tab
+
+The Hooks tab edits the `hooks` key of the settings file for the scope. It
+accepts every hook event, every matcher form, every hook type, and every handler
+field that the [Claude Code hooks reference](https://code.claude.com/docs/en/hooks)
+documents. It also accepts the fields that the Claude Code CLI reads but the
+reference does not list: `rewakeMessage`, `rewakeSummary`, and `cloud`. Any
+other field for that hook type stops the save with a validation error (`422`),
+and nothing is written. A `timeout` must be a number of seconds above 0, as the
+CLI requires.
+Clauster stores each hook as data and never runs it. It does not run a command,
+send a request to a URL, call an MCP tool, or send a prompt to a model.
+
+In Rows view, each row is one hook: the event, the matcher, the type, the main
+field of that type, and the timeout.
+
+| Type | What Claude Code does when the hook fires | Handler column |
+| --- | --- | --- |
+| `command` | Runs a shell command | Command |
+| `http` | Sends the event data as an HTTP POST to a URL | URL |
+| `mcp_tool` | Calls a tool on a configured MCP server | Server and tool |
+| `prompt` | Asks a model to allow or block the action | Prompt |
+| `agent` | Starts a subagent that checks a condition | Prompt |
+
+If any hook at the scope uses another field, for example `headers`, `args`,
+`async`, `model`, or an MCP tool `input`, the whole tab opens in Raw JSON. The
+same happens if any value contains a line break, because a row cannot show it.
+
+An `http` hook sends data off the host, so the tab shows where the data goes: the
+scheme, the host, the port, the plain path segments, and the plain query keys of
+its URL.
+These parts of the URL show as `********`:
+
+- `user:password@` credentials.
+- Path segments and query keys that look like a token: a `${VAR}` reference, a
+  segment of 20 or more characters, or a segment whose letters and digits number
+  8 or more and mix both, with punctuation such as `;`, `:` or `=` not counted
+  (for example the three segments after `/services/` in a Slack webhook).
+- Every query value (for example `?token=` or `?sig=`), and the fragment.
+- The whole URL, if it contains a tab or a line break, if its port is not a number,
+  or if it is not a valid `http` or `https` URL.
+
+Every non-empty `headers` value also shows as `********`, and so do
+secret-shaped values in an MCP tool `input`.
+
+If you leave a mask in place, the save keeps the stored value. These rules decide
+when Clauster keeps it:
+
+- The URL, the headers, and the `input` must be unchanged, including every visible
+  part of the URL. If you change any of them, type every masked value in that hook
+  again. You can change other fields, for example `timeout`, without retyping.
+- If several hooks at the scope send to one destination with different masked
+  values (for example two Slack webhooks), Clauster keeps them only as a set. Each
+  hook keeps its own value when the hooks come back exactly as they were read, in
+  any order. A save that changes any field of one of them (the `timeout` too),
+  adds or removes one, or moves one to another event or matcher needs every masked
+  value among them typed again.
+
+Otherwise the save is refused (`422`) and nothing is written. These rules stop a
+stored token from going to a new host or path, or into a hook that you edited. If
+you edit a hook until it is identical, mask for mask, to another stored hook with
+the same URL, it becomes a copy of that hook. Clauster cannot tell the text
+`********` in any other hook field from a mask, so a save that holds it there is
+also refused. Change that value to save.
+
+Some secrets are not masked. The tab does not mask a `command`, its `args`, a
+`prompt`, a `model`, an `if` rule, a `statusMessage`, or a `matcher`. A URL path
+segment or query key shorter than 20 characters is not masked either if it has
+fewer than 8 letters and digits, or only letters, or only digits. Do not put a
+secret in them. For an `http` hook, put the secret in a header as a `$VAR` that
+`allowedEnvVars` lists.
+
+Clauster treats a hook that refers to `CLAUDE_PLUGIN_ROOT` in any field as a
+plugin hook. While one is in the settings file, every save of the Hooks tab at
+that scope is refused (`422`). Remove it in Raw JSON. To change a plugin hook,
+change the plugin.
+
+The `disableAllHooks`, `allowedHttpHookUrls`, and `httpHookAllowedEnvVars`
+settings are top-level keys, not part of the `hooks` key, so the Hooks tab does
+not edit them.
 
 ## Troubleshooting and limits
 

@@ -1,11 +1,14 @@
 """The config-write hooks routes (#1156).
 
 ``GET``/``PUT /api/config-write/hooks`` read and replace the stored hooks block for
-a surface. SECURITY: hooks are shell commands claude runs on lifecycle events. The
-structural validator NEVER resolves, spawns, or shell-parses a command string; it is
-stored as inert data and only runs inside a real claude process. Reading never runs a
-command. The off-by-default gate plus the validate-never-execute invariant are what
-prevent a browser write from reaching host RCE.
+a surface. SECURITY: hooks are handlers claude runs on lifecycle events (a shell
+command, an HTTP POST, an MCP tool call, or a model prompt). The structural validator
+NEVER resolves, spawns, or shell-parses a command string, never fetches a URL, and never
+calls a server or a model; every handler is stored as inert data and only runs inside a
+real claude process. Reading never runs a hook, and it masks the secret-bearing fields
+(``http`` headers, URL credentials, secret-shaped ``mcp_tool`` input). The off-by-default
+gate plus the validate-never-execute invariant are what prevent a browser write from
+reaching host RCE.
 """
 
 from __future__ import annotations

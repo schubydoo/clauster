@@ -1,10 +1,11 @@
 """Hooks config-write surface (#690) over the #347 Foundation.
 
 Covers the pure structural validator (validate-NEVER-execute — a hook ``command`` is
-never resolved/spawned/parsed/run, only its shape is checked, and only ``type:
-"command"`` is accepted), the project/user read+write routers (both write a real
+never resolved/spawned/parsed/run, only its shape is checked; the five documented hook
+types and their fields are covered in ``test_config_write_hooks_types.py``), the
+project/user read+write routers (both write a real
 ``settings.json``), and the gated routes (capability/scope 404, runner-missing 404,
-type-the-name 400, bad-shape/unknown-event/non-command-type 422 writing nothing,
+type-the-name 400, bad-shape/unknown-event/unknown-type 422 writing nothing,
 stale-hash 409, path-escape 400, corrupt-file 422, sibling-key preservation).
 
 The RCE-negative test proves the invariant that makes this code-executing surface
@@ -101,11 +102,11 @@ def test_validate_rejects_bad_shape(candidate: object) -> None:
         hooks.validate_hooks(candidate)
 
 
-@pytest.mark.parametrize("bad_type", ["prompt", "agent", "http", "mcp_tool", "Command", "", None])
-def test_validate_rejects_non_command_type(bad_type: object) -> None:
-    """Only ``type: "command"`` is managed by this surface; everything else is rejected."""
+@pytest.mark.parametrize("bad_type", ["Command", "HTTP", "shell", "", 5, None])
+def test_validate_rejects_unknown_type(bad_type: object) -> None:
+    """A type outside the five documented ones (or a missing type) is rejected."""
     entry = {"command": "x"} if bad_type is None else {"type": bad_type, "command": "x"}
-    with pytest.raises(cw.InvalidCandidateError):
+    with pytest.raises(cw.InvalidCandidateError, match="'type' must be one of"):
         hooks.validate_hooks({"PreToolUse": [{"hooks": [entry]}]})
 
 
@@ -521,7 +522,7 @@ def test_route_unknown_event_is_422_and_writes_nothing(
 def test_route_non_command_type_is_422_and_writes_nothing(
     write_config, tmp_path, projects_root
 ) -> None:
-    """A non-``command`` hook type (e.g. ``prompt``) is rejected (422), nothing written."""
+    """A field another type owns (``command`` on a ``prompt`` hook) is 422, nothing written."""
     with _client(write_config, tmp_path, _ON) as c:
         resp = c.put(
             _URL,

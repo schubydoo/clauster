@@ -58,6 +58,9 @@ async def _dashboard_context(config: ClausterConfig, engine: ClausterEngine) -> 
         # source of truth for the config editor's Hooks rows <select>, sorted for a
         # stable order and derived from the backend validator so the two never drift.
         "hook_events": sorted(config_write_hooks.RECOGNIZED_EVENTS),
+        # The accepted hook handler types (TASK-449.4), from the same validator, for the
+        # rows editor's type <select>.
+        "hook_types": list(config_write_hooks.HOOK_TYPES),
         # Interactive Session (true-resume pty) works on POSIX always and on Windows
         # via the ConPTY keeper when the `pty` extra (pywinpty) is installed (#914).
         "pty_supported": _pty_supported(),

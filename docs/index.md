@@ -56,11 +56,12 @@ Interactive Session mode, this *recaps* the prior conversation rather than truly
 - In-dashboard editor for a project's Claude Code config surfaces — `CLAUDE.md`,
   `settings.json` (env as friendly key/value rows or raw JSON), permissions (every
   documented `permissions` key as rows, or raw JSON, plus the auto mode classifier
-  rules in `autoMode` at user scope), hooks (one command hook per row — event /
-  matcher / command / timeout — or raw JSON), MCP servers, subagents, skills, and
-  plugins — at user / project scope (plus local for all but subagents and skills),
-  with secret-shaped values masked on the surfaces that carry them (settings `env`,
-  MCP, `autoMode`). Every write is lost-update-guarded and
+  rules in `autoMode` at user scope), hooks (all five documented hook types:
+  command, http, mcp_tool, prompt and agent, one hook per row, or raw JSON), MCP
+  servers, subagents, skills, and plugins — at user / project scope (plus local for
+  all but subagents and skills), with secret-shaped values masked on the surfaces
+  that carry them (settings `env`, MCP, `autoMode`, hook headers, URL credentials
+  and tokens, and MCP tool input). Every write is lost-update-guarded and
   trust-gated; every write is audit-logged to `config_audit.log`.
 - Approximate per-project cost / token badge rolled up from session transcripts.
 - Live per-bridge resource metrics (CPU / memory / disk) while a bridge runs.
