@@ -161,6 +161,7 @@ async def put_config_write(
     *,
     surface: str,
     get_user_path: Callable[[], Path],
+    extra_audit_keys: tuple[str, ...],
     user_fn_has_hash: bool = True,
     local_fn_has_hash: bool = True,
     get_local_target: Callable[[], Path] | None = None,
@@ -182,6 +183,10 @@ async def put_config_write(
     surface should leave both hash flags at the default ``True`` so the stale-hash
     guard is enforced. Any ``"hash"`` key the client sends is intentionally not
     forwarded when the relevant flag is ``False``.
+
+    ``extra_audit_keys`` names body keys outside ``payload_key`` that the write also
+    changed (the permissions surface's sibling ``autoMode``), so the audit line lists
+    them next to the payload's own keys. Pass ``()`` when there are none.
     """
     scope = body.get("scope", "project")
     # Capability gate FIRST, before the scope-enum check, so a disabled surface 404s
@@ -219,7 +224,7 @@ async def put_config_write(
             target=str(user_path),
             action="update",
             actor=SESSION_USER,
-            keys=sorted(payload),
+            keys=sorted([*payload, *extra_audit_keys]),
         )
         return {"scope": "user", "ok": True}
     if scope == "local":
@@ -258,7 +263,7 @@ async def put_config_write(
             target=str(project_dir if local_fn_has_hash else local_target),
             action="update",
             actor=SESSION_USER,
-            keys=sorted(payload),
+            keys=sorted([*payload, *extra_audit_keys]),
         )
         return {"scope": "local", "project": project, "ok": True}
     project = body.get("project")
@@ -281,7 +286,7 @@ async def put_config_write(
         target=str(project_dir),
         action="update",
         actor=SESSION_USER,
-        keys=sorted(payload),
+        keys=sorted([*payload, *extra_audit_keys]),
     )
     return {"scope": "project", "project": project, "ok": True}
 

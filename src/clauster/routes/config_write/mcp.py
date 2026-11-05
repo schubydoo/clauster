@@ -91,6 +91,7 @@ async def api_config_write_mcp_write(config: ConfigDep, runner: RunnerDep, body:
         write_project_fn=config_write_mcp.write_project_servers,
         write_local_fn=config_write_mcp.write_project_local_servers,
         get_user_path=lambda: runner.claude_json,
+        extra_audit_keys=(),
         user_fn_has_hash=False,
         local_fn_has_hash=False,
         get_local_target=lambda: runner.claude_json,

@@ -101,6 +101,45 @@ def test_permissions_rows_editor_present_when_enabled(write_config):
     assert "configMgmtAddPermRow(" in html
 
 
+def test_permissions_new_keys_and_auto_mode_box_present(write_config):
+    # TASK-449.3: the switches; TASK-449.1: the autoMode box and its scope note.
+    html = _html(write_config, _ON_USER)
+    assert 'data-test="cm-perm-flags"' in html
+    assert "'cm-perm-flag-' + flag.key" in html
+    assert 'data-test="cm-automode-text"' in html
+    assert 'data-test="cm-automode-scope-warning"' in html
+    assert "Switch to User scope to save auto mode rules." in html
+    # The additionalDirectories bucket and the four switches are in the Alpine state.
+    assert 'key: "additionalDirectories"' in html
+    for key in (
+        "blockReadsOutsideWorkingDirectories",
+        "blockWritesOutsideWorkingDirectories",
+        "disableBypassPermissionsMode",
+        "disableAutoMode",
+    ):
+        assert f'key: "{key}"' in html
+    assert "body.autoMode = am" in html
+    # The scope note is described to screen readers only where it shows.
+    assert (
+        ":aria-describedby=\"configMgmt.scope !== 'user' ? "
+        "'cm-automode-scope-warning cm-automode-hint' : 'cm-automode-hint'\""
+    ) in html
+    assert 'aria-describedby="cm-perm-flags-hint"' in html
+    # ...and each reference has its target, so none dangles.
+    for target in ("cm-perm-flags-hint", "cm-automode-hint", "cm-automode-scope-warning"):
+        assert f'id="{target}"' in html
+    # A failed load clears the text/orig/hash too, so an emptied row set cannot save over
+    # the file with the previous target's hash (the catch path keeps them otherwise).
+    assert 'p.text = ""; p.orig = ""; p.hash = null;' in html
+
+
+def test_auto_mode_note_without_user_scope_points_at_the_host_file(write_config):
+    # With allow_user_scope off there is no User button, so the note must not offer one.
+    html = _html(write_config, _ON)
+    assert "Switch to User scope to save auto mode rules." not in html
+    assert "editing is off in this Clauster configuration" in html
+
+
 def test_hooks_rows_editor_present_when_enabled(write_config):
     # #958 Part 5: the hooks surface gains a flat rows editor (event/matcher/command/
     # timeout) over the nested shape, layered on the raw-JSON escape hatch.

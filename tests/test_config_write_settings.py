@@ -57,6 +57,32 @@ def test_validate_rejects_each_owned_key(owned_key: str) -> None:
         cws.validate_misc_settings({owned_key: {}})
 
 
+@pytest.mark.parametrize("owned_key", sorted(cws.OWNED_KEYS))
+def test_owned_key_error_names_its_tab(owned_key: str) -> None:
+    # Every carved key maps to a real dashboard tab, and the refusal says which.
+    tab = cws.OWNED_KEY_TABS[owned_key]
+    assert tab in {"Permissions", "Hooks", "Plugins", "MCP"}
+    with pytest.raises(cws.SettingsCarveError, match=f"{owned_key} on the {tab} tab"):
+        cws.validate_misc_settings({owned_key: {}})
+
+
+def test_auto_mode_is_carved_to_the_permissions_surface(tmp_path: Path) -> None:
+    # autoMode is permission policy: the generic surface hides it on read and keeps it
+    # verbatim on write, so the two surfaces never race on the key.
+    assert "autoMode" in cws.OWNED_KEYS
+    settings = cw.project_settings_path(tmp_path)
+    settings.parent.mkdir(parents=True)
+    settings.write_text(
+        json.dumps({"autoMode": {"allow": ["$defaults", "x"]}, "model": "opus"}),
+        encoding="utf-8",
+    )
+    view, h = cws.read_project_settings(tmp_path)
+    assert view == {"model": "opus"}
+    cws.write_project_settings(tmp_path, {"model": "sonnet"}, h)
+    out = json.loads(settings.read_text(encoding="utf-8"))
+    assert out == {"autoMode": {"allow": ["$defaults", "x"]}, "model": "sonnet"}
+
+
 def test_validate_rejects_owned_key_alongside_valid_misc() -> None:
     # A single owned key rejects the WHOLE write, even with otherwise-valid misc.
     with pytest.raises(cw.InvalidCandidateError):
@@ -561,6 +587,28 @@ def test_route_owned_key_is_422_and_writes_nothing(write_config, tmp_path, proje
             },
         )
         assert resp.status_code == 422
+    assert not (projects_root / "alpha" / ".claude" / "settings.json").exists()
+
+
+def test_route_owned_key_error_names_the_owning_tab(write_config, tmp_path, projects_root) -> None:
+    """TASK-449.1: the maintainer's Raw JSON paste names the tab, not a bare refusal."""
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(
+            _URL,
+            json={
+                "scope": "project",
+                "project": "alpha",
+                "confirm": "alpha",
+                "settings": {
+                    "permissions": {"allow": []},
+                    "autoMode": {"allow": ["$defaults", "rule"]},
+                },
+            },
+        )
+        assert resp.status_code == 422
+        detail = resp.json()["detail"]
+    assert "autoMode on the Permissions tab" in detail
+    assert "permissions on the Permissions tab" in detail
     assert not (projects_root / "alpha" / ".claude" / "settings.json").exists()
 
 

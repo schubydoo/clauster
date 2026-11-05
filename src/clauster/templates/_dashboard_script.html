@@ -221,15 +221,24 @@
         // object (it has no other keys); a shape the rows can't show (unknown key,
         // non-string rule, unlisted mode) falls back to raw. `rowSeq` mints stable
         // per-row ids so x-for keys on identity, not array index.
+        // TASK-449.3: every documented `permissions` key has a row — the string lists
+        // (allow/deny/ask/additionalDirectories) as buckets, the Boolean and "disable"
+        // switches as `flags` checkboxes. `flagsOrig` keeps each switch's loaded value so
+        // an explicit `false` on disk is written back as `false`, not dropped.
+        // TASK-449.1: `autoModeText` edits the top-level `autoMode` block (a sibling of
+        // `permissions`) as JSON in both modes; it is sent only when it changed.
         permissions: {
           text: "", orig: "", hash: null,
           mode: "rows",
           buckets: [
-            { key: "allow", label: "Allow", rows: [] },
-            { key: "deny", label: "Deny", rows: [] },
-            { key: "ask", label: "Ask", rows: [] },
+            { key: "allow", label: "Allow", itemLabel: "Allow rule", addLabel: "Add Allow rule", rows: [] },
+            { key: "deny", label: "Deny", itemLabel: "Deny rule", addLabel: "Add Deny rule", rows: [] },
+            { key: "ask", label: "Ask", itemLabel: "Ask rule", addLabel: "Add Ask rule", rows: [] },
+            { key: "additionalDirectories", label: "Additional directories", itemLabel: "Additional directory", addLabel: "Add directory", rows: [] },
           ],
           defaultMode: "", rowsError: "", rowSeq: 0,
+          flags: {}, flagsOrig: {},
+          autoModeText: "", autoModeOrig: "",
         },
         // Hooks (#958 Part 5): a flat rows editor over the nested
         // `event → [{matcher?, hooks:[{type:"command", command, timeout?}]}]` shape.
@@ -299,6 +308,18 @@
         { key: "subagents", label: "Subagents" },
         { key: "skills", label: "Skills" },
         { key: "plugins", label: "Plugins" },
+      ],
+      // The documented on/off `permissions` switches (TASK-449.3), one checkbox each.
+      // `on` is the value a checked box writes: `true` for the two Booleans, the string
+      // "disable" for the two disable switches (the only value the docs define for them).
+      configMgmtPermFlags: [
+        { key: "blockReadsOutsideWorkingDirectories", on: true,
+          label: "Block file-tool reads outside the working directories" },
+        { key: "blockWritesOutsideWorkingDirectories", on: true,
+          label: "Block file-tool writes outside the working directories" },
+        { key: "disableBypassPermissionsMode", on: "disable",
+          label: "Disable bypassPermissions mode" },
+        { key: "disableAutoMode", on: "disable", label: "Disable auto mode" },
       ],
       // Surfaces that edit ONE document via the shared footer confirm+Save. List
       // surfaces (subagents, later MCP/skills/plugins) drive their own inline controls.
@@ -1707,23 +1728,27 @@
       // Shared JSON-surface loader: GET /api/config-write/<surface> and pretty-print
       // the (server-redacted) object into that surface's editor. settings/permissions/
       // hooks share this shape — only the route path + response key (== surface) differ.
+      // Resolves to the parsed response on success (so a caller can read a sibling key,
+      // such as permissions' `autoMode`), or null on any failure or superseded load.
       async _loadJsonSurface(surface, myGen) {
         const c = this.configMgmt;
         const st = c[surface];
         try {
           const res = await fetch(ROOT + "/api/config-write/" + surface + "?" + this._configMgmtQuery());
-          if (c.gen !== myGen) return;  // superseded by a newer load
-          if (this._authExpired(res)) return;
+          if (c.gen !== myGen) return null;  // superseded by a newer load
+          if (this._authExpired(res)) return null;
           if (!res.ok) {
             // Clear so a failed switch never leaves the previous target's JSON visible.
             st.text = ""; st.orig = ""; st.hash = null;
-            c.error = this._configMgmtLoadErr(res); return;
+            c.error = this._configMgmtLoadErr(res); return null;
           }
           const d = await res.json();
-          if (c.gen !== myGen) return;  // re-check across the json() await before writing state
+          if (c.gen !== myGen) return null;  // re-check across the json() await before writing state
           const text = JSON.stringify(d[surface] || {}, null, 2);
           st.text = text; st.orig = text; st.hash = d.hash || null;
+          return d;
         } catch (e) { if (c.gen === myGen) c.error = "Failed to load " + surface + "."; }
+        return null;
       },
       async _loadClaudeMd(myGen) {
         const c = this.configMgmt;
@@ -1923,39 +1948,65 @@
         return "Duplicate key" + (dupes.size > 1 ? "s" : "") + " — rename or remove to save: " +
           [...dupes].join(", ");
       },
-      // --- #958 Part 5: friendly permissions rows over allow/deny/ask + defaultMode --
-      // The permissions object has ONLY these keys, so the rows are the source of truth
-      // for the WHOLE object (no non-row keys to preserve, unlike settings' env). Rules
-      // are opaque, never-secret strings (no mask round-trip). Anything the rows can't
-      // represent falls back to raw, so nothing is ever hidden or silently dropped.
+      // --- #958 Part 5: friendly permissions rows over every permissions key ----------
+      // The rows cover every documented `permissions` key (TASK-449.3), so they are the
+      // source of truth for the WHOLE object (no non-row keys to preserve, unlike
+      // settings' env). Rules and paths are opaque, never-secret strings (no mask
+      // round-trip). Anything the rows can't represent falls back to raw, so nothing is
+      // ever hidden or silently dropped. The `autoMode` box (TASK-449.1) is separate:
+      // its value comes from the same GET, and it is server-redacted.
       async _loadPermissions(myGen) {
         const c = this.configMgmt;
-        await this._loadJsonSurface("permissions", myGen);
+        const p = c.permissions;
+        const d = await this._loadJsonSurface("permissions", myGen);
         if (c.gen !== myGen) return;  // superseded — skip the row rebuild
+        // A failed load clears the box too, so the previous target's rules never show.
+        const am = d && d.autoMode !== undefined && d.autoMode !== null
+          ? JSON.stringify(d.autoMode, null, 2) : "";
+        p.autoModeText = am; p.autoModeOrig = am;
+        if (!d) {
+          // Same for the rows (only a successful load rebuilds them below) and for the
+          // text/orig/hash: the catch path in _loadJsonSurface keeps the previous
+          // target's, and an emptied row set compared against an old `orig` would read
+          // dirty and could save `{}` over the file with the old hash. A null hash fails
+          // closed (409) on an existing file instead.
+          for (const b of p.buckets) b.rows = [];
+          p.flags = {}; p.flagsOrig = {}; p.defaultMode = ""; p.rowsError = "";
+          p.text = ""; p.orig = ""; p.hash = null;
+          return;
+        }
         // Rebuild the rows from the freshly loaded JSON; an unrepresentable shape
         // (unknown key, non-string rule, unlisted mode) drops to raw rather than
         // silently showing an empty/partial editor.
-        if (!c.error && !this._permissionsRowsFromText()) c.permissions.mode = "raw";
+        if (!c.error && !this._permissionsRowsFromText()) p.mode = "raw";
       },
       // The recognized defaultMode options = the canonical labels minus the footgun-
       // gated bypassPermissions AND the "inherit" launch sentinel (#1231), which means
       // "pass no --permission-mode flag" and is not a value claude's settings.json
-      // accepts. The two exclusions are hand-listed here and MUST track the backend's
-      // RECOGNIZED_MODES subtractions in config_write_permissions.py — that set is not
-      // injected into the template. {value, label} so the <select> renders friendly text.
+      // accepts, plus the documented settings-only alias "manual". "auto" is offered at
+      // User scope only: Claude Code ignores it in project and local settings, and the
+      // backend refuses it there. These rules are hand-listed here and MUST track the
+      // backend's SETTINGS_DEFAULT_MODES / USER_ONLY_MODES in config_write_permissions.py
+      // — that set is not injected into the template. {value, label} so the <select>
+      // renders friendly text.
       configMgmtPermissionModeOptions() {
-        return Object.keys(PERMISSION_LABELS)
+        const userScope = this.configMgmt.scope === "user";
+        const opts = Object.keys(PERMISSION_LABELS)
           .filter((m) => m !== "bypassPermissions" && m !== "inherit")
+          .filter((m) => userScope || m !== "auto")
           .map((m) => ({ value: m, label: (PERMISSION_LABELS[m] && PERMISSION_LABELS[m].long) || m }));
+        opts.push({ value: "manual", label: "Manual (same as Ask each time)" });
+        return opts;
       },
-      // Canonicalize a permissions-shaped object into the saved JSON: non-empty rules
-      // per bucket kept VERBATIM (opaque data — never trimmed/rewritten), buckets dropped
-      // when empty, defaultMode only when set. Both rows-dirty sides run through this so a
-      // freshly loaded doc never reads dirty.
+      // Canonicalize a permissions-shaped object into the saved JSON: non-empty strings
+      // per list kept VERBATIM (opaque data — never trimmed/rewritten), lists dropped
+      // when empty, defaultMode only when set, and each on/off switch kept with its
+      // value when present. Both rows-dirty sides run through this so a freshly loaded
+      // doc never reads dirty.
       _permissionsCanonicalize(obj) {
         const out = {};
-        for (const key of ["allow", "deny", "ask"]) {
-          const src = obj[key];
+        for (const b of this.configMgmt.permissions.buckets) {
+          const src = obj[b.key];
           if (!Array.isArray(src)) continue;
           const vals = [];
           for (const r of src) {
@@ -1966,18 +2017,28 @@
             const v = typeof r === "string" ? r : "";
             if (v !== "") vals.push(v);
           }
-          if (vals.length) out[key] = vals;
+          if (vals.length) out[b.key] = vals;
         }
         if (typeof obj.defaultMode === "string" && obj.defaultMode) out.defaultMode = obj.defaultMode;
+        for (const f of this.configMgmtPermFlags) {
+          if (obj[f.key] !== undefined) out[f.key] = obj[f.key];
+        }
         return JSON.stringify(out, null, 2);
       },
-      // Serialize the current buckets + defaultMode into the saved permissions JSON.
-      // Pure (no state mutation) so it's safe to call from configMgmtDirty every render.
+      // Serialize the current buckets + defaultMode + switches into the saved
+      // permissions JSON. A checked switch writes its documented value; an unchecked one
+      // writes `false` only when the file held an explicit `false` (kept, not dropped),
+      // and is otherwise left out. Pure (no state mutation) so it's safe to call from
+      // configMgmtDirty every render.
       _permissionsSerialized() {
         const p = this.configMgmt.permissions;
         const obj = {};
         for (const b of p.buckets) obj[b.key] = b.rows.map((r) => r.value);
         obj.defaultMode = p.defaultMode;
+        for (const f of this.configMgmtPermFlags) {
+          if (p.flags[f.key]) obj[f.key] = f.on;
+          else if (p.flagsOrig[f.key] === false) obj[f.key] = false;
+        }
         return this._permissionsCanonicalize(obj);
       },
       // Normalize a permissions JSON string through the SAME canonicalization the rows
@@ -1989,10 +2050,11 @@
         if (obj === null || typeof obj !== "object" || Array.isArray(obj)) return text;
         return this._permissionsCanonicalize(obj);
       },
-      // Rebuild the buckets + defaultMode from permissions.text. Returns false (and sets
-      // rowsError) for any shape the rows can't represent without lying — the caller then
-      // stays in raw. Never coerces: an unknown key, a non-string rule, or a defaultMode
-      // the editor doesn't offer (incl. the footgun bypassPermissions) sends you to raw.
+      // Rebuild the buckets + defaultMode + switches from permissions.text. Returns false
+      // (and sets rowsError) for any shape the rows can't represent without lying — the
+      // caller then stays in raw. Never coerces: an unknown key, a non-string rule, a
+      // switch with an undocumented value, or a defaultMode the editor doesn't offer
+      // (incl. the footgun bypassPermissions) sends you to raw.
       _permissionsRowsFromText() {
         const p = this.configMgmt.permissions;
         let obj;
@@ -2001,39 +2063,65 @@
         if (obj === null || typeof obj !== "object" || Array.isArray(obj)) {
           p.rowsError = "permissions must be a JSON object to use rows."; return false;
         }
-        const known = new Set(["allow", "deny", "ask", "defaultMode"]);
+        const known = new Set(["defaultMode"]);
+        for (const b of p.buckets) known.add(b.key);
+        for (const f of this.configMgmtPermFlags) known.add(f.key);
         const unknown = Object.keys(obj).filter((k) => !known.has(k));
         if (unknown.length) {
           p.rowsError = "permissions has keys the rows can't show (" + unknown.join(", ") +
             ") — edit in Raw JSON."; return false;
         }
-        const buckets = [];
-        for (const [key, label] of [["allow", "Allow"], ["deny", "Deny"], ["ask", "Ask"]]) {
-          const src = obj[key];
+        const lists = {};
+        for (const b of p.buckets) {
+          const src = obj[b.key];
           const rows = [];
           if (src !== undefined) {
             if (!Array.isArray(src)) {
-              p.rowsError = key + " must be a list of rule strings — edit in Raw JSON."; return false;
+              p.rowsError = b.key + " must be a list of strings — edit in Raw JSON."; return false;
             }
             for (const v of src) {
               if (typeof v !== "string") {
-                p.rowsError = key + " has a non-text rule — edit in Raw JSON."; return false;
+                p.rowsError = b.key + " has a non-text entry — edit in Raw JSON."; return false;
               }
               rows.push({ id: ++p.rowSeq, value: v });
             }
           }
-          buckets.push({ key, label, rows });
+          lists[b.key] = rows;
+        }
+        const flags = {};
+        const flagsOrig = {};
+        for (const f of this.configMgmtPermFlags) {
+          const v = obj[f.key];
+          // A Boolean switch holds true/false; a "disable" switch holds only "disable".
+          const ok = v === undefined || v === f.on || (f.on === true && v === false);
+          if (!ok) {
+            p.rowsError = f.key + " has a value the rows can't show — edit in Raw JSON."; return false;
+          }
+          flags[f.key] = v === f.on;
+          flagsOrig[f.key] = v;
         }
         let dm = "";
         if (obj.defaultMode !== undefined) {
           const ok = typeof obj.defaultMode === "string" &&
             this.configMgmtPermissionModeOptions().some((o) => o.value === obj.defaultMode);
           if (!ok) {
-            p.rowsError = "defaultMode isn't one the rows offer — edit in Raw JSON."; return false;
+            p.rowsError = obj.defaultMode === "auto"
+              ? "defaultMode \"auto\" only takes effect from User settings — edit in Raw JSON."
+              : "defaultMode isn't one the rows offer — edit in Raw JSON.";
+            return false;
           }
           dm = obj.defaultMode;
         }
-        p.buckets = buckets; p.defaultMode = dm; p.rowsError = ""; return true;
+        // Commit only after every check passed, so a refused shape leaves the rows as
+        // they were rather than half-rebuilt.
+        for (const b of p.buckets) b.rows = lists[b.key];
+        p.flags = flags; p.flagsOrig = flagsOrig;
+        p.defaultMode = dm; p.rowsError = ""; return true;
+      },
+      // The autoMode box changed since it was loaded (TASK-449.1).
+      _permissionsAutoModeDirty() {
+        const p = this.configMgmt.permissions;
+        return p.autoModeText !== p.autoModeOrig;
       },
       configMgmtPermissionsMode(mode) {
         const p = this.configMgmt.permissions;
@@ -2273,8 +2361,12 @@
         // as dirty. The no-edit Rows→Raw toggle is kept clean by preserving the original
         // text verbatim on switch (see configMgmtPermissionsMode), not by canonicalizing
         // here — canonicalizing raw would wrongly hide an edit to an unrepresentable key.
-        if (c.surface === "permissions" && c.permissions.mode === "rows") {
-          return this._permissionsSerialized() !== this._permissionsNormalize(c.permissions.orig);
+        // Either mode is also dirty when the separate autoMode box changed (TASK-449.1).
+        if (c.surface === "permissions") {
+          if (this._permissionsAutoModeDirty()) return true;
+          if (c.permissions.mode === "rows") {
+            return this._permissionsSerialized() !== this._permissionsNormalize(c.permissions.orig);
+          }
         }
         // Hooks rows mode: the flat rows are the source of truth; compare their regrouped
         // serialization against the canonicalized original. Raw mode falls through to the
@@ -2344,7 +2436,12 @@
         // raw mode) saves its textarea.
         let raw;
         if (surface === "settings" && c.settings.mode === "rows") raw = this._settingsEnvSerialized();
-        else if (surface === "permissions" && c.permissions.mode === "rows") raw = this._permissionsSerialized();
+        else if (surface === "permissions" && c.permissions.mode === "rows") {
+          // An autoMode-only edit resends the loaded permissions text as it was, so the
+          // rows' canonical form never rewrites a block the user did not touch.
+          const ser = this._permissionsSerialized();
+          raw = ser === this._permissionsNormalize(c.permissions.orig) ? c.permissions.orig : ser;
+        }
         else if (surface === "hooks" && c.hooks.mode === "rows") raw = this._hooksSerialized();
         else raw = st.text;
         // Fail closed: a null serialization means the base JSON is unusable — refuse to
@@ -2362,6 +2459,19 @@
         }
         const body = Object.assign(this._configMgmtTarget(), { confirm: c.confirm, hash: st.hash });
         body[surface] = payload;
+        // TASK-449.1: the top-level autoMode block rides along only when its box changed,
+        // so an untouched (or unparseable on disk) block is never rewritten. An emptied
+        // box sends {}, which removes the block.
+        if (surface === "permissions" && this._permissionsAutoModeDirty()) {
+          const amText = (c.permissions.autoModeText || "").trim();
+          let am;
+          try { am = JSON.parse(amText === "" ? "{}" : amText); }
+          catch (e) { c.error = "autoMode must be valid JSON."; return; }
+          if (am === null || typeof am !== "object" || Array.isArray(am)) {
+            c.error = "autoMode must be a JSON object."; return;
+          }
+          body.autoMode = am;
+        }
         const res = await fetch(ROOT + "/api/config-write/" + surface, {
           method: "PUT", headers: JSON_HEADERS, body: JSON.stringify(body),
         });
