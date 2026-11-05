@@ -153,9 +153,28 @@ def test_mask_moved_onto_a_clear_list_entry_is_refused(tmp_path: Path) -> None:
     h = _seed(settings, {"mirrors": ["plain", "https://user:tok@host/x"]})
     view, _ = cws.read_user_settings(settings)
     assert view == {"mirrors": ["plain", S]}
-    with pytest.raises(cw.InvalidCandidateError, match=r"mirrors\.0 holds a masked value"):
+    with pytest.raises(cw.InvalidCandidateError, match=r"mirrors\.[01] holds a masked value"):
         cws.write_user_settings(settings, {"mirrors": [S, "plain"]}, h)
     assert json.loads(settings.read_text(encoding="utf-8"))["mirrors"][1].startswith("https://")
+
+
+@pytest.mark.parametrize(
+    ("stored", "sent"),
+    [
+        # Delete the first masked entry and append a clear one: same length, slot 0 masked.
+        (["https://u:one@h/x", "https://u:two@h/y"], [S, "plain"]),
+        ([{"url": "https://u:one@h/x"}, {"url": "https://u:two@h/y"}], [{"url": S}, {"url": "n"}]),
+    ],
+)
+def test_identical_masks_in_a_list_cannot_be_partly_replaced(
+    tmp_path: Path, stored: list[Any], sent: list[Any]
+) -> None:
+    settings = tmp_path / "settings.json"
+    h = _seed(settings, {"mirrors": stored})
+    with pytest.raises(cw.InvalidCandidateError, match=r"mirrors\.1 holds a masked value"):
+        cws.write_user_settings(settings, {"mirrors": sent}, h)
+    # Retyping every masked entry is accepted.
+    cws.write_user_settings(settings, {"mirrors": ["https://u:two@h/y", "plain"]}, h)
 
 
 def test_mask_under_a_value_masked_whole_is_refused(tmp_path: Path) -> None:
@@ -352,6 +371,16 @@ def test_effective_never_mutates_its_inputs() -> None:
 def test_effective_drops_an_object_whose_every_part_is_ignored() -> None:
     eff = _eff(user={"model": "m"}, project={"sandbox": {"ripgrep": {"c": 1}}})
     assert "sandbox" not in eff
+    eff = _eff(project={"sandbox": {"credentials": {"awsPairs": []}, "enabled": True}})
+    assert eff["sandbox"]["value"] == {"enabled": True}  # the emptied middle level goes too
+
+
+def test_effective_null_marketplace_alias_is_dropped_and_fills_a_null_canonical() -> None:
+    lower = {"extraKnownMarketplaces": {"m": {}}}
+    eff = _eff(user=lower, project={"additionalMarketplaces": None})
+    assert eff["extraKnownMarketplaces"]["value"] == {"m": {}}
+    eff = _eff(project={"extraKnownMarketplaces": None, "additionalMarketplaces": {"n": {}}})
+    assert eff["extraKnownMarketplaces"]["value"] == {"n": {}}
 
 
 def test_effective_fallback_model_chain_is_replaced_whole() -> None:

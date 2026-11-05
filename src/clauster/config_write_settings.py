@@ -412,19 +412,21 @@ def reject_scope_ignored(candidate: dict[str, Any], scope: cw.Scope) -> None:
 def _without_paths(data: dict[str, Any], paths: list[str]) -> dict[str, Any]:
     """Return a copy of ``data`` without each dotted path (copying only the dicts on a path).
 
-    A top-level object left empty by the removal is dropped too, so the merged view never
+    Each parent object left empty by the removal is dropped too, so the merged view never
     names a scope for a key whose every part that scope sets is ignored there.
     """
     out = dict(data)
     for dotted in paths:
         *parents, leaf = dotted.split(".")
-        node = out
+        chain = [out]
         for part in parents:
-            node[part] = dict(node[part])
-            node = node[part]
-        del node[leaf]
-        if parents and out[parents[0]] == {}:
-            del out[parents[0]]
+            chain[-1][part] = dict(chain[-1][part])
+            chain.append(chain[-1][part])
+        del chain[-1][leaf]
+        for depth in range(len(parents), 0, -1):
+            if chain[depth]:
+                break
+            del chain[depth - 1][parents[depth - 1]]
     return out
 
 
@@ -539,6 +541,11 @@ def _unmasked_slot_path(incoming: Any, shown: Any, path: str) -> str | None:
     stored value" marker where the read put one, so a mask moved onto another slot (a
     list reordered so the mask lands on a clear entry) is caught here: the positional
     restore would otherwise copy that clear entry and drop the masked credential.
+
+    Masks all look the same, so in a list that still holds one, every element the read
+    showed masked must still hold a mask in the same position. Otherwise deleting one
+    masked entry and appending another value would keep the deleted credential and drop
+    the kept one. To change one such element, retype every masked entry of the list.
     """
     if incoming == cw.REDACTION_SENTINEL:
         return None if shown == cw.REDACTION_SENTINEL else path
@@ -548,6 +555,10 @@ def _unmasked_slot_path(incoming: Any, shown: Any, path: str) -> str | None:
             for k, v in incoming.items()
         )
     elif isinstance(incoming, list):
+        if isinstance(shown, list) and _has_sentinel(incoming):
+            for i, sub in enumerate(shown):
+                if _has_sentinel(sub) and not (i < len(incoming) and _has_sentinel(incoming[i])):
+                    return f"{path}.{i}"
         pairs = (
             (i, v, shown[i] if isinstance(shown, list) and i < len(shown) else _MISSING)
             for i, v in enumerate(incoming)
@@ -830,10 +841,11 @@ def _compute_effective_settings(
         if misc is not None:
             layer = _without_paths(misc, _ignored_paths(misc, scope))
             # Claude Code reads the alias as the canonical key in each file before it
-            # merges, and ignores the alias in a file that sets both.
-            alias = layer.pop(cwp.EXTRA_MARKETPLACES_ALIAS_KEY, _MISSING)
-            if alias is not _MISSING:
-                layer.setdefault(cwp.EXTRA_MARKETPLACES_KEY, alias)
+            # merges: a null alias is dropped, and an alias is ignored where the file
+            # also sets the canonical key to a non-null value.
+            alias = layer.pop(cwp.EXTRA_MARKETPLACES_ALIAS_KEY, None)
+            if alias is not None and layer.get(cwp.EXTRA_MARKETPLACES_KEY) is None:
+                layer[cwp.EXTRA_MARKETPLACES_KEY] = alias
             layers.append((scope, layer))
 
     # ``layers`` is in precedence order (local, project, user). Walk it reversed so

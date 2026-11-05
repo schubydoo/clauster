@@ -355,7 +355,9 @@ as `********` when they look like a secret. If you leave a mask as it is, the
 save keeps the stored value. If a mask no longer matches a stored value, the
 save is refused (`422`) and nothing is written. This occurs when you rename an
 `env` variable that shows a mask, or when you move or remove an entry of a list
-that holds a mask. Type the real value again.
+that holds a mask. Type the real value again. All masks look the same, so to
+change one masked entry of a list, type the real value of every masked entry in
+that list.
 
 The [settings reference](https://code.claude.com/docs/en/settings-reference)
 gives each key a scope. Claude Code reads some keys only from user settings,
