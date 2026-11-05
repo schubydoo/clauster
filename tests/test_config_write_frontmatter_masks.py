@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 
 from clauster import config_write as cw
@@ -1225,3 +1226,81 @@ def test_a_masked_member_behind_a_symlinked_directory_is_refused(tmp_path: Path)
 def test_restore_masked_lines_reports_the_lines_it_restored() -> None:
     restored, lines = cw.restore_masked_lines(f"a\ntoken: {MASK}\nb", "token: x\na\n", what="f")
     assert (restored, lines) == ("a\ntoken: x\nb", {1})
+
+
+def test_restore_masked_lines_is_linear_in_repeated_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Greptile on PR 1824: the group test `set(held)` ran once per incoming line, so an
+    # unchanged save of 10,000 alike lines scanned the 10,000 stored lines 10,000 times.
+    # Counted, not timed: every element any `set()` call takes is tallied.
+    taken: list[int] = []
+    real_set = set
+
+    def counting_set(items=()):
+        items = list(items)
+        taken.append(len(items))
+        return real_set(items)
+
+    monkeypatch.setitem(cw.__dict__, "set", counting_set)
+    n = 10_000
+    restored, lines = cw.restore_masked_lines(f"TOKEN={MASK}\n" * n, "TOKEN=x\n" * n, what="f")
+    assert restored == "TOKEN=x\n" * n and len(lines) == n
+    assert sum(taken) <= 2 * n  # linear: one pass per group, not one per line
+
+
+@pytest.mark.parametrize("changed_key", ["a", "b"])
+def test_an_aliased_scalar_changed_at_one_place_only_cannot_be_rewritten(changed_key: str) -> None:
+    # One node, two places: whichever place the walk reaches first, a change at only one of
+    # them has no single text that loads to both values.
+    text = "---\nname: x\ndescription: d\na: &t v\nb: *t\n---\nbody\n"
+    value, _body = sub.parse_frontmatter(text)
+    match = sub._FRONTMATTER_RE.match(text)
+    assert match is not None
+    root = yaml.compose(cw.cli_frontmatter_text(cw.frontmatter_header(text, match)))
+    assert sub._changed_scalars(root, value, {**value, changed_key: "w"}) is None
+
+
+def test_changed_scalars_is_linear_in_the_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The walk used to compare the whole subtree at every level above a change, so a deep
+    # chain over a wide list cost depth x width. Counted: each comparison's leaves.
+    depth, width = 200, 2000
+    text = (
+        "---\nname: x\ndescription: d\nk: "
+        + "[" * depth
+        + ", ".join(["a"] * width)
+        + "]" * depth
+        + "\n---\nb\n"
+    )
+    value, _body = sub.parse_frontmatter(text)
+    target = json.loads(json.dumps(value))
+    node = target["k"]
+    for _ in range(depth - 1):
+        node = node[0]
+    node[0] = "changed"  # the element the comparison reaches last
+    match = sub._FRONTMATTER_RE.match(text)
+    assert match is not None
+    root = yaml.compose(cw.cli_frontmatter_text(cw.frontmatter_header(text, match)))
+    work: list[int] = []
+    real = cw.same_yaml_value
+
+    def leaves(item: object) -> int:
+        stack, count = [item], 0
+        while stack:
+            top = stack.pop()
+            if isinstance(top, dict):
+                stack.extend(top.values())
+            elif isinstance(top, list):
+                stack.extend(top)
+            else:
+                count += 1
+        return count
+
+    def counting(a: object, b: object) -> bool:
+        work.append(leaves(a))
+        return real(a, b)
+
+    monkeypatch.setattr(cw, "same_yaml_value", counting)
+    slots = sub._changed_scalars(root, value, target)
+    assert slots is not None and len(slots) == 1
+    assert sum(work) <= 2 * (width + depth + 2)  # each leaf compared about once

@@ -1583,20 +1583,29 @@ def _changed_scalars(
     Walks the composed header and its loaded value side by side. ``None`` when a change
     cannot be placed on the text of one scalar: a node reached at a second place (an
     alias), a mapping with a merge key, a container whose shape changed, or a container the
-    walk cannot pair with its node (an ``!!omap``, ``!!pairs`` or ``!!set``).
+    walk cannot pair with its node (an ``!!omap``, ``!!pairs`` or ``!!set``) and that changed.
+
+    Linear in the size of the loaded header: each node is visited once per place it is
+    reached, and a whole subtree is compared only where the walk stops descending, never
+    again at every level above a change. A scalar reached at a second place may not change
+    at either one, which is what an alias with a changed value means.
     """
     slots: list[tuple[yaml.ScalarNode, Any]] = []
     changed: set[int] = set()
+    seen: set[int] = set()
     stack: list[tuple[yaml.Node, Any, Any]] = [(root, value, target)]
     while stack:
         node, have, want = stack.pop()
-        if cw.same_yaml_value(have, want):
-            continue
-        if id(node) in changed:
-            return None
-        changed.add(id(node))
-        if isinstance(node, yaml.ScalarNode) and not isinstance(want, cw._YAML_CONTAINERS):
-            slots.append((node, want))
+        if isinstance(node, yaml.ScalarNode):
+            differs = isinstance(want, cw._YAML_CONTAINERS) or not cw.same_yaml_value(have, want)
+            if differs and (id(node) in seen or isinstance(want, cw._YAML_CONTAINERS)):
+                return None
+            if not differs and id(node) in changed:
+                return None
+            seen.add(id(node))
+            if differs:
+                changed.add(id(node))
+                slots.append((node, want))
         elif (
             isinstance(node, yaml.MappingNode)
             and type(have) is dict
@@ -1618,8 +1627,8 @@ def _changed_scalars(
             and len(node.value) == len(have) == len(want)
         ):
             stack.extend(zip(node.value, have, want, strict=True))
-        else:
-            return None
+        elif not cw.same_yaml_value(have, want):
+            return None  # a change the walk cannot pair with one scalar's text
     return slots
 
 

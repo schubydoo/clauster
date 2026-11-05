@@ -663,6 +663,10 @@ def restore_masked_lines(incoming: str, stored: str, *, what: str) -> tuple[str,
     Returns the restored text and the 0-based indexes of the lines that were restored. The
     restored line keeps the incoming line ending. The message names a line number, never a
     value (invariant 4).
+
+    Linear in the size of both texts: what the loop needs about each group of stored lines
+    with one view (does it hold different texts, does the incoming count fit it) is worked
+    out once, before the loop, and the loop keeps one cursor per group.
     """
     by_view: dict[str, list[str]] = {}
     for line in stored.splitlines(keepends=True):
@@ -676,6 +680,13 @@ def restore_masked_lines(incoming: str, stored: str, *, what: str) -> tuple[str,
         body, _eol = _split_eol(line)
         if REDACTION_SENTINEL in body:
             wanted[body] = wanted.get(body, 0) + 1
+    # Once per view, never per line: whether the incoming lines with this view can be paired
+    # one for one with the stored ones (more than stored is refused; a group of different
+    # texts needs the same number on both sides).
+    fits: dict[str, bool] = {}
+    for view, count in wanted.items():
+        held = by_view.get(view, [])
+        fits[view] = count <= len(held) and (count == len(held) or len(set(held)) == 1)
     taken: dict[str, int] = {}
     restored: set[int] = set()
     out: list[str] = []
@@ -691,7 +702,7 @@ def restore_masked_lines(incoming: str, stored: str, *, what: str) -> tuple[str,
                 "line matches it, so there is no stored value to keep. Type the real value, "
                 "or change the text if it really is that"
             )
-        if wanted[body] > len(held) or (len(set(held)) > 1 and wanted[body] != len(held)):
+        if not fits[body]:
             raise InvalidCandidateError(
                 f"{what} line {index + 1} holds the mask {REDACTION_SENTINEL}, but the stored "
                 "lines that look like it were not sent back one for one (a line was added, "
