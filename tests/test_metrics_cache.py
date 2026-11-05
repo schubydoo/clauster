@@ -493,6 +493,8 @@ async def test_session_figure_needs_an_identity(runner_config):
     tracked = {101: _session(101, "u-a", inst.instance_id)}
     figure = {"u-a": _figure(101, start=(None, None))}
     assert runner._vet_session_figures(inst.instance_id, tracked, figure) == {}
+    # Nothing was pinned, so the next complete read is measured afresh and shown.
+    assert "u-a" in runner._vet_session_figures(inst.instance_id, tracked, {"u-a": _figure(101)})
 
 
 async def test_session_figure_must_match_the_tracked_session(runner_config):
@@ -525,19 +527,49 @@ async def test_first_figure_checked_against_started_at_where_epoch_is_fixed(
     assert vet(inst.instance_id, tracked, moved) == {}
 
 
-async def test_started_at_check_skipped_where_the_epoch_drifts(runner_config, monkeypatch):
-    """On Linux the epoch moves with the wall clock (#1399), so only the ticks decide."""
+async def test_started_at_check_is_coarse_where_the_epoch_drifts(
+    runner_config, monkeypatch, caplog
+):
+    """On Linux the epoch moves with the wall clock (#1399): the ticks decide identity.
+
+    The first-figure startedAt check there uses the coarse hour bound, so a corrected clock
+    does not refuse a real session, while a pid reused after an hours-long session does.
+    """
     monkeypatch.setattr("clauster.runner.procutil.start_time_is_drift_prone", lambda: True)
     runner = _runner(runner_config)
     inst = _running(runner, project="alpha", pid=100)
-    tracked = {101: _session(101, "u-a", inst.instance_id, started=_T0)}
+    tracked = {
+        101: _session(101, "u-a", inst.instance_id, started=_T0),
+        102: _session(102, "u-b", inst.instance_id, started=_T0),
+        103: _session(103, "u-c", inst.instance_id, started=_T0),
+    }
     vet = runner._vet_session_figures
-    # An epoch far from startedAt (a corrected clock) does not block the first figure,
+    # An epoch 90s from startedAt (a corrected clock) does not block the first figure,
     # and a later epoch shift with the same ticks keeps it.
     assert "u-a" in vet(inst.instance_id, tracked, {"u-a": _figure(101, start=(_T0 + 90, 7))})
     assert "u-a" in vet(inst.instance_id, tracked, {"u-a": _figure(101, start=(_T0 + 95, 7))})
-    # Without ticks an epoch cannot prove identity here: no figure.
-    assert vet(inst.instance_id, tracked, {"u-a": _figure(101, start=(_T0, None))}) == {}
+    # The pinned epoch exactly, without ticks: only the drift rule can refuse it.
+    assert vet(inst.instance_id, tracked, {"u-a": _figure(101, start=(_T0 + 90, None))}) == {}
+    # A process started two hours after its session began is a reused pid; logged.
+    with caplog.at_level(logging.DEBUG, logger="clauster.runner"):
+        late = {"u-b": _figure(102, start=(_T0 + 7200, 9))}
+        assert vet(inst.instance_id, tracked, late) == {}
+    assert "process started 7200s from its startedAt" in caplog.text
+    # An epoch-only first read is never pinned, so it cannot poison a later full read.
+    assert vet(inst.instance_id, tracked, {"u-c": _figure(103, start=(_T0, None))}) == {}
+    assert "u-c" in vet(inst.instance_id, tracked, {"u-c": _figure(103, start=(_T0, 11))})
+
+
+def test_same_start_rules():
+    """Ticks decide; an epoch decides only where it is fixed at exec."""
+    from clauster.runner import _same_start
+
+    assert _same_start((1.0, 5), (9.0, 5), drift_prone=True)  # ticks win over the epoch
+    assert not _same_start((1.0, 5), (1.0, 6), drift_prone=False)
+    assert not _same_start((1.0, None), (1.0, None), drift_prone=True)
+    assert _same_start((1.0, None), (1.01, None), drift_prone=False)
+    assert not _same_start((1.0, None), (1.2, None), drift_prone=False)
+    assert not _same_start((None, None), (None, None), drift_prone=False)
 
 
 async def test_session_pins_are_forgotten_with_the_session_and_the_bridge(runner_config):

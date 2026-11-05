@@ -339,12 +339,11 @@ _TREE_REAP_WAIT = 2.0
 _NOTIFY_DRAIN_GRACE = 2.0
 # How far a session process's start may sit from the `startedAt` that `claude agents --json`
 # reports for it before its first metrics figure is refused (TASK-342). Measured about 1s
-# on a live bridge (the CLI stamps the session just after the process starts); the slack
-# allows a loaded host. Used only where the epoch is fixed at exec (macOS, Windows).
+# on a live Linux bridge (the CLI stamps the session just after the process starts); the
+# slack allows a loaded host. This tight bound is used only where the epoch is fixed at
+# exec (macOS, Windows). On Linux the live epoch moves with the wall clock (#1399), so
+# there the coarse `procutil._DRIFT_EPOCH_TOLERANCE` applies instead, as elsewhere.
 _SESSION_START_SLACK_SECONDS = 30.0
-# The epoch bound for one process measured twice where it is fixed at exec: the same
-# value comes back, so this only absorbs float noise.
-_SAME_START_EPOCH_SLACK = 0.05
 
 
 def _same_start(
@@ -364,7 +363,7 @@ def _same_start(
         return pinned[1] == seen[1]
     if drift_prone or pinned[0] is None or seen[0] is None:
         return False
-    return abs(pinned[0] - seen[0]) <= _SAME_START_EPOCH_SLACK
+    return abs(pinned[0] - seen[0]) <= procutil._EXACT_PROC_START_TOLERANCE
 
 
 class SessionRunner:
@@ -963,14 +962,17 @@ class SessionRunner:
         it is fixed at exec (macOS, Windows). The pin stays after a mismatch, so a reused
         pid is never adopted for that session.
 
-        Where the epoch is fixed at exec, a FIRST figure must also have started near the
-        session's own ``startedAt``, which closes the case of a pid reused before the
-        first measurement. On Linux that epoch moves with the wall clock (#1399), so the
-        check is skipped there; the pin still closes every reuse after the first figure.
-        A figure without any identity is dropped. Pins for sessions that left the tracked
-        list, and for bridges that left the registry, are forgotten.
+        A FIRST figure must also have started near the session's own ``startedAt``, which
+        catches a pid reused before the first measurement: within 30s where the epoch is
+        fixed at exec, and within the coarse hour bound on Linux, where the live epoch
+        moves with the wall clock (#1399) and a tight compare would refuse real sessions.
+        Only an identity that can match itself on this platform is pinned (ticks on
+        Linux), so a figure without one is dropped and never poisons the pin for a later,
+        complete read. Pins for sessions that left the tracked list, and for bridges that
+        left the registry, are forgotten.
         """
         drift_prone = procutil.start_time_is_drift_prone()
+        slack = procutil._DRIFT_EPOCH_TOLERANCE if drift_prone else _SESSION_START_SLACK_SECONDS
         self._session_pins = {k: v for k, v in self._session_pins.items() if k in self._instances}
         live = {(s.local_uuid, p) for p, s in tracked.items()}
         pins = {k: v for k, v in self._session_pins.get(iid, {}).items() if k in live}
@@ -981,19 +983,22 @@ class SessionRunner:
             session = tracked.get(entry["pid"])
             if session is None or session.local_uuid != uuid:
                 continue
-            if epoch is None and ticks is None:
-                continue  # nothing to identify the process by
+            seen = (epoch, ticks)
+            if not _same_start(seen, seen, drift_prone=drift_prone):
+                continue  # nothing on this platform can identify the process by
             key = (uuid, session.pid)
             prior = pins.get(key)
             if prior is None:
-                if (
-                    not drift_prone
-                    and epoch is not None
-                    and abs(epoch - session.started_at / 1000) > _SESSION_START_SLACK_SECONDS
-                ):
+                gap = abs(epoch - session.started_at / 1000) if epoch is not None else None
+                if gap is not None and gap > slack:
+                    # Silent on the page by design; logged so that a platform where
+                    # `startedAt` means something else is diagnosable. No uuid in the line.
+                    _log.debug(
+                        "session figure refused: process started %.0fs from its startedAt", gap
+                    )
                     continue  # not the process the CLI saw start this session
-                pins[key] = prior = (epoch, ticks)
-            if not _same_start(prior, (epoch, ticks), drift_prone=drift_prone):
+                pins[key] = prior = seen
+            if not _same_start(prior, seen, drift_prone=drift_prone):
                 continue
             kept[uuid] = entry
         self._session_pins[iid] = pins

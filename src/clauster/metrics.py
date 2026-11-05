@@ -34,6 +34,17 @@ def _io_bytes(proc: psutil.Process) -> tuple[int, int] | None:
         return None
 
 
+def _start_token(pair: tuple[float | None, int | None]) -> tuple[str, float | int | None]:
+    """Reduce a ``proc_start_pair`` to the half that is stable for one process.
+
+    The boot-relative ticks when present (Linux), since the epoch half moves there with
+    the wall clock between two reads; otherwise the epoch, which macOS and Windows fix at
+    exec.
+    """
+    epoch, ticks = pair
+    return ("ticks", ticks) if ticks is not None else ("epoch", epoch)
+
+
 def _own_members(subtrees: dict[int, set[int]]) -> dict[int, set[int]]:
     """Split overlapping session subtrees so that each process counts for one session only.
 
@@ -173,6 +184,11 @@ def sample_tree(
         # The session root must be measured in BOTH snapshots: one that exited mid-sample
         # gets no figure at all, not a partial one made of the children it left behind.
         if sp not in members:
+            continue
+        # The identity read before the snapshots must still name this pid's process: a
+        # death and a pid reuse inside the window would otherwise put the old identity on
+        # the new process's figure.
+        if _start_token(procutil.proc_start_pair(sp)) != _start_token(starts[sp]):
             continue
         per_session[sessions[sp]] = {
             "pid": sp,

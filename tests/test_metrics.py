@@ -297,16 +297,61 @@ def test_sample_tree_keeps_sibling_sessions_apart(two_session_tree, monkeypatch)
     assert sum(e["rss_bytes"] for e in s["sessions"].values()) < s["rss_bytes"]
 
 
-def test_sample_tree_leaves_out_a_session_pid_outside_the_tree(bridge_tree):
-    # A pid the CLI named that is not under this bridge, and the bridge pid itself, get
-    # no figure. The bridge total is still returned.
+def test_sample_tree_leaves_out_a_session_pid_outside_the_tree(bridge_tree, monkeypatch):
+    # A pid the CLI named that is not under this bridge (a live one, and one that does not
+    # exist), and the bridge pid itself, get no figure and no subtree walk. The bridge
+    # total is still returned.
     root, _session, _procs = bridge_tree
+    outside = os.getpid()  # live, and not inside the bridge stand-in's tree
+    real = psutil.Process.children
+    walked: list[int] = []
+
+    def walk(self, recursive=False):
+        walked.append(self.pid)
+        return real(self, recursive=recursive)
+
+    monkeypatch.setattr(psutil.Process, "children", walk)
     s = metrics.sample_tree(
-        root, interval=0.02, sessions={2_147_483_646: "elsewhere", root: "the-bridge"}
+        root,
+        interval=0.02,
+        sessions={outside: "outside", 2_147_483_646: "gone", root: "the-bridge"},
     )
     assert s is not None
     assert s["sessions"] == {}
     assert s["rss_bytes"] > 0
+    assert walked == [root]
+
+
+def test_sample_tree_nested_session_keeps_its_own_processes(bridge_tree):
+    # A session started inside another session's subtree (here: the tool, named as a
+    # session too) reports its own processes, and the outer session no longer counts them.
+    root, session, session_procs = bridge_tree
+    inner = psutil.Process(session).children()[0]
+    inner_procs = len(inner.children(recursive=True)) + 1
+    s = metrics.sample_tree(root, interval=0.02, sessions={session: "outer", inner.pid: "inner"})
+    assert s is not None
+    assert s["sessions"]["inner"]["procs"] == inner_procs
+    assert s["sessions"]["outer"]["procs"] == session_procs - inner_procs
+
+
+def test_sample_tree_drops_a_session_whose_identity_changed_mid_sample(bridge_tree, monkeypatch):
+    # The pid named a different process after the snapshots than before them (it died and
+    # was reused inside the window): no figure under the old identity.
+    root, session, _procs = bridge_tree
+    reads = itertools.count()
+
+    def pair(pid):
+        return (1.0, 100 + next(reads))  # a new tick count on every read
+
+    monkeypatch.setattr(procutil, "proc_start_pair", pair)
+    s = metrics.sample_tree(root, interval=0.02, sessions={session: "u"})
+    assert s is not None
+    assert s["sessions"] == {}
+
+
+def test_start_token_uses_the_half_that_is_stable():
+    assert metrics._start_token((1.0, 7)) == metrics._start_token((2.0, 7))  # ticks decide
+    assert metrics._start_token((1.0, None)) != metrics._start_token((2.0, None))
 
 
 def test_sample_tree_leaves_out_a_session_that_exits_mid_sample(bridge_tree, monkeypatch):
