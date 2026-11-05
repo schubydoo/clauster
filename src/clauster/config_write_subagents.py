@@ -71,21 +71,25 @@ read/write/delete additionally resolves through
 :func:`clauster.config_file_writer.resolve_contained_path` so a filename that somehow
 passed the regex still cannot escape the agents directory.
 
-**Redaction.** The freeform *body* (the system prompt) is never redacted — like
-CLAUDE.md, it is operator-authored content, not credential storage, and masking it
-would corrupt the operator's own prose. The *frontmatter*, when surfaced as a parsed
-convenience field (a subagent's ``mcpServers``/``env``-shaped values could carry
-secrets), is run through the structural :func:`clauster.config_write.redact_secrets`
-before being returned — this is a read-only display field, never the value round
-tripped back on write, so masking it costs nothing on the write side. The raw
-``content`` field returned for editing is the unredacted file bytes (the round trip
-CLAUDE.md, hooks, and permissions all use), so a save always re-submits the real text.
+**Redaction (TASK-427).** The freeform *body* (the system prompt) is never redacted or
+rewritten — like CLAUDE.md, it is operator-authored content, not credential storage, and
+masking it would corrupt the operator's own prose. The *frontmatter* can carry secrets (an
+inline ``mcpServers`` server's ``env``, ``headers`` or credentialed URL, a ``hooks``
+header), so both the parsed ``frontmatter`` display field and the editor's ``content``
+show its secret values as ``********``, masked by key AND by value shape with the masking
+of the tab that owns each field (:func:`frontmatter_view`). ``content`` has them written
+in place of the values, every other byte as stored (:func:`_mask_agent_text`). A save that
+sends a mask back keeps the stored value only where the mask can be bound to it with that
+tab's own rules, and is refused (→ 422) otherwise, never written as the literal mask
+(:func:`_keep_masked_values`): a masked credential is not kept when its server's url text
+changed (exact text, never parsed), and a masked stdio ``env`` value is not kept when the
+server's ``command`` or ``args`` changed.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -93,9 +97,23 @@ import yaml
 
 from . import config_file_writer as fw
 from . import config_write as cw
-from .config_write_hooks import validate_hooks
-from .config_write_mcp import _convert_legacy_entry, _validate_server_fields
+from .config_write_hooks import (
+    _MAX_BLOCK_DEPTH,
+    _depth_at_most,
+    _has_sentinel,
+    _merge_hooks,
+    _redact_hooks,
+    validate_hooks,
+)
+from .config_write_mcp import (
+    _convert_legacy_entry,
+    _merge_kept,
+    _redact_entry,
+    _validate_server_fields,
+    contains_sentinel,
+)
 from .config_write_permissions import BYPASS_MODE, RECOGNIZED_MODES
+from .config_write_settings import _orphan_sentinel_path
 
 #: The directory name holding subagent files under ``.claude/`` at either scope.
 AGENTS_DIRNAME = "agents"
@@ -1070,7 +1088,8 @@ def _list_agents(root: Path, source: str) -> list[dict[str, Any]]:
             frontmatter, _body = parse_frontmatter(raw.decode("utf-8"))
             value = frontmatter.get("description")
             if isinstance(value, str):
-                description = value
+                # Masked as the editor masks it (a `${VAR}` or a credential URL in it).
+                description = cw.redact_secrets(value, "description")
         except (UnicodeDecodeError, cw.InvalidCandidateError):
             description = None
         out.append(
@@ -1358,6 +1377,482 @@ def _convert_inline_servers(text: str) -> tuple[str, list[str]] | None:
     return candidate, notes
 
 
+# ---------------------------------------------------------------------------
+# Masked frontmatter (TASK-427): the editor view and its keep-stored save
+# ---------------------------------------------------------------------------
+
+#: The editor note when a file's frontmatter holds a secret that cannot be masked in place.
+MASK_UNAVAILABLE_NOTE = (
+    "This file's frontmatter holds a secret value in a YAML form the editor cannot mask in "
+    "place (an anchor, an alias or a merge key on it, or an ordered map or set around it), "
+    "so the file is not shown here. Edit it by hand."
+)
+
+#: The fields :func:`_merge_frontmatter` merges with their own tab's rules.
+_OWN_MERGE_FIELDS = frozenset({"mcpServers", "hooks"})
+
+
+def _server_item_view(item: Any) -> Any:
+    """Return the display copy of one ``mcpServers`` list item; a server NAME is never a hint."""
+    if isinstance(item, dict) and len(item) == 1:
+        ((server_name, definition),) = item.items()
+        return {server_name: _redact_entry(definition)}
+    return cw.redact_secrets(item)
+
+
+def frontmatter_view(frontmatter: dict[str, Any]) -> dict[str, Any]:
+    """Return the editor's copy of a parsed frontmatter, with every secret value masked.
+
+    Each field is masked by the tab that owns its shape, so a value masks here exactly as it
+    does there, by key name AND by value shape:
+
+    * every field: :func:`~clauster.config_write.redact_secrets` (a secret-shaped key, a
+      ``${VAR}`` interpolation, a credential URL);
+    * ``mcpServers``: the MCP tab's masking of each inline definition
+      (:func:`clauster.config_write_mcp._redact_entry`: every ``env`` and ``headers`` value,
+      a ``headersHelper``). It runs per definition, so a server NAME never acts as a secret
+      hint: a server called ``oauth-gw`` keeps its ``type`` and ``url`` visible;
+    * ``hooks``: the Hooks tab's masking (:func:`clauster.config_write_hooks._redact_hooks`:
+      every ``headers`` value, URL credentials and token-like URL parts, ``input``);
+    * ``env``: every non-empty string value, as on the MCP tab.
+
+    :func:`_merge_frontmatter` is the write-side twin. Whole keys are replaced on the copy,
+    never a nested value in place (``redact_secrets`` may share nested objects).
+    """
+    view = cw.redact_secrets(frontmatter)
+    servers = frontmatter.get("mcpServers")
+    if isinstance(servers, dict):
+        view["mcpServers"] = {name: _redact_entry(entry) for name, entry in servers.items()}
+    elif isinstance(servers, list) and _is_pair_list(servers):
+        # The `!!omap`/`!!pairs` spelling, a list of 2-tuples. The NAME goes through the
+        # redactor too, unlike a dict key: `construct_yaml_omap` puts no hashability
+        # constraint on a key, so an omap "name" can be a whole container holding a secret.
+        view["mcpServers"] = [
+            [cw.redact_secrets(name), _redact_entry(entry)] for name, entry in servers
+        ]
+    elif isinstance(servers, list):
+        view["mcpServers"] = [_server_item_view(item) for item in servers]
+    hooks = frontmatter.get("hooks")
+    if isinstance(hooks, dict):
+        deep_ok = _depth_at_most(hooks, _MAX_BLOCK_DEPTH)
+        view["hooks"] = _redact_hooks(hooks) if deep_ok else cw.REDACTION_SENTINEL
+    env = frontmatter.get("env")
+    if isinstance(env, dict):
+        shown = view["env"]
+        view["env"] = {
+            k: cw.REDACTION_SENTINEL if isinstance(v, str) and v else shown[k]
+            for k, v in env.items()
+        }
+    return view
+
+
+def _texts(value: Any, *, unordered_only: bool = False) -> Iterator[str]:
+    """Yield every string leaf of a loaded YAML value (iterative, every container kind).
+
+    ``unordered_only`` yields only the strings inside an ``!!omap``/``!!pairs`` entry or a
+    ``!!set``, the containers a mask cannot be bound in by key or position.
+    """
+    stack: list[tuple[Any, bool]] = [(value, False)]
+    while stack:
+        node, inside = stack.pop()
+        if isinstance(node, str):
+            if inside or not unordered_only:
+                yield node
+        elif isinstance(node, dict):
+            stack.extend((v, inside) for v in node.values())
+        elif isinstance(node, list):
+            stack.extend((v, inside) for v in node)
+        elif isinstance(node, tuple | set | frozenset):
+            stack.extend((v, True) for v in node)
+
+
+def _carries_mask(value: Any, *, unordered_only: bool = False) -> bool:
+    """Whether a string leaf of ``value`` holds the redaction sentinel."""
+    return any(
+        cw.REDACTION_SENTINEL in text for text in _texts(value, unordered_only=unordered_only)
+    )
+
+
+def _merge_servers(incoming: Any, stored: Any) -> Any:
+    """Merge the ``mcpServers`` list with the MCP tab's keep-stored rules, or refuse (→ 422).
+
+    An inline definition is paired with the stored definition of the same server NAME (the
+    stored block may still be the old mapping form, which the editor converted on load) and
+    merged by :func:`clauster.config_write_mcp._merge_kept`. That refuses a mask with no
+    stored value, a masked credential whose server's ``type`` or url text changed (compared
+    as exact text, never parsed), and a masked ``env`` value whose stdio ``command`` or
+    ``args`` changed. A masked server reference by name keeps the stored one only at the
+    same position of an unchanged-length list.
+    """
+    # `incoming` is a list: the validator refused any other shape before this runs.
+    stored_defs: dict[Any, Any] = {}
+    repeated: set[Any] = set()
+    pairs: list[tuple[Any, Any]] = []
+    if isinstance(stored, dict):
+        pairs = list(stored.items())
+    elif isinstance(stored, list):
+        pairs = [
+            next(iter(item.items()))
+            for item in stored
+            if isinstance(item, dict) and len(item) == 1
+        ]
+    for server_name, definition in pairs:
+        if server_name in stored_defs:
+            repeated.add(server_name)
+        stored_defs[server_name] = definition
+    merged: list[Any] = []
+    for index, item in enumerate(incoming):
+        if isinstance(item, dict) and len(item) == 1:
+            ((server_name, definition),) = item.items()
+            if contains_sentinel(definition):
+                if server_name in repeated:
+                    raise cw.InvalidCandidateError(
+                        f"frontmatter 'mcpServers': server {server_name!r} keeps a masked "
+                        f"value {cw.REDACTION_SENTINEL}, but the stored file defines it twice. "
+                        "Type the real value"
+                    )
+                try:
+                    definition = _merge_kept(
+                        definition, stored_defs.get(server_name), path=str(server_name)
+                    )
+                except cw.InvalidCandidateError as exc:
+                    raise cw.InvalidCandidateError(f"frontmatter 'mcpServers': {exc}") from exc
+            merged.append({server_name: definition})
+        elif item == cw.REDACTION_SENTINEL:
+            same_list = isinstance(stored, list) and len(stored) == len(incoming)
+            held = stored[index] if same_list else None
+            if not isinstance(held, str) or cw.redact_secrets(held) != cw.REDACTION_SENTINEL:
+                raise cw.InvalidCandidateError(
+                    f"frontmatter 'mcpServers'[{index}] is the masked value "
+                    f"{cw.REDACTION_SENTINEL}, but no stored server name is masked at that "
+                    "place. Type the real name"
+                )
+            merged.append(held)
+        else:
+            merged.append(item)
+    return merged
+
+
+def _merge_frontmatter(incoming: dict[str, Any], stored: dict[str, Any]) -> dict[str, Any]:
+    """Merge a saved frontmatter over the stored one, keeping each bound mask (→ 422 if not).
+
+    The write-side twin of :func:`frontmatter_view`, each field with its own tab's rules:
+    ``mcpServers`` with :func:`_merge_servers`, ``hooks`` with
+    :func:`clauster.config_write_hooks._merge_hooks` (a masked URL or header is kept only
+    for a hook whose masked fields are unchanged, at one stored destination), and every
+    other field by key with :func:`~clauster.config_write.merge_redacted`, after the
+    Settings tab's check (:func:`clauster.config_write_settings._orphan_sentinel_path`)
+    refuses a mask with no stored value at its key or list position. A mask is never
+    written as the literal ``********``: it is bound to a stored value or refused.
+    """
+    if _carries_mask(incoming, unordered_only=True):
+        raise cw.InvalidCandidateError(
+            f"frontmatter holds the mask {cw.REDACTION_SENTINEL} inside an ordered map or a "
+            "set, where it cannot be matched to a stored value. Type the real value"
+        )
+    rest_in = {k: v for k, v in incoming.items() if k not in _OWN_MERGE_FIELDS}
+    rest_stored = {k: v for k, v in stored.items() if k not in _OWN_MERGE_FIELDS}
+    where = _orphan_sentinel_path(rest_in, rest_stored, "frontmatter")
+    if where is not None:
+        raise cw.InvalidCandidateError(
+            f"{where} is the masked value {cw.REDACTION_SENTINEL}, but no stored value can be "
+            "kept there (a key was renamed, or a list changed). Type the real value"
+        )
+    rest = cw.merge_redacted(rest_in, rest_stored)
+    merged: dict[str, Any] = {}
+    for key, value in incoming.items():
+        if key == "mcpServers":
+            merged[key] = _merge_servers(value, stored.get(key))
+        elif key == "hooks" and _has_sentinel(value):
+            try:
+                merged[key] = _merge_hooks(value, stored.get(key))
+            except cw.InvalidCandidateError as exc:
+                raise cw.InvalidCandidateError(f"frontmatter 'hooks': {exc}") from exc
+        elif key == "hooks":
+            merged[key] = value
+        else:
+            merged[key] = rest[key]
+    return merged
+
+
+def _changed_scalars(
+    root: yaml.Node, value: Any, target: Any
+) -> list[tuple[yaml.ScalarNode, Any]] | None:
+    """Pair each scalar node of a header whose loaded value differs in ``target`` with it.
+
+    Walks the composed header and its loaded value side by side. ``None`` when a change
+    cannot be placed on the text of one scalar: a node reached at a second place (an
+    alias), a mapping with a merge key, a container whose shape changed, or a changed value
+    the walk cannot pair with a node: a ``!!set``, or an ``!!omap``/``!!pairs`` entry (the
+    list itself pairs, but each entry loads as a tuple, which no node branch takes).
+
+    Linear in the size of the loaded header: each node is visited once per place it is
+    reached, and a whole subtree is compared only where the walk stops descending, never
+    again at every level above a change. A scalar reached at a second place may not change
+    at either one, which is what an alias with a changed value means.
+    """
+    slots: list[tuple[yaml.ScalarNode, Any]] = []
+    changed: set[int] = set()
+    seen: set[int] = set()
+    stack: list[tuple[yaml.Node, Any, Any]] = [(root, value, target)]
+    while stack:
+        node, have, want = stack.pop()
+        if isinstance(node, yaml.ScalarNode):
+            differs = isinstance(want, cw._YAML_CONTAINERS) or not cw.same_yaml_value(have, want)
+            if differs and (id(node) in seen or isinstance(want, cw._YAML_CONTAINERS)):
+                return None
+            if not differs and id(node) in changed:
+                return None
+            seen.add(id(node))
+            if differs:
+                changed.add(id(node))
+                slots.append((node, want))
+        elif (
+            isinstance(node, yaml.MappingNode)
+            and type(have) is dict
+            and type(want) is dict
+            and len(node.value) == len(have)
+            and have.keys() == want.keys()
+            and all(key.tag != cw._YAML_MERGE_TAG for key, _sub in node.value)
+        ):
+            # No merge key and no repeated key (the seam refuses one), so the loaded dict
+            # holds the node's pairs in their order.
+            stack.extend(
+                (sub, inner, want[key])
+                for (_key, sub), (key, inner) in zip(node.value, have.items(), strict=True)
+            )
+        elif (
+            isinstance(node, yaml.SequenceNode)
+            and type(have) is list
+            and type(want) is list
+            and len(node.value) == len(have) == len(want)
+        ):
+            stack.extend(zip(node.value, have, want, strict=True))
+        elif not cw.same_yaml_value(have, want):
+            return None  # a change the walk cannot pair with one scalar's text
+    return slots
+
+
+def _render_scalar(value: Any) -> str | None:
+    """Return a one-line YAML spelling of a scalar that both YAML 1.1 and 1.2 load alike.
+
+    A string is double-quoted by PyYAML's own emitter, which escapes every line break and
+    every character a plain or single-quoted scalar could misread. ``None`` for a value that
+    has no one-line spelling here (``bytes``, a date).
+    """
+    if isinstance(value, str):
+        text = yaml.safe_dump(value, default_style='"', width=float("inf"), allow_unicode=True)
+        return text.rstrip("\n")
+    if value is None or isinstance(value, bool | int | float):
+        return yaml.safe_dump(value, width=float("inf")).removesuffix("...\n").rstrip("\n")
+    return None
+
+
+def _scalar_spellings(text: str | None) -> dict[tuple[type, Any], str]:
+    """Return the source text of each scalar in the frontmatter of ``text``, by its value.
+
+    Used to put a kept value back spelled as it is stored, so an unchanged save leaves the
+    bytes as they were. A spelling is only a first try: the rewritten header must still
+    load to exactly the merged value, or a quoted spelling is used instead.
+    """
+    out: dict[tuple[type, Any], str] = {}
+    match = _FRONTMATTER_RE.match(text) if text is not None else None
+    if text is None or match is None:
+        return out
+    # The caller passes only a stored file whose frontmatter loaded, so this composes; the
+    # caller's `refuse_check_failures` would turn a failure into "cannot rewrite".
+    source = cw.cli_frontmatter_text(cw.frontmatter_header(text, match))
+    root = yaml.compose(source, Loader=yaml.SafeLoader)
+    constructor = yaml.constructor.SafeConstructor()
+    stack = [root] if root is not None else []
+    seen: set[int] = set()
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, yaml.MappingNode):
+            stack.extend(child for pair in node.value for child in pair)
+        elif isinstance(node, yaml.SequenceNode):
+            stack.extend(node.value)
+        else:  # a ScalarNode, the only other kind `compose` builds
+            spelling = source[node.start_mark.index : node.end_mark.index].rstrip(" \t\r\n")
+            if spelling.startswith("&"):
+                continue  # a second copy of an anchor would be a duplicate anchor
+            try:
+                loaded = constructor.construct_object(node)
+                out.setdefault((type(loaded), loaded), spelling)
+            except cw._CHECK_FAILURES:
+                continue
+    return out
+
+
+def _splice(
+    text: str,
+    match: re.Match[str],
+    source: str,
+    slots: list[tuple[yaml.ScalarNode, Any]],
+    spellings: dict[tuple[type, Any], str],
+) -> str | None:
+    """Return ``text`` with each slot's scalar in header ``source`` replaced by its new value."""
+    out: list[str] = []
+    prev = 0
+    # Distinct scalar nodes never overlap, and a slot's value is never a container, so it
+    # is hashable (`_changed_scalars`).
+    for node, want in sorted(slots, key=lambda slot: slot[0].start_mark.index):
+        start, end = node.start_mark.index, node.end_mark.index
+        span = source[start:end]
+        core = span.rstrip(" \t\r\n")
+        rendered = spellings.get((type(want), want)) or _render_scalar(want)
+        if rendered is None:
+            return None
+        # A block scalar's span ends after its line breaks: keep them for the next line.
+        out.extend((source[prev:start], rendered, span[len(core) :]))
+        prev = end
+    out.append(source[prev:])
+    header = "".join(out)
+    if text.startswith("\r", match.end(1)):
+        # `frontmatter_header` added the CRLF closing fence's `\r`, which stays in the text.
+        header = header.removesuffix("\r")
+    return text[: match.start(1)] + header + text[match.end(1) :]
+
+
+def _loads_as(candidate: str, target: dict[str, Any], body: str) -> bool:
+    """Whether ``candidate`` keeps ``body`` and its frontmatter loads to exactly ``target``."""
+    match = _FRONTMATTER_RE.match(candidate)
+    if match is None or candidate[match.end() :] != body:
+        return False
+    try:
+        loaded, _body = parse_frontmatter(candidate)  # the shared seam, every check of a write
+    except cw.InvalidCandidateError:
+        return False
+    return cw.same_yaml_value(loaded, target)
+
+
+def _rewrite_values(text: str, target: dict[str, Any], *, stored: str | None) -> str | None:
+    """Return ``text`` with the frontmatter values that differ in ``target`` rewritten, or None.
+
+    Text-level, like the convert-on-load rewrites above: only the scalars whose value
+    changes are replaced (:func:`_changed_scalars`), each where it stands, so every other
+    byte of the header, every comment and the whole body stay as they are. A value is
+    spelled as in ``stored`` when it can be (:func:`_scalar_spellings`), else double-quoted
+    (:func:`_render_scalar`).
+
+    Fail closed: the result is used only when it passes the whole shared seam and loads to
+    exactly ``target`` with the body unchanged (:func:`_loads_as`). ``None`` when no
+    rewrite does. When the header loads only through Claude Code's re-quoting retry
+    (:func:`~clauster.config_write.cli_frontmatter_text`), the retry text is the one
+    rewritten, so those values come back quoted the way Claude Code reads them.
+    """
+    match = _FRONTMATTER_RE.match(text)
+    if match is None:
+        return None
+    source = cw.cli_frontmatter_text(cw.frontmatter_header(text, match))
+    body = text[match.end() :]
+    try:
+        with cw.refuse_check_failures("frontmatter"):
+            value, _body = parse_frontmatter(text)
+            if cw.same_yaml_value(value, target):
+                return text
+            root = yaml.compose(source, Loader=yaml.SafeLoader)
+            slots = None if root is None else _changed_scalars(root, value, target)
+            if not slots:
+                return None
+            attempts = [_scalar_spellings(stored), {}] if stored is not None else [{}]
+            for spellings in attempts:
+                candidate = _splice(text, match, source, slots, spellings)
+                if candidate is not None and _loads_as(candidate, target, body):
+                    return candidate
+    except cw.InvalidCandidateError:
+        return None
+    return None
+
+
+def _mask_agent_text(text: str) -> str | None:
+    """Return a subagent file with its frontmatter secret values masked, or None.
+
+    The masked values are :func:`frontmatter_view`'s, written in place by
+    :func:`_rewrite_values`; the Markdown body is never masked or rewritten, and a byte
+    order mark is kept. A file with no frontmatter fence is all body and is returned as it
+    is. A header that does not load is masked line by line
+    (:func:`~clauster.config_write.redact_secret_lines`), the best that can be done without
+    its structure. ``None`` when the view cannot be written in place
+    (:data:`MASK_UNAVAILABLE_NOTE`); the caller then shows nothing.
+    """
+    bom = "\ufeff" if text.startswith("\ufeff") else ""
+    core = text[len(bom) :]
+    match = _FRONTMATTER_RE.match(core)
+    if match is None:
+        return text
+    try:
+        frontmatter, _body = parse_frontmatter(core)
+        with cw.refuse_check_failures("frontmatter"):
+            view = frontmatter_view(frontmatter)
+    except cw.InvalidCandidateError:
+        masked = cw.redact_secret_lines(match.group(1))
+        return bom + core[: match.start(1)] + masked + core[match.end(1) :]
+    shown = _rewrite_values(core, view, stored=None)
+    return None if shown is None else bom + shown
+
+
+def _keep_masked_values(
+    content: str, stored_bytes: bytes | None, expected_hash: str | None, name: str
+) -> str:
+    """Return ``content`` with each mask from the editor view bound back to its stored value.
+
+    A save with no mask in its frontmatter is returned as sent. Otherwise the stored file
+    must be the one the editor loaded (its hash), the frontmatter is merged
+    (:func:`_merge_frontmatter`, which refuses any mask it cannot bind), and the kept values
+    are written in place of their masks (:func:`_rewrite_values`). The result is validated
+    again, since a kept value comes from the file on disk, not from the checked candidate.
+    """
+    incoming, _body = parse_frontmatter(content)
+    if not _carries_mask(incoming):
+        return content
+    stored: dict[str, Any] = {}
+    stored_text: str | None = None
+    if stored_bytes is not None:
+        if expected_hash is None:
+            raise cw.StaleConfigWriteError(f"{name}.md already exists; a hash is required")
+        if cw.hash_bytes(stored_bytes) != expected_hash:
+            raise cw.StaleConfigWriteError(f"{name}.md changed on disk since it was loaded")
+        try:
+            # The editor showed a stored byte order mark, and its save strips it, so the
+            # stored text is read without it too (as `_mask_agent_text` read it).
+            text = stored_bytes.decode("utf-8").removeprefix("\ufeff")
+            stored, _stored_body = parse_frontmatter(text)
+            stored_text = text  # only a stored file that loads lends its spellings
+        except (UnicodeDecodeError, cw.InvalidCandidateError) as exc:
+            # The editor masked this header line by line (`_mask_agent_text`), so a mask can
+            # sit inside a value (`run ********`), where no merge sees it as a mask. Nothing
+            # stored loads to bind it to: refuse rather than write it as typed.
+            raise cw.InvalidCandidateError(
+                f"frontmatter keeps a masked value {cw.REDACTION_SENTINEL}, but the stored "
+                "frontmatter does not load, so there is no stored value to keep. Type the "
+                "real values"
+            ) from exc
+    merged = _merge_frontmatter(incoming, stored)
+    rewritten = _rewrite_values(content, merged, stored=stored_text)
+    if rewritten is None:
+        raise cw.InvalidCandidateError(
+            f"frontmatter keeps a masked value {cw.REDACTION_SENTINEL} that cannot be put back "
+            "in its place (an anchor, an alias or a merge key on it). Type the real value"
+        )
+    try:
+        cw.validate_candidate(rewritten, lambda c: validate_agent_content(c, expected_name=name))
+    except cw.InvalidCandidateError as exc:
+        # The sent text passed these same checks, so the kept stored values are the cause.
+        # Their message can name a size or a column of that stored text, which tells the
+        # length of a hidden value in one answer: refuse without it. (Repeated saves near
+        # the size cap can still find that length; a documented residual.)
+        raise cw.InvalidCandidateError(
+            "frontmatter does not pass the checks once its masked values are kept: the "
+            "stored text behind a mask is not valid here. Type the real values, or fix the "
+            "stored file on the host"
+        ) from exc
+    return rewritten
+
+
 def _is_builtin_override_file(root: Path, name: str) -> bool:
     """Whether a regular, non-symlink ``<name>.md`` sits in ``root`` for a built-in ``name``.
 
@@ -1377,15 +1872,18 @@ def _read_agent(root: Path, name: str, source: str) -> dict[str, Any]:
     A built-in name reads as a synthetic, non-existent, non-editable doc (200-shaped
     — it is "shown but not editable", never a 404: Claude Code really does offer that
     agent, there is just no file backing it here). A missing real file raises
-    :class:`AgentNotFoundError` (→ 404). ``frontmatter`` is a **derived, redacted**
-    display field (:func:`~clauster.config_write.redact_secrets`); ``content`` is the
-    raw, unredacted file text — the value a subsequent write must re-submit. One exception:
-    when an editable file still uses the old ``mcpServers`` mapping, ``content`` is that text
-    with the block rewritten in the list form (:func:`_mcp_servers_as_list`), and when an
-    inline server has a field Claude Code ignores, ``content`` is without it
-    (:func:`_convert_inline_servers`). ``converted`` then carries the one note the editor
-    shows for both; otherwise ``converted`` is None. The ``frontmatter`` display field
-    always describes the file as it is on disk.
+    :class:`AgentNotFoundError` (→ 404). ``frontmatter`` is a **derived, masked**
+    display field (:func:`frontmatter_view`); ``content`` is the file text with the same
+    frontmatter values masked in place as ``********`` (:func:`_mask_agent_text`) and the
+    Markdown body verbatim. A write that sends a mask back keeps the stored value
+    (:func:`_keep_masked_values`). When an editable file still uses the old ``mcpServers``
+    mapping, ``content`` is that text with the block rewritten in the list form
+    (:func:`_mcp_servers_as_list`), and when an inline server has a field Claude Code
+    ignores, ``content`` is without it (:func:`_convert_inline_servers`). ``converted`` then
+    carries the one note the editor shows for both; otherwise ``converted`` is None. The
+    ``frontmatter`` display field always describes the file as it is on disk. When the
+    masked values cannot be written in place, ``content`` is empty, the doc is not
+    editable, and ``converted`` is :data:`MASK_UNAVAILABLE_NOTE`.
 
     A built-in name with a regular FILE behind it is the exception: Claude Code lets a user
     or project agent override a built-in of the same name, so that file is real
@@ -1426,34 +1924,10 @@ def _read_agent(root: Path, name: str, source: str) -> dict[str, Any]:
         raise cw.InvalidCandidateError(f"{name}.md is not valid UTF-8") from exc
     try:
         parsed, _body = parse_frontmatter(text)
-        frontmatter = cw.redact_secrets(parsed)
-        # An `mcpServers` block is a map keyed by user-chosen SERVER NAMES, not config keys,
-        # so the name must not act as a secret hint — a server called `oauth-gw` would
-        # otherwise have its own `type`/`url` masked. Same reason config_write_mcp redacts
-        # per entry. Display-only here (PUT round-trips `content`, never `frontmatter`, so a
-        # sentinel is never written back), but a transport shown as `********` is misleading.
-        servers = parsed.get("mcpServers")
-        if isinstance(servers, dict):
-            frontmatter["mcpServers"] = {
-                name_: cw.redact_secrets(entry) for name_, entry in servers.items()
-            }
-        elif isinstance(servers, list) and _is_pair_list(servers):
-            # The SAME carve-out for the `!!omap`/`!!pairs` spelling of the same block, which
-            # `safe_load` builds as a list of 2-tuples rather than a dict. Without this the
-            # spellings disagreed in the opposite direction to the redactor's own tuple gap:
-            # `redact_secrets` treats an omap entry's first element as a key, so the SERVER
-            # NAME became the hint and `mcpServers: !!omap [{auth-gw: {command: npx}}]`
-            # masked its own `command`/`args` while the dict spelling showed them. Entry
-            # values are re-redacted with NO hint, exactly as the dict branch does.
-            #
-            # The NAME goes through the redactor too, where the dict branch keeps its key
-            # verbatim, and the asymmetry is deliberate: `construct_yaml_omap` puts no
-            # hashability constraint on a key, so an omap "name" can be a whole container
-            # holding a secret, where a dict key is always a scalar. An ordinary string name
-            # is unaffected — with no hint, `_is_secretish("", "auth-gw")` is False.
-            frontmatter["mcpServers"] = [
-                [cw.redact_secrets(name_), cw.redact_secrets(entry)] for name_, entry in servers
-            ]
+        # The same masked view the editor's `content` shows (an `mcpServers` server NAME is
+        # never a secret hint there, in the list, mapping and `!!omap` spellings alike).
+        with cw.refuse_check_failures("frontmatter"):
+            frontmatter = frontmatter_view(parsed)
     except cw.InvalidCandidateError:
         # An unparsable frontmatter block still surfaces via `content` (so the
         # operator can see and fix it); the derived display field just degrades.
@@ -1475,6 +1949,15 @@ def _read_agent(root: Path, name: str, source: str) -> dict[str, Any]:
         if inline is not None:
             content = inline[0]
             notes.extend([*inline[1], INLINE_SERVERS_CONVERSION_TAIL])
+    # TASK-427: the editor shows each frontmatter secret value as `********`, and a save
+    # that sends a mask back keeps the stored value (`_keep_masked_values`). Masked after
+    # the conversions, so the view describes the text the editor shows. The body is never
+    # masked. When the view cannot be written in place, nothing is shown at all.
+    shown = _mask_agent_text(content)
+    if shown is None:
+        content, editable, notes = "", False, [MASK_UNAVAILABLE_NOTE]
+    else:
+        content = shown
     return {
         "name": name,
         "source": "plugin" if read_only else source,
@@ -1540,6 +2023,9 @@ def _write_agent(root: Path, name: str, content: str, expected_hash: str | None)
         raise ReadOnlyAgentError(f"{name!r} is a plugin-provided subagent (read-only)")
 
     cw.validate_candidate(content, lambda c: validate_agent_content(c, expected_name=name))
+    # TASK-427: the editor shows frontmatter secrets masked. Bind each mask that comes back
+    # to its stored value, or refuse (→ 422); never write the literal mask.
+    content = _keep_masked_values(content, current if found else None, expected_hash, name)
 
     def _verify_unchanged(current_bytes: bytes | None) -> None:
         """Reject the write when the on-disk bytes no longer match ``expected_hash``."""

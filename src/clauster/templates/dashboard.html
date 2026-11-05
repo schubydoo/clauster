@@ -3002,11 +3002,14 @@
                 <textarea id="cm-agent-content" class="form-control form-control-sm font-monospace" rows="11"
                           data-test="cm-agent-content" spellcheck="false"
                           aria-describedby="cm-agent-name-hint cm-agent-converted"
+                          :readonly="configMgmt.subagents.readOnly"
                           x-model="configMgmt.subagents.content" {{ NO_AUTOFILL }}></textarea>
                 <div class="form-hint small mt-1" id="cm-agent-name-hint" data-test="cm-agent-name-hint">
                   The <strong>Name</strong> above is the single source — it's written into the frontmatter
                   <code>name:</code> automatically on save, so you don't need to repeat it here.
-                  This field shows the file exactly as stored, so do not put secrets anywhere in it.
+                  Secret values in the frontmatter show as <code>********</code>. Leave a mask as it
+                  is to keep the stored value. The body and any comments show as stored, so do not
+                  put secrets there.
                 </div>
                 <div class="mt-2">
                   <label class="form-label small mb-1" for="cm-agent-confirm">
@@ -3216,10 +3219,12 @@
                 <label class="form-label small" for="cm-skill-content">SKILL.md (Markdown + frontmatter)</label>
                 <textarea id="cm-skill-content" class="form-control form-control-sm font-monospace" rows="11"
                           data-test="cm-skill-content" spellcheck="false"
-                          aria-describedby="cm-skill-converted"
+                          aria-describedby="cm-skill-converted cm-skill-hint"
                           x-model="configMgmt.skills.content" {{ NO_AUTOFILL }}></textarea>
-                <div class="form-hint small mt-1">
+                <div class="form-hint small mt-1" id="cm-skill-hint">
                   Edits the skill's <code>SKILL.md</code>. Supporting scripts aren't managed here.
+                  Secret-shaped lines show as <code>********</code>. Leave a mask as it is to keep
+                  the stored line.
                 </div>
                 <div class="mt-2">
                   <label class="form-label small mb-1" for="cm-skill-confirm">

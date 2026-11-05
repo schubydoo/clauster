@@ -303,6 +303,10 @@
           // mapping as the list form on load (TASK-449.5). Non-empty ⇒ the shown content
           // differs from the file on disk, so the editor counts as dirty until it is saved.
           converted: "",
+          // `readOnly`: the backend returned the doc as not editable (TASK-427: its
+          // frontmatter secret cannot be masked in place, so no content is shown). Save
+          // stays off; `converted` carries the note that says why.
+          readOnly: false,
           // `busy` is derived from `ops` (a concurrent-op counter) so an early op's
           // finally can't clear it while another subagent request is still in flight.
           confirm: "", busy: false, ops: 0, deletingName: "",
@@ -2742,6 +2746,7 @@
       async _loadSubagents(myGen) {
         const c = this.configMgmt;
         c.subagents.editing = false; c.subagents.deletingName = ""; c.subagents.converted = "";
+        c.subagents.readOnly = false;
         try {
           const res = await fetch(ROOT + "/api/config-write/subagents?" + this._configMgmtQuery());
           if (c.gen !== myGen) return;
@@ -2758,6 +2763,7 @@
         c.error = ""; c.saved = false; s.deletingName = "";
         s.editing = true; s.isNew = true;
         s.name = ""; s.content = AGENT_TEMPLATE; s.orig = ""; s.hash = null; s.confirm = "";
+        s.readOnly = false;
         s.converted = "";
       },
       // #958 Part 5: the Name box is the single source of a subagent's name. The backend
@@ -2808,12 +2814,14 @@
           s.editing = true; s.isNew = false; s.name = d.name || name;
           s.content = d.content || ""; s.orig = s.content; s.hash = d.hash || null; s.confirm = "";
           s.converted = typeof d.converted === "string" ? d.converted : "";
+          s.readOnly = d.editable === false;
         } catch (e) { if (c.gen === gen) c.error = "Failed to load subagent."; }
         finally { s.ops = Math.max(0, s.ops - 1); s.busy = s.ops > 0; }
       },
       configMgmtCancelAgent() {
         const c = this.configMgmt;
         c.subagents.editing = false; c.subagents.confirm = ""; c.subagents.converted = ""; c.error = "";
+        c.subagents.readOnly = false;
       },
       configMgmtAgentDirty() {
         const s = this.configMgmt.subagents;
@@ -2824,7 +2832,7 @@
       },
       configMgmtCanSaveAgent() {
         const c = this.configMgmt, s = c.subagents;
-        if (s.busy || this.configMgmtNeedsProject()) return false;
+        if (s.busy || s.readOnly || this.configMgmtNeedsProject()) return false;
         if (s.isNew && !s.name.trim()) return false;
         if (s.confirm !== this.configMgmtConfirmToken()) return false;  // type-the-name gate
         return this.configMgmtAgentDirty();

@@ -253,6 +253,19 @@ def test_subagent_editor_shows_the_mcp_conversion_note(write_config):
     assert 'c.saved = true; s.editing = false; s.confirm = ""; s.converted = "";' in html
 
 
+def test_subagent_editor_keeps_save_off_for_a_doc_it_cannot_show(write_config):
+    # TASK-427: a doc whose frontmatter secret cannot be masked in place arrives with no
+    # content and `editable: false`. Save stays off and the textarea is read-only; the flag
+    # is reset on every path that opens, creates, cancels or reloads.
+    html = _html(write_config, _ON)
+    open_agent = _between(html, "async configMgmtOpenAgent(", "configMgmtCancelAgent()")
+    assert "s.readOnly = d.editable === false;" in open_agent
+    can_save = _between(html, "configMgmtCanSaveAgent() {", "async configMgmtSaveAgent()")
+    assert "if (s.busy || s.readOnly || this.configMgmtNeedsProject()) return false;" in can_save
+    assert ':readonly="configMgmt.subagents.readOnly"' in html
+    assert html.count("readOnly = false;") == 3
+
+
 def test_mcp_surface_present_when_enabled(write_config):
     # Slice D adds the MCP list surface (servers CRUD + project approvals panel).
     html = _html(write_config, _ON)
@@ -540,7 +553,8 @@ def test_skill_editor_shows_the_conversion_note(write_config):
     assert 'data-test="cm-skill-converted"' in html
     assert 'x-show="configMgmt.skills.converted"' in html
     assert 'x-text="configMgmt.skills.converted"' in html
-    assert 'aria-describedby="cm-skill-converted"' in html
+    # TASK-427: the hint (masked lines) is described to a screen reader too.
+    assert 'aria-describedby="cm-skill-converted cm-skill-hint"' in html
     open_skill = _between(html, "async configMgmtOpenSkill(", "configMgmtCancelSkill()")
     assert 's.converted = typeof d.converted === "string" ? d.converted : "";' in open_skill
     dirty = _between(html, "configMgmtSkillDirty() {", "configMgmtCanSaveSkill()")
