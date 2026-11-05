@@ -646,7 +646,7 @@
           // A hung doctor run must not leave the pill on "Checking…" for good: abort it,
           // and the catch below reports the run as not run.
           const opts = typeof AbortSignal.timeout === "function"
-            ? { signal: AbortSignal.timeout(30000) } : {};
+            ? { signal: AbortSignal.timeout(60000) } : {};
           const r = await fetch(ROOT + "/api/doctor", opts);
           if (this._authExpired(r)) return;
           if (!r.ok) { this._readinessFailed("the server answered HTTP " + r.status); return; }
@@ -696,6 +696,8 @@
         if (b) s += " · " + b + " blocking";
         return s;
       },
+      // Text of the header's visually-hidden live region (role=status).
+      readinessLiveText() { return "System readiness: " + this.readinessSummary(); },
       readinessPillText() {
         const st = this.readinessState();
         if (st === "checking") return "Checking…";
@@ -712,7 +714,7 @@
         const st = this.readinessState();
         if (st === "checking") return "System readiness — the checks are running";
         if (st === "unavailable") {
-          return "System readiness — the checks did not run, so readiness is unknown (not a pass); click for details";
+          return "System readiness — checks not run, so readiness is unknown (not a pass); click for details";
         }
         if (st === "blocking") {
           return "System readiness — a check is blocking; no session will start until it is fixed (affects every launch on this host)";

@@ -80,6 +80,37 @@ def _stub_doctor(browser: AgentBrowser, status: int | None, body: dict | None = 
     )
 
 
+def _live_text(browser: AgentBrowser) -> str:
+    """The text of the header's visually-hidden readiness live region."""
+    return browser.eval_json(
+        "(()=>document.querySelector('[data-test=\"readiness-live\"]').textContent)()"
+    )
+
+
+# WCAG contrast of the pill's text against its background, at rest and on keyboard focus.
+# Colours go through a 1x1 canvas so oklch/oklab computed values become sRGB bytes.
+_CONTRAST_JS = """(async () => {
+  const cv = document.createElement("canvas"); cv.width = cv.height = 1;
+  const cx = cv.getContext("2d", { willReadFrequently: true });
+  const rgb = (c) => { cx.clearRect(0, 0, 1, 1); cx.fillStyle = "#000"; cx.fillStyle = c;
+    cx.fillRect(0, 0, 1, 1); return [...cx.getImageData(0, 0, 1, 1).data]; };
+  const lum = ([r, g, b]) => { const f = (v) => { v /= 255;
+    return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+    return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
+  const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p);
+    return (x + 0.05) / (y + 0.05); };
+  const pill = document.querySelector('[data-test="readiness-pill"]');
+  const pageBg = getComputedStyle(document.body).backgroundColor;
+  const measure = () => { const s = getComputedStyle(pill);
+    const bg = s.backgroundColor === "rgba(0, 0, 0, 0)" ? pageBg : s.backgroundColor;
+    return { color: s.color, bg, ratio: ratio(rgb(s.color), rgb(bg)) }; };
+  const rest = measure();
+  pill.focus();
+  await new Promise((r) => setTimeout(r, 300));
+  return { rest, focus: { ...measure(), focusVisible: pill.matches(":focus-visible") } };
+})()"""
+
+
 def _open_panel(browser: AgentBrowser) -> None:
     if not browser.is_visible(_PANEL):
         browser.click(_PILL)
@@ -127,6 +158,7 @@ def test_all_passed_shows_a_calm_count_and_every_row(
     browser.expect_text(_SUMMARY, "3 of 3 checks passed")
     browser.expect_hidden(_TOGGLE)  # no issues -> nothing to filter
     browser.expect_hidden(_UNAVAILABLE)
+    assert _live_text(browser) == "System readiness: 3 of 3 checks passed"
 
 
 def test_failed_recheck_after_a_pass_shows_not_run_never_a_stale_pass(
@@ -146,9 +178,11 @@ def test_failed_recheck_after_a_pass_shows_not_run_never_a_stale_pass(
     assert "passed" not in browser.get_text(_PILL)
     browser.expect_count(_ROW, 0)
     browser.expect_visible(_UNAVAILABLE)
-    browser.expect_text(_UNAVAILABLE, "HTTP 500")
-    # The live region stays mounted and now carries the failure, not the old pass.
     browser.expect_text(_SUMMARY, "Checks not run: the server answered HTTP 500")
+    # The header live region (outside the panel) carries the failure, not the old pass.
+    assert _live_text(browser) == (
+        "System readiness: Checks not run: the server answered HTTP 500"
+    )
 
 
 def test_rejected_request_shows_not_run(browser: AgentBrowser, open_server: str) -> None:
@@ -159,8 +193,27 @@ def test_rejected_request_shows_not_run(browser: AgentBrowser, open_server: str)
 
     browser.expect_attr(_PILL, "data-state", "unavailable")
     _open_panel(browser)
-    browser.expect_text(_UNAVAILABLE, "the request failed or timed out")
+    browser.expect_visible(_UNAVAILABLE)
+    browser.expect_text(_SUMMARY, "Checks not run: the request failed or timed out")
     browser.expect_count(_ROW, 0)
+
+
+@pytest.mark.parametrize("theme", ["dark", "light"])
+def test_not_run_pill_text_meets_aa_at_rest_and_on_keyboard_focus(
+    browser: AgentBrowser, open_server: str, theme: str
+) -> None:
+    """The outline-warning pill text is >= 4.5:1 at rest and when focus fills it."""
+    browser.goto(open_server)
+    browser.eval_js(f"(()=>{{localStorage.setItem('clauster-theme','{theme}');return 1}})()")
+    browser.reload()
+    _settle(browser)
+    _stub_doctor(browser, 500, {})
+    browser.expect_attr(_PILL, "data-state", "unavailable")
+
+    got = browser.eval_json(_CONTRAST_JS)
+    assert got["focus"]["focusVisible"], got  # the filled focus state was exercised
+    assert got["rest"]["ratio"] >= 4.5, got
+    assert got["focus"]["ratio"] >= 4.5, got
 
 
 def test_warning_stays_visible_and_toggle_reveals_the_passing_rows(

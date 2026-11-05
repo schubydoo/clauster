@@ -1126,15 +1126,21 @@ def test_readiness_pill_shows_every_state(write_config):
     assert "x-show" not in pill.group(0)  # never hidden: every state is visible
     assert ':data-state="readinessState()"' in pill.group(0)
     assert "readinessState()" in page and "readinessPillText()" in page
-    assert '" checks passed"' in page  # the calm all-green summary
+    assert '" checks passed"' in page  # the calm all-green pill text
     assert 'if (st === "unavailable") return "Checks not run";' in page  # never a pass
+    # The summary names why the run failed; the pill carries its scope for a screen reader.
+    assert 'return "Checks not run" + (this.readiness.error ? ": "' in page
+    assert 'class="visually-hidden">System readiness:</span> <span' in page
     # Both failure paths of the loader report "not run", and busy always resets.
     load = page[page.index("async loadReadiness() {") :]
     load = load[: load.index("_readinessFailed(why) {")]
     assert 'if (!r.ok) { this._readinessFailed("the server answered HTTP "' in load
     assert "} catch (e) {\n          this._readinessFailed(" in load
     assert "finally { this.readiness.busy = false; }" in load
-    assert "AbortSignal.timeout(" in load  # a hung run cannot stay "Checking…" for good
+    # A hung run cannot stay "Checking…" for good; the guard keeps an old browser working.
+    assert 'typeof AbortSignal.timeout === "function"' in load
+    assert "{ signal: AbortSignal.timeout(" in load
+    assert 'fetch(ROOT + "/api/doctor", opts)' in load
     # A failed run drops the stale rows, so an old pass cannot survive a failed re-check.
     failed = page[page.index("_readinessFailed(why) {") :]
     assert "this.readiness.checks = [];" in failed[: failed.index("},")]
@@ -1145,11 +1151,28 @@ def test_readiness_pill_shows_every_state(write_config):
     assert state.index('"unavailable"') < state.index('return "passed"')
     for hook in ("readiness-panel", "readiness-summary", "readiness-unavailable", "readiness-row"):
         assert f'data-test="{hook}"' in page
-    # The summary is the one live region: always mounted (no x-show), so a state change is
-    # a text change that a screen reader announces.
-    summary = re.search(r'<div[^>]*data-test="readiness-summary"[^>]*>', page, re.S)
-    assert summary and 'role="status"' in summary.group(0)
-    assert "x-show" not in summary.group(0)
+    # The one live region sits in the header beside the pill, outside the collapsed panel
+    # and any x-show, so the first result and each re-check result is announced.
+    header = page[page.index('data-test="readiness-pill"') : page.index("</header>")]
+    live = re.search(r'<span[^>]*data-test="readiness-live"[^>]*>', header, re.S)
+    assert live and 'role="status"' in live.group(0)
+    assert "x-show" not in live.group(0)
+    assert 'x-text="readinessLiveText()"' in live.group(0)
+    live_hooks = [
+        m.group(1)
+        for m in re.finditer(r'<[a-z]+[^>]*data-test="(readiness-[a-z-]+)"[^>]*>', page, re.S)
+        if 'role="status"' in m.group(0)
+    ]
+    assert live_hooks == ["readiness-live"]  # no second region inside the hidden panel
+    # AA text on the outline-warning pill: emphasis token at rest, black once filled.
+    # The measured ratios are pinned in tests/e2e/test_readiness_e2e.py.
+    assert (
+        ".btn.readiness-pill.btn-outline-warning { color: var(--tblr-warning-text-emphasis); }"
+        in page
+    )
+    assert ".btn.readiness-pill.btn-outline-warning:is(:hover, :active, :focus-visible)" in page
+    assert 'class="btn btn-sm readiness-pill"' in page
+    assert 'aria-controls="readiness-panel"' in page and 'id="readiness-panel"' in page
 
 
 def test_readiness_vocab_is_unified_and_scoped(write_config):
