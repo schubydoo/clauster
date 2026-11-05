@@ -265,6 +265,35 @@ def test_write_resent_sentinel_keeps_stored_apikeyhelper(tmp_path: Path) -> None
     assert on_disk["model"] == "sonnet"
 
 
+@pytest.mark.parametrize("key", ["extraKnownMarketplaces", "additionalMarketplaces"])
+def test_marketplace_header_credentials_masked_on_read_and_kept_on_resend(
+    tmp_path: Path, key: str
+) -> None:
+    # TASK-449.7: a plain-named header (`Cookie`) and a `headersHelper` command are not
+    # secret-shaped by key name, so the generic heuristic alone showed them verbatim.
+    stored = {
+        "hosted": {
+            "source": {
+                "source": "url",
+                "url": "https://plugins.example.com/m.json",
+                "headers": {"Cookie": "session=C123"},
+                "headersHelper": "/bin/h --t SEK",
+            }
+        }
+    }
+    _s, h0 = cws.read_project_settings(tmp_path)
+    cws.write_project_settings(tmp_path, {key: stored}, h0)
+    settings, h1 = cws.read_project_settings(tmp_path)
+    assert "C123" not in json.dumps(settings) and "SEK" not in json.dumps(settings)
+    source = settings[key]["hosted"]["source"]
+    assert source["headers"] == {"Cookie": cw.REDACTION_SENTINEL}
+    assert source["url"] == "https://plugins.example.com/m.json"
+    # Resending the read view unchanged keeps the stored credentials.
+    cws.write_project_settings(tmp_path, {key: settings[key], "model": "sonnet"}, h1)
+    on_disk = json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    assert on_disk[key] == stored
+
+
 def test_write_sentinel_for_absent_key_is_dropped(tmp_path: Path) -> None:
     # A resent sentinel for a var that was never actually stored has nothing to
     # keep — it is dropped, never written as the literal "********" string.
@@ -923,3 +952,292 @@ def test_route_effective_path_escape_is_400(write_config, tmp_path) -> None:
 def test_route_effective_missing_project_is_422(write_config, tmp_path) -> None:
     with _client(write_config, tmp_path, _ON) as c:
         assert c.get(_EFFECTIVE_URL).status_code == 422
+
+
+# --- marketplace declarations on the Settings tab (TASK-449.7) ----------------------
+
+_HOSTED = {
+    "hosted": {
+        "source": {
+            "source": "url",
+            "url": "https://plugins.example.com/m.json",
+            "headers": {"Cookie": "session=C123"},
+            "headersHelper": "/bin/h --t SEK",
+        }
+    }
+}
+
+
+def _store(tmp_path: Path, data: dict) -> str:
+    _s, h0 = cws.read_project_settings(tmp_path)
+    cws.write_project_settings(tmp_path, data, h0)
+    return cws.read_project_settings(tmp_path)[1]
+
+
+def _on_disk(tmp_path: Path) -> dict:
+    return json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8"))
+
+
+def test_marketplace_inline_plugin_args_mask_whole_and_round_trip(tmp_path: Path) -> None:
+    # `args` shows as ONE sentinel, so a resend keeps the stored list whole (a
+    # per-element mask would restore by position and shift values on an edit).
+    stored = {
+        "inline": {
+            "source": {
+                "source": "settings",
+                "name": "inline",
+                "plugins": [{"name": "p", "mcpServers": {"s": {"args": ["--v", "--key", "S1"]}}}],
+            }
+        }
+    }
+    h = _store(tmp_path, {"extraKnownMarketplaces": stored})
+    view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
+    assert view["inline"]["source"]["plugins"][0]["mcpServers"]["s"]["args"] == (
+        cw.REDACTION_SENTINEL
+    )
+    cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": view}, h)
+    assert _on_disk(tmp_path)["extraKnownMarketplaces"] == stored
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        pytest.param(lambda v: {"hosted2": v["hosted"]}, id="entry-renamed"),
+        pytest.param(
+            lambda v: {
+                "hosted": {
+                    "source": {
+                        **v["hosted"]["source"],
+                        "headers": {"cookie": cw.REDACTION_SENTINEL},
+                    }
+                }
+            },
+            id="header-key-renamed",
+        ),
+    ],
+)
+def test_marketplace_write_with_orphaned_mask_is_rejected_whole(tmp_path: Path, edit) -> None:
+    # merge_redacted would silently DROP a sentinel with nothing stored behind it, saving
+    # a marketplace with its credential gone. Fail closed: refuse the write, change nothing.
+    h = _store(tmp_path, {"extraKnownMarketplaces": _HOSTED})
+    view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
+    with pytest.raises(cw.InvalidCandidateError, match="masked value"):
+        cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": edit(view)}, h)
+    assert _on_disk(tmp_path)["extraKnownMarketplaces"] == _HOSTED
+
+
+def _two_plugin_market() -> dict:
+    return {
+        "inline": {
+            "source": {
+                "source": "settings",
+                "name": "inline",
+                "plugins": [
+                    {"name": "a", "mcpServers": {"s": {"env": {"K": "AAA"}}}},
+                    {"name": "b", "mcpServers": {"s": {"env": {"K": "BBB"}}}},
+                ],
+            }
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        pytest.param(lambda p: p[1:], id="delete-first"),
+        pytest.param(lambda p: list(reversed(p)), id="reorder"),
+        pytest.param(lambda p: [*p, p[0]], id="append-copy"),
+        pytest.param(lambda p: [{**p[0], "description": "edited"}, p[1]], id="edit-masked-elem"),
+    ],
+)
+def test_marketplace_list_edit_that_would_shift_a_mask_is_rejected(tmp_path: Path, edit) -> None:
+    # merge_redacted restores a list by POSITION: deleting `a` would give `b` the
+    # credential AAA, and a reorder would swap them. Refuse the write; change nothing.
+    stored = _two_plugin_market()
+    h = _store(tmp_path, {"extraKnownMarketplaces": stored})
+    view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
+    view["inline"]["source"]["plugins"] = edit(view["inline"]["source"]["plugins"])
+    with pytest.raises(cw.InvalidCandidateError, match="masked value"):
+        cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": view}, h)
+    assert _on_disk(tmp_path)["extraKnownMarketplaces"] == stored
+
+
+def test_marketplace_list_resend_unchanged_keeps_each_credential(tmp_path: Path) -> None:
+    stored = _two_plugin_market()
+    h = _store(tmp_path, {"extraKnownMarketplaces": stored})
+    view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
+    cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": view}, h)
+    assert _on_disk(tmp_path)["extraKnownMarketplaces"] == stored
+
+
+def test_masked_whole_declaration_sent_under_a_new_key_is_rejected(tmp_path: Path) -> None:
+    # A malformed string declaration that reads back as a bare sentinel, resent under the
+    # alias key: the merge would drop it and save `{}`. Refuse instead.
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(
+        json.dumps({"extraKnownMarketplaces": "https://u:tok@h.example/m.git"}), encoding="utf-8"
+    )
+    view, h = cws.read_project_settings(tmp_path)
+    assert view["extraKnownMarketplaces"] == cw.REDACTION_SENTINEL
+    with pytest.raises(cw.InvalidCandidateError):
+        cws.write_project_settings(tmp_path, {"additionalMarketplaces": cw.REDACTION_SENTINEL}, h)
+    assert _on_disk(tmp_path) == {"extraKnownMarketplaces": "https://u:tok@h.example/m.git"}
+
+
+def test_masked_element_with_a_shortened_nested_list_is_rejected(tmp_path: Path) -> None:
+    # "Unchanged apart from its masks" covers a sentinel-free nested list too: an element
+    # that holds a mask may not come back with a nested list shortened.
+    stored = {
+        "inline": {
+            "source": {
+                "source": "settings",
+                "name": "inline",
+                "plugins": [
+                    {"name": "a", "tags": ["x", "y"], "mcpServers": {"s": {"env": {"K": "A"}}}}
+                ],
+            }
+        }
+    }
+    h = _store(tmp_path, {"extraKnownMarketplaces": stored})
+    view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
+    view["inline"]["source"]["plugins"][0]["tags"] = ["x"]
+    with pytest.raises(cw.InvalidCandidateError, match="masked value"):
+        cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": view}, h)
+    assert _on_disk(tmp_path)["extraKnownMarketplaces"] == stored
+
+
+@pytest.mark.parametrize(
+    "new_url",
+    [
+        pytest.param("https://evil.example.com/m.json", id="host"),
+        pytest.param("http://plugins.example.com/m.json", id="scheme"),
+        pytest.param("https://plugins.example.com:8443/m.json", id="port"),
+        pytest.param("https://plugins.example.com/other.json", id="path"),
+        pytest.param(None, id="url-removed"),
+        # Python's urlsplit reads this host as plugins.example.com; a WHATWG parser
+        # (what a Node fetch uses) reads evil.example.com. Only an exact compare is safe.
+        pytest.param("https://evil.example.com\\@plugins.example.com/m.json", id="backslash"),
+        pytest.param("https://Plugins.Example.com/m.json", id="host-case"),
+        pytest.param("https://plugins.example.com:443/m.json", id="default-port"),
+    ],
+)
+def test_marketplace_url_change_refuses_masked_credentials(tmp_path: Path, new_url) -> None:
+    # A masked header kept by key while the url moves would send the stored credential
+    # to the new host. Refuse the write whole; the operator retypes it for the new host.
+    # Any change to the url text counts: a "same destination" parse is a second parser
+    # that can disagree with Claude Code's.
+    h = _store(tmp_path, {"extraKnownMarketplaces": _HOSTED})
+    view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
+    source = view["hosted"]["source"]
+    if new_url is None:
+        del source["url"]
+    else:
+        source["url"] = new_url
+    with pytest.raises(cw.InvalidCandidateError, match="retype the credential for the new url"):
+        cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": view}, h)
+    assert _on_disk(tmp_path)["extraKnownMarketplaces"] == _HOSTED
+
+
+def test_marketplace_url_unchanged_restores_masked_credentials(tmp_path: Path) -> None:
+    # Same url, another field edited: the masked header and headersHelper are restored.
+    h = _store(tmp_path, {"extraKnownMarketplaces": _HOSTED})
+    view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
+    view["hosted"]["autoUpdate"] = True
+    cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": view}, h)
+    entry = _on_disk(tmp_path)["extraKnownMarketplaces"]["hosted"]
+    assert entry["source"] == _HOSTED["hosted"]["source"]
+    assert entry["autoUpdate"] is True
+
+
+def test_nested_plugin_url_change_in_a_dict_shaped_plugins_is_refused(tmp_path: Path) -> None:
+    # The binding covers every `url` in the entry, not only `source.url`: a malformed
+    # dict-shaped `plugins` escapes the list rule, so the url check must catch it.
+    stored = {
+        "inline": {
+            "source": {
+                "source": "settings",
+                "name": "inline",
+                "plugins": {
+                    "p": {
+                        "source": {"source": "archive", "url": "https://r.example/p.zip"},
+                        "headers": {"Cookie": "C"},
+                    }
+                },
+            }
+        }
+    }
+    h = _store(tmp_path, {"extraKnownMarketplaces": stored})
+    view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
+    view["inline"]["source"]["plugins"]["p"]["source"]["url"] = "https://evil.example/m.json"
+    with pytest.raises(cw.InvalidCandidateError, match="url changed"):
+        cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": view}, h)
+    assert _on_disk(tmp_path)["extraKnownMarketplaces"] == stored
+
+
+def test_masked_credential_url_resent_unchanged_keeps_url_and_headers(tmp_path: Path) -> None:
+    # The url itself reads back masked (it carries user:pass), so it cannot have moved.
+    stored = {
+        "hosted": {
+            "source": {
+                "source": "url",
+                "url": "https://bot:tok@plugins.example.com/m.json",
+                "headers": {"Cookie": "session=C123"},
+            }
+        }
+    }
+    h = _store(tmp_path, {"extraKnownMarketplaces": stored})
+    view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
+    assert view["hosted"]["source"]["url"] == cw.REDACTION_SENTINEL
+    cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": view}, h)
+    assert _on_disk(tmp_path)["extraKnownMarketplaces"] == stored
+
+
+def test_list_shaped_declaration_resent_unchanged_is_accepted(tmp_path: Path) -> None:
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"extraKnownMarketplaces": [_HOSTED["hosted"]]}), "utf-8")
+    view, h = cws.read_project_settings(tmp_path)
+    cws.write_project_settings(
+        tmp_path, {"extraKnownMarketplaces": view["extraKnownMarketplaces"]}, h
+    )
+    assert _on_disk(tmp_path)["extraKnownMarketplaces"] == [_HOSTED["hosted"]]
+
+
+def test_marketplace_url_change_without_masks_is_accepted(tmp_path: Path) -> None:
+    # Retyping the credential for the new host is the documented way forward.
+    h = _store(tmp_path, {"extraKnownMarketplaces": _HOSTED})
+    moved = {
+        "hosted": {
+            "source": {
+                "source": "url",
+                "url": "https://new.example.com/m.json",
+                "headers": {"Cookie": "session=NEW"},
+            }
+        }
+    }
+    cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": moved}, h)
+    assert _on_disk(tmp_path)["extraKnownMarketplaces"] == moved
+
+
+def test_marketplace_moved_to_alias_with_masks_is_rejected(tmp_path: Path) -> None:
+    h = _store(tmp_path, {"extraKnownMarketplaces": _HOSTED})
+    view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
+    with pytest.raises(cw.InvalidCandidateError):
+        cws.write_project_settings(tmp_path, {"additionalMarketplaces": view}, h)
+
+
+def test_marketplace_secret_shaped_name_keeps_its_entry_editable(tmp_path: Path) -> None:
+    stored = {"auth-tools": {"source": {"source": "github", "repo": "acme/auth-tools"}}}
+    _store(tmp_path, {"extraKnownMarketplaces": stored})
+    assert cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"] == stored
+
+
+def test_malformed_marketplace_declaration_is_still_masked(tmp_path: Path) -> None:
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(
+        json.dumps({"extraKnownMarketplaces": [_HOSTED["hosted"]]}), encoding="utf-8"
+    )
+    view = cws.read_project_settings(tmp_path)[0]
+    assert "C123" not in json.dumps(view) and "SEK" not in json.dumps(view)

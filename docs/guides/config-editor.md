@@ -178,7 +178,9 @@ Common mechanics across the modal:
   surfaces, and the `permissions` rules, return the raw content, because they
   round-trip the exact text on write. Do not put a secret anywhere in a subagent
   file, for example in an inline `mcpServers` block in the frontmatter. For what
-  the Hooks tab masks, see [The Hooks tab](#the-hooks-tab).
+  the Hooks tab masks, see [The Hooks tab](#the-hooks-tab). The
+  Plugins surface is read-only for these values, and it masks them too. See
+  [Plugins and marketplaces](#plugins-and-marketplaces).
 
 The surface tabs:
 
@@ -491,6 +493,74 @@ The `disableAllHooks`, `allowedHttpHookUrls`, and `httpHookAllowedEnvVars`
 settings are top-level keys, not part of the `hooks` key, so the Hooks tab does
 not edit them.
 
+### Plugins and marketplaces
+
+The Plugins tab runs the `claude plugin` command on the host for every change.
+For enable, disable, install, update, uninstall, and marketplace add and
+remove, Clauster passes `--scope` with the scope you chose, so one change never
+reaches a second settings file. The marketplace Update button is the exception:
+`claude plugin marketplace update` takes no `--scope`, because a marketplace's
+checkout is shared by every scope and project. An update therefore refreshes
+that marketplace for every project on the host, not only the one you selected.
+The commands, flags and settings below were checked against Claude Code 2.1.318.
+
+- **Install and update never accept a marketplace command for you.** Some
+  marketplace entries install a plugin by running a command, or fetch it with a
+  `headersHelper` command. Claude Code shows that command and asks before it
+  runs it. Clauster never passes `-y` or `--accept-command`, so Claude Code
+  refuses the install and the tab shows the error. To install such a plugin,
+  read the command and run `claude plugin install` from a terminal on the host.
+- **Enable and Disable can refuse a plugin that already has that state.** The
+  badge on each row shows the merged state from all scopes. If the plugin is
+  already enabled at the scope you chose, Claude Code refuses and names that
+  scope. A plugin that the project enables cannot be disabled at user scope. To
+  turn it off for yourself only, disable it at the Local scope.
+- **Each marketplace row shows the source type and its location**, for example
+  `github · owner/repo`. A URL that carries a user name or password, such as
+  `https://user:token@host/repo.git`, shows as `********`.
+- **Clauster masks credentials in what it reads.** It masks every `headers`,
+  `env` and MCP server `args` value, every `headersHelper` command, and every URL
+  that carries a user name or password. This applies to the marketplace list, to
+  the marketplaces that a scope declares (`extraKnownMarketplaces`), and to the
+  MCP server definitions in the plugin list. A masked value is never written
+  back. A token in a URL query string, such as `?sig=...`, is not detected. Do
+  not put a credential there.
+- **The Settings tab masks `extraKnownMarketplaces` in the same way.** If you
+  save the Raw JSON with a masked value unchanged, Clauster keeps the stored
+  value. An `args` list shows as one `********`, so you keep it whole or type
+  the full list again. Clauster refuses the save (`422`) if a masked value can no
+  longer be matched to its stored value. This happens when you rename or move an
+  entry or a header that holds one. It also happens when you delete, reorder or
+  edit an element of a list (such as a `settings` source's `plugins`) that holds
+  one. Type the real values again, then save.
+- **A masked credential stays bound to its marketplace URL.** If you change any
+  `url` in a marketplace entry on the Settings tab, or remove one, Clauster
+  refuses the save (`422`) while that entry still holds any masked value, for
+  example a `headers` value or a `headersHelper`. Any change to the text counts,
+  including the letter case of the host or an added `:443`. This stops the
+  stored credential from going to a new host. Type the credential again, then
+  save.
+- **The `additionalMarketplaces` spelling is read too.** Claude Code 2.1.232 and
+  later accept it as another name for `extraKnownMarketplaces`. When a file sets
+  both, the canonical key wins, as it does in Claude Code.
+- **Claude Code ignores marketplaces that a project declares until you trust the
+  folder.** This applies to the `extraKnownMarketplaces` entries in a project's
+  `.claude/settings.json` and `.claude/settings.local.json`. Such an entry has no
+  effect until the folder is trusted.
+
+The tab does not offer these commands and settings:
+
+- `plugin configure` and `install --config`. Plugin options can be secrets, and
+  Clauster does not put a secret in a command line.
+- `install --marketplace`, `marketplace add --claudeai`, `marketplace add
+  --sparse`, `disable --all`, `prune`, and the authoring commands (`init`,
+  `validate`, `eval`, `tag`, `test`).
+- Managed policy settings such as `strictKnownMarketplaces`,
+  `blockedMarketplaces` and `disableCommandPluginSources`. Only managed settings
+  can hold them, and Clauster never writes managed settings. Claude Code still
+  applies them: a change that the policy blocks fails with Claude Code's own
+  message.
+
 ## Troubleshooting and limits
 
 | Symptom | Why | What to do |
@@ -502,6 +572,9 @@ not edit them.
 | No Advanced section / no wrench button | `config_write.enabled` is off (the whole surface 404s) | Enable it in `clauster.yml` — deliberately not web-editable |
 | A saved change has no effect | Saves never live-reload | Use **Restart Clauster** in the Configuration modal |
 | A subagent has no description and won't edit | It is built-in, or a plugin owns it — the **Source** badge says which | Built-in: nothing to do, there is no file. Plugin: change the plugin, not Clauster |
+| A plugin install or update fails and the message names a command | The marketplace entry runs a command, and Clauster never accepts one for you | Read the command, then run `claude plugin install` from a terminal on the host |
+| Enable or Disable fails with "is already enabled" or "is installed at project scope, not user" | The badge is the merged state, and the chosen scope already has that value or cannot override it | Pick the scope that the message names, or use the Local scope to override a project setting for yourself |
+| Removing a marketplace returns `404` with "is not declared in user settings" | A different scope declares it | Switch to the scope that declares it and remove it there |
 
 Need to recover an earlier config? The five most recent pre-save snapshots
 sit next to the file as `clauster.yml.bak-*` — copy one back over

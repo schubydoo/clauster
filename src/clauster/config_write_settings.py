@@ -112,6 +112,7 @@ from pathlib import Path
 from typing import Any
 
 from . import config_write as cw
+from . import config_write_plugins as cwp
 from .claude_json import locked_replace_json_file
 
 #: Top-level ``settings.json`` keys owned by a DEDICATED config-write surface.
@@ -202,13 +203,157 @@ def _redact_misc(misc: dict[str, Any]) -> dict[str, Any]:
 
     Runs the normal structural :func:`~clauster.config_write.redact_secrets`
     heuristic over every key, then unconditionally masks every ``env`` value on
-    top -- the #822-lesson override described in the module docstring.
+    top -- the #822-lesson override described in the module docstring -- and
+    redacts ``extraKnownMarketplaces`` (and its ``additionalMarketplaces`` alias)
+    with :func:`clauster.config_write_plugins.redact_named_map`.
     """
     redacted = cw.redact_secrets(misc)
     env = misc.get(ENV_KEY)
     if isinstance(env, dict):
         redacted[ENV_KEY] = dict.fromkeys(env, cw.REDACTION_SENTINEL)
+    # A marketplace declaration's `headers`/`headersHelper` hold credentials under plain
+    # names (`Cookie`), so it gets the Plugins surface's masking, not only the key-name
+    # heuristic. A resent sentinel keeps the stored value through `merge_redacted`.
+    for key in (cwp.EXTRA_MARKETPLACES_KEY, cwp.EXTRA_MARKETPLACES_ALIAS_KEY):
+        declared = misc.get(key)
+        if isinstance(declared, dict):
+            redacted[key] = cwp.redact_named_map(declared)
+        elif declared is not None:
+            # Malformed (not the documented map), but it can still carry credentials.
+            redacted[key] = cwp.redact_plugin_display(declared)
     return redacted
+
+
+_MISSING = object()
+
+
+def _has_sentinel(value: Any) -> bool:
+    """Whether ``value`` holds a :data:`~clauster.config_write.REDACTION_SENTINEL` at any depth."""
+    if isinstance(value, dict):
+        return any(_has_sentinel(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_has_sentinel(v) for v in value)
+    return value == cw.REDACTION_SENTINEL
+
+
+def _unchanged_but_masks(incoming: Any, stored: Any) -> bool:
+    """Whether ``incoming`` equals ``stored`` everywhere except where it holds a sentinel."""
+    if incoming == cw.REDACTION_SENTINEL:
+        return True
+    if isinstance(incoming, dict):
+        return (
+            isinstance(stored, dict)
+            and incoming.keys() == stored.keys()
+            and all(_unchanged_but_masks(v, stored[k]) for k, v in incoming.items())
+        )
+    if isinstance(incoming, list):
+        return (
+            isinstance(stored, list)
+            and len(incoming) == len(stored)
+            and all(_unchanged_but_masks(v, s) for v, s in zip(incoming, stored, strict=True))
+        )
+    return bool(incoming == stored)
+
+
+def _orphan_sentinel_path(incoming: Any, stored: Any, path: str) -> str | None:
+    """Return the path of the first sentinel in ``incoming`` that cannot be matched safely.
+
+    :func:`~clauster.config_write.merge_redacted` silently DROPS a sentinel with no
+    stored value behind it, and restores a list by POSITION. So renaming a masked
+    marketplace entry or header on the Settings tab would save it with its credential
+    gone, and deleting or reordering an element of a list (a ``settings`` source's
+    ``plugins``) would move one entry's credential into another and report success.
+    A dict is matched by key. A list that holds a sentinel must keep its length, and
+    each element that holds one must come back unchanged apart from its sentinels.
+    """
+    if isinstance(incoming, dict):
+        items: Any = incoming.items()
+    elif isinstance(incoming, list):
+        if _has_sentinel(incoming):
+            if not isinstance(stored, list) or len(stored) != len(incoming):
+                return path
+            for i, v in enumerate(incoming):
+                if _has_sentinel(v) and not _unchanged_but_masks(v, stored[i]):
+                    return f"{path}.{i}"
+        items = enumerate(incoming)
+    else:
+        return None
+    for k, v in items:
+        if isinstance(incoming, dict):
+            here = stored.get(k, _MISSING) if isinstance(stored, dict) else _MISSING
+        else:
+            here = stored[k] if isinstance(stored, list) and k < len(stored) else _MISSING
+        where = f"{path}.{k}"
+        if v == cw.REDACTION_SENTINEL and here is _MISSING:
+            return where
+        found = _orphan_sentinel_path(v, None if here is _MISSING else here, where)
+        if found:
+            return found
+    return None
+
+
+def _reject_orphan_marketplace_sentinels(incoming: dict[str, Any], stored: dict[str, Any]) -> None:
+    """Refuse (422) a marketplace write whose masked values no longer match a stored value."""
+    for key in (cwp.EXTRA_MARKETPLACES_KEY, cwp.EXTRA_MARKETPLACES_ALIAS_KEY):
+        if key not in incoming:
+            continue
+        if incoming[key] == cw.REDACTION_SENTINEL and key not in stored:
+            where: str | None = key
+        else:
+            where = _orphan_sentinel_path(incoming[key], stored.get(key), key)
+        if where:
+            raise cw.InvalidCandidateError(
+                f"{where} holds a masked value that no longer matches its stored value (an "
+                "entry or key was renamed, moved or reordered, or a list changed length); "
+                "enter the real value again"
+            )
+        _reject_masks_sent_to_a_new_url(incoming[key], stored.get(key), key)
+
+
+def _urls(value: Any, path: tuple[Any, ...] = ()) -> dict[tuple[Any, ...], Any]:
+    """Return every ``url`` value under ``value``, at any depth, keyed by its path."""
+    found: dict[tuple[Any, ...], Any] = {}
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if k == "url":
+                found[(*path, k)] = v
+            found.update(_urls(v, (*path, k)))
+    elif isinstance(value, list):
+        for i, v in enumerate(value):
+            found.update(_urls(v, (*path, i)))
+    return found
+
+
+def _reject_masks_sent_to_a_new_url(incoming: Any, stored: Any, key: str) -> None:
+    """Refuse (422) a marketplace entry that keeps masked values while any of its urls changes.
+
+    A masked ``headers`` value or ``headersHelper`` is restored from the stored entry by
+    key. If a ``url`` in that entry (its ``source.url``, or a nested plugin's) now differs
+    from the stored one, restoring would send the stored credential to a new host. So every
+    masked value in such an entry is refused whole, and the operator retypes the
+    credential. The comparison is the EXACT string: any parsed "same destination" rule
+    is a second URL parser that can disagree with the one Claude Code fetches with (a
+    backslash before ``@`` names a different host to Python's ``urlsplit`` than to a
+    WHATWG parser), and a disagreement there would leak the credential. A url that is
+    itself masked was resent unchanged, so it still matches.
+    """
+    if not isinstance(incoming, dict):
+        return
+    stored_map = stored if isinstance(stored, dict) else {}
+    for name, entry in incoming.items():
+        if not _has_sentinel(entry):
+            continue
+        new_urls = _urls(entry)
+        old_urls = _urls(stored_map.get(name))
+        moved = any(
+            url != cw.REDACTION_SENTINEL and old_urls.get(where, _MISSING) != url
+            for where, url in new_urls.items()
+        ) or any(where not in new_urls for where in old_urls)
+        if moved:
+            raise cw.InvalidCandidateError(
+                f"{key}.{name}: a marketplace url changed, so its masked credentials cannot "
+                "be kept; retype the credential for the new url"
+            )
 
 
 def _read_misc(path: Path) -> tuple[dict[str, Any], str]:
@@ -256,6 +401,7 @@ def _locked_write_misc(path: Path, incoming: dict[str, Any], expected_hash: str 
             raise cw.StaleConfigWriteError("config file changed on disk since it was loaded")
         current = cw.load_settings_json_obj(current_bytes)
         stored_misc = _misc_view(current)
+        _reject_orphan_marketplace_sentinels(incoming, stored_misc)
         merged_misc = cw.merge_redacted(incoming, stored_misc)
         # Replace the whole non-owned partition; every owned key keeps its value
         # (the file is re-rendered, so byte layout and key order are not preserved).
@@ -286,7 +432,9 @@ def write_project_settings(
     project that has no ``.claude`` dir yet does not fail the atomic writer's
     ``mkstemp`` in a missing directory), then runs the fail-closed Foundation
     pipeline. The candidate is validated *before* the directory is created, so
-    a bad shape (422) leaves the filesystem untouched.
+    a bad shape (422) leaves the filesystem untouched. A masked marketplace value that no
+    longer matches its stored value is refused inside the lock instead (also 422); the
+    settings file is unchanged, though a new ``.claude`` directory may be left behind.
     """
     cw.validate_candidate(incoming, validate_misc_settings)
     path = cw.project_settings_path(project_dir)

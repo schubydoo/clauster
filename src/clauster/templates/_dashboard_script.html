@@ -3168,6 +3168,14 @@
           Object.assign(this._configMgmtTarget(), { op: op, name: name, confirm: pl.confirm }),
         );
       },
+      // `marketplace list --json` gives the source TYPE in `source` ("github", "git",
+      // "url", "directory", "file", "claudeai") and its location in `repo`, `url` or
+      // `path` (the backend has already masked any credentials in a url).
+      configMgmtMarketSource(m) {
+        const where = [m.repo, m.url, m.path].find((v) => typeof v === "string" && v) || "";
+        const kind = typeof m.source === "string" ? m.source : "";
+        return where ? (kind ? kind + " · " + where : where) : kind;
+      },
       configMgmtCanAddMarket() {
         const c = this.configMgmt, pl = c.plugins;
         if (pl.busy || this.configMgmtNeedsProject()) return false;

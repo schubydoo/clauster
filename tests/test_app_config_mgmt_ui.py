@@ -325,6 +325,11 @@ def test_plugins_surface_present_when_enabled(write_config):
     assert 'data-test="cm-marketplaces-table"' in html
     assert 'data-test="cm-marketplace-add-source"' in html
     assert 'data-test="cm-marketplace-add-go"' in html
+    # A marketplace row shows its location, not only the source type that
+    # `marketplace list --json` carries in `source` (TASK-449.7).
+    assert 'x-text="configMgmtMarketSource(m)"' in html
+    assert "configMgmtMarketSource(m) {" in html
+    assert 'x-text="m.source"' not in html
     # Plugins support all three scopes — NOT in the no-local list.
     no_local = re.search(r"configMgmtNoLocalSurfaces:\s*\[([^\]]*)\]", html)
     assert no_local and '"plugins"' not in no_local.group(1)
