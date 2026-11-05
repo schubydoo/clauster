@@ -1006,12 +1006,14 @@ def _check_inline_server(name: str, node: yaml.Node) -> None:
 
 
 #: A plain scalar that the CLI reads as a number although PyYAML (YAML 1.1) reads a string:
-#: ``1e3``, ``1E3``, ``+1e3`` and ``1.0e3`` (YAML 1.1 wants a dot and a signed exponent),
-#: ``0o17`` and a signed ``-0o17``/``+0o7``, and a leading-zero decimal that is not octal to
-#: YAML 1.1 (``09``). The CLI parses frontmatter with ``Bun.YAML.parse``; each of those
-#: spellings was probed on 2.1.318 as an ``args`` item, and each made the server invalid.
-#: ``0O17`` and ``0o8`` connect, so they do not match. A signed hex such as ``-0x1F`` is an
-#: int to PyYAML already, so the type check refuses it before this.
+#: ``1e3``, ``1E3``, ``+1e3``, ``-.5`` and ``+.5e-3`` (YAML 1.1 wants a dot, a signed
+#: exponent, and no sign before a leading dot), ``0o17`` and a signed ``-0o17``/``+0o7``,
+#: and a leading-zero decimal that is not octal to YAML 1.1 (``09``). The CLI parses
+#: frontmatter with ``Bun.YAML.parse``. On 2.1.318 each of those spellings made the server
+#: invalid (probed as an ``args`` item, and ``1e3`` also as an ``env`` value), while
+#: ``0O17`` and ``0o8`` connect, so they do not match. The sign on the hex arm is there for
+#: symmetry only: a plain signed hex such as ``-0x1F`` is an int to PyYAML, so the type
+#: check refuses it first, and only an explicit ``!!str`` reaches this arm.
 _YAML12_NUMBER_RE = re.compile(
     r"[-+]?[0-9]+|[-+]?0o[0-7]+|[-+]?0x[0-9a-fA-F]+"
     r"|[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?"
@@ -1023,7 +1025,7 @@ def _refuse_yaml12_number_strings(label: str, node: yaml.Node) -> None:
     """Refuse a plain string value under ``node`` that the CLI's YAML 1.2 reads as a number.
 
     Every value of an MCP entry that is not a boolean or a number is a string, and the CLI's
-    entry schema refuses a number there, so it skips the whole server (probed on 2.1.318
+    entry schema refuses a number there, so it drops that ``mcpServers`` item (probed on 2.1.318
     with ``env: {A: 1e3}`` and ``args: [0o17]``; the quoted ``"1e3"`` connects). Only values
     are checked, never keys. ⚠️ This is stricter than the CLI for an explicit ``!!str 1e3``,
     which the composed node cannot tell from a plain ``1e3``. Quoting is the fix for both.

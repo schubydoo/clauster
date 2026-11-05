@@ -1434,7 +1434,7 @@ def test_inline_servers_refuse_yaml11_only_spellings(definition: str) -> None:
         # Probed one by one as an `args` item on 2.1.318: each made the server invalid.
         *[
             f"  - srv:\n      command: x\n      args: [{v}]\n"
-            for v in ("+1e3", "1E3", "-0o17", "+0o7", "09")
+            for v in ("+1e3", "1E3", "-0o17", "+0o7", "-.5", "+.5e-3")
         ],
     ],
 )
@@ -1442,7 +1442,9 @@ def test_inline_servers_refuse_strings_yaml12_reads_as_numbers(item: str) -> Non
     # PyYAML reads each plain value as a string; the CLI's YAML 1.2 reads a number, which its
     # entry schema refuses, so it skips the server (probed: `env: {A: 1e3}`, `args: [0o17]`).
     text = f"---\nname: x\ndescription: d\nmcpServers:\n{item}---\nbody\n"
-    with pytest.raises(cw.InvalidCandidateError, match="as a number, not a string"):
+    with pytest.raises(
+        cw.InvalidCandidateError, match="as a number, not a string, and drops that mcpServers"
+    ):
         sub.validate_agent_content(text, expected_name="x")
 
 
