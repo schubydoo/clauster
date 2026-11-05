@@ -758,13 +758,10 @@ def test_cost_is_linear_on_hostile_text() -> None:
 
 
 def _cpu_seconds(text: str) -> float:
-    """The least CPU time of two runs of the known-value search over ``text``."""
-    best = float("inf")
-    for _ in range(2):
-        start = time.process_time()
-        redact._known_spans(text)
-        best = min(best, time.process_time() - start)
-    return best
+    """The CPU time of one run of the known-value search over ``text``."""
+    start = time.process_time()
+    redact._known_spans(text)
+    return time.process_time() - start
 
 
 def test_cost_grows_linearly_on_split_copies() -> None:
@@ -772,10 +769,22 @@ def test_cost_grows_linearly_on_split_copies() -> None:
 
     That cost grew with the square of the length (0.5 MB in 1 s, 2 MB in 14 s). This compares
     how the cost GROWS, not a wall-clock time, so a loaded host or a slow runner cannot fail
-    it: 4 times the text must cost less than 8 times the CPU time (linear is about 4).
+    it: 4 times the text must cost less than 8 times the CPU time (linear is about 4). The
+    small and large runs alternate, so a change of load hits both, and the least of three runs
+    of each counts. The floor of 0.05 s keeps Windows' 15.6 ms ``process_time`` step from
+    deciding the ratio.
     """
     redact.remember_known_values("iid-1", ENV, SESSION, BRIDGE)
     body = _random_part(ENV)
     unit = "env_" + body[:10] + " " + body[10:] + " x "
-    small, large = _cpu_seconds(unit * 8_000), _cpu_seconds(unit * 32_000)
-    assert large < 8 * max(small, 1e-3), (small, large)
+    small_text, large_text = unit * 8_000, unit * 32_000
+    # Positive control: the search really works on this input. Each copy is split in two
+    # pieces at the space, and both are masked, so a test that passes is not timing a no-op.
+    assert len(redact._known_spans(unit * 3)) == 6
+    assert len(redact._known_spans(small_text)) == 2 * 8_000
+    assert not _leaks(redact.redact_for_disk(unit), ENV) and _leaks(unit, ENV)
+    small = large = float("inf")
+    for _ in range(3):
+        small = min(small, _cpu_seconds(small_text))
+        large = min(large, _cpu_seconds(large_text))
+    assert large < 8 * max(small, 0.05), (small, large)

@@ -4092,7 +4092,8 @@ async def test_delta_frames_reach_no_subscriber_with_their_text(fake_claustrum):
     pieces = [_KNOWN_ID[i : i + 5] for i in range(0, len(_KNOWN_ID), 5)]
     lines = [_delta(0, {"type": "text_delta", "text": p}) for p in pieces]
     lines.append(_delta(1, {"type": "input_json_delta", "partial_json": f'{{"a": "{_KNOWN_ID}'}))
-    lines.append(_delta(2, {"type": "thinking_delta", "thinking": _KNOWN_ID}))
+    lines.append(_delta(2, {"type": "thinking_delta", "thinking": _KNOWN_ID[:9]}))
+    lines.append(_delta(2, {"type": "signature_delta", "signature": _KNOWN_ID[9:]}))
     whole = {"type": "assistant", "message": {"content": [{"type": "text", "text": _KNOWN_ID}]}}
     lines.append(whole)
     # Positive control: the delta frames, read in order, hold the id; no single one does.
@@ -4127,6 +4128,9 @@ async def test_delta_frames_reach_no_subscriber_with_their_text(fake_claustrum):
         }
         json_delta = sent[len(pieces)]["event"]["delta"]
         assert json_delta == {"type": "input_json_delta", "partial_json": ""}
+        thinking, signature = (sent[len(pieces) + k]["event"]["delta"] for k in (1, 2))
+        assert thinking == {"type": "thinking_delta", "thinking": ""}
+        assert signature == {"type": "signature_delta", "signature": ""}
         # The whole-message frame keeps its text, masked as before.
         final = sent[-1]["message"]["content"][0]["text"]
         assert final and "<redacted>" in final
@@ -4153,3 +4157,47 @@ def test_drop_delta_text_leaves_other_frames_alone():
         node["x"] = {}
         node = node["x"]
     assert hosted._REDACT_TOO_DEEP in json.dumps(hosted._drop_delta_text(_delta(0, deep)))
+
+
+@pytest.mark.parametrize(
+    ("odd", "emptied"),
+    [(_KNOWN_ID, ""), ([_KNOWN_ID[:9], _KNOWN_ID[9:]], []), (12345, None), (None, None)],
+)
+def test_drop_delta_text_empties_a_delta_that_is_not_an_object(odd, emptied):
+    """A future or broken CLI shape fails closed: the whole delta goes, never passed on."""
+    frame = {"type": "stream_event", "event": {"type": "content_block_delta", "delta": odd}}
+    if isinstance(odd, str | list):
+        assert _leaks_known(json.dumps(odd).replace('", "', ""))  # positive control
+    out = hosted._drop_delta_text(frame)
+    assert out["event"] == {"type": "content_block_delta", "delta": emptied}
+
+
+def test_drop_delta_text_does_not_change_its_input():
+    import copy
+
+    frame = _delta(0, {"type": "text_delta", "text": _KNOWN_ID, "extra": [{"k": "v"}]})
+    before = copy.deepcopy(frame)
+    out = hosted._drop_delta_text(frame)
+    assert frame == before  # the parsed frame other code may still hold is untouched
+    assert out["event"]["delta"] == {"type": "text_delta", "text": "", "extra": [{"k": ""}]}
+
+
+async def test_delta_frames_from_the_reattach_backlog_carry_no_text(fake_claustrum):
+    """Deltas the daemon buffered while Clauster was away arrive through reattach: emptied too."""
+    from clauster import redact
+
+    redact.remember_known_values("iid-1", _KNOWN_ID)
+    pieces = [_KNOWN_ID[i : i + 5] for i in range(0, len(_KNOWN_ID), 5)]
+    lines = [_delta(0, {"type": "text_delta", "text": p}) for p in pieces]
+    assert _leaks_known(_delta_texts(lines))  # positive control
+    fake = await fake_claustrum()
+    for line in lines:  # buffered on the daemon before any session attaches
+        await fake.emit(_PID, "stdout", (json.dumps(line) + "\n").encode())
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        session = HostedSession(client, _PID, _BIN)
+        await session.reattach(0)
+        await wait_until(lambda: len(_frames(session)) >= len(lines) or None)
+        frames = _frames(session)
+    assert len(frames) == len(lines)
+    assert not _leaks_known(_delta_texts(frames))
+    assert all(f["event"]["delta"] == {"type": "text_delta", "text": ""} for f in frames)

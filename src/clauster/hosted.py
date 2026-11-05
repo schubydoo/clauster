@@ -2218,10 +2218,20 @@ def _drop_delta_text(frame: dict[str, Any]) -> dict[str, Any]:
     event = frame.get("event")
     if frame.get("type") != "stream_event" or not isinstance(event, dict):
         return frame
-    delta = event.get("delta")
-    if event.get("type") != "content_block_delta" or not isinstance(delta, dict):
+    if event.get("type") != "content_block_delta" or "delta" not in event:
         return frame
-    return {**frame, "event": {**event, "delta": _blank_strings(delta)}}
+    delta = event["delta"]
+    # Fail closed on an odd shape (a future or broken CLI): a delta that is not an object is
+    # emptied whole, "" for a string, [] for a list, None for anything else. Never passed on.
+    if isinstance(delta, dict):
+        blank: Any = _blank_strings(delta)
+    elif isinstance(delta, str):
+        blank = ""
+    elif isinstance(delta, list):
+        blank = []
+    else:
+        blank = None
+    return {**frame, "event": {**event, "delta": blank}}
 
 
 def _blank_strings(obj: Any, _depth: int = 0) -> Any:
