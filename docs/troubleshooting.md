@@ -475,13 +475,17 @@ deleted. Current releases remove these variables before they start a process.
 with, and bridges, pty keepers and the claustrum daemon all outlive a Clauster
 restart. So an upgrade alone does not change them. Restart each old one:
 
-1. For a standard bridge, click **Stop** on its dashboard card, then start it
-   again.
+1. For a standard bridge, click **Stop** on its dashboard card, then click
+   **Resume**.
 2. For an Interactive Session (pty) bridge, click **Stop** on its card, then
    click **Resume**. Stop also ends the pty keeper that holds the bridge, and
    Resume starts a new keeper.
-3. For Direct Sessions, end each session, then stop the claustrum daemon process.
-   Its command line is `claustrum -serve -socket <state_dir>/claustrum/daemon.sock`
+3. For a background agent, stop it, then resume it. Claude Code starts
+   background agents from its own supervisor process, which Clauster does not
+   manage. If the warning stays after you restart the agents, that supervisor
+   still has the old environment.
+4. For Direct Sessions, end each session, then stop the claustrum daemon process.
+   Its command line contains `-serve -socket <state_dir>/claustrum/daemon.sock`
    (or the `claustrum.socket_path` that you configured). Then restart Clauster,
    which starts a new daemon at startup. Every Direct Session gets its
    environment from the daemon.
@@ -490,7 +494,7 @@ To see if one process still has the old environment, run this on the Linux host.
 No output means that the process is clean:
 
 ```sh
-tr '\0' '\n' < /proc/<pid>/environ | grep -E '^(LD_LIBRARY_PATH=.*_MEI|_PYI_)'
+tr '\0' '\n' < /proc/<pid>/environ | grep -E '^(LD_LIBRARY_PATH=(.*:)?[^:]*/_MEI|_PYI_)'
 ```
 
 Do not run this check on a pty keeper's own pid. A current keeper keeps these
@@ -754,7 +758,7 @@ present in every run:
 | `systemd` | `KillMode=process` (bridges survive a restart) | a restart would kill live pty bridges |
 | `node-toolchain` | node resolvable for npx MCP servers | nvm-only node invisible to bridges |
 | `workspace-trust` | `N/M discovered projects trusted` (OK when all are) | any untrusted discovered project — a session there will stall on the trust prompt (see above) |
-| `bundle-env` | no running bridge or claustrum daemon has an older binary's environment (Linux only) | a process that an older standalone binary started; restart it as [described above](#in-a-session-node-fails-with-glibc_238-not-found-or-clauster-cannot-load-libpython) |
+| `bundle-env` | no running bridge, background agent or claustrum daemon has an older binary's environment (Linux only) | a process that an older standalone binary started; restart it as [described above](#in-a-session-node-fails-with-glibc_238-not-found-or-clauster-cannot-load-libpython) |
 
 The rest belong to two **prefixed families** that grow as optional pieces are
 added, so read the prefix rather than expecting this page to enumerate them:

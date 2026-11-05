@@ -333,7 +333,11 @@ def test_open_in_browser_hands_the_opener_a_clean_env_in_the_binary(monkeypatch,
     import os
     import sys
 
-    fake_environ = {"PATH": "/usr/bin", "_PYI_ARCHIVE_FILE": "/usr/local/bin/clauster"}
+    fake_environ = {
+        "PATH": "/usr/bin",
+        "_PYI_ARCHIVE_FILE": "/usr/local/bin/clauster",
+        "CLAUSTER_SESSION_SECRET": "s",  # child_env drops it, so it shows the gate ran
+    }
     monkeypatch.setattr(os, "environ", fake_environ)
     if frozen:
         monkeypatch.setattr(sys, "frozen", True, raising=False)
@@ -344,3 +348,4 @@ def test_open_in_browser_hands_the_opener_a_clean_env_in_the_binary(monkeypatch,
     cli_read._open_in_browser("https://claude.ai/code/s1")
     assert seen["env"]["PATH"] == "/usr/bin"
     assert ("_PYI_ARCHIVE_FILE" in seen["env"]) is not frozen  # a source install is untouched
+    assert ("CLAUSTER_SESSION_SECRET" in seen["env"]) is not frozen

@@ -2748,12 +2748,13 @@ def test_bundle_env_check_never_fails_doctor(monkeypatch):
     assert check.detail == "could not check: RuntimeError"
 
 
-def test_bundle_env_suspects_lists_bridges_pty_bridges_and_the_daemon(
+def test_bundle_env_suspects_lists_each_live_tracked_process_and_nothing_else(
     write_config, tmp_path, monkeypatch
 ):
+    # Every conjunct of every identity gate has a case that fails ONLY that conjunct.
     import types
 
-    from clauster import pointers, procutil, pty_keeper
+    from clauster import pointers, procutil, pty_keeper, supervisor
     from clauster.claustrum_daemon import ClaustrumDaemon
     from clauster.models import Project, TrustState
 
@@ -2761,20 +2762,44 @@ def test_bundle_env_suspects_lists_bridges_pty_bridges_and_the_daemon(
         str(write_config(f"state_dir: {tmp_path / '.s'}\nclaustrum:\n  enabled: true\n"))
     )
     projects = [
-        Project(name="std", path=Path("/p/std"), trust_state=TrustState.TRUSTED),
-        Project(name="idle", path=Path("/p/idle"), trust_state=TrustState.TRUSTED),
+        Project(name=n, path=Path(f"/p/{n}"), trust_state=TrustState.TRUSTED)
+        for n in ("std", "idle", "stale")
     ]
-    ptr = types.SimpleNamespace(pid=101, proc_start="5")
-    monkeypatch.setattr(
-        pointers, "pointer_for_project", lambda path: ptr if path.name == "std" else None
-    )
+    ptrs = {
+        "std": types.SimpleNamespace(pid=101, proc_start="5"),
+        "stale": types.SimpleNamespace(pid=102, proc_start="5"),  # pointer, but not live
+    }
+    monkeypatch.setattr(pointers, "pointer_for_project", lambda path: ptrs.get(path.name))
     monkeypatch.setattr(procutil, "is_live_standard_bridge", lambda pid, start: pid == 101)
+
+    def _keeper(name, *, alive, bridge_pid):
+        return types.SimpleNamespace(
+            alive=alive, bridge_pid=bridge_pid, project=name, sidecar=tmp_path / f"{name}.json"
+        )
+
     keepers = [
-        types.SimpleNamespace(alive=True, bridge_pid=202, project="pty", keeper_pid=201),
-        types.SimpleNamespace(alive=False, bridge_pid=302, project="dead", keeper_pid=301),
+        _keeper("pty", alive=True, bridge_pid=202),
+        _keeper("deadkeeper", alive=False, bridge_pid=302),  # bridge alive, keeper gone
+        _keeper("recycled", alive=True, bridge_pid=502),  # bridge pid fails its identity
+        _keeper("nobridge", alive=True, bridge_pid=None),
     ]
     monkeypatch.setattr(pty_keeper, "iter_keepers", lambda log_dir: keepers)
-    monkeypatch.setattr(procutil, "is_bridge_process", lambda pid: pid == 202)
+    sidecar_info = {
+        "bridge_proc_start": 1717000000.0,
+        "bridge_start_ticks": 770579,
+        "boot_id": "b-1",
+    }
+    monkeypatch.setattr(pty_keeper, "_read_sidecar", lambda path: sidecar_info)
+    seen_gate = []
+
+    def _is_live_bridge(pid, start, *, start_ticks, boot_id):
+        seen_gate.append((pid, start, start_ticks, boot_id))
+        return pid in (202, 302)
+
+    monkeypatch.setattr(procutil, "is_live_bridge", _is_live_bridge)
+    workers = {"ab12": {"pid": 601, "procStart": "9"}, "cd34": {"pid": 602, "procStart": "9"}}
+    monkeypatch.setattr(supervisor, "load_roster_workers", lambda: workers)
+    monkeypatch.setattr(supervisor, "worker_alive", lambda pid, start: pid == 601)
     sock = str(ClaustrumDaemon(config).socket_path)
     procs = [
         types.SimpleNamespace(
@@ -2783,14 +2808,18 @@ def test_bundle_env_suspects_lists_bridges_pty_bridges_and_the_daemon(
         types.SimpleNamespace(
             info={"pid": 402, "cmdline": ["claustrum", "-serve", "-socket", "/other.sock"]}
         ),
+        types.SimpleNamespace(info={"pid": 404, "cmdline": ["claustrum", "-socket", sock]}),
         types.SimpleNamespace(info={"pid": 403, "cmdline": None}),
     ]
     monkeypatch.setattr(ops_mod.psutil, "process_iter", lambda attrs: procs)
     assert ops_mod._bundle_env_suspects(config, projects) == [
         ("bridge for std", 101),
-        ("pty bridge for pty", 202),  # the bridge, never the keeper (201) itself
+        ("pty bridge for pty", 202),  # the bridge, never its keeper
+        ("background agent ab12", 601),
         ("claustrum daemon", 401),
     ]
+    # The pty bridge is checked with the identity the keeper recorded, not a bare pid.
+    assert (202, 1717000000.0, 770579, "b-1") in seen_gate
 
 
 def test_doctor_reports_the_bundle_env_row(write_config, tmp_path):

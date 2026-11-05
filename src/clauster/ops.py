@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import http.client
 import json
+import logging
 import ntpath
 import os
 import re
@@ -45,6 +46,8 @@ from .config_editor import _friendly_validation_message
 from .config_write import _yaml_error_where
 from .discovery import Project, discover_projects
 from .state import CURRENT_SCHEMA, CorruptStateFile, StateStore
+
+_log = logging.getLogger("clauster.ops")
 
 # ----- doctor -----------------------------------------------------------
 
@@ -1036,12 +1039,14 @@ def _bundle_env_suspects(config: ClausterConfig, projects: list[Project]) -> lis
     """Return ``(label, pid)`` for each live process Clauster tracks that hands out an env.
 
     Standard bridges (from their bridge pointer), pty bridges (from the keeper sidecars),
-    and the claustrum daemon (by its ``-socket`` argument), which every hosted session
-    inherits its environment from. A pty KEEPER is deliberately not listed: a current
+    background agents (from Claude Code's roster), and the claustrum daemon (by its
+    ``-socket`` argument), which every hosted session inherits its environment from. Each
+    pid must pass the same identity gate its owner uses (cmdline and recorded start time),
+    so a recycled pid is never reported. A pty KEEPER is deliberately not listed: a current
     keeper keeps the bundle's runtime on purpose (``procutil.keeper_launch_env``), and
     what reaches the session is its bridge's environment.
     """
-    from . import pointers, pty_keeper  # local: keeps ops' import graph as it was
+    from . import pointers, pty_keeper, supervisor  # local: keeps ops' import graph as it was
 
     found: list[tuple[str, int]] = []
     for project in projects:
@@ -1050,8 +1055,25 @@ def _bundle_env_suspects(config: ClausterConfig, projects: list[Project]) -> lis
             found.append((f"bridge for {project.name}", ptr.pid))
     for keeper in pty_keeper.iter_keepers((config.state_dir / "logs").expanduser()):
         bridge_pid = keeper.bridge_pid
-        if keeper.alive and bridge_pid is not None and procutil.is_bridge_process(bridge_pid):
+        if not keeper.alive or bridge_pid is None:
+            continue
+        info = pty_keeper._read_sidecar(keeper.sidecar)
+        start, ticks, boot = (
+            info.get("bridge_proc_start"),
+            info.get("bridge_start_ticks"),
+            info.get("boot_id"),
+        )
+        if procutil.is_live_bridge(
+            bridge_pid,
+            start if isinstance(start, (int, float)) and not isinstance(start, bool) else None,
+            start_ticks=ticks if isinstance(ticks, int) and not isinstance(ticks, bool) else None,
+            boot_id=boot if isinstance(boot, str) else None,
+        ):
             found.append((f"pty bridge for {keeper.project or 'an unknown project'}", bridge_pid))
+    for worker_id, worker in supervisor.load_roster_workers().items():
+        pid = worker.get("pid") if isinstance(worker, dict) else None
+        if isinstance(pid, int) and supervisor.worker_alive(pid, worker.get("procStart")):
+            found.append((f"background agent {worker_id}", pid))
     if config.claustrum.enabled:
         found.extend(("claustrum daemon", pid) for pid in _claustrum_daemon_pids(config))
     return found
@@ -1101,6 +1123,8 @@ def _check_bundle_env(
             if env is not None and _carries_bundle_env(env):
                 leaking.append(f"{label} (pid {pid})")
     except Exception as exc:  # noqa: BLE001 - an advisory probe must never break doctor
+        # The traceback names files and pids, never an environment value.
+        _log.debug("bundle-env probe failed", exc_info=True)
         return Check("bundle-env", WARN, f"could not check: {type(exc).__name__}")
     if leaking:
         return Check(
@@ -1111,7 +1135,7 @@ def _check_bundle_env(
             + f" — {_BUNDLE_ENV_HINT}",
         )
     if not suspects:
-        return Check("bundle-env", OK, "no running bridge or claustrum daemon to check")
+        return Check("bundle-env", OK, "no running bridge, agent or claustrum daemon to check")
     return Check("bundle-env", OK, f"{len(suspects)} running process(es) have a clean environment")
 
 

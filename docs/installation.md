@@ -173,7 +173,8 @@ want the full supply-chain check.
     bridge or any other program. So `node`, `npm` and `clauster` behave the same in
     a session as in your shell. On Windows the unpack step also sets a DLL search
     directory, which is not an environment variable. Clauster does not change it. A
-    bridge, a pty keeper or a claustrum daemon that an older release started keeps
+    bridge, a pty keeper, a background agent or a claustrum daemon that an older
+    release started keeps
     the old environment until you restart it. See
     [the troubleshooting entry](troubleshooting.md#in-a-session-node-fails-with-glibc_238-not-found-or-clauster-cannot-load-libpython).
 
