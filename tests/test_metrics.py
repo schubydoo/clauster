@@ -302,7 +302,13 @@ def test_sample_tree_leaves_out_a_session_pid_outside_the_tree(bridge_tree, monk
     # exist), and the bridge pid itself, get no figure and no subtree walk. The bridge
     # total is still returned.
     root, _session, _procs = bridge_tree
-    outside = os.getpid()  # live, and not inside the bridge stand-in's tree
+    # Live and outside the bridge stand-in's tree. A childless sleeper, not the pytest
+    # worker: if the guard ever broke, walking the worker is what faulted Windows CI.
+    outside = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
     real = psutil.Process.children
     walked: list[int] = []
 
@@ -311,11 +317,15 @@ def test_sample_tree_leaves_out_a_session_pid_outside_the_tree(bridge_tree, monk
         return real(self, recursive=recursive)
 
     monkeypatch.setattr(psutil.Process, "children", walk)
-    s = metrics.sample_tree(
-        root,
-        interval=0.02,
-        sessions={outside: "outside", 2_147_483_646: "gone", root: "the-bridge"},
-    )
+    try:
+        s = metrics.sample_tree(
+            root,
+            interval=0.02,
+            sessions={outside.pid: "outside", 2_147_483_646: "gone", root: "the-bridge"},
+        )
+    finally:
+        outside.kill()
+        outside.wait()
     assert s is not None
     assert s["sessions"] == {}
     assert s["rss_bytes"] > 0
