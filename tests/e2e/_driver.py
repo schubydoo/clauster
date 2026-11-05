@@ -155,6 +155,10 @@ class AgentBrowser:
             time.sleep(_DAEMON_CONNECT_RETRY_S)
         self._run(*args, check=True)
 
+    def set_viewport(self, width: int, height: int) -> None:
+        """Resize the viewport of the open page (it fires the page's ``resize`` event)."""
+        self._run("set", "viewport", str(width), str(height), check=True)
+
     def reload(self) -> None:
         """Reload the current page."""
         self._run("reload", check=True)

@@ -375,6 +375,11 @@ def test_live_terminal_client_side_fit_wiring(write_config):
     # #673: .xterm is pinned to naturalW so it doesn't stretch past the canvas as a block element
     # on wide viewports (which would leave a dark background strip to the right of the grid).
     assert 'inner.style.width = naturalW + "px";' in body
+    # TASK-270: at scale=1 on a wide host the pinned grid is centered (auto inline margins), not
+    # parked top-left. The auto margins resolve to 0 when the grid is wider (scale<1), so the
+    # top-left transform origin and the shrink-to-fit path stay unchanged.
+    assert ".pty-screen-host .xterm { padding: 0; margin-inline: auto; }" in body
+    assert 'inner.style.transformOrigin = "top left";' in body
     # #673: host is border-box (Tabler reset), so style.height = total box including padding;
     # both padTop and padBottom are added so the content area inside equals the scaled grid height.
     assert "const padTop = parseFloat(cs.paddingTop) || 0;" in body

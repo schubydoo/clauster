@@ -60,9 +60,12 @@
        viewports. JS pins .xterm to the intrinsic grid width and (the host being border-box
        under Tabler's reset) sets the host height to the scaled grid height plus its vertical
        padding, so the content area equals the grid and no dark gap shows below or beside it
-       (#673). The host clips overflow so the untransformed layout box is hidden. */
+       (#673). The host clips overflow so the untransformed layout box is hidden.
+       margin-inline:auto centers the pinned grid when the host is wider than it (scale=1), so
+       the spare width splits evenly left and right. When the grid is wider (scale<1), the auto
+       margins resolve to 0 and the top-left transform origin stays at the host's left edge. */
     .pty-screen-host { background: #000; border-radius: 8px; padding: 6px; overflow: hidden; }
-    .pty-screen-host .xterm { padding: 0; }
+    .pty-screen-host .xterm { padding: 0; margin-inline: auto; }
     /* #fff is required — a QR code needs a light field + quiet zone to scan reliably;
        intentionally NOT theme-variabled (a dark field breaks phone scanning). */
     .qr-box { background: #fff; padding: 8px; border-radius: 8px; width: max-content; }
@@ -875,7 +878,7 @@
                      The whole control is server-gated on pty_screen_enabled (no markup when off). #}
                   <template x-if="i.resume_mode === 'pty'">
                     {% if pty_extra_present %}
-                    <button type="button" class="btn btn-sm btn-ghost-secondary" @click="togglePtyScreen(i.rk)"
+                    <button type="button" class="btn btn-sm btn-ghost-secondary" data-test="pty-screen-toggle" @click="togglePtyScreen(i.rk)"
                             :aria-expanded="!!(ptyScreen[i.rk] && ptyScreen[i.rk].open)"
                             {# Only reference the host id while the panel is mounted — the div lives
                                inside the open-gated x-if, so a static aria-controls would dangle. #}
@@ -1021,7 +1024,7 @@
                     <span class="text-danger ms-2" x-show="ptyScreen[i.rk].error" x-cloak
                           x-text="ptyScreen[i.rk].error"></span>
                   </div>
-                  <div :id="'pty-screen-' + i.rk" class="pty-screen-host" role="img"
+                  <div :id="'pty-screen-' + i.rk" class="pty-screen-host" data-test="pty-screen-host" role="img"
                        aria-label="Read-only live terminal view"></div>
                   {# Restart/disconnect affordance: a pty bridge restart writes a final "exited"
                      frame (the view freezes on the old session) and a dropped socket reads
