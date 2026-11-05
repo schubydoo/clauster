@@ -6,7 +6,9 @@ an automated browser. These drive the whole journey against a real server:
 
 * a project WITH a seeded Claude-format transcript lists the session and renders its
   turns (user + assistant, redacted server-side, ``x-text``-only);
-* a project WITHOUT transcripts shows the explicit empty state, not a blank modal.
+* a project WITHOUT transcripts shows the explicit empty state, not a blank modal;
+* a live session row under a bridge opens its own session in the live-tail view
+  (backlog TASK-269), on ``tracked_session_server``.
 
 Seeding rides ``usage_server``'s isolated HOME: transcripts live under
 ``$HOME/.claude/projects/<sanitized-cwd>/`` and are read on demand at click time, so
@@ -16,10 +18,11 @@ the test writes its session file directly before opening the modal.
 from __future__ import annotations
 
 import json
+import urllib.request
 from typing import TYPE_CHECKING
 
 import pytest
-from _helpers import STATUS_TIMEOUT
+from _helpers import STATUS_TIMEOUT, open_desktop_launch, trust_and_start
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -188,3 +191,162 @@ def test_transcript_position_indicator_tracks_paging_search_and_sort(
     browser.click('[data-test="transcript-order-toggle"]')
     browser.expect_text(more, "Load more (70 newer)", timeout_ms=STATUS_TIMEOUT)
     browser.expect_text(position, "showing 50 of 120 turns", timeout_ms=STATUS_TIMEOUT)
+
+
+_SESSION_269 = "26900000-0000-4000-8000-000000000269"
+
+
+def _bridge_pid(server: Server, project: str) -> int:
+    """Return the ``bridge_pid`` of ``project``'s running bridge, read from the API."""
+    with urllib.request.urlopen(server.url + "/api/instances", timeout=10) as res:  # noqa: S310
+        rows = json.load(res)
+    pids = [r["bridge_pid"] for r in rows if r["project"] == project and r.get("bridge_pid")]
+    assert len(pids) == 1, rows
+    return pids[0]
+
+
+def test_bridge_session_row_opens_its_live_transcript(
+    browser: AgentBrowser, tracked_session_server: Server, mutable_projects_tree: Path
+) -> None:
+    """A live session row's Live transcript button opens that session, following it live.
+
+    Backlog TASK-269. Before the session has a transcript, the button opens the list
+    with a note that names the session. Once the transcript exists, it opens the
+    session itself in the live-tail view, and a turn appended later shows up. The
+    claude.ai Open link beside it stays the same.
+    """
+    from clauster.pointers import sanitize_cwd  # pure cwd→dirname mapping
+
+    server = tracked_session_server
+    gamma = (mutable_projects_tree / "gamma").resolve()
+    browser.goto(server.url)
+    browser.expect_visible('[data-project="gamma"]')
+    open_desktop_launch(browser, "gamma")
+    trust_and_start(browser, "gamma")
+    browser.expect_text("section.zone-active", "Running", timeout_ms=STATUS_TIMEOUT)
+
+    # List one session owned by the bridge pid, so reconcile attributes it TRACKED.
+    agents = [
+        {
+            "pid": _bridge_pid(server, "gamma"),
+            "cwd": str(gamma),
+            "kind": "interactive",
+            "state": "running",
+            "startedAt": 1735689600000,
+            "sessionId": _SESSION_269,
+        }
+    ]
+    (server.state_dir.parent / "agents.json").write_text(json.dumps(agents), encoding="utf-8")
+
+    toggle = 'section.zone-active [data-test="bridge-sessions-toggle"]'
+    button = 'section.zone-active [data-test="bridge-session-transcript"]'
+    browser.expect_visible(toggle, timeout_ms=STATUS_TIMEOUT)
+    browser.click(toggle)
+    # The expanded list pushes the rows below it down: wait for it before the click.
+    browser.expect_visible(button, timeout_ms=STATUS_TIMEOUT)
+    browser.expect_attr(button, "aria-label", "Live transcript of session 26900000")
+    browser.expect_attr(
+        'section.zone-active [data-test="bridge-session-row"] a[target="_blank"]',
+        "href",
+        "https://claude.ai/code/" + _SESSION_269,
+    )
+
+    # No transcript for this session yet (only an older one): the list opens and says
+    # which session it could not find.
+    home = server.state_dir.parent / "home"
+    _seed_session(home, gamma, "older-269.jsonl")
+    modal = '[data-test="transcript-modal"]'
+    missing = '[data-test="transcript-jump-missing"]'
+    browser.click(button)
+    browser.expect_visible(modal)
+    browser.expect_text(
+        missing,
+        "No transcript for session 26900000 in this project yet.",
+        timeout_ms=STATUS_TIMEOUT,
+    )
+    # Picking a listed session spends the note: back on the list, it is gone.
+    browser.expect_count('[data-test="transcript-session"]', 1, timeout_ms=STATUS_TIMEOUT)
+    browser.click('[data-test="transcript-session"]')
+    browser.expect_visible('[data-test="transcript-back"]', timeout_ms=STATUS_TIMEOUT)
+    browser.click('[data-test="transcript-back"]')
+    browser.expect_visible('[data-test="transcript-session"]', timeout_ms=STATUS_TIMEOUT)
+    browser.expect_hidden(missing)
+    browser.click(f"{modal} .btn-close")
+    browser.expect_hidden(modal)
+
+    # With its transcript on disk, the same button lands on the session in live mode.
+    _seed_session(home, gamma, _SESSION_269 + ".jsonl")
+    browser.click(button)
+    browser.expect_visible('[data-test="transcript-tail-live"]', timeout_ms=STATUS_TIMEOUT)
+    browser.expect_hidden('[data-test="transcript-jump-missing"]')
+    browser.expect_text(modal, "hello from e2e", timeout_ms=STATUS_TIMEOUT)
+    browser.expect_text(modal, "hi back from the fixture", timeout_ms=STATUS_TIMEOUT)
+
+    # The view follows the session: a turn written after it opened appears.
+    transcript = home / ".claude" / "projects" / sanitize_cwd(gamma) / (_SESSION_269 + ".jsonl")
+    line = {
+        "timestamp": "2026-07-16T00:00:09Z",
+        "message": {"role": "user", "content": "tail 269"},
+    }
+    with transcript.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(line) + "\n")
+    browser.expect_text(modal, "tail 269", timeout_ms=STATUS_TIMEOUT)
+
+
+def test_bridge_session_transcript_close_keeps_focus_on_worktree_bridge_row(
+    browser: AgentBrowser, tracked_session_server: Server, mutable_projects_tree: Path
+) -> None:
+    """Closing the viewer after its session ended keeps focus on the bridge row (TASK-269).
+
+    A worktree bridge hides its row's Transcript button, and the sessions toggle hides
+    once the last session ends. So when the session that opened the viewer ends while
+    it is open, the only shown control left on the row is the Logs toggle, and closing
+    the viewer must focus it, never the page body.
+    """
+    server = tracked_session_server
+    alpha = (mutable_projects_tree / "alpha").resolve()  # a git repo: worktree spawn offered
+    browser.goto(server.url)
+    browser.expect_visible('[data-project="alpha"]')
+    open_desktop_launch(browser, "alpha")
+    browser.click('[data-project="alpha"] [data-test="launch-more-options"]')
+    browser.expect_visible("#spawn-alpha")
+    browser.select("#spawn-alpha", "worktree")
+    trust_and_start(browser, "alpha")
+    browser.expect_text("section.zone-active", "Running", timeout_ms=STATUS_TIMEOUT)
+
+    # One session in a per-session worktree, attributed to the bridge by containment.
+    worktree = alpha / ".claude" / "worktrees" / "wt-269"
+    worktree.mkdir(parents=True)
+    agents_file = server.state_dir.parent / "agents.json"
+    agents = [
+        {
+            "pid": _bridge_pid(server, "alpha"),
+            "cwd": str(worktree),
+            "kind": "interactive",
+            "state": "running",
+            "startedAt": 1735689600000,
+            "sessionId": _SESSION_269,
+        }
+    ]
+    agents_file.write_text(json.dumps(agents), encoding="utf-8")
+
+    toggle = 'section.zone-active [data-test="bridge-sessions-toggle"]'
+    button = 'section.zone-active [data-test="bridge-session-transcript"]'
+    browser.expect_visible(toggle, timeout_ms=STATUS_TIMEOUT)
+    browser.expect_hidden('section.zone-active [data-test="transcript-trigger-session"]')
+    browser.click(toggle)
+    # The expanded list pushes the rows below it down: wait for it before the click.
+    browser.expect_visible(button, timeout_ms=STATUS_TIMEOUT)
+    browser.click(button)
+    modal = '[data-test="transcript-modal"]'
+    browser.expect_visible(modal)
+    browser.expect_visible('[data-test="transcript-jump-missing"]', timeout_ms=STATUS_TIMEOUT)
+
+    # The session ends while the viewer is open: its row (and the opener) leave the DOM.
+    agents_file.write_text("[]", encoding="utf-8")
+    browser.expect_count(button, 0, timeout_ms=STATUS_TIMEOUT)
+    browser.expect_hidden(toggle, timeout_ms=STATUS_TIMEOUT)
+    browser.click(f"{modal} .btn-close")
+    browser.expect_hidden(modal)
+    focused = browser.eval_json("[(document.activeElement || {dataset: {}}).dataset.test || null]")
+    assert focused == ["bridge-logs-toggle"]
