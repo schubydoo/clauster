@@ -1829,7 +1829,14 @@ fresh copy, and the bridges survive it under <code>KillMode=process</code>.</p>
 panel uses, from the CLI:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>clauster<span class="w"> </span>doctor<span class="w"> </span>-c<span class="w"> </span>/etc/clauster/clauster.yml
 </code></pre></div>
-<p>It prints one line per check and exits non-zero if any check <strong>fails</strong>. Checks:</p>
+<p>It prints one line per check and exits non-zero if any check <strong>fails</strong>.</p>
+<p>The dashboard shows the same result as the <strong>System readiness</strong> pill in the header.
+The pill is always present. It counts the warnings or blocking checks when there are
+any, and shows <code>N checks passed</code> when every check passes. If the checks did not load
+(an HTTP error, a failed request, or an empty result), it shows <code>Checks not run</code>.
+That state is not a pass. Select the pill to see each check row and to run the checks
+again.</p>
+<p>Checks:</p>
 <table>
 <thead>
 <tr>
