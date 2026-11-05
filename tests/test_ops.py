@@ -2662,3 +2662,150 @@ def test_doctor_cli_has_no_server_check_when_the_port_is_free(write_config, tmp_
         port = s.getsockname()[1]
     cfg = write_config(f"port: {port}\nstate_dir: {tmp_path / '.s'}\n")
     assert "server" not in {c.name for c in run_doctor(str(cfg))[0]}
+
+
+# ----- doctor: an old binary's PyInstaller env in long-lived processes (issue 1708) -----
+
+_LEAKED = {"_PYI_ARCHIVE_FILE": "/usr/local/bin/clauster", "PATH": "/usr/bin"}
+_MEI_PATH = {"LD_LIBRARY_PATH": "/tmp/_MEI0042abc:/opt/lib", "PATH": "/usr/bin"}
+_CLEAN = {"LD_LIBRARY_PATH": "/opt/lib", "PATH": "/usr/bin"}
+
+
+@pytest.mark.parametrize(
+    ("env", "carries"),
+    [
+        (_LEAKED, True),
+        (_MEI_PATH, True),
+        ({"LD_LIBRARY_PATH": "/var/tmp/_MEIx"}, True),
+        (_CLEAN, False),
+        ({"LD_LIBRARY_PATH": "/opt/not_MEI:/usr/lib"}, False),
+        ({}, False),
+    ],
+)
+def test_carries_bundle_env(env, carries):
+    assert ops_mod._carries_bundle_env(env) is carries
+
+
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="/proc ownership is POSIX")
+def test_proc_environ_reads_an_own_process_and_skips_the_rest(tmp_path, monkeypatch):
+    (tmp_path / "7").mkdir()
+    (tmp_path / "7" / "environ").write_bytes(b"_PYI_X=1\0PATH=/usr/bin\0junk\0")
+    assert ops_mod._proc_environ(7, tmp_path) == {"_PYI_X": "1", "PATH": "/usr/bin"}
+    assert ops_mod._proc_environ(8, tmp_path) is None  # gone: skipped, never an error
+    other_uid = os.getuid() + 1
+    monkeypatch.setattr(ops_mod.os, "getuid", lambda: other_uid)
+    assert ops_mod._proc_environ(7, tmp_path) is None  # another user's process: not read
+
+
+def _bundle_check(monkeypatch, suspects, envs, *, platform="linux"):
+    monkeypatch.setattr(ops_mod.sys, "platform", platform)
+    monkeypatch.setattr(ops_mod, "_bundle_env_suspects", lambda config, projects: suspects)
+    return ops_mod._check_bundle_env(None, [], read_environ=envs.get)
+
+
+def test_bundle_env_check_names_each_leaking_process_and_never_a_value(monkeypatch):
+    suspects = [
+        ("bridge for a", 11),
+        ("pty bridge for b", 22),
+        ("claustrum daemon", 33),
+        ("bridge for c", 44),
+    ]
+    envs = {11: _LEAKED, 22: _MEI_PATH, 44: _CLEAN}  # 33 is unreadable: skipped
+    check = _bundle_check(monkeypatch, suspects, envs)
+    assert check.status == WARN
+    assert "bridge for a (pid 11)" in check.detail
+    assert "pty bridge for b (pid 22)" in check.detail
+    assert "pid 33" not in check.detail
+    assert "pid 44" not in check.detail
+    assert "restart it to drop the old binary's environment" in check.detail
+    for value in ("/usr/local/bin/clauster", "_MEI0042abc", "/opt/lib", "/usr/bin"):
+        assert value not in check.detail  # names and pids only (redaction invariant)
+
+
+def test_bundle_env_check_ok_when_clean_or_nothing_runs(monkeypatch):
+    clean = _bundle_check(monkeypatch, [("bridge for a", 11)], {11: _CLEAN})
+    assert clean.status == OK and "1 running process(es)" in clean.detail
+    none = _bundle_check(monkeypatch, [], {})
+    assert none.status == OK and "no running bridge" in none.detail
+
+
+@pytest.mark.parametrize("platform", ["darwin", "win32"])
+def test_bundle_env_check_is_skipped_off_linux(monkeypatch, platform):
+    check = _bundle_check(monkeypatch, [("bridge for a", 11)], {11: _LEAKED}, platform=platform)
+    assert check.status == OK
+    assert check.detail == f"not checked on {platform}: it reads Linux /proc"
+
+
+def test_bundle_env_check_never_fails_doctor(monkeypatch):
+    monkeypatch.setattr(ops_mod.sys, "platform", "linux")
+
+    def _boom(config, projects):
+        raise RuntimeError("sidecar dir vanished")
+
+    monkeypatch.setattr(ops_mod, "_bundle_env_suspects", _boom)
+    check = ops_mod._check_bundle_env(None, [])
+    assert check.status == WARN
+    assert check.detail == "could not check: RuntimeError"
+
+
+def test_bundle_env_suspects_lists_bridges_pty_bridges_and_the_daemon(
+    write_config, tmp_path, monkeypatch
+):
+    import types
+
+    from clauster import pointers, procutil, pty_keeper
+    from clauster.claustrum_daemon import ClaustrumDaemon
+    from clauster.models import Project, TrustState
+
+    config = load_config(
+        str(write_config(f"state_dir: {tmp_path / '.s'}\nclaustrum:\n  enabled: true\n"))
+    )
+    projects = [
+        Project(name="std", path=Path("/p/std"), trust_state=TrustState.TRUSTED),
+        Project(name="idle", path=Path("/p/idle"), trust_state=TrustState.TRUSTED),
+    ]
+    ptr = types.SimpleNamespace(pid=101, proc_start="5")
+    monkeypatch.setattr(
+        pointers, "pointer_for_project", lambda path: ptr if path.name == "std" else None
+    )
+    monkeypatch.setattr(procutil, "is_live_standard_bridge", lambda pid, start: pid == 101)
+    keepers = [
+        types.SimpleNamespace(alive=True, bridge_pid=202, project="pty", keeper_pid=201),
+        types.SimpleNamespace(alive=False, bridge_pid=302, project="dead", keeper_pid=301),
+    ]
+    monkeypatch.setattr(pty_keeper, "iter_keepers", lambda log_dir: keepers)
+    monkeypatch.setattr(procutil, "is_bridge_process", lambda pid: pid == 202)
+    sock = str(ClaustrumDaemon(config).socket_path)
+    procs = [
+        types.SimpleNamespace(
+            info={"pid": 401, "cmdline": ["claustrum", "-serve", "-socket", sock]}
+        ),
+        types.SimpleNamespace(
+            info={"pid": 402, "cmdline": ["claustrum", "-serve", "-socket", "/other.sock"]}
+        ),
+        types.SimpleNamespace(info={"pid": 403, "cmdline": None}),
+    ]
+    monkeypatch.setattr(ops_mod.psutil, "process_iter", lambda attrs: procs)
+    assert ops_mod._bundle_env_suspects(config, projects) == [
+        ("bridge for std", 101),
+        ("pty bridge for pty", 202),  # the bridge, never the keeper (201) itself
+        ("claustrum daemon", 401),
+    ]
+
+
+def test_doctor_reports_the_bundle_env_row(write_config, tmp_path):
+    names = {c.name for c in run_doctor(_cfg_file(write_config, tmp_path))[0]}
+    assert "bundle-env" in names
+
+
+def test_claustrum_daemon_pids_none_for_an_unusable_socket_path(monkeypatch):
+    # A socket path the daemon could never bind means no daemon serves this deployment;
+    # that is "nothing to check", not a doctor error.
+    from clauster import claustrum_daemon
+    from clauster.claustrum_client import ClaustrumError
+
+    def _raise(config):
+        raise ClaustrumError("socket path too long")
+
+    monkeypatch.setattr(claustrum_daemon, "ClaustrumDaemon", _raise)
+    assert ops_mod._claustrum_daemon_pids(None) == []

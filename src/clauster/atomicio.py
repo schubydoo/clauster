@@ -50,8 +50,6 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import IO, Any
 
-from . import procutil
-
 try:
     import fcntl  # POSIX only; Windows has no flock equivalent we rely on here.
 except ImportError:
@@ -288,6 +286,8 @@ def _apply_owner_only_acl(path: Path) -> str | None:
     (caller logs it). Split out from :func:`_restrict_windows_acl` so the caching + warning
     policy is testable apart from the subprocess mechanics.
     """
+    from . import procutil  # local: keeps this low-level module's import graph minimal
+
     icacls = shutil.which("icacls")
     if icacls is None:
         return "icacls not found on PATH"

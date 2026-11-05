@@ -752,6 +752,13 @@ def test_keeper_launch_env_keeps_the_runtime_and_hands_the_bridge_the_clean_path
     assert not [name for name in bridge if name.startswith("_PYI_")]
 
 
+def test_keeper_launch_env_drops_an_operator_reset_flag(monkeypatch):
+    # PYINSTALLER_RESET_ENVIRONMENT=1 would make the keeper a fresh two-process instance.
+    _as_frozen(monkeypatch, ld=_MEI)
+    keeper = procutil.keeper_launch_env({"PYINSTALLER_RESET_ENVIRONMENT": "1"})
+    assert "PYINSTALLER_RESET_ENVIRONMENT" not in keeper
+
+
 def test_keeper_launch_env_without_any_library_path_adds_none(monkeypatch):
     # Defensive: a one-file child always has one, but its absence must not invent one.
     _as_frozen(monkeypatch, ld=None)

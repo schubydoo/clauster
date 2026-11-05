@@ -220,7 +220,26 @@ def cmd_open(config: ClausterConfig, identity: str, *, launch: bool) -> int:
         return 2
     print(url)
     if launch:
-        import webbrowser
-
-        webbrowser.open(url)
+        _open_in_browser(url)
     return 0
+
+
+def _open_in_browser(url: str) -> None:
+    """Open ``url`` with the platform's browser opener, under the scrubbed child env.
+
+    :mod:`webbrowser` starts ``xdg-open`` / ``open`` / the browser with no ``env=``, so
+    it inherits ``os.environ`` — in the standalone binary that is the bundle's
+    ``LD_LIBRARY_PATH`` and ``_PYI_*`` state (issue 1708). This CLI process exits right
+    after, so replacing its own environment with :func:`procutil.child_env` is safe.
+    A source install is left as it was.
+    """
+    import os
+    import webbrowser
+
+    from . import deps, procutil
+
+    if deps.is_frozen():
+        clean = procutil.child_env()
+        os.environ.clear()
+        os.environ.update(clean)
+    webbrowser.open(url)

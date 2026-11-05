@@ -324,3 +324,23 @@ def test_open_launch_opens_browser(cfg, capsys, monkeypatch):
     monkeypatch.setattr("webbrowser.open", lambda url: opened.setdefault("url", url))
     assert main(["open", "-c", cfg, "i1", "--launch"]) == 0
     assert opened["url"] == "https://claude.ai/code/s1?from=cli"
+
+
+@pytest.mark.parametrize("frozen", [True, False])
+def test_open_in_browser_hands_the_opener_a_clean_env_in_the_binary(monkeypatch, frozen):
+    # webbrowser spawns xdg-open/open with no env=, so it inherits os.environ: in the
+    # standalone binary that must not be the bundle's runtime env (issue 1708).
+    import os
+    import sys
+
+    fake_environ = {"PATH": "/usr/bin", "_PYI_ARCHIVE_FILE": "/usr/local/bin/clauster"}
+    monkeypatch.setattr(os, "environ", fake_environ)
+    if frozen:
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+    else:
+        monkeypatch.delattr(sys, "frozen", raising=False)
+    seen = {}
+    monkeypatch.setattr("webbrowser.open", lambda url: seen.update(env=dict(os.environ)))
+    cli_read._open_in_browser("https://claude.ai/code/s1")
+    assert seen["env"]["PATH"] == "/usr/bin"
+    assert ("_PYI_ARCHIVE_FILE" in seen["env"]) is not frozen  # a source install is untouched

@@ -457,29 +457,45 @@ version:
 
 ### In a session, Node fails with `GLIBC_2.38 not found`, or `clauster` cannot load libpython
 
-**What you see:** this applies to the standalone binary on Linux. In a session that
-Clauster started, `node`, `npm` or a Node-based MCP server fails with a
-`GLIBC_2.38 not found` error for `libstdc++`. Or `clauster` (or the recap hook)
-fails to load `libpython3.13.so.1.0`.
+**What you see:** this applies to the standalone binary. On Linux, in a session
+that Clauster started, `node`, `npm` or a Node-based MCP server fails with a
+`GLIBC_2.38 not found` error for `libstdc++`. On any OS, `clauster` (or the recap
+hook) run from such a session fails to start, for example because it cannot load
+`libpython3.13.so.1.0`. On Linux, `clauster doctor` shows a `bundle-env` warning
+that names the process.
 
-**Most likely cause:** an older Clauster release started the bridge. Older
-releases passed the binary's own runtime environment to every bridge: its
-`_MEI…` unpack directory in `LD_LIBRARY_PATH`, and the `_PYI_*` variables. The
-programs in the session then load the binary's bundled libraries, or look for an
-unpack directory that a Clauster restart already deleted. Current releases remove
-these variables before they start a bridge.
+**Most likely cause:** an older Clauster release started the bridge or the
+claustrum daemon. Older releases passed the binary's own runtime environment to
+every process they started: its `_MEI…` unpack directory in `LD_LIBRARY_PATH`,
+and the `_PYI_*` variables. The programs in the session then load the binary's
+bundled libraries, or look for an unpack directory that a Clauster restart already
+deleted. Current releases remove these variables before they start a process.
 
-**The fix:** upgrade Clauster, then stop and start each bridge that an older
-release started. A bridge and its pty keeper keep the environment they started
-with, so an upgrade or a Clauster restart alone does not change them. The
-claustrum daemon and its Direct Sessions also keep their start environment: end
-those sessions, stop the daemon process, then restart Clauster. Clauster starts a
-new daemon at startup. To see if a bridge still has the old environment, run
-this on the host. No output means that the bridge is clean:
+**The fix:** upgrade Clauster first. A process keeps the environment it started
+with, and bridges, pty keepers and the claustrum daemon all outlive a Clauster
+restart. So an upgrade alone does not change them. Restart each old one:
+
+1. For a standard bridge, click **Stop** on its dashboard card, then start it
+   again.
+2. For an Interactive Session (pty) bridge, click **Stop** on its card, then
+   click **Resume**. Stop also ends the pty keeper that holds the bridge, and
+   Resume starts a new keeper.
+3. For Direct Sessions, end each session, then stop the claustrum daemon process.
+   Its command line is `claustrum -serve -socket <state_dir>/claustrum/daemon.sock`
+   (or the `claustrum.socket_path` that you configured). Then restart Clauster,
+   which starts a new daemon at startup. Every Direct Session gets its
+   environment from the daemon.
+
+To see if one process still has the old environment, run this on the Linux host.
+No output means that the process is clean:
 
 ```sh
-tr '\0' '\n' < /proc/<bridge-pid>/environ | grep -E '^(LD_LIBRARY_PATH=/tmp/_MEI|_PYI_)'
+tr '\0' '\n' < /proc/<pid>/environ | grep -E '^(LD_LIBRARY_PATH=.*_MEI|_PYI_)'
 ```
+
+Do not run this check on a pty keeper's own pid. A current keeper keeps these
+variables on purpose, and it removes them from the bridge that it starts. Check
+the bridge pid instead.
 
 ## An Interactive Session (pty) bridge is wedged
 
@@ -738,6 +754,7 @@ present in every run:
 | `systemd` | `KillMode=process` (bridges survive a restart) | a restart would kill live pty bridges |
 | `node-toolchain` | node resolvable for npx MCP servers | nvm-only node invisible to bridges |
 | `workspace-trust` | `N/M discovered projects trusted` (OK when all are) | any untrusted discovered project — a session there will stall on the trust prompt (see above) |
+| `bundle-env` | no running bridge or claustrum daemon has an older binary's environment (Linux only) | a process that an older standalone binary started; restart it as [described above](#in-a-session-node-fails-with-glibc_238-not-found-or-clauster-cannot-load-libpython) |
 
 The rest belong to two **prefixed families** that grow as optional pieces are
 added, so read the prefix rather than expecting this page to enumerate them:

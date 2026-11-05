@@ -26,6 +26,7 @@ from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Literal, TypedDict
 from xml.sax.saxutils import escape as _xml_escape
 
+import psutil
 import yaml
 from pydantic import ValidationError
 
@@ -318,6 +319,9 @@ def run_doctor(
             else "no projects discovered",
         )
     )
+
+    # long-lived processes still carrying an old binary's PyInstaller env (#1708)
+    checks.append(_check_bundle_env(config, projects))
 
     # port (warn-only; see the ``check_port`` paragraph in the docstring)
     if check_port:
@@ -990,6 +994,125 @@ def _check_node_toolchain(config: ClausterConfig) -> Check | None:
             "set it with `nvm alias default <version>`",
         )
     return Check("node-toolchain", OK, f"nvm default node on bridge PATH ({bin_dir})")
+
+
+_BUNDLE_ENV_HINT = "restart it to drop the old binary's environment"
+
+
+def _proc_environ(pid: int, proc_root: Path = Path("/proc")) -> dict[str, str] | None:
+    """Return the environment ``pid`` started with, or ``None`` when it cannot be read.
+
+    Reads ``/proc/<pid>/environ`` for a process of THIS user only: another user's
+    process, a gone pid, or any read error is ``None`` (skipped, never an error). The
+    values are returned for the caller to classify and are never reported.
+    """
+    proc_dir = proc_root / str(pid)
+    try:
+        if proc_dir.stat().st_uid != os.getuid():
+            return None
+        raw = (proc_dir / "environ").read_bytes()
+    except (OSError, ValueError):
+        return None
+    env: dict[str, str] = {}
+    for item in raw.split(b"\0"):
+        name, sep, value = item.partition(b"=")
+        if sep:
+            env[name.decode("utf-8", "replace")] = value.decode("utf-8", "replace")
+    return env
+
+
+def _carries_bundle_env(env: dict[str, str]) -> bool:
+    """Whether ``env`` holds a standalone binary's PyInstaller runtime state (issue 1708).
+
+    Any ``_PYI_*`` name, or an ``LD_LIBRARY_PATH`` entry that is a ``_MEI…`` unpack dir.
+    """
+    if any(name.startswith(procutil.PYI_ENV_PREFIX) for name in env):
+        return True
+    entries = env.get("LD_LIBRARY_PATH", "").split(":")
+    return any(PurePosixPath(e).name.startswith("_MEI") for e in entries if e)
+
+
+def _bundle_env_suspects(config: ClausterConfig, projects: list[Project]) -> list[tuple[str, int]]:
+    """Return ``(label, pid)`` for each live process Clauster tracks that hands out an env.
+
+    Standard bridges (from their bridge pointer), pty bridges (from the keeper sidecars),
+    and the claustrum daemon (by its ``-socket`` argument), which every hosted session
+    inherits its environment from. A pty KEEPER is deliberately not listed: a current
+    keeper keeps the bundle's runtime on purpose (``procutil.keeper_launch_env``), and
+    what reaches the session is its bridge's environment.
+    """
+    from . import pointers, pty_keeper  # local: keeps ops' import graph as it was
+
+    found: list[tuple[str, int]] = []
+    for project in projects:
+        ptr = pointers.pointer_for_project(project.path)
+        if ptr is not None and procutil.is_live_standard_bridge(ptr.pid, ptr.proc_start):
+            found.append((f"bridge for {project.name}", ptr.pid))
+    for keeper in pty_keeper.iter_keepers((config.state_dir / "logs").expanduser()):
+        bridge_pid = keeper.bridge_pid
+        if keeper.alive and bridge_pid is not None and procutil.is_bridge_process(bridge_pid):
+            found.append((f"pty bridge for {keeper.project or 'an unknown project'}", bridge_pid))
+    if config.claustrum.enabled:
+        found.extend(("claustrum daemon", pid) for pid in _claustrum_daemon_pids(config))
+    return found
+
+
+def _claustrum_daemon_pids(config: ClausterConfig) -> list[int]:
+    """Return the pids of this deployment's claustrum daemon (``-serve -socket <its sock>``)."""
+    from .claustrum_client import ClaustrumError
+    from .claustrum_daemon import ClaustrumDaemon  # local: avoid a module-level cycle
+
+    try:
+        sock = str(ClaustrumDaemon(config).socket_path)
+    except ClaustrumError:
+        return []  # an unusable socket path: no daemon can be serving this deployment
+    pids = []
+    for proc in psutil.process_iter(["pid", "cmdline"]):
+        argv = proc.info.get("cmdline") or []
+        if "-serve" in argv and any(
+            a == "-socket" and b == sock for a, b in zip(argv, argv[1:], strict=False)
+        ):
+            pids.append(proc.info["pid"])
+    return pids
+
+
+def _check_bundle_env(
+    config: ClausterConfig,
+    projects: list[Project],
+    *,
+    read_environ: Callable[[int], dict[str, str] | None] = _proc_environ,
+) -> Check:
+    """Flag bridges and daemons that still carry an old standalone binary's env (#1708).
+
+    A release before the fix passed the binary's ``_PYI_*`` state and its ``_MEI…``
+    library path to everything it started. Bridges, pty keepers and the claustrum
+    daemon outlive a Clauster upgrade, so they keep handing that environment to every
+    session until they are restarted. Linux only (it reads ``/proc``). Never FAILs: an
+    unreadable process is skipped, and the row names only the process and its pid,
+    never an environment value.
+    """
+    if not sys.platform.startswith("linux"):
+        return Check("bundle-env", OK, f"not checked on {sys.platform}: it reads Linux /proc")
+    try:
+        suspects = _bundle_env_suspects(config, projects)
+        leaking = []
+        for label, pid in suspects:
+            env = read_environ(pid)
+            if env is not None and _carries_bundle_env(env):
+                leaking.append(f"{label} (pid {pid})")
+    except Exception as exc:  # noqa: BLE001 - an advisory probe must never break doctor
+        return Check("bundle-env", WARN, f"could not check: {type(exc).__name__}")
+    if leaking:
+        return Check(
+            "bundle-env",
+            WARN,
+            "started with an old standalone binary's environment: "
+            + ", ".join(leaking)
+            + f" — {_BUNDLE_ENV_HINT}",
+        )
+    if not suspects:
+        return Check("bundle-env", OK, "no running bridge or claustrum daemon to check")
+    return Check("bundle-env", OK, f"{len(suspects)} running process(es) have a clean environment")
 
 
 def _check_port(host: str, port: int) -> Check:

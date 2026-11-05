@@ -869,7 +869,12 @@ def run_keeper(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entrypoint: ``python -m clauster.pty_keeper --sidecar P -- <bridge argv>``."""
+    """CLI entrypoint: ``python -m clauster.pty_keeper --sidecar P -- <bridge argv>``.
+
+    In the standalone binary the keeper runs out of the launching server's unpack
+    directory, which is deleted when that server exits: import every module the keeper
+    needs at startup, never lazily (see :func:`clauster.procutil.keeper_launch_env`).
+    """
     parser = argparse.ArgumentParser(prog="clauster.pty_keeper", description=__doc__)
     parser.add_argument("--sidecar", required=True, type=Path, help="JSON discovery file to write")
     parser.add_argument("--cwd", default=None, help="working directory for the bridge")

@@ -4,6 +4,11 @@
 binary's PyInstaller state from a child's environment. A spawn that passes no ``env=``
 silently inherits ``os.environ`` — both the secrets and, in the binary, a library path into
 its temporary unpack directory — so this walks the source tree's AST and fails on one.
+
+Scope: module-qualified ``subprocess.*`` / ``asyncio.create_subprocess_*`` / ``os.exec*``
+calls. It does not see the pywinpty ``<pty process>.spawn(...)`` calls (both pass
+``env=procutil.child_env()`` today), an aliased import, an ``env`` variable built from
+``os.environ`` on an earlier line, or :mod:`webbrowser` (handled in ``cli_read``).
 """
 
 from __future__ import annotations
@@ -39,7 +44,9 @@ _SPAWNERS = {
 # (file, function) pairs allowed to spawn without a child_env. Each needs a reason.
 _EXEMPT = {
     # The in-place restart re-execs Clauster ITSELF: it needs its own secrets (session
-    # secret, password hash) and stays inside the running bundle, so it keeps os.environ.
+    # secret, password hash), so it keeps os.environ. On POSIX the new image keeps the pid
+    # and stays inside the running bundle. (Windows emulates execv as spawn-then-exit;
+    # that frozen case is not verified here.)
     ("__main__.py", "_reexec"),
 }
 

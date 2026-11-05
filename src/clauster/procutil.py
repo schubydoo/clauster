@@ -1126,7 +1126,7 @@ def is_secret_env_name(name: str) -> bool:
 # inherits this loads the bundle's ``libstdc++`` instead of the system one, and a re-run of
 # the binary reads the ``_PYI_*`` state as "I am a sub-process of that bundle" and tries to
 # load Python from an unpack directory that may already be deleted (issue 1708).
-_PYI_ENV_PREFIX = "_PYI_"
+PYI_ENV_PREFIX = "_PYI_"
 _PYI_RESET_ENV = "PYINSTALLER_RESET_ENVIRONMENT"
 
 
@@ -1134,8 +1134,10 @@ def _bundle_library_path_var() -> str | None:
     """Return the library-path variable the frozen bootloader rewrote, or ``None``.
 
     macOS rewrites the bundled binaries' load paths instead, and Windows calls
-    ``SetDllDirectoryW``, so neither touches the environment: an ``LD_LIBRARY_PATH``
-    there is the user's own and must pass through.
+    ``SetDllDirectoryW``, so neither touches an environment variable: an
+    ``LD_LIBRARY_PATH`` there is the user's own and must pass through. (Whether the
+    Windows DLL directory reaches a child is a separate, non-environment question this
+    module does not address.)
     """
     if sys.platform.startswith("aix"):
         return "LIBPATH"
@@ -1153,7 +1155,7 @@ def _drop_frozen_runtime(env: dict[str, str]) -> None:
     Without ``_PYI_*`` a re-run of the binary is a fresh top-level instance — the same
     path ``PYINSTALLER_RESET_ENVIRONMENT=1`` selects — so that flag is not needed.
     """
-    for name in [name for name in env if name.startswith(_PYI_ENV_PREFIX)]:
+    for name in [name for name in env if name.startswith(PYI_ENV_PREFIX)]:
         del env[name]
     env.pop(_PYI_RESET_ENV, None)
     var = _bundle_library_path_var()
@@ -1208,11 +1210,20 @@ def keeper_launch_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     the library path from ``*_ORIG``. So ``*_ORIG`` here carries the value the BRIDGE
     must get — the user's own, or the operator's ``claude.env`` override — while the
     keeper itself runs with the bundle-first library path it inherited.
+
+    ⚠️ Consequence: the frozen keeper runs out of THIS server's unpack directory, which
+    the server's bootloader deletes when the server exits — and the keeper outlives it.
+    Modules it already imported keep working, and pure-Python modules still load from
+    the archive inside the executable, but a C extension imported for the first time
+    after a restart fails. So the keeper must import everything it needs at startup.
+    (This was already true before issue 1708: the keeper inherited the same state.)
     """
     env = child_env(extra)
     if not deps.is_frozen():
         return env
-    env.update({k: v for k, v in os.environ.items() if k.startswith(_PYI_ENV_PREFIX)})
+    env.update({k: v for k, v in os.environ.items() if k.startswith(PYI_ENV_PREFIX)})
+    # An operator-set reset flag would make the keeper a fresh two-process instance.
+    env.pop(_PYI_RESET_ENV, None)
     var = _bundle_library_path_var()
     if var is None:
         return env
