@@ -917,6 +917,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#what-a-skill-save-writes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What a skill save writes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#skill-frontmatter-checks" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1687,6 +1698,17 @@
     <span class="md-ellipsis">
       
         YAML spellings that Clauster refuses
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#what-a-skill-save-writes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What a skill save writes
       
     </span>
   </a>
@@ -2528,6 +2550,47 @@ are a file that uses one anchor name twice, such as <code>&amp;t</code> on two v
 anchor name with a dot or a non-ASCII letter, such as <code>&amp;d.1</code>, a list item
 that starts with <code>:</code>, such as <code>[:a]</code>, and a tab between a value and a comment,
 such as <code>Bash</code>, a tab, then <code># note</code>.</p>
+<h3 id="what-a-skill-save-writes">What a skill save writes<a class="headerlink" href="#what-a-skill-save-writes" title="Permanent link">&para;</a></h3>
+<p>A skill save writes only the files that it sends. The Skills editor sends
+<code>SKILL.md</code> alone. So a save replaces <code>SKILL.md</code> and keeps every other file in
+the skill directory, for example <code>scripts/</code> and reference files. The kept
+files stay byte for byte as they were. Clauster removes files from a skill only
+when you delete the whole skill.</p>
+<p>On Linux and macOS, the kept files and directories also keep their modes and
+their group, with these changes:</p>
+<ul>
+<li>Clauster clears the setuid and setgid bits. A directory keeps its sticky bit.</li>
+<li>The owner of a directory always gets read, write and search access, so that
+  the next save can remove the old copy.</li>
+<li>The skill directory itself never gets group or world write access.</li>
+<li>If you are not a member of the stored group, Clauster clears the group bits.
+  It never gives them to another group.</li>
+</ul>
+<p>While Clauster builds the new copy, every directory in it is private to the
+owner. Clauster sets the final modes only as the last step before the new copy
+replaces the old one. Clauster does not keep the file owner, access control
+lists, or extended attributes.</p>
+<p>On Windows, Clauster keeps no modes. The new copy gets the access rules of the
+skills directory that holds it, also while Clauster builds it.</p>
+<p>Clauster refuses the save and writes nothing in these cases:</p>
+<ul>
+<li>The skill directory holds a symlink, or an entry that is not a regular file
+  or a directory. Clauster does not follow a symlink inside the skill
+  directory, and it cannot keep one without following it. Replace the symlink
+  with a regular file, then save.</li>
+<li>Clauster cannot read a file or a directory that it must keep, or one of them
+  changes while Clauster copies it.</li>
+<li>A sent path is a directory in the stored skill, or it is inside a path that
+  the stored skill holds as a file.</li>
+<li>A sent path names a stored file under another spelling, and Clauster cannot
+  prove which file it is. Examples are a case variant of a file that has a hard
+  link, or a Windows short name such as <code>LONGNA~1.MD</code>. Send the file under its
+  stored name. On macOS and Windows, a plain case variant such as <code>RUN.sh</code> for
+  a stored <code>run.sh</code> replaces that file.</li>
+<li>The kept files and the sent files together are larger than 2 MiB, the size
+  limit for one skill directory. Clauster never drops a file to make the skill
+  fit.</li>
+</ul>
 <h3 id="skill-frontmatter-checks">Skill frontmatter checks<a class="headerlink" href="#skill-frontmatter-checks" title="Permanent link">&para;</a></h3>
 <p>The Skills editor checks the frontmatter of <code>SKILL.md</code> before it saves the
 file. The fields are those of the
