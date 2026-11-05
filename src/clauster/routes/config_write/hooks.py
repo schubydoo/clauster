@@ -82,4 +82,5 @@ async def api_config_write_hooks_write(
         write_project_fn=config_write_hooks.write_project_hooks,
         write_local_fn=config_write_hooks.write_project_local_hooks,
         get_user_path=lambda: _base.user_settings_json(runner),
+        extra_audit_keys=(),
     )

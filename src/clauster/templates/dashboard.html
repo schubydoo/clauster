@@ -2071,7 +2071,8 @@
                           data-test="cm-settings-text" spellcheck="false"
                           x-model="configMgmt.settings.text" {{ NO_AUTOFILL }}></textarea>
                 <div class="form-hint small mt-1">
-                  Permissions, hooks, plugins, and MCP-enable have their own tabs and are not shown here.
+                  Permissions, auto mode rules (<code>autoMode</code>), hooks, plugins, and MCP-enable have
+                  their own tabs and are not shown here.
                   Secret-shaped values are masked as <code>********</code> — leave the mask to keep the stored value.
                 </div>
               </div>
@@ -2114,7 +2115,7 @@
                 <!-- A section heading, not a control label: in rows mode this surface has
                      several controls (the mode select + rule rows), and the raw textarea
                      gets its programmatic name from the visually-hidden label below. -->
-                <div class="form-label small mb-0">permissions — allow / deny / ask</div>
+                <div class="form-label small mb-0">permissions — rules, mode and switches</div>
                 <!-- #958 Part 5: friendly rows vs the raw-JSON escape hatch -->
                 <div class="btn-group btn-group-sm" role="group" aria-label="Permissions editor mode">
                   <button type="button" class="btn" data-test="cm-permissions-mode-rows"
@@ -2132,7 +2133,8 @@
               <div class="alert alert-warning py-1 small" data-test="cm-permissions-rows-error" role="alert"
                    x-show="configMgmt.permissions.rowsError" x-cloak x-text="configMgmt.permissions.rowsError"></div>
 
-              <!-- ROWS: allow / deny / ask rule lists + defaultMode -->
+              <!-- ROWS: every documented permissions key (TASK-449.3): the allow / deny / ask
+                   rule lists and additionalDirectories, defaultMode, and the on/off switches -->
               <div x-show="configMgmt.permissions.mode === 'rows'" data-test="cm-permissions-rows" x-cloak>
                 <div class="mb-3">
                   <label class="form-label small mb-1" for="cm-perm-defaultmode">Default mode</label>
@@ -2153,21 +2155,42 @@
                                :data-test="'cm-perm-rule-' + bucket.key" {{ NO_AUTOFILL }} spellcheck="false"
                                :id="'cm-perm-rule-' + bucket.key + '-' + row.id"
                                :name="'cm-perm-rule-' + bucket.key + '-' + row.id"
-                               :aria-label="bucket.label + ' rule ' + (idx + 1)"
+                               :aria-label="bucket.itemLabel + ' ' + (idx + 1)"
                                x-model="row.value">
                         <button type="button" class="btn btn-outline-danger" :data-test="'cm-perm-remove-' + bucket.key"
-                                :aria-label="'Remove ' + bucket.label + ' rule ' + (idx + 1)"
+                                :aria-label="'Remove ' + bucket.itemLabel + ' ' + (idx + 1)"
                                 @click="configMgmtRemovePermRow(bucket.key, idx)">Remove</button>
                       </div>
                     </template>
                     <button type="button" class="btn btn-sm btn-outline-primary" :data-test="'cm-perm-add-' + bucket.key"
                             @click="configMgmtAddPermRow(bucket.key)"
-                            x-text="'Add ' + bucket.label + ' rule'"></button>
+                            x-text="bucket.addLabel"></button>
                   </div>
                 </template>
+                <!-- On/off switches: a checked box writes the documented value -->
+                <fieldset class="mb-3" data-test="cm-perm-flags" aria-describedby="cm-perm-flags-hint">
+                  <legend class="form-label small mb-1 fw-bold">Switches</legend>
+                  <!-- A real wrapper so Tabler's `legend + *` clear lands on an element that renders. -->
+                  <div>
+                    <template x-for="flag in configMgmtPermFlags" :key="flag.key">
+                      <label class="form-check mb-1">
+                        <input type="checkbox" class="form-check-input"
+                               :data-test="'cm-perm-flag-' + flag.key"
+                               :id="'cm-perm-flag-' + flag.key" :name="'cm-perm-flag-' + flag.key"
+                               x-model="configMgmt.permissions.flags[flag.key]">
+                        <span class="form-check-label small" x-text="flag.label"></span>
+                        <code class="small ms-1" x-text="flag.key"></code>
+                      </label>
+                    </template>
+                  </div>
+                  <div class="form-hint small" id="cm-perm-flags-hint">
+                    Unchecking a switch that is on removes its key from this file. Another scope can still turn it on.
+                  </div>
+                </fieldset>
                 <div class="form-hint small mt-1">
-                  Rules are stored verbatim and never run. <code>allow</code> auto-approves,
-                  <code>deny</code> blocks, <code>ask</code> prompts. Switch to Raw JSON for shapes the rows can't show.
+                  Rules and paths are stored verbatim and never run. <code>allow</code> auto-approves,
+                  <code>deny</code> blocks, <code>ask</code> prompts. <code>additionalDirectories</code>
+                  gives Claude file access outside the start directory. Switch to Raw JSON for shapes the rows can't show.
                 </div>
               </div>
 
@@ -2178,7 +2201,38 @@
                           data-test="cm-permissions-text" spellcheck="false"
                           x-model="configMgmt.permissions.text" {{ NO_AUTOFILL }}></textarea>
                 <div class="form-hint small mt-1">
-                  The tool-permission rules Claude Code enforces (<code>allow</code> / <code>deny</code> / <code>ask</code>). Edited as JSON.
+                  The <code>permissions</code> object Claude Code enforces, edited as JSON. Put
+                  <code>autoMode</code> in the box below, not here: it is a separate top-level key.
+                </div>
+              </div>
+
+              <!-- TASK-449.1: the top-level autoMode block (auto mode classifier rules), a
+                   sibling of `permissions`, edited as JSON in both modes. Claude Code reads it
+                   from User settings only, so the backend refuses rules at project/local scope;
+                   the note says so before the user types. -->
+              <div class="mt-3" data-test="cm-automode">
+                <label class="form-label small mb-1" for="cm-automode-text">autoMode — auto mode classifier rules</label>
+                <div class="alert alert-warning py-1 small" data-test="cm-automode-scope-warning" role="note"
+                     id="cm-automode-scope-warning" x-show="configMgmt.scope !== 'user'" x-cloak>
+                  Claude Code reads <code>autoMode</code> only from User settings and ignores it in
+                  this file.
+                  {% if config_write_allow_user_scope %}Switch to User scope to save auto mode rules.{% else %}User-scope
+                  editing is off in this Clauster configuration, so edit <code>~/.claude/settings.json</code> on the
+                  host.{% endif %}
+                  To remove a block that is already in this file, clear the box and save.
+                </div>
+                <textarea id="cm-automode-text" class="form-control form-control-sm font-monospace" rows="8"
+                          data-test="cm-automode-text" spellcheck="false"
+                          :aria-describedby="configMgmt.scope !== 'user' ? 'cm-automode-scope-warning cm-automode-hint' : 'cm-automode-hint'"
+                          placeholder='{ "allow": ["$defaults", "Pushing to our staging bucket is allowed"] }'
+                          x-model="configMgmt.permissions.autoModeText" {{ NO_AUTOFILL }}></textarea>
+                <div class="form-hint small mt-1" id="cm-automode-hint">
+                  A JSON object with the lists <code>environment</code>, <code>allow</code>,
+                  <code>soft_deny</code> and <code>hard_deny</code> (prose rules for the classifier, never run
+                  by Clauster) and the Boolean <code>classifyAllShell</code>. Put <code>"$defaults"</code> in a
+                  list to keep the built-in rules at that position; a list without it replaces them. Leave the
+                  box empty for no block. An entry that holds a secret shows as <code>********</code>: leave the
+                  mask to keep the stored value.
                 </div>
               </div>
             </div>

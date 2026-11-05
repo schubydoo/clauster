@@ -9,7 +9,52 @@ it *consumes* :mod:`clauster.config_write`.
 Permission rules are **data**, not code, but the gate is applied uniformly with the
 code-executing children. The validator is **structural only**: it checks shape and
 the recognized ``defaultMode`` vocabulary; it **never resolves, parses, or evaluates
-a rule string** (a rule like ``Bash(rm:*)`` is stored verbatim as inert text).
+a rule string** (a rule like ``Bash(rm:*)`` is stored verbatim as inert text), and it
+never resolves an ``additionalDirectories`` path.
+
+The recognized ``permissions`` keys follow the settings reference
+(https://code.claude.com/docs/en/settings-reference, ``permissions`` entry, checked
+2026-11-04 against Claude Code 2.1.318): the rule lists ``allow``/``deny``/``ask``,
+the path list ``additionalDirectories``, the Booleans
+``blockReadsOutsideWorkingDirectories``/``blockWritesOutsideWorkingDirectories``, the
+``"disable"`` switches ``disableBypassPermissionsMode``/``disableAutoMode``, and
+``defaultMode``.
+
+**The auto mode classifier rules (``autoMode``, TASK-449.1).** ``autoMode`` is a
+*top-level* ``settings.json`` key, a sibling of ``permissions``, not a member of it. It
+is permission policy, so this surface manages it next to ``permissions`` (the generic
+settings surface carves it out, see
+:data:`~clauster.config_write_settings.OWNED_KEYS`). Its documented shape is the prose
+rule lists ``environment``/``allow``/``soft_deny``/``hard_deny`` (each may hold the
+literal ``"$defaults"`` entry, which splices in the built-in rules) plus the
+``classifyAllShell`` Boolean (https://code.claude.com/docs/en/auto-mode-config).
+
+Claude Code reads ``autoMode`` **only from user settings** (and managed settings or
+``--settings``): it ignores the block in ``.claude/settings.json`` and
+``.claude/settings.local.json`` so a repository cannot inject its own classifier
+allow rules (same doc, "Where the classifier reads configuration"; verified with
+``claude auto-mode config`` on 2.1.318, which listed a user-scope rule and dropped
+the project and local ones). Writing a block there would save rules that never apply,
+so a project or local write with a non-empty ``autoMode`` is refused (422) with a
+message that points to User scope. An empty ``{}`` is accepted at every scope: it
+removes the key, so a block that is already in a project file can be cleared. The
+same docs say ``defaultMode: "auto"`` does not take effect from project or local
+settings either, so it is refused there for the same reason.
+
+``autoMode`` is redacted on read (:func:`_redact_auto_mode`). An entry is free prose, so a
+credential-bearing URL or a ``${...}`` interpolation can sit in the middle of it, where
+the structural :func:`~clauster.config_write.redact_secrets` (which matches a URL only at
+the start of a value) would miss it. Each such entry is therefore replaced *whole* with
+:data:`~clauster.config_write.REDACTION_SENTINEL`, using the line-oriented
+:func:`~clauster.config_write.redact_secret_lines` as the detector. The box is free
+text, so a user can move entries around a mask. A write therefore maps each resent
+sentinel to the stored masked entries *in order* (:func:`_merge_auto_mode`), and it
+refuses the write whole (422) when a list still holds masks but their count no longer
+matches the count of masked entries stored there. A mask therefore never restores a
+value from another list or from a clear entry. Two limits remain: masks all look the
+same, so an edit that deletes one mask and duplicates another while keeping the count
+is not detected; and a list with *no* masks left is written as sent, which deletes its
+stored masked entries (an explicit choice, not an ambiguous one).
 
 Three surfaces, one entry shape (mirroring Claude Code's own ``settings.json``):
 
@@ -24,8 +69,9 @@ Three surfaces, one entry shape (mirroring Claude Code's own ``settings.json``):
   ``~/.claude.json``), gated additionally on ``allow_user_scope`` and likewise guarded
   by the stale-hash check (it is a real file, not a ``~/.claude.json`` subtree).
 
-Only the ``permissions`` subtree is written; every sibling key in the file is
-preserved verbatim by the locked atomic replace (never a whole-file clobber).
+Only the ``permissions`` subtree (and ``autoMode`` when the caller sends one) is
+written; every other sibling key in the file is preserved by the locked atomic replace
+(never a whole-file clobber).
 
 ``bypassPermissions`` is **deliberately excluded** from the recognized
 ``defaultMode`` set: it stays behind the existing footgun gate
@@ -40,42 +86,81 @@ from pathlib import Path
 from typing import Any
 
 from . import config_write as cw
+from .claude_json import locked_replace_json_file
 from .config import INHERIT_PERMISSION_MODE, PERMISSION_LABELS
 
 #: The top-level key holding the permission rules in ``settings.json``.
 PERMISSIONS_KEY = "permissions"
 
+#: The top-level key holding the auto mode classifier rules, a sibling of
+#: :data:`PERMISSIONS_KEY` (never nested inside it).
+AUTO_MODE_KEY = "autoMode"
+
 #: The list-valued rule buckets (each a list of opaque, never-parsed rule strings).
 #: ``ask`` is the third canonical Claude Code decision bucket (prompt before use) —
 #: same opaque-string shape as ``allow``/``deny``, validated identically and never
-#: parsed or executed.
-_RULE_LIST_KEYS = frozenset({"allow", "deny", "ask"})
+#: parsed or executed. ``additionalDirectories`` is a list of directory paths with the
+#: same shape; a path is stored verbatim and never resolved.
+_STRING_LIST_KEYS = frozenset({"allow", "deny", "ask", "additionalDirectories"})
+
+#: Boolean ``permissions`` keys. ``false`` is documented as the same as unset.
+_BOOL_KEYS = frozenset(
+    {"blockReadsOutsideWorkingDirectories", "blockWritesOutsideWorkingDirectories"}
+)
+
+#: Keys whose only documented value is the string ``"disable"``.
+_DISABLE_KEYS = frozenset({"disableBypassPermissionsMode", "disableAutoMode"})
+
+#: The one value a :data:`_DISABLE_KEYS` member accepts.
+DISABLE_VALUE = "disable"
 
 #: Allowed top-level keys inside the ``permissions`` object.
-_PERMISSION_KEYS = frozenset({"allow", "deny", "ask", "defaultMode"})
+_PERMISSION_KEYS = _STRING_LIST_KEYS | _BOOL_KEYS | _DISABLE_KEYS | {"defaultMode"}
 
 #: The mode this surface refuses to set — it stays behind the footgun gate (#347/#685).
 BYPASS_MODE = "bypassPermissions"
 
-#: The recognized ``defaultMode`` values: the canonical permission-label vocabulary
+#: The recognized permission-mode values: the canonical permission-label vocabulary
 #: minus :data:`BYPASS_MODE`, which is footgun-gated and never settable here. Derived
 #: from :data:`~clauster.config.PERMISSION_LABELS` so the two never drift (#685).
 #: ``inherit`` (#1231) is subtracted too: it is a Clauster *launch-time* sentinel meaning
 #: "pass no ``--permission-mode`` flag", not a value claude understands — writing it into
-#: a real ``settings.json`` would produce a file claude rejects.
+#: a real ``settings.json`` would produce a file claude rejects. The subagent surface
+#: shares this set for an agent's ``permissionMode``.
 RECOGNIZED_MODES = frozenset(PERMISSION_LABELS) - {BYPASS_MODE, INHERIT_PERMISSION_MODE}
 
+#: Settings-only ``defaultMode`` aliases: ``"manual"`` is documented as an alias for
+#: ``"default"`` in ``permissions.defaultMode``. It is not a launch mode, so it is not
+#: in :data:`~clauster.config.PERMISSION_LABELS`.
+DEFAULT_MODE_ALIASES = frozenset({"manual"})
 
-def _validate_rule_list(value: Any, label: str) -> None:
-    """Reject ``value`` unless it is a list of non-empty rule strings (opaque data).
+#: Every ``defaultMode`` value this surface writes.
+SETTINGS_DEFAULT_MODES = RECOGNIZED_MODES | DEFAULT_MODE_ALIASES
 
-    A rule string is stored verbatim and **never parsed or executed** — only its
-    type (non-empty ``str``) is checked.
+#: ``defaultMode`` values Claude Code ignores in project and local settings (the docs
+#: list ``auto`` and ``bypassPermissions``; the latter is never settable here at all).
+USER_ONLY_MODES = frozenset({"auto"})
+
+#: The prose rule lists inside ``autoMode`` (each a list of non-empty strings; the
+#: literal ``"$defaults"`` entry is an ordinary member of the list).
+_AUTO_MODE_LIST_KEYS = frozenset({"environment", "allow", "soft_deny", "hard_deny"})
+
+#: The one Boolean inside ``autoMode``.
+_AUTO_MODE_BOOL_KEYS = frozenset({"classifyAllShell"})
+
+_AUTO_MODE_KEYS = _AUTO_MODE_LIST_KEYS | _AUTO_MODE_BOOL_KEYS
+
+
+def _validate_string_list(value: Any, label: str) -> None:
+    """Reject ``value`` unless it is a list of non-empty strings (opaque data).
+
+    A rule string or path is stored verbatim and **never parsed, resolved, or
+    executed** — only its type (non-empty ``str``) is checked.
     """
     if not isinstance(value, list):
-        raise cw.InvalidCandidateError(f"{label} must be a list of rule strings")
-    for rule in value:
-        if not isinstance(rule, str) or not rule:
+        raise cw.InvalidCandidateError(f"{label} must be a list of strings")
+    for item in value:
+        if not isinstance(item, str) or not item:
             raise cw.InvalidCandidateError(f"{label} must contain only non-empty strings")
 
 
@@ -83,10 +168,12 @@ def validate_permissions(candidate: Any) -> None:
     """Structural validator for the whole ``permissions`` object (the Foundation hook).
 
     ``candidate`` is the desired ``permissions`` object: a ``dict`` whose only
-    recognized keys are ``allow``/``deny``/``ask`` (lists of non-empty rule strings)
-    and ``defaultMode`` (one of :data:`RECOGNIZED_MODES`). Unknown keys, wrong types, or an
-    unrecognized mode reject the whole write (→ 422 via
-    :func:`config_write.validate_candidate`), so a partial/garbled block never lands.
+    recognized keys are the documented ones (see the module docstring). The string
+    lists hold non-empty strings, the Booleans are ``bool``, the ``"disable"`` switches
+    hold exactly ``"disable"``, and ``defaultMode`` is one of
+    :data:`SETTINGS_DEFAULT_MODES`. Unknown keys, wrong types, or an unrecognized mode
+    reject the whole write (→ 422 via :func:`config_write.validate_candidate`), so a
+    partial/garbled block never lands.
 
     :data:`BYPASS_MODE` is **not** a recognized mode: a request to set it as
     ``defaultMode`` is rejected here, keeping ``bypassPermissions`` behind the existing
@@ -94,13 +181,26 @@ def validate_permissions(candidate: Any) -> None:
     """
     if not isinstance(candidate, dict):
         raise cw.InvalidCandidateError("permissions must be an object")
+    if AUTO_MODE_KEY in candidate:
+        # The likeliest mistake (TASK-449.1): autoMode pasted inside permissions.
+        raise cw.InvalidCandidateError(
+            "autoMode is a top-level settings key, not part of permissions; "
+            "put it in the auto mode rules box instead"
+        )
     unknown = set(candidate) - _PERMISSION_KEYS
     if unknown:
         raise cw.InvalidCandidateError(f"permissions has unknown keys: {sorted(unknown)}")
 
-    for key in _RULE_LIST_KEYS:
-        if key in candidate:
-            _validate_rule_list(candidate[key], f"permissions {key!r}")
+    for key in sorted(_STRING_LIST_KEYS & set(candidate)):
+        _validate_string_list(candidate[key], f"permissions {key!r}")
+    for key in sorted(_BOOL_KEYS & set(candidate)):
+        if not isinstance(candidate[key], bool):
+            raise cw.InvalidCandidateError(f"permissions {key!r} must be true or false")
+    for key in sorted(_DISABLE_KEYS & set(candidate)):
+        if candidate[key] != DISABLE_VALUE:
+            raise cw.InvalidCandidateError(
+                f"permissions {key!r} must be the string {DISABLE_VALUE!r}"
+            )
 
     if "defaultMode" in candidate:
         mode = candidate["defaultMode"]
@@ -111,19 +211,138 @@ def validate_permissions(candidate: Any) -> None:
             raise cw.InvalidCandidateError(
                 "permissions 'defaultMode' cannot be 'bypassPermissions' (footgun-gated)"
             )
-        if mode not in RECOGNIZED_MODES:
+        if mode not in SETTINGS_DEFAULT_MODES:
             raise cw.InvalidCandidateError(
-                f"unknown permission defaultMode {mode!r} (want one of {sorted(RECOGNIZED_MODES)})"
+                f"unknown permission defaultMode {mode!r} "
+                f"(want one of {sorted(SETTINGS_DEFAULT_MODES)})"
             )
 
 
-def _read_permissions(path: Path) -> tuple[dict[str, Any], str]:
-    """Return ``(permissions, content_hash)`` for a settings file at ``path``.
+def validate_auto_mode(candidate: Any) -> None:
+    """Structural validator for a top-level ``autoMode`` object.
+
+    ``candidate`` must be a ``dict`` with only the documented keys: the prose rule lists
+    ``environment``/``allow``/``soft_deny``/``hard_deny`` (non-empty strings, the
+    ``"$defaults"`` entry included) and the ``classifyAllShell`` Boolean. Anything else
+    rejects the whole write. Rules are prose for the classifier and are **never parsed or
+    executed** here.
+    """
+    if not isinstance(candidate, dict):
+        raise cw.InvalidCandidateError("autoMode must be an object")
+    unknown = set(candidate) - _AUTO_MODE_KEYS
+    if unknown:
+        raise cw.InvalidCandidateError(f"autoMode has unknown keys: {sorted(unknown)}")
+    for key in sorted(_AUTO_MODE_LIST_KEYS & set(candidate)):
+        _validate_string_list(candidate[key], f"autoMode {key!r}")
+    for key in sorted(_AUTO_MODE_BOOL_KEYS & set(candidate)):
+        if not isinstance(candidate[key], bool):
+            raise cw.InvalidCandidateError(f"autoMode {key!r} must be true or false")
+
+
+def _reject_user_only(incoming: dict[str, Any], auto_mode: Any, label: str) -> None:
+    """Refuse a value Claude Code ignores outside user settings, at a project/local scope.
+
+    A non-empty ``autoMode`` and ``defaultMode: "auto"`` never take effect from a project
+    or local settings file (see the module docstring), so saving one there would show a
+    policy that does not apply. Fail closed with a message that names User scope.
+    """
+    if auto_mode:
+        raise cw.InvalidCandidateError(
+            f"Claude Code reads autoMode only from user settings and ignores it in {label}; "
+            "switch to User scope, or edit ~/.claude/settings.json on the host, to save auto "
+            "mode rules (an empty autoMode removes the block)"
+        )
+    mode = incoming.get("defaultMode")
+    if mode in USER_ONLY_MODES:
+        raise cw.InvalidCandidateError(
+            f"permissions 'defaultMode' {mode!r} does not take effect from {label}; "
+            "set it at User scope instead"
+        )
+
+
+def _is_masked_entry(entry: Any) -> bool:
+    """Whether an ``autoMode`` list entry is secret-shaped anywhere in its text.
+
+    Masks the whole entry when the line-oriented detector changes it (a credential URL
+    or ``${...}`` anywhere, or a ``token: ...``-style line) or the structural one would.
+    Over-masking only costs a resend; under-masking leaks.
+    """
+    if not isinstance(entry, str):
+        return False
+    return cw.redact_secret_lines(entry) != entry or cw.redact_secrets([entry]) != [entry]
+
+
+def _mask_prose_leaves(node: Any) -> Any:
+    """Return ``node`` with every string leaf that :func:`_is_masked_entry` flags masked."""
+    if isinstance(node, dict):
+        return {k: _mask_prose_leaves(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_mask_prose_leaves(v) for v in node]
+    return cw.REDACTION_SENTINEL if _is_masked_entry(node) else node
+
+
+def _redact_auto_mode(value: Any) -> Any:
+    """Return the display copy of a stored ``autoMode`` value (see the module docstring).
+
+    Two passes over the whole value, whatever its shape (a hand-edited or cloned file can
+    hold anything): first :func:`~clauster.config_write.redact_secrets`, which keeps its
+    key-name hint, so a value under a secret-named key is masked; then every string leaf
+    that :func:`_is_masked_entry` flags is masked whole. The second pass is what catches
+    a secret in the middle of a prose entry.
+    """
+    return _mask_prose_leaves(cw.redact_secrets(value))
+
+
+def _merge_auto_mode(incoming: dict[str, Any], stored: Any) -> dict[str, Any]:
+    """Restore each resent sentinel in ``incoming`` from the stored masked entries.
+
+    Per list, the n-th sentinel takes the n-th stored entry that :func:`_is_masked_entry`
+    flags, so adding, removing or moving *unmasked* entries keeps every secret. When the
+    number of sentinels differs from the number of stored masked entries, the mapping is
+    ambiguous (a mask was deleted, duplicated, or has nothing stored behind it), so the
+    write is refused whole rather than guessed. A list with no sentinel is written as
+    sent. Must run under the file lock, on the stored value read there.
+    """
+    stored_obj = stored if isinstance(stored, dict) else {}
+    out: dict[str, Any] = {}
+    for key, member in incoming.items():
+        if not isinstance(member, list) or cw.REDACTION_SENTINEL not in member:
+            out[key] = member
+            continue
+        stored_list = stored_obj.get(key)
+        masked = (
+            [e for e in stored_list if _is_masked_entry(e)]
+            if isinstance(stored_list, list)
+            else []
+        )
+        if member.count(cw.REDACTION_SENTINEL) != len(masked):
+            raise cw.InvalidCandidateError(
+                f"autoMode {key!r} has {member.count(cw.REDACTION_SENTINEL)} masked "
+                f"entries but {len(masked)} are stored; keep each masked entry as loaded, "
+                "or type the full entry again"
+            )
+        restored = iter(masked)
+        out[key] = [next(restored) if e == cw.REDACTION_SENTINEL else e for e in member]
+    return out
+
+
+def _validate_write(incoming: Any, auto_mode: Any) -> None:
+    """Run both structural validators (``auto_mode`` only when the caller sent one)."""
+    cw.validate_candidate(incoming, validate_permissions)
+    if auto_mode is not None:
+        cw.validate_candidate(auto_mode, validate_auto_mode)
+
+
+def _read_permissions(path: Path) -> tuple[dict[str, Any], Any, str]:
+    """Return ``(permissions, auto_mode, content_hash)`` for a settings file at ``path``.
 
     The hash is over the *current file bytes* (empty digest when absent) — the caller
     echoes it back on write so the stale-hash guard can reject a stale write (409).
-    Permission rules are not secret-shaped, so no redaction is applied; a missing file
-    reads as an empty permissions block.
+    Permission rules are not secret-shaped, so no redaction is applied to them; a
+    missing file reads as an empty permissions block. ``auto_mode`` is the on-disk
+    ``autoMode`` value passed through :func:`_redact_auto_mode`, or ``None`` when the
+    file has no such key. A non-object value is returned as it is (after
+    redaction), so the editor shows what is stored rather than hiding it.
     """
     try:
         raw = path.read_bytes()
@@ -132,16 +351,48 @@ def _read_permissions(path: Path) -> tuple[dict[str, Any], str]:
     data = cw.load_settings_json_obj(raw)
     permissions = data.get(PERMISSIONS_KEY)
     permissions = permissions if isinstance(permissions, dict) else {}
-    return permissions, cw.hash_bytes(raw)
+    auto_mode = _redact_auto_mode(data[AUTO_MODE_KEY]) if AUTO_MODE_KEY in data else None
+    return permissions, auto_mode, cw.hash_bytes(raw)
 
 
-def read_project_permissions(project_dir: Path) -> tuple[dict[str, Any], str]:
-    """Return ``(permissions, content_hash)`` for a project's ``.claude/settings.json``."""
+def _locked_write(
+    path: Path, incoming: dict[str, Any], auto_mode: Any, expected_hash: str | None
+) -> None:
+    """Locked stale-hash-guarded write of ``permissions`` (and ``autoMode``) at ``path``.
+
+    The caller must have already validated both values. ``permissions`` is replaced
+    wholesale. ``auto_mode`` ``None`` leaves the stored ``autoMode`` as it is; an empty
+    dict removes the key; any other dict replaces it after :func:`_merge_auto_mode`
+    restores each resent sentinel from the stored value (or refuses the write). Both
+    keys change in one locked replace, so they never race each other.
+    """
+
+    def _mutate(current_bytes: bytes) -> dict[str, Any]:
+        """Check the expected hash, then swap in the new subtree(s)."""
+        if expected_hash is None:
+            if current_bytes:
+                raise cw.StaleConfigWriteError(f"{path.name} already exists; a hash is required")
+        elif cw.hash_bytes(current_bytes) != expected_hash:
+            raise cw.StaleConfigWriteError("config file changed on disk since it was loaded")
+        current = cw.load_settings_json_obj(current_bytes)
+        current[PERMISSIONS_KEY] = incoming
+        if auto_mode is not None:
+            if auto_mode:
+                current[AUTO_MODE_KEY] = _merge_auto_mode(auto_mode, current.get(AUTO_MODE_KEY))
+            else:
+                current.pop(AUTO_MODE_KEY, None)
+        return current
+
+    locked_replace_json_file(path, _mutate, render=cw.render_json)
+
+
+def read_project_permissions(project_dir: Path) -> tuple[dict[str, Any], Any, str]:
+    """Return ``(permissions, auto_mode, content_hash)`` for a project's ``settings.json``."""
     return _read_permissions(cw.project_settings_path(project_dir))
 
 
 def write_project_permissions(
-    project_dir: Path, incoming: dict[str, Any], expected_hash: str | None
+    project_dir: Path, incoming: dict[str, Any], expected_hash: str | None, *, auto_mode: Any
 ) -> None:
     """Validate + write the project ``.claude/settings.json`` ``permissions`` block.
 
@@ -151,21 +402,23 @@ def write_project_permissions(
     structural validation, the stale-hash guard, and the locked atomic subtree write.
     The capability gate, type-the-name confirm, and path containment are the route's,
     upstream of here. The candidate is validated *before* the directory is created, so
-    a bad shape (422) leaves the filesystem untouched.
+    a bad shape (422) leaves the filesystem untouched. ``auto_mode`` follows
+    :func:`_locked_write`; a non-empty one is refused at this scope.
     """
-    cw.validate_candidate(incoming, validate_permissions)
+    _validate_write(incoming, auto_mode)
+    _reject_user_only(incoming, auto_mode, "project settings (.claude/settings.json)")
     path = cw.project_settings_path(project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    cw.write_settings_subtree(path, PERMISSIONS_KEY, incoming, expected_hash)
+    _locked_write(path, incoming, auto_mode, expected_hash)
 
 
-def read_user_permissions(settings_json: Path) -> tuple[dict[str, Any], str]:
-    """Return ``(permissions, content_hash)`` for the user-scope ``~/.claude/settings.json``."""
+def read_user_permissions(settings_json: Path) -> tuple[dict[str, Any], Any, str]:
+    """Return ``(permissions, auto_mode, content_hash)`` for ``~/.claude/settings.json``."""
     return _read_permissions(settings_json)
 
 
 def write_user_permissions(
-    settings_json: Path, incoming: dict[str, Any], expected_hash: str | None
+    settings_json: Path, incoming: dict[str, Any], expected_hash: str | None, *, auto_mode: Any
 ) -> None:
     """Validate + write the user-scope ``~/.claude/settings.json`` ``permissions`` block.
 
@@ -176,20 +429,21 @@ def write_user_permissions(
     writer (which edits a ``~/.claude.json``
     subtree), this writes a *separate real file* and so carries the same stale-hash
     guard as the project scope. The candidate is validated *before* the directory is
-    created, so a bad shape (422) writes nothing.
+    created, so a bad shape (422) writes nothing. This is the one scope where Claude
+    Code reads ``autoMode``, so ``auto_mode`` is written here as sent.
     """
-    cw.validate_candidate(incoming, validate_permissions)
+    _validate_write(incoming, auto_mode)
     settings_json.parent.mkdir(parents=True, exist_ok=True)
-    cw.write_settings_subtree(settings_json, PERMISSIONS_KEY, incoming, expected_hash)
+    _locked_write(settings_json, incoming, auto_mode, expected_hash)
 
 
-def read_project_local_permissions(project_dir: Path) -> tuple[dict[str, Any], str]:
-    """Return ``(permissions, content_hash)`` for a project's ``settings.local.json``."""
+def read_project_local_permissions(project_dir: Path) -> tuple[dict[str, Any], Any, str]:
+    """Return ``(permissions, auto_mode, content_hash)`` for a ``settings.local.json``."""
     return _read_permissions(cw.project_local_settings_path(project_dir))
 
 
 def write_project_local_permissions(
-    project_dir: Path, incoming: dict[str, Any], expected_hash: str | None
+    project_dir: Path, incoming: dict[str, Any], expected_hash: str | None, *, auto_mode: Any
 ) -> None:
     """Validate + write the local-scope ``.claude/settings.local.json`` ``permissions`` block.
 
@@ -200,11 +454,13 @@ def write_project_local_permissions(
     :func:`~clauster.config_write.ensure_gitignored` runs *before* the
     write (fail-closed: the write creates a secret-bearing ``.bak``), so
     ``settings.local.json`` and that backup are never accidentally committed (#766) —
-    idempotent, so an already-gitignored file is a no-op there.
+    idempotent, so an already-gitignored file is a no-op there. A non-empty
+    ``auto_mode`` is refused at this scope, as at project scope.
     """
-    cw.validate_candidate(incoming, validate_permissions)
+    _validate_write(incoming, auto_mode)
+    _reject_user_only(incoming, auto_mode, "local settings (.claude/settings.local.json)")
     path = cw.project_local_settings_path(project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     # Ignore BEFORE writing (fail-closed order) — see `cw.ensure_gitignored` for why.
     cw.ensure_gitignored(project_dir, ".claude/settings.local.json", ignore_backup_sibling=True)
-    cw.write_settings_subtree(path, PERMISSIONS_KEY, incoming, expected_hash)
+    _locked_write(path, incoming, auto_mode, expected_hash)

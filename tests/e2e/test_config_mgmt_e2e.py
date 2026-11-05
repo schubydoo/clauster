@@ -184,6 +184,140 @@ def test_config_mgmt_permissions_rows_round_trip(
     assert "Bash(ls:*)" in settings.read_text(encoding="utf-8")
 
 
+#: The maintainer's exact autoMode block from the TASK-449.1 report (2026-11-04).
+_MAINTAINER_AUTO_MODE = {
+    "allow": [
+        "$defaults",
+        "git push --force-with-lease from a worktree under /home/claude/worktrees/claustrum/ "
+        "to an unmerged feature branch that this session opened is allowed. Never to main "
+        "or master, ...",
+    ]
+}
+
+
+def test_config_mgmt_auto_mode_user_scope_round_trip(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """TASK-449.1: the reported autoMode block saves from the Permissions tab at User scope."""
+    # _start_server isolates HOME at <tmp>/home, beside state_dir; user-scope settings
+    # land in <home>/.claude/settings.json, never the real account.
+    home = Path(config_mgmt_server.state_dir).parent / "home"
+
+    _open_modal(browser, config_mgmt_server)
+    browser.click('[data-test="cm-scope-user"]')
+    browser.click('[data-test="cm-surface-permissions"]')
+    browser.expect_visible('[data-test="cm-view-permissions"]')
+    browser.expect_visible('[data-test="cm-automode-text"]')
+    browser.fill('[data-test="cm-automode-text"]', json.dumps(_MAINTAINER_AUTO_MODE))
+    browser.fill('[data-test="cm-confirm"]', "USER SCOPE")
+    browser.click('[data-test="cm-save"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+    stored = json.loads((home / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    assert stored["autoMode"] == _MAINTAINER_AUTO_MODE
+
+
+def test_config_mgmt_auto_mode_only_edit_keeps_permissions_as_loaded(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """An autoMode-only save resends `permissions` as loaded, explicit `false` included."""
+    home = Path(config_mgmt_server.state_dir).parent / "home"
+    settings = home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    # Not the rows' canonical form: an empty list, then an explicit false switch.
+    seeded = {"deny": [], "allow": ["Bash(ls:*)"], "blockReadsOutsideWorkingDirectories": False}
+    settings.write_text(json.dumps({"permissions": seeded}), encoding="utf-8")
+
+    _open_modal(browser, config_mgmt_server)
+    browser.click('[data-test="cm-scope-user"]')
+    browser.click('[data-test="cm-surface-permissions"]')
+    browser.expect_visible('[data-test="cm-permissions-rows"]')  # the seed fits the rows
+    browser.fill('[data-test="cm-automode-text"]', json.dumps(_MAINTAINER_AUTO_MODE))
+    browser.fill('[data-test="cm-confirm"]', "USER SCOPE")
+    browser.click('[data-test="cm-save"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+    stored = json.loads(settings.read_text(encoding="utf-8"))
+    assert stored["permissions"] == seeded  # same keys, same order-free content, false kept
+    assert list(stored["permissions"]) == list(seeded)  # and the loaded key order
+    assert stored["autoMode"] == _MAINTAINER_AUTO_MODE
+
+
+def test_config_mgmt_permissions_failed_load_clears_previous_rows(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A failed load never leaves the previous target's rules editable or saveable."""
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+    project_settings = projects_root / "alpha" / ".claude" / "settings.json"
+    project_settings.parent.mkdir(parents=True, exist_ok=True)
+    project_settings.write_text(
+        json.dumps({"permissions": {"allow": ["Bash(ls:*)"]}}), encoding="utf-8"
+    )
+    user_settings = (
+        Path(config_mgmt_server.state_dir).parent / "home" / ".claude" / "settings.json"
+    )
+    user_settings.parent.mkdir(parents=True, exist_ok=True)
+    user_settings.write_text("{not json", encoding="utf-8")  # the User-scope read fails (422)
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-permissions"]')
+    browser.expect_count('[data-test="cm-perm-rule-allow"]', 1)  # alpha's rule loaded
+    browser.click('[data-test="cm-scope-user"]')
+    browser.expect_visible('[data-test="cm-error"]')
+    browser.expect_count('[data-test="cm-perm-rule-allow"]', 0)  # alpha's rule is gone
+    browser.fill('[data-test="cm-confirm"]', "USER SCOPE")
+    browser.expect_visible('[data-test="cm-save"][disabled]')  # nothing to save over
+
+
+def test_config_mgmt_auto_mode_project_scope_explains_refusal(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """At project scope the tab warns first, and a save is refused with a User-scope hint."""
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-permissions"]')
+    browser.expect_visible('[data-test="cm-automode-scope-warning"]')
+    browser.fill('[data-test="cm-automode-text"]', json.dumps(_MAINTAINER_AUTO_MODE))
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    browser.click('[data-test="cm-save"]')
+    browser.expect_visible('[data-test="cm-error"]', timeout_ms=_SAVE_TIMEOUT)
+    assert "User scope" in browser.get_text('[data-test="cm-error"]')
+    assert not (projects_root / "alpha" / ".claude" / "settings.json").exists()
+
+
+def test_config_mgmt_permissions_rows_new_keys_round_trip(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """TASK-449.3: a switch and an additional directory save through the rows editor."""
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-permissions"]')
+    browser.expect_visible('[data-test="cm-perm-flags"]')
+    browser.check('[data-test="cm-perm-flag-blockWritesOutsideWorkingDirectories"]')
+    browser.click('[data-test="cm-perm-add-additionalDirectories"]')
+    browser.expect_visible('[data-test="cm-perm-rule-additionalDirectories"]')
+    browser.fill('[data-test="cm-perm-rule-additionalDirectories"]', "../docs/")
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    browser.click('[data-test="cm-save"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+    stored = json.loads(
+        (projects_root / "alpha" / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    assert stored["permissions"] == {
+        "additionalDirectories": ["../docs/"],
+        "blockWritesOutsideWorkingDirectories": True,
+    }
+
+
 def test_config_mgmt_settings_env_rows_round_trip(
     browser: AgentBrowser, config_mgmt_server: Server
 ) -> None:

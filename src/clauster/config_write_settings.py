@@ -9,16 +9,16 @@ stale-hash -> atomic write). It owns no gate, no writer, and no redaction
 primitive of its own -- it *consumes* :mod:`clauster.config_write`.
 
 **The carve (#772 scope, locked 2026-06-29).** :data:`OWNED_KEYS` --
-``permissions``, ``hooks``, ``enabledPlugins``, ``disabledPlugins``,
-``enabledMcpjsonServers``, ``disabledMcpjsonServers`` -- are excluded from this
-surface: each already has (or will have) its own dedicated config-write surface,
-and writing them here would race/duplicate that surface's own validation. A
-write candidate naming one of them is rejected **whole** (422), never silently
-stripped. Every *other* top-level key -- ``env``, ``model``, and the wide (and
-still-growing) vocabulary of "documented misc" keys Claude Code ships
-(``apiKeyHelper``, ``cleanupPeriodDays``, ``includeCoAuthoredBy``,
-``statusLine``, ``outputStyle``, ``attribution``, ... see
-https://docs.anthropic.com/en/docs/claude-code/settings) -- is handled
+``permissions``, ``autoMode`` (added for TASK-449.1), ``hooks``, ``enabledPlugins``,
+``disabledPlugins``, ``enabledMcpjsonServers``, ``disabledMcpjsonServers`` -- are
+excluded from this surface: each already has (or will have) its own dedicated
+config-write surface, and writing them here would race/duplicate that surface's own
+validation. A write candidate naming one of them is rejected **whole** (422), never
+silently stripped; the error names the tab that owns each key. Every *other*
+top-level key -- ``env``, ``model``, and the wide (and still-growing) vocabulary
+of "documented misc" keys Claude Code ships (``apiKeyHelper``,
+``cleanupPeriodDays``, ``includeCoAuthoredBy``, ``statusLine``, ``outputStyle``,
+``attribution``, ... see https://docs.anthropic.com/en/docs/claude-code/settings) -- is handled
 generically here. Unlike the permissions/hooks validators (a narrow, enumerated
 shape because they are literally code Claude executes), this surface
 deliberately does **not** maintain an exhaustive allowlist of recognized misc
@@ -120,16 +120,23 @@ from .claude_json import locked_replace_json_file
 #: candidate that names any of them is rejected **whole** (422) rather than
 #: silently accepted or silently stripped -- fail closed, mirroring the hooks
 #: surface's plugin-owned-hook guard (:mod:`clauster.config_write_hooks`).
-OWNED_KEYS = frozenset(
-    {
-        "permissions",
-        "hooks",
-        "enabledPlugins",
-        "disabledPlugins",
-        "enabledMcpjsonServers",
-        "disabledMcpjsonServers",
-    }
-)
+#:
+#: Each key maps to the dashboard tab that owns it, so a refused Raw JSON write can say
+#: where to edit the key instead of a bare "owned by a dedicated surface" (TASK-449.1).
+#: ``autoMode`` (the auto mode classifier rules) is a top-level key that the
+#: Permissions tab manages beside ``permissions``
+#: (:mod:`clauster.config_write_permissions`).
+OWNED_KEY_TABS: dict[str, str] = {
+    "permissions": "Permissions",
+    "autoMode": "Permissions",
+    "hooks": "Hooks",
+    "enabledPlugins": "Plugins",
+    "disabledPlugins": "Plugins",
+    "enabledMcpjsonServers": "MCP",
+    "disabledMcpjsonServers": "MCP",
+}
+
+OWNED_KEYS = frozenset(OWNED_KEY_TABS)
 
 #: The one key this surface treats as an unconditional secret container: every
 #: value under it is masked on read regardless of the key/value heuristic (see
@@ -176,8 +183,10 @@ def validate_misc_settings(candidate: Any) -> None:
         raise cw.InvalidCandidateError("settings must be an object")
     owned = OWNED_KEYS & set(candidate)
     if owned:
+        where = "; ".join(f"{key} on the {OWNED_KEY_TABS[key]} tab" for key in sorted(owned))
         raise SettingsCarveError(
-            f"settings has keys owned by a dedicated surface: {sorted(owned)}"
+            f"settings has keys owned by a dedicated surface: {sorted(owned)}. "
+            f"Remove them here and edit {where}"
         )
     if ENV_KEY in candidate:
         _validate_env(candidate[ENV_KEY])

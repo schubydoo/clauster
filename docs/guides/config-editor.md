@@ -168,12 +168,13 @@ Common mechanics across the modal:
 - **Typed confirmation** — every document save asks you to type the scope
   name; destructive list actions (delete, reset, plugin install) have their
   own typed confirms.
-- **Secret masking** — the Settings, MCP, and Skills surfaces mask secret-shaped
-  values on read. On Settings and MCP, a masked value left untouched keeps the
-  stored secret on write. The Skills editor masks on read but restores nothing on
-  write, so a save writes the mask over the stored value. The CLAUDE.md,
-  Permissions, Hooks, and Subagents surfaces return the raw content, because they
-  round-trip the exact text on write. Do not put a secret anywhere in a subagent
+- **Secret masking** — the Settings, MCP, and Skills surfaces, and the `autoMode`
+  box on the Permissions tab, mask secret-shaped values on read. On Settings, MCP
+  and `autoMode`, a masked value left untouched keeps the stored secret on write.
+  The Skills editor masks on read but restores nothing on write, so a save writes
+  the mask over the stored value. The CLAUDE.md, Hooks, and Subagents surfaces,
+  and the `permissions` rules, return the raw content, because they round-trip
+  the exact text on write. Do not put a secret anywhere in a subagent
   file, for example in an inline `mcpServers` block in the frontmatter.
 
 The surface tabs:
@@ -182,7 +183,7 @@ The surface tabs:
 | --- | --- |
 | CLAUDE.md | The scope's `CLAUDE.md` memory file, as plain text. |
 | Settings | `settings.json` — friendly rows for `env` variables, with a Raw JSON escape hatch for other keys, plus a read-only merged ("effective") view showing which scope each value comes from. |
-| Permissions | Permission rules (allow / ask / deny), as rows or raw JSON. |
+| Permissions | The `permissions` object, as rows or raw JSON, and the auto mode classifier rules (`autoMode`). See [The Permissions tab](#the-permissions-tab). |
 | Hooks | The `hooks` key, as rows or raw JSON. |
 | MCP | MCP server definitions (add / edit / delete), plus per-server **approvals** for committed `.mcp.json` servers — Approve / Reject each, or reset all choices behind a typed confirm. |
 | Subagents | Subagent definition files: list, edit, create, delete. |
@@ -202,6 +203,63 @@ row tells the first two apart:
   the link, so the description is blank as well.
 - **A skill Clauster cannot read still appears, carrying an error in place of
   the missing information.** One unreadable skill never hides the others.
+
+### The Permissions tab
+
+The rows editor shows every key that the Claude Code
+[settings reference](https://code.claude.com/docs/en/settings-reference#permissions)
+documents for the `permissions` object:
+
+- The rule lists `allow`, `deny` and `ask`, and the directory list
+  `additionalDirectories`, which gives Claude file access outside the
+  directory that the session starts in. Clauster stores each entry as you type
+  it. It never parses a rule or resolves a path.
+- `defaultMode`. The list offers `default`, `acceptEdits`, `plan`, `dontAsk`,
+  `manual` (an alias for `default`), and `auto` at User scope only.
+- Four switches. A checked box writes `true` for
+  `blockReadsOutsideWorkingDirectories` and
+  `blockWritesOutsideWorkingDirectories`, and `"disable"` for
+  `disableBypassPermissionsMode` and `disableAutoMode`.
+
+A shape that the rows cannot show opens in Raw JSON. A save with an unknown key
+or a wrong type is refused whole, with a `422` that names the key.
+
+`bypassPermissions` is not offered, and a save that sets it as `defaultMode` is
+refused at every scope, so Clauster never writes it. If a session starts with
+**No forced mode** (`inherit`), a hand-written `bypassPermissions` in User or
+managed settings still takes effect. See the `inherit` caveat under the
+[bypassPermissions footgun gate](../security.md#bypasspermissions-footgun-gate).
+
+The box under the rows edits `autoMode`, the rules for the auto mode classifier.
+`autoMode` is a top-level key next to `permissions`, so the Settings tab does
+not show it. The box takes a JSON object with the lists `environment`, `allow`,
+`soft_deny` and `hard_deny`, and the Boolean `classifyAllShell`. Put the entry
+`"$defaults"` in a list to keep the built-in rules at that position. A list
+without it replaces the built-in rules for that section. A `soft_deny` or
+`hard_deny` list without `"$defaults"` removes the built-in blocks, including
+the block for force push and the data-exfiltration rule. Run
+`claude auto-mode defaults` to see the built-in rules. See
+[Configure auto mode](https://code.claude.com/docs/en/auto-mode-config).
+
+Claude Code reads `autoMode` from User settings, managed settings and the
+`--settings` flag, and it reads `defaultMode: "auto"` from User and managed
+settings. It ignores both in a project or local settings file, so that a
+repository cannot add its own classifier rules. Clauster therefore refuses a
+save of either one at Project or Local scope, and the error names User scope.
+If `config_write.allow_user_scope` is off, the tab has no User scope, so edit
+`~/.claude/settings.json` on the host instead. A Project or Local save with an
+empty box is accepted, and it removes an `autoMode` block that is already in
+that file.
+
+If the text of an `autoMode` entry holds a secret-shaped value anywhere, the
+entry shows as `********`. A secret-shaped value is a URL with a user name or
+password, a `${...}` reference, or a `key: value` line with a secret-shaped key.
+Leave the mask to keep the stored
+entry. You can add, remove or move the other entries around a mask. If a list
+still holds masks but their number no longer matches the number of masked
+entries on disk, the save is refused. Restore the masks as they loaded, or type
+the full entry again. If you remove every mask from a list, the save is
+accepted, and it deletes those entries.
 
 ## Troubleshooting and limits
 
