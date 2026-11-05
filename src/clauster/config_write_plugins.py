@@ -15,33 +15,42 @@ plugin id being introduced, not just the project/scope name, since that is the o
 op that pulls new code onto the host. Marketplaces are operator-added sources (the
 gate is the control there too; no extra source allowlist, per the design doc).
 
-Verified against a live ``claude`` 2.1.198 (``claude plugin --help`` / every
-subcommand's own ``--help``, plus a throwaway ``HOME``-isolated probe — never the
-real account) rather than assumed from memory or docs alone, per #771. Cross-checked
-against the published docs (``code.claude.com/docs/en/plugins-reference``,
-``.../plugin-marketplaces``, ``.../settings``) via context7:
+First verified against a live ``claude`` 2.1.198, then re-verified on 2026-11-04
+against a live ``claude`` 2.1.318 (every subcommand's own ``--help`` plus a throwaway
+``HOME``-isolated probe of each verb this module runs — never the real account), and
+against the current docs (``code.claude.com/docs/en/plugins/cli-reference``,
+``.../plugins/marketplace-reference``, ``.../settings-reference``):
 
 * ``claude plugin enable|disable <plugin> --scope user|project|local`` — the ONLY
   native verbs for enable/disable (unlike MCP server approvals, which had no CLI
   verb and needed a direct settings write). Writes ``enabledPlugins`` in the
   target scope's ``settings.json`` as ``{"<plugin>@<marketplace>": true|false}`` —
   a single map of booleans, confirmed live and by the docs' own examples. There is
-  **no** separate ``disabledPlugins`` list in practice (unlike the MCP
-  ``enabledMcpjsonServers``/``disabledMcpjsonServers`` pair) — a disabled plugin is
-  simply ``false`` in the same map. (:mod:`clauster.config_write_settings`'s
+  **no** separate ``disabledPlugins`` list (the current docs do not name one) — a
+  disabled plugin is simply ``false`` in the same map. (:mod:`clauster.config_write_settings`'s
   ``OWNED_KEYS`` carves out both key names defensively; this surface only ever
-  produces/reads ``enabledPlugins``.) Enable/disable does **not** check whether the
-  named plugin is actually installed — it blind-writes the map entry (confirmed:
-  enabling a nonexistent id exits 0) — so it is exactly the settings-write
-  operation the design doc describes, just reached via a real CLI verb instead of
-  a direct file write.
-* ``claude plugin install <plugin> --scope user|project|local`` — succeeds with
-  **no** confirmation prompt even with stdin closed (confirmed: a non-TTY install
-  of an already-added, trusted local marketplace's plugin exits 0 immediately);
-  there is **no** ``-y``/``--yes`` option on ``install`` at all (confirmed:
-  passing either is "unknown option"). Re-installing an already-installed id is a
-  clean idempotent success ("already installed"), not an error. ``--config
-  key=value`` (repeatable) is out of scope for this pass (not named in #771).
+  produces/reads ``enabledPlugins``.) Enable of an id that is not installed still
+  blind-writes the map entry and exits 0 (confirmed on 2.1.318). Two cases that
+  2.1.198 accepted now exit 1, and this module surfaces both as a 400 carrying the
+  CLI's own message rather than swallowing them: an id already in the requested state
+  at that scope ("is already enabled at project scope"), and a ``--scope`` that does
+  not take precedence over the declaring scope ("is installed at project scope, not
+  user"). The dashboard's ``enabled`` badge is the MERGED state, so that message is
+  what tells the operator which scope already holds the value. ``--json`` and
+  ``disable --all`` are not used (``--all`` cannot take ``--scope``, so it would
+  write past the one scope the confirm named).
+* ``claude plugin install <plugin> --scope user|project|local`` — a plugin from an
+  ordinary marketplace installs with no prompt even with stdin closed. Re-installing
+  an already-installed id is a clean idempotent success ("already installed").
+  ``-y``/``--yes`` (2.1.229+) and ``--accept-command <sha256>`` (2.1.271+) now
+  exist; this module **never passes either**. They accept a marketplace-declared
+  command (a ``command`` plugin source, or a ``headersHelper``) without a person
+  reading it first, so passing one would let a stored marketplace value run code on
+  the host. With stdin closed and neither flag, the CLI refuses such an install and
+  exits 1, which surfaces as a 400: fail closed. ``--config key=value`` (values can
+  be secrets, and argv is no place for a secret), ``--marketplace <source>`` (adds a
+  marketplace as a side effect, skipping the marketplace route's own validation), and
+  ``--json`` are out of scope.
 * ``claude plugin uninstall|remove <plugin> --scope ... [--keep-data] [--prune
   [-y|--yes]]`` — ``-y``/``--yes`` is real here (and on bare ``prune``), gating
   only the ``--prune`` confirmation; it is **required whenever stdin/stdout is
@@ -50,23 +59,25 @@ against the published docs (``code.claude.com/docs/en/plugins-reference``,
   never answer an interactive prompt, so omitting it would hang a real
   dependency-pruning uninstall until the timeout. Uninstalling a not-installed id
   is an error ("not found in installed plugins").
-* ``claude plugin update <plugin> --scope user|project|local|managed`` — no
-  ``-y``. ``managed`` is excluded here (out of clauster's scope model, see the
-  design doc's canonical scope table — Managed is MDM/system, never
-  clauster-writable). Updating a not-installed id is an error ("not found").
+* ``claude plugin update <plugin> --scope user|project|local|managed`` — the
+  ``-y``/``--accept-command`` pair exists here too, for a changed marketplace-declared
+  command, and is never passed, for the same reason as ``install``. ``managed`` is
+  excluded here (out of clauster's scope model, see the design doc's canonical scope
+  table — Managed is MDM/system, never clauster-writable). Updating a not-installed
+  id is an error ("not found").
 * ``claude plugin list --json`` / ``claude plugin details <name>`` — CLI-only
   reads: cache path, install timestamp, and (per-invocation-cwd) live
   ``enabled``/``projectPath`` state have no settings.json equivalent to read
-  directly, unlike the MCP surface's "file read beats CLI for display" doctrine
-  (which was about avoiding an extra spawn + about redaction, neither of which
-  applies to plugin metadata — there is nothing secret in a plugin id or cache
-  path). Confirmed live: the ``enabled`` field in ``list --json`` genuinely
+  directly. Confirmed live: the ``enabled`` field in ``list --json`` genuinely
   depends on invocation cwd (a project-scope entry reads ``enabled: true`` only
   from *that* project's directory, ``false`` elsewhere) — the cwd this module
-  spawns from is not cosmetic.
+  spawns from is not cosmetic. ``list --json`` now also carries a plugin's
+  ``mcpServers`` definitions, which can hold ``env``/``headers`` credentials, so its
+  output goes through :func:`redact_plugin_display` before it leaves this module.
 * ``claude plugin marketplace add <source> --scope ... [--sparse ...]`` — source
-  is ``owner/repo``, a URL, or a path; ``--sparse`` is out of scope for this pass
-  (monorepo checkout limiting, not named in #771). Re-adding an already-known name
+  is ``owner/repo[#ref|@ref]``, ``user@host:path``, a URL, or a path; ``--sparse``
+  and ``--claudeai`` (an account-hosted marketplace that no settings file declares,
+  and that refuses ``--scope``) are out of scope. Re-adding an already-known name
   from the same source is an idempotent success ("already on disk"), never an
   error — confirmed live, so this module treats a nonzero exit here as a genuine
   failure, never something to swallow.
@@ -75,17 +86,20 @@ against the published docs (``code.claude.com/docs/en/plugins-reference``,
   appears in (confirmed by ``--help``). This module never omits it: every mutation
   in this app is scoped to the one settings file the caller confirmed against, so
   ``--scope`` is always passed explicitly here, matching the confirm token's own
-  scope. Removing an unknown name is an error ("not found").
+  scope. Removing an unknown name is an error ("not found"), and so is a name that
+  the chosen scope does not declare ("is not declared in user settings"); both
+  map to a 404.
 * ``claude plugin marketplace list --json`` / ``claude plugin marketplace update
   [name]`` — **neither takes ``--scope``**: confirmed live that ``list`` reflects
   ``~/.claude/plugins/known_marketplaces.json``, a single merged pool independent
   of invocation cwd (a marketplace declared at *any* scope, from *any* project,
   shows up from every cwd) — unlike plugin ``list``'s cwd-dependent ``enabled``
-  field. This module still routes both through the ordinary scope/project/confirm
-  plumbing (for capability gating + which settings file's confirm token applies +
-  a stable cwd to spawn from) even though the resulting argv never carries
-  ``--scope`` — consistent with every other route in this app rather than a
-  special-cased "always user scope" carve-out.
+  field. Its ``url`` field can carry credentials (``https://user:token@host``), so
+  this output is redacted too. This module still routes both through the ordinary
+  scope/project/confirm plumbing (for capability gating + which settings file's
+  confirm token applies + a stable cwd to spawn from) even though the resulting argv
+  never carries ``--scope`` — consistent with every other route in this app rather
+  than a special-cased "always user scope" carve-out.
 
 Every spawn here is validate-before-spawn (:mod:`clauster.claude_cli`, list-argv,
 never ``shell=True``, ``stdin=DEVNULL`` so a surprise interactive prompt fails
@@ -93,6 +107,11 @@ fast rather than hanging the request) — the same discipline
 :mod:`clauster.config_write_mcp_cli` uses. Unlike that module, a plugin/marketplace
 identifier is never secret-shaped, so there is no "must route around the CLI"
 predicate here — every mutation goes through the CLI, always.
+
+Every read that leaves this module (plugin list, marketplace list, declared
+marketplaces) is redacted (:func:`redact_plugin_display`): a ``url`` marketplace
+source's ``headers`` and ``headersHelper``, and a plugin MCP server's ``env`` and
+``headers``, are the documented places a credential lives on this surface.
 """
 
 from __future__ import annotations
@@ -117,7 +136,10 @@ RunFn = Callable[..., subprocess.CompletedProcess]
 #: so this is a little more generous than the MCP CLI's 30s local-JSON-edit bound.
 DEFAULT_TIMEOUT_SECONDS = 60.0
 
-_NOT_FOUND_RE = re.compile(r"not found|not installed", re.IGNORECASE)
+#: "not declared" is ``marketplace remove --scope``'s message for a name the chosen
+#: scope's settings file does not declare (``Marketplace 'x' is not declared in user
+#: settings``, confirmed on 2.1.318): absent at that scope, so a 404 like "not found".
+_NOT_FOUND_RE = re.compile(r"not found|not installed|not declared", re.IGNORECASE)
 
 #: Identifier charset for a single name segment (plugin name, marketplace name):
 #: no leading ``-`` (would be parsed as a CLI option by ``claude``'s argument
@@ -133,6 +155,57 @@ _NAME_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
 #: charset allowlist that would reject a real URL/path.
 _SOURCE_LEADING_DASH_RE = re.compile(r"^-")
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+#: Keys whose EVERY leaf value is masked on read, whatever that leaf's own key is called.
+#: A ``url`` marketplace source's ``headers`` (and an inline ``settings``-source plugin
+#: entry's) and a plugin MCP server's ``env``/``headers`` routinely hold a literal
+#: credential under a benign name (``Cookie``, ``X-Registry``) that the key-name heuristic
+#: in :func:`clauster.config_write.redact_secrets` cannot see — the same reason the
+#: settings surface masks every ``env`` value.
+_MASK_ALL_LEAVES_KEYS = frozenset({"env", "headers"})
+
+#: String fields masked whole: a ``headersHelper`` is a command line, and a command can
+#: carry a token in its own arguments.
+_MASK_WHOLE_STRING_KEYS = frozenset({"headersHelper"})
+
+
+def _mask_leaves(value: Any) -> Any:
+    """Return ``value`` with every leaf replaced by the sentinel (dict keys and lists kept)."""
+    if isinstance(value, dict):
+        return {k: _mask_leaves(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_mask_leaves(v) for v in value]
+    return cw.REDACTION_SENTINEL
+
+
+def _mask_credential_fields(data: Any) -> Any:
+    """Return a copy of ``data`` with the documented credential fields masked, at any depth."""
+    if isinstance(data, dict):
+        out: dict[Any, Any] = {}
+        for k, v in data.items():
+            if k in _MASK_ALL_LEAVES_KEYS:
+                out[k] = _mask_leaves(v)
+            elif k in _MASK_WHOLE_STRING_KEYS and isinstance(v, str) and v:
+                out[k] = cw.REDACTION_SENTINEL
+            else:
+                out[k] = _mask_credential_fields(v)
+        return out
+    if isinstance(data, list):
+        return [_mask_credential_fields(v) for v in data]
+    return data
+
+
+def redact_plugin_display(data: Any) -> Any:
+    """Return a display copy of a plugin/marketplace read with its secrets masked.
+
+    Two passes. First the documented credential fields are masked unconditionally
+    (:data:`_MASK_ALL_LEAVES_KEYS`, :data:`_MASK_WHOLE_STRING_KEYS`). Then the shared
+    structural heuristic (:func:`clauster.config_write.redact_secrets`) masks the rest:
+    a secret-shaped key, a ``${...}`` interpolation, or a credential-bearing URL such as
+    a marketplace ``url`` of ``https://user:token@host/repo.git``. Over-masking only
+    hides a value from the dashboard; this surface never writes a read value back.
+    """
+    return cw.redact_secrets(_mask_credential_fields(data))
 
 
 class PluginCliError(cw.ConfigWriteError):
@@ -273,7 +346,8 @@ def _raise_for_failure(op: str, ident: str, proc: subprocess.CompletedProcess) -
     A "not found"/"not installed" message maps to the appropriate typed 404 — but
     **only for the verbs where "not found" means the named entity is genuinely
     absent** (uninstall/update/enable/disable of an absent id, install of a plugin
-    absent from its marketplace, marketplace remove/update of an unknown name).
+    absent from its marketplace, marketplace remove/update of an unknown name, and
+    marketplace remove at a scope that does not declare the name).
     An ``add`` (``marketplace-add``) is deliberately **excluded**: its ``source``
     is a URL/path/repo the CLI must fetch, so a failed add commonly reports
     ``fatal: repository '…' not found`` — a git/network *failure*, not an absent
@@ -289,7 +363,10 @@ def _raise_for_failure(op: str, ident: str, proc: subprocess.CompletedProcess) -
         if op.startswith("marketplace"):
             raise MarketplaceNotFoundError(detail)
         raise PluginNotFoundError(detail)
-    raise PluginCliError(f"claude plugin {op} {ident!r} exited {proc.returncode}: {detail}")
+    # `ident` is a marketplace SOURCE for `marketplace-add`, and a git or url source can
+    # embed credentials (`https://user:token@host/repo.git`), so it is redacted as well.
+    shown = cw.redact_secret_lines(ident)
+    raise PluginCliError(f"claude plugin {op} {shown!r} exited {proc.returncode}: {detail}")
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +382,9 @@ def cli_enable_plugin(
     Re-validates ``plugin_id`` structurally (belt + suspenders: the route layer
     validates first, but this is the last line before a spawn). Does **not**
     require the plugin to already be installed — the CLI itself blind-writes the
-    ``enabledPlugins`` map entry (verified live), so this simply mirrors that.
+    ``enabledPlugins`` map entry (verified live), so this simply mirrors that. An id
+    already enabled at ``scope`` exits 1 on current CLIs and raises
+    :class:`PluginCliError` (→ 400) with the CLI's message (see the module docstring).
     """
     validate_plugin_id(plugin_id)
     proc = _run(binary, ["enable", plugin_id, "--scope", scope], cwd=cwd, run=run)
@@ -332,10 +411,12 @@ def cli_install_plugin(
     per-install confirm (:func:`require_install_confirm`) gates this, on top of
     the ordinary scope confirm; this function itself does not re-check that
     confirm (it is a route-layer concern, checked before this is ever called) —
-    it only re-validates the identifier shape and spawns. No ``-y``/interactive
-    handling is needed: confirmed live that ``install`` never prompts, even
-    non-interactively, for a plugin from an already-trusted (operator-added)
-    marketplace.
+    it only re-validates the identifier shape and spawns. ``-y``/``--yes`` and
+    ``--accept-command`` are **never** passed: a plugin from an ordinary marketplace
+    installs without a prompt, and one whose marketplace entry declares a command to
+    run (a ``command`` source or a ``headersHelper``) is refused by the CLI when stdin
+    is closed, which surfaces as :class:`PluginCliError` (→ 400). Clauster never
+    accepts such a command on the operator's behalf.
     """
     validate_plugin_id(plugin_id)
     proc = _run(binary, ["install", plugin_id, "--scope", scope], cwd=cwd, run=run)
@@ -381,7 +462,9 @@ def cli_update_plugin(
     ``scope`` is restricted to the three clauster manages (project/user/local) —
     the CLI's own fourth value, ``managed``, is never passed here (out of scope,
     see the module docstring). Updating a not-installed id raises
-    :class:`PluginNotFoundError` (→ 404).
+    :class:`PluginNotFoundError` (→ 404). Like :func:`cli_install_plugin`, never passes
+    ``-y``/``--accept-command``, so a changed marketplace-declared command is refused
+    (→ 400) rather than run unseen.
     """
     validate_plugin_id(plugin_id)
     proc = _run(binary, ["update", plugin_id, "--scope", scope], cwd=cwd, run=run)
@@ -401,7 +484,8 @@ def cli_list_plugins(
     ``cwd`` is not cosmetic: a project-scope entry's ``enabled`` field reads
     ``true`` only from that project's own directory, ``false`` elsewhere
     (verified live) — so a caller must resolve the intended project directory
-    first, exactly like every other scoped read in this app.
+    first, exactly like every other scoped read in this app. The result is redacted
+    (:func:`redact_plugin_display`): an entry's ``mcpServers`` can carry credentials.
     """
     proc = _run(binary, ["list", "--json"], cwd=cwd, run=run)
     _raise_for_failure("list", "", proc)
@@ -414,7 +498,7 @@ def cli_list_plugins(
         raise PluginCliError(f"claude plugin list returned invalid JSON: {exc}") from exc
     if not isinstance(data, list):
         raise PluginCliError("claude plugin list returned a non-list JSON value")
-    return data
+    return redact_plugin_display(data)
 
 
 def cli_plugin_details(
@@ -503,7 +587,8 @@ def cli_list_marketplaces(
     ``cwd`` — a marketplace declared at any scope, from any project, appears from
     every directory. ``cwd`` is still taken (for a stable, valid spawn directory
     and API symmetry with the rest of this module) even though it does not change
-    the result.
+    the result. The result is redacted (:func:`redact_plugin_display`): a ``git`` or
+    ``url`` entry's ``url`` can embed credentials.
     """
     proc = _run(binary, ["marketplace", "list", "--json"], cwd=cwd, run=run)
     _raise_for_failure("marketplace-list", "", proc)
@@ -516,7 +601,7 @@ def cli_list_marketplaces(
         ) from exc
     if not isinstance(data, list):
         raise PluginCliError("claude plugin marketplace list returned a non-list JSON value")
-    return data
+    return redact_plugin_display(data)
 
 
 # ---------------------------------------------------------------------------
@@ -568,21 +653,34 @@ def read_user_enabled_plugins(settings_json: Path) -> dict[str, bool]:
 #: The ``settings.json`` key declaring marketplaces at a given scope.
 EXTRA_MARKETPLACES_KEY = "extraKnownMarketplaces"
 
+#: The alias Claude Code 2.1.232+ reads exactly as :data:`EXTRA_MARKETPLACES_KEY`. When
+#: one file sets both spellings, Claude Code uses the canonical key and ignores the alias
+#: (settings-reference, "Marketplace key aliases").
+EXTRA_MARKETPLACES_ALIAS_KEY = "additionalMarketplaces"
+
 
 def _read_declared_marketplaces(path: Path) -> dict[str, Any]:
-    """Return the raw ``extraKnownMarketplaces`` map from a settings file at ``path``.
+    """Return the redacted ``extraKnownMarketplaces`` map from a settings file at ``path``.
 
     Direct file read (no spawn) — the *declaration* side (which scope's
     settings.json names which marketplace), as distinct from
     :func:`cli_list_marketplaces`'s CLI-merged, cwd-independent pool view (which
     also carries resolved ``installLocation`` the declaration alone doesn't have).
-    A path that is not a readable file raises
+    Reads the ``additionalMarketplaces`` alias only when the canonical key is absent,
+    matching Claude Code's own precedence. Every source type passes through as it is
+    stored (``github``, ``git``, ``url``, ``file``, ``directory``, ``settings``, and any
+    type a newer CLI adds); nothing is fetched or resolved. The map is redacted
+    (:func:`redact_plugin_display`), because a ``url`` source's ``headers`` and
+    ``headersHelper`` hold credentials. A path that is not a readable file raises
     :class:`~clauster.config_write.ConfigWriteError` (see
     :func:`~clauster.config_write.read_config_bytes`).
     """
     data = cw.load_settings_json_obj(cw.read_config_bytes(path))
-    marketplaces = data.get(EXTRA_MARKETPLACES_KEY)
-    return marketplaces if isinstance(marketplaces, dict) else {}
+    key = (
+        EXTRA_MARKETPLACES_KEY if EXTRA_MARKETPLACES_KEY in data else EXTRA_MARKETPLACES_ALIAS_KEY
+    )
+    marketplaces = data.get(key)
+    return redact_plugin_display(marketplaces) if isinstance(marketplaces, dict) else {}
 
 
 def read_project_marketplaces(project_dir: Path) -> dict[str, Any]:

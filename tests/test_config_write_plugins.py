@@ -1612,3 +1612,313 @@ def test_route_marketplaces_action_update_user_scope_skips_project_key(
         )
         assert resp.status_code == 200
         assert "project" not in resp.json()
+
+
+# --- current-CLI audit (claude 2.1.318, 2026-11-04) ---------------------------------
+# Each message below is the CLI's own text, captured from a live HOME-isolated probe.
+
+
+def test_cli_marketplace_remove_not_declared_at_scope_maps_to_404(tmp_path: Path) -> None:
+    # `marketplace remove --scope user` on a name only project settings declare: absent
+    # at the confirmed scope, so the same 404 as an unknown name (was a generic 400).
+    run, _calls = _fake_run(
+        rc=1,
+        stderr=(
+            "✘ Failed to remove marketplace: Marketplace 'probe-mkt' is not declared in "
+            "user settings. Omit --scope to remove it from all scopes."
+        ),
+    )
+    with pytest.raises(plugins.MarketplaceNotFoundError):
+        plugins.cli_marketplace_remove(str(FAKE_CLAUDE), tmp_path, "probe-mkt", "user", run=run)
+
+
+@pytest.mark.parametrize(
+    ("verb", "message"),
+    [
+        ("enable", 'Plugin "fmt@probe-mkt" is already enabled at project scope'),
+        ("disable", 'Plugin "fmt@probe-mkt" is already disabled at project scope'),
+        (
+            "enable",
+            'Plugin "fmt@probe-mkt" is installed at project scope, not user. Use --scope '
+            "project or omit --scope to auto-detect.",
+        ),
+    ],
+)
+def test_cli_enable_disable_goal_state_and_scope_refusals_surface_as_400(
+    tmp_path: Path, verb: str, message: str
+) -> None:
+    # Current CLIs exit 1 for both; neither is "not found", and neither is swallowed as
+    # success: the dashboard badge is the MERGED state, so the CLI's message is what tells
+    # the operator which scope already holds the value.
+    run, _calls = _fake_run(rc=1, stderr=f'✘ Failed to {verb} plugin "fmt@probe-mkt": {message}')
+    fn = plugins.cli_enable_plugin if verb == "enable" else plugins.cli_disable_plugin
+    with pytest.raises(plugins.PluginCliError) as exc_info:
+        fn(str(FAKE_CLAUDE), tmp_path, "fmt@probe-mkt", "project", run=run)
+    assert not isinstance(exc_info.value, plugins.PluginNotFoundError)
+    assert message.split(",")[0] in str(exc_info.value)
+
+
+@pytest.mark.parametrize("fn_name", ["cli_install_plugin", "cli_update_plugin"])
+def test_install_and_update_never_auto_accept_a_marketplace_command(
+    tmp_path: Path, fn_name: str
+) -> None:
+    # `-y`/`--yes` and `--accept-command` exist on current CLIs; passing either would run a
+    # marketplace-declared command unseen. The argv carries neither, and the CLI's
+    # non-TTY refusal surfaces as a 400 instead.
+    run, calls = _fake_run(
+        rc=1, stdout="The command was only displayed. Re-run from a terminal to accept it."
+    )
+    with pytest.raises(plugins.PluginCliError) as exc_info:
+        getattr(plugins, fn_name)(str(FAKE_CLAUDE), tmp_path, "x@m", "project", run=run)
+    assert not isinstance(exc_info.value, plugins.PluginNotFoundError)
+    argv = calls[0]["argv"]
+    assert not {"-y", "--yes", "--accept-command"} & set(argv)
+    assert calls[0]["kwargs"]["stdin"] is subprocess.DEVNULL
+
+
+def test_cli_list_plugins_masks_plugin_mcp_server_credentials(tmp_path: Path) -> None:
+    payload = [
+        {
+            "id": "deployer@acme-tools",
+            "version": "1.2.0",
+            "scope": "project",
+            "enabled": True,
+            "installPath": "/home/u/.claude/plugins/cache/acme-tools/deployer/1.2.0",
+            "mcpServers": {
+                "deploy": {
+                    "command": "node",
+                    "args": ["server.js"],
+                    "env": {"REGION": "eu-west-1", "DEPLOY_KEY": "AKIA-literal"},
+                    "headers": {"X-Registry": "literal-value"},
+                }
+            },
+        }
+    ]
+    run, _calls = _fake_run(rc=0, stdout=json.dumps(payload))
+    (got,) = plugins.cli_list_plugins(str(FAKE_CLAUDE), tmp_path, run=run)
+    server = got["mcpServers"]["deploy"]
+    assert server["env"] == {"REGION": cw.REDACTION_SENTINEL, "DEPLOY_KEY": cw.REDACTION_SENTINEL}
+    assert server["headers"] == {"X-Registry": cw.REDACTION_SENTINEL}
+    assert server["command"] == "node" and server["args"] == ["server.js"]
+    # What the dashboard renders stays intact.
+    assert got["id"] == "deployer@acme-tools" and got["enabled"] is True
+    assert got["installPath"] == payload[0]["installPath"]
+
+
+def test_cli_list_marketplaces_masks_url_credentials(tmp_path: Path) -> None:
+    payload = [
+        {"name": "probe-mkt", "source": "directory", "path": "/srv/mkt"},
+        {
+            "name": "private",
+            "source": "git",
+            "url": "https://bot:ghp_secret@git.example.com/p.git",
+        },
+        {"name": "acme", "source": "github", "repo": "acme/plugins", "ref": "v2"},
+        {"name": "claudeai-org", "source": "claudeai", "marketplaceId": "m1", "status": "ok"},
+    ]
+    run, _calls = _fake_run(rc=0, stdout=json.dumps(payload))
+    got = plugins.cli_list_marketplaces(str(FAKE_CLAUDE), tmp_path, run=run)
+    assert "ghp_secret" not in json.dumps(got)
+    assert got[1]["url"] == cw.REDACTION_SENTINEL
+    assert [got[0], got[2], got[3]] == [payload[0], payload[2], payload[3]]
+
+
+def _write_project_settings(project_dir: Path, data: dict) -> None:
+    settings = cw.project_settings_path(project_dir)
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps(data), encoding="utf-8")
+
+
+#: One `extraKnownMarketplaces` entry per documented marketplace source type
+#: (settings-reference "Marketplace source types", marketplace-reference "Fields by type").
+_DOCUMENTED_SOURCES = {
+    "gh": {"source": {"source": "github", "repo": "acme/plugins", "ref": "v2", "path": "mk"}},
+    "gh-sparse": {
+        "source": {"source": "github", "repo": "acme/mono", "sparsePaths": [".claude-plugin"]},
+        "autoUpdate": True,
+    },
+    "gl": {"source": {"source": "git", "url": "https://gitlab.example.com/t/p.git", "ref": "x"}},
+    "hosted": {"source": {"source": "url", "url": "https://plugins.example.com/m.json"}},
+    "f": {"source": {"source": "file", "path": "/opt/acme/marketplace.json"}},
+    "d": {"source": {"source": "directory", "path": "/opt/acme"}, "autoUpdate": False},
+    "team-tools": {
+        "source": {
+            "source": "settings",
+            "name": "team-tools",
+            "plugins": [{"name": "fmt", "source": {"source": "github", "repo": "acme/fmt"}}],
+        }
+    },
+    "future": {"source": {"source": "some-new-type", "where": "elsewhere"}},
+}
+
+
+def test_read_marketplaces_passes_every_documented_source_type_through(tmp_path: Path) -> None:
+    # Nothing is fetched, resolved, or dropped: every type (and an unknown future one)
+    # reads back exactly as stored.
+    _write_project_settings(tmp_path, {"extraKnownMarketplaces": _DOCUMENTED_SOURCES})
+    assert plugins.read_project_marketplaces(tmp_path) == _DOCUMENTED_SOURCES
+
+
+def test_read_marketplaces_masks_headers_and_headers_helper(tmp_path: Path) -> None:
+    declared = {
+        "private-hosted": {
+            "source": {
+                "source": "url",
+                "url": "https://plugins.example.com/marketplace.json",
+                "headers": {"Authorization": "Bearer ${TOKEN}", "Cookie": "session=literal"},
+                "headersHelper": "/usr/local/bin/mint-token --secret literal",
+            }
+        },
+        "inline": {
+            "source": {
+                "source": "settings",
+                "name": "inline",
+                "plugins": [
+                    {
+                        "name": "pkg",
+                        "source": {"source": "archive", "url": "https://r.example.com/p.zip"},
+                        "headers": {"X-Registry": "literal-value"},
+                        "headersHelper": "print-headers",
+                    }
+                ],
+            }
+        },
+        "cred-url": {"source": {"source": "git", "url": "https://bot:tok@git.example.com/r.git"}},
+    }
+    _write_project_settings(tmp_path, {"extraKnownMarketplaces": declared})
+    got = plugins.read_project_marketplaces(tmp_path)
+    text = json.dumps(got)
+    for secret in ("${TOKEN}", "session=literal", "mint-token", "literal-value", "bot:tok"):
+        assert secret not in text
+    hosted = got["private-hosted"]["source"]
+    assert hosted["headers"] == {
+        "Authorization": cw.REDACTION_SENTINEL,
+        "Cookie": cw.REDACTION_SENTINEL,
+    }
+    assert hosted["headersHelper"] == cw.REDACTION_SENTINEL
+    assert hosted["url"] == "https://plugins.example.com/marketplace.json"  # no creds: kept
+    entry = got["inline"]["source"]["plugins"][0]
+    assert entry["headers"] == {"X-Registry": cw.REDACTION_SENTINEL}
+    assert entry["headersHelper"] == cw.REDACTION_SENTINEL
+    assert entry["name"] == "pkg"
+
+
+def test_marketplace_add_failure_never_echoes_source_credentials(tmp_path: Path) -> None:
+    # The failure detail quotes the identifier; for `marketplace add` that is the source,
+    # and a git source can embed a token. It must not reach the 400 detail unmasked.
+    run, _calls = _fake_run(rc=1, stderr="Invalid marketplace source format.")
+    with pytest.raises(plugins.PluginCliError) as exc_info:
+        plugins.cli_marketplace_add(
+            str(FAKE_CLAUDE),
+            tmp_path,
+            "https://bot:ghp_tok@git.example.com/r.git",
+            "user",
+            run=run,
+        )
+    assert "ghp_tok" not in str(exc_info.value)
+    assert "git.example.com/r.git" in str(exc_info.value)  # still diagnosable
+
+
+def test_redact_plugin_display_masks_malformed_credential_fields_too() -> None:
+    # A `headers`/`env` that is not the documented object still has every leaf masked
+    # (structure kept); an empty `headersHelper` has nothing to hide and stays as stored.
+    got = plugins.redact_plugin_display(
+        {"headers": ["Cookie: a=1", {"X": "y"}], "env": "FOO=bar", "headersHelper": ""}
+    )
+    assert got == {
+        "headers": [cw.REDACTION_SENTINEL, {"X": cw.REDACTION_SENTINEL}],
+        "env": cw.REDACTION_SENTINEL,
+        "headersHelper": "",
+    }
+
+
+def test_read_marketplaces_reads_the_additional_marketplaces_alias(tmp_path: Path) -> None:
+    alias = {"acme": {"source": {"source": "github", "repo": "acme/plugins"}}}
+    _write_project_settings(tmp_path, {"additionalMarketplaces": alias})
+    assert plugins.read_project_marketplaces(tmp_path) == alias
+
+
+def test_read_marketplaces_canonical_key_wins_over_the_alias(tmp_path: Path) -> None:
+    # Claude Code's own rule: with both spellings in one file, the alias is ignored.
+    canonical = {"real": {"source": {"source": "directory", "path": "/opt/real"}}}
+    _write_project_settings(
+        tmp_path,
+        {
+            "extraKnownMarketplaces": canonical,
+            "additionalMarketplaces": {"ignored": {"source": {"source": "github", "repo": "a/b"}}},
+        },
+    )
+    assert plugins.read_project_marketplaces(tmp_path) == canonical
+
+
+def test_read_enabled_plugins_accepts_every_documented_id_form(tmp_path: Path) -> None:
+    # settings-reference `enabledPlugins`: `name@marketplace` -> bool, including the
+    # `@synced` form for a claude.ai-synced plugin and a reserved `@skills-dir` id.
+    enabled = {"fmt@team-tools": True, "notes@synced": False, "helper@skills-dir": False}
+    _write_project_settings(tmp_path, {"enabledPlugins": enabled})
+    assert plugins.read_project_enabled_plugins(tmp_path) == enabled
+
+
+@pytest.mark.parametrize("plugin_id", ["notes@synced", "helper@skills-dir", "fmt@builtin"])
+def test_validate_plugin_id_accepts_reserved_marketplace_suffixes(plugin_id: str) -> None:
+    # The CLI takes `<name>@synced` for enable/disable (cli-reference) and lists
+    # `@skills-dir` / `@builtin` ids; the shape check must not refuse them.
+    plugins.validate_plugin_id(plugin_id)
+
+
+def test_route_marketplaces_declared_masks_header_credentials(
+    write_config, tmp_path, projects_root
+) -> None:
+    _write_project_settings(
+        projects_root / "alpha",
+        {
+            "extraKnownMarketplaces": {
+                "hosted": {
+                    "source": {
+                        "source": "url",
+                        "url": "https://plugins.example.com/m.json",
+                        "headers": {"X-Custom": "literal-credential"},
+                    }
+                }
+            }
+        },
+    )
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.get("/api/config-write/marketplaces/declared?scope=project&project=alpha")
+        assert resp.status_code == 200
+        assert "literal-credential" not in resp.text
+        source = resp.json()["marketplaces"]["hosted"]["source"]
+        assert source["headers"] == {"X-Custom": cw.REDACTION_SENTINEL}
+
+
+def test_route_marketplaces_list_masks_url_credentials(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    payload = [{"name": "p", "source": "git", "url": "https://u:secret-tok@h.example/r.git"}]
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_STDOUT", json.dumps(payload))
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.get("/api/config-write/marketplaces?scope=project&project=alpha")
+        assert resp.status_code == 200
+        assert "secret-tok" not in resp.text
+
+
+def test_route_marketplaces_action_remove_not_declared_is_404(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_EXIT_CODE", "1")
+    monkeypatch.setenv(
+        "FAKE_CLAUDE_PLUGIN_STDERR",
+        "Failed to remove marketplace: Marketplace 'x' is not declared in project settings.",
+    )
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.post(
+            "/api/config-write/marketplaces/action",
+            json={
+                "scope": "project",
+                "project": "alpha",
+                "confirm": "alpha",
+                "op": "remove",
+                "name": "x",
+            },
+        )
+        assert resp.status_code == 404
