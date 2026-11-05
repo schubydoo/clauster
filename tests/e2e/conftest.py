@@ -536,6 +536,21 @@ def bridge_server_pty(
 
 
 @pytest.fixture
+def bridge_server_pty_screen(
+    tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
+) -> Iterator[Server]:
+    """A :func:`bridge_server_pty` with the read-only live terminal view switched on.
+
+    ``claude.pty_screen_enabled: true`` renders the per-row Live terminal toggle (the
+    dev extra installs ``pyte``, so the view is live rather than the greyed install hint).
+    """
+    tmp = tmp_path_factory.mktemp("e2e-bridge-pty-screen")
+    yield from _start_server(
+        tmp, mutable_projects_tree, extra="  launch_mode: pty\n  pty_screen_enabled: true\n"
+    )
+
+
+@pytest.fixture
 def usage_server(
     tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
 ) -> Iterator[Server]:

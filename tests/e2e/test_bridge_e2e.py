@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from typing import TYPE_CHECKING
 
 import pytest
@@ -256,6 +257,73 @@ def test_pty_resume_picker_forks_past_conversation(
     assert argv[argv.index("--resume") + 1] == uuid
     assert "--fork-session" in argv
     assert "--continue" not in argv  # a fork is not a revive
+
+
+# The rendered grid's offsets inside the live-terminal host's content box, in CSS px.
+# getBoundingClientRect reflects the fit transform, so a scaled grid reports its scaled size.
+_PTY_GRID_GEOMETRY_JS = """(() => {
+  const h = document.querySelector('[data-test="pty-screen-host"]');
+  const x = h && h.querySelector(".xterm");
+  const s = h && h.querySelector(".xterm-screen");
+  if (!x || !s || !s.offsetWidth) return null;
+  const hr = h.getBoundingClientRect(), xr = x.getBoundingClientRect();
+  const cs = getComputedStyle(h);
+  return {
+    left: xr.left - hr.left - parseFloat(cs.paddingLeft),
+    right: hr.right - parseFloat(cs.paddingRight) - xr.right,
+    bottom: hr.bottom - parseFloat(cs.paddingBottom) - xr.bottom,
+    scaled: x.style.transform !== "",
+  };
+})()"""
+
+
+def _wait_for_grid(browser: AgentBrowser, accept) -> dict:
+    """Poll the live-terminal grid geometry until ``accept(geometry)`` holds; return it."""
+    deadline = time.monotonic() + STATUS_TIMEOUT / 1000
+    geo = None
+    while time.monotonic() < deadline:
+        geo = browser.eval_json(_PTY_GRID_GEOMETRY_JS)
+        if geo and accept(geo):
+            return geo
+        time.sleep(0.2)
+    raise AssertionError(f"live-terminal grid geometry never settled: last={geo!r}")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="pty mode is POSIX-only")
+def test_live_terminal_grid_is_centered_when_host_is_wider(
+    browser: AgentBrowser, bridge_server_pty_screen: Server
+) -> None:
+    """TASK-270: at scale=1 the fixed 120x40 grid sits centered in a wider host (balanced
+    left/right margins, no dead space below), and a narrow viewport still shrinks it to fit
+    from the host's left edge (#641), with the re-fit following each viewport resize."""
+    browser.goto(bridge_server_pty_screen.url)
+    browser.expect_visible('[data-project="gamma"]')
+    open_desktop_launch(browser, "gamma")
+    trust_and_start(browser, "gamma")
+    browser.expect_text("section.zone-active", "Running", timeout_ms=STATUS_TIMEOUT)
+
+    browser.set_viewport(1920, 2000)
+    browser.click('section.zone-active [data-test="pty-screen-toggle"]')
+    browser.expect_visible('[data-test="pty-screen-host"]', timeout_ms=STATUS_TIMEOUT)
+
+    # Wide: unscaled, centered with real spare width on both sides, and the host hugs the
+    # grid height (#673), so nothing is left over below it either.
+    wide = _wait_for_grid(browser, lambda g: not g["scaled"] and g["left"] > 10)
+    assert abs(wide["left"] - wide["right"]) <= 1, wide
+    assert abs(wide["bottom"]) <= 1, wide
+
+    # Narrow: the grid no longer fits, so the shrink-to-fit transform applies. The auto
+    # margins resolve to 0, so the scaled grid starts at the host's left edge and fits.
+    browser.set_viewport(640, 2000)
+    narrow = _wait_for_grid(browser, lambda g: g["scaled"])
+    assert abs(narrow["left"]) <= 1, narrow
+    assert narrow["right"] >= -1, narrow
+    assert abs(narrow["bottom"]) <= 1, narrow
+
+    # Back to wide: the re-fit drops the transform and the grid is centered again.
+    browser.set_viewport(1920, 2000)
+    again = _wait_for_grid(browser, lambda g: not g["scaled"] and g["left"] > 10)
+    assert abs(again["left"] - again["right"]) <= 1, again
 
 
 def test_background_launch_option_labeled_and_reveals_subfields(
