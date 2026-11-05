@@ -35,8 +35,11 @@ gives each key a scope; some are read only from user settings, only from user an
 settings, only from managed settings, or only from ``~/.claude.json``. A write that names
 such a key (:data:`SCOPE_LIMITED_KEYS`) at a scope where Claude Code ignores it is
 refused whole (422, :func:`reject_scope_ignored`), with a message naming the scope that
-works, and the merged view leaves it out of that scope's layer. This is a scope rule,
-not a key allowlist: every other key still passes through as opaque JSON.
+works, and the merged view leaves it out of that scope's layer. A key that Claude Code
+reads at every scope but with one value it reads only at some
+(:data:`SCOPE_LIMITED_VALUES`) is refused, and left out, only when it holds that value.
+This is a scope rule, not a key allowlist: every other key still passes through as
+opaque JSON.
 
 **Redaction decision (#772, applying the #822 lesson) -- flagged for maintainer
 review.** :func:`~clauster.config_write.redact_secrets` only masks a value whose
@@ -396,9 +399,9 @@ def _has_path(data: Any, dotted: str) -> bool:
 
 def _holds_value(data: Any, dotted: str, value: Any) -> bool:
     """Whether ``data`` holds exactly ``value`` (same JSON type) at the dotted path."""
-    if not _has_path(data, dotted):
-        return False
     for part in dotted.split("."):
+        if not isinstance(data, dict) or part not in data:
+            return False
         data = data[part]
     return type(data) is type(value) and data == value
 
@@ -422,12 +425,15 @@ def _ignored_paths(data: dict[str, Any], scope: cw.Scope) -> list[str]:
     return sorted(keys + values)
 
 
-def _scope_rule(path: str) -> tuple[str, str]:
-    """Return the label for an ignored ``path`` (with its value, if value-level) and kind."""
+def _scope_rule(path: str) -> tuple[str, str, str]:
+    """Return the label, the read-from phrase and the fix hint for an ignored ``path``."""
     if path in SCOPE_LIMITED_KEYS:
-        return path, SCOPE_LIMITED_KEYS[path]
+        _, where, fix = _READ_FROM[SCOPE_LIMITED_KEYS[path]]
+        return path, where, fix
     value, kind = SCOPE_LIMITED_VALUES[path]
-    return f"{path}: {json.dumps(value)}", kind
+    _, where, fix = _READ_FROM[kind]
+    # Every value-level entry is a true whose false Claude Code reads at every scope.
+    return f"{path}: {json.dumps(value)}", where, f"set it to false or remove it, or {fix}"
 
 
 def reject_scope_ignored(candidate: dict[str, Any], scope: cw.Scope) -> None:
@@ -442,10 +448,9 @@ def reject_scope_ignored(candidate: dict[str, Any], scope: cw.Scope) -> None:
         rules = [_scope_rule(path) for path in paths]
         raise cw.InvalidCandidateError(
             " ".join(
-                f"Claude Code reads {label} only from {_READ_FROM[kind][1]} "
-                f"and ignores it in {_SCOPE_LABEL[scope]}; "
-                f"{_READ_FROM[kind][2]}."
-                for label, kind in rules
+                f"Claude Code reads {label} only from {where} "
+                f"and ignores it in {_SCOPE_LABEL[scope]}; {fix}."
+                for label, where, fix in rules
             )
         )
 

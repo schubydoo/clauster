@@ -376,16 +376,19 @@ example:
   Code `/config` command writes.
 
 If a file already holds such a key, remove the key in Raw JSON before you save
-the file again at that scope. The settings reference gives
-`bashEditDiffEnabled` and `sandbox.allowNestedUserNamespaces` User scope, but
-Claude Code also reads `false` for them from a project or local file, so the
-tab accepts `false` at every scope. Claude Code reads `true` for them only from
-user settings, so the tab refuses `true` at Project and Local scope. Clauster
-checks no other values. For example, Claude Code drops a `mask` entry of
-`sandbox.credentials.envVars` from a project file, but Clauster does not refuse
-that entry. The auto mode key `disableAutoMode` and the hook keys
-`disableAllHooks`, `allowedHttpHookUrls` and `httpHookAllowedEnvVars` work in
-every settings file, so the tab accepts them at every scope.
+the file again at that scope. The auto mode key `disableAutoMode` and the hook
+keys `disableAllHooks`, `allowedHttpHookUrls` and `httpHookAllowedEnvVars` work
+in every settings file, so the tab accepts them at every scope.
+
+The settings reference gives `bashEditDiffEnabled` and
+`sandbox.allowNestedUserNamespaces` User scope, but Claude Code also reads
+`false` for them from a project or local file, so the tab accepts `false` at
+every scope. Claude Code reads `true` for them only from user settings, so the
+tab refuses `true` at Project and Local scope. If a project or local file
+already holds `true` for one of them, change it to `false` or remove it before
+you save. Clauster checks no other values, so it does not refuse a `mask` entry
+of `sandbox.credentials.envVars` in a project file, although Claude Code drops
+that entry.
 
 At Project and Local scope, the merged ("effective") view shows the value that
 Claude Code applies from the three files. Local settings override project
@@ -393,8 +396,7 @@ settings, and project settings override user settings. Claude Code merges an
 object such as `env` key by key and combines the lists from each file. A plain
 value from a higher scope replaces the lower one, and `fallbackModel` comes
 whole from one file. A key or value that a file is not allowed to set is left
-out. When
-more than one file makes up a value, the **From** column names each file.
+out. When more than one file makes up a value, the **From** column names each file.
 Managed settings and the `--settings` flag are not part of the view.
 
 If a scope fails to load, the tab clears its rows. A save therefore cannot write

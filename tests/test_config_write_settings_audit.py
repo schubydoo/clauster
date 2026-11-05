@@ -343,6 +343,15 @@ def test_true_is_refused_exactly_where_claude_code_ignores_it(
     assert not (tmp_path / ".claude").exists()
 
 
+def test_a_file_already_holding_true_saves_once_it_is_false(tmp_path: Path) -> None:
+    h = _seed(cw.project_settings_path(tmp_path), {"bashEditDiffEnabled": True})
+    view, _ = cws.read_project_settings(tmp_path)
+    with pytest.raises(cw.InvalidCandidateError) as exc:
+        cws.write_project_settings(tmp_path, {**view, "model": "opus"}, h)
+    assert "set it to false or remove it, or switch to User scope" in str(exc.value)
+    cws.write_project_settings(tmp_path, {"bashEditDiffEnabled": False, "model": "opus"}, h)
+
+
 @pytest.mark.parametrize("path", _FALSE_READ_EVERYWHERE)
 def test_value_rule_matches_the_json_type_only(tmp_path: Path, path: str) -> None:
     # 1 == True in Python, but a JSON 1 is not the boolean Claude Code compares with.
