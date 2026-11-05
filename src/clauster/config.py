@@ -304,7 +304,8 @@ class InstanceDefaults(BaseModel):
     )
     permission_mode: PermissionMode = Field(
         default="default",
-        description="Default permission mode for new bridges. `inherit` is a Clauster "
+        description="Default permission mode for new bridges, for background runs that "
+        "name no mode, and for background resumes. `inherit` is a Clauster "
         "sentinel, not a claude mode: it passes **no** `--permission-mode` flag, so the "
         "session starts in whatever mode it would pick on its own. With no flag passed, a "
         "`permissions.defaultMode: bypassPermissions` in user or managed settings takes "

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import signal
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,7 +13,7 @@ from fastapi.testclient import TestClient
 from clauster import supervisor
 from clauster.app import create_app
 from clauster.claude_cli import ClaudeNotFound
-from clauster.config import load_config
+from clauster.config import CEILING_GATED_MODES, ClausterConfig, load_config
 
 FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
 
@@ -1086,20 +1087,110 @@ def test_api_resume_agent_inherit_with_ceiling_resumes(
     assert captured[0]["permission_mode"] == "inherit"
 
 
-@pytest.mark.parametrize("where", ["outside", "root"])
-def test_api_resume_agent_inherit_outside_projects_is_403(
-    write_config, tmp_path, projects_root, monkeypatch, where
-):
-    # A job outside projects_root has no project, so no ceiling allows a gated mode. Its
-    # directory name must not borrow the same-named project's ceiling.
+def _outside(tmp_path: Path) -> Path:
     # projects_root IS tmp_path here, so "outside" is a sibling of it.
-    outside = tmp_path.parent / f"elsewhere-{tmp_path.name}" / "alpha"
-    cwd = outside if where == "outside" else projects_root
+    return tmp_path.parent / f"elsewhere-{tmp_path.name}"
+
+
+@pytest.mark.parametrize("mode", sorted(CEILING_GATED_MODES))
+@pytest.mark.parametrize("where", ["outside", "root", "dotdot", "dotdot-missing", "sibling"])
+def test_api_resume_agent_gated_mode_outside_the_ceiling_project_is_403(
+    write_config, tmp_path, projects_root, monkeypatch, mode, where
+):
+    # Only alpha has the ceiling. A job that is not really in alpha must not borrow it:
+    # not by its directory name, not at projects_root itself, and not by a `..` that
+    # leads out of alpha (existing or not) — the mapping compares resolved paths.
+    cwd = {
+        "outside": _outside(tmp_path) / "alpha",
+        "root": projects_root,
+        "dotdot": projects_root / "alpha" / ".." / "beta",
+        "dotdot-missing": projects_root / "alpha" / ".." / ".." / "gone" / "x",
+        "sibling": projects_root / "beta",
+    }[where]
+    extra = f"instance_defaults:\n  permission_mode: {mode}\n" + _ALPHA_CEILING
+    r, captured = _resume_via_route(write_config, tmp_path, monkeypatch, cwd=cwd, extra=extra)
+    assert r.status_code == 403
+    assert "allow_bypass_permissions: true" in r.json()["detail"]
+    assert captured == []
+
+
+def test_api_resume_agent_project_with_ceiling_off_names_the_project(
+    write_config, tmp_path, projects_root, monkeypatch
+):
+    extra = _INHERIT_DEFAULT + "projects:\n  alpha:\n    allow_bypass_permissions: false\n"
     r, captured = _resume_via_route(
-        write_config, tmp_path, monkeypatch, cwd=cwd, extra=_INHERIT_DEFAULT + _ALPHA_CEILING
+        write_config, tmp_path, monkeypatch, cwd=projects_root / "alpha", extra=extra
     )
     assert r.status_code == 403
-    assert "outside projects_root" in r.json()["detail"]
+    assert r.json() == {
+        "detail": ClausterConfig.bypass_denied_detail("alpha", permission_mode="inherit")
+    }
+    assert captured == []
+
+
+def test_api_resume_agent_ignores_a_traversal_project_key(
+    write_config, tmp_path, projects_root, monkeypatch
+):
+    # A `projects:` key that is not a valid project name (here "..") must not make the
+    # parent of projects_root a project whose ceiling covers everything under it.
+    extra = _INHERIT_DEFAULT + "projects:\n  '..':\n    allow_bypass_permissions: true\n"
+    r, captured = _resume_via_route(
+        write_config, tmp_path, monkeypatch, cwd=_outside(tmp_path), extra=extra
+    )
+    assert r.status_code == 403
+    assert captured == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="os.symlink needs privilege on Windows")
+def test_api_resume_agent_symlink_out_of_the_project_is_403(
+    write_config, tmp_path, tmp_path_factory, projects_root, monkeypatch
+):
+    # A link inside alpha that points outside: the job really runs outside alpha.
+    target = tmp_path_factory.mktemp("outside335")
+    (projects_root / "alpha" / "link").symlink_to(target, target_is_directory=True)
+    r, captured = _resume_via_route(
+        write_config,
+        tmp_path,
+        monkeypatch,
+        cwd=projects_root / "alpha" / "link",
+        extra=_INHERIT_DEFAULT + _ALPHA_CEILING,
+    )
+    assert r.status_code == 403
+    assert captured == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="os.symlink needs privilege on Windows")
+def test_api_resume_agent_symlinked_project_keeps_its_ceiling(
+    write_config, tmp_path, tmp_path_factory, projects_root, monkeypatch
+):
+    # Positive control for the resolved comparison: a project whose directory is itself
+    # a symlink still matches its own ceiling (both sides resolve to the same place).
+    real = tmp_path_factory.mktemp("delta-real335")
+    (projects_root / "delta").symlink_to(real, target_is_directory=True)
+    extra = _INHERIT_DEFAULT + "projects:\n  delta:\n    allow_bypass_permissions: true\n"
+    r, captured = _resume_via_route(
+        write_config, tmp_path, monkeypatch, cwd=projects_root / "delta", extra=extra
+    )
+    assert r.status_code == 201
+    assert captured[0]["permission_mode"] == "inherit"
+
+
+def test_api_resume_agent_unresolvable_cwd_is_403(
+    write_config, tmp_path, projects_root, monkeypatch
+):
+    # Python 3.11/3.12 raise RuntimeError on a symlink loop; any resolve failure fails closed.
+    class _LoopPath(type(Path())):
+        def resolve(self, strict=False):
+            raise RuntimeError("Symlink loop")
+
+    r, captured = _resume_via_route(
+        write_config,
+        tmp_path,
+        monkeypatch,
+        cwd=_LoopPath(projects_root / "alpha"),
+        extra=_INHERIT_DEFAULT + _ALPHA_CEILING,
+    )
+    assert r.status_code == 403
     assert captured == []
 
 
@@ -1107,9 +1198,7 @@ def test_api_resume_agent_outside_projects_explicit_mode_resumes(
     write_config, tmp_path, monkeypatch
 ):
     # A non-gated default forces its own flag, so the ceiling does not apply to it.
-    r, captured = _resume_via_route(
-        write_config, tmp_path, monkeypatch, cwd=tmp_path.parent / f"elsewhere-{tmp_path.name}"
-    )
+    r, captured = _resume_via_route(write_config, tmp_path, monkeypatch, cwd=_outside(tmp_path))
     assert r.status_code == 201
     assert captured[0]["permission_mode"] == "default"
 

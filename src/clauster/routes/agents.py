@@ -229,23 +229,43 @@ async def api_resume_agent(job_id: str, config: ConfigDep, runner: RunnerDep) ->
 def _resume_ceiling_refusal(config: ClausterConfig, cwd: Path, permission_mode: str) -> str | None:
     """Return the 403 detail when ``permission_mode`` is refused for a job in ``cwd``.
 
-    The job belongs to the project named by the first path part under ``projects_root``.
-    A job outside ``projects_root`` has no project and so no ceiling: a ceiling-gated mode
-    is refused for it (fail closed), and its directory name is never matched against a
-    project's ceiling, so ``/tmp/<name>`` cannot borrow ``<name>``'s ceiling.
+    An explicit mode forces its own flag, so only :data:`CEILING_GATED_MODES` are
+    checked. Those need the ceiling of the configured project whose real directory
+    holds the job's real directory (:func:`_configured_project_holding`). A job in no
+    configured project has no ceiling and is refused (fail closed).
     """
-    try:
-        parts = cwd.resolve().relative_to(config.projects_root.resolve()).parts
-    except ValueError:
-        parts = ()
-    if not parts:
-        if permission_mode in CEILING_GATED_MODES:
-            return (
-                f"{permission_mode} is not enabled for a background job outside projects_root: "
-                "no project's allow_bypass_permissions ceiling covers its directory."
-            )
+    if permission_mode not in CEILING_GATED_MODES:
         return None
-    project = parts[0]
+    project = _configured_project_holding(config, cwd)
+    if project is None:
+        return (
+            f"{permission_mode} is not enabled for this background job: its directory is in "
+            "no project that sets projects.<name>.allow_bypass_permissions: true in "
+            "clauster.yml."
+        )
     if config.bypass_denied(project, permission_mode):
         return config.bypass_denied_detail(project, permission_mode=permission_mode)
+    return None
+
+
+def _configured_project_holding(config: ClausterConfig, cwd: Path) -> str | None:
+    """Return the ``config.projects`` name whose directory holds ``cwd``, or ``None``.
+
+    Both sides are compared after ``resolve()``, so ``..`` and symlinks cannot move a
+    job into a project it does not run in (a symlinked project directory still matches
+    itself), and a directory name is never matched by name alone: ``/tmp/<name>`` does
+    not borrow ``<name>``'s ceiling. Only configured projects can carry a ceiling, so
+    no other directory needs a match. Unresolvable paths match nothing (fail closed).
+    """
+    try:
+        resolved = cwd.resolve()
+        for name in config.projects:
+            # A key like ".." would make projects_root's parent a "project" (widening).
+            if not is_valid_project_name(name):
+                continue
+            base = (config.projects_root / name).resolve()
+            if resolved == base or base in resolved.parents:
+                return name
+    except (OSError, RuntimeError):  # 3.11/3.12 raise RuntimeError on a symlink loop
+        return None
     return None
