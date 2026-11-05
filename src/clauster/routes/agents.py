@@ -230,42 +230,51 @@ def _resume_ceiling_refusal(config: ClausterConfig, cwd: Path, permission_mode: 
     """Return the 403 detail when ``permission_mode`` is refused for a job in ``cwd``.
 
     An explicit mode forces its own flag, so only :data:`CEILING_GATED_MODES` are
-    checked. Those need the ceiling of the configured project whose real directory
-    holds the job's real directory (:func:`_configured_project_holding`). A job in no
-    configured project has no ceiling and is refused (fail closed).
+    checked. Those need the ceiling of EVERY project whose real directory holds the
+    job's real directory (:func:`_projects_holding`), so overlapping project
+    directories (one symlinked inside another) can only make the gate stricter, never
+    depend on the order of the ``projects:`` keys. A job in no project has no ceiling
+    and is refused (fail closed).
     """
     if permission_mode not in CEILING_GATED_MODES:
         return None
-    project = _configured_project_holding(config, cwd)
-    if project is None:
+    projects = _projects_holding(config, cwd)
+    if not projects:
         return (
             f"{permission_mode} is not enabled for this background job: its directory is in "
             "no project that sets projects.<name>.allow_bypass_permissions: true in "
             "clauster.yml."
         )
-    if config.bypass_denied(project, permission_mode):
-        return config.bypass_denied_detail(project, permission_mode=permission_mode)
+    for project in projects:
+        if config.bypass_denied(project, permission_mode):
+            return config.bypass_denied_detail(project, permission_mode=permission_mode)
     return None
 
 
-def _configured_project_holding(config: ClausterConfig, cwd: Path) -> str | None:
-    """Return the ``config.projects`` name whose directory holds ``cwd``, or ``None``.
+def _projects_holding(config: ClausterConfig, cwd: Path) -> list[str]:
+    """Return every project whose directory holds ``cwd``, sorted; empty if none.
 
+    The candidates are each valid ``config.projects`` key and the first path part of
+    ``cwd`` under ``projects_root`` (a project with no config entry, so no ceiling).
     Both sides are compared after ``resolve()``, so ``..`` and symlinks cannot move a
     job into a project it does not run in (a symlinked project directory still matches
     itself), and a directory name is never matched by name alone: ``/tmp/<name>`` does
-    not borrow ``<name>``'s ceiling. Only configured projects can carry a ceiling, so
-    no other directory needs a match. Unresolvable paths match nothing (fail closed).
+    not borrow ``<name>``'s ceiling. An unresolvable path matches nothing (fail closed).
     """
+    found: set[str] = set()
     try:
         resolved = cwd.resolve()
+        root = config.projects_root.resolve()
+        if root in resolved.parents:
+            found.add(resolved.relative_to(root).parts[0])
         for name in config.projects:
             # A key like ".." would make projects_root's parent a "project" (widening).
             if not is_valid_project_name(name):
                 continue
             base = (config.projects_root / name).resolve()
             if resolved == base or base in resolved.parents:
-                return name
-    except (OSError, RuntimeError):  # 3.11/3.12 raise RuntimeError on a symlink loop
-        return None
-    return None
+                found.add(name)
+    # RuntimeError: a symlink loop on 3.11/3.12. ValueError: a NUL byte in the path.
+    except (OSError, RuntimeError, ValueError):
+        return []
+    return sorted(found)

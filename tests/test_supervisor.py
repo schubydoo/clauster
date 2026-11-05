@@ -1114,6 +1114,80 @@ def test_api_resume_agent_gated_mode_outside_the_ceiling_project_is_403(
     assert captured == []
 
 
+def test_api_resume_agent_prefix_sibling_does_not_borrow(
+    write_config, tmp_path, projects_root, monkeypatch
+):
+    # Containment is by path parts, not a string prefix: alpha-x is not inside alpha.
+    (projects_root / "alpha-x").mkdir()
+    r, captured = _resume_via_route(
+        write_config,
+        tmp_path,
+        monkeypatch,
+        cwd=projects_root / "alpha-x",
+        extra=_INHERIT_DEFAULT + _ALPHA_CEILING,
+    )
+    assert r.status_code == 403
+    assert captured == []
+
+
+def test_api_resume_agent_nul_byte_cwd_is_403(write_config, tmp_path, projects_root, monkeypatch):
+    # resolve() raises ValueError on an embedded NUL: still a 403, never a 500.
+    r, captured = _resume_via_route(
+        write_config,
+        tmp_path,
+        monkeypatch,
+        cwd=projects_root / "alpha" / "bad\x00name",
+        extra=_INHERIT_DEFAULT + _ALPHA_CEILING,
+    )
+    assert r.status_code == 403
+    assert captured == []
+
+
+_A_ON = "  a:\n    allow_bypass_permissions: true\n"
+_B_ON = "  b:\n    allow_bypass_permissions: true\n"
+_B_OFF = "  b:\n    allow_bypass_permissions: false\n"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="os.symlink needs privilege on Windows")
+@pytest.mark.parametrize(
+    ("projects_yaml", "expected"),
+    [
+        # b (no ceiling) listed after / before a (ceiling): the order must not matter.
+        (
+            _A_ON + _B_OFF,
+            403,
+        ),
+        (
+            _B_OFF + _A_ON,
+            403,
+        ),
+        # b with no config entry at all is a project with no ceiling, too.
+        ("  a:\n    allow_bypass_permissions: true\n", 403),
+        # Positive control: both ceilings on -> the overlap is allowed.
+        (
+            _A_ON + _B_ON,
+            201,
+        ),
+    ],
+)
+def test_api_resume_agent_overlapping_projects_need_every_ceiling(
+    write_config, tmp_path, projects_root, monkeypatch, projects_yaml, expected
+):
+    # projects_root/a is a symlink to projects_root/b/sub, so a job in b/sub/x is in both
+    # projects: every one of them must allow the gated mode.
+    (projects_root / "b" / "sub" / "x").mkdir(parents=True)
+    (projects_root / "a").symlink_to(projects_root / "b" / "sub", target_is_directory=True)
+    r, captured = _resume_via_route(
+        write_config,
+        tmp_path,
+        monkeypatch,
+        cwd=projects_root / "b" / "sub" / "x",
+        extra=_INHERIT_DEFAULT + "projects:\n" + projects_yaml,
+    )
+    assert r.status_code == expected
+    assert (captured == []) is (expected == 403)
+
+
 def test_api_resume_agent_project_with_ceiling_off_names_the_project(
     write_config, tmp_path, projects_root, monkeypatch
 ):
@@ -1173,6 +1247,22 @@ def test_api_resume_agent_symlinked_project_keeps_its_ceiling(
     )
     assert r.status_code == 201
     assert captured[0]["permission_mode"] == "inherit"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="os.symlink needs privilege on Windows")
+def test_api_resume_agent_prefix_of_a_symlinked_project_does_not_borrow(
+    write_config, tmp_path, tmp_path_factory, projects_root, monkeypatch
+):
+    # Outside projects_root only the configured match decides, so pin that containment
+    # is by path parts: <real>-2 shares <real>'s string prefix but is not inside it.
+    real = tmp_path_factory.mktemp("delta-real335")
+    sibling = real.parent / f"{real.name}-2"
+    sibling.mkdir()
+    (projects_root / "delta").symlink_to(real, target_is_directory=True)
+    extra = _INHERIT_DEFAULT + "projects:\n  delta:\n    allow_bypass_permissions: true\n"
+    r, captured = _resume_via_route(write_config, tmp_path, monkeypatch, cwd=sibling, extra=extra)
+    assert r.status_code == 403
+    assert captured == []
 
 
 def test_api_resume_agent_unresolvable_cwd_is_403(
