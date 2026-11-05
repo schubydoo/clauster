@@ -1335,6 +1335,17 @@ def test_auto_mode_non_object_on_disk_reads_redacted(tmp_path: Path) -> None:
     assert auto_mode == [cw.REDACTION_SENTINEL]
 
 
+def test_auto_mode_non_string_leaves_read_unchanged(tmp_path: Path) -> None:
+    # classifyAllShell is a documented Boolean, and a hand-edited list can hold a number
+    # or null: the prose-secret pass must leave every non-string leaf as stored.
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    stored = {"classifyAllShell": True, "environment": ["$defaults", 3, None]}
+    settings.write_text(json.dumps({"autoMode": stored}), encoding="utf-8")
+    _b, auto_mode, _h = perms.read_user_permissions(settings)
+    assert auto_mode == stored
+
+
 @pytest.mark.parametrize(
     ("stored", "expected"),
     [
