@@ -24,7 +24,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO, Literal, TypedDict
+from typing import BinaryIO, Final, Literal, TypedDict
 from xml.sax.saxutils import escape as _xml_escape
 
 import psutil
@@ -1006,12 +1006,12 @@ _BUNDLE_ENV_HINT = "restart it to drop the old binary's environment"
 #: listed, so it hands nothing to anyone and is left out of the counts. An UNREADABLE one is
 #: still running (or cannot be told apart from running) but its environment was not read, so
 #: it is reported: counting it as clean would claim a check that never happened.
-_ENV_GONE = "gone"
-_ENV_UNREADABLE = "unreadable"
-EnvironRead = dict[str, str] | Literal["gone", "unreadable"]
+_ENV_GONE: Final = "gone"
+_ENV_UNREADABLE: Final = "unreadable"
+_EnvironRead = dict[str, str] | Literal["gone", "unreadable"]
 
 
-def _proc_environ(pid: int, proc_root: Path = Path("/proc")) -> EnvironRead:
+def _proc_environ(pid: int, proc_root: Path = Path("/proc")) -> _EnvironRead:
     """Return the environment ``pid`` started with, or why it could not be read.
 
     Reads ``/proc/<pid>/environ`` for a process of THIS user only. ``_ENV_GONE`` when the
@@ -1120,7 +1120,7 @@ def _check_bundle_env(
     config: ClausterConfig,
     projects: list[Project],
     *,
-    read_environ: Callable[[int], EnvironRead] = _proc_environ,
+    read_environ: Callable[[int], _EnvironRead] = _proc_environ,
 ) -> Check:
     """Flag bridges and daemons that still carry an old standalone binary's env (#1708).
 
@@ -1168,7 +1168,7 @@ def _check_bundle_env(
         return Check(
             "bundle-env",
             WARN,
-            f"check not completed: no tracked process environment could be read ({not_read})",
+            "check not completed: could not read the environment of " + ", ".join(unreadable),
         )
     if unreadable:
         return Check("bundle-env", WARN, f"{clean} clean, {len(unreadable)} {not_read}")

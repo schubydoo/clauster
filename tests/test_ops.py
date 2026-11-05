@@ -2717,6 +2717,19 @@ def test_proc_environ_a_permission_error_is_unreadable_not_gone(tmp_path, monkey
     assert ops_mod._proc_environ(7, tmp_path) == "unreadable"
 
 
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="/proc ownership is POSIX")
+def test_proc_environ_esrch_mid_read_is_gone(tmp_path, monkeypatch):
+    # The kernel answers ESRCH when the task dies between the lookup and the open.
+    (tmp_path / "7").mkdir()
+    (tmp_path / "7" / "environ").write_bytes(b"PATH=/usr/bin\0")
+
+    def _esrch(self):
+        raise ProcessLookupError(3, "No such process")
+
+    monkeypatch.setattr(Path, "read_bytes", _esrch)
+    assert ops_mod._proc_environ(7, tmp_path) == "gone"
+
+
 def _bundle_check(monkeypatch, suspects, envs, *, platform="linux"):
     """Run the row with a fake /proc reader: ``envs`` maps pid -> env, "gone" or "unreadable"."""
     monkeypatch.setattr(ops_mod.sys, "platform", platform)
@@ -2760,11 +2773,10 @@ def test_bundle_env_check_all_unreadable_is_not_completed(monkeypatch):
     suspects = [("bridge for a", 11), ("claustrum daemon", 33)]
     check = _bundle_check(monkeypatch, suspects, {11: "unreadable", 33: "unreadable"})
     assert check.status == WARN
-    assert check.detail.startswith(
-        "check not completed: no tracked process environment could be read"
+    assert check.detail == (
+        "check not completed: could not read the environment of "
+        "bridge for a (pid 11), claustrum daemon (pid 33)"
     )
-    assert "bridge for a (pid 11)" in check.detail
-    assert "claustrum daemon (pid 33)" in check.detail
 
 
 def test_bundle_env_check_leaked_plus_unreadable_reports_both(monkeypatch):
