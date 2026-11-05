@@ -353,7 +353,7 @@
         open: false, loading: false, loadingMore: false,
         project: "", sessions: [],
         session: "", turns: [], total: 0, nextCursor: null,
-        error: "", trigger: null, gen: 0,
+        error: "", trigger: null, triggerRow: null, gen: 0,
         order: "desc", q: "", queryTooShort: false,
         // appliedQ: the search term the loaded list was filtered with ("" = none). Load
         // more pages with it and the position line says "matching" when it is set
@@ -3234,7 +3234,17 @@
         this._stopTranscriptTail();  // #614: kill the live-tail poll loop on close
         t.live = false; t.tailRaw = []; t.tailOffset = 0; t.tailKey = 0; t.tailError = ""; t.tailTruncated = false;  // clear live state on close
         document.body.style.overflow = "";  // release the scroll lock
-        if (t.trigger && t.trigger.focus) t.trigger.focus();  // restore focus to the opener
+        // Restore focus to the opener. A live session row's button (TASK-269) leaves the
+        // DOM when that session ends while the modal is open, so fall back to a control
+        // that is still shown on the same bridge row.
+        let back = t.trigger;
+        if (!(back && back.isConnected) && t.triggerRow && t.triggerRow.isConnected) {
+          back = [...t.triggerRow.querySelectorAll(
+            '[data-test="bridge-sessions-toggle"], [data-test="transcript-trigger-session"]',
+          )].find((el) => el.offsetParent !== null) || null;
+        }
+        t.triggerRow = null;
+        if (back && back.focus) back.focus();
       },
       // Open the viewer and load the project's session list (newest-first).
       async openTranscripts(name) {
@@ -3243,6 +3253,7 @@
         t.gen = (t.gen || 0) + 1;  // bump generation so a stale in-flight load is ignored on reopen
         const myGen = t.gen;
         t.trigger = document.activeElement;  // remember the opener to restore focus on close
+        t.triggerRow = null;  // set only by openBridgeSessionTranscript
         t.open = true; t.project = name; t.error = ""; t.loading = true;
         t.sessions = []; t.session = ""; t.turns = []; t.total = 0; t.nextCursor = null;
         t.jumpMissing = "";
@@ -3268,6 +3279,8 @@
         if (t.open || t.loading) return;  // same single-flight rule as openTranscripts
         const listed = this.openTranscripts(project);
         const myGen = t.gen;  // openTranscripts bumps gen before its first await
+        // The bridge row outlives this session's row: closeTranscripts falls back to it.
+        t.triggerRow = t.trigger && t.trigger.closest ? t.trigger.closest(".sess-row") : null;
         await listed;
         // Closed or reopened mid-load, or the load failed: leave that view alone.
         if (t.gen !== myGen || !t.open || t.session || t.error) return;

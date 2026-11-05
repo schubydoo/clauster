@@ -2942,15 +2942,19 @@
                  x-show="transcripts.error" x-cloak x-text="transcripts.error"></div>
 
             <!-- session picker: shown until a session is selected -->
-            <div x-show="!transcripts.loading && !transcripts.error && !transcripts.session" x-cloak>
-              {# A session row's Live transcript button (TASK-269) asked for a session that has
-                 no transcript in this list yet: say so instead of leaving the operator to
-                 wonder why the list opened rather than the session. #}
-              <div class="alert alert-info py-1 px-2 mb-2 small" data-test="transcript-jump-missing"
-                   role="status" x-show="transcripts.jumpMissing" x-cloak>
+            {# A session row's Live transcript button (TASK-269) asked for a session that has
+               no transcript in this list yet: say so instead of leaving the operator to
+               wonder why the list opened rather than the session. The status region is
+               mounted with the modal, outside the loading-gated picker, so the note is
+               announced when it fills (a region that appears already holding text is not). #}
+            <div role="status">
+              <div class="text-secondary small mb-2" data-test="transcript-jump-missing"
+                   x-show="transcripts.jumpMissing && !transcripts.session" x-cloak>
                 No transcript for session <code x-text="transcripts.jumpMissing"></code>
                 in this project yet.
               </div>
+            </div>
+            <div x-show="!transcripts.loading && !transcripts.error && !transcripts.session" x-cloak>
               <div class="text-secondary small" data-test="transcript-empty"
                    x-show="transcripts.sessions.length === 0">
                 No transcripts for this project yet.

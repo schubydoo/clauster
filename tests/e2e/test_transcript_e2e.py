@@ -251,20 +251,30 @@ def test_bridge_session_row_opens_its_live_transcript(
         "https://claude.ai/code/" + _SESSION_269,
     )
 
-    # No transcript yet: the list opens and says which session it could not find.
+    # No transcript for this session yet (only an older one): the list opens and says
+    # which session it could not find.
+    home = server.state_dir.parent / "home"
+    _seed_session(home, gamma, "older-269.jsonl")
     modal = '[data-test="transcript-modal"]'
+    missing = '[data-test="transcript-jump-missing"]'
     browser.click(button)
     browser.expect_visible(modal)
     browser.expect_text(
-        '[data-test="transcript-jump-missing"]',
+        missing,
         "No transcript for session 26900000 in this project yet.",
         timeout_ms=STATUS_TIMEOUT,
     )
+    # Picking a listed session spends the note: back on the list, it is gone.
+    browser.expect_count('[data-test="transcript-session"]', 1, timeout_ms=STATUS_TIMEOUT)
+    browser.click('[data-test="transcript-session"]')
+    browser.expect_visible('[data-test="transcript-back"]', timeout_ms=STATUS_TIMEOUT)
+    browser.click('[data-test="transcript-back"]')
+    browser.expect_visible('[data-test="transcript-session"]', timeout_ms=STATUS_TIMEOUT)
+    browser.expect_hidden(missing)
     browser.click(f"{modal} .btn-close")
     browser.expect_hidden(modal)
 
-    # With a transcript on disk, the same button lands on the session in live mode.
-    home = server.state_dir.parent / "home"
+    # With its transcript on disk, the same button lands on the session in live mode.
     _seed_session(home, gamma, _SESSION_269 + ".jsonl")
     browser.click(button)
     browser.expect_visible('[data-test="transcript-tail-live"]', timeout_ms=STATUS_TIMEOUT)

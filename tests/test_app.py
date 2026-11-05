@@ -1478,16 +1478,32 @@ def test_dashboard_bridge_session_transcript_selects_the_session(write_config):
     fn = fn[: fn.index("\n      },")]
     assert "if (t.open || t.loading) return;" in fn
     assert "const listed = this.openTranscripts(project);" in fn
+    # The gen is read AFTER openTranscripts bumped it and BEFORE the await: swapped
+    # either way, the check would drop every run and the button would never navigate.
+    assert fn.index("const listed = this.openTranscripts(project);") < fn.index(
+        "const myGen = t.gen;"
+    )
     assert fn.index("const myGen = t.gen;") < fn.index("await listed;")
     assert "if (t.gen !== myGen || !t.open || t.session || t.error) return;" in fn
     assert "await this.openTranscriptSession(session);" in fn
     assert 't.jumpMissing = session.split("-")[0];' in fn
     # The note lives in the list view, is a status region, and is reset on every open
     # and on every session pick.
-    assert 'data-test="transcript-jump-missing"' in page
-    assert 'x-show="transcripts.jumpMissing"' in page
+    # The status region is mounted with the modal, outside the loading-gated picker, so
+    # filling it is announced.
+    region = page.index(
+        '<div role="status">\n              <div class="text-secondary small mb-2"'
+    )
+    assert region < page.index('data-test="transcript-jump-missing"')
+    assert page.index('data-test="transcript-jump-missing"') < page.index(
+        '<div x-show="!transcripts.loading && !transcripts.error && !transcripts.session"'
+    )
+    assert 'x-show="transcripts.jumpMissing && !transcripts.session"' in page
     assert 'jumpMissing: "",' in page
     assert page.count('t.jumpMissing = "";') == 2
+    # Focus goes back to the bridge row when the session's own button left the DOM.
+    assert 't.triggerRow = t.trigger && t.trigger.closest ? t.trigger.closest(".sess-row")' in fn
+    assert "if (!(back && back.isConnected) && t.triggerRow && t.triggerRow.isConnected) {" in page
 
 
 def test_dashboard_transcript_content_uses_x_text_not_x_html(write_config):
