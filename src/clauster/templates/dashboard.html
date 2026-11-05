@@ -2577,16 +2577,21 @@
                 <input type="text" class="form-control form-control-sm mb-2" id="cm-agent-name" data-test="cm-agent-name"
                        {{ NO_AUTOFILL }} spellcheck="false" x-model="configMgmt.subagents.name"
                        :readonly="!configMgmt.subagents.isNew" placeholder="my-agent">
-                <label class="form-label small" for="cm-agent-content">Definition (Markdown + frontmatter)</label>
                 {# TASK-449.5: the backend rewrote the file's old `mcpServers` mapping as the list
                    form on load. Say so before the operator saves, since the shown text is no
-                   longer byte-identical to the file on disk. #}
-                <div class="alert alert-info py-1 px-2 mb-2 small" role="status" id="cm-agent-converted"
-                     data-test="cm-agent-converted"
+                   longer byte-identical to the file on disk. Above the label, so the label stays
+                   next to its control; `text-info-emphasis` because plain alert-info text is
+                   below AA contrast on its own tint. The textarea also lists it in
+                   aria-describedby, since a status region shown together with its parent is
+                   often not announced. #}
+                <div class="alert alert-info text-info-emphasis py-1 px-2 mb-2 small" role="status"
+                     id="cm-agent-converted" data-test="cm-agent-converted"
                      x-show="configMgmt.subagents.converted" x-cloak
                      x-text="configMgmt.subagents.converted"></div>
+                <label class="form-label small" for="cm-agent-content">Definition (Markdown + frontmatter)</label>
                 <textarea id="cm-agent-content" class="form-control form-control-sm font-monospace" rows="11"
-                          data-test="cm-agent-content" spellcheck="false" aria-describedby="cm-agent-name-hint"
+                          data-test="cm-agent-content" spellcheck="false"
+                          aria-describedby="cm-agent-name-hint cm-agent-converted"
                           x-model="configMgmt.subagents.content" {{ NO_AUTOFILL }}></textarea>
                 <div class="form-hint small mt-1" id="cm-agent-name-hint" data-test="cm-agent-name-hint">
                   The <strong>Name</strong> above is the single source — it's written into the frontmatter

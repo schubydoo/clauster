@@ -229,6 +229,17 @@ def test_subagent_editor_shows_the_mcp_conversion_note(write_config):
     assert 'x-text="configMgmt.subagents.converted"' in html
     assert 's.converted = typeof d.converted === "string" ? d.converted : "";' in html
     assert "(s.content !== s.orig || !!s.converted)" in html
+    # The note is read with the textarea, and meets AA contrast on its tint.
+    assert 'aria-describedby="cm-agent-name-hint cm-agent-converted"' in html
+    assert "alert alert-info text-info-emphasis" in html
+    # The note and the extra dirty state are cleared on every path that leaves or replaces
+    # the editor: new agent, cancel, list reload, surface switch, and a successful save.
+    assert 's.content = AGENT_TEMPLATE; s.orig = ""; s.hash = null; s.confirm = "";\n' in html
+    assert '        s.converted = "";\n      },\n      // #958 Part 5' in html
+    assert 'c.subagents.confirm = ""; c.subagents.converted = ""; c.error = "";' in html
+    assert 'c.subagents.deletingName = ""; c.subagents.converted = "";' in html
+    assert html.count('c.subagents.converted = "";') == 3
+    assert 'c.saved = true; s.editing = false; s.confirm = ""; s.converted = "";' in html
 
 
 def test_mcp_surface_present_when_enabled(write_config):

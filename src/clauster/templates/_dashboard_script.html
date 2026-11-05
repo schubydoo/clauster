@@ -1668,6 +1668,7 @@
         // never carry across a switch.
         c.surface = key; c.error = ""; c.saved = false; c.confirm = "";
         c.subagents.editing = false; c.subagents.deletingName = ""; c.subagents.confirm = "";
+        c.subagents.converted = "";
         c.mcp.editing = false; c.mcp.deletingName = ""; c.mcp.confirm = "";
         c.mcp.approvals.confirm = ""; c.mcp.approvals.resetConfirm = "";
         c.skills.editing = false; c.skills.deletingName = ""; c.skills.confirm = "";
@@ -2496,7 +2497,7 @@
       // --- subagents (#773 slice C): a list surface — list + per-agent editor ------
       async _loadSubagents(myGen) {
         const c = this.configMgmt;
-        c.subagents.editing = false; c.subagents.deletingName = "";
+        c.subagents.editing = false; c.subagents.deletingName = ""; c.subagents.converted = "";
         try {
           const res = await fetch(ROOT + "/api/config-write/subagents?" + this._configMgmtQuery());
           if (c.gen !== myGen) return;
