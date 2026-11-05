@@ -599,6 +599,29 @@ def test_route_refuses_a_non_finite_number_and_writes_nothing(
     assert settings.read_bytes() == before
 
 
+def test_huge_int_timeout_is_accepted_and_huge_float_refused_cleanly() -> None:
+    """A 400-digit int is finite JSON; 1e400 is not. Neither raises past the validator."""
+    hooks.validate_hooks(_block({**MINIMAL["command"], "timeout": 10**400}))
+    with pytest.raises(cw.InvalidCandidateError, match="'timeout' must be"):
+        hooks.validate_hooks(_block({**MINIMAL["command"], "timeout": float("1e400")}))
+
+
+@pytest.mark.parametrize("bad", _NON_FINITE)
+def test_settings_surface_refuses_a_non_finite_number(tmp_path: Path, bad: float) -> None:
+    """The generic settings surface stores opaque JSON, so only render_json stops inf."""
+    from clauster import config_write_settings as settings_cw
+
+    path = cw.project_settings_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text('{"model": "opus"}', encoding="utf-8")
+    before = path.read_bytes()
+    with pytest.raises(cw.InvalidCandidateError, match="Infinity or NaN"):
+        settings_cw.write_project_settings(
+            tmp_path, {"cleanupPeriodDays": bad}, cw.hash_bytes(before)
+        )
+    assert path.read_bytes() == before
+
+
 @pytest.mark.parametrize("bad", _NON_FINITE)
 def test_shared_writer_fails_closed_on_a_non_finite_number(tmp_path: Path, bad: float) -> None:
     """render_json refuses Infinity/NaN for every settings surface, before any write."""
@@ -611,10 +634,14 @@ def test_shared_writer_fails_closed_on_a_non_finite_number(tmp_path: Path, bad: 
     assert not list(tmp_path.glob("settings.json.*.tmp"))  # no stray temp file
 
 
-@pytest.mark.parametrize("bad", [[], {}, 5, None])
-def test_malformed_stored_mcp_destination_never_blocks_a_save(tmp_path: Path, bad) -> None:
+@pytest.mark.parametrize(
+    ("server", "tool"), [([], {}), ([], "t"), ("s", {}), (5, "t"), ("s", None)]
+)
+def test_malformed_stored_mcp_destination_never_blocks_a_save(
+    tmp_path: Path, server, tool
+) -> None:
     """A hand-edited `"server": []` neither 500s every save nor restores through a mask."""
-    odd = {"type": "mcp_tool", "server": bad, "tool": {}, "input": {"api_key": "sk-1"}}
+    odd = {"type": "mcp_tool", "server": server, "tool": tool, "input": {"api_key": "sk-1"}}
     path = _seed(tmp_path, {"Stop": [{"hooks": [odd]}]})
     _, h = hooks.read_project_hooks(tmp_path)
     # A resent mask cannot restore through it (it is refused, never a 500).

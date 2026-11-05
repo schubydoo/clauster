@@ -189,12 +189,10 @@ def _is_positive_number(value: Any) -> bool:
     ``inf``, which JSON cannot store, so it would be written as ``Infinity`` and leave a
     settings file neither Clauster nor Claude Code can read.
     """
-    return (
-        isinstance(value, int | float)
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-        and value > 0
-    )
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return False
+    # An int is always finite (math.isfinite would raise OverflowError on a huge one).
+    return (isinstance(value, int) or math.isfinite(value)) and value > 0
 
 
 def _all_finite(value: Any) -> bool:
