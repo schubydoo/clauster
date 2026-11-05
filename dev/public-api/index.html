@@ -1678,7 +1678,7 @@ changed.</p>
 <tr>
 <td>POST</td>
 <td><code>/agents/{job_id}/resume</code></td>
-<td>Resume an ended background session</td>
+<td>Resume an ended background session, in <code>instance_defaults.permission_mode</code> (<code>403</code> when the <a href="../security/#bypasspermissions-footgun-gate">bypass ceiling</a> refuses that mode)</td>
 </tr>
 </tbody>
 </table>

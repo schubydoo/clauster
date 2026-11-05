@@ -1131,6 +1131,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#after-133-inherit-needs-allow_bypass_permissions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        After 1.3.3: inherit needs allow_bypass_permissions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#after-121-every-browser-logs-in-once-more" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1487,6 +1498,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#after-133-inherit-needs-allow_bypass_permissions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        After 1.3.3: inherit needs allow_bypass_permissions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#after-121-every-browser-logs-in-once-more" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1678,6 +1700,18 @@ startup — clauster refuses to serve until the migration succeeds, so you never
 run a database migration by hand. (The separate <code>clauster migrate</code> command is a
 <em>legacy</em> helper that only upgrades an older flat-file <code>state.json</code>; on a 0.12+
 deployment it has nothing to do.)</p>
+<h2 id="after-133-inherit-needs-allow_bypass_permissions">After 1.3.3: <code>inherit</code> needs <code>allow_bypass_permissions</code><a class="headerlink" href="#after-133-inherit-needs-allow_bypass_permissions" title="Permanent link">&para;</a></h2>
+<p>The <code>inherit</code> permission mode (<strong>No forced mode</strong>) passes no <code>--permission-mode</code>
+flag, so a <code>permissions.defaultMode: bypassPermissions</code> in user or managed settings
+takes effect. Clauster now gates <code>inherit</code> with the same per-project ceiling as
+<code>bypassPermissions</code>. On a project without <code>allow_bypass_permissions: true</code>, the
+launch picker does not offer it, and every launch or resume that asks for it gets a
+<code>403</code>. If <code>instance_defaults.permission_mode</code> is <code>inherit</code>, pick an explicit mode
+there, or set the ceiling on each project that must use <code>inherit</code>. A resume of an
+ended background run now uses <code>instance_defaults.permission_mode</code>. Before, it passed
+no <code>--permission-mode</code> flag. For the reasons,
+see the <a href="../security/#bypasspermissions-footgun-gate">bypassPermissions footgun
+gate</a>.</p>
 <h2 id="after-121-every-browser-logs-in-once-more">After 1.2.1: every browser logs in once more<a class="headerlink" href="#after-121-every-browser-logs-in-once-more" title="Permanent link">&para;</a></h2>
 <p>Up to 1.2.1, every instance named its login cookie <code>clauster_session</code>. Browsers
 scope cookies by host name and ignore the port. Two instances on one host

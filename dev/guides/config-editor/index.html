@@ -2050,9 +2050,10 @@ documents for the <code>permissions</code> object:</p>
 <p>A shape that the rows cannot show opens in Raw JSON. A save with an unknown key
 or a wrong type is refused whole, with a <code>422</code> that names the key.</p>
 <p><code>bypassPermissions</code> is not offered, and a save that sets it as <code>defaultMode</code> is
-refused at every scope, so Clauster never writes it. If a session starts with
-<strong>No forced mode</strong> (<code>inherit</code>), a hand-written <code>bypassPermissions</code> in User or
-managed settings still takes effect. See the <code>inherit</code> caveat under the
+refused at every scope, so Clauster never writes it. A hand-written
+<code>bypassPermissions</code> in User or managed settings takes effect for a session that
+starts with <strong>No forced mode</strong> (<code>inherit</code>). For this reason, a project offers
+<code>inherit</code> only when it sets <code>allow_bypass_permissions: true</code>. See the
 <a href="../../security/#bypasspermissions-footgun-gate">bypassPermissions footgun gate</a>.</p>
 <p>The box under the rows edits <code>autoMode</code>, the rules for the auto mode classifier.
 <code>autoMode</code> is a top-level key next to <code>permissions</code>, so the Settings tab does
