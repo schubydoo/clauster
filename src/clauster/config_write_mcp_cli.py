@@ -176,7 +176,7 @@ def entry_needs_direct_write(entry: dict[str, Any]) -> bool:
     args = entry.get("args")
     if isinstance(args, list) and args:
         return True
-    if _contains_sentinel(entry):
+    if mcp.contains_sentinel(entry):
         return True
     oauth = entry.get("oauth")
     if isinstance(oauth, dict) and _oauth_needs_direct_write(oauth):
@@ -192,17 +192,6 @@ def entry_needs_direct_write(entry: dict[str, Any]) -> bool:
         skip.add("toolPermissions")
     rest = {k: v for k, v in entry.items() if k not in skip}
     return cw.redact_secrets(rest) != rest
-
-
-def _contains_sentinel(value: Any) -> bool:
-    """Whether the redaction sentinel appears anywhere in ``value`` (dicts and lists)."""
-    if value == cw.REDACTION_SENTINEL:
-        return True
-    if isinstance(value, dict):
-        return any(_contains_sentinel(v) for v in value.values())
-    if isinstance(value, list):
-        return any(_contains_sentinel(v) for v in value)
-    return False
 
 
 def _oauth_needs_direct_write(oauth: dict[str, Any]) -> bool:

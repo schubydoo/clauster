@@ -233,10 +233,12 @@ ignores them:
   a new server that you copied from the masked view of another one. Type the
   real value instead.
 - A masked value in an `http`, `sse` or `ws` server when you changed its `type`,
-  or the scheme, host, port or path of its `url`. Clauster does not send a
-  stored credential to a new host. Type the credential again for the new host.
-  A change to the query string only, or to a stdio server's `command`, keeps
-  the masked values.
+  or any character of its `url` or of another url field such as
+  `oauth.authServerMetadataUrl`. Clauster compares the text exactly, so a
+  change of letter case, an added default port or a new query string also
+  counts. Clauster does not send a stored credential to a new destination.
+  Type the credential again. A change to a stdio server's `command` keeps the
+  masked values.
 - A reserved name, such as `workspace`, `claude-in-chrome` or `computer-use`.
 - An entry with a `url` and no `type`. Claude Code reads such an entry as a
   stdio server and skips it.

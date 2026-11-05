@@ -73,7 +73,6 @@ import logging
 import re
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 from . import config_write as cw
 
@@ -678,29 +677,44 @@ def _unbacked_sentinel(incoming: Any, stored: Any, path: str) -> str | None:
     return None
 
 
-def _url_destination(url: Any) -> tuple[str, str, int | None, str] | None:
-    """Return ``(scheme, host, port, path)`` of ``url``, or ``None`` when it cannot be parsed.
+def _is_url_key(key: Any) -> bool:
+    """Whether ``key`` names a url-bearing field (``url``, ``authServerMetadataUrl``, ...)."""
+    return isinstance(key, str) and key.lower().endswith("url")
 
-    Scheme and host are lowercased (both are case-insensitive). ``None`` never compares
-    equal to a parsed destination, so an unparseable url fails the check closed.
+
+def _url_texts(value: Any, stored: Any, path: str = "") -> dict[str, Any]:
+    """Return ``{path: text}`` for every url-bearing key in ``value``, at any depth.
+
+    A masked value takes the stored value at the same path, exactly as ``merge_redacted``
+    will write it, so a url that is itself masked and resent unchanged counts as unchanged.
+    Pass ``stored`` as ``value`` to list the stored entry's own urls.
     """
-    if not isinstance(url, str):
-        return None
-    try:
-        parts = urlsplit(url)
-        port = parts.port
-    except ValueError:
-        return None
-    return parts.scheme.lower(), (parts.hostname or "").lower(), port, parts.path
+    out: dict[str, Any] = {}
+    if isinstance(value, dict):
+        held = stored if isinstance(stored, dict) else {}
+        for k, v in value.items():
+            sub = f"{path}.{k}" if path else str(k)
+            if _is_url_key(k):
+                out[sub] = held.get(k) if v == cw.REDACTION_SENTINEL else v
+            else:
+                out.update(_url_texts(v, held.get(k), sub))
+    elif isinstance(value, list):
+        held_list = stored if isinstance(stored, list) else []
+        for i, v in enumerate(value):
+            out.update(_url_texts(v, held_list[i] if i < len(held_list) else None, f"{path}[{i}]"))
+    return out
 
 
 def _destination(entry: dict[str, Any], stored: dict[str, Any]) -> tuple[Any, ...] | None:
-    """Return where a remote ``entry`` sends credentials, after masks are restored.
+    r"""Return where ``entry`` sends credentials: its transport plus the TEXT of its urls.
 
-    The destination is the ``type`` and the ``url`` (scheme, host, port, path), the url
-    taken from ``stored`` when it is itself masked. A stdio entry returns ``("stdio",)``:
-    it is not bound (see :func:`_check_destination`). ``None`` means the destination
-    cannot be decided, which never matches.
+    The urls are compared as exact text, never parsed. A parser here (``urlsplit``) and
+    the WHATWG parser Claude Code's Node runtime uses disagree on inputs such as
+    ``https://evil.example.com\@good.example.com/`` (Python reads host ``good``, Node
+    reads ``evil``), so any parsed comparison can be steered. Any change at all to a url,
+    host letter case and an added default port included, therefore counts as a new
+    destination. A stdio entry returns ``("stdio",)``: it is not bound (see
+    :func:`_check_destination`). ``None`` means the destination cannot be decided.
     """
     try:
         transport = entry_transport(entry)
@@ -708,20 +722,21 @@ def _destination(entry: dict[str, Any], stored: dict[str, Any]) -> tuple[Any, ..
         return None
     if transport == "stdio":
         return ("stdio",)
-    url = entry.get("url")
-    where = _url_destination(stored.get("url") if url == cw.REDACTION_SENTINEL else url)
-    return None if where is None else (transport, where)
+    return transport, sorted(_url_texts(entry, stored).items(), key=lambda kv: kv[0])
 
 
 def _check_destination(name: str, entry: Any, stored: Any) -> None:
     """Refuse a masked value whose server now points somewhere else (→ 422).
 
-    ``merge_redacted`` restores a sentinel by KEY. Without this check an operator who
-    cannot read a stored header could change the server's ``url`` to a host they control,
-    resend the mask, and Claude Code would send the real credential there. So a masked
+    ``merge_redacted`` restores a sentinel by KEY. Without this check, changing a server's
+    ``url`` and resending a mask would make Claude Code send the stored credential to the
+    new host. That is mostly a guard against an accidental repoint: an operator who can
+    write a stdio ``command`` in the same scope can already run code here. So a masked
     value in a remote server keeps its stored value only when that server's ``type`` and
-    ``url`` (scheme, host, port, path) are unchanged. The stored entry is first converted
-    as on load, so a legacy ``transport`` compares as its ``type``.
+    the exact text of every url-bearing key (``url``, ``oauth.authServerMetadataUrl``, any
+    key ending in ``url`` at any depth) are unchanged. A removed url, or one added, is a
+    change. The stored entry is first converted as on load, so a legacy ``transport``
+    compares as its ``type``.
 
     A stdio server is deliberately NOT bound: editing its ``command`` while keeping a
     masked ``env`` is a supported edit (the env goes to a program on this host that the
@@ -730,26 +745,26 @@ def _check_destination(name: str, entry: Any, stored: Any) -> None:
     """
     if not isinstance(entry, dict) or not isinstance(stored, dict):
         return
-    if not _has_sentinel(entry):
+    if not contains_sentinel(entry):
         return
     stored_entry = _convert_legacy_entry(stored)[0]
     now = _destination(entry, stored_entry)
     if now is None or now != _destination(stored_entry, stored_entry):
         raise cw.InvalidCandidateError(
-            f"server {name!r} keeps a masked value '********' but its type or url changed; "
-            "the stored credential is not sent to a new host. Type the credential for the "
-            "new host"
+            f"server {name!r} keeps a masked value '********' but its type or a url changed; "
+            "the stored credential is not sent to a new destination. Retype the credential "
+            "for the new destination"
         )
 
 
-def _has_sentinel(value: Any) -> bool:
+def contains_sentinel(value: Any) -> bool:
     """Whether the redaction sentinel appears anywhere in ``value`` (dicts and lists)."""
     if value == cw.REDACTION_SENTINEL:
         return True
     if isinstance(value, dict):
-        return any(_has_sentinel(v) for v in value.values())
+        return any(contains_sentinel(v) for v in value.values())
     if isinstance(value, list):
-        return any(_has_sentinel(v) for v in value)
+        return any(contains_sentinel(v) for v in value)
     return False
 
 

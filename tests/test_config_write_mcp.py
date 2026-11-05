@@ -2029,6 +2029,19 @@ def _seed_bound(tmp_path: Path) -> bytes:
         pytest.param({"url": "https://mcp.example.com:8443/v1/mcp?tenant=a"}, id="port"),
         pytest.param({"url": "https://mcp.example.com/other?tenant=a"}, id="path"),
         pytest.param({"url": "https://mcp.example.com:bad/v1"}, id="unparseable"),
+        # Exact text, never parsed: urlsplit reads this host as mcp.example.com, while the
+        # WHATWG parser in Claude Code's Node runtime reads evil.example.net.
+        pytest.param(
+            {"url": "https://evil.example.net\\@mcp.example.com/v1/mcp?tenant=a"},
+            id="backslash",
+        ),
+        pytest.param({"url": "https://mcp.example.com/v1/mcp?tenant=b"}, id="query"),
+        pytest.param({"url": "HTTPS://MCP.EXAMPLE.COM/v1/mcp?tenant=a"}, id="case"),
+        pytest.param({"url": "https://mcp.example.com:443/v1/mcp?tenant=a"}, id="default-port"),
+        pytest.param(
+            {"oauth": {"clientId": "********", "authServerMetadataUrl": "https://a.example/m"}},
+            id="added-nested-url",
+        ),
         pytest.param({"type": "sse"}, id="type"),
         pytest.param({"type": "streamable-http"}, id="alias-is-same-type"),
     ],
@@ -2045,9 +2058,9 @@ def test_masked_credential_is_refused_for_a_new_destination(
         on_disk = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
         assert on_disk["mcpServers"]["s"]["headers"] == _BOUND["headers"]
         return
-    with pytest.raises(cw.InvalidCandidateError, match="type or url changed"):
+    with pytest.raises(cw.InvalidCandidateError, match="type or a url changed"):
         mcp.write_project_server_entry(tmp_path, "s", edited, op="edit")
-    with pytest.raises(cw.InvalidCandidateError, match="type or url changed"):
+    with pytest.raises(cw.InvalidCandidateError, match="type or a url changed"):
         mcp.write_project_servers(tmp_path, {"s": edited}, h)
     assert (tmp_path / ".mcp.json").read_bytes() == before  # nothing written
 
@@ -2056,8 +2069,6 @@ def test_masked_credential_is_refused_for_a_new_destination(
     "change",
     [
         pytest.param({}, id="unchanged"),
-        pytest.param({"url": "https://mcp.example.com/v1/mcp?tenant=b"}, id="query-only"),
-        pytest.param({"url": "HTTPS://MCP.EXAMPLE.COM/v1/mcp?tenant=a"}, id="case-only"),
         pytest.param({"timeout": 120000}, id="other-field"),
     ],
 )
@@ -2070,6 +2081,44 @@ def test_masked_credential_is_kept_for_the_same_destination(tmp_path: Path, chan
     assert on_disk["headers"] == _BOUND["headers"]
     assert on_disk["headersHelper"] == _BOUND["headersHelper"]
     assert on_disk["oauth"] == _BOUND["oauth"]
+
+
+def test_url_texts_walks_lists_and_restores_masks_by_path() -> None:
+    m = cw.REDACTION_SENTINEL
+    stored = {"a": [{"iconUrl": "https://i.example/1"}], "url": "https://x.example"}
+    shown = {"a": [{"iconUrl": m}, {"iconUrl": "https://new.example"}], "url": m}
+    assert mcp._url_texts(shown, stored) == {
+        "a[0].iconUrl": "https://i.example/1",
+        "a[1].iconUrl": "https://new.example",
+        "url": "https://x.example",
+    }
+
+
+def test_nested_url_change_refuses_a_mask(tmp_path: Path) -> None:
+    stored = {
+        "type": "http",
+        "url": "https://x.example/mcp",
+        "headers": {"X": "h-4498"},
+        "oauth": {"authServerMetadataUrl": "https://auth.example/meta"},
+    }
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"s": stored}}), encoding="utf-8"
+    )
+    before = (tmp_path / ".mcp.json").read_bytes()
+    shown, _h = mcp.read_project_servers(tmp_path)
+    moved = {**shown["s"], "oauth": {"authServerMetadataUrl": "https://evil.example/meta"}}
+    with pytest.raises(cw.InvalidCandidateError, match="type or a url changed"):
+        mcp.write_project_server_entry(tmp_path, "s", moved, op="edit")
+    removed = {k: v for k, v in shown["s"].items() if k != "oauth"}
+    with pytest.raises(cw.InvalidCandidateError, match="type or a url changed"):
+        mcp.write_project_server_entry(tmp_path, "s", removed, op="edit")
+    assert (tmp_path / ".mcp.json").read_bytes() == before
+    # Resent unchanged (the nested url shows masked), the mask is kept.
+    mcp.write_project_server_entry(tmp_path, "s", shown["s"], op="edit")
+    assert (
+        json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]["s"]
+        == stored
+    )
 
 
 def test_new_destination_with_retyped_credentials_is_accepted(tmp_path: Path) -> None:
@@ -2121,7 +2170,7 @@ def test_undecidable_stored_destination_refuses_a_mask(tmp_path: Path, stored: d
         "url": "https://x.example/mcp",
         "headers": {"X": cw.REDACTION_SENTINEL},
     }
-    with pytest.raises(cw.InvalidCandidateError, match="type or url changed"):
+    with pytest.raises(cw.InvalidCandidateError, match="type or a url changed"):
         mcp.write_project_server_entry(tmp_path, "s", entry, op="edit")
 
 
@@ -2146,7 +2195,7 @@ def test_remote_to_stdio_with_a_mask_is_refused(tmp_path: Path) -> None:
     )
     before = (tmp_path / ".mcp.json").read_bytes()
     entry = {"command": "x", "env": {"K": cw.REDACTION_SENTINEL}}
-    with pytest.raises(cw.InvalidCandidateError, match="type or url changed"):
+    with pytest.raises(cw.InvalidCandidateError, match="type or a url changed"):
         mcp.write_project_server_entry(tmp_path, "s", entry, op="edit")
     assert (tmp_path / ".mcp.json").read_bytes() == before
 
@@ -2164,11 +2213,11 @@ def test_destination_binding_on_user_and_local_scope(tmp_path: Path) -> None:
     moved = {"url": "https://evil.example.net/v1/mcp"}
     user = mcp.read_user_servers(cj)["u"]
     local = mcp.read_project_local_servers(cj, proj)["l"]
-    with pytest.raises(cw.InvalidCandidateError, match="type or url changed"):
+    with pytest.raises(cw.InvalidCandidateError, match="type or a url changed"):
         mcp.write_user_server_entry(cj, "u", {**user, **moved}, op="edit")
-    with pytest.raises(cw.InvalidCandidateError, match="type or url changed"):
+    with pytest.raises(cw.InvalidCandidateError, match="type or a url changed"):
         mcp.write_project_local_server_entry(cj, proj, "l", {**local, **moved}, op="edit")
-    with pytest.raises(cw.InvalidCandidateError, match="type or url changed"):
+    with pytest.raises(cw.InvalidCandidateError, match="type or a url changed"):
         mcp.write_user_servers(cj, {"u": {**user, **moved}})
     assert cj.read_bytes() == before
 
@@ -2197,6 +2246,6 @@ def test_route_edit_to_a_new_host_with_a_mask_is_422(
             },
         )
     assert resp.status_code == 422
-    assert "new host" in resp.json()["detail"]
+    assert "Retype the credential" in resp.json()["detail"]
     assert mcp_json.read_bytes() == before
     assert not argv_file.exists()
