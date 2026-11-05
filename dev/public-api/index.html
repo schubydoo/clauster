@@ -954,6 +954,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#deprecated-instance-fields" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deprecated instance fields
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -1477,6 +1488,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#deprecated-instance-fields" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deprecated instance fields
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -1703,6 +1725,16 @@ an instance id directly</code>, since a fixed name can't be narrowed. An id matc
 still <strong>404</strong>. A prefix that used to 404 now 409s; a bare project name with two instances
 used to return <strong>200</strong> (silently picking the last-registered row) and now 409s
 deliberately.</p>
+<h3 id="deprecated-instance-fields">Deprecated instance fields<a class="headerlink" href="#deprecated-instance-fields" title="Permanent link">&para;</a></h3>
+<p>Every instance response still has the key <code>sandbox_mode</code>, so that a <code>/api/v1</code>
+client keeps working. The key is deprecated, and its value is always <code>"default"</code>.
+It never shows <code>"on"</code> or <code>"off"</code>. This holds for an instance that an older
+Clauster stored with <code>"on"</code> or <code>"off"</code>.</p>
+<p>The per-launch sandbox option is removed and was ignored. To sandbox sessions,
+set <code>sandbox.enabled</code> in a Claude Code settings file. See
+<a href="../reference/cli/#sandboxing-sessions">Sandboxing sessions</a>. A <code>sandbox</code> value in
+a <code>POST /instances</code> body is accepted and ignored, and a successful response
+carries the same note in <code>warnings</code>.</p>
 <h2 id="authenticating">Authenticating<a class="headerlink" href="#authenticating" title="Permanent link">&para;</a></h2>
 <p>Every <code>/api/v1</code> request needs the same credential any other <code>/api/*</code> route
 needs whenever <code>auth.enabled</code> is set: a session cookie, trusted-reverse-proxy

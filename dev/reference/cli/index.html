@@ -1050,6 +1050,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Headless write commands">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#sandboxing-sessions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Sandboxing sessions
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -1661,6 +1678,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Headless write commands">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#sandboxing-sessions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Sandboxing sessions
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -2016,7 +2050,7 @@ added or removed. (On Windows the file lock is unavailable, so two <em>processes
 fall back to the atomic-write + re-detect behavior; a single process is always
 fully serialized.)</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>clauster start &lt;project&gt; [--mode standard|pty] [--spawn-mode …] [--permission-mode …] \
-<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>               [--name NAME] [--sandbox default|on|off] [--trust] [--json]
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>               [--name NAME] [--trust] [--json]
 <a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>clauster stop  &lt;instance&gt; [--json]        # stop a bridge by id / unique prefix / identity
 </code></pre></div>
 <p><code>&lt;instance&gt;</code> resolves the same way as for the read commands above — full id, unique
@@ -2026,11 +2060,32 @@ more than one instance) is refused with the candidates listed.</p>
 interchangeable); <code>--trust</code> accepts the workspace-trust dialog before starting
 (otherwise an untrusted directory is refused). Sending a conversation turn to a
 running hosted session is not a headless command — it needs the live server.</p>
-<p><code>--sandbox</code> is <strong>disabled in this release</strong> (<a href="https://github.com/schubydoo/clauster/issues/1037">#1037</a>):
-it is still accepted and validated, but inert (coerced to <code>default</code>) — the flag
-never reached the server-mode session worker, so it silently did nothing. It
-returns behind dependency-preflight + platform gating in
-<a href="https://github.com/schubydoo/clauster/issues/1046">#1046</a>.</p>
+<h3 id="sandboxing-sessions">Sandboxing sessions<a class="headerlink" href="#sandboxing-sessions" title="Permanent link">&para;</a></h3>
+<p>Clauster has no per-launch sandbox option. Claude Code 2.1.300 removed the
+<code>--sandbox</code> and <code>--no-sandbox</code> flags from <code>claude remote-control</code>, and a bridge
+that gets either flag exits at once. So no Clauster launch passes either flag, in
+any bridge mode.</p>
+<p>To sandbox sessions, set <code>sandbox.enabled</code> to <code>true</code> in a Claude Code settings
+file, for example <code>~/.claude/settings.json</code> (user scope) or the project's
+<code>.claude/settings.local.json</code> (local scope). Every session that reads that file
+starts in the sandbox, not only the sessions that Clauster starts. If
+<code>config_write.enabled</code> is on, you can edit the key in the Raw JSON box on the
+Settings tab of the
+<a href="../../guides/config-editor/#managing-claude-code-config">Claude Code config editor</a>.
+The user scope there also needs <code>config_write.allow_user_scope</code>.</p>
+<p>The sandbox has host requirements. On Linux and WSL2 it needs <code>bubblewrap</code> and
+<code>socat</code>, and native Windows has no sandbox. If a requirement is missing, Claude
+Code runs the session without the sandbox. To make it exit at startup instead,
+also set <code>sandbox.failIfUnavailable</code> to <code>true</code>. Claude Code's
+<a href="https://code.claude.com/docs/en/sandboxing">sandboxing guide</a> is the authority
+for these rules.</p>
+<p><code>clauster start</code> still accepts <code>--sandbox default|on|off</code>, so that an old script
+does not fail. It ignores the value and prints a warning on stderr. The
+<a href="../../mcp/">MCP <code>spawn_session</code> tool</a> and <code>POST /api/instances</code> also accept a
+<code>sandbox</code> value and ignore it. When the spawn itself succeeds, they return the
+same note in <code>warnings</code>. The instance JSON keeps a deprecated <code>sandbox_mode</code>
+key, which is always <code>"default"</code> (see
+<a href="../../public-api/#deprecated-instance-fields">Deprecated instance fields</a>).</p>
 <h2 id="clauster-usage-transcript-cost-summary"><code>clauster usage</code> — transcript cost summary<a class="headerlink" href="#clauster-usage-transcript-cost-summary" title="Permanent link">&para;</a></h2>
 <p><code>clauster usage &lt;transcript&gt;</code> prints the token counts and approximate cost for
 one session transcript — the same math as the dashboard's

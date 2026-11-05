@@ -1748,7 +1748,7 @@ dashboard's <strong>Run Claude here</strong>).</p>
 <tr>
 <td><code>sandbox</code></td>
 <td>string</td>
-<td><code>default</code> · <code>on</code> · <code>off</code> (standard only). <strong>Disabled in this release</strong> (<a href="https://github.com/schubydoo/clauster/issues/1037">#1037</a>) — accepted but inert (coerced to <code>default</code>); the launch popover no longer offers it. Returns behind dependency-preflight + platform gating in <a href="https://github.com/schubydoo/clauster/issues/1046">#1046</a>.</td>
+<td>Removed. Any value is accepted and ignored, and the result carries a note in <code>warnings</code>. To sandbox sessions, set <code>sandbox.enabled</code> in a Claude Code settings file. See <a href="../reference/cli/#sandboxing-sessions">Sandboxing sessions</a>.</td>
 </tr>
 <tr>
 <td><code>trust</code></td>
