@@ -2852,7 +2852,7 @@ runs.</p>
 <td><code>enabled</code></td>
 <td>bool</td>
 <td><code>true</code></td>
-<td>Show the per-session resource metrics line — live CPU, memory, and disk I/O for each running bridge, each row reporting its own bridge. When <code>false</code>, the line is hidden and Clauster skips the work behind it entirely: no <code>/api/metrics</code> polling from the browser and no server-side resource sampling.</td>
+<td>Show the per-session resource metrics line — live CPU, memory, and disk I/O for each running bridge, each row reporting its own bridge, plus CPU and memory for each live session listed under a standard bridge when the session's process is found inside that bridge's process tree. When <code>false</code>, the line is hidden and Clauster skips the work behind it entirely: no <code>/api/metrics</code> polling from the browser and no server-side resource sampling.</td>
 </tr>
 <tr>
 <td><code>normalize_cpu</code></td>

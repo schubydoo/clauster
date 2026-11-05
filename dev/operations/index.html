@@ -2041,7 +2041,16 @@ sustained over a scrape interval.</p>
 are a separate, dashboard-only fetch. Each row shows <strong>its own bridge's</strong> usage:
 the dashboard reads <code>/api/metrics</code>, keyed by instance id, so two bridges of one
 project — a Server Mode bridge and an Interactive Session, say — never report each
-other's figures. <code>/api/projects/{name}/metrics</code> still returns the project <strong>total</strong>,
+other's figures. Each live session listed under a standard bridge also shows its own
+CPU and memory: the session process and the tools that it started, taken from the
+same sample, so the figure is a part of the bridge figure. The session's process is
+the pid that <code>claude agents --json</code> reports for it. A session shows no figure when
+Clauster does not find that pid inside the bridge's process tree, or when the process
+at that pid is not the one that Clauster first measured for the session (a reused
+pid). Clauster leaves
+the figure out in that case, and does not estimate it. The figures are in the
+<code>sessions</code> field of each <code>/api/metrics</code> entry, keyed by session id.
+<code>/api/projects/{name}/metrics</code> still returns the project <strong>total</strong>,
 summed across that project's live bridges. Neither is part of the Prometheus
 exposition, and both are governed by the <code>metrics</code> config block, not
 <code>observability</code>. <strong>Disk I/O is unavailable on macOS</strong> — <code>psutil</code> has no per-process
