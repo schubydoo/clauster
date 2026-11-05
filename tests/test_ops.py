@@ -2828,15 +2828,28 @@ def test_bundle_env_suspects_lists_each_live_tracked_process_and_nothing_else(
     write_config, tmp_path, monkeypatch
 ):
     # Every conjunct of every identity gate has a case that fails ONLY that conjunct.
+    # A short mkdtemp state_dir, as test_claustrum_daemon's `make_daemon` does: the derived
+    # AF_UNIX socket path must stay under the kernel limit, and macOS's tmp_path does not.
+    import shutil
+    import tempfile
+
+    short_state = Path(tempfile.mkdtemp(prefix="cld-"))
+    config = load_config(
+        str(write_config(f"state_dir: {short_state}\nclaustrum:\n  enabled: true\n"))
+    )
+    try:
+        _assert_bundle_env_suspects(config, tmp_path, monkeypatch)
+    finally:
+        shutil.rmtree(short_state, ignore_errors=True)
+
+
+def _assert_bundle_env_suspects(config, tmp_path, monkeypatch):
     import types
 
     from clauster import pointers, procutil, pty_keeper, supervisor
     from clauster.claustrum_daemon import ClaustrumDaemon
     from clauster.models import Project, TrustState
 
-    config = load_config(
-        str(write_config(f"state_dir: {tmp_path / '.s'}\nclaustrum:\n  enabled: true\n"))
-    )
     projects = [
         Project(name=n, path=Path(f"/p/{n}"), trust_state=TrustState.TRUSTED)
         for n in ("std", "idle", "stale")
