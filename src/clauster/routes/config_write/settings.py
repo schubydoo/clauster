@@ -24,6 +24,19 @@ from . import _base
 router = APIRouter()
 
 
+def _row_hints(scope: config_write.Scope) -> dict[str, Any]:
+    """Return what the Rows editor needs beside the values (TASK-271), for ``scope``.
+
+    ``key_types`` gives each documented scalar key its editor type
+    (:func:`config_write_settings.row_key_catalog`), and ``owned_keys`` names the tab that
+    edits each carved key, so the browser never keeps a copy of either list.
+    """
+    return {
+        "key_types": config_write_settings.row_key_catalog(scope),
+        "owned_keys": dict(config_write_settings.OWNED_KEY_TABS),
+    }
+
+
 @router.get("/api/config-write/settings")
 async def api_config_write_settings_read(
     config: ConfigDep, runner: RunnerOrNoneDep, scope: str = "project", project: str = ""
@@ -52,6 +65,7 @@ async def api_config_write_settings_read(
             "settings": settings_view,
             "hash": file_hash,
             "desktop_only": config_write_settings.desktop_only_keys(settings_view),
+            **_row_hints("user"),
         }
     if scope == "local":
         project_dir = _base.resolve_cw_project(config, project)
@@ -67,6 +81,7 @@ async def api_config_write_settings_read(
             "settings": settings_view,
             "hash": file_hash,
             "desktop_only": config_write_settings.desktop_only_keys(settings_view),
+            **_row_hints("local"),
         }
     project_dir = _base.resolve_cw_project(config, project)
     try:
@@ -81,6 +96,7 @@ async def api_config_write_settings_read(
         "settings": settings_view,
         "hash": file_hash,
         "desktop_only": config_write_settings.desktop_only_keys(settings_view),
+        **_row_hints("project"),
     }
 
 

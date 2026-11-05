@@ -189,7 +189,7 @@ The surface tabs:
 | Tab | What it manages |
 | --- | --- |
 | CLAUDE.md | The scope's `CLAUDE.md` memory file, as plain text. |
-| Settings | `settings.json` — friendly rows for `env` variables, with a Raw JSON escape hatch for other keys, plus a read-only merged ("effective") view showing which scopes each value comes from. See [The Settings tab](#the-settings-tab). |
+| Settings | `settings.json` — a row for each key, typed by its value, with a Raw JSON escape hatch, plus a read-only merged ("effective") view showing which scopes each value comes from. See [The Settings tab](#the-settings-tab). |
 | Permissions | The `permissions` object, as rows or raw JSON, and the auto mode classifier rules (`autoMode`). See [The Permissions tab](#the-permissions-tab). |
 | Hooks | The `hooks` key, as rows or raw JSON. |
 | MCP | MCP server definitions (add / edit / delete), as fields or raw JSON, plus per-server **approvals** for committed `.mcp.json` servers — Approve / Reject each, or reset all choices behind a typed confirm. |
@@ -334,9 +334,33 @@ The Settings tab edits each top-level key of the settings file for the scope,
 except the keys that another tab writes. These are `permissions` and `autoMode`
 (the Permissions tab), `hooks` (the Hooks tab) and `enabledPlugins` (the Plugins
 tab). A save that names one of them is refused (`422`), and the error names the
-tab to use. The `env` variables show as rows, and every other key is in Raw JSON.
-Clauster checks the shape of `env` only. It does not run or interpret any other
-value. Claude Code reads the values when a session starts.
+tab to use. Clauster checks the shape of `env` only. It does not run or interpret
+any other value. Claude Code reads the values when a session starts.
+
+The tab has two modes, Rows and Raw JSON. In Rows mode, each top-level key of the
+file is one row, and the editor follows the JSON type of the value:
+
+- A Boolean is a switch.
+- A number is a number box. A save sends a number, and an empty box blocks the
+  save.
+- A string is a list of values when the settings reference gives the key a fixed
+  set of values, for example `tui` or `theme`. Clauster sends that set with the
+  file. Any other string is a text box, and a value outside the set is text too.
+- An object, a list or `null` is a read-only row. Use **Edit in Raw JSON** to
+  change it. A save writes it back unchanged.
+- `env` has its own table of variables below the rows.
+
+Each value saves with the JSON type that it had when it loaded, unless you change
+it. For example, the string `"1"` stays a string. To add a key, type its name in
+**Add a key**, or pick one of the suggestions. The suggestions are the documented
+keys that Claude Code reads at the current scope. A documented key gets its
+editor, and a new switch starts off. Any other name gets a text box, and Clauster
+sends it as you typed it. If you type a key that another tab edits, the tab names
+that tab and links to it. The browser does not decide whether Claude Code reads
+a key at a scope. The server checks every key when you save, and the error gives
+its reason. Raw JSON shows the whole file as JSON. A switch between the two modes
+keeps every value. While a number box is empty or two `env` variables have the
+same name, the tab stays in Rows mode, and a warning names the problem.
 
 No other tab writes these keys in a settings file, so the Settings tab shows them:
 
@@ -378,8 +402,8 @@ example:
 - `diffTool` and `autoConnectIde` belong in `~/.claude.json`, which the Claude
   Code `/config` command writes.
 
-If a file already holds such a key, remove the key in Raw JSON before you save
-the file again at that scope. The auto mode key `disableAutoMode` and the hook
+If a file already holds such a key, remove the key (its **Remove** button in
+Rows mode, or Raw JSON) before you save the file again at that scope. The auto mode key `disableAutoMode` and the hook
 keys `disableAllHooks`, `allowedHttpHookUrls` and `httpHookAllowedEnvVars` work
 in every settings file, so the tab accepts them at every scope.
 
@@ -1033,7 +1057,7 @@ space at the start or the end is part of the name.
 | A plugin install or update fails and the message names a command | The marketplace entry runs a command, and Clauster never accepts one for you | Read the command, then run `claude plugin install` from a terminal on the host |
 | Enable or Disable fails with "is already enabled" or "is installed at project scope, not user" | The badge is the merged state, and the chosen scope already has that value or cannot override it | Pick the scope that the message names, or use the Local scope to override a project setting for yourself |
 | Removing a marketplace returns `404` with "is not declared in user settings" | A different scope declares it | Switch to the scope that declares it and remove it there |
-| A Settings save returns `422` with "Claude Code reads … only from" | The file holds a key (or a `true` value) that Claude Code ignores at this scope | Remove the key in Raw JSON, or save it at the scope that the message names. For a `true` value, set it to `false` |
+| A Settings save returns `422` with "Claude Code reads … only from" | The file holds a key (or a `true` value) that Claude Code ignores at this scope | Remove the key (in Rows mode or Raw JSON), or save it at the scope that the message names. For a `true` value, set it to `false` |
 
 Need to recover an earlier config? The five most recent pre-save snapshots
 sit next to the file as `clauster.yml.bak-*` — copy one back over

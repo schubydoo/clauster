@@ -482,6 +482,235 @@ def test_config_mgmt_settings_failed_load_clears_previous_env_rows(
     assert not user_settings.exists()
 
 
+# --- TASK-271: a typed row for every top-level key --------------------------------------
+
+
+def _alpha_settings_path(server: Server) -> Path:
+    cfg_path = Path(server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+    return projects_root / "alpha" / ".claude" / "settings.json"
+
+
+def _open_settings_rows(browser: AgentBrowser, server: Server) -> None:
+    _open_modal(browser, server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-settings"]')
+    browser.expect_visible('[data-test="cm-settings-rows"]')
+
+
+def _row(key: str, control: str = "") -> str:
+    """Selector for the settings row of ``key`` (or one of its controls)."""
+    sel = f'[data-test="cm-settings-key-row"][data-key="{key}"]'
+    return f'{sel} [data-test="{control}"]' if control else sel
+
+
+def _checked(browser: AgentBrowser, selector: str) -> bool:
+    return browser.eval_json(f"document.querySelector({json.dumps(selector)}).checked")
+
+
+def _save_alpha(browser: AgentBrowser) -> None:
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    browser.click('[data-test="cm-save"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+
+def _add_settings_key(browser: AgentBrowser, key: str) -> None:
+    browser.fill('[data-test="cm-settings-add-key"]', key)
+    browser.click('[data-test="cm-settings-add-key-btn"]')
+
+
+_MARKETPLACES = {"team": {"source": {"source": "github", "repo": "org/plugins"}}}
+
+
+def test_config_mgmt_settings_typed_rows_round_trip(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Each key loads as its typed row and saves with the JSON type it had (TASK-271)."""
+    _seed_alpha_settings(
+        config_mgmt_server,
+        {
+            "verbose": True,
+            "cleanupPeriodDays": 30,
+            "tui": "default",
+            "language": "1",
+            "extraKnownMarketplaces": _MARKETPLACES,
+            "apiKeyHelper": "/opt/print-key --token s3cr3t",
+            "env": {"A": "x"},
+        },
+    )
+    _open_settings_rows(browser, config_mgmt_server)
+    browser.expect_count('[data-test="cm-settings-key-row"]', 7)
+    assert _checked(browser, _row("verbose", "cm-settings-bool")) is True
+    browser.expect_value(_row("cleanupPeriodDays", "cm-settings-number"), "30")
+    browser.expect_value(_row("tui", "cm-settings-enum"), "default")
+    browser.expect_value(_row("language", "cm-settings-string"), "1")
+    browser.expect_visible(_row("extraKnownMarketplaces", "cm-settings-readonly"))
+    # The helper is masked in the page; the real command never reaches the browser.
+    browser.expect_value(_row("apiKeyHelper", "cm-settings-string"), "********")
+    assert "s3cr3t" not in browser.eval_js("document.documentElement.outerHTML")
+    browser.expect_visible(_row("env", "cm-settings-env-summary"))
+
+    browser.click(_row("verbose", "cm-settings-bool"))
+    browser.fill(_row("cleanupPeriodDays", "cm-settings-number"), "45")
+    browser.select(_row("tui", "cm-settings-enum"), "fullscreen")
+    _save_alpha(browser)
+
+    stored = json.loads(_alpha_settings_path(config_mgmt_server).read_text(encoding="utf-8"))
+    assert stored == {
+        "verbose": False,
+        "cleanupPeriodDays": 45,
+        "tui": "fullscreen",
+        "language": "1",  # untouched text that looks like a number stays text
+        "extraKnownMarketplaces": _MARKETPLACES,  # the read-only row is written back as is
+        "apiKeyHelper": "/opt/print-key --token s3cr3t",  # the untouched mask kept it
+        "env": {"A": "x"},
+    }
+    assert type(stored["cleanupPeriodDays"]) is int
+
+
+def test_config_mgmt_settings_add_and_remove_key_rows(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Added keys get the server's editor type, unknown keys are text, owned keys link."""
+    _seed_alpha_settings(config_mgmt_server, {"model": "opus"})
+    _open_settings_rows(browser, config_mgmt_server)
+    browser.expect_count('[data-test="cm-settings-key-row"]', 1)
+    browser.click(_row("model", "cm-settings-key-remove"))
+    browser.expect_count('[data-test="cm-settings-key-row"]', 0)
+
+    _add_settings_key(browser, "verbose")
+    browser.expect_visible(_row("verbose", "cm-settings-bool"))
+    assert _checked(browser, _row("verbose", "cm-settings-bool")) is False
+    browser.click(_row("verbose", "cm-settings-bool"))
+    _add_settings_key(browser, "someFutureKey")
+    browser.fill(_row("someFutureKey", "cm-settings-string"), "abc")
+    _add_settings_key(browser, "theme")
+    browser.expect_value(_row("theme", "cm-settings-enum"), "auto")
+    browser.select(_row("theme", "cm-settings-enum"), "dark")
+    _add_settings_key(browser, "cleanupPeriodDays")
+    # An empty number box blocks the save until it holds a number.
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    browser.expect_visible('[data-test="cm-settings-number-error"]')
+    browser.expect_disabled('[data-test="cm-save"]')
+    browser.fill(_row("cleanupPeriodDays", "cm-settings-number"), "7")
+    browser.expect_hidden('[data-test="cm-settings-number-error"]')
+    _save_alpha(browser)
+    stored = json.loads(_alpha_settings_path(config_mgmt_server).read_text(encoding="utf-8"))
+    assert stored == {
+        "verbose": True,
+        "someFutureKey": "abc",
+        "theme": "dark",
+        "cleanupPeriodDays": 7,
+    }
+
+    # A key that another tab edits is not added; the message links to that tab.
+    _add_settings_key(browser, "hooks")
+    browser.expect_text('[data-test="cm-settings-add-error"]', "hooks is edited on the Hooks tab")
+    browser.expect_count(_row("hooks"), 0)
+    browser.click('[data-test="cm-settings-add-owner-link"]')
+    browser.expect_visible('[data-test="cm-view-hooks"]')
+
+
+def test_config_mgmt_settings_refused_key_shows_server_refusal(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A key Claude Code ignores at Project scope saves to the server's own refusal."""
+    _open_settings_rows(browser, config_mgmt_server)
+    options = browser.eval_json(
+        "[...document.querySelectorAll('#cm-settings-key-options option')].map(o => o.value)"
+    )
+    assert "verbose" in options
+    assert "skipAutoPermissionPrompt" not in options  # User scope only: not offered here
+    _add_settings_key(browser, "skipAutoPermissionPrompt")  # typed: still a typed row
+    browser.click(_row("skipAutoPermissionPrompt", "cm-settings-bool"))
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    browser.click('[data-test="cm-save"]')
+    browser.expect_text(
+        '[data-test="cm-error"]',
+        "Claude Code reads skipAutoPermissionPrompt only from user settings and ignores it "
+        "in project settings (.claude/settings.json)",
+    )
+    assert not _alpha_settings_path(config_mgmt_server).exists()
+
+
+def test_config_mgmt_settings_rows_raw_switch_keeps_every_value(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Rows <-> Raw never drops a value, an unedited switch is not dirty (TASK-271)."""
+    seeded = {
+        "constructor": "x",  # a key named like an Object member is an ordinary key
+        "verbose": True,
+        "feedbackSurveyRate": 0.25,
+        "attribution": False,
+        "companyAnnouncements": ["a", "b"],
+        "nothing": None,
+        "statusLine": {"type": "command", "command": "echo hi"},
+    }
+    _seed_alpha_settings(config_mgmt_server, seeded)
+    _open_settings_rows(browser, config_mgmt_server)
+    browser.expect_count('[data-test="cm-settings-key-row"]', len(seeded))
+    browser.expect_visible(_row("constructor", "cm-settings-string"))
+    browser.expect_visible(_row("nothing", "cm-settings-readonly"))
+
+    # An unedited round trip stays clean.
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    browser.click('[data-test="cm-settings-mode-raw"]')
+    browser.expect_visible('[data-test="cm-settings-text"]')
+    browser.expect_disabled('[data-test="cm-save"]')
+    browser.click('[data-test="cm-settings-mode-rows"]')
+    browser.expect_count('[data-test="cm-settings-key-row"]', len(seeded))
+    browser.expect_disabled('[data-test="cm-save"]')
+
+    # A row edit shows in Raw JSON, and a Raw JSON edit shows in the rows.
+    browser.click(_row("verbose", "cm-settings-bool"))
+    browser.click(_row("statusLine", "cm-settings-edit-raw"))
+    browser.expect_visible('[data-test="cm-settings-text"]')
+    raw = json.loads(browser.get_value('[data-test="cm-settings-text"]'))
+    assert raw == {**seeded, "verbose": False}
+    browser.fill('[data-test="cm-settings-text"]', json.dumps({**raw, "feedbackSurveyRate": 0.5}))
+    browser.click('[data-test="cm-settings-mode-rows"]')
+    browser.expect_value(_row("feedbackSurveyRate", "cm-settings-number"), "0.5")
+    assert _checked(browser, _row("verbose", "cm-settings-bool")) is False
+    _save_alpha(browser)
+    stored = json.loads(_alpha_settings_path(config_mgmt_server).read_text(encoding="utf-8"))
+    assert stored == {**seeded, "verbose": False, "feedbackSurveyRate": 0.5}
+
+
+def test_config_mgmt_settings_row_count_matches_merged_view(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Rows and the merged view agree on what exists, and the rows fit a 320 px phone."""
+    _seed_alpha_settings(
+        config_mgmt_server,
+        {
+            "verbose": True,
+            "cleanupPeriodDays": 30,
+            "tui": "fullscreen",
+            "model": "opus",
+            "env": {"A": "x"},
+            "extraKnownMarketplaces": _MARKETPLACES,
+            "companyAnnouncements": ["hello"],
+        },
+    )
+    _open_settings_rows(browser, config_mgmt_server)
+    browser.click('[data-test="cm-effective-toggle"]')
+    browser.expect_visible('[data-test="cm-effective-table"]')
+    browser.expect_count('[data-test="cm-effective-table"] tbody tr', 7)
+    browser.expect_count('[data-test="cm-settings-key-row"]', 7)
+    # The Settings view fits a 320 px phone, with no sideways scroll inside it. goto() sets
+    # its own viewport, so resize after the page is open (the session closes after the
+    # test, so no restore). The page header behind the modal is not measured here.
+    browser.set_viewport(320, 740)
+    widths = browser.eval_json(
+        "(() => { const v = document.querySelector('[data-test=\"cm-view-settings\"]');"
+        " return [window.innerWidth, Math.round(v.getBoundingClientRect().right),"
+        " v.scrollWidth, v.clientWidth]; })()"
+    )
+    assert widths[0] == 320, widths
+    assert widths[1] <= 320, widths
+    assert widths[2] <= widths[3], widths
+
+
 def test_config_mgmt_hooks_tab_loads(browser: AgentBrowser, config_mgmt_server: Server) -> None:
     """Switching to the Hooks tab loads its JSON editor for the scope."""
     _open_modal(browser, config_mgmt_server)
