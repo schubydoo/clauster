@@ -281,7 +281,9 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
         )
     # `line_offset=1`: the header slice starts after the opening `---` fence, so a raw mark
     # names the line one above the fault in the FILE the operator is looking at.
-    data = cw.load_frontmatter_yaml(match.group(1), what="frontmatter", line_offset=1)
+    data = cw.load_frontmatter_yaml(
+        cw.frontmatter_header(text, match), what="frontmatter", line_offset=1
+    )
     if data is None:
         data = {}
     if not isinstance(data, dict):
@@ -881,13 +883,8 @@ def validate_agent_content(candidate: Any, *, expected_name: str | None = None) 
     validate_frontmatter(frontmatter, expected_name=expected_name)
     header = _FRONTMATTER_RE.match(candidate)
     if header is not None:  # pragma: no branch — always, once parse_frontmatter accepted it
-        _refuse_yaml11_only_spellings(header.group(1))
+        _refuse_yaml11_only_spellings(cw.frontmatter_header(candidate, header))
 
-
-#: Line breaks to YAML 1.1 (PyYAML) but ordinary characters to YAML 1.2 (the CLI): NEL,
-#: LINE SEPARATOR and PARAGRAPH SEPARATOR. A header with one reads as different keys in
-#: the two (``tools: Read # c<LS>disallowedTools: Bash`` hides the denylist from the CLI).
-_YAML11_ONLY_LINE_BREAKS = ("\x85", "\u2028", "\u2029")
 
 #: The fields whose loaded value this module checks as a boolean or a number, and the
 #: YAML 1.2 core spellings those loaded values must come from.
@@ -940,7 +937,8 @@ def _check_mapping(
     ``compose`` leaves merges unflattened, so a ``<<: {background: yes}`` would otherwise
     never be looked at. A source is checked even where an explicit key overrides it, which
     only ever refuses more. ``seen`` skips a source merged twice; an alias cycle never gets
-    here, because :func:`_refuse_enclosing_references` refuses it first.
+    here, because the shared seam (:func:`~clauster.config_write.load_frontmatter_yaml`)
+    refuses an alias to an enclosing node first.
 
     Iterative: a chain of ``<<`` merges declared in document order loads without trouble
     (PyYAML flattens each mapping as it reaches it) and passes the merge-size guard (each
@@ -1094,34 +1092,6 @@ def _refuse_yaml12_number_strings(label: str, node: yaml.Node, *, seen: set[int]
             stack.extend(value_node for _key_node, value_node in current.value)
 
 
-def _refuse_enclosing_references(node: yaml.Node, path: set[int], done: set[int]) -> None:
-    """Refuse an alias that points at a node enclosing it (``a: &a {<<: *a}``).
-
-    PyYAML loads that header (it drops the merge key before it follows it), but the CLI's
-    YAML 1.2 loader refuses it ("Merge key cannot reference an enclosing node") and then
-    falls back to re-quoting values, so ``permissionMode: plan # c`` would reach the CLI as
-    the string ``"plan # c"``. ``path`` holds the nodes being walked through; ``done``
-    skips a node already checked, so a shared alias is walked once.
-    """
-    if id(node) in path:
-        raise cw.InvalidCandidateError(
-            "frontmatter has an alias to a node that encloses it, which the YAML 1.2 that "
-            "Claude Code reads refuses. Remove the self-reference"
-        )
-    if id(node) in done or not isinstance(node, yaml.CollectionNode):
-        return
-    path.add(id(node))
-    children = (
-        [part for pair in node.value for part in pair]
-        if isinstance(node, yaml.MappingNode)
-        else node.value
-    )
-    for child in children:
-        _refuse_enclosing_references(child, path, done)
-    path.discard(id(node))
-    done.add(id(node))
-
-
 def _refuse_yaml11_only_spellings(header: str) -> None:
     """Refuse header text that PyYAML (YAML 1.1) and the CLI (YAML 1.2) read differently.
 
@@ -1129,8 +1099,6 @@ def _refuse_yaml11_only_spellings(header: str) -> None:
     looks at how the checked values are SPELLED, so a value is not accepted on a reading
     the CLI does not share:
 
-    * a NEL / LINE SEPARATOR / PARAGRAPH SEPARATOR anywhere in the header (a line break
-      only to YAML 1.1, so the two see different keys);
     * a ``background``/``omitClaudeMd`` boolean spelled ``yes``/``no``/``on``/``off`` (a
       string to YAML 1.2, which the CLI logs or ignores), plain, quoted with an explicit
       ``!!bool``, or brought in through a ``<<`` merge;
@@ -1144,17 +1112,17 @@ def _refuse_yaml11_only_spellings(header: str) -> None:
       1.2 reads as a number (``env: {A: 1e3}``, ``args: [0o17]``), which the entry schema
       refuses for the same reason.
 
-    ``header`` already loaded as a mapping, so composing it again yields a mapping node and
-    does not fail.
+    These are the TOP-LEVEL fields. The shared seam
+    (:func:`~clauster.config_write.load_frontmatter_yaml`) already refused a NEL, LINE
+    SEPARATOR or PARAGRAPH SEPARATOR, an alias to an enclosing node, and every NESTED
+    boolean or number with a YAML 1.1-only spelling (a frontmatter hook's ``async: yes``)
+    before this runs (TASK-449.6).
+
+    ``header`` already loaded as a mapping, so composing the text the CLI parses (the header,
+    or its retry text: :func:`~clauster.config_write.cli_frontmatter_text`) yields a mapping
+    node and does not fail.
     """
-    for char in _YAML11_ONLY_LINE_BREAKS:
-        if char in header:
-            raise cw.InvalidCandidateError(
-                f"frontmatter contains {char!r}, a line break to YAML 1.1 but not to the "
-                "YAML 1.2 that Claude Code reads. Remove it"
-            )
-    root = yaml.compose(header, Loader=yaml.SafeLoader)
-    _refuse_enclosing_references(root, set(), set())
+    root = yaml.compose(cw.cli_frontmatter_text(header), Loader=yaml.SafeLoader)
     _check_mapping(
         root, set(), visit=functools.partial(_check_top_level_field, walk=_InlineWalk())
     )
@@ -1366,10 +1334,8 @@ def _mcp_servers_as_list(text: str) -> str | None:
     servers = frontmatter.get("mcpServers")
     if not isinstance(servers, dict) or not servers:
         return None
-    if any(char in match.group(1) for char in _YAML11_ONLY_LINE_BREAKS):
-        # PyYAML splits lines there and YAML 1.2 does not, so re-indenting "the next line"
-        # would add two spaces inside a value for the CLI. (Its save is refused anyway.)
-        return None
+    # A NEL/LS/PS character never reaches here: `parse_frontmatter` above went through the
+    # shared seam, which refuses it, so "the next line" means the same to both YAML versions.
     lines = match.group(1).splitlines(keepends=True)
     bounds = _mcp_servers_block_bounds(lines)
     if bounds is None:
@@ -1495,7 +1461,9 @@ def _convert_inline_servers(text: str) -> tuple[str, list[str]] | None:
                 new_item = {server_name: converted}
         expected.append(new_item)
         edits.append(edit)
-    if not notes or any(char in match.group(1) for char in _YAML11_ONLY_LINE_BREAKS):
+    # A NEL/LS/PS character never reaches here: `parse_frontmatter` above went through the
+    # shared seam, which refuses it, so "the next line" means the same to both YAML versions.
+    if not notes:
         return None
     lines = match.group(1).splitlines(keepends=True)
     bounds = _mcp_servers_block_bounds(lines)

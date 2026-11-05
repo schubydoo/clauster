@@ -70,7 +70,8 @@ def test_parse_frontmatter_rejects_missing_block() -> None:
 
 def test_parse_frontmatter_rejects_invalid_yaml() -> None:
     with pytest.raises(cw.InvalidCandidateError, match="YAML"):
-        sub.parse_frontmatter("---\nname: [unterminated\n---\nbody\n")
+        # Nested: the CLI retry would re-quote a top-level `[` line (TASK-449.6).
+        sub.parse_frontmatter("---\nm:\n  name: [unterminated\n---\nbody\n")
 
 
 def test_parse_frontmatter_rejects_deeply_nested_yaml() -> None:
@@ -1184,16 +1185,33 @@ def test_conversion_keeps_every_value_spelled_as_written(tmp_path: Path) -> None
     # PyYAML reads YAML 1.1 and the CLI reads YAML 1.2, which disagree on `yes`, `0755`,
     # `1:30` and on whether `'1e5'` needs its quotes. Re-indenting instead of re-dumping
     # keeps each scalar's text, so the CLI reads the converted file as it read the old one.
+    # Since TASK-449.6 the shared seam refuses the UNQUOTED nested `yes`, `0755` and `1:30`
+    # outright (see the next test), so this one pins that the quoting survives, and a
+    # plain spelling both versions read alike (`0x1F`) keeps its text.
     text = (
         "---\nname: my-agent\ndescription: d\nmcpServers:\n  srv:\n    command: x\n"
-        "    env:\n      DEBUG: yes\n      MODE: 0755\n      PORT: 1:30\n      T: '1e5'\n"
-        "---\nbody\n"
+        "    env:\n      DEBUG: 'yes'\n      MODE: \"0755\"\n      PORT: '1:30'\n"
+        "      T: '1e5'\n      H: 0x1F\n---\nbody\n"
     )
     _place(tmp_path, "my-agent", text)
     content = sub.read_project_agent(tmp_path, "my-agent")["content"]
-    for spelling in ("DEBUG: yes", "MODE: 0755", "PORT: 1:30", "T: '1e5'"):
+    for spelling in ("DEBUG: 'yes'", 'MODE: "0755"', "PORT: '1:30'", "T: '1e5'", "H: 0x1F"):
         assert f"        {spelling}\n" in content
     assert "  - srv:\n" in content
+
+
+def test_a_nested_yaml_1_1_only_spelling_blocks_the_conversion(tmp_path: Path) -> None:
+    # The unquoted `DEBUG: yes` is a boolean to PyYAML and the string "yes" to the CLI, so
+    # the shared seam refuses the header (TASK-449.6). The file is shown as it is, with the
+    # error, and is not converted: the conversion never builds on a header the seam refused.
+    text = (
+        "---\nname: my-agent\ndescription: d\nmcpServers:\n  srv:\n    command: x\n"
+        "    env:\n      DEBUG: yes\n---\nbody\n"
+    )
+    _place(tmp_path, "my-agent", text)
+    doc = sub.read_project_agent(tmp_path, "my-agent")
+    assert doc["content"] == text
+    assert not doc.get("converted")
 
 
 def test_conversion_keeps_crlf_line_endings(tmp_path: Path) -> None:

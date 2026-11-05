@@ -31,9 +31,9 @@ And across the pair:
   parsers reading one file into two different grants is the divergence that matters — but
   the body is the file the operator is shown and re-submits, so a byte of disagreement
   there is a silent edit. Stated as an implication rather than as equality of the accept
-  sets, deliberately: the two surfaces still differ on what they *accept* (skills rejects
-  a non-mapping header that subagents reads as ``{}``) and this harness must not rule on
-  which is right.
+  sets, deliberately: the two surfaces may differ on what they *accept* (until TASK-449.6
+  skills rejected an empty header that subagents reads as ``{}``; both read it as ``{}``
+  now) and this harness must not rule on which is right.
 
 ⚠️ Mapping equality goes through :func:`_same`, which falls back to ``repr``. YAML's
 ``.nan`` is real input here and ``float('nan') != float('nan')``, so a plain ``==`` would

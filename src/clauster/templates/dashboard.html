@@ -3054,9 +3054,19 @@
                 <input type="text" class="form-control form-control-sm mb-2" id="cm-skill-name" data-test="cm-skill-name"
                        {{ NO_AUTOFILL }} spellcheck="false" x-model="configMgmt.skills.name"
                        :readonly="!configMgmt.skills.isNew" placeholder="my-skill">
+                {# TASK-449.6: the backend removed frontmatter fields whose value Claude Code
+                   ignores on load. Say so before the operator saves, since the shown text is no
+                   longer byte-identical to the file on disk. Same pattern as the subagent
+                   editor's note: above the label, `text-info-emphasis` for AA contrast, and in
+                   the textarea's aria-describedby. #}
+                <div class="alert alert-info text-info-emphasis py-1 px-2 mb-2 small" role="status"
+                     id="cm-skill-converted" data-test="cm-skill-converted"
+                     x-show="configMgmt.skills.converted" x-cloak
+                     x-text="configMgmt.skills.converted"></div>
                 <label class="form-label small" for="cm-skill-content">SKILL.md (Markdown + frontmatter)</label>
                 <textarea id="cm-skill-content" class="form-control form-control-sm font-monospace" rows="11"
                           data-test="cm-skill-content" spellcheck="false"
+                          aria-describedby="cm-skill-converted"
                           x-model="configMgmt.skills.content" {{ NO_AUTOFILL }}></textarea>
                 <div class="form-hint small mt-1">
                   Edits the skill's <code>SKILL.md</code>. Supporting scripts aren't managed here.

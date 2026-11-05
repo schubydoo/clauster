@@ -63,7 +63,9 @@ async def api_config_write_skills_file_read(
 ) -> dict:
     """Return one redacted file from inside a skill directory (``SKILL.md`` by default)."""
     # Redaction closes the #813 INFO-1 gap here, unlike the CLAUDE.md content-tier
-    # route -- see config_write_skills' module docstring.
+    # route -- see config_write_skills' module docstring. `converted` is non-null when a
+    # SKILL.md arrives with fields Claude Code ignores removed (TASK-449.6); `hash` is
+    # still the hash of the file on disk, so the stale guard holds.
     config_write.require_capability(config, scope)  # type: ignore[arg-type]
     if scope not in ("project", "user"):
         raise HTTPException(status_code=422, detail="scope must be 'project' or 'user' for skills")
@@ -71,8 +73,8 @@ async def api_config_write_skills_file_read(
         raise HTTPException(status_code=422, detail="'name' is required")
     if scope == "user":
         try:
-            content, file_hash, exists = await asyncio.to_thread(
-                config_write_skills.read_user_skill_file,
+            content, file_hash, exists, converted = await asyncio.to_thread(
+                config_write_skills.read_user_skill_file_for_edit,
                 _base.user_claude_json(runner),
                 name,
                 relative,
@@ -86,11 +88,12 @@ async def api_config_write_skills_file_read(
             "content": content,
             "hash": file_hash,
             "exists": exists,
+            "converted": converted,
         }
     project_dir = _base.resolve_cw_project(config, project)
     try:
-        content, file_hash, exists = await asyncio.to_thread(
-            config_write_skills.read_project_skill_file, project_dir, name, relative
+        content, file_hash, exists, converted = await asyncio.to_thread(
+            config_write_skills.read_project_skill_file_for_edit, project_dir, name, relative
         )
     except config_write.ConfigWriteError as exc:
         raise _base.map_config_write_error(exc) from exc
@@ -102,6 +105,7 @@ async def api_config_write_skills_file_read(
         "content": content,
         "hash": file_hash,
         "exists": exists,
+        "converted": converted,
     }
 
 

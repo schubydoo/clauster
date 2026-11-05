@@ -466,3 +466,41 @@ def test_noninteractive_auth_absent_when_login_shepherd_off(write_config):
     # (shepherd off) must not surface it.
     html = _html(write_config, _ON)
     assert 'data-test="noninteractive-auth"' not in html
+
+
+def _between(html: str, start: str, end: str) -> str:
+    """Return the text of ``html`` from ``start`` up to the next ``end``."""
+    head = html.index(start)
+    return html[head : html.index(end, head)]
+
+
+def test_skill_editor_shows_the_conversion_note(write_config):
+    # TASK-449.6: a SKILL.md loaded with fields Claude Code ignores arrives with them removed
+    # plus a `converted` note. The editor must show that note before the save, and count the
+    # load as dirty so the converted text can be saved without an edit. Each script pin is
+    # cut to the skill function it belongs to: the subagent editor has the same lines.
+    html = _html(write_config, _ON)
+    assert 'data-test="cm-skill-converted"' in html
+    assert 'x-show="configMgmt.skills.converted"' in html
+    assert 'x-text="configMgmt.skills.converted"' in html
+    assert 'aria-describedby="cm-skill-converted"' in html
+    open_skill = _between(html, "async configMgmtOpenSkill(", "configMgmtCancelSkill()")
+    assert 's.converted = typeof d.converted === "string" ? d.converted : "";' in open_skill
+    dirty = _between(html, "configMgmtSkillDirty() {", "configMgmtCanSaveSkill()")
+    assert "(s.content !== s.orig || !!s.converted)" in dirty
+    # Cleared on every path that leaves or replaces the editor: new skill, cancel, list
+    # reload, surface switch, and a successful save.
+    new_skill = _between(html, "configMgmtNewSkill() {", "async configMgmtOpenSkill(")
+    assert 's.converted = "";' in new_skill
+    cancel = _between(html, "configMgmtCancelSkill() {", "configMgmtSkillDirty()")
+    assert 's.converted = "";' in cancel
+    reload = _between(html, "async _loadSkills(myGen) {", "configMgmtNewSkill()")
+    assert 'c.skills.converted = "";' in reload
+    switch = _between(
+        html,
+        'c.skills.editing = false; c.skills.deletingName = ""; c.skills.confirm',
+        "this.configMgmtReload();",
+    )
+    assert 'c.skills.converted = "";' in switch
+    save = _between(html, "async configMgmtSaveSkill() {", "configMgmtAskDeleteSkill(")
+    assert 'c.saved = true; s.editing = false; s.confirm = ""; s.converted = "";' in save
