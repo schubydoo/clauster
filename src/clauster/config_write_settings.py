@@ -545,7 +545,9 @@ def _unmasked_slot_path(incoming: Any, shown: Any, path: str) -> str | None:
     Masks all look the same, so in a list that still holds one, every element the read
     showed masked must still hold a mask in the same position. Otherwise deleting one
     masked entry and appending another value would keep the deleted credential and drop
-    the kept one. To change one such element, retype every masked entry of the list.
+    the kept one. To change one such element, retype every masked entry of the list. That
+    case raises :class:`~clauster.config_write.InvalidCandidateError` here, with a message
+    that names the list, since no single slot is at fault.
     """
     if incoming == cw.REDACTION_SENTINEL:
         return None if shown == cw.REDACTION_SENTINEL else path

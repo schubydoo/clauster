@@ -180,6 +180,13 @@ def test_identical_masks_in_a_list_cannot_be_partly_replaced(
     cws.write_user_settings(settings, {"mirrors": ["https://u:two@h/y", "plain"]}, h)
 
 
+def test_identical_masks_in_a_nested_list_name_the_nested_path(tmp_path: Path) -> None:
+    settings = tmp_path / "settings.json"
+    h = _seed(settings, {"a": {"mirrors": ["https://u:one@h/x", "https://u:two@h/y"]}})
+    with pytest.raises(cw.InvalidCandidateError, match=r"a\.mirrors holds masked entries"):
+        cws.write_user_settings(settings, {"a": {"mirrors": [S, "plain"]}}, h)
+
+
 def test_mask_under_a_value_masked_whole_is_refused(tmp_path: Path) -> None:
     settings = tmp_path / "settings.json"
     h = _seed(settings, {"apiKeyHelper": {"cmd": "secret"}})
