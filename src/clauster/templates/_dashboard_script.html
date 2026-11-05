@@ -348,7 +348,7 @@
           ov: {
             rows: [], stored: {}, listed: [], hash: null, orig: "",
             ready: false, loading: false, error: "",
-            addName: "", addValue: "off", confirm: "", busy: false, ops: 0,
+            addName: "", addValue: "on", confirm: "", busy: false, ops: 0,
           },
         },
         // Plugins + marketplaces (#773 slice F): a CLI-driven list surface, all three
@@ -3543,21 +3543,31 @@
       async _loadSkills(myGen, keepOvEdits) {
         const c = this.configMgmt, local = c.scope === "local";
         c.skills.editing = false; c.skills.deletingName = ""; c.skills.converted = "";
-        // No rows and no earlier scope's error until this scope's map loads.
-        if (!keepOvEdits) { c.skills.ov.ready = false; c.skills.ov.error = ""; }
-        let names;
+        // No rows and no earlier scope's error until this scope's map loads. `loading` is
+        // reset too: a superseded map load skips its gen-gated finally, so it would stay set.
+        if (!keepOvEdits) {
+          c.skills.ov.ready = false; c.skills.ov.error = ""; c.skills.ov.loading = false;
+        }
+        // A failed folder list still loads the map, with no folder rows, so stored keys
+        // stay visible and removable; the list's error shows in the banner.
+        let names = [];
         try {
           const q = this._configMgmtQuery(local ? { scope: "project" } : undefined);
           const res = await fetch(ROOT + "/api/config-write/skills?" + q);
           if (c.gen !== myGen) return;
           if (this._authExpired(res)) return;
-          if (!res.ok) { c.skills.list = []; c.error = this._configMgmtLoadErr(res); return; }
-          const d = await res.json();
+          if (!res.ok) { c.skills.list = []; c.error = this._configMgmtLoadErr(res); }
+          else {
+            const d = await res.json();
+            if (c.gen !== myGen) return;
+            const skills = d.skills || [];
+            c.skills.list = local ? [] : skills;
+            names = skills.map(sk => sk.name);
+          }
+        } catch (e) {
           if (c.gen !== myGen) return;
-          const skills = d.skills || [];
-          c.skills.list = local ? [] : skills;
-          names = skills.map(sk => sk.name);
-        } catch (e) { if (c.gen === myGen) c.error = "Failed to load skills."; return; }
+          c.skills.list = []; c.error = "Failed to load skills.";
+        }
         await this._loadSkillOverrides(myGen, names, keepOvEdits);
       },
       // The rows: listed folder names first, in list order, then each stored key that no
@@ -3572,6 +3582,12 @@
           value: !has ? "" : (known ? raw : "?"),
           rawText: has && !known ? JSON.stringify(raw) : "",
         };
+      },
+      // The "Not valid" option label: the stored value, cut so a long one cannot stretch
+      // the select. The full value is still what a save sends.
+      configMgmtSkillOvRawLabel(row) {
+        const t = row.rawText;
+        return "Not valid: " + (t.length > 40 ? t.slice(0, 40) + "…" : t);
       },
       _skillOvRows(listed, stored) {
         const rows = [], seen = new Set();
@@ -3604,7 +3620,9 @@
             r.listed = listed.has(r.name); have.add(r.name);
             return r.listed || r.stored || r.value !== "";
           });
-          names.forEach(n => { if (!have.has(n)) ov.rows.push(this._skillOvRow(n, true, ov.stored)); });
+          names.forEach(n => {
+            if (!have.has(n)) { have.add(n); ov.rows.push(this._skillOvRow(n, true, ov.stored)); }
+          });
           return;
         }
         ov.rows = []; ov.stored = {}; ov.hash = null; ov.orig = this._skillOvSig([]);
@@ -3636,9 +3654,13 @@
         const ov = this.configMgmt.skills.ov;
         return this._skillOvSig(ov.rows) !== ov.orig;
       },
+      // Text of the always-mounted status node: empty while loading or loaded, so a
+      // screen reader announces a failure when its text appears (not an x-show flip).
       configMgmtSkillOvUnavailable() {
         const ov = this.configMgmt.skills.ov;
-        return ov.error || "Could not load skill visibility. Reload to try again.";
+        if (ov.loading || ov.ready) return "";
+        return ov.error
+          || "Could not load skill visibility. Change the scope or reopen this window to try again.";
       },
       configMgmtSkillOvRowsHint() {
         const where = this.configMgmt.scope === "local" ? "this project's skill folders"
@@ -3657,8 +3679,9 @@
         const ov = this.configMgmt.skills.ov;
         return ov.ready && !ov.busy && ov.addName !== "";
       },
-      configMgmtAddSkillOv() {
+      configMgmtAddSkillOv(ev) {
         const c = this.configMgmt, ov = c.skills.ov;
+        if (ev && ev.isComposing) return;  // an Enter that ends an IME composition
         if (!this.configMgmtCanAddSkillOv()) return;
         const name = ov.addName;
         const row = ov.rows.find(r => r.name === name);
@@ -3669,6 +3692,13 @@
           ov.rows.push(r);
         }
         ov.addName = ""; c.saved = false;
+        this._focusSkillOvAddName();  // the Add button disables itself, so keep focus here
+      },
+      _focusSkillOvAddName() {
+        this.$nextTick(() => {
+          const el = document.getElementById("cm-skill-ov-add-name");
+          if (el) el.focus({ preventScroll: true });
+        });
       },
       configMgmtCanSaveSkillOv() {
         const c = this.configMgmt, ov = c.skills.ov;
@@ -3689,7 +3719,12 @@
           });
           if (c.gen !== gen) return;
           if (this._authExpired(res)) return;
-          if (res.ok) { c.saved = true; ov.confirm = ""; await this._loadSkillOverrides(gen, ov.listed, false); }
+          if (res.ok) {
+            c.saved = true; ov.confirm = "";
+            await this._loadSkillOverrides(gen, ov.listed, false);
+            // The confirm and Save hide once nothing is dirty; give focus a visible home.
+            if (c.gen === gen) this._focusSkillOvAddName();
+          }
           else await this._configMgmtWriteErr(res);
         } catch (e) { if (c.gen === gen) c.error = "Save failed."; }
         finally {

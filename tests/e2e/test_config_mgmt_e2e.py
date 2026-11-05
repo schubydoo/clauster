@@ -12,6 +12,7 @@ unit-tested; this proves the wired Alpine flow round-trips to a real running ser
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -1082,6 +1083,16 @@ def _save_skill_visibility(browser: AgentBrowser, token: str) -> None:
     browser.click('[data-test="cm-skill-ov-save"]')
 
 
+def _expect_focused(browser: AgentBrowser, element_id: str, timeout_s: float = 5.0) -> None:
+    """Wait until the element with ``element_id`` holds keyboard focus (set on $nextTick)."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if browser.eval_json("document.activeElement && document.activeElement.id") == element_id:
+            return
+        time.sleep(0.1)
+    raise AssertionError(f"timed out waiting for #{element_id} to have focus")
+
+
 def _add_skill_override(browser: AgentBrowser, name: str, value: str) -> None:
     browser.fill('[data-test="cm-skill-ov-add-name"]', name)
     browser.select('[data-test="cm-skill-ov-add-value"]', value)
@@ -1111,6 +1122,8 @@ def test_config_mgmt_skill_visibility_project_round_trip(
     browser.select('[data-test="cm-skill-ov-greeter"]', "name-only")
     browser.select('[data-test="cm-skill-ov-orphan"]', "")  # No override: remove the key
     _add_skill_override(browser, "doctor", "off")  # a bundled skill: no folder
+    # Add disables itself once the name clears, so focus must return to the name box.
+    _expect_focused(browser, "cm-skill-ov-add-name")
     _save_skill_visibility(browser, "alpha")
     browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
 
@@ -1246,6 +1259,10 @@ def test_config_mgmt_skill_visibility_fits_a_phone_width(
         " return e ? e.scrollWidth - e.clientWidth : null; }); })()"
     )
     assert overflow == [0, 0], overflow
+
+    # The "Not valid" value is sent unchanged, so the backend refuses the save by its key.
+    _save_skill_visibility(browser, "alpha")
+    browser.expect_text('[data-test="cm-error"]', "skillOverrides['odd'] must be one of")
 
 
 def test_config_mgmt_hooks_save_round_trip(

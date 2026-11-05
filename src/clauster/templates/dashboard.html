@@ -317,6 +317,10 @@
        wraps; min-width 0 lets a long unbroken name shrink instead of overflowing. */
     .cm-ov-name { flex: 1 1 10rem; min-width: 0; }
     .cm-keep-spaces { white-space: pre-wrap; }
+    .cm-ov-tag {
+      font-size: .75rem; padding: 0 .35rem;
+      border: 1px solid var(--tblr-border-color); border-radius: var(--tblr-border-radius);
+    }
 
     /* #846: login-shepherd mode picker — a segmented toggle, not Tabler's default
        .form-selectgroup. That component's unselected .form-selectgroup-label shares
@@ -3092,9 +3096,9 @@
                   </div>
                   <div class="text-secondary small" x-show="configMgmt.skills.ov.loading" x-cloak>Loading…</div>
                   <!-- Fail closed: a map that did not load shows its reason, never empty rows
-                       whose save would replace the real map. -->
+                       whose save would replace the real map. Always mounted, with the text
+                       swapped, so the live region announces the failure. -->
                   <div class="text-danger small" data-test="cm-skill-ov-unavailable" role="status"
-                       x-show="!configMgmt.skills.ov.loading && !configMgmt.skills.ov.ready" x-cloak
                        x-text="configMgmtSkillOvUnavailable()"></div>
                   <div x-show="!configMgmt.skills.ov.loading && configMgmt.skills.ov.ready" x-cloak>
                     <div class="text-secondary small mb-2" data-test="cm-skill-ov-empty"
@@ -3103,27 +3107,32 @@
                     </div>
                     {# A wrapping list, not a table: at phone width the select drops under
                        its name instead of pushing the panel wider than the screen. #}
-                    <ul class="list-unstyled mb-2" data-test="cm-skill-ov-table"
+                    {# role="list": Safari drops the list role from a list-unstyled <ul>. #}
+                    <ul class="list-unstyled mb-2" data-test="cm-skill-ov-table" role="list"
                         aria-label="Skill visibility: name and override"
                         x-show="configMgmt.skills.ov.rows.length" x-cloak>
-                      <template x-for="row in configMgmt.skills.ov.rows" :key="'ov-' + row.name">
+                      <template x-for="(row, idx) in configMgmt.skills.ov.rows" :key="'ov-' + row.name">
                         <li class="d-flex flex-wrap align-items-center justify-content-between gap-1 py-1 border-bottom"
                             :data-test="'cm-skill-ov-row-' + row.name">
                           <div class="text-break cm-ov-name">
                             {# pre-wrap: a refused name such as "two  spaces" must show both
                                spaces, or the operator cannot see why it is refused. #}
                             <span class="font-monospace cm-keep-spaces" x-text="row.name"></span>
+                            {# Body-colour tags, not tinted badges: the -lt badges fall short
+                               of 4.5:1 at this size. #}
                             <span x-show="!row.listed" x-cloak
                                   :data-test="'cm-skill-ov-unlisted-' + row.name"
-                                  class="badge bg-secondary-lt text-secondary ms-1 fw-normal"
+                                  class="cm-ov-tag ms-1"
                                   title="No skill folder here has this name. It can still be a bundled, plugin or frontmatter name.">no skill folder</span>
                             <span x-show="configMgmtSkillOvChanged(row)" x-cloak
-                                  class="badge bg-blue-lt ms-1 fw-normal">changed</span>
+                                  :data-test="'cm-skill-ov-changed-' + row.name"
+                                  class="cm-ov-tag ms-1 fst-italic">changed</span>
                           </div>
                           <select class="form-select form-select-sm w-auto mw-100"
                                   :data-test="'cm-skill-ov-' + row.name" :name="'cm-skill-ov-' + row.name"
                                   :aria-label="'Visibility for ' + row.name"
-                                  aria-describedby="cm-skill-ov-hint" x-model="row.value">
+                                  :aria-describedby="idx === 0 ? 'cm-skill-ov-hint' : null"
+                                  :disabled="configMgmt.skills.ov.busy" x-model="row.value">
                             <option value="">No override</option>
                             <option value="on">on</option>
                             <option value="name-only">name-only</option>
@@ -3133,7 +3142,7 @@
                                after x-model set the value, so :selected picks it as it renders. #}
                             <template x-if="row.unknown">
                               <option value="?" :selected="row.value === '?'"
-                                      x-text="'Not valid: ' + row.rawText"></option>
+                                      x-text="configMgmtSkillOvRawLabel(row)"></option>
                             </template>
                           </select>
                         </li>
@@ -3143,11 +3152,13 @@
                     <div class="d-flex gap-2 align-items-center flex-wrap mb-2">
                       <input type="text" class="form-control form-control-sm cm-input-cap" id="cm-skill-ov-add-name"
                              name="cm-skill-ov-add-name" data-test="cm-skill-ov-add-name"
-                             {{ NO_AUTOFILL }} spellcheck="false" placeholder="doctor"
-                             x-model="configMgmt.skills.ov.addName" @keydown.enter.prevent="configMgmtAddSkillOv()">
+                             {{ NO_AUTOFILL }} spellcheck="false" placeholder="skill name"
+                             :disabled="configMgmt.skills.ov.busy"
+                             x-model="configMgmt.skills.ov.addName" @keydown.enter.prevent="configMgmtAddSkillOv($event)">
                       <select class="form-select form-select-sm w-auto" data-test="cm-skill-ov-add-value"
                               id="cm-skill-ov-add-value" name="cm-skill-ov-add-value"
-                              aria-label="Visibility for the added name" x-model="configMgmt.skills.ov.addValue">
+                              aria-label="Visibility for the added name" :disabled="configMgmt.skills.ov.busy"
+                              x-model="configMgmt.skills.ov.addValue">
                         <option value="on">on</option>
                         <option value="name-only">name-only</option>
                         <option value="user-invocable-only">user-invocable-only</option>

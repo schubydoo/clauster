@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 
 from clauster.app import create_app
 from clauster.config import load_config
+from clauster.config_write_skills import SKILL_OVERRIDE_VALUES
 
 _OFF = ""
 _ON = "config_write:\n  enabled: true\n"
@@ -392,15 +393,31 @@ def test_skill_visibility_panel_present_when_enabled(write_config):
     ):
         assert f'data-test="{hook}"' in html, hook
     assert '"/api/config-write/skills/overrides' in html
-    # Each of the four values is an option, plus "No override", which removes the key.
-    for value in ("on", "name-only", "user-invocable-only", "off"):
-        assert f'<option value="{value}">{value}</option>' in html
-    assert '<option value="">No override</option>' in html
+    # Each of the four values is an option in BOTH selects: the per-row select, plus
+    # "No override", which removes the key, and the add form's select. Cut each select out
+    # so one cannot satisfy the pin for the other.
+    row_select = _between(html, ":data-test=\"'cm-skill-ov-' + row.name\"", "</select>")
+    add_select = _between(html, 'data-test="cm-skill-ov-add-value"', "</select>")
+    for value in sorted(SKILL_OVERRIDE_VALUES):
+        option = f'<option value="{value}">{value}</option>'
+        assert option in row_select, value
+        assert option in add_select, value
+    assert '<option value="">No override</option>' in row_select
+    assert "No override" not in add_select  # adding a name with no value means nothing
     # The save sends a name as typed: no client-side name rule, and an own-key map so
     # `__proto__` reaches the backend rule. A trim or a name regex here would be a second
     # copy of the backend check.
     assert "Object.fromEntries(this.configMgmt.skills.ov.rows" in html
     assert "ov.addName.trim()" not in html
+
+
+def test_skill_visibility_values_match_the_backend(write_config):
+    # The panel tells a known stored value from a "Not valid" one with this list. If the
+    # backend gains a value, the panel must too, or it shows a valid value as not valid.
+    html = _html(write_config, _ON)
+    js = re.search(r"configMgmtSkillOvValues:\s*\[([^\]]*)\]", html)
+    assert js
+    assert set(re.findall(r'"([^"]*)"', js.group(1))) == SKILL_OVERRIDE_VALUES
 
 
 def test_plugins_surface_present_when_enabled(write_config):

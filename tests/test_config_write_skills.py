@@ -1463,6 +1463,20 @@ def test_route_overrides_refused_key_names_it_and_writes_nothing(
     assert not (projects_root / "alpha" / ".claude" / "settings.json").exists()
 
 
+@pytest.mark.parametrize("bad", [[], {}, ["off"], None, 1, True])
+def test_route_overrides_non_string_value_is_422_not_500(
+    write_config, tmp_path, projects_root, bad
+) -> None:
+    # The panel sends a stored value it cannot show back unchanged, so the backend must
+    # refuse a hand-edited list or object with its message, not fail on an unhashable `in`.
+    with _client(write_config, tmp_path, _ON) as c:
+        h0 = c.get(f"{_OVERRIDES_URL}?project=alpha").json()["hash"]
+        resp = _overrides_put(c, {"odd": bad}, h0)
+        assert resp.status_code == 422
+        assert resp.json()["detail"].startswith("skillOverrides['odd'] must be one of ")
+    assert not (projects_root / "alpha" / ".claude" / "settings.json").exists()
+
+
 def test_route_overrides_read_returns_an_unlisted_and_an_unknown_value_as_stored(
     write_config, tmp_path, projects_root
 ) -> None:
