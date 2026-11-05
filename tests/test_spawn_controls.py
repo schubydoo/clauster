@@ -176,6 +176,26 @@ async def test_inherit_without_ceiling_rejected(runner_config):
     assert runner.list_instances() == []
 
 
+@pytest.mark.parametrize("mode", ["bypassPermissions", "inherit"])
+async def test_bridge_resume_after_ceiling_removed_rejected(runner_config, monkeypatch, mode):
+    # A resume respawns with the stored mode, so the ceiling is re-applied against the
+    # CURRENT config: a bridge started with the ceiling is refused once it is gone.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, claude_json = runner_config
+    config.projects = {"alpha": ProjectConfig(allow_bypass_permissions=True)}
+    runner = SessionRunner(config, claude_json=claude_json)
+    inst = await runner.spawn("alpha", permission_mode=mode)
+    await runner.stop(inst.instance_id)
+    config.projects = {}
+    with pytest.raises(PermissionModeNotAllowed):
+        await runner.resume(inst.instance_id)
+    # Positive control: with the ceiling back, the same stored row resumes.
+    config.projects = {"alpha": ProjectConfig(allow_bypass_permissions=True)}
+    revived = await runner.resume(inst.instance_id)
+    assert revived.permission_mode == mode
+    await runner.stop(revived.instance_id)
+
+
 async def test_inherit_default_without_ceiling_rejected(runner_config):
     # The configured default is gated too: omitting permission_mode cannot sidestep it.
     config, claude_json = runner_config

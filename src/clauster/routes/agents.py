@@ -3,9 +3,11 @@
 These four routes drive the agent-view background sessions: list them read-only,
 dispatch a new one, stop one cleanly, and resume an ended one. Every dispatch
 validates the project name before spawning (invariant 2) and mirrors the runner's
-``bypassPermissions`` ceiling via :func:`clauster.routes._common.enforce_bypass_ceiling`,
-failing closed so the background channel cannot sidestep a project's
-``allow_bypass_permissions`` gate (invariant 1).
+``bypassPermissions`` / ``inherit`` ceiling via
+:func:`clauster.routes._common.enforce_bypass_ceiling`, failing closed so the
+background channel cannot sidestep a project's ``allow_bypass_permissions`` gate
+(invariant 1). A resume applies the same ceiling to the project that holds the job's
+recorded directory.
 The stop route redacts any ``claude rm`` detail through :func:`clauster.redact.redact_for_disk`
 before it leaves the process on the ``bg-settled`` event (invariant 4).
 """
@@ -13,10 +15,12 @@ before it leaves the process on the ``bg-settled`` event (invariant 4).
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
 from .. import claude_cli, supervisor
+from ..config import CEILING_GATED_MODES, ClausterConfig
 from ..dependencies import ConfigDep, RunnerDep
 from ..discovery import is_valid_project_name
 from ..models import BackgroundJob
@@ -194,20 +198,54 @@ async def api_resume_agent(job_id: str, config: ConfigDep, runner: RunnerDep) ->
     (`valid_session_id`) — the 8-hex guard would reject a UUID. Resume mints a NEW
     job id (and session UUID) that inherits the prior transcript, so `{id}` returned
     here differs from the path id; the panel surfaces it as a new row.
+
+    The resume runs in the configured default permission mode, like a dispatch that
+    names none, and that mode faces the ceiling of the project holding the job's
+    directory (403 when refused, TASK-335).
     """
     if not supervisor.valid_job_id(job_id):
         raise HTTPException(status_code=422, detail="invalid job id")
+    pm = config.instance_defaults.permission_mode
     try:
         new_id = await asyncio.to_thread(
             supervisor.resume_background_job,
             job_id,
+            permission_mode=pm,
+            refuse_cwd=lambda cwd: _resume_ceiling_refusal(config, cwd, pm),
             binary=config.claude.binary,
             claude_json=runner.claude_json,
         )
     except claude_cli.ClaudeNotFound as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except supervisor.ResumeNotAllowed as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except supervisor.ResumeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except supervisor.DispatchError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {"id": new_id}
+
+
+def _resume_ceiling_refusal(config: ClausterConfig, cwd: Path, permission_mode: str) -> str | None:
+    """Return the 403 detail when ``permission_mode`` is refused for a job in ``cwd``.
+
+    The job belongs to the project named by the first path part under ``projects_root``.
+    A job outside ``projects_root`` has no project and so no ceiling: a ceiling-gated mode
+    is refused for it (fail closed), and its directory name is never matched against a
+    project's ceiling, so ``/tmp/<name>`` cannot borrow ``<name>``'s ceiling.
+    """
+    try:
+        parts = cwd.resolve().relative_to(config.projects_root.resolve()).parts
+    except ValueError:
+        parts = ()
+    if not parts:
+        if permission_mode in CEILING_GATED_MODES:
+            return (
+                f"{permission_mode} is not enabled for a background job outside projects_root: "
+                "no project's allow_bypass_permissions ceiling covers its directory."
+            )
+        return None
+    project = parts[0]
+    if config.bypass_denied(project, permission_mode):
+        return config.bypass_denied_detail(project, permission_mode=permission_mode)
+    return None

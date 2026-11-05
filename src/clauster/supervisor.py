@@ -38,6 +38,7 @@ import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 from . import redact
@@ -438,9 +439,15 @@ class ResumeError(RuntimeError):
     """An ended `claude --bg` session could not be resumed (raised fail-closed, #336)."""
 
 
+class ResumeNotAllowed(ResumeError):
+    """The resume's permission mode is refused for the job's directory (TASK-335)."""
+
+
 def resume_background_job(
     job_id: str,
     *,
+    permission_mode: str,
+    refuse_cwd: Callable[[Path], str | None],
     binary: str = "claude",
     claude_json: Path | None = None,
     jobs_dir: Path | None = None,
@@ -454,9 +461,15 @@ def resume_background_job(
     id — a resume mints a fresh 8-hex id (and a new session UUID) that inherits the
     prior transcript, so the resumed agent surfaces as a new panel row.
 
+    ``permission_mode`` is passed to the dispatch like a new job's. It is required
+    because a resume with no mode would pass no ``--permission-mode`` flag, which is
+    the ``inherit`` argv: a ``bypassPermissions`` default in user or managed settings
+    would take effect (TASK-335). ``refuse_cwd`` is the caller's ceiling check for the
+    job's recorded cwd: it returns a refusal detail, or ``None`` to allow.
+
     Fail-closed: a job that is still live, no longer exists, has no recorded session
     UUID, or has no cwd raises :class:`ResumeError` rather than dispatching a duplicate
-    or malformed resume.
+    or malformed resume, and a refused mode raises :class:`ResumeNotAllowed`.
     """
     job = next((j for j in list_background_jobs(jobs_dir, roster_json) if j.id == job_id), None)
     if job is None:
@@ -469,9 +482,13 @@ def resume_background_job(
         raise ResumeError(f"job {job_id!r} has no resumable session id")
     if job.cwd is None:
         raise ResumeError(f"job {job_id!r} has no recorded working directory")
+    refusal = refuse_cwd(job.cwd)
+    if refusal is not None:
+        raise ResumeNotAllowed(refusal)
     return dispatch_background_job(
         job.cwd,
         resume=job.session_id,
+        permission_mode=permission_mode,
         binary=binary,
         claude_json=claude_json,
         timeout=timeout,

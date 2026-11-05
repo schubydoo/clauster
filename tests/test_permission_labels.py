@@ -94,9 +94,13 @@ def test_bypass_option_appends_the_desktop_hint_outside_the_label(write_config) 
 
 def test_no_bypass_option_without_ceiling(write_config) -> None:
     # Fail-closed: no ceiling -> the gated options are absent from the picker entirely.
+    # Looped over the backend's set, so a mode added to CEILING_GATED_MODES but not to
+    # the template's hand-listed tuple fails here. (The template keeps its own tuple on
+    # purpose: a context that forgot to pass a set would make `mode in <undefined>`
+    # False and offer the mode, which fails open.)
     page = _client(write_config).get("/").text
-    assert '<option value="bypassPermissions"' not in page
-    assert '<option value="inherit"' not in page
+    for mode in CEILING_GATED_MODES:
+        assert f'<option value="{mode}"' not in page
 
 
 def test_perm_tooltip_ends_cleanly(write_config) -> None:

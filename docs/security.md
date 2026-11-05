@@ -583,6 +583,10 @@ it does not try to inspect the files. Instead, it refuses `inherit` itself:
   is `inherit`.
 - A resume of a stopped bridge or a hosted session that was started with `inherit`
   gets the same `403` after you remove the ceiling.
+- A resume of an ended background run passes `instance_defaults.permission_mode` as
+  an explicit flag, like a new background run that names no mode. If that default is
+  `inherit` or `bypassPermissions`, the resume needs the ceiling of the project that
+  holds the run's directory, and a run outside `projects_root` is refused.
 
 Claude Code ignores `bypassPermissions` in a project's `.claude/settings.json` and
 `.claude/settings.local.json` (the session starts in the default mode), so a value

@@ -966,10 +966,35 @@ def test_resume_background_job_dispatches(monkeypatch):
 
     monkeypatch.setattr(supervisor, "list_background_jobs", lambda *a, **k: [_fake_job()])
     monkeypatch.setattr(supervisor, "dispatch_background_job", _fake_dispatch)
-    new_id = supervisor.resume_background_job("29e8026f", binary="/abs/claude")
+    seen: list[Path] = []
+
+    def _allow(cwd):
+        seen.append(cwd)
+        return None
+
+    new_id = supervisor.resume_background_job(
+        "29e8026f", permission_mode="plan", refuse_cwd=_allow, binary="/abs/claude"
+    )
     assert new_id == "newjob01"
     assert captured["cwd"] == Path("/proj")
     assert captured["kw"]["resume"] == _UUID  # the FULL uuid, not the 8-hex id
+    # TASK-335: the mode is passed explicitly (no flag would be the inherit argv), and the
+    # caller's ceiling check saw the job's recorded cwd before the dispatch.
+    assert captured["kw"]["permission_mode"] == "plan"
+    assert seen == [Path("/proj")]
+
+
+def test_resume_background_job_refused_cwd_never_dispatches(monkeypatch):
+    dispatched: list = []
+    monkeypatch.setattr(supervisor, "list_background_jobs", lambda *a, **k: [_fake_job()])
+    monkeypatch.setattr(
+        supervisor, "dispatch_background_job", lambda *a, **k: dispatched.append(a) or "x"
+    )
+    with pytest.raises(supervisor.ResumeNotAllowed, match="not enabled"):
+        supervisor.resume_background_job(
+            "29e8026f", permission_mode="inherit", refuse_cwd=lambda cwd: "not enabled"
+        )
+    assert dispatched == []
 
 
 @pytest.mark.parametrize(
@@ -986,7 +1011,9 @@ def test_resume_background_job_errors(job, match, monkeypatch):
     jobs = [] if job is None else [job]
     monkeypatch.setattr(supervisor, "list_background_jobs", lambda *a, **k: jobs)
     with pytest.raises(supervisor.ResumeError, match=match):
-        supervisor.resume_background_job("29e8026f")
+        supervisor.resume_background_job(
+            "29e8026f", permission_mode="default", refuse_cwd=lambda cwd: None
+        )
 
 
 def test_api_resume_agent(write_config, tmp_path, monkeypatch):
@@ -994,6 +1021,97 @@ def test_api_resume_agent(write_config, tmp_path, monkeypatch):
     r = _client(write_config, tmp_path).post("/api/agents/29e8026f/resume")
     assert r.status_code == 201
     assert r.json() == {"id": "newjob01"}
+
+
+# TASK-335: a bg resume used to pass no --permission-mode at all, which is the inherit argv
+# (a bypassPermissions default in user/managed settings takes effect). It now runs in the
+# configured default mode, gated by the ceiling of the project holding the job's cwd.
+def _resume_via_route(write_config, tmp_path, monkeypatch, *, cwd: Path, extra: str = ""):
+    captured: list[dict] = []
+
+    def _fake_dispatch(cwd, **kw):
+        captured.append({"cwd": cwd, **kw})
+        return "newjob01"
+
+    monkeypatch.setattr(supervisor, "list_background_jobs", lambda *a, **k: [_fake_job(cwd=cwd)])
+    monkeypatch.setattr(supervisor, "dispatch_background_job", _fake_dispatch)
+    cfg = write_config(f"state_dir: {tmp_path}/.s\n{extra}")
+    with TestClient(create_app(load_config(cfg))) as client:
+        r = client.post("/api/agents/29e8026f/resume")
+    return r, captured
+
+
+_INHERIT_DEFAULT = "instance_defaults:\n  permission_mode: inherit\n"
+_ALPHA_CEILING = "projects:\n  alpha:\n    allow_bypass_permissions: true\n"
+
+
+def test_api_resume_agent_passes_the_default_mode(
+    write_config, tmp_path, projects_root, monkeypatch
+):
+    r, captured = _resume_via_route(
+        write_config, tmp_path, monkeypatch, cwd=projects_root / "alpha"
+    )
+    assert r.status_code == 201
+    assert captured[0]["permission_mode"] == "default"  # an explicit flag, never "none"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [_INHERIT_DEFAULT, "instance_defaults:\n  permission_mode: bypassPermissions\n"],
+)
+def test_api_resume_agent_gated_default_without_ceiling_is_403(
+    write_config, tmp_path, projects_root, monkeypatch, extra
+):
+    r, captured = _resume_via_route(
+        write_config, tmp_path, monkeypatch, cwd=projects_root / "alpha", extra=extra
+    )
+    assert r.status_code == 403
+    assert "allow_bypass_permissions" in r.json()["detail"]
+    assert captured == []  # refused before any dispatch
+
+
+def test_api_resume_agent_inherit_with_ceiling_resumes(
+    write_config, tmp_path, projects_root, monkeypatch
+):
+    # Positive control: the ceiling is the only thing the 403 above depends on. A job in a
+    # subdirectory of the project (a worktree, say) is covered by that project's ceiling.
+    r, captured = _resume_via_route(
+        write_config,
+        tmp_path,
+        monkeypatch,
+        cwd=projects_root / "alpha" / "sub",
+        extra=_INHERIT_DEFAULT + _ALPHA_CEILING,
+    )
+    assert r.status_code == 201
+    assert captured[0]["permission_mode"] == "inherit"
+
+
+@pytest.mark.parametrize("where", ["outside", "root"])
+def test_api_resume_agent_inherit_outside_projects_is_403(
+    write_config, tmp_path, projects_root, monkeypatch, where
+):
+    # A job outside projects_root has no project, so no ceiling allows a gated mode. Its
+    # directory name must not borrow the same-named project's ceiling.
+    # projects_root IS tmp_path here, so "outside" is a sibling of it.
+    outside = tmp_path.parent / f"elsewhere-{tmp_path.name}" / "alpha"
+    cwd = outside if where == "outside" else projects_root
+    r, captured = _resume_via_route(
+        write_config, tmp_path, monkeypatch, cwd=cwd, extra=_INHERIT_DEFAULT + _ALPHA_CEILING
+    )
+    assert r.status_code == 403
+    assert "outside projects_root" in r.json()["detail"]
+    assert captured == []
+
+
+def test_api_resume_agent_outside_projects_explicit_mode_resumes(
+    write_config, tmp_path, monkeypatch
+):
+    # A non-gated default forces its own flag, so the ceiling does not apply to it.
+    r, captured = _resume_via_route(
+        write_config, tmp_path, monkeypatch, cwd=tmp_path.parent / f"elsewhere-{tmp_path.name}"
+    )
+    assert r.status_code == 201
+    assert captured[0]["permission_mode"] == "default"
 
 
 def test_api_resume_agent_invalid_job_id(write_config, tmp_path):

@@ -37,7 +37,9 @@ takes effect. Clauster now gates `inherit` with the same per-project ceiling as
 `bypassPermissions`. On a project without `allow_bypass_permissions: true`, the
 launch picker does not offer it, and every launch or resume that asks for it gets a
 `403`. If `instance_defaults.permission_mode` is `inherit`, pick an explicit mode
-there, or set the ceiling on each project that must use `inherit`. For the reasons,
+there, or set the ceiling on each project that must use `inherit`. A resume of an
+ended background run now passes `instance_defaults.permission_mode` as a flag (it
+passed none before), so it starts in that mode. For the reasons,
 see the [bypassPermissions footgun
 gate](docs/security.md#bypasspermissions-footgun-gate).
 
