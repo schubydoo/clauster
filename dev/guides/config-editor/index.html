@@ -928,10 +928,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#skill-names-in-skilloverrides" class="md-nav__link">
+  <a href="#skill-visibility" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Skill names in skillOverrides
+        Skill visibility
       
     </span>
   </a>
@@ -1705,10 +1705,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#skill-names-in-skilloverrides" class="md-nav__link">
+  <a href="#skill-visibility" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Skill names in skillOverrides
+        Skill visibility
       
     </span>
   </a>
@@ -1952,8 +1952,10 @@ on; the User scope additionally requires <code>config_write.allow_user_scope</co
 <p>Common mechanics across the modal:</p>
 <ul>
 <li><strong>Scope toggle</strong> — User / Project / Local, with a project picker for the
-  project-level scopes. Subagents and skills have no project-local scope
-  (Claude Code has no local directory for them).</li>
+  project-level scopes. Subagents have no project-local scope (Claude Code has
+  no local directory for them). The Skills tab has a Local scope for
+  <a href="#skill-visibility">skill visibility</a> only, because Claude Code has no local
+  skills folder.</li>
 <li><strong>Typed confirmation</strong> — every document save asks you to type the scope
   name; destructive list actions (delete, reset, plugin install) have their
   own typed confirms.</li>
@@ -2006,7 +2008,7 @@ on; the User scope additionally requires <code>config_write.allow_user_scope</co
 </tr>
 <tr>
 <td>Skills</td>
-<td>Skills: list, a per-skill <code>SKILL.md</code> editor, create, delete. See <a href="#skill-frontmatter-checks">Skill frontmatter checks</a>.</td>
+<td>Skills: list, a per-skill <code>SKILL.md</code> editor, create, delete, and the visibility of each skill (<code>skillOverrides</code>). See <a href="#skill-frontmatter-checks">Skill frontmatter checks</a> and <a href="#skill-visibility">Skill visibility</a>.</td>
 </tr>
 <tr>
 <td>Plugins</td>
@@ -2615,12 +2617,64 @@ removed, because Claude Code acts on them. The first is a <code>hooks</code> val
 not a mapping and not empty: Claude Code then also drops <code>allowed-tools</code>. The
 second is a <code>disallowed-tools</code> value next to <code>disallowedTools</code>: it still hides
 <code>disallowedTools</code>.</p>
-<h3 id="skill-names-in-skilloverrides">Skill names in skillOverrides<a class="headerlink" href="#skill-names-in-skilloverrides" title="Permanent link">&para;</a></h3>
-<p>In <code>skillOverrides</code>, a key is the name of a skill, as Claude Code shows it.
-The key can be a frontmatter <code>name</code>, the name of a bundled skill such as
-<code>doctor</code>, or a name with a colon. Clauster refuses an empty key, the key
-<code>__proto__</code>, and a name that Claude Code cannot show. The values are <code>on</code>,
-<code>name-only</code>, <code>user-invocable-only</code> and <code>off</code>.</p>
+<h3 id="skill-visibility">Skill visibility<a class="headerlink" href="#skill-visibility" title="Permanent link">&para;</a></h3>
+<p>The <strong>Skill visibility</strong> panel on the Skills tab edits the <code>skillOverrides</code> key
+in the settings file of the scope: <code>~/.claude/settings.json</code> at User scope,
+<code>.claude/settings.json</code> at Project scope, and <code>.claude/settings.local.json</code> at
+Local scope. The key tells Claude Code how to list each skill. A skill that has
+no key is <code>on</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Effect in Claude Code</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>on</code></td>
+<td>Claude Code lists the skill with its description.</td>
+</tr>
+<tr>
+<td><code>name-only</code></td>
+<td>Claude Code lists the skill without its description.</td>
+</tr>
+<tr>
+<td><code>user-invocable-only</code></td>
+<td>Claude does not see the skill. You can still run it with its <code>/</code> command.</td>
+</tr>
+<tr>
+<td><code>off</code></td>
+<td>Neither Claude nor you can use the skill.</td>
+</tr>
+</tbody>
+</table>
+<p>The panel shows one row for each skill folder at the scope, and one row for
+each key that is already in the file. At Local scope, the rows show the skill
+folders of the project. A key that matches no folder gets a <strong>no skill folder</strong>
+badge, so you can see it and remove it. A stored value that Claude Code does
+not read shows as <strong>Not valid</strong>. Clauster refuses a save until you choose a
+value for that row.</p>
+<p>To change the visibility of skills:</p>
+<ol>
+<li>Open <strong>Manage Claude Code config</strong>, select the scope and the project, then
+   open the <strong>Skills</strong> tab.</li>
+<li>Choose a value for each row. To remove a key from the file, choose
+   <strong>No override</strong>.</li>
+<li>To set a skill that has no row, such as the bundled skill <code>doctor</code>, type its
+   name in <strong>Add a skill name</strong>, choose a value, then select <strong>Add</strong>.</li>
+<li>Type the scope name, then select <strong>Save visibility</strong>.</li>
+</ol>
+<p>A save replaces the whole <code>skillOverrides</code> map with the rows that have a value.
+It does not change the other keys in the settings file. If the file changed
+after the panel loaded it, Clauster refuses the save and writes nothing. Close
+and reopen the panel to load the file again.</p>
+<p>A key is the name of a skill, as Claude Code shows it. The key can be a
+frontmatter <code>name</code>, the name of a bundled skill such as <code>doctor</code>, or a name with
+a colon such as <code>anthropic-skills:pdf</code>. Clauster refuses an empty key, the key
+<code>__proto__</code>, and a name that Claude Code cannot show. The refusal names the key,
+and Clauster writes nothing. The panel sends each name as you typed it, so a
+space at the start or the end is part of the name.</p>
 <h2 id="troubleshooting-and-limits">Troubleshooting and limits<a class="headerlink" href="#troubleshooting-and-limits" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
