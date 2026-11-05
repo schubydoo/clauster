@@ -575,11 +575,19 @@ def test_config_mgmt_settings_add_and_remove_key_rows(
     _seed_alpha_settings(config_mgmt_server, {"model": "opus"})
     _open_settings_rows(browser, config_mgmt_server)
     browser.expect_count('[data-test="cm-settings-key-row"]', 1)
+    # The Add-a-key warning is hidden on a fresh load (the rows above have rendered, so
+    # Alpine has run). An x-show element must not carry a Tabler d-* display class,
+    # because its !important display beats the display:none that x-show sets.
+    assert not browser.is_visible('[data-test="cm-settings-add-error"]')
     browser.click(_row("model", "cm-settings-key-remove"))
     browser.expect_count('[data-test="cm-settings-key-row"]', 0)
 
+    # A refused add shows the warning, and the next successful add hides it again.
+    _add_settings_key(browser, "env")
+    browser.expect_text('[data-test="cm-settings-add-error"]', "env table below")
     _add_settings_key(browser, "verbose")
     browser.expect_visible(_row("verbose", "cm-settings-bool"))
+    assert not browser.is_visible('[data-test="cm-settings-add-error"]')
     assert _checked(browser, _row("verbose", "cm-settings-bool")) is False
     browser.click(_row("verbose", "cm-settings-bool"))
     _add_settings_key(browser, "someFutureKey")

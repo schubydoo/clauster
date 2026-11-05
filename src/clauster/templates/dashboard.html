@@ -2232,9 +2232,14 @@
                     text) that Claude Code reads at this scope. A key that is not on it gets a text box,
                     and the server checks every key when you save.
                   </div>
-                  <div class="alert alert-warning py-1 small mt-1 mb-0 d-flex flex-wrap align-items-center gap-2"
+                  {# Keep d-flex OFF this x-show element: Tabler's `.d-flex` is
+                     `display:flex !important`, which beats the inline `display:none` that
+                     x-show sets, so the empty alert would always show. The flex layout lives
+                     on the inner wrapper instead, as for the live-tail banners. #}
+                  <div class="alert alert-warning py-1 small mt-1 mb-0"
                        data-test="cm-settings-add-error" role="alert"
                        x-show="configMgmt.settings.addError" x-cloak>
+                    <div class="d-flex flex-wrap align-items-center gap-2">
                     <span x-text="configMgmt.settings.addError"></span>
                     <button type="button" class="btn btn-sm btn-ghost-primary" data-test="cm-settings-add-owner-link"
                             x-show="configMgmtSurfaceKeyForLabel(configMgmt.settings.addOwner)" x-cloak
@@ -2243,6 +2248,7 @@
                     <button type="button" class="btn btn-sm btn-ghost-primary" data-test="cm-settings-add-raw"
                             x-show="configMgmt.settings.addRaw" x-cloak
                             @click="configMgmtSettingsEditRaw()">Edit in Raw JSON</button>
+                    </div>
                   </div>
                 </div>
 
