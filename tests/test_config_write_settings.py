@@ -4,9 +4,10 @@ Covers the structural validator (owned-key rejection + env shape check), the
 project/user/local read+write functions (round trip, owned-key preservation,
 stale-hash guard), the #822-lesson env redaction (every env value masked on
 read regardless of key name, keep-stored on a resent sentinel), the
-scope-merge provenance computation (local > project > user precedence, per
-top-level key), and the gated routes (capability/scope 404, the #819/#768
-capability-before-scope-enum ordering, type-the-name 400, bad-shape/owned-key
+scope-merge provenance computation (local > project > user precedence, with
+Claude Code's own merge; more cases in ``test_config_write_settings_audit.py``),
+and the gated routes (capability/scope 404, the #819/#768 capability-before-scope-enum
+ordering, type-the-name 400, bad-shape/owned-key
 422 writing nothing, stale-hash 409, path-escape 400).
 
 Every test that touches ``~/.claude/settings.json`` runs under the autouse
@@ -294,13 +295,13 @@ def test_marketplace_header_credentials_masked_on_read_and_kept_on_resend(
     assert on_disk[key] == stored
 
 
-def test_write_sentinel_for_absent_key_is_dropped(tmp_path: Path) -> None:
-    # A resent sentinel for a var that was never actually stored has nothing to
-    # keep — it is dropped, never written as the literal "********" string.
-    cws.write_project_settings(tmp_path, {"env": {"GHOST": cw.REDACTION_SENTINEL}}, None)
-    settings_path = tmp_path / ".claude" / "settings.json"
-    on_disk = json.loads(settings_path.read_text(encoding="utf-8"))
-    assert on_disk.get("env", {}) == {}
+def test_write_sentinel_for_absent_key_is_refused(tmp_path: Path) -> None:
+    # A resent sentinel for a var that was never stored has nothing to keep. It used to
+    # be dropped and the save reported success (TASK-449.2): now the write is refused
+    # whole, so the operator learns the value is gone and retypes it.
+    with pytest.raises(cw.InvalidCandidateError, match=r"env\.GHOST holds a masked value"):
+        cws.write_project_settings(tmp_path, {"env": {"GHOST": cw.REDACTION_SENTINEL}}, None)
+    assert not (tmp_path / ".claude" / "settings.json").exists()
 
 
 # --- user scope --------------------------------------------------------------------
@@ -432,9 +433,13 @@ def test_effective_local_overrides_project_overrides_user() -> None:
         project_misc={"model": "opus"},
         local_misc={"model": "sonnet"},
     )
-    assert effective["model"] == {"value": "sonnet", "source": "local"}
+    assert effective["model"] == {"value": "sonnet", "source": "local", "sources": ["local"]}
     # cleanupPeriodDays only defined at user scope — falls through to it.
-    assert effective["cleanupPeriodDays"] == {"value": 10, "source": "user"}
+    assert effective["cleanupPeriodDays"] == {
+        "value": 10,
+        "source": "user",
+        "sources": ["user"],
+    }
 
 
 def test_effective_project_overrides_user_when_local_silent_on_key() -> None:
@@ -443,14 +448,14 @@ def test_effective_project_overrides_user_when_local_silent_on_key() -> None:
         project_misc={"model": "opus"},
         local_misc={},
     )
-    assert effective["model"] == {"value": "opus", "source": "project"}
+    assert effective["model"] == {"value": "opus", "source": "project", "sources": ["project"]}
 
 
 def test_effective_falls_through_to_user_when_others_absent() -> None:
     effective = cws._compute_effective_settings(
         user_misc={"model": "haiku"}, project_misc={}, local_misc={}
     )
-    assert effective["model"] == {"value": "haiku", "source": "user"}
+    assert effective["model"] == {"value": "haiku", "source": "user", "sources": ["user"]}
 
 
 def test_effective_omits_key_absent_everywhere() -> None:
@@ -465,18 +470,22 @@ def test_effective_none_scope_never_participates() -> None:
     effective = cws._compute_effective_settings(
         user_misc=None, project_misc={"model": "opus"}, local_misc={}
     )
-    assert effective == {"model": {"value": "opus", "source": "project"}}
+    assert effective == {"model": {"value": "opus", "source": "project", "sources": ["project"]}}
 
 
-def test_effective_whole_value_wins_no_deep_merge_inside_env() -> None:
-    # A project-scope `env` is not key-by-key merged with a user-scope `env` —
-    # the highest-precedence scope that defines `env` at all supplies it whole.
+def test_effective_env_merges_key_by_key() -> None:
+    # Claude Code deep-merges objects across scopes (TASK-449.2, its merge customizer
+    # in 2.1.318): local's A overrides user's A, and user's B still applies.
     effective = cws._compute_effective_settings(
         user_misc={"env": {"A": "1", "B": "2"}},
         project_misc={},
         local_misc={"env": {"A": "9"}},
     )
-    assert effective["env"] == {"value": {"A": "9"}, "source": "local"}
+    assert effective["env"] == {
+        "value": {"A": "9", "B": "2"},
+        "source": "local",
+        "sources": ["local", "user"],
+    }
 
 
 # --- gated routes (full FastAPI lifespan) --------------------------------------------
@@ -683,6 +692,7 @@ def test_route_project_write_read_round_trip(write_config, tmp_path, projects_ro
             "project": "alpha",
             "settings": {},
             "hash": cw.hash_bytes(b""),
+            "desktop_only": [],
         }
         resp = c.put(
             _URL,
@@ -921,7 +931,11 @@ def test_route_effective_reads_across_scopes(write_config, tmp_path, projects_ro
         assert eff.status_code == 200
         body = eff.json()
         assert body["project"] == "alpha"
-        assert body["effective"]["model"] == {"value": "sonnet", "source": "local"}
+        assert body["effective"]["model"] == {
+            "value": "sonnet",
+            "source": "local",
+            "sources": ["local"],
+        }
 
 
 def test_route_effective_omits_user_layer_when_allow_user_scope_off(
@@ -941,7 +955,11 @@ def test_route_effective_omits_user_layer_when_allow_user_scope_off(
         )
         eff = c.get(f"{_EFFECTIVE_URL}?project=alpha")
         assert eff.status_code == 200
-        assert eff.json()["effective"]["model"] == {"value": "opus", "source": "project"}
+        assert eff.json()["effective"]["model"] == {
+            "value": "opus",
+            "source": "project",
+            "sources": ["project"],
+        }
 
 
 def test_route_effective_path_escape_is_400(write_config, tmp_path) -> None:

@@ -189,7 +189,7 @@ The surface tabs:
 | Tab | What it manages |
 | --- | --- |
 | CLAUDE.md | The scope's `CLAUDE.md` memory file, as plain text. |
-| Settings | `settings.json` — friendly rows for `env` variables, with a Raw JSON escape hatch for other keys, plus a read-only merged ("effective") view showing which scope each value comes from. |
+| Settings | `settings.json` — friendly rows for `env` variables, with a Raw JSON escape hatch for other keys, plus a read-only merged ("effective") view showing which scopes each value comes from. See [The Settings tab](#the-settings-tab). |
 | Permissions | The `permissions` object, as rows or raw JSON, and the auto mode classifier rules (`autoMode`). See [The Permissions tab](#the-permissions-tab). |
 | Hooks | The `hooks` key, as rows or raw JSON. |
 | MCP | MCP server definitions (add / edit / delete), as fields or raw JSON, plus per-server **approvals** for committed `.mcp.json` servers — Approve / Reject each, or reset all choices behind a typed confirm. |
@@ -327,6 +327,93 @@ row tells the first two apart:
   the link, so the description is blank as well.
 - **A skill Clauster cannot read still appears, carrying an error in place of
   the missing information.** One unreadable skill never hides the others.
+
+### The Settings tab
+
+The Settings tab edits each top-level key of the settings file for the scope,
+except the keys that another tab writes. These are `permissions` and `autoMode`
+(the Permissions tab), `hooks` (the Hooks tab) and `enabledPlugins` (the Plugins
+tab). A save that names one of them is refused (`422`), and the error names the
+tab to use. The `env` variables show as rows, and every other key is in Raw JSON.
+Clauster checks the shape of `env` only. It does not run or interpret any other
+value. Claude Code reads the values when a session starts.
+
+No other tab writes these keys in a settings file, so the Settings tab shows them:
+
+- `enabledMcpjsonServers` and `disabledMcpjsonServers`. The MCP tab shows an
+  approval from a settings file as read-only, with a `settings` badge. Change
+  it here.
+- `skillOverrides`. The Skills tab has no editor for it yet.
+- `disabledPlugins`. Claude Code 2.1.318 does not read this key. If a file
+  still has it, remove it here.
+
+Every `env` value shows as `********`. If a hand-edited `env` is not an object,
+it shows as one `********`, and the save is refused (`422`, "'env' must be an
+object") until you replace it with an object in Raw JSON. The value of each
+credential helper shows
+as `********` too, because the command can hold the credential that it prints.
+The helpers are `apiKeyHelper`, `awsAuthRefresh`, `awsCredentialExport`,
+`gcpAuthRefresh`, `otelHeadersHelper` and `proxyAuthHelper`. Other values show
+as `********` when they look like a secret. If you leave a mask as it is, the
+save keeps the stored value. If a mask no longer matches a stored value, the
+save is refused (`422`) and the settings file is not changed. This occurs when
+you rename an `env` variable that shows a mask, or when you move or remove an entry of a list
+that holds a mask. Type the real value again. All masks look the same, so to
+change one masked entry of a list, type the real value of every masked entry in
+that list.
+
+The [settings reference](https://code.claude.com/docs/en/settings-reference)
+gives each key a scope. Claude Code reads some keys only from user settings,
+only from user and local settings, only from managed settings, or only from
+`~/.claude.json`. Clauster refuses a save that puts such a key at a scope where
+Claude Code ignores it (`422`), and the error names the scope that works. For
+example:
+
+- `skipAutoPermissionPrompt`, `modelPicker` and `spellcheck` work only at User
+  scope.
+- `useAutoModeDuringPlan` and `skipDangerousModePermissionPrompt` work at User
+  and Local scope.
+- `strictKnownMarketplaces` and `allowManagedHooksOnly` work only in managed
+  settings. Clauster never writes managed settings.
+- `diffTool` and `autoConnectIde` belong in `~/.claude.json`, which the Claude
+  Code `/config` command writes.
+
+If a file already holds such a key, remove the key in Raw JSON before you save
+the file again at that scope. The auto mode key `disableAutoMode` and the hook
+keys `disableAllHooks`, `allowedHttpHookUrls` and `httpHookAllowedEnvVars` work
+in every settings file, so the tab accepts them at every scope.
+
+The settings reference gives `bashEditDiffEnabled` and
+`sandbox.allowNestedUserNamespaces` User scope, but Claude Code also reads
+`false` for them from a project or local file, so the tab accepts `false` at
+every scope. Of the three files, Claude Code reads `true` for them only from
+user settings, so the tab refuses `true` at Project and Local scope. If a project or local file
+already holds `true` for one of them, change it to `false` or remove it before
+you save. Clauster checks no other values, so it does not refuse a `mask` entry
+of `sandbox.credentials.envVars` in a project file, although Claude Code drops
+that entry.
+
+Some keys are Desktop-only: only Claude Desktop reads them, and the Claude Code
+CLI ignores them. The tab keeps the scope that the settings reference gives
+each one. `sshConfigs` works at User scope only. `sshHostAllowlist`,
+`browserExternalPageTools`, `disableBrowserExternalNavigation`,
+`disableDesktopLocalSessions` and `disableMobileSimulatorTools` work only in
+managed settings, so the tab refuses them at every scope. The refusal says that
+only Claude Desktop reads the key. If the file that you load holds a
+Desktop-only key, a note above the editor names it, and the merged view leaves
+it out.
+
+At Project and Local scope, the merged ("effective") view shows the value that
+Claude Code applies from the three files. Local settings override project
+settings, and project settings override user settings. Claude Code merges an
+object such as `env` key by key and combines the lists from each file. A plain
+value from a higher scope replaces the lower one, and `fallbackModel` comes
+whole from one file. A key or value that a file is not allowed to set is left
+out. When more than one file makes up a value, the **From** column names each file.
+Managed settings and the `--settings` flag are not part of the view.
+
+If a scope fails to load, the tab clears its rows. A save therefore cannot write
+the values of the scope that you looked at before into the new scope.
 
 ### The Permissions tab
 
@@ -568,7 +655,7 @@ change the plugin.
 
 The `disableAllHooks`, `allowedHttpHookUrls`, and `httpHookAllowedEnvVars`
 settings are top-level keys, not part of the `hooks` key, so the Hooks tab does
-not edit them.
+not edit them. Edit them on [the Settings tab](#the-settings-tab).
 
 ### Plugins and marketplaces
 
@@ -888,6 +975,7 @@ space at the start or the end is part of the name.
 | A plugin install or update fails and the message names a command | The marketplace entry runs a command, and Clauster never accepts one for you | Read the command, then run `claude plugin install` from a terminal on the host |
 | Enable or Disable fails with "is already enabled" or "is installed at project scope, not user" | The badge is the merged state, and the chosen scope already has that value or cannot override it | Pick the scope that the message names, or use the Local scope to override a project setting for yourself |
 | Removing a marketplace returns `404` with "is not declared in user settings" | A different scope declares it | Switch to the scope that declares it and remove it there |
+| A Settings save returns `422` with "Claude Code reads … only from" | The file holds a key (or a `true` value) that Claude Code ignores at this scope | Remove the key in Raw JSON, or save it at the scope that the message names. For a `true` value, set it to `false` |
 
 Need to recover an earlier config? The five most recent pre-save snapshots
 sit next to the file as `clauster.yml.bak-*` — copy one back over
