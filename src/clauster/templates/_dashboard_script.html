@@ -1951,11 +1951,11 @@
       async _loadSettings(myGen) {
         const c = this.configMgmt;
         c.settings.effective = null; c.settings.effectiveError = "";
-        await this._loadJsonSurface("settings", myGen);
+        const d = await this._loadJsonSurface("settings", myGen);
         if (c.gen !== myGen) return;  // superseded — skip the secondary effective fetch
-        if (c.error) {
-          // A failed load (non-2xx or a network error) must not leave the previous
-          // target's env rows editable (TASK-463): only a successful load rebuilds them,
+        if (!d) {
+          // A failed load (non-2xx, a network error or an expired login) must not leave
+          // the previous target's env rows editable (TASK-463): only a success rebuilds them,
           // and a save serializes the rows over this text, so a switch to a scope whose
           // file does not exist yet (null hash) would write the old target's env there.
           // Clear the text/orig/hash too: the catch path in _loadJsonSurface keeps them.

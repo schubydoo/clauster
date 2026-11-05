@@ -474,6 +474,8 @@ def test_config_mgmt_settings_failed_load_clears_previous_env_rows(
     assert browser.eval_json(_FAIL_USER_SETTINGS_GET % failure) == "stubbed"
     _switch_to_user_scope(browser)
     browser.expect_visible('[data-test="cm-error"]')
+    # The row check is what fails without the fix in both cases. In the network-error case
+    # the old text stayed too, so Save was already disabled (and the old hash would 409).
     browser.expect_count('[data-test="cm-settings-env-key"]', 0)  # alpha's row is gone
     browser.fill('[data-test="cm-confirm"]', "USER SCOPE")
     browser.expect_disabled('[data-test="cm-save"]')  # nothing to save into User scope

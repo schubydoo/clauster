@@ -145,7 +145,49 @@ def test_reordered_list_holding_a_mask_is_refused(tmp_path: Path) -> None:
         )
 
 
+def test_mask_moved_onto_a_clear_list_entry_is_refused(tmp_path: Path) -> None:
+    # The list keeps its length and each masked element passes "unchanged apart from its
+    # mask", but the mask now sits where the read showed a clear value: the positional
+    # restore would copy "plain" twice and drop the credential.
+    settings = tmp_path / "settings.json"
+    h = _seed(settings, {"mirrors": ["plain", "https://user:tok@host/x"]})
+    view, _ = cws.read_user_settings(settings)
+    assert view == {"mirrors": ["plain", S]}
+    with pytest.raises(cw.InvalidCandidateError, match=r"mirrors\.0 holds a masked value"):
+        cws.write_user_settings(settings, {"mirrors": [S, "plain"]}, h)
+    assert json.loads(settings.read_text(encoding="utf-8"))["mirrors"][1].startswith("https://")
+
+
+def test_mask_under_a_value_masked_whole_is_refused(tmp_path: Path) -> None:
+    settings = tmp_path / "settings.json"
+    h = _seed(settings, {"apiKeyHelper": {"cmd": "secret"}})
+    with pytest.raises(cw.InvalidCandidateError, match=r"apiKeyHelper\.cmd holds a masked"):
+        cws.write_user_settings(settings, {"apiKeyHelper": {"cmd": S}}, h)
+
+
+def test_mask_left_in_place_still_saves(tmp_path: Path) -> None:
+    settings = tmp_path / "settings.json"
+    h = _seed(settings, {"mirrors": ["plain", "https://user:tok@host/x"], "model": "a"})
+    view, _ = cws.read_user_settings(settings)
+    cws.write_user_settings(settings, {**view, "model": "b"}, h)
+    on_disk = json.loads(settings.read_text(encoding="utf-8"))
+    assert on_disk == {"mirrors": ["plain", "https://user:tok@host/x"], "model": "b"}
+
+
 # --- keys Claude Code reads only at some scopes ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("path", "kind"),
+    [
+        ("allowedMarketplaces", "managed"),
+        ("attributionProjectPolicy", "managed"),
+        ("remoteTools.allowUnattendedServing", "user"),
+    ],
+)
+def test_cli_parsed_scope_limited_keys_are_listed(path: str, kind: str) -> None:
+    # Undocumented, but the 2.1.318 schema text of each one names its scope.
+    assert cws.SCOPE_LIMITED_KEYS[path] == kind
 
 
 _SCOPES = ("user", "project", "local")
@@ -280,6 +322,36 @@ def test_effective_lists_combine_lower_first_without_repeats() -> None:
 def test_effective_list_dedupe_is_typed_and_never_collapses_masks() -> None:
     eff = _eff(user={"x": [1, S]}, project={"x": [True, S]})
     assert eff["x"]["value"] == [1, S, True, S]
+
+
+def test_effective_list_dedupe_treats_int_and_float_as_one_number() -> None:
+    eff = _eff(user={"x": [1]}, project={"x": [1.0, 2]})
+    assert eff["x"]["value"] == [1, 2]
+
+
+def test_effective_reads_the_marketplace_alias_as_the_canonical_key() -> None:
+    eff = _eff(
+        user={"additionalMarketplaces": {"m": {"a": 1}}},
+        project={
+            "extraKnownMarketplaces": {"n": {"b": 2}},
+            "additionalMarketplaces": {"ignored": {}},
+        },
+    )
+    assert "additionalMarketplaces" not in eff
+    assert eff["extraKnownMarketplaces"]["value"] == {"m": {"a": 1}, "n": {"b": 2}}
+
+
+def test_effective_never_mutates_its_inputs() -> None:
+    project = {"sandbox": {"enabled": True, "ripgrep": {"c": 1}, "allowAppleEvents": True}}
+    before = json.loads(json.dumps(project))
+    eff = _eff(project=project)
+    assert project == before
+    assert eff["sandbox"]["value"] == {"enabled": True}
+
+
+def test_effective_drops_an_object_whose_every_part_is_ignored() -> None:
+    eff = _eff(user={"model": "m"}, project={"sandbox": {"ripgrep": {"c": 1}}})
+    assert "sandbox" not in eff
 
 
 def test_effective_fallback_model_chain_is_replaced_whole() -> None:

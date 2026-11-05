@@ -133,7 +133,7 @@ from .claude_json import locked_replace_json_file
 #: Permissions tab manages beside ``permissions``
 #: (:mod:`clauster.config_write_permissions`).
 #:
-#: Only a key that another tab WRITES is carved (TASK-449.2). ``disabledPlugins`` is not:
+#: Only a key that another tab's editor WRITES is carved (TASK-449.2). ``disabledPlugins`` is not:
 #: the Plugins tab never writes it, and Claude Code 2.1.318 does not read it (the name is
 #: absent from its bundle). ``enabledMcpjsonServers``/``disabledMcpjsonServers`` are not
 #: either: the MCP tab writes approvals to ``~/.claude.json`` and shows a settings-file
@@ -192,7 +192,8 @@ _READ_FROM: dict[str, tuple[frozenset[str], str, str]] = {
 
 #: Keys (dotted for a nested key) that Claude Code reads only from some settings files,
 #: from the Scope column of https://code.claude.com/docs/en/settings-reference (checked
-#: 2026-11-04 against Claude Code 2.1.318). A write that names one at a scope where it is
+#: 2026-11-04 against Claude Code 2.1.318), plus three undocumented keys whose own schema
+#: text in the 2.1.318 bundle names their scope. A write that names one at a scope where it is
 #: ignored is refused whole (422) with a message naming the scope that works, as the
 #: Permissions tab does for ``autoMode`` (PR 1801). ``autoMode`` itself is carved above.
 #: A value-level caveat (for example a ``mask`` entry in ``sandbox.credentials.envVars``)
@@ -214,6 +215,9 @@ SCOPE_LIMITED_KEYS: dict[str, str] = {
             "pluginConfigs",
             "prependPlugins",
             "processWrapper",
+            # CLI-parsed, undocumented: its 2.1.318 schema text says a project, local or
+            # --settings value is ignored.
+            "remoteTools.allowUnattendedServing",
             "sandbox.allowAppleEvents",
             "sandbox.allowNestedUserNamespaces",
             "sandbox.credentials.allowPlaintextInject",
@@ -249,7 +253,12 @@ SCOPE_LIMITED_KEYS: dict[str, str] = {
             "allowManagedMcpServersOnly",
             "allowManagedPermissionRulesOnly",
             "allowedChannelPlugins",
+            # CLI-parsed, undocumented: the 2.1.318 schema text says "Alias for
+            # strictKnownMarketplaces (managed settings only)".
+            "allowedMarketplaces",
             "allowedProviders",
+            # CLI-parsed, undocumented: "Only honored from managed settings".
+            "attributionProjectPolicy",
             "availableModelsMatch",
             "blockedMarketplaces",
             "browserExternalPageTools",
@@ -401,7 +410,11 @@ def reject_scope_ignored(candidate: dict[str, Any], scope: cw.Scope) -> None:
 
 
 def _without_paths(data: dict[str, Any], paths: list[str]) -> dict[str, Any]:
-    """Return a copy of ``data`` without each dotted path (copying only the dicts on a path)."""
+    """Return a copy of ``data`` without each dotted path (copying only the dicts on a path).
+
+    A top-level object left empty by the removal is dropped too, so the merged view never
+    names a scope for a key whose every part that scope sets is ignored there.
+    """
     out = dict(data)
     for dotted in paths:
         *parents, leaf = dotted.split(".")
@@ -410,6 +423,8 @@ def _without_paths(data: dict[str, Any], paths: list[str]) -> dict[str, Any]:
             node[part] = dict(node[part])
             node = node[part]
         del node[leaf]
+        if parents and out[parents[0]] == {}:
+            del out[parents[0]]
     return out
 
 
@@ -517,19 +532,52 @@ def _orphan_sentinel_path(incoming: Any, stored: Any, path: str) -> str | None:
     return None
 
 
+def _unmasked_slot_path(incoming: Any, shown: Any, path: str) -> str | None:
+    """Return the path of the first sentinel in ``incoming`` where the read view showed none.
+
+    ``shown`` is the redacted view of the stored value. A sentinel is only a "keep the
+    stored value" marker where the read put one, so a mask moved onto another slot (a
+    list reordered so the mask lands on a clear entry) is caught here: the positional
+    restore would otherwise copy that clear entry and drop the masked credential.
+    """
+    if incoming == cw.REDACTION_SENTINEL:
+        return None if shown == cw.REDACTION_SENTINEL else path
+    if isinstance(incoming, dict):
+        pairs: Any = (
+            (k, v, shown.get(k, _MISSING) if isinstance(shown, dict) else _MISSING)
+            for k, v in incoming.items()
+        )
+    elif isinstance(incoming, list):
+        pairs = (
+            (i, v, shown[i] if isinstance(shown, list) and i < len(shown) else _MISSING)
+            for i, v in enumerate(incoming)
+        )
+    else:
+        return None
+    for k, v, sub in pairs:
+        found = _unmasked_slot_path(v, sub, f"{path}.{k}")
+        if found:
+            return found
+    return None
+
+
 def _reject_orphan_sentinels(incoming: dict[str, Any], stored: dict[str, Any]) -> None:
     """Refuse (422) a write whose masked values no longer match a stored value.
 
     Covers every key of the partition, not only the marketplace maps (TASK-449.2): a
     renamed ``env`` variable or a credential helper sent as a mask to a file that has none
     would otherwise be dropped by :func:`~clauster.config_write.merge_redacted` and the
-    save would report success.
+    save would report success. Each mask must also sit where the read view of the stored
+    file shows one (:func:`_unmasked_slot_path`).
     """
+    shown = _redact_misc(stored)
     for key in sorted(incoming):
         if incoming[key] == cw.REDACTION_SENTINEL and key not in stored:
             where: str | None = key
         else:
-            where = _orphan_sentinel_path(incoming[key], stored.get(key), key)
+            where = _orphan_sentinel_path(
+                incoming[key], stored.get(key), key
+            ) or _unmasked_slot_path(incoming[key], shown.get(key, _MISSING), key)
         if where:
             raise cw.InvalidCandidateError(
                 f"{where} holds a masked value that no longer matches its stored value (an "
@@ -780,7 +828,13 @@ def _compute_effective_settings(
     for scope in _SCOPE_PRECEDENCE:
         misc = by_scope[scope]
         if misc is not None:
-            layers.append((scope, _without_paths(misc, _ignored_paths(misc, scope))))
+            layer = _without_paths(misc, _ignored_paths(misc, scope))
+            # Claude Code reads the alias as the canonical key in each file before it
+            # merges, and ignores the alias in a file that sets both.
+            alias = layer.pop(cwp.EXTRA_MARKETPLACES_ALIAS_KEY, _MISSING)
+            if alias is not _MISSING:
+                layer.setdefault(cwp.EXTRA_MARKETPLACES_KEY, alias)
+            layers.append((scope, layer))
 
     # ``layers`` is in precedence order (local, project, user). Walk it reversed so
     # each higher scope merges OVER the lower ones, as Claude Code applies them.
@@ -800,7 +854,16 @@ def _compute_effective_settings(
 #: Keys whose object value Claude Code merges one entry deep: a higher scope's entry
 #: replaces the lower scope's entry of the same name whole. (Its customizer does the same
 #: for ``managedMcpServers``, which only managed settings may set.)
-_SHALLOW_MERGE_KEYS = frozenset({cwp.EXTRA_MARKETPLACES_KEY, cwp.EXTRA_MARKETPLACES_ALIAS_KEY})
+_SHALLOW_MERGE_KEYS = frozenset({cwp.EXTRA_MARKETPLACES_KEY})
+
+
+def _js_kind(value: Any) -> str:
+    """Return the JavaScript type name of a parsed JSON scalar (a number is one kind)."""
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)):
+        return "number"
+    return type(value).__name__
 
 
 def _merge_setting(lower: Any, higher: Any, key: Any) -> Any:
@@ -809,7 +872,8 @@ def _merge_setting(lower: Any, higher: Any, key: Any) -> Any:
     Mirrors the merge customizer in Claude Code 2.1.318 (and the settings docs, "Lists
     merge instead of overriding"): two lists combine, lower entries first, with repeated
     plain values kept once; ``fallbackModel`` is an ordered chain, so the higher list
-    replaces it; the marketplace maps merge one entry deep; two objects merge key by key;
+    replaces it; ``extraKnownMarketplaces`` (each layer's alias already renamed to it)
+    merges one entry deep; two objects merge key by key;
     anything else is replaced by the higher value. The rule
     applies at every depth, as the customizer receives each nested key. (The customizer
     also takes ``modelPicker`` whole, but only user settings may set it, so among the
@@ -822,8 +886,9 @@ def _merge_setting(lower: Any, higher: Any, key: Any) -> Any:
         out: list[Any] = []
         for item in [*lower, *higher]:
             plain = not isinstance(item, (dict, list)) and item != cw.REDACTION_SENTINEL
-            # Typed equality: Python's ``1 == True`` must not merge two distinct entries.
-            if not (plain and any(type(o) is type(item) and o == item for o in out)):
+            # Typed equality as in JavaScript: ``1 == True`` must not merge two entries,
+            # while ``1`` and ``1.0`` are the same number.
+            if not (plain and any(_js_kind(o) == _js_kind(item) and o == item for o in out)):
                 out.append(item)
         return out
     if isinstance(lower, dict) and isinstance(higher, dict):
