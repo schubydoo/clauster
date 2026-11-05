@@ -1278,6 +1278,11 @@ def _start_held_visibility_save(browser: AgentBrowser, settings: Path) -> None:
         time.sleep(0.1)
 
 
+_MODAL_SCROLL_TOP = (
+    "document.querySelector('[data-test=\"configmgmt-modal\"] .modal-body').scrollTop"
+)
+
+
 def _release_held_save(browser: AgentBrowser) -> None:
     browser.eval_json("(() => { window.__release249(); return true; })()")
 
@@ -1291,16 +1296,71 @@ def test_config_mgmt_skill_visibility_save_does_not_take_focus_from_delete(
     settings = alpha / ".claude" / "settings.json"
 
     _open_skill_visibility(browser, config_mgmt_server)
+    # A short window, so the modal body scrolls: the banner and the confirm are not both
+    # in view, and a wrong "Saved." reveal would move scrollTop.
+    browser.set_viewport(1280, 560)
     _start_held_visibility_save(browser, settings)
+    browser.scroll_into_view('[data-test="cm-skill-del-greeter"]')
     browser.click('[data-test="cm-skill-del-greeter"]')
     browser.expect_visible('[data-test="cm-skill-delete-confirm"]')
     _expect_focused(browser, "cm-skill-delete-input")
+    time.sleep(0.5)  # let the confirm's own smooth scroll finish before measuring
+    scroll_before = browser.eval_json(_MODAL_SCROLL_TOP)
     _release_held_save(browser)
     # The save landed: its reload made "off" the baseline.
     browser.expect_hidden('[data-test="cm-skill-ov-changed-greeter"]', timeout_ms=_SAVE_TIMEOUT)
     browser.expect_value('[data-test="cm-skill-ov-greeter"]', "off")
-    time.sleep(0.3)  # past the $nextTick in which a wrong focus move would happen
+    time.sleep(0.5)  # past the frames in which a wrong focus move or scroll would happen
     _expect_focused(browser, "cm-skill-delete-input")
+    # Nor does the "Saved." reveal scroll the operator up to the banner, away from the
+    # confirm. The panel's reload can still shift the layout (scroll anchoring moves
+    # scrollTop down a little), so the pin is the direction: never back toward the top.
+    assert browser.eval_json(_MODAL_SCROLL_TOP) >= scroll_before
+
+
+# Holds the response of the FIRST skills-list GET (`/api/config-write/skills?`, not the
+# file or overrides routes) until `__releaseList249()` runs. Later list GETs pass.
+_HOLD_FIRST_LIST_GET = """(() => {
+  window.__holdList249 = new Promise(r => { window.__releaseList249 = r; });
+  let armed = true;
+  const real = window.fetch;
+  window.fetch = function (url, opts) {
+    const p = real.apply(this, arguments);
+    const isGet = !opts || !opts.method || opts.method === "GET";
+    if (armed && isGet && String(url).includes("/api/config-write/skills?")) {
+      armed = false;
+      return window.__holdList249.then(() => p);
+    }
+    return p;
+  };
+  return true;
+})()"""
+
+
+def test_config_mgmt_skill_list_reload_dropped_after_scope_switch(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A SKILL.md save's list reload that lands after a scope switch does not show."""
+    alpha = _projects_root(config_mgmt_server) / "alpha"
+    _open_skill_visibility(browser, config_mgmt_server)
+    browser.click('[data-test="cm-skill-new"]')
+    browser.expect_visible('[data-test="cm-skill-editor"]')
+    browser.fill('[data-test="cm-skill-name"]', "fresh")
+    browser.fill('[data-test="cm-skill-content"]', "---\ndescription: new\n---\nGo.\n")
+    browser.fill('[data-test="cm-skill-confirm"]', "alpha")
+    assert browser.eval_json(_HOLD_FIRST_LIST_GET) is True
+    browser.click('[data-test="cm-skill-save"]')  # the write lands; its list reload is held
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+    assert (alpha / ".claude" / "skills" / "fresh" / "SKILL.md").exists()
+
+    browser.click('[data-test="cm-scope-local"]')  # no folder list at Local scope
+    browser.expect_visible('[data-test="cm-skill-local-note"]')
+    browser.expect_visible('[data-test="cm-skill-ov-row-fresh"]')  # named by project folders
+    browser.eval_json("(() => { window.__releaseList249(); return true; })()")
+    deadline = time.monotonic() + 1.5
+    while time.monotonic() < deadline:  # the stale Project list would appear in this window
+        assert not browser.is_visible('[data-test="cm-skills-table"]'), "stale list shown"
+        time.sleep(0.1)
 
 
 def test_config_mgmt_skill_visibility_save_dropped_after_surface_switch(

@@ -3642,7 +3642,7 @@
           names.forEach(n => {
             if (!have.has(n)) { have.add(n); ov.rows.push(this._skillOvRow(n, true, ov.stored)); }
           });
-          return;
+          return true;  // nothing was fetched, so this panel state is still the current one
         }
         ov.rows = []; ov.stored = {}; ov.hash = null; ov.orig = this._skillOvSig([]);
         ov.ready = false; ov.error = ""; ov.confirm = ""; ov.addName = "";
@@ -3786,13 +3786,16 @@
           }
         }
       },
-      // Focus is "free" when it is on nothing (the body) or still inside the visibility
-      // panel, such as on the Save button that a landed save just hid.
+      // Focus is "free" unless the operator is on a control outside the visibility panel
+      // (a Delete confirm, the editor). The body, the modal root and the panel itself are
+      // free: Safari and macOS Firefox do not focus a clicked button, so after a click on
+      // Save the focus sits on the nearest focusable ancestor, the tabindex="-1" modal.
       _skillOvFocusIsFree() {
         const a = document.activeElement;
         if (!a || a === document.body) return true;
         const panel = document.querySelector('[data-test="cm-skill-ov"]');
-        return !!panel && panel.contains(a);
+        if (panel && panel.contains(a)) return true;
+        return !a.matches('input, textarea, select, button, a[href], [contenteditable="true"]');
       },
       configMgmtNewSkill() {
         const c = this.configMgmt, s = c.skills;
