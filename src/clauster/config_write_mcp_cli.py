@@ -149,8 +149,26 @@ def entry_needs_direct_write(entry: dict[str, Any]) -> bool:
     non-secret ``env``/``url``/``args`` also skips the CLI — harmless, since the direct
     writer produces equivalent file state. A secret in the ``url`` *path* stays uncovered
     (see :func:`_url_carries_credential` for that conscious boundary).
+
+    TASK-449.8 additions, same rule:
+
+    * a non-empty ``headersHelper`` command — it is a shell command that may print a
+      literal token (the docs' own inline example does), so it is kept off argv like
+      ``env``/``headers``;
+    * an ``oauth.authServerMetadataUrl`` that could carry a credential, or any ``oauth``
+      string with a ``${VAR}`` or credential-URL shape. The ``oauth`` block is otherwise
+      exempt from the final key-name comparison: its ``auth`` substring would mark the
+      public ``clientId`` secret and push every pre-configured OAuth server onto the
+      direct writer, which cannot deliver ``--client-secret``. A client ID is a public
+      identifier; the docs pass it as the ``--client-id`` argv flag;
+    * the redaction sentinel anywhere in the entry. A sentinel means "keep the stored
+      value", which only :func:`~clauster.config_write.merge_redacted` in the direct
+      writer honors; the CLI would store the literal ``"********"``.
     """
     if _has_nonempty_value(entry.get("env")) or _has_nonempty_value(entry.get("headers")):
+        return True
+    helper = entry.get("headersHelper")
+    if isinstance(helper, str) and helper:
         return True
     url = entry.get("url")
     if isinstance(url, str) and url and _url_carries_credential(url):
@@ -158,7 +176,41 @@ def entry_needs_direct_write(entry: dict[str, Any]) -> bool:
     args = entry.get("args")
     if isinstance(args, list) and args:
         return True
-    return cw.redact_secrets(entry) != entry
+    if _contains_sentinel(entry):
+        return True
+    oauth = entry.get("oauth")
+    if isinstance(oauth, dict) and _oauth_needs_direct_write(oauth):
+        return True
+    rest = {k: v for k, v in entry.items() if k != "oauth"}
+    return cw.redact_secrets(rest) != rest
+
+
+def _contains_sentinel(value: Any) -> bool:
+    """Whether the redaction sentinel appears anywhere in ``value`` (dicts and lists)."""
+    if value == cw.REDACTION_SENTINEL:
+        return True
+    if isinstance(value, dict):
+        return any(_contains_sentinel(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_contains_sentinel(v) for v in value)
+    return False
+
+
+def _oauth_needs_direct_write(oauth: dict[str, Any]) -> bool:
+    """Whether an ``oauth`` block holds a value that must not reach ``add-json``'s argv.
+
+    Each string is checked by the Foundation's VALUE detectors (``${VAR}`` and credential
+    URL) under a benign key, so the ``oauth`` key's ``auth`` substring does not count; the
+    metadata URL also gets :func:`_url_carries_credential`.
+    """
+    for key, value in oauth.items():
+        if not isinstance(value, str):
+            continue
+        if cw.redact_secrets({"value": value}) != {"value": value}:
+            return True
+        if key == "authServerMetadataUrl" and value and _url_carries_credential(value):
+            return True
+    return False
 
 
 def _run(

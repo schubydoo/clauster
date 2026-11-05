@@ -83,6 +83,288 @@ def test_validate_rejects_bad_shape(candidate: object) -> None:
         mcp.validate_mcp_servers(candidate)
 
 
+# --- TASK-449.8: every documented server-definition field, per transport ------------
+# Source: https://code.claude.com/docs/en/mcp (plus /errors for bareElicitationCapability
+# and /changelog for request_timeout_ms), cross-checked against the 2.1.318 CLI schema.
+
+_OAUTH_FULL = {
+    "clientId": "my-client",
+    "callbackPort": 8080,
+    "authServerMetadataUrl": "https://auth.example.com/.well-known/openid-configuration",
+    "scopes": "channels:read chat:write",
+}
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        pytest.param(
+            {
+                "type": "stdio",
+                "command": "npx",
+                "args": ["-y", "srv"],
+                "env": {"K": "v"},
+                "timeout": 600000,
+                "alwaysLoad": True,
+                "bareElicitationCapability": True,
+            },
+            id="stdio-all-fields",
+        ),
+        pytest.param(
+            {
+                "type": "http",
+                "url": "https://mcp.example.com/mcp",
+                "headers": {"X-Api": "v"},
+                "headersHelper": "/opt/bin/get-mcp-auth-headers.sh",
+                "oauth": _OAUTH_FULL,
+                "timeout": 600000,
+                "request_timeout_ms": 120000,
+                "alwaysLoad": False,
+                "bareElicitationCapability": True,
+            },
+            id="http-all-fields",
+        ),
+        pytest.param(
+            {"type": "streamable-http", "url": "https://mcp.example.com/mcp"},
+            id="streamable-http-alias",
+        ),
+        pytest.param(
+            {
+                "type": "sse",
+                "url": "https://mcp.example.com/sse",
+                "headers": {"X-Api": "v"},
+                "headersHelper": "get-headers",
+                "oauth": {"callbackPort": 8080},
+                "timeout": 1000,
+                "request_timeout_ms": 5000,
+                "alwaysLoad": True,
+                "bareElicitationCapability": False,
+            },
+            id="sse-all-fields",
+        ),
+        pytest.param(
+            {
+                "type": "ws",
+                "url": "wss://mcp.example.com/socket",
+                "headers": {"Authorization": "Bearer t"},
+                "headersHelper": "get-headers",
+                "timeout": 1000,
+                "alwaysLoad": True,
+                "bareElicitationCapability": True,
+            },
+            id="ws-all-fields",
+        ),
+        pytest.param(
+            {"type": "http", "url": "https://x/mcp", "oauth": {"scopes": "a"}},
+            id="oauth-scopes-only",
+        ),
+        pytest.param(
+            {"type": "http", "url": "https://x/mcp", "oauth": {}},
+            id="oauth-empty",
+        ),
+        pytest.param(
+            # Undocumented for a remote server (the CLI drops it), kept so a stored entry
+            # written by an earlier clauster stays editable.
+            {"type": "sse", "url": "https://x/sse", "env": {"K": "v"}},
+            id="sse-legacy-env",
+        ),
+        pytest.param(
+            # The read path masks every oauth string; the sentinel round-trips.
+            {
+                "type": "http",
+                "url": "https://x/mcp",
+                "oauth": {"authServerMetadataUrl": cw.REDACTION_SENTINEL},
+            },
+            id="oauth-metadata-url-sentinel",
+        ),
+    ],
+)
+def test_validate_accepts_every_documented_field(entry: dict) -> None:
+    mcp.validate_mcp_servers({"srv": entry})  # no raise
+
+
+@pytest.mark.parametrize(
+    ("entry", "match"),
+    [
+        ({"command": "x", "timeout": 0}, "timeout"),
+        ({"command": "x", "timeout": -5}, "timeout"),
+        ({"command": "x", "timeout": 1.5}, "timeout"),
+        ({"command": "x", "timeout": True}, "timeout"),
+        ({"command": "x", "timeout": "600000"}, "timeout"),
+        ({"command": "x", "alwaysLoad": "true"}, "alwaysLoad"),
+        ({"command": "x", "bareElicitationCapability": 1}, "bareElicitationCapability"),
+        # stdio takes no remote-only field
+        ({"command": "x", "headersHelper": "h"}, "unknown keys"),
+        ({"command": "x", "oauth": {}}, "unknown keys"),
+        ({"command": "x", "cwd": "/tmp"}, "unknown keys"),  # not documented, CLI drops it
+        ({"type": "http", "url": "u", "headersHelper": 5}, "headersHelper"),
+        ({"type": "http", "url": "u", "request_timeout_ms": 0}, "request_timeout_ms"),
+        ({"type": "http", "url": "u", "oauth": "x"}, "oauth"),
+        ({"type": "http", "url": "u", "oauth": {"clientSecret": "s"}}, "unknown keys"),
+        ({"type": "http", "url": "u", "oauth": {"xaa": True}}, "unknown keys"),
+        ({"type": "http", "url": "u", "oauth": {"clientId": 5}}, "clientId"),
+        ({"type": "http", "url": "u", "oauth": {"callbackPort": 0}}, "callbackPort"),
+        ({"type": "http", "url": "u", "oauth": {"callbackPort": 65536}}, "callbackPort"),
+        ({"type": "http", "url": "u", "oauth": {"callbackPort": "8080"}}, "callbackPort"),
+        ({"type": "http", "url": "u", "oauth": {"callbackPort": True}}, "callbackPort"),
+        (
+            {"type": "http", "url": "u", "oauth": {"authServerMetadataUrl": "http://a/x"}},
+            "authServerMetadataUrl",
+        ),
+        (
+            {"type": "http", "url": "u", "oauth": {"authServerMetadataUrl": "https://"}},
+            "authServerMetadataUrl",
+        ),
+        (
+            {
+                "type": "http",
+                "url": "u",
+                "oauth": {"authServerMetadataUrl": "https://a/" + "x" * 4096},
+            },
+            "authServerMetadataUrl",
+        ),
+        ({"type": "http", "url": "u", "oauth": {"scopes": ""}}, "scopes"),
+        ({"type": "http", "url": "u", "oauth": {"scopes": ["a"]}}, "scopes"),
+        # ws: no OAuth (the docs: WebSocket supports neither OAuth nor --transport)
+        ({"type": "ws", "url": "wss://x", "oauth": {"clientId": "c"}}, "unknown keys"),
+        ({"type": "ws", "url": "wss://x", "env": {"K": "v"}}, "unknown keys"),
+        ({"type": "ws"}, "url"),
+        # documented error shapes
+        ({"url": "https://x/mcp"}, "no 'type'"),
+        ({"type": "sdk", "name": "x"}, "SDK host"),
+    ],
+)
+def test_validate_rejects_bad_documented_field_values(entry: dict, match: str) -> None:
+    with pytest.raises(cw.InvalidCandidateError, match=match):
+        mcp.validate_mcp_servers({"srv": entry})
+
+
+@pytest.mark.parametrize(
+    "name", ["workspace", "claude-in-chrome", "computer-use", "constructor", "__proto__"]
+)
+def test_validate_rejects_reserved_server_names(name: str) -> None:
+    # The docs: Claude Code reserves its built-in server names, `claude mcp add` rejects
+    # them and a file entry is skipped at load. The CLI also refuses the JS prototype names.
+    with pytest.raises(cw.InvalidCandidateError, match="reserved"):
+        mcp.validate_mcp_servers({name: {"command": "x"}})
+
+
+def test_validate_rejects_dotted_server_name() -> None:
+    # The docs and the 2.1.318 CLI allow only letters, numbers, hyphens and underscores.
+    with pytest.raises(cw.InvalidCandidateError, match="letters, numbers"):
+        mcp.validate_mcp_servers({"srv.v2": {"command": "x"}})
+
+
+@pytest.mark.parametrize(
+    ("entry", "want"),
+    [
+        ({"command": "x"}, "stdio"),
+        ({"type": "stdio", "command": "x"}, "stdio"),
+        ({"type": "http", "url": "u"}, "http"),
+        ({"type": "streamable-http", "url": "u"}, "http"),
+        ({"type": "sse", "url": "u"}, "sse"),
+        ({"type": "ws", "url": "u"}, "ws"),
+        ({"transport": "sse", "url": "u"}, "sse"),
+    ],
+)
+def test_entry_transport_normalizes(entry: dict, want: str) -> None:
+    assert mcp.entry_transport(entry) == want
+
+
+def test_new_fields_round_trip_through_project_writer(tmp_path: Path) -> None:
+    entry = {
+        "type": "http",
+        "url": "https://mcp.example.com/mcp",
+        "headersHelper": "/opt/bin/h.sh",
+        "oauth": _OAUTH_FULL,
+        "timeout": 600000,
+        "alwaysLoad": True,
+        "bareElicitationCapability": True,
+    }
+    mcp.write_project_servers(tmp_path, {"srv": entry}, expected_hash=None)
+    on_disk = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
+    assert on_disk["mcpServers"]["srv"] == entry  # stored verbatim, nothing dropped
+
+
+def test_read_masks_every_secret_bearing_field(tmp_path: Path) -> None:
+    # Key-name detection alone missed a token under a benign key (GH_PAT, X-Custom) and
+    # never looked at headersHelper. Every env/headers value, the helper command and every
+    # oauth string are masked; structural fields (type, url, timeout, ports) stay readable.
+    stored = {
+        "gh": {
+            "command": "npx",
+            "env": {"GH_PAT": "ghp_FAKE4498", "EMPTY": ""},
+        },
+        "api": {
+            "type": "http",
+            "url": "https://mcp.example.com/mcp",
+            "headers": {"X-Custom": "Bearer sk-FAKE4498"},
+            "headersHelper": 'echo \'{"Authorization": "Bearer sk-FAKE4498-helper"}\'',
+            "oauth": _OAUTH_FULL,
+            "timeout": 600000,
+            "alwaysLoad": True,
+        },
+    }
+    (tmp_path / ".mcp.json").write_text(json.dumps({"mcpServers": stored}), encoding="utf-8")
+    servers, h = mcp.read_project_servers(tmp_path)
+    text = json.dumps(servers)
+    assert "FAKE4498" not in text
+    assert "my-client" not in text and "auth.example.com" not in text
+    m = cw.REDACTION_SENTINEL
+    assert servers["gh"]["env"] == {"GH_PAT": m, "EMPTY": ""}
+    assert servers["api"]["headers"] == {"X-Custom": m}
+    assert servers["api"]["headersHelper"] == m
+    assert servers["api"]["oauth"] == {
+        "clientId": m,
+        "callbackPort": 8080,
+        "authServerMetadataUrl": m,
+        "scopes": m,
+    }
+    assert servers["api"]["url"] == "https://mcp.example.com/mcp"
+    assert servers["api"]["timeout"] == 600000
+
+    # The masked view validates and writes back unchanged: every sentinel keeps its value.
+    mcp.write_project_servers(tmp_path, servers, h)
+    on_disk = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
+    assert on_disk["mcpServers"] == stored
+
+
+def test_read_passes_a_non_object_entry_through(tmp_path: Path) -> None:
+    # A hand-edited file can hold a non-object server value. The display read must not
+    # crash on it; the entry writer refuses it on the next write anyway.
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"odd": "not-an-object"}}), encoding="utf-8"
+    )
+    servers, _h = mcp.read_project_servers(tmp_path)
+    assert servers == {"odd": "not-an-object"}
+
+
+def test_user_and_local_reads_mask_headers_helper(tmp_path: Path) -> None:
+    cj = tmp_path / "claude.json"
+    entry = {"type": "ws", "url": "wss://x/s", "headersHelper": "print-token"}
+    proj = str(tmp_path / "p")
+    cj.write_text(
+        json.dumps({"mcpServers": {"u": entry}, "projects": {proj: {"mcpServers": {"l": entry}}}}),
+        encoding="utf-8",
+    )
+    assert mcp.read_user_servers(cj)["u"]["headersHelper"] == cw.REDACTION_SENTINEL
+    local = mcp.read_project_local_servers(cj, Path(proj))
+    assert local["l"]["headersHelper"] == cw.REDACTION_SENTINEL
+
+
+def test_headers_helper_is_stored_never_executed(tmp_path: Path) -> None:
+    # Validate-never-execute covers the new code-bearing field too.
+    marker = tmp_path / "HELPER_RAN"
+    script = tmp_path / "helper.sh"
+    script.write_text(f"#!/bin/sh\ntouch {marker}\necho '{{}}'\n", encoding="utf-8")
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    entry = {"type": "http", "url": "https://x/mcp", "headersHelper": str(script)}
+    mcp.validate_mcp_servers({"srv": entry})
+    mcp.write_project_servers(tmp_path, {"srv": entry}, expected_hash=None)
+    mcp.read_project_servers(tmp_path)
+    assert not marker.exists(), "validation/write/read executed the headersHelper (RCE!)"
+
+
 # --- RCE-NEGATIVE: validation must NEVER execute the candidate command -------------
 
 
@@ -129,7 +411,7 @@ def test_secret_shaped_server_name_does_not_break_reads_or_writes(tmp_path: Path
     # A server NAME is a user-chosen identifier, not a config key — but `_SECRET_KEY_RE`
     # matches `oauth`, `github-token`, `vault-secrets`, `auth0`, and `_SERVER_NAME_RE`
     # admits all of them. Redacting the whole map at once made such a name mark its own
-    # entry secret, masking the structural `type` to the sentinel; `_entry_transport` then
+    # entry secret, masking the structural `type` to the sentinel; `entry_transport` then
     # rejects that as an unknown transport, so EVERY add/edit/remove of EVERY server in the
     # scope 422s — with the value the operator must retype shown as `********`.
     # Redacting per entry keeps the name out of the hint chain.
@@ -152,7 +434,7 @@ def test_secret_shaped_server_name_does_not_break_reads_or_writes(tmp_path: Path
 
     # Structural fields survive, so the entry still validates...
     assert servers["oauth-gw"]["type"] == "http"
-    assert mcp._entry_transport(servers["oauth-gw"]) == "http"
+    assert mcp.entry_transport(servers["oauth-gw"]) == "http"
     # ...while a secret INSIDE the entry is still masked.
     assert servers["oauth-gw"]["headers"]["Authorization"] == cw.REDACTION_SENTINEL
     assert "sk-live-SECRET" not in json.dumps(servers)

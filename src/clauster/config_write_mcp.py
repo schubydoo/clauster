@@ -27,13 +27,18 @@ Three surfaces, one entry shape (mirroring Claude Code's own ``.mcp.json``):
 * **user** scope ⇒ ``~/.claude.json`` ``mcpServers`` subtree, written through the
   locked subtree-merge writer (gated additionally on ``allow_user_scope``).
 
-A server entry is either a **stdio** server (``command`` + optional
-``args``/``env``) or a **remote** server (``type``/``transport`` of ``sse``/``http``
-+ ``url`` + optional ``headers``). Unknown keys or wrong types ⇒ 422, nothing
-written. Secret-shaped ``env`` values and token-bearing ``url``/``headers`` flow
-through the Foundation's :func:`~clauster.config_write.redact_secrets` /
-:func:`~clauster.config_write.merge_redacted` so the browser never reads a stored
-secret out and a returned ``"********"`` sentinel keeps the stored value.
+A server entry is a **stdio** server (``command`` + optional ``args``/``env``), a
+remote **http**/**sse** server (``url`` + optional ``headers``/``headersHelper``/
+``oauth``), or a remote **ws** server (``url`` + optional ``headers``/``headersHelper``).
+Every transport also takes ``timeout``, ``alwaysLoad`` and ``bareElicitationCapability``.
+The accepted fields per transport are the ones Claude Code documents at
+https://code.claude.com/docs/en/mcp (audited against the live 2.1.318 CLI schema,
+TASK-449.8); see :data:`_STDIO_KEYS`, :data:`_HTTP_SSE_KEYS` and :data:`_WS_KEYS`.
+Unknown keys or wrong types ⇒ 422, nothing written. Every ``env``/``headers`` value,
+every ``headersHelper`` command, the ``oauth`` strings and a token-bearing ``url`` flow
+through :func:`_redact_entry` / :func:`~clauster.config_write.merge_redacted` so the
+browser never reads a stored secret out and a returned ``"********"`` sentinel keeps
+the stored value.
 
 **#769 additions** (CLI-driven writes + enable/disable, over this same Foundation):
 
@@ -82,26 +87,92 @@ MCP_SERVERS_KEY = "mcpServers"
 #: ``--scope``, ``--client-secret``, ``-e`` — would be consumed by the CLI's argument
 #: parser as a flag rather than the positional name (arg-injection / positional shift;
 #: verified against a live ``claude`` 2.1.198, which errors or mis-binds such a name).
-#: Constrain it to a conservative identifier charset that CANNOT begin with ``-``: an
-#: alphanumeric/underscore first char, then alphanumerics/underscore/dot/hyphen. This is
-#: validated structurally (validate-never-execute), so a bad name is a 422 with nothing
-#: written, and it is enforced for the direct (non-CLI) writers too so the two write
-#: paths never diverge on which names they accept.
-_SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
+#: Constrain it to the charset Claude Code itself accepts — letters, numbers, hyphens and
+#: underscores (https://code.claude.com/docs/en/mcp; the 2.1.318 CLI refuses a dotted name
+#: with "Names can only contain letters, numbers, hyphens, and underscores" and skips one
+#: found in a file) — and additionally forbid a leading ``-``. This is validated
+#: structurally (validate-never-execute), so a bad name is a 422 with nothing written, and
+#: it is enforced for the direct (non-CLI) writers too so the two write paths never diverge
+#: on which names they accept.
+_SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]*$")
+
+#: Names Claude Code refuses for a configured server. The first three are the built-in
+#: servers the docs list as reserved (``claude mcp add`` rejects them and a file entry is
+#: skipped at load; the other documented reserved names contain a space, which
+#: :data:`_SERVER_NAME_RE` already rejects). The rest are the JavaScript prototype names the
+#: 2.1.318 CLI's own name check refuses.
+_RESERVED_SERVER_NAMES = frozenset(
+    {
+        "workspace",
+        "claude-in-chrome",
+        "computer-use",
+        "constructor",
+        "prototype",
+        "__proto__",
+        "__defineGetter__",
+        "__defineSetter__",
+        "__lookupGetter__",
+        "__lookupSetter__",
+    }
+)
 
 #: The top-level ``~/.claude.json`` key holding per-project state, keyed by the
 #: resolved absolute project path (the same shape :mod:`clauster.trust` uses for
 #: ``hasTrustDialogAccepted``).
 PROJECTS_KEY = "projects"
 
-#: The two recognized remote transports (stdio servers carry no transport).
-_REMOTE_TRANSPORTS = frozenset({"sse", "http"})
+#: Every ``type`` value Claude Code reads, mapped to the transport it means. ``streamable-http``
+#: is the MCP specification's name for ``http`` and Claude Code accepts it as an alias
+#: (https://code.claude.com/docs/en/mcp, "Option 1"). An entry with no ``type`` is stdio.
+_TRANSPORT_ALIASES = {
+    "stdio": "stdio",
+    "http": "http",
+    "streamable-http": "http",
+    "sse": "sse",
+    "ws": "ws",
+}
+
+#: Keys every transport accepts: the declared type, the per-call tool ``timeout`` (ms), the
+#: tool-search exemption ``alwaysLoad``, and ``bareElicitationCapability`` (the errors page:
+#: "accepted on stdio, sse, http, and ws entries"). ``transport`` is clauster's legacy synonym
+#: for ``type``; Claude Code does not document or read it.
+_COMMON_KEYS = frozenset(
+    {"type", "transport", "timeout", "alwaysLoad", "bareElicitationCapability"}
+)
 
 #: Allowed keys for a stdio server entry (``command`` required; rest optional).
-_STDIO_KEYS = frozenset({"command", "args", "env", "type", "transport"})
+_STDIO_KEYS = _COMMON_KEYS | {"command", "args", "env"}
 
-#: Allowed keys for a remote server entry (``url`` required; transport required).
-_REMOTE_KEYS = frozenset({"url", "headers", "env", "type", "transport"})
+#: Allowed keys for an http/sse server entry (``url`` required). ``request_timeout_ms`` is
+#: named in the changelog as a per-server ``.mcp.json`` field. ``env`` is undocumented for a
+#: remote server (the CLI drops it) and is kept only so a stored entry stays editable.
+_HTTP_SSE_KEYS = _COMMON_KEYS | {
+    "url",
+    "headers",
+    "headersHelper",
+    "oauth",
+    "request_timeout_ms",
+    "env",
+}
+
+#: Allowed keys for a ws server entry: "the same url, headers, headersHelper, timeout, and
+#: alwaysLoad fields as http". No ``oauth``: the docs say WebSocket does not support OAuth.
+_WS_KEYS = _COMMON_KEYS | {"url", "headers", "headersHelper"}
+
+_KEYS_BY_TRANSPORT = {
+    "stdio": _STDIO_KEYS,
+    "http": _HTTP_SSE_KEYS,
+    "sse": _HTTP_SSE_KEYS,
+    "ws": _WS_KEYS,
+}
+
+#: Allowed keys of an http/sse server's ``oauth`` object (pre-configured OAuth client,
+#: fixed callback port, metadata-discovery override, pinned scopes). The client SECRET is
+#: never part of the entry: Claude Code keeps it in the keychain or a credentials file.
+_OAUTH_KEYS = frozenset({"clientId", "callbackPort", "authServerMetadataUrl", "scopes"})
+
+#: The CLI's own length cap on ``oauth.authServerMetadataUrl``.
+_AUTH_METADATA_URL_MAX = 4096
 
 
 def _validate_str_dict(value: Any, label: str) -> None:
@@ -113,60 +184,139 @@ def _validate_str_dict(value: Any, label: str) -> None:
             raise cw.InvalidCandidateError(f"{label} must map string keys to string values")
 
 
-def _entry_transport(entry: dict[str, Any]) -> str | None:
-    """Return the remote transport declared by ``entry`` (``type``/``transport``), or None.
+def _is_positive_int(value: Any) -> bool:
+    """Whether ``value`` is a positive ``int`` (a ``bool`` is not a number here)."""
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
-    ``type`` and ``transport`` are accepted as synonyms (Claude Code has used both).
-    A non-string, or the two disagreeing, is a structural error. A stdio entry
-    declares neither (or the literal ``"stdio"``) ⇒ returns ``None``.
+
+def entry_transport(entry: dict[str, Any]) -> str:
+    """Return the transport ``entry`` declares: ``stdio``, ``http``, ``sse`` or ``ws``.
+
+    ``type`` and ``transport`` are accepted as synonyms (clauster's legacy spelling). A
+    non-string, the two disagreeing, or an unknown value is a structural error. An entry
+    that declares neither is stdio, exactly as Claude Code reads it. ``streamable-http``
+    normalizes to ``http``. ``sdk`` is refused: only an SDK host application can register
+    an in-process server, and Claude Code skips one found in a config file.
     """
     declared = {entry[k] for k in ("type", "transport") if k in entry}
     if not declared:
-        return None
+        return "stdio"
     if not all(isinstance(v, str) for v in declared):
         raise cw.InvalidCandidateError("server 'type'/'transport' must be a string")
     if len(declared) > 1:
         raise cw.InvalidCandidateError("server 'type' and 'transport' disagree")
     (value,) = declared
-    if value == "stdio":
-        return None
-    if value not in _REMOTE_TRANSPORTS:
-        raise cw.InvalidCandidateError(f"unknown server transport {value!r} (want stdio/sse/http)")
-    return value
+    if value == "sdk":
+        raise cw.InvalidCandidateError(
+            "server type 'sdk' is registered by an SDK host application at runtime; "
+            "Claude Code skips it in a config file"
+        )
+    transport = _TRANSPORT_ALIASES.get(value)
+    if transport is None:
+        raise cw.InvalidCandidateError(
+            f"unknown server transport {value!r} (want stdio/http/streamable-http/sse/ws)"
+        )
+    return transport
+
+
+def _validate_oauth(name: str, oauth: Any) -> None:
+    """Structurally validate an http/sse server's ``oauth`` object, or raise (→ 422).
+
+    Mirrors the 2.1.318 CLI schema: ``clientId`` a string, ``callbackPort`` a TCP port,
+    ``authServerMetadataUrl`` an ``https://`` URL of at most 4096 characters, ``scopes`` a
+    non-empty space-separated string. ``authServerMetadataUrl`` may also be the redaction
+    sentinel: the read path masks every ``oauth`` string, and a returned sentinel means
+    "keep the stored value" (:func:`~clauster.config_write.merge_redacted`).
+    """
+    label = f"server {name!r} 'oauth'"
+    if not isinstance(oauth, dict):
+        raise cw.InvalidCandidateError(f"{label} must be an object")
+    unknown = set(oauth) - _OAUTH_KEYS
+    if unknown:
+        raise cw.InvalidCandidateError(f"{label} has unknown keys: {sorted(unknown)}")
+    if "clientId" in oauth and not isinstance(oauth["clientId"], str):
+        raise cw.InvalidCandidateError(f"{label} 'clientId' must be a string")
+    if "callbackPort" in oauth:
+        port = oauth["callbackPort"]
+        if not _is_positive_int(port) or port > 65535:
+            raise cw.InvalidCandidateError(
+                f"{label} 'callbackPort' must be an integer from 1 to 65535"
+            )
+    if "authServerMetadataUrl" in oauth:
+        url = oauth["authServerMetadataUrl"]
+        if url != cw.REDACTION_SENTINEL and (
+            not isinstance(url, str)
+            or not url.startswith("https://")
+            or len(url) <= len("https://")
+            or len(url) > _AUTH_METADATA_URL_MAX
+        ):
+            raise cw.InvalidCandidateError(
+                f"{label} 'authServerMetadataUrl' must be an https:// URL "
+                f"of at most {_AUTH_METADATA_URL_MAX} characters"
+            )
+    if "scopes" in oauth:
+        scopes = oauth["scopes"]
+        if not isinstance(scopes, str) or not scopes:
+            raise cw.InvalidCandidateError(
+                f"{label} 'scopes' must be a non-empty space-separated string"
+            )
+
+
+def _validate_common_fields(name: str, entry: dict[str, Any]) -> None:
+    """Validate the fields every transport shares (``timeout`` and the two booleans)."""
+    if "timeout" in entry and not _is_positive_int(entry["timeout"]):
+        raise cw.InvalidCandidateError(
+            f"server {name!r} 'timeout' must be a positive integer (milliseconds)"
+        )
+    for key in ("alwaysLoad", "bareElicitationCapability"):
+        if key in entry and not isinstance(entry[key], bool):
+            raise cw.InvalidCandidateError(f"server {name!r} {key!r} must be true or false")
 
 
 def _validate_server_entry(name: Any, entry: Any) -> None:
     """Structurally validate one ``name -> entry`` MCP server, or raise (→ 422).
 
-    Stdio entries require a non-empty string ``command`` (``args`` a list of
-    strings, ``env`` a string→string map); remote entries require a non-empty
-    string ``url`` (``headers`` a string→string map). Unknown keys are rejected.
-    The ``name`` must additionally match :data:`_SERVER_NAME_RE` (no leading ``-``,
-    identifier charset) so it can never be mis-parsed as a CLI option when it reaches
-    ``claude mcp``'s argv — see that constant. **Nothing here resolves, spawns, or
-    runs the command/url** — shape only.
+    The allowed keys depend on the transport (:func:`entry_transport`); unknown keys are
+    rejected. Stdio entries require a non-empty string ``command`` (``args`` a list of
+    strings, ``env`` a string→string map); remote entries require a non-empty string
+    ``url`` (``headers`` a string→string map, ``headersHelper`` a string, ``oauth`` per
+    :func:`_validate_oauth`). The ``name`` must additionally match
+    :data:`_SERVER_NAME_RE` (no leading ``-``, Claude Code's charset) and not be one of
+    :data:`_RESERVED_SERVER_NAMES`, so it can never be mis-parsed as a CLI option when it
+    reaches ``claude mcp``'s argv — see that constant. **Nothing here resolves, spawns, or
+    runs the command, url or headersHelper** — shape only.
     """
     if not isinstance(name, str) or not name:
         raise cw.InvalidCandidateError("server name must be a non-empty string")
     if not _SERVER_NAME_RE.match(name):
         raise cw.InvalidCandidateError(
             f"server name {name!r} must match {_SERVER_NAME_RE.pattern} "
-            "(identifier chars, no leading '-')"
+            "(letters, numbers, hyphens and underscores, no leading '-')"
         )
+    if name in _RESERVED_SERVER_NAMES:
+        raise cw.InvalidCandidateError(f"server name {name!r} is reserved by Claude Code")
     if not isinstance(entry, dict):
         raise cw.InvalidCandidateError(f"server {name!r} must be an object")
 
-    transport = _entry_transport(entry)
-    is_remote = transport is not None
-    allowed = _REMOTE_KEYS if is_remote else _STDIO_KEYS
-    unknown = set(entry) - allowed
+    transport = entry_transport(entry)
+    declares_type = "type" in entry or "transport" in entry
+    if transport == "stdio" and not declares_type and "url" in entry and "command" not in entry:
+        # Claude Code reads an entry with no `type` as stdio and skips this one with the
+        # same advice; say it here instead of the less helpful "unknown keys: ['url']".
+        raise cw.InvalidCandidateError(
+            f'server {name!r} has a \'url\' but no \'type\'; add "type": "http" (or "sse" / "ws")'
+        )
+    unknown = set(entry) - _KEYS_BY_TRANSPORT[transport]
     if unknown:
-        raise cw.InvalidCandidateError(f"server {name!r} has unknown keys: {sorted(unknown)}")
+        raise cw.InvalidCandidateError(
+            f"{transport} server {name!r} has unknown keys: {sorted(unknown)}"
+        )
+    _validate_common_fields(name, entry)
 
     if "env" in entry:
         _validate_str_dict(entry["env"], f"server {name!r} 'env'")
 
-    if is_remote:
+    if transport != "stdio":
         url = entry.get("url")
         if not isinstance(url, str) or not url:
             raise cw.InvalidCandidateError(
@@ -174,6 +324,14 @@ def _validate_server_entry(name: Any, entry: Any) -> None:
             )
         if "headers" in entry:
             _validate_str_dict(entry["headers"], f"server {name!r} 'headers'")
+        if "headersHelper" in entry and not isinstance(entry["headersHelper"], str):
+            raise cw.InvalidCandidateError(f"server {name!r} 'headersHelper' must be a string")
+        if "oauth" in entry:
+            _validate_oauth(name, entry["oauth"])
+        if "request_timeout_ms" in entry and not _is_positive_int(entry["request_timeout_ms"]):
+            raise cw.InvalidCandidateError(
+                f"server {name!r} 'request_timeout_ms' must be a positive integer"
+            )
         return
 
     # stdio
@@ -208,14 +366,51 @@ def _redact_server_map(servers: dict[str, Any]) -> dict[str, Any]:
     whole subtree secret. That is right for config keys and wrong for this map: the keys here
     are user-chosen server NAMES, so a server called ``oauth-gw`` or ``github-token`` would
     have its own ``type``/``url`` masked to the sentinel. Those are structural fields, and
-    :func:`_entry_transport` rejects the sentinel as an unknown transport — which would 422
+    :func:`entry_transport` rejects the sentinel as an unknown transport — which would 422
     every add/edit/remove of every server in the scope, with the value the operator needs to
     retype displayed as ``********``.
 
     Redacting per entry keeps the name out of the hint chain while leaving everything inside
-    an entry (``env``, ``headers``, a nested ``{"auth": {"value": ...}}``) fully masked.
+    an entry (``env``, ``headers``, a nested ``{"auth": {"value": ...}}``) fully masked —
+    see :func:`_redact_entry`.
     """
-    return {name: cw.redact_secrets(entry) for name, entry in servers.items()}
+    return {name: _redact_entry(entry) for name, entry in servers.items()}
+
+
+#: Entry fields whose every string value is masked on read, whatever its key name. Key-name
+#: detection cannot see a real secret under a benign key (``{"GH_PAT": "ghp_…"}``,
+#: ``{"X-Custom": "Bearer sk-…"}``), which is why the CLI write path already treats every
+#: ``env``/``headers`` value as potentially secret (``entry_needs_direct_write``).
+_ALWAYS_SECRET_MAPS = ("env", "headers")
+
+
+def _redact_entry(entry: Any) -> Any:
+    """Return the display copy of one server entry, with every secret-bearing field masked.
+
+    :func:`~clauster.config_write.redact_secrets` runs first (key-name, ``${VAR}`` and
+    credential-URL detection anywhere in the entry; its ``auth`` hint also masks every
+    ``oauth`` string). On top of that, every non-empty value under ``env`` and ``headers``
+    is masked, and so is a ``headersHelper`` command: the docs show an inline helper that
+    prints the token itself (``echo '{"Authorization": "Bearer …"}'``). The helper's OUTPUT
+    is never stored, so there is nothing else to mask for it. Each masked value round-trips
+    as the sentinel, which :func:`~clauster.config_write.merge_redacted` turns back into the
+    stored value. Whole keys are replaced on the copy, never a nested value in place (the
+    copy may share nested objects, see ``redact_secrets``).
+    """
+    out = cw.redact_secrets(entry)
+    if not isinstance(out, dict):
+        return out
+    for key in _ALWAYS_SECRET_MAPS:
+        block = out.get(key)
+        if isinstance(block, dict):
+            out[key] = {
+                k: cw.REDACTION_SENTINEL if isinstance(v, str) and v else v
+                for k, v in block.items()
+            }
+    helper = out.get("headersHelper")
+    if isinstance(helper, str) and helper:
+        out["headersHelper"] = cw.REDACTION_SENTINEL
+    return out
 
 
 def read_project_servers(project_dir: Path) -> tuple[dict[str, Any], str]:

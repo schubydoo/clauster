@@ -169,14 +169,16 @@ Common mechanics across the modal:
   name; destructive list actions (delete, reset, plugin install) have their
   own typed confirms.
 - **Secret masking** — the Settings, MCP, Hooks, and Skills surfaces, and the
-  `autoMode` box on the Permissions tab, mask secret-shaped values on read. On
-  Settings, MCP, Hooks and `autoMode`, a masked value left untouched keeps the
-  stored secret on write. The Skills editor masks on read but restores nothing on
-  write, so a save writes the mask over the stored value. The CLAUDE.md and
-  Subagents surfaces, and the `permissions` rules, return the raw content, because
-  they round-trip the exact text on write. Do not put a secret anywhere in a
-  subagent file, for example in an inline `mcpServers` block in the frontmatter.
-  For what the Hooks tab masks, see [The Hooks tab](#the-hooks-tab).
+  `autoMode` box on the Permissions tab, mask secret-shaped values on read. The
+  MCP surface also masks every `env` and `headers` value, the `headersHelper`
+  command, and the strings in `oauth`, whatever their key names. On Settings,
+  MCP, Hooks and `autoMode`, a masked value left untouched keeps the stored secret
+  on write. The Skills editor masks on read but restores nothing on write, so a
+  save writes the mask over the stored value. The CLAUDE.md and Subagents
+  surfaces, and the `permissions` rules, return the raw content, because they
+  round-trip the exact text on write. Do not put a secret anywhere in a subagent
+  file, for example in an inline `mcpServers` block in the frontmatter. For what
+  the Hooks tab masks, see [The Hooks tab](#the-hooks-tab).
 
 The surface tabs:
 
@@ -190,6 +192,46 @@ The surface tabs:
 | Subagents | Subagent definition files: list, edit, create, delete. |
 | Skills | Skills: list, a per-skill `SKILL.md` editor, create, delete. |
 | Plugins | Installed plugins (install / uninstall / enable / disable / update) and the marketplaces they come from (add / remove). |
+
+### MCP server definitions
+
+The MCP tab edits each server as one JSON object, in the same shape as an
+`mcpServers` entry in `.mcp.json`. The editor accepts the fields that the
+[Claude Code MCP documentation](https://code.claude.com/docs/en/mcp) lists for
+each transport:
+
+| `type` | Required | Optional |
+| --- | --- | --- |
+| `stdio`, or no `type` | `command` | `args`, `env` |
+| `http` (alias `streamable-http`), `sse` | `url` | `headers`, `headersHelper`, `oauth`, `request_timeout_ms` |
+| `ws` | `url` | `headers`, `headersHelper` |
+
+Every transport also accepts `timeout` (milliseconds, a positive integer),
+`alwaysLoad` and `bareElicitationCapability` (both `true` or `false`). The
+`oauth` object accepts `clientId`, `callbackPort` (1 to 65535),
+`authServerMetadataUrl` (an `https://` URL) and `scopes` (a space-separated
+string).
+
+The editor refuses the whole entry when a field is unknown or has the wrong
+type. It also refuses these values, because Claude Code refuses or skips them:
+
+- A server name with a character other than a letter, a number, a hyphen or an
+  underscore, or a name that starts with a hyphen.
+- A reserved name, such as `workspace`, `claude-in-chrome` or `computer-use`.
+- An entry with a `url` and no `type`. Claude Code reads such an entry as a
+  stdio server and skips it.
+- `"type": "sdk"`. Only an SDK host application can register that server.
+
+Clauster stores a `headersHelper` command but never runs it. Claude Code runs it
+when it connects to the server. For a server in `.mcp.json` or at local scope,
+Claude Code runs it only after you accept the trust dialog for that project.
+
+An OAuth client secret is not part of the entry. Claude Code keeps it in the
+system keychain or a credentials file. The `POST /api/config-write/mcp/server`
+route takes an optional `client_secret` for an `http` or `sse` server. The
+dashboard does not send one. Clauster passes it to
+`claude mcp add-json --client-secret` through the `MCP_CLIENT_SECRET`
+environment variable, never on the command line.
 
 Three entries can look broken when they are not. The **Source** badge on each
 row tells the first two apart:

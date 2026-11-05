@@ -152,13 +152,22 @@ async def api_config_write_mcp_server(config: ConfigDep, runner: RunnerDep, body
     # silently drop the secret: the operator would believe it was stored and only
     # discover otherwise when the server fails to authenticate.
     if client_secret is not None and entry is not None:
+        # The docs: the OAuth client flags "only apply to HTTP and SSE transports. They
+        # have no effect on stdio servers" (and WebSocket has no OAuth at all). Refuse
+        # rather than accept a secret that would be silently ignored.
+        if config_write_mcp.entry_transport(entry) not in ("http", "sse"):
+            raise HTTPException(
+                status_code=422,
+                detail="'client_secret' applies only to an http or sse server",
+            )
         if config_write_mcp_cli.entry_needs_direct_write(entry):
             raise HTTPException(
                 status_code=422,
                 detail=(
                     "'client_secret' cannot be stored for this entry: it carries a "
                     "value that must be kept off the CLI's argv (inline env/headers, "
-                    "or a url with a query string, userinfo, or fragment), so it is "
+                    "a headersHelper, a masked '********' value, or a url with a query "
+                    "string, userinfo, or fragment), so it is "
                     "written directly to the config file, which has no way to deliver "
                     "the secret. Put the credential in the entry's 'env' or 'headers' "
                     "instead."
