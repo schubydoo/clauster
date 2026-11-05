@@ -139,7 +139,7 @@ PROJECTS_KEY = "projects"
 #: Every ``type`` value Claude Code reads, mapped to the transport it means. ``streamable-http``
 #: is the MCP specification's name for ``http`` and Claude Code accepts it as an alias
 #: (https://code.claude.com/docs/en/mcp, "Option 1"). An entry with no ``type`` is stdio.
-_TRANSPORT_ALIASES = {
+TRANSPORT_ALIASES = {
     "stdio": "stdio",
     "http": "http",
     "streamable-http": "http",
@@ -239,7 +239,7 @@ def entry_transport(entry: dict[str, Any]) -> str:
         # `type`, or a plain transport word. Any other value is never converted, so saying
         # "reload" would send the operator round the same refusal again.
         value = entry["transport"]
-        convertible = "type" in entry or (isinstance(value, str) and value in _TRANSPORT_ALIASES)
+        convertible = "type" in entry or (isinstance(value, str) and value in TRANSPORT_ALIASES)
         hint = (
             "The editor converts a stored 'transport' to 'type' when it loads the server, "
             "so reload the server and save it"
@@ -260,7 +260,7 @@ def entry_transport(entry: dict[str, Any]) -> str:
             f"server type {value!r} is registered at runtime (an SDK host, an IDE or a "
             "claude.ai connector); Claude Code refuses it in a config file"
         )
-    transport = _TRANSPORT_ALIASES.get(value)
+    transport = TRANSPORT_ALIASES.get(value)
     if transport is None:
         raise cw.InvalidCandidateError(
             f"unknown server transport {value!r} (want stdio/http/streamable-http/sse/ws)"
@@ -531,7 +531,7 @@ def _convert_legacy_entry(entry: Any) -> tuple[Any, list[dict[str, str]]]:
                     "message": f"'transport' is removed because 'type' is set ({_IGNORED_REASON})",
                 }
             )
-        elif isinstance(value, str) and value in _TRANSPORT_ALIASES:
+        elif isinstance(value, str) and value in TRANSPORT_ALIASES:
             del out["transport"]
             out = {"type": value, **out}
             notes.append(
@@ -542,7 +542,7 @@ def _convert_legacy_entry(entry: Any) -> tuple[Any, list[dict[str, str]]]:
                 }
             )
     declared = out.get("type")
-    is_remote = isinstance(declared, str) and _TRANSPORT_ALIASES.get(declared) in (
+    is_remote = isinstance(declared, str) and TRANSPORT_ALIASES.get(declared) in (
         "http",
         "sse",
         "ws",

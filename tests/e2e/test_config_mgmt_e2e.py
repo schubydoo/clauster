@@ -12,6 +12,8 @@ unit-tested; this proves the wired Alpine flow round-trips to a real running ser
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -37,6 +39,16 @@ def _open_modal(browser: AgentBrowser, server: Server) -> None:
     browser.expect_visible('[data-project="alpha"]')
     browser.click('[data-test="configmgmt-trigger"]')
     browser.expect_visible('[data-test="configmgmt-modal"]')
+
+
+def _mcp_raw_mode(browser: AgentBrowser) -> None:
+    """Switch the MCP editor to Raw JSON and wait for the textarea to replace the fields.
+
+    The editor opens in Fields (TASK-272). The switch hides the form and shows the
+    textarea on the next Alpine frame, so a fill sent before that frame has no target.
+    """
+    browser.click('[data-test="cm-mcp-mode-raw"]')
+    browser.expect_visible('[data-test="cm-mcp-entry"]')
 
 
 def _switch_to_user_scope(browser: AgentBrowser) -> None:
@@ -521,10 +533,11 @@ def test_config_mgmt_mcp_tab_loads(browser: AgentBrowser, config_mgmt_server: Se
 def test_config_mgmt_new_mcp_server_round_trip(
     browser: AgentBrowser, config_mgmt_server: Server
 ) -> None:
-    """Adding an MCP server through the editor writes it into the project .mcp.json.
+    """Adding an MCP server through the Raw JSON editor writes it into the project .mcp.json.
 
-    The entry carries an ``env`` value, so the backend routes it to the secret-safe
-    direct writer (never the CLI) — proving the wired flow round-trips to disk
+    Raw JSON is the fallback for fields the form does not show (TASK-272). The entry
+    carries an ``env`` value, so the backend routes it to the secret-safe direct writer
+    (never the CLI) — proving the wired flow round-trips to disk
     without depending on the fake ``claude`` implementing ``mcp add-json``.
     """
     import json
@@ -540,6 +553,7 @@ def test_config_mgmt_new_mcp_server_round_trip(
     browser.expect_visible('[data-test="cm-mcp-editor"]')
 
     browser.fill('[data-test="cm-mcp-name"]', "my-server")
+    _mcp_raw_mode(browser)
     browser.fill(
         '[data-test="cm-mcp-entry"]',
         '{"command": "echo", "args": ["hi"], "env": {"FOO": "bar"}}',
@@ -622,6 +636,242 @@ def test_config_mgmt_mcp_converted_entry_shows_note_and_saves_unedited(
             mcp_json.unlink(missing_ok=True)
         else:
             mcp_json.write_bytes(prior)
+
+
+# --- TASK-272: the MCP fields editor -------------------------------------------------------
+
+
+@contextmanager
+def _alpha_mcp_json(config_mgmt_server: Server, servers: dict | None) -> Iterator[Path]:
+    """Seed alpha's ``.mcp.json`` with ``servers`` (or leave it absent), then restore it.
+
+    The projects tree outlives one test, and later tests read this file and launch alpha,
+    so it is put back exactly as it was, whatever happens in the test.
+    """
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+    mcp_json = projects_root / "alpha" / ".mcp.json"
+    prior = mcp_json.read_bytes() if mcp_json.exists() else None
+    try:
+        if servers is None:
+            mcp_json.unlink(missing_ok=True)
+        else:
+            mcp_json.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
+        yield mcp_json
+    finally:
+        if prior is None:
+            mcp_json.unlink(missing_ok=True)
+        else:
+            mcp_json.write_bytes(prior)
+
+
+def _open_mcp_new(browser: AgentBrowser, config_mgmt_server: Server, name: str) -> None:
+    """Open alpha's MCP tab, start a new server in the fields editor and type its name."""
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-mcp"]')
+    browser.expect_visible('[data-test="cm-mcp-new"]')  # wait for the list to finish loading
+    browser.click('[data-test="cm-mcp-new"]')
+    browser.expect_visible('[data-test="cm-mcp-fields"]')
+    browser.fill('[data-test="cm-mcp-name"]', name)
+
+
+def _save_mcp(browser: AgentBrowser) -> None:
+    """Type the scope token, save, and wait for the saved notice."""
+    browser.fill('[data-test="cm-mcp-confirm"]', "alpha")
+    browser.click('[data-test="cm-mcp-save"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+
+_REMOTE_272 = {
+    "type": "http",
+    "url": "https://a.example/mcp",
+    "headers": {"Authorization": "Bearer keep-272"},
+}
+
+
+def test_config_mgmt_mcp_fields_add_stdio(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A stdio server typed into the fields saves with no hand-written JSON (TASK-272).
+
+    The env value sends the save to the secret-safe direct writer, so the fake ``claude``
+    is never needed.
+    """
+    with _alpha_mcp_json(config_mgmt_server, None) as mcp_json:
+        _open_mcp_new(browser, config_mgmt_server, "stdio-272")
+        browser.fill('[data-test="cm-mcp-command"]', "echo")
+        browser.click('[data-test="cm-mcp-arg-add"]')
+        browser.expect_visible('[data-test="cm-mcp-arg"]')
+        browser.fill('[data-test="cm-mcp-arg"]', "hi-272")
+        browser.click('[data-test="cm-mcp-env-add"]')
+        browser.expect_visible('[data-test="cm-mcp-env-key"]')
+        browser.fill('[data-test="cm-mcp-env-key"]', "FOO")
+        browser.fill('[data-test="cm-mcp-env-value"]', "bar-272")
+        _save_mcp(browser)
+
+        data = json.loads(mcp_json.read_text(encoding="utf-8"))
+        assert data["mcpServers"]["stdio-272"] == {
+            "type": "stdio",
+            "command": "echo",
+            "args": ["hi-272"],
+            "env": {"FOO": "bar-272"},
+        }
+
+
+def test_config_mgmt_mcp_fields_add_http_with_header(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Picking http swaps in the url and header fields, and the server saves (TASK-272)."""
+    with _alpha_mcp_json(config_mgmt_server, None) as mcp_json:
+        _open_mcp_new(browser, config_mgmt_server, "http-272")
+        browser.select('[data-test="cm-mcp-type"]', "http")
+        # The type switch replaces the stdio fields with the remote ones above the targets.
+        browser.expect_visible('[data-test="cm-mcp-url"]')
+        browser.expect_hidden('[data-test="cm-mcp-command"]')
+        browser.fill('[data-test="cm-mcp-url"]', "https://h.example/mcp")
+        browser.click('[data-test="cm-mcp-header-add"]')
+        browser.expect_visible('[data-test="cm-mcp-header-key"]')
+        browser.fill('[data-test="cm-mcp-header-key"]', "Authorization")
+        browser.fill('[data-test="cm-mcp-header-value"]', "Bearer h-272")
+        _save_mcp(browser)
+
+        data = json.loads(mcp_json.read_text(encoding="utf-8"))
+        assert data["mcpServers"]["http-272"] == {
+            "type": "http",
+            "url": "https://h.example/mcp",
+            "headers": {"Authorization": "Bearer h-272"},
+        }
+
+
+def test_config_mgmt_mcp_fields_edit_keeps_masked_header(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A masked header left unchanged keeps the stored value through a fields save.
+
+    The stored header shows as the mask, never as its value. Only the timeout changes,
+    so the destination is the same and the backend restores the header from disk.
+    """
+    with _alpha_mcp_json(config_mgmt_server, {"remote-272": _REMOTE_272}) as mcp_json:
+        _open_modal(browser, config_mgmt_server)
+        browser.select('[data-test="cm-project"]', "alpha")
+        browser.click('[data-test="cm-surface-mcp"]')
+        browser.click('[data-test="cm-mcp-edit-remote-272"]')
+        browser.expect_visible('[data-test="cm-mcp-fields"]')
+        browser.expect_value('[data-test="cm-mcp-url"]', "https://a.example/mcp")
+        browser.expect_value('[data-test="cm-mcp-header-key"]', "Authorization")
+        browser.expect_value('[data-test="cm-mcp-header-value"]', "********")
+        browser.fill('[data-test="cm-mcp-timeout"]', "5000")
+        browser.expect_hidden('[data-test="cm-mcp-retype"]')
+        _save_mcp(browser)
+
+        data = json.loads(mcp_json.read_text(encoding="utf-8"))
+        assert data["mcpServers"]["remote-272"] == {**_REMOTE_272, "timeout": 5000}
+
+
+def test_config_mgmt_mcp_fields_url_change_asks_to_retype(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A new url with a masked header left in place explains the retype and blocks Save.
+
+    The backend never sends a stored credential to a new destination. The editor names
+    the masked value to retype and keeps Save off; once the header is retyped, the
+    warning goes and the save writes the new url with the new header.
+    """
+    with _alpha_mcp_json(config_mgmt_server, {"remote-272": _REMOTE_272}) as mcp_json:
+        _open_modal(browser, config_mgmt_server)
+        browser.select('[data-test="cm-project"]', "alpha")
+        browser.click('[data-test="cm-surface-mcp"]')
+        browser.click('[data-test="cm-mcp-edit-remote-272"]')
+        browser.expect_visible('[data-test="cm-mcp-fields"]')
+        browser.expect_value('[data-test="cm-mcp-header-value"]', "********")
+        browser.fill('[data-test="cm-mcp-url"]', "https://b.example/mcp")
+        browser.expect_visible('[data-test="cm-mcp-retype"]')
+        assert "headers.Authorization" in browser.get_text('[data-test="cm-mcp-retype"]')
+        browser.fill('[data-test="cm-mcp-confirm"]', "alpha")
+        browser.expect_disabled('[data-test="cm-mcp-save"]')
+
+        browser.fill('[data-test="cm-mcp-header-value"]', "Bearer new-272")
+        browser.expect_hidden('[data-test="cm-mcp-retype"]')
+        browser.click('[data-test="cm-mcp-save"]')
+        browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+        data = json.loads(mcp_json.read_text(encoding="utf-8"))
+        assert data["mcpServers"]["remote-272"] == {
+            "type": "http",
+            "url": "https://b.example/mcp",
+            "headers": {"Authorization": "Bearer new-272"},
+        }
+
+
+def test_config_mgmt_mcp_fields_stdio_arg_change_asks_to_retype(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A new stdio argument with a masked env value left in place asks for the env value.
+
+    The backend never hands a stored env value to a new command or argument list.
+    """
+    stored = {"command": "echo", "args": ["a"], "env": {"TOKEN": "keep-272"}}
+    with _alpha_mcp_json(config_mgmt_server, {"cmd-272": stored}) as mcp_json:
+        _open_modal(browser, config_mgmt_server)
+        browser.select('[data-test="cm-project"]', "alpha")
+        browser.click('[data-test="cm-surface-mcp"]')
+        browser.click('[data-test="cm-mcp-edit-cmd-272"]')
+        browser.expect_visible('[data-test="cm-mcp-fields"]')
+        browser.expect_value('[data-test="cm-mcp-env-value"]', "********")
+        browser.fill('[data-test="cm-mcp-arg"]', "b")
+        browser.expect_visible('[data-test="cm-mcp-retype"]')
+        text = browser.get_text('[data-test="cm-mcp-retype"]')
+        assert "command or its arguments" in text and "env.TOKEN" in text
+        browser.fill('[data-test="cm-mcp-confirm"]', "alpha")
+        browser.expect_disabled('[data-test="cm-mcp-save"]')
+
+        browser.fill('[data-test="cm-mcp-env-value"]', "new-272")
+        browser.expect_hidden('[data-test="cm-mcp-retype"]')
+        browser.click('[data-test="cm-mcp-save"]')
+        browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+        data = json.loads(mcp_json.read_text(encoding="utf-8"))
+        assert data["mcpServers"]["cmd-272"] == {
+            "command": "echo",
+            "args": ["b"],
+            "env": {"TOKEN": "new-272"},
+        }
+
+
+def test_config_mgmt_mcp_fields_renamed_masked_header_asks_for_value(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Renaming a header that still shows the mask asks for its value: nothing is stored there."""
+    with _alpha_mcp_json(config_mgmt_server, {"remote-272": _REMOTE_272}):
+        _open_modal(browser, config_mgmt_server)
+        browser.select('[data-test="cm-project"]', "alpha")
+        browser.click('[data-test="cm-surface-mcp"]')
+        browser.click('[data-test="cm-mcp-edit-remote-272"]')
+        browser.expect_visible('[data-test="cm-mcp-fields"]')
+        browser.fill('[data-test="cm-mcp-header-key"]', "X-Renamed")
+        browser.expect_visible('[data-test="cm-mcp-retype"]')
+        assert "headers.X-Renamed" in browser.get_text('[data-test="cm-mcp-retype"]')
+        browser.fill('[data-test="cm-mcp-confirm"]', "alpha")
+        browser.expect_disabled('[data-test="cm-mcp-save"]')
+
+
+def test_config_mgmt_mcp_unshown_field_opens_in_raw_json(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A server with a field the form does not show opens in Raw JSON and says why."""
+    servers = {"role-272": {"command": "echo", "role": "comms"}}
+    with _alpha_mcp_json(config_mgmt_server, servers):
+        _open_modal(browser, config_mgmt_server)
+        browser.select('[data-test="cm-project"]', "alpha")
+        browser.click('[data-test="cm-surface-mcp"]')
+        browser.click('[data-test="cm-mcp-edit-role-272"]')
+        browser.expect_visible('[data-test="cm-mcp-raw"]')
+        browser.expect_hidden('[data-test="cm-mcp-fields"]')
+        assert "role" in browser.get_text('[data-test="cm-mcp-fields-error"]')
+        # Fields stays refused while the entry still has the field.
+        browser.click('[data-test="cm-mcp-mode-fields"]')
+        browser.expect_visible('[data-test="cm-mcp-raw"]')
+        browser.expect_hidden('[data-test="cm-mcp-fields"]')
 
 
 def test_config_mgmt_skills_tab_loads(browser: AgentBrowser, config_mgmt_server: Server) -> None:
@@ -1120,6 +1370,7 @@ def test_config_mgmt_mcp_approvals_round_trip(
     browser.click('[data-test="cm-mcp-new"]')
     browser.expect_visible('[data-test="cm-mcp-editor"]')
     browser.fill('[data-test="cm-mcp-name"]', "gizmo")
+    _mcp_raw_mode(browser)
     browser.fill('[data-test="cm-mcp-entry"]', '{"command": "echo", "env": {"K": "v"}}')
     browser.fill('[data-test="cm-mcp-confirm"]', "alpha")
     browser.click('[data-test="cm-mcp-save"]')
@@ -1162,6 +1413,7 @@ def test_config_mgmt_mcp_settings_owned_approval_is_read_only(
     browser.click('[data-test="cm-mcp-new"]')
     browser.expect_visible('[data-test="cm-mcp-editor"]')
     browser.fill('[data-test="cm-mcp-name"]', "gizmo")
+    _mcp_raw_mode(browser)
     browser.fill('[data-test="cm-mcp-entry"]', '{"command": "echo", "env": {"K": "v"}}')
     browser.fill('[data-test="cm-mcp-confirm"]', "alpha")
     browser.click('[data-test="cm-mcp-save"]')
@@ -1204,6 +1456,7 @@ def test_config_mgmt_mcp_approvals_confirm_clears_on_surface_switch(
     browser.click('[data-test="cm-mcp-new"]')
     browser.expect_visible('[data-test="cm-mcp-editor"]')
     browser.fill('[data-test="cm-mcp-name"]', "gizmo")
+    _mcp_raw_mode(browser)
     browser.fill('[data-test="cm-mcp-entry"]', '{"command": "echo", "env": {"K": "v"}}')
     browser.fill('[data-test="cm-mcp-confirm"]', "alpha")
     browser.click('[data-test="cm-mcp-save"]')

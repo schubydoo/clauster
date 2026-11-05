@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, Response
 
-from .. import __version__, config_write_hooks, deps
+from .. import __version__, config_write_hooks, config_write_mcp, deps
 from ..config import BYPASS_DESKTOP_HINT, PERMISSION_LABELS
 from ..dependencies import ConfigDep, EngineDep, RenderDep
 from ._common import list_projects
@@ -61,6 +61,9 @@ async def _dashboard_context(config: ClausterConfig, engine: ClausterEngine) -> 
         # The accepted hook handler types (TASK-449.4), from the same validator, for the
         # rows editor's type <select>.
         "hook_types": list(config_write_hooks.HOOK_TYPES),
+        # Every MCP server `type` the write surface reads, mapped to its transport
+        # (TASK-272), for the MCP fields editor's type <select> and its per-type fields.
+        "mcp_transports": dict(config_write_mcp.TRANSPORT_ALIASES),
         # Interactive Session (true-resume pty) works on POSIX always and on Windows
         # via the ConPTY keeper when the `pty` extra (pywinpty) is installed (#914).
         "pty_supported": _pty_supported(),

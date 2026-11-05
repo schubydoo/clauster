@@ -2441,7 +2441,7 @@
               </div>
             </div>
 
-            <!-- MCP servers surface (#773 slice D) — list + per-server JSON editor -->
+            <!-- MCP servers surface (#773 slice D) — list + per-server editor (fields or raw JSON, TASK-272) -->
             <div data-test="cm-view-mcp"
                  x-show="!configMgmt.loading && !configMgmtNeedsProject() && configMgmt.surface === 'mcp'" x-cloak>
               <!-- LIST mode -->
@@ -2604,15 +2604,265 @@
                     </template>
                   </ul>
                 </div>
-                <label class="form-label small" for="cm-mcp-entry">Definition (JSON)</label>
-                <textarea id="cm-mcp-entry" class="form-control form-control-sm font-monospace" rows="10"
-                          data-test="cm-mcp-entry" spellcheck="false"
-                          x-model="configMgmt.mcp.entryText" {{ NO_AUTOFILL }}></textarea>
-                <div class="form-hint small mt-1">
-                  e.g. <code>{"command": "npx", "args": ["-y", "a-server"]}</code> or
-                  <code>{"type": "http", "url": "https://…"}</code>. Secret-shaped values are
-                  masked as <code>********</code> — leave the mask to keep the stored value.
+                <!-- TASK-272: the definition as fields (type -> that transport's fields) or as
+                     raw JSON. The form builds the same entry the backend validates. -->
+                <div class="d-flex justify-content-between align-items-center mb-1">
+                  <!-- A section heading, not a control label (fields mode has many controls;
+                       the raw textarea is named by its own visually-hidden label). -->
+                  <div class="form-label small mb-0">Definition</div>
+                  <div class="btn-group btn-group-sm" role="group" aria-label="MCP server editor mode">
+                    <button type="button" class="btn" data-test="cm-mcp-mode-fields"
+                            :class="configMgmt.mcp.mode === 'fields' ? 'btn-primary' : 'btn-outline-primary'"
+                            :aria-pressed="configMgmt.mcp.mode === 'fields'"
+                            @click="configMgmtMcpMode('fields')">Fields</button>
+                    <button type="button" class="btn" data-test="cm-mcp-mode-raw"
+                            :class="configMgmt.mcp.mode === 'raw' ? 'btn-primary' : 'btn-outline-primary'"
+                            :aria-pressed="configMgmt.mcp.mode === 'raw'"
+                            @click="configMgmtMcpMode('raw')">Raw JSON</button>
+                  </div>
                 </div>
+                <!-- Shows in either mode, so a refused 'Fields' click (or an entry that opened
+                     in Raw JSON) explains itself. -->
+                <div class="alert alert-warning py-1 small" data-test="cm-mcp-fields-error" role="alert"
+                     x-show="configMgmt.mcp.fieldsError" x-cloak x-text="configMgmt.mcp.fieldsError"></div>
+
+                <!-- FIELDS -->
+                <div x-show="configMgmt.mcp.mode === 'fields'" data-test="cm-mcp-fields" x-cloak>
+                  <label class="form-label small" for="cm-mcp-type">Type</label>
+                  <select class="form-select form-select-sm cm-input-cap" id="cm-mcp-type" name="cm-mcp-type"
+                          data-test="cm-mcp-type" aria-describedby="cm-mcp-type-hint"
+                          x-model="configMgmt.mcp.f.type">
+                    {%- for t in mcp_transports %}
+                    <option value="{{ t }}">{{ t }}</option>
+                    {%- endfor %}
+                  </select>
+                  <div class="form-hint small mb-2" id="cm-mcp-type-hint">
+                    <code>stdio</code> runs a local command. <code>http</code> (also written
+                    <code>streamable-http</code>), <code>sse</code> and <code>ws</code> connect to a URL.
+                    A save writes only the fields of the selected type.
+                  </div>
+
+                  <!-- stdio: command, args, env -->
+                  <div x-show="configMgmtMcpFormTransport() === 'stdio'" data-test="cm-mcp-stdio" x-cloak>
+                    <label class="form-label small" for="cm-mcp-command">Command</label>
+                    <input type="text" class="form-control form-control-sm font-monospace mb-2"
+                           id="cm-mcp-command" name="cm-mcp-command" data-test="cm-mcp-command"
+                           {{ NO_AUTOFILL }} spellcheck="false" placeholder="npx"
+                           :class="{ 'is-invalid': configMgmtMcpNeedsRetype(configMgmt.mcp.f.command) }"
+                           :aria-invalid="configMgmtMcpNeedsRetype(configMgmt.mcp.f.command) ? 'true' : null"
+                           :aria-describedby="configMgmtMcpNeedsRetype(configMgmt.mcp.f.command) ? 'cm-mcp-retype' : null"
+                           x-model="configMgmt.mcp.f.command">
+                    <div role="group" aria-labelledby="cm-mcp-args-label" class="mb-2">
+                      <div class="form-label small mb-1" id="cm-mcp-args-label">Arguments</div>
+                      <div class="text-secondary small mb-1" data-test="cm-mcp-args-empty"
+                           x-show="!configMgmt.mcp.f.args.length" x-cloak>No arguments.</div>
+                      <template x-for="(row, idx) in configMgmt.mcp.f.args" :key="row.id">
+                        <div class="d-flex gap-1 mb-1" :data-test="'cm-mcp-arg-row-' + idx">
+                          <input type="text" class="form-control form-control-sm font-monospace"
+                                 data-test="cm-mcp-arg" {{ NO_AUTOFILL }} spellcheck="false"
+                                 :id="'cm-mcp-arg-' + row.id" :name="'cm-mcp-arg-' + row.id"
+                                 :aria-label="'Argument ' + (idx + 1)"
+                                 :title="configMgmtMcpIsMasked(row.value) ? 'Masked: leave ******** to keep the stored value' : ''"
+                                 :class="{ 'is-invalid': configMgmtMcpNeedsRetype(row.value) }"
+                                 :aria-invalid="configMgmtMcpNeedsRetype(row.value) ? 'true' : null"
+                                 :aria-describedby="configMgmtMcpNeedsRetype(row.value) ? 'cm-mcp-retype' : null"
+                                 x-model="row.value">
+                          <button type="button" class="btn btn-sm btn-ghost-danger" data-test="cm-mcp-arg-remove"
+                                  :aria-label="'Remove argument ' + (idx + 1)"
+                                  @click="configMgmtMcpRemoveArg(idx)">Remove</button>
+                        </div>
+                      </template>
+                      <button type="button" class="btn btn-sm btn-outline-primary" data-test="cm-mcp-arg-add"
+                              @click="configMgmtMcpAddArg()">Add argument</button>
+                    </div>
+                    <div role="group" aria-labelledby="cm-mcp-env-label" class="mb-2">
+                      <div class="form-label small mb-1" id="cm-mcp-env-label">Environment variables</div>
+                      <table class="table table-sm mb-1" data-test="cm-mcp-env-table"
+                             x-show="configMgmt.mcp.f.env.length" x-cloak>
+                        <caption class="visually-hidden">Environment variables: name, value, and remove action</caption>
+                        <thead><tr><th class="cm-name-col">Name</th><th>Value</th><th class="text-end">Remove</th></tr></thead>
+                        <tbody>
+                          <template x-for="(row, idx) in configMgmt.mcp.f.env" :key="row.id">
+                            <tr :data-test="'cm-mcp-env-row-' + idx">
+                              <td>
+                                <input type="text" class="form-control form-control-sm font-monospace"
+                                       data-test="cm-mcp-env-key" {{ NO_AUTOFILL }} spellcheck="false"
+                                       :id="'cm-mcp-env-key-' + row.id" :name="'cm-mcp-env-key-' + row.id"
+                                       :aria-label="'Name for environment variable ' + (idx + 1)"
+                                       x-model="row.key">
+                              </td>
+                              <td>
+                                <input type="text" class="form-control form-control-sm font-monospace"
+                                       data-test="cm-mcp-env-value" {{ NO_AUTOFILL }} spellcheck="false"
+                                       :id="'cm-mcp-env-value-' + row.id" :name="'cm-mcp-env-value-' + row.id"
+                                       :aria-label="'Value for ' + (row.key || 'environment variable ' + (idx + 1))"
+                                       :title="configMgmtMcpIsMasked(row.value) ? 'Masked: leave ******** to keep the stored value' : ''"
+                                       :class="{ 'is-invalid': configMgmtMcpNeedsRetype(row.value) }"
+                                       :aria-invalid="configMgmtMcpNeedsRetype(row.value) ? 'true' : null"
+                                       :aria-describedby="configMgmtMcpNeedsRetype(row.value) ? 'cm-mcp-retype' : null"
+                                       x-model="row.value">
+                              </td>
+                              <td class="text-end">
+                                <button type="button" class="btn btn-sm btn-ghost-danger" data-test="cm-mcp-env-remove"
+                                        :aria-label="'Remove ' + (row.key || 'environment variable ' + (idx + 1))"
+                                        @click="configMgmtMcpRemovePair('env', idx)">Remove</button>
+                              </td>
+                            </tr>
+                          </template>
+                        </tbody>
+                      </table>
+                      <button type="button" class="btn btn-sm btn-outline-primary" data-test="cm-mcp-env-add"
+                              @click="configMgmtMcpAddPair('env')">Add variable</button>
+                    </div>
+                  </div>
+
+                  <!-- http / streamable-http / sse / ws: url, headers, headersHelper (+ oauth) -->
+                  <div x-show="configMgmtMcpFormTransport() !== 'stdio'" data-test="cm-mcp-remote" x-cloak>
+                    <label class="form-label small" for="cm-mcp-url">URL</label>
+                    <input type="text" inputmode="url" class="form-control form-control-sm font-monospace mb-2"
+                           id="cm-mcp-url" name="cm-mcp-url" data-test="cm-mcp-url"
+                           {{ NO_AUTOFILL }} spellcheck="false" placeholder="https://"
+                           :title="configMgmtMcpIsMasked(configMgmt.mcp.f.url) ? 'Masked: leave ******** to keep the stored value' : ''"
+                           :class="{ 'is-invalid': configMgmtMcpNeedsRetype(configMgmt.mcp.f.url) }"
+                           :aria-invalid="configMgmtMcpNeedsRetype(configMgmt.mcp.f.url) ? 'true' : null"
+                           :aria-describedby="configMgmtMcpNeedsRetype(configMgmt.mcp.f.url) ? 'cm-mcp-retype' : null"
+                           x-model="configMgmt.mcp.f.url">
+                    <div role="group" aria-labelledby="cm-mcp-headers-label" class="mb-2">
+                      <div class="form-label small mb-1" id="cm-mcp-headers-label">Headers</div>
+                      <table class="table table-sm mb-1" data-test="cm-mcp-headers-table"
+                             x-show="configMgmt.mcp.f.headers.length" x-cloak>
+                        <caption class="visually-hidden">Headers: name, value, and remove action</caption>
+                        <thead><tr><th class="cm-name-col">Name</th><th>Value</th><th class="text-end">Remove</th></tr></thead>
+                        <tbody>
+                          <template x-for="(row, idx) in configMgmt.mcp.f.headers" :key="row.id">
+                            <tr :data-test="'cm-mcp-header-row-' + idx">
+                              <td>
+                                <input type="text" class="form-control form-control-sm font-monospace"
+                                       data-test="cm-mcp-header-key" {{ NO_AUTOFILL }} spellcheck="false"
+                                       :id="'cm-mcp-header-key-' + row.id" :name="'cm-mcp-header-key-' + row.id"
+                                       :aria-label="'Name for header ' + (idx + 1)"
+                                       x-model="row.key">
+                              </td>
+                              <td>
+                                <input type="text" class="form-control form-control-sm font-monospace"
+                                       data-test="cm-mcp-header-value" {{ NO_AUTOFILL }} spellcheck="false"
+                                       :id="'cm-mcp-header-value-' + row.id" :name="'cm-mcp-header-value-' + row.id"
+                                       :aria-label="'Value for ' + (row.key || 'header ' + (idx + 1))"
+                                       :title="configMgmtMcpIsMasked(row.value) ? 'Masked: leave ******** to keep the stored value' : ''"
+                                       :class="{ 'is-invalid': configMgmtMcpNeedsRetype(row.value) }"
+                                       :aria-invalid="configMgmtMcpNeedsRetype(row.value) ? 'true' : null"
+                                       :aria-describedby="configMgmtMcpNeedsRetype(row.value) ? 'cm-mcp-retype' : null"
+                                       x-model="row.value">
+                              </td>
+                              <td class="text-end">
+                                <button type="button" class="btn btn-sm btn-ghost-danger" data-test="cm-mcp-header-remove"
+                                        :aria-label="'Remove ' + (row.key || 'header ' + (idx + 1))"
+                                        @click="configMgmtMcpRemovePair('headers', idx)">Remove</button>
+                              </td>
+                            </tr>
+                          </template>
+                        </tbody>
+                      </table>
+                      <button type="button" class="btn btn-sm btn-outline-primary" data-test="cm-mcp-header-add"
+                              @click="configMgmtMcpAddPair('headers')">Add header</button>
+                    </div>
+                    <label class="form-label small" for="cm-mcp-headers-helper">Headers helper (optional)</label>
+                    <input type="text" class="form-control form-control-sm font-monospace"
+                           id="cm-mcp-headers-helper" name="cm-mcp-headers-helper" data-test="cm-mcp-headers-helper"
+                           {{ NO_AUTOFILL }} spellcheck="false"
+                           :class="{ 'is-invalid': configMgmtMcpNeedsRetype(configMgmt.mcp.f.headersHelper) }"
+                           :aria-invalid="configMgmtMcpNeedsRetype(configMgmt.mcp.f.headersHelper) ? 'true' : null"
+                           :aria-describedby="configMgmtMcpNeedsRetype(configMgmt.mcp.f.headersHelper) ? 'cm-mcp-headers-helper-hint cm-mcp-retype' : 'cm-mcp-headers-helper-hint'"
+                           x-model="configMgmt.mcp.f.headersHelper">
+                    <div class="form-hint small mb-2" id="cm-mcp-headers-helper-hint">
+                      A command that prints the headers as JSON. Claude Code runs it when it connects.
+                      Clauster stores it and never runs it.
+                    </div>
+                    <!-- OAuth: http and sse only (the docs: WebSocket does not support OAuth). -->
+                    <fieldset class="mb-2" data-test="cm-mcp-oauth"
+                              x-show="configMgmtMcpFormTransport() !== 'ws'" x-cloak>
+                      <legend class="form-label small mb-1">OAuth (optional)</legend>
+                      <div class="row g-2">
+                        <div class="col-sm-6">
+                          <label class="form-label small mb-1" for="cm-mcp-oauth-client-id">Client ID</label>
+                          <input type="text" class="form-control form-control-sm font-monospace"
+                                 id="cm-mcp-oauth-client-id" name="cm-mcp-oauth-client-id" data-test="cm-mcp-oauth-client-id"
+                                 {{ NO_AUTOFILL }} spellcheck="false"
+                                 :class="{ 'is-invalid': configMgmtMcpNeedsRetype(configMgmt.mcp.f.clientId) }"
+                                 :aria-invalid="configMgmtMcpNeedsRetype(configMgmt.mcp.f.clientId) ? 'true' : null"
+                                 :aria-describedby="configMgmtMcpNeedsRetype(configMgmt.mcp.f.clientId) ? 'cm-mcp-retype' : null"
+                                 x-model="configMgmt.mcp.f.clientId">
+                        </div>
+                        <div class="col-sm-6">
+                          <label class="form-label small mb-1" for="cm-mcp-oauth-port">Callback port</label>
+                          <input type="number" min="1" max="65535" step="1" class="form-control form-control-sm"
+                                 id="cm-mcp-oauth-port" name="cm-mcp-oauth-port" data-test="cm-mcp-oauth-port"
+                                 {{ NO_AUTOFILL }} x-model="configMgmt.mcp.f.callbackPort">
+                        </div>
+                        <div class="col-sm-6">
+                          <label class="form-label small mb-1" for="cm-mcp-oauth-metadata-url">Auth server metadata URL</label>
+                          <input type="text" inputmode="url" class="form-control form-control-sm font-monospace"
+                                 id="cm-mcp-oauth-metadata-url" name="cm-mcp-oauth-metadata-url" data-test="cm-mcp-oauth-metadata-url"
+                                 {{ NO_AUTOFILL }} spellcheck="false" placeholder="https://"
+                                 :class="{ 'is-invalid': configMgmtMcpNeedsRetype(configMgmt.mcp.f.authServerMetadataUrl) }"
+                                 :aria-invalid="configMgmtMcpNeedsRetype(configMgmt.mcp.f.authServerMetadataUrl) ? 'true' : null"
+                                 :aria-describedby="configMgmtMcpNeedsRetype(configMgmt.mcp.f.authServerMetadataUrl) ? 'cm-mcp-retype' : null"
+                                 x-model="configMgmt.mcp.f.authServerMetadataUrl">
+                        </div>
+                        <div class="col-sm-6">
+                          <label class="form-label small mb-1" for="cm-mcp-oauth-scopes">Scopes</label>
+                          <input type="text" class="form-control form-control-sm font-monospace"
+                                 id="cm-mcp-oauth-scopes" name="cm-mcp-oauth-scopes" data-test="cm-mcp-oauth-scopes"
+                                 {{ NO_AUTOFILL }} spellcheck="false" placeholder="read write"
+                                 :class="{ 'is-invalid': configMgmtMcpNeedsRetype(configMgmt.mcp.f.scopes) }"
+                                 :aria-invalid="configMgmtMcpNeedsRetype(configMgmt.mcp.f.scopes) ? 'true' : null"
+                                 :aria-describedby="configMgmtMcpNeedsRetype(configMgmt.mcp.f.scopes) ? 'cm-mcp-retype' : null"
+                                 x-model="configMgmt.mcp.f.scopes">
+                        </div>
+                      </div>
+                    </fieldset>
+                  </div>
+
+                  <!-- Every transport -->
+                  <label class="form-label small" for="cm-mcp-timeout">Tool call timeout (ms, optional)</label>
+                  <input type="number" min="1" step="1" class="form-control form-control-sm cm-input-cap"
+                         id="cm-mcp-timeout" name="cm-mcp-timeout" data-test="cm-mcp-timeout"
+                         {{ NO_AUTOFILL }} x-model="configMgmt.mcp.f.timeout">
+                  <label class="form-check mt-2 mb-1">
+                    <input type="checkbox" class="form-check-input" id="cm-mcp-always-load" name="cm-mcp-always-load"
+                           data-test="cm-mcp-always-load" aria-describedby="cm-mcp-always-load-hint"
+                           x-model="configMgmt.mcp.f.alwaysLoad">
+                    <span class="form-check-label">Always load this server's tools (<code>alwaysLoad</code>)</span>
+                  </label>
+                  <div class="form-hint small" id="cm-mcp-always-load-hint">
+                    Claude Code loads the tools at the start of a session instead of through tool search.
+                  </div>
+                  <div class="form-hint small mt-2">
+                    Stored <code>env</code> and header values, the headers helper and OAuth text show as
+                    <code>********</code>. Leave a mask in place to keep the stored value. For other
+                    fields, such as <code>role</code> or <code>tools</code>, switch to Raw JSON.
+                  </div>
+                </div>
+
+                <!-- RAW: every accepted field -->
+                <div x-show="configMgmt.mcp.mode === 'raw'" data-test="cm-mcp-raw" x-cloak>
+                  <label class="visually-hidden" for="cm-mcp-entry">Definition (raw JSON)</label>
+                  <textarea id="cm-mcp-entry" class="form-control form-control-sm font-monospace" rows="10"
+                            data-test="cm-mcp-entry" spellcheck="false"
+                            x-model="configMgmt.mcp.entryText" {{ NO_AUTOFILL }}></textarea>
+                  <div class="form-hint small mt-1">
+                    One server's definition, without its name, e.g.
+                    <code>{"command": "npx", "args": ["-y", "a-server"]}</code> or
+                    <code>{"type": "http", "url": "https://…"}</code>. Secret-shaped values are
+                    masked as <code>********</code>. Leave the mask to keep the stored value.
+                  </div>
+                </div>
+
+                <!-- Both block the save until fixed (configMgmtCanSaveMcp). -->
+                <div class="alert alert-warning py-1 small mt-2 mb-0" data-test="cm-mcp-fields-warn" role="alert"
+                     x-show="configMgmtMcpFieldsWarning()" x-cloak x-text="configMgmtMcpFieldsWarning()"></div>
+                <div class="alert alert-warning py-2 small mt-2 mb-0" id="cm-mcp-retype" data-test="cm-mcp-retype" role="alert"
+                     x-show="configMgmtMcpRetypeWarning()" x-cloak x-text="configMgmtMcpRetypeWarning()"></div>
                 <div class="mt-2">
                   <label class="form-label small mb-1" for="cm-mcp-confirm">
                     Type <code x-text="configMgmtConfirmToken()"></code> to confirm

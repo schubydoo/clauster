@@ -265,6 +265,67 @@ def test_mcp_surface_present_when_enabled(write_config):
     )
 
 
+def test_mcp_editor_has_fields_and_raw_json_modes(write_config):
+    # TASK-272: a type select shows that transport's fields; Raw JSON stays the fallback.
+    html = _html(write_config, _ON)
+    for hook in (
+        "cm-mcp-mode-fields",
+        "cm-mcp-mode-raw",
+        "cm-mcp-fields-error",
+        "cm-mcp-fields",
+        "cm-mcp-type",
+        "cm-mcp-stdio",
+        "cm-mcp-command",
+        "cm-mcp-arg-add",
+        "cm-mcp-env-add",
+        "cm-mcp-remote",
+        "cm-mcp-url",
+        "cm-mcp-header-add",
+        "cm-mcp-headers-helper",
+        "cm-mcp-oauth",
+        "cm-mcp-oauth-client-id",
+        "cm-mcp-oauth-port",
+        "cm-mcp-oauth-metadata-url",
+        "cm-mcp-oauth-scopes",
+        "cm-mcp-timeout",
+        "cm-mcp-always-load",
+        "cm-mcp-raw",
+        "cm-mcp-entry",
+        "cm-mcp-fields-warn",
+        "cm-mcp-retype",
+    ):
+        assert f'data-test="{hook}"' in html, hook
+    # Every visible control in the form has a label bound to it.
+    for control in ("cm-mcp-type", "cm-mcp-command", "cm-mcp-url", "cm-mcp-timeout"):
+        assert f'for="{control}"' in html, control
+
+
+def test_mcp_type_select_lists_every_type_the_backend_reads(write_config):
+    # The <select> options and the JS transport map are server-injected from the validator,
+    # so a type the backend gains or drops changes the form with it.
+    from clauster.config_write_mcp import TRANSPORT_ALIASES
+
+    html = _html(write_config, _ON)
+    select = html[html.index('data-test="cm-mcp-type"') :]
+    select = select[: select.index("</select>")]
+    assert re.findall(r'<option value="([^"]+)">', select) == list(TRANSPORT_ALIASES)
+    assert '"streamable-http": "http"' in html
+    assert "const MCP_TRANSPORTS = new Map(Object.entries(" in html
+
+
+def test_mcp_save_is_blocked_by_the_fields_and_retype_warnings(write_config):
+    # TASK-272: the editor explains the backend's masked-value refusal before the save and
+    # keeps Save off until the masked values are retyped; it never sends a bypass.
+    html = _html(write_config, _ON)
+    assert (
+        "if (this.configMgmtMcpFieldsWarning() || this.configMgmtMcpRetypeWarning()) return false;"
+        in html
+    )
+    assert 'x-show="configMgmtMcpRetypeWarning()"' in html
+    # A fields save builds the entry from the form; a raw save parses the textarea.
+    assert 'if (m.mode === "fields") entry = this._mcpFieldsEntry();' in html
+
+
 def test_mcp_delete_confirm_suppresses_approvals_confirms(write_config):
     # #1043: the delete confirm and the approvals save/reset confirms both bind the
     # scope token, so two identical "Type <scope>" inputs could stack with no signal

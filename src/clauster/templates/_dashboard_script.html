@@ -102,6 +102,33 @@
   };
   // Every field a row can hold across all types (a Type switch hides, not clears, them).
   const HOOK_ROW_FIELD_NAMES = [...new Set(Object.values(HOOK_ROW_FIELDS).flat())];
+  // Every MCP server `type` the write surface reads, mapped to its transport
+  // (config_write_mcp.TRANSPORT_ALIASES, server-injected). A Map, so a stored type such as
+  // "constructor" can never resolve through Object.prototype.
+  const MCP_TRANSPORTS = new Map(Object.entries({{ mcp_transports | tojson }}));
+  // The keys the MCP FIELDS editor can show for each transport (TASK-272). This is what the
+  // form displays, not what the backend accepts: an entry with any other key (role, tools,
+  // request_timeout_ms, oauth.xaa, ...) opens in Raw JSON, where every accepted field edits.
+  const MCP_FORM_KEYS = {
+    stdio: ["type", "command", "args", "env", "timeout", "alwaysLoad"],
+    http: ["type", "url", "headers", "headersHelper", "oauth", "timeout", "alwaysLoad"],
+    sse: ["type", "url", "headers", "headersHelper", "oauth", "timeout", "alwaysLoad"],
+    ws: ["type", "url", "headers", "headersHelper", "timeout", "alwaysLoad"],
+  };
+  const MCP_OAUTH_FORM_KEYS = ["clientId", "callbackPort", "authServerMetadataUrl", "scopes"];
+  // Maps keyed by names the operator chooses (an env variable, a header, a tool), never a
+  // destination: the url check skips them (config_write_mcp._FREE_FORM_MAPS).
+  const MCP_FREE_FORM_MAPS = ["env", "headers", "toolPermissions"];
+  // A blank MCP fields form. `keepType` writes `type` even for stdio (a stored stdio entry
+  // with no `type` keeps having none); `present` records which optional containers the
+  // loaded entry had, so an empty `args: []` or `env: {}` round-trips as it was stored.
+  function mcpBlankFields() {
+    return {
+      type: "stdio", keepType: true, command: "", args: [], env: [], url: "", headers: [],
+      headersHelper: "", clientId: "", callbackPort: "", authServerMetadataUrl: "", scopes: "",
+      timeout: "", alwaysLoad: false, present: {},
+    };
+  }
   const USAGE_MODE = {{ usage_mode | tojson }};  // usage.mode — "cost" | "tokens" | "off"
   const CURRENCY = {{ currency | tojson }};  // usage.currency — code, shown in the tooltip
   const CURRENCY_SYMBOL = {{ currency_symbol | tojson }};  // resolved symbol for cost mode
@@ -286,6 +313,10 @@
           editing: false, isNew: false,
           name: "", entryText: "", orig: "",
           confirm: "", busy: false, ops: 0, deletingName: "",
+          // TASK-272 fields editor: `mode` is "fields" or "raw"; `f` holds the form (see
+          // _mcpBlankFields); `fieldsError` says why an entry can't be shown as fields;
+          // `base` is the loaded (masked) entry, the baseline for the retype check.
+          mode: "fields", f: mcpBlankFields(), fieldsError: "", base: null, seq: 0,
           // Convert-on-load notes from the read (TASK-449.8): [{name, field, message}] for
           // stored fields Claude Code ignores. Shown before a save; a save writes the fix.
           conversions: [],
@@ -2859,6 +2890,7 @@
         c.error = ""; c.saved = false; m.deletingName = "";
         m.editing = true; m.isNew = true;
         m.name = ""; m.entryText = ""; m.orig = ""; m.confirm = "";
+        m.f = mcpBlankFields(); m.mode = "fields"; m.fieldsError = ""; m.base = null;
       },
       // Editing reuses the already-loaded (masked) list entry — no fetch, so no race.
       configMgmtOpenMcp(name) {
@@ -2871,6 +2903,13 @@
         // A converted entry differs from the file on disk, so it must be savable unedited:
         // an empty baseline makes it dirty, and the Save writes the conversion out.
         m.orig = this.configMgmtMcpConversionsFor(name).length ? "" : m.entryText;
+        m.base = JSON.parse(m.entryText);  // a private copy of the loaded view (retype check)
+        // Open in the fields when they can show every key; otherwise in Raw JSON, with
+        // the reason shown so the switch explains itself. Clear the form first, so a
+        // server that opens in Raw JSON never leaves the previous server's fields behind.
+        m.f = mcpBlankFields();
+        const err = this._mcpFieldsFromEntry(m.base);
+        m.mode = err ? "raw" : "fields"; m.fieldsError = err;
       },
       // The convert-on-load notes for one server (empty when nothing was converted).
       configMgmtMcpConversionsFor(name) {
@@ -2886,23 +2925,365 @@
         // silently discard any unsaved toggle choices made before opening the editor.
         if (m.approvals.loading) this.configMgmtReload();
       },
+      // --- MCP fields editor (TASK-272) ------------------------------------------------
+      // A type select shows that transport's fields, and the form builds the same entry
+      // the backend validates (config_write_mcp), so a typical server needs no hand-written
+      // JSON and the name-wrapper mix-up ({"name": {...}}) cannot happen. Raw JSON stays
+      // the escape hatch for every field the form does not show. A masked value
+      // (********) is plain text in its input: left alone it is sent back as the sentinel,
+      // which the backend restores from the stored value. The backend refuses a mask
+      // whose server now points elsewhere; configMgmtMcpRetypeWarning explains that
+      // refusal before the save, and never works around it.
+      _mcpTransport(type) {
+        return typeof type === "string" ? (MCP_TRANSPORTS.get(type) || null) : null;
+      },
+      // A number input's text, trimmed (x-model may hand back a number or a string).
+      _mcpText(v) {
+        return String(v === undefined || v === null ? "" : v).trim();
+      },
+      // The transport the form shows now (drives the per-type x-show blocks).
+      configMgmtMcpFormTransport() {
+        return this._mcpTransport(this.configMgmt.mcp.f.type) || "stdio";
+      },
+      // Load `entry` into the form. Returns "" on success, or (form untouched) the reason
+      // the fields can't show it without dropping or reshaping a value.
+      _mcpFieldsFromEntry(entry) {
+        const m = this.configMgmt.mcp;
+        if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+          return "The definition must be a JSON object to use the fields.";
+        }
+        const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+        const has = (k) => own(entry, k);
+        const transport = has("type") ? this._mcpTransport(entry.type) : "stdio";
+        if (!transport) return "The fields can't show this server's type. Edit it in Raw JSON.";
+        const extra = Object.keys(entry).filter(k => !MCP_FORM_KEYS[transport].includes(k));
+        const oauth = has("oauth") ? entry.oauth : {};
+        const oauthIsObj = oauth !== null && typeof oauth === "object" && !Array.isArray(oauth);
+        if (oauthIsObj) {
+          for (const k of Object.keys(oauth)) {
+            if (!MCP_OAUTH_FORM_KEYS.includes(k)) extra.push("oauth." + k);
+          }
+        }
+        if (extra.length) {
+          return "The fields can't show " + extra.join(", ") + ". Edit this server in Raw JSON.";
+        }
+        const isStr = (v) => typeof v === "string";
+        const isStrMap = (v) => v !== null && typeof v === "object" && !Array.isArray(v)
+          && Object.values(v).every(isStr);
+        const isInt = (v) => typeof v === "number" && Number.isInteger(v) && v > 0;
+        const bad = [];
+        for (const k of ["command", "url", "headersHelper"]) if (has(k) && !isStr(entry[k])) bad.push(k);
+        if (has("args") && !(Array.isArray(entry.args) && entry.args.every(isStr))) bad.push("args");
+        for (const k of ["env", "headers"]) if (has(k) && !isStrMap(entry[k])) bad.push(k);
+        if (has("timeout") && !isInt(entry.timeout)) bad.push("timeout");
+        if (has("alwaysLoad") && typeof entry.alwaysLoad !== "boolean") bad.push("alwaysLoad");
+        if (!oauthIsObj) bad.push("oauth");
+        else {
+          for (const k of ["clientId", "authServerMetadataUrl", "scopes"]) {
+            if (own(oauth, k) && !isStr(oauth[k])) bad.push("oauth." + k);
+          }
+          if (own(oauth, "callbackPort") && !isInt(oauth.callbackPort)) bad.push("oauth.callbackPort");
+        }
+        if (bad.length) {
+          return "The fields can't show the value of " + bad.join(", ") + ". Edit this server in Raw JSON.";
+        }
+        const f = mcpBlankFields();
+        const pair = (k, v) => ({ id: ++m.seq, key: k, value: v, loaded: true });
+        f.type = has("type") ? entry.type : "stdio";
+        f.keepType = has("type");
+        f.command = entry.command || ""; f.url = entry.url || "";
+        f.headersHelper = entry.headersHelper || "";
+        f.args = (entry.args || []).map(a => ({ id: ++m.seq, value: a, loaded: true }));
+        f.env = Object.entries(entry.env || {}).map(([k, v]) => pair(k, v));
+        f.headers = Object.entries(entry.headers || {}).map(([k, v]) => pair(k, v));
+        f.clientId = oauth.clientId || ""; f.scopes = oauth.scopes || "";
+        f.authServerMetadataUrl = oauth.authServerMetadataUrl || "";
+        f.callbackPort = own(oauth, "callbackPort") ? String(oauth.callbackPort) : "";
+        f.timeout = has("timeout") ? String(entry.timeout) : "";
+        f.alwaysLoad = entry.alwaysLoad === true;
+        f.present = {
+          args: has("args"), env: has("env"), headers: has("headers"),
+          oauth: has("oauth"), alwaysLoad: has("alwaysLoad"),
+        };
+        m.f = f;
+        return "";
+      },
+      // Build the entry from the form. Pure (dirty and warning checks call it every render).
+      // Only the current transport's fields are written, so a Type switch never carries a
+      // hidden stdio `env` onto a remote server. A row with a blank name is dropped; a
+      // number field that isn't a whole number is sent as typed, and
+      // configMgmtMcpFieldsWarning blocks the save until it is fixed.
+      _mcpFieldsEntry() {
+        const f = this.configMgmt.mcp.f;
+        const transport = this.configMgmtMcpFormTransport();
+        const out = {};
+        if (f.keepType || f.type !== "stdio") out.type = f.type;
+        // A null-prototype map, so a header or env name "__proto__" is an ordinary key.
+        const pairs = (rows) => {
+          const o = Object.create(null);
+          for (const r of rows) { const k = (r.key || "").trim(); if (k) o[k] = r.value; }
+          return o;
+        };
+        const num = (text) => {
+          const t = this._mcpText(text);
+          return t === "" ? undefined : (this._hookTimeoutInt(t) || t);
+        };
+        if (transport === "stdio") {
+          if (f.command !== "") out.command = f.command;
+          if (f.args.length || f.present.args) out.args = f.args.map(r => r.value);
+          const env = pairs(f.env);
+          if (Object.keys(env).length || f.present.env) out.env = env;
+        } else {
+          if (f.url !== "") out.url = f.url;
+          const headers = pairs(f.headers);
+          if (Object.keys(headers).length || f.present.headers) out.headers = headers;
+          if (f.headersHelper !== "") out.headersHelper = f.headersHelper;
+          if (transport !== "ws") {
+            const oauth = {};
+            if (f.clientId !== "") oauth.clientId = f.clientId;
+            const port = num(f.callbackPort);
+            if (port !== undefined) oauth.callbackPort = port;
+            if (f.authServerMetadataUrl !== "") oauth.authServerMetadataUrl = f.authServerMetadataUrl;
+            if (f.scopes !== "") oauth.scopes = f.scopes;
+            if (Object.keys(oauth).length || f.present.oauth) out.oauth = oauth;
+          }
+        }
+        const timeout = num(f.timeout);
+        if (timeout !== undefined) out.timeout = timeout;
+        if (f.alwaysLoad || f.present.alwaysLoad) out.alwaysLoad = !!f.alwaysLoad;
+        return out;
+      },
+      // Problems in the form that would lose a row or that the backend refuses. Warns AND
+      // blocks the save (configMgmtCanSaveMcp), like the hooks and env rows.
+      configMgmtMcpFieldsWarning() {
+        const m = this.configMgmt.mcp, f = m.f;
+        if (!m.editing || m.mode !== "fields") return "";
+        const transport = this.configMgmtMcpFormTransport();
+        const msgs = [];
+        const checkPairs = (rows, label) => {
+          const seen = new Set(), dupes = new Set();
+          let unnamed = false;
+          for (const r of rows) {
+            const k = (r.key || "").trim();
+            if (!k) { if (r.value) unnamed = true; continue; }
+            if (seen.has(k)) dupes.add(k); else seen.add(k);
+          }
+          if (unnamed) msgs.push("Give every " + label + " a name, or remove it.");
+          if (dupes.size) msgs.push("Each " + label + " name must be unique: " + [...dupes].join(", ") + ".");
+        };
+        if (transport === "stdio") {
+          const blank = [];
+          f.args.forEach((r, i) => { if (r.value === "" && !r.loaded) blank.push(i + 1); });
+          if (blank.length) msgs.push("Type a value for argument " + blank.join(", ") + ", or remove it.");
+          checkPairs(f.env, "environment variable");
+        } else {
+          checkPairs(f.headers, "header");
+          if (transport !== "ws" && this._mcpText(f.callbackPort) !== "") {
+            const p = this._hookTimeoutInt(f.callbackPort);
+            if (p === null || p > 65535) msgs.push("The OAuth callback port must be a whole number from 1 to 65535.");
+          }
+        }
+        if (this._mcpText(f.timeout) !== "" && this._hookTimeoutInt(f.timeout) === null) {
+          msgs.push("The timeout must be a whole number of milliseconds, 1 or more.");
+        }
+        return msgs.join(" ");
+      },
+      // The entry the editor would save now, or null when the raw text is not a JSON object.
+      _mcpCurrentEntry() {
+        const m = this.configMgmt.mcp;
+        if (m.mode === "fields") return this._mcpFieldsEntry();
+        let v;
+        try { v = JSON.parse(m.entryText); } catch (e) { return null; }
+        return v !== null && typeof v === "object" && !Array.isArray(v) ? v : null;
+      },
+      // JSON with sorted keys, so two entries compare equal whatever their key order.
+      _mcpCanon(v) {
+        if (Array.isArray(v)) return "[" + v.map(x => this._mcpCanon(x)).join(",") + "]";
+        if (v !== null && typeof v === "object") {
+          return "{" + Object.keys(v).sort().map(k => JSON.stringify(k) + ":" + this._mcpCanon(v[k])).join(",") + "}";
+        }
+        return JSON.stringify(v === undefined ? null : v);
+      },
+      // The dotted path of every masked value in `v` ("headers.Authorization", "args[1]").
+      _mcpMaskedPaths(v, path, out) {
+        out = out || [];
+        if (v === CONFIG_MASK) out.push(path || "the definition");
+        else if (Array.isArray(v)) v.forEach((x, i) => this._mcpMaskedPaths(x, path + "[" + i + "]", out));
+        else if (v !== null && typeof v === "object") {
+          for (const k of Object.keys(v)) this._mcpMaskedPaths(v[k], path ? path + "." + k : k, out);
+        }
+        return out;
+      },
+      // The path of every mask in `v` with no stored value at the same key or list index in
+      // `base` (the loaded view), decided as config_write_mcp._unbacked_sentinel decides it.
+      _mcpUnbackedMasks(v, base, path, out) {
+        if (Array.isArray(v)) {
+          const held = Array.isArray(base) ? base : [];
+          v.forEach((x, i) => {
+            const sub = path + "[" + i + "]";
+            if (x === CONFIG_MASK) { if (i >= held.length) out.push(sub); }
+            else this._mcpUnbackedMasks(x, i < held.length ? held[i] : null, sub, out);
+          });
+        } else if (v !== null && typeof v === "object") {
+          const held = base !== null && typeof base === "object" && !Array.isArray(base) ? base : {};
+          for (const k of Object.keys(v)) {
+            const sub = path ? path + "." + k : k;
+            const backed = Object.prototype.hasOwnProperty.call(held, k);
+            if (v[k] === CONFIG_MASK) { if (!backed) out.push(sub); }
+            else this._mcpUnbackedMasks(v[k], backed ? held[k] : null, sub, out);
+          }
+        }
+        return out;
+      },
+      // Every url-bearing key outside the free-form maps, as [path, text] pairs.
+      _mcpUrlTexts(v, path, out) {
+        if (Array.isArray(v)) v.forEach((x, i) => this._mcpUrlTexts(x, path.concat([i]), out));
+        else if (v !== null && typeof v === "object") {
+          for (const k of Object.keys(v)) {
+            const sub = path.concat([k]);
+            if (k.toLowerCase().endsWith("url")) out.push([JSON.stringify(sub), v[k] === undefined ? null : v[k]]);
+            else if (!MCP_FREE_FORM_MAPS.includes(k)) this._mcpUrlTexts(v[k], sub, out);
+          }
+        }
+        return out;
+      },
+      // Where an entry sends its masked values, as the backend decides it
+      // (config_write_mcp._destination): a stdio server's exact command and args, or a
+      // remote server's transport and the exact text of every url field. null when the
+      // type is unknown. Both sides here are the masked view, so a mask left in place
+      // compares equal to itself, as it does once the backend restores it.
+      _mcpDestination(entry) {
+        if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return null;
+        const hasType = Object.prototype.hasOwnProperty.call(entry, "type");
+        const transport = hasType ? this._mcpTransport(entry.type) : "stdio";
+        if (!transport) return null;
+        if (transport === "stdio") {
+          const args = entry.args === undefined ? [] : entry.args;
+          const command = entry.command === undefined ? null : entry.command;
+          return { transport: "stdio", key: JSON.stringify(["stdio", command, args]) };
+        }
+        const urls = this._mcpUrlTexts(entry, [], []);
+        urls.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+        return { transport: transport, key: JSON.stringify([transport, urls]) };
+      },
+      // The backend refuses an edit that keeps a masked value while the server now points
+      // somewhere else (a new url or type, or a new stdio command or args): it never sends a
+      // stored credential to a new destination. It also refuses a mask with nothing stored
+      // behind it. Say so before the save, name the values to
+      // retype, and block the save (configMgmtCanSaveMcp). Not a bypass: the backend still
+      // decides, and retyping the values is the only way through.
+      configMgmtMcpRetypeWarning() {
+        const m = this.configMgmt.mcp;
+        if (!m.editing) return "";
+        const entry = this._mcpCurrentEntry();
+        if (entry === null) return "";
+        const masked = this._mcpMaskedPaths(entry, "");
+        if (!masked.length) return "";
+        // A mask is restored by key or list index (config_write_mcp._unbacked_sentinel): a
+        // renamed row, a new row or a new server has nothing stored behind its mask.
+        const unbacked = this._mcpUnbackedMasks(entry, m.isNew ? null : m.base, "", []);
+        const now = this._mcpDestination(entry), then = m.isNew ? null : this._mcpDestination(m.base);
+        if (!m.isNew && now && then && now.key === then.key) {
+          if (!unbacked.length) return "";
+          return "Nothing is stored behind the masked value (********) at " + unbacked.join(", ") +
+            ", so there is no value to keep. Type the real value before you save.";
+        }
+        if (m.isNew) {
+          return "A new server has no stored values, so a mask (********) keeps nothing. " +
+            "Type the real value before you save: " + masked.join(", ") + ".";
+        }
+        if (now && then && now.transport === "stdio" && then.transport === "stdio") {
+          return "The command or its arguments changed. Clauster does not hand a stored masked " +
+            "value to a new command, so retype each masked value (********) before you save: " +
+            masked.join(", ") + ".";
+        }
+        return "The type or a URL changed. Clauster does not send a stored credential to a new " +
+          "destination, so retype each masked value (********) before you save: " +
+          masked.join(", ") + ".";
+      },
+      // Whether an input still holds a mask that the retype warning asks the operator to replace.
+      configMgmtMcpNeedsRetype(value) {
+        return value === CONFIG_MASK && this.configMgmtMcpRetypeWarning() !== "";
+      },
+      configMgmtMcpIsMasked(value) {
+        return value === CONFIG_MASK;
+      },
+      configMgmtMcpMode(mode) {
+        const m = this.configMgmt.mcp;
+        if (m.mode === mode) return;
+        if (mode === "raw") {
+          // Materialize the form so Raw JSON shows the current edits.
+          m.entryText = JSON.stringify(this._mcpFieldsEntry(), null, 2);
+          m.mode = "raw"; m.fieldsError = ""; return;
+        }
+        let entry;
+        if (m.isNew && m.entryText.trim() === "") entry = { type: "stdio" };
+        else {
+          try { entry = JSON.parse(m.entryText); }
+          catch (e) { m.fieldsError = "Fix the JSON in Raw JSON before you use the fields."; return; }
+        }
+        // Stay in raw with the reason when the fields can't show the entry.
+        m.fieldsError = this._mcpFieldsFromEntry(entry);
+        if (!m.fieldsError) m.mode = "fields";
+      },
+      configMgmtMcpAddArg() {
+        const m = this.configMgmt.mcp;
+        m.f.args.push({ id: ++m.seq, value: "", loaded: false });
+        this._mcpFocusLast("cm-mcp-arg");
+      },
+      // A Remove destroys the focused button, so move focus to the list's Add button.
+      configMgmtMcpRemoveArg(idx) {
+        this.configMgmt.mcp.f.args.splice(idx, 1);
+        this._mcpFocusLast("cm-mcp-arg-add");
+      },
+      // kind is "env" or "headers".
+      configMgmtMcpAddPair(kind) {
+        const m = this.configMgmt.mcp;
+        m.f[kind].push({ id: ++m.seq, key: "", value: "", loaded: false });
+        this._mcpFocusLast(kind === "env" ? "cm-mcp-env-key" : "cm-mcp-header-key");
+      },
+      configMgmtMcpRemovePair(kind, idx) {
+        this.configMgmt.mcp.f[kind].splice(idx, 1);
+        this._mcpFocusLast(kind === "env" ? "cm-mcp-env-add" : "cm-mcp-header-add");
+      },
+      // Move focus to the newest input of a row list, for keyboard flow.
+      _mcpFocusLast(testId) {
+        this.$nextTick(() => {
+          const inputs = document.querySelectorAll('[data-test="' + testId + '"]');
+          const last = inputs[inputs.length - 1];
+          if (last && last.focus) last.focus();
+        });
+      },
       configMgmtMcpDirty() {
         const m = this.configMgmt.mcp;
-        return m.isNew ? (m.name.trim() !== "" || m.entryText.trim() !== "") : (m.entryText !== m.orig);
+        if (m.isNew) {
+          if (m.name.trim() !== "") return true;
+          return m.mode === "raw" ? m.entryText.trim() !== ""
+            : this._mcpCanon(this._mcpFieldsEntry()) !== this._mcpCanon({ type: "stdio" });
+        }
+        if (m.orig === "") return true;  // a converted entry: the shown one differs from disk
+        // Compare entries, not text: Fields and Raw JSON can order keys differently.
+        const cur = this._mcpCurrentEntry();
+        if (cur === null) return m.entryText !== m.orig;
+        return this._mcpCanon(cur) !== this._mcpCanon(JSON.parse(m.orig));
       },
       configMgmtCanSaveMcp() {
         const c = this.configMgmt, m = c.mcp;
         if (m.busy || this.configMgmtNeedsProject()) return false;
         if (m.isNew && !m.name.trim()) return false;
         if (m.confirm !== this.configMgmtConfirmToken()) return false;  // type-the-name gate
+        if (this.configMgmtMcpFieldsWarning() || this.configMgmtMcpRetypeWarning()) return false;
         return this.configMgmtMcpDirty();
       },
       async configMgmtSaveMcp() {
         const c = this.configMgmt, m = c.mcp;
         if (!this.configMgmtCanSaveMcp()) return;
         let entry;
-        try { entry = JSON.parse(m.entryText); }
-        catch (e) { c.error = "Server entry must be valid JSON."; return; }
+        if (m.mode === "fields") entry = this._mcpFieldsEntry();
+        else {
+          try { entry = JSON.parse(m.entryText); }
+          catch (e) { c.error = "Server entry must be valid JSON."; return; }
+        }
         if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
           c.error = "Server entry must be a JSON object."; return;
         }
