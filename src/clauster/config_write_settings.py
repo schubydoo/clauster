@@ -798,10 +798,9 @@ def _compute_effective_settings(
 
 
 #: Keys whose object value Claude Code merges one entry deep: a higher scope's entry
-#: replaces the lower scope's entry of the same name whole.
-_SHALLOW_MERGE_KEYS = frozenset(
-    {cwp.EXTRA_MARKETPLACES_KEY, cwp.EXTRA_MARKETPLACES_ALIAS_KEY, "managedMcpServers"}
-)
+#: replaces the lower scope's entry of the same name whole. (Its customizer does the same
+#: for ``managedMcpServers``, which only managed settings may set.)
+_SHALLOW_MERGE_KEYS = frozenset({cwp.EXTRA_MARKETPLACES_KEY, cwp.EXTRA_MARKETPLACES_ALIAS_KEY})
 
 
 def _merge_setting(lower: Any, higher: Any, key: Any) -> Any:
@@ -810,14 +809,13 @@ def _merge_setting(lower: Any, higher: Any, key: Any) -> Any:
     Mirrors the merge customizer in Claude Code 2.1.318 (and the settings docs, "Lists
     merge instead of overriding"): two lists combine, lower entries first, with repeated
     plain values kept once; ``fallbackModel`` is an ordered chain, so the higher list
-    replaces it; ``modelPicker`` is taken whole from the higher scope; the marketplace
-    maps and ``managedMcpServers`` merge one entry deep; two objects merge key by key;
-    anything else is replaced by the higher value. The rule applies at every depth, as
-    the customizer receives each nested key. A masked value is never collapsed into
-    another, because two masks can stand for different stored values.
+    replaces it; the marketplace maps merge one entry deep; two objects merge key by key;
+    anything else is replaced by the higher value. The rule
+    applies at every depth, as the customizer receives each nested key. (The customizer
+    also takes ``modelPicker`` whole, but only user settings may set it, so among the
+    three scopes here it never merges.) A masked value is never collapsed into another,
+    because two masks can stand for different stored values.
     """
-    if key == "modelPicker":
-        return higher
     if isinstance(lower, list) and isinstance(higher, list):
         if key == "fallbackModel":
             return higher

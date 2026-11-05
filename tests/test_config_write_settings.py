@@ -4,9 +4,10 @@ Covers the structural validator (owned-key rejection + env shape check), the
 project/user/local read+write functions (round trip, owned-key preservation,
 stale-hash guard), the #822-lesson env redaction (every env value masked on
 read regardless of key name, keep-stored on a resent sentinel), the
-scope-merge provenance computation (local > project > user precedence, per
-top-level key), and the gated routes (capability/scope 404, the #819/#768
-capability-before-scope-enum ordering, type-the-name 400, bad-shape/owned-key
+scope-merge provenance computation (local > project > user precedence, with
+Claude Code's own merge; more cases in ``test_config_write_settings_audit.py``),
+and the gated routes (capability/scope 404, the #819/#768 capability-before-scope-enum
+ordering, type-the-name 400, bad-shape/owned-key
 422 writing nothing, stale-hash 409, path-escape 400).
 
 Every test that touches ``~/.claude/settings.json`` runs under the autouse

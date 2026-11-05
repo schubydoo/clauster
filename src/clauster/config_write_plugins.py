@@ -27,16 +27,17 @@ against the current docs (``code.claude.com/docs/en/plugins/cli-reference``,
   target scope's ``settings.json`` as ``{"<plugin>@<marketplace>": true|false}`` —
   a single map of booleans, confirmed live and by the docs' own examples. There is
   **no** separate ``disabledPlugins`` list (the current docs do not name one) — a
-  disabled plugin is simply ``false`` in the same map. (:mod:`clauster.config_write_settings`'s
-  ``OWNED_KEYS`` carves out both key names defensively; this surface only ever
-  produces/reads ``enabledPlugins``.) Enable of an id that is not installed still
-  blind-writes the map entry and exits 0 (confirmed on 2.1.318). Two cases that
-  2.1.198 accepted now exit 1, and this module surfaces both as a 400 carrying the
-  CLI's own message rather than swallowing them: an id already in the requested state
-  at that scope ("is already enabled at project scope"), and a ``--scope`` that does
-  not take precedence over the declaring scope ("is installed at project scope, not
-  user"). The dashboard's ``enabled`` badge is the MERGED state, so that message is
-  what tells the operator which scope already holds the value. ``--json`` and
+  disabled plugin is simply ``false`` in the same map.
+  (:mod:`clauster.config_write_settings`'s ``OWNED_KEYS`` carves out ``enabledPlugins``
+  only; Claude Code 2.1.318 does not read ``disabledPlugins``, so the Settings tab shows
+  it and can remove it.) Enable of an id that is not installed still blind-writes the
+  map entry and exits 0 (confirmed on 2.1.318). Two cases that 2.1.198 accepted now exit
+  1, and this module surfaces both as a 400 carrying the CLI's own message rather than
+  swallowing them: an id already in the requested state at that scope ("is already
+  enabled at project scope"), and a ``--scope`` that does not take precedence over the
+  declaring scope ("is installed at project scope, not user"). The dashboard's
+  ``enabled`` badge is the MERGED state, so that message is what tells the operator
+  which scope already holds the value. ``--json`` and
   ``disable --all`` are not used (``--all`` cannot take ``--scope``, so it would
   write past the one scope the confirm named).
 * ``claude plugin install <plugin> --scope user|project|local`` — a plugin from an
