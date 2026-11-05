@@ -775,6 +775,7 @@ The issue tracker is the support channel — see [Support](support.md).
     bearer-equivalent credentials. Set `logs.redact_session_url: true` and
     reproduce if possible, then **review the log and scrub any remaining
     session URLs or secrets before sharing it** — even with redaction
-    enabled, the redactor only recognizes known token shapes.
+    enabled, the redactor recognizes only the ids Clauster learned and known
+    token shapes.
 
 **Mechanism:** [Log redaction](security.md#log-redaction).

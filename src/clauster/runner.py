@@ -2770,6 +2770,8 @@ class SessionRunner:
             # and _last_saved to the same object, so mutating _persisted would also mutate the
             # dedup baseline and _persist would skip the write (leaving the row on disk).
             self._persisted = {k: v for k, v in self._persisted.items() if k != instance_id}
+            # The record is gone, so its ids leave the exact-value redaction store (#1621).
+            redact.forget_known_values(instance_id)
             # drop=… — the deletion must ride INSIDE the persist's own store-locked
             # refresh→save: _persist re-loads the base (which still holds the row), so
             # a bare filtered save computed out here could race another process or be

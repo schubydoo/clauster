@@ -411,13 +411,36 @@ def read_screen_sidecar(path: Path) -> dict[str, Any] | None:
     in the same spirit: a missing file (keeper not up yet), a transient read error, or
     malformed JSON all map to None so the reader simply waits for the next frame instead of
     tearing down the live stream. A non-object payload is rejected the same way.
+
+    The keeper redacted the frame, but it knows only the values it learned itself. So the
+    frame is masked again here with every value THIS process knows, the environment id among
+    them (:func:`_redact_known_frame`, #1621).
     """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError):
         # RecursionError (deeply-nested JSON) is not a ValueError; it must map to None too.
         return None
-    return data if isinstance(data, dict) else None
+    return _redact_known_frame(data) if isinstance(data, dict) else None
+
+
+def _redact_known_frame(data: dict[str, Any]) -> dict[str, Any]:
+    """Mask every known value in a sidecar frame's rows and its ``error`` text (#1621).
+
+    Fails closed: a ``screen`` that is present but not ``{"rows": [str, ...], ...}`` cannot be
+    checked, so it is replaced by ``None``, which the client shows as a frame with no screen.
+    """
+    out = dict(data)
+    screen = out.get("screen")
+    if screen is not None:
+        rows = screen.get("rows") if isinstance(screen, dict) else None
+        if isinstance(rows, list) and all(isinstance(row, str) for row in rows):
+            out["screen"] = {**screen, "rows": redact.redact_known_screen_rows(rows)}
+        else:
+            out["screen"] = None
+    if isinstance(out.get("error"), str):
+        out["error"] = redact.sanitize_line(out["error"])
+    return out
 
 
 class PyteUnavailableError(RuntimeError):
@@ -943,11 +966,14 @@ class PtyScreen:
         so an off-width row would corrupt the geometry (a too-long row wraps). Because a re-fit
         can *create* a match the redactor was right to leave alone, the fitted text is redacted
         again — see :meth:`_fit_redacted_row` for why one extra pass is enough (#1359).
+
+        Last, every value this process knows is masked by exact match over the whole screen
+        (:func:`redact.redact_known_screen_rows`, #1621). That pass keeps each row's length.
         """
         with self._lock:
             cursor_x, cursor_y = self._screen.cursor.x, self._screen.cursor.y
             display = list(self._screen.display)
-        rows = self._redact_display(display)
+        rows = redact.redact_known_screen_rows(self._redact_display(display))
         return {
             "rows": rows,
             "cursor": {"x": cursor_x, "y": cursor_y},

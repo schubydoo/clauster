@@ -22,6 +22,7 @@ from typing import Any, TypeGuard
 
 from pydantic import BaseModel, Field, computed_field
 
+from . import redact
 from .config import PermissionMode, ResumeMode, SandboxMode, SessionChannel, SpawnMode
 
 
@@ -96,6 +97,12 @@ class Project(BaseModel):
     # dashboard can decide whether to even offer the option. Set at the app layer
     # from config (discovery has no config knowledge).
     allow_bypass_permissions: bool = False
+
+
+#: The fields of :class:`RemoteControlInstance` whose assignment stores its ids for exact-value
+#: redaction: the three ids that open or name its remote session, and the key they are stored
+#: under.
+_KNOWN_ID_FIELDS = frozenset({"environment_id", "starter_session_id", "bridge_id", "instance_id"})
 
 
 class RemoteControlInstance(BaseModel):
@@ -220,6 +227,40 @@ class RemoteControlInstance(BaseModel):
     daemon_last_seq: int = 0  # highest daemon frame seq seen; reattach cursor across restarts
     hosted_log_path: Path | None = None  # redacted on-disk mirror of the hosted stream
     is_orphan: bool = False  # CL-8: survived a daemon restart (live pid, no daemon session)
+
+    def model_post_init(self, context: Any, /) -> None:
+        """Store the ids this record was built with for exact-value redaction (#1621)."""
+        self._remember_known_ids()
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Assign a field, and store a newly learned id for exact-value redaction (#1621).
+
+        The ids are set in many places (the debug-log parse, the pointer, the keeper's
+        connect URL, rediscovery, the poll loop), and a site that forgot to store one would
+        leave it to the best-effort shape masks. Storing on assignment means no site can.
+
+        The id is stored BEFORE it is set, so no thread can read it off the record while the
+        store does not hold it yet.
+        """
+        if name in _KNOWN_ID_FIELDS:
+            self._remember_known_ids(**{name: value})
+        super().__setattr__(name, value)
+
+    def _remember_known_ids(self, **pending: Any) -> None:
+        """Store this record's remote-session ids, with ``pending`` fields not set yet."""
+        fields = {
+            "instance_id": self.instance_id,
+            "environment_id": self.environment_id,
+            "starter_session_id": self.starter_session_id,
+            "bridge_id": self.bridge_id,
+            **pending,
+        }
+        redact.remember_known_values(
+            fields["instance_id"],
+            fields["environment_id"],
+            fields["starter_session_id"],
+            fields["bridge_id"],
+        )
 
     @computed_field  # type: ignore[prop-decorator]
     @property

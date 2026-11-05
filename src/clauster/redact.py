@@ -4,6 +4,10 @@ Per decision D11 the bridge log is *hybrid*: verbatim on disk, redacted over the
 WebSocket. So whatever ``redact_session_url`` is set to, the WS stream always
 strips the session/env identifiers (they are effectively bearer credentials —
 anyone with ``env_<ULID>`` can open a New Session composer for that bridge).
+
+Two layers do it (#1621). The values Clauster itself knows are masked by EXACT match, which is
+the guarantee (:func:`remember_known_values`, at the end of this module). Everything else is
+masked by SHAPE, which is best effort with documented residue.
 """
 
 from __future__ import annotations
@@ -13,7 +17,8 @@ import functools
 import heapq
 import itertools
 import re
-from collections.abc import Callable, Iterator
+import threading
+from collections.abc import Callable, Iterable, Iterator
 from typing import NamedTuple
 
 # CSI / escape sequences (colors, cursor moves, and the C1 string sequences OSC / DCS /
@@ -111,9 +116,10 @@ _UUID_RE = re.compile(rf"\b{_UUID_CORE}\b")
 # boundaries. It will NOT catch a novel/unstructured high-entropy secret — a
 # bearer value that isn't literally "Bearer …", a raw JWT, or a vendor token whose
 # prefix isn't listed below all pass through. That is acceptable because this layer
-# is defense-in-depth: the *primary* WS guarantees are the env_/session_/cse_ + UUID
-# redaction above (D11, the bearer-equivalent identifiers) and the bridge's own
-# "[REDACTED]". Add new shapes here as they appear rather than assuming coverage.
+# is defense-in-depth: the GUARANTEE is the exact-value masking of the ids Clauster knows
+# (`remember_known_values`, #1621), backed by the env_/session_/cse_ + UUID shapes above
+# and the bridge's own "[REDACTED]". Add new shapes here as they appear rather than
+# assuming coverage.
 _SECRET_CORES: tuple[tuple[str, int], ...] = (
     (r"gh[pousr]_[A-Za-z0-9]{16,}", 0),  # GitHub tokens
     (r"github_pat_[A-Za-z0-9_]{20,}", 0),  # GitHub fine-grained PAT
@@ -716,11 +722,18 @@ def _sanitize(text: str) -> str:
     the one that matters, because there clauster's OWN bridge prints the identifier and the
     injected escape only deletes the boundary. The same holds for a secret welded onto an
     ordinary word (``agentghp_<a>``); one welded onto a masked token is not residue.
+
+    A sixth source has no residue of this kind: every value Clauster KNOWS
+    (:func:`remember_known_values`), found by exact match over ``visible`` wherever it stands,
+    welded or split (:func:`_known_spans`, #1621). A line whose known spans are not all inside
+    an anchored shape match leaves the sequential path, so its spans join the union too.
     """
     missed: list[tuple[int, int]] | None = None
+    known: list[tuple[int, int]] | None = None
     if _ANSI_RE.search(text) is None and _INVISIBLE_RE.search(text) is None:
+        known = _known_spans(text)  # with no escape and no invisible, `visible` is `text`
         missed = _fast_path_misses(text)
-        if missed is None:
+        if missed is None and (not known or _known_inside_anchored(text, known)):
             return redact_secrets(redact_ids(text))
     stripped, visible, cuts, invisible = _views(text)
     spans: list[tuple[int, int, str]] = []
@@ -739,6 +752,9 @@ def _sanitize(text: str) -> str:
     if missed is None:  # an escape: the seeds are every span above, cut-anchored ones included
         missed = _open_spans(visible, cuts, [(start, end) for start, end, _ in spans])
     spans += [(start, end, _REDACTED) for start, end in missed]
+    if known is None:
+        known = _known_spans(visible)
+    spans += [(start, end, _REDACTED) for start, end in known]
     return _apply_spans(visible, spans)
 
 
@@ -1320,4 +1336,440 @@ def redact_wrapped_screen_rows(
             out.append(_redact_screen_row(rows[k]))
             continue
         out.append(_render_coverage(joined[lo:hi], cov))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Exact-value redaction (#1621): the secrets Clauster itself knows.
+#
+# Everything above guesses from the SHAPE of the text, and a shape filter cannot be complete:
+# each fix in the 1.3 run exposed the next edge case. The values that matter most, the
+# environment and session ids that open a remote session, are not guesses. Clauster reads
+# them from the bridge's debug log, its pointer file and its connect URL. So the guarantee
+# rests on matching those exact values, and the shape masks stay as best-effort cover for
+# third-party secrets Clauster never learns.
+#
+# The store holds the values in memory only, per OWNER (an instance id, the pty keeper, the
+# background-job listing), and never writes them anywhere. Matching uses every owner's
+# values on every text: a value of one instance is masked in another instance's output too.
+#
+# The matcher works on the SQUEEZED text: every character that cannot be part of a value
+# (anything outside ``[A-Za-z0-9_-]``) removed. A wrap, a line break, padding, a box
+# border, an escape or an invisible character then cannot split a value, because each one
+# is removed before the search. Only the characters of the value itself are masked; the
+# removed characters between its pieces stay as they were.
+# ---------------------------------------------------------------------------
+
+#: The shortest run of a known value's random part that is masked. A run this long is never
+#: shown on any path, whole or reassembled across a wrap. A shorter run is not the value: it
+#: shows only where the rest of the value is not on screen (scrolled off, overwritten, not yet
+#: printed) or is already hidden by a shape mask.
+KNOWN_FRAGMENT_MIN = 7
+
+#: The length of the anchors: every run of this many characters of each value's random part is
+#: an anchor. The search reads the squeezed text only at the offsets ``0, 4, 8, ...`` (a
+#: GRID) and looks each 4-character piece up among the anchors. Any run of
+#: :data:`KNOWN_FRAGMENT_MIN` (``2 * 4 - 1``) characters starts at most 3 characters before a
+#: grid offset, so the piece at that offset lies inside the run and is an anchor: the search
+#: finds every such run. Reading the grid is ``re.findall`` and ``isdisjoint``, both in C, so
+#: the cost of a text that holds no value does not grow with the number of stored values. A
+#: ``str.find`` per anchor was a Python loop of 200 calls per line, and one alternation of all
+#: anchors in a regex was slower still.
+_KNOWN_ANCHOR = 4
+_KNOWN_GRID_RE = re.compile(".{4}", re.DOTALL)
+
+#: What the squeeze keeps: the characters a value may hold. A value with any other character
+#: is not stored, so the squeeze can never remove a character of a stored value.
+_KNOWN_VALUE_RE = re.compile(r"[A-Za-z0-9_-]+")
+_NOT_KNOWN_CHARS_RE = re.compile(r"[^A-Za-z0-9_-]+")
+
+#: The fixed prefix of an id. It is not random, so it is not part of the random part.
+_KNOWN_PREFIX_RE = re.compile(r"(?:env|session|cse)_")
+
+#: The shortest random part a stored value may have. A real id has 24 characters after its
+#: prefix (``01`` and 22 more) and a UUID has 36. A shorter value is not a real credential,
+#: and storing one would mask ordinary text, so it is not stored. The shape masks still apply
+#: to it.
+_KNOWN_RANDOM_MIN = 16
+
+#: The squeeze runs block by block (a multiple of 4, so the grid is the same in every block),
+#: and the way back from a squeezed offset to the text is built only for a block that holds a
+#: match. So a 10 MB log costs no Python step per character, and no step per word of a block
+#: with no match.
+_KNOWN_BLOCK = 1024
+
+
+class _KnownMatcher(NamedTuple):
+    """The compiled form of every stored value; rebuilt when the store changes."""
+
+    values: tuple[str, ...]
+    random_starts: tuple[int, ...]  #: where each value's random part starts (after the prefix)
+    anchors: dict[str, tuple[tuple[int, int], ...]]  #: piece -> (value index, offset in value)
+    value_set: frozenset[str]  #: ``values`` as a set, so an add can skip what is stored
+
+
+_known_lock = threading.Lock()
+_known_owners: dict[str, frozenset[str]] = {}
+#: Read without the lock: a reader takes one reference to an immutable matcher.
+_known_matcher: _KnownMatcher | None = None
+
+
+def _known_forms(value: object) -> frozenset[str]:
+    """Return the forms of ``value`` the store holds: none, the value, or a session id pair.
+
+    A ``session_<id>`` and the ``cse_<id>`` code-session id that Clauster derives from it
+    (:func:`clauster.code_sessions.code_session_id_for`) share their random part, so each one
+    stores both.
+
+    A value whose random part repeats a run of :data:`KNOWN_FRAGMENT_MIN` characters is not
+    stored. It is not random, so it is not a real id (for 22 random characters the chance of
+    a repeat is about 1 in 10^10). Storing it would mask ordinary text such as ``AAAAAAA``,
+    and a long run of such text could match it at every position, which would make the
+    search cost more than linear.
+    """
+    if not isinstance(value, str) or _KNOWN_VALUE_RE.fullmatch(value) is None:
+        return frozenset()
+    prefix = _KNOWN_PREFIX_RE.match(value)
+    body = value[prefix.end() :] if prefix else value
+    if len(body) < _KNOWN_RANDOM_MIN:
+        return frozenset()
+    runs = len(body) - KNOWN_FRAGMENT_MIN + 1
+    if len({body[i : i + KNOWN_FRAGMENT_MIN] for i in range(runs)}) < runs:
+        return frozenset()
+    if prefix is not None and prefix.group() in ("session_", "cse_"):
+        return frozenset({f"session_{body}", f"cse_{body}"})
+    return frozenset({value})
+
+
+def _matcher_with(base: _KnownMatcher | None, added: Iterable[str]) -> _KnownMatcher:
+    """Return a new matcher that holds ``base`` and the values of ``added`` it lacks.
+
+    ``base`` is never changed: a reader that holds it keeps a whole matcher. Only the new
+    values are compiled. The rest is copied in C, so storing one more value does not cost a
+    Python step per value already stored.
+    """
+    base = base or _KnownMatcher((), (), {}, frozenset())
+    new = sorted(frozenset(added) - base.value_set)
+    if not new:
+        return base
+    values, starts, anchors = list(base.values), list(base.random_starts), dict(base.anchors)
+    for value in new:
+        index = len(values)
+        values.append(value)
+        prefix = _KNOWN_PREFIX_RE.match(value)
+        start = prefix.end() if prefix else 0
+        starts.append(start)
+        for offset in range(start, len(value) - _KNOWN_ANCHOR + 1):
+            piece = value[offset : offset + _KNOWN_ANCHOR]
+            anchors[piece] = (*anchors.get(piece, ()), (index, offset))
+    return _KnownMatcher(tuple(values), tuple(starts), anchors, base.value_set | frozenset(new))
+
+
+def _rebuild_known_matcher() -> None:
+    """Compile the union of every owner's values; the caller holds :data:`_known_lock`."""
+    global _known_matcher
+    values = frozenset().union(*_known_owners.values())
+    if _known_matcher is not None and values == _known_matcher.value_set:
+        return  # another owner still holds every value: nothing to recompile (a per-call owner)
+    _known_matcher = _matcher_with(None, values) if values else None
+
+
+def remember_known_values(owner: str, *values: str | None) -> None:
+    """Add ``values`` to the exact-value store under ``owner``; ignore what is not a value.
+
+    Call this the moment Clauster learns a secret value. From then on every redactor in this
+    module masks it. A value that is ``None``, too short, or holds a character outside
+    ``[A-Za-z0-9_-]`` is skipped, never raised on: a caller in the poll loop must not fail on
+    an odd value, and the shape masks still apply to it.
+    """
+    global _known_matcher
+    forms = frozenset().union(*(_known_forms(value) for value in values))
+    if not forms or forms <= _known_owners.get(owner, frozenset()):
+        return  # the common case: the poll loop re-assigns a value it already stored
+    with _known_lock:
+        _known_owners[owner] = _known_owners.get(owner, frozenset()) | forms
+        _known_matcher = _matcher_with(_known_matcher, forms)  # an add compiles only the new
+
+
+def replace_known_values(owner: str, values: Iterable[str | None]) -> None:
+    """Make ``values`` the whole set ``owner`` holds, for an owner that re-reads its values."""
+    forms = frozenset().union(*(_known_forms(value) for value in values))
+    if forms == _known_owners.get(owner, frozenset()):
+        return
+    with _known_lock:
+        if forms:
+            _known_owners[owner] = forms
+        else:
+            _known_owners.pop(owner, None)
+        _rebuild_known_matcher()
+
+
+def forget_known_values(owner: str) -> None:
+    """Drop every value ``owner`` holds, when the instance or session that owns them is gone.
+
+    The values a log stream learned for ``owner`` (:func:`remember_stream_value`) go with them.
+    """
+    stream = _stream_owner(owner)
+    if owner not in _known_owners and stream not in _known_owners:
+        return
+    with _known_lock:
+        _known_owners.pop(owner, None)
+        _known_owners.pop(stream, None)
+        _rebuild_known_matcher()
+
+
+def _stream_owner(owner: str) -> str:
+    """Return the owner key for the values a log stream learned for ``owner``.
+
+    Safe while no real owner holds a ``#``: instance ids are UUIDs, and the fixed owners are
+    ``pty-keeper`` and ``background-jobs`` (plus ``background-jobs:<uuid>``).
+    """
+    return f"{owner}#stream"
+
+
+def _form_kind(form: str) -> str:
+    """Return a stored form's kind: ``"env"``, ``"session"`` (also ``cse_``), or ``"other"``."""
+    prefix = _KNOWN_PREFIX_RE.match(form)
+    if prefix is None:
+        return "other"
+    return "env" if prefix.group() == "env_" else "session"
+
+
+def remember_stream_value(owner: str, value: str, *, cap: int) -> None:
+    """Store ``value`` that a log stream read for ``owner``, unless that kind is at its cap.
+
+    Text a stream reads (tool output the bridge echoes) is not trusted the way the record is,
+    so the stream's values sit under an owner of their own (``<owner>#stream``), and each kind
+    (``env``, ``session``, other) holds at most ``cap`` of them across every connection of the
+    stream, not per connection: a reconnecting client cannot add ``cap`` more each time. The
+    values the record itself stores (:func:`remember_known_values` under ``owner``) do not
+    count: a value the record holds is not stored again, and one the stream stored before the
+    record learned it is not counted. The count and the add happen under the lock, so two
+    sockets cannot both pass it.
+    """
+    global _known_matcher
+    forms = _known_forms(value)
+    if not forms:
+        return
+    stream = _stream_owner(owner)
+    with _known_lock:
+        held = _known_owners.get(stream, frozenset())
+        record = _known_owners.get(owner, frozenset())
+        if forms <= held | record:
+            return  # stored already, by the stream or by the record
+        kind = _form_kind(next(iter(forms)))
+        # A session id is stored with its `cse_` twin: count the `session_` forms only.
+        count = sum(
+            1 for form in held - record if _form_kind(form) == kind and not form.startswith("cse_")
+        )
+        if count >= cap:
+            return
+        _known_owners[stream] = held | forms
+        _known_matcher = _matcher_with(_known_matcher, forms)
+
+
+def _known_grid_hits(
+    squeezed: str, anchors: dict[str, tuple[tuple[int, int], ...]]
+) -> Iterator[tuple[int, str]]:
+    """Yield ``(offset, piece)`` for every grid piece of ``squeezed`` that is an anchor.
+
+    The text is read in windows whose length is a multiple of 4, so the grid runs on unbroken
+    from one window to the next. A window with no anchor at all, the common case, costs one
+    ``findall`` and one ``isdisjoint``, both in C.
+    """
+    keys = anchors.keys()
+    window = 4 * _KNOWN_BLOCK  # small, so a hit costs a Python walk of few pieces
+    for start in range(0, len(squeezed), window):
+        pieces = _KNOWN_GRID_RE.findall(squeezed, start, start + window)
+        if keys.isdisjoint(pieces):
+            continue
+        for j, piece in enumerate(pieces):
+            if piece in anchors:
+                yield start + _KNOWN_ANCHOR * j, piece
+
+
+def _known_runs(squeezed: str, matcher: _KnownMatcher) -> list[tuple[int, int]]:
+    """Return every run of ``squeezed`` that is a piece of a stored value, long enough to mask.
+
+    Each anchor on the grid is grown left and right for as long as the text keeps spelling
+    the value it came from. The run is kept when it holds at least
+    :data:`KNOWN_FRAGMENT_MIN` characters of the value's random part. An anchor inside a run
+    already grown at the same alignment (``position - offset``) is skipped. An anchor past the
+    end of that run is grown again: one character of the value replaced by another id
+    character stops the first run, and the rest of the value after it must still be found.
+
+    The cost is linear. Each grid offset holds one piece, a stored value repeats no run of
+    :data:`KNOWN_FRAGMENT_MIN` characters (:func:`_known_forms`), so a piece has few places,
+    and growing a run stops at the length of its value.
+    """
+    runs: list[tuple[int, int]] = []
+    grown: dict[tuple[int, int], int] = {}  # (value index, alignment) -> end of the last run
+    for at, piece in _known_grid_hits(squeezed, matcher.anchors):
+        for index, offset in matcher.anchors[piece]:
+            if at < grown.get((index, at - offset), -1):
+                continue
+            value = matcher.values[index]
+            lo, first = at, offset
+            while lo > 0 and first > 0 and squeezed[lo - 1] == value[first - 1]:
+                lo -= 1
+                first -= 1
+            hi, last = at + _KNOWN_ANCHOR, offset + _KNOWN_ANCHOR
+            while hi < len(squeezed) and last < len(value) and squeezed[hi] == value[last]:
+                hi += 1
+                last += 1
+            grown[(index, at - offset)] = hi
+            if last - max(first, matcher.random_starts[index]) >= KNOWN_FRAGMENT_MIN:
+                runs.append((lo, hi))
+    return runs
+
+
+class _KnownBlocks:
+    """The way back from an offset in the squeezed text to the text, built block by block."""
+
+    def __init__(self, text: str, kept_before: list[int]) -> None:
+        """Index ``text``; the squeeze kept ``kept_before[b]`` characters before block ``b``."""
+        self._text = text
+        self._kept_before = kept_before
+        self._runs: dict[int, tuple[list[int], list[tuple[int, int]]]] = {}
+
+    def _block_runs(self, block: int) -> tuple[list[int], list[tuple[int, int]]]:
+        """Return the kept runs of one block and how many kept characters precede each."""
+        cached = self._runs.get(block)
+        if cached is None:
+            lo = block * _KNOWN_BLOCK
+            spans = [m.span() for m in _KNOWN_VALUE_RE.finditer(self._text, lo, lo + _KNOWN_BLOCK)]
+            before = list(itertools.accumulate((e - s for s, e in spans), initial=0))[:-1]
+            cached = self._runs[block] = (before, spans)
+        return cached
+
+    def pieces(self, lo: int, hi: int) -> list[tuple[int, int]]:
+        """Return the spans of the text that hold the squeezed characters ``[lo, hi)``."""
+        block = bisect.bisect_right(self._kept_before, lo) - 1
+        pieces: list[tuple[int, int]] = []
+        while lo < hi:
+            before, spans = self._block_runs(block)
+            base = self._kept_before[block]
+            i = bisect.bisect_right(before, lo - base) - 1
+            while 0 <= i < len(spans) and lo < hi:
+                start = spans[i][0] + lo - base - before[i]
+                take = min(spans[i][1] - start, hi - lo)
+                pieces.append((start, start + take))
+                lo += take
+                i += 1
+            block += 1
+        return pieces
+
+
+def _known_spans(text: str) -> list[tuple[int, int]]:
+    """Return the spans of ``text`` that hold a stored value, or a long enough piece of one.
+
+    The pieces of one value can lie in different spans with removed characters between them
+    (a wrap, a line break, a removed escape); each span holds only characters of the value.
+    Empty when nothing is stored, which is the cost of this pass for a Clauster that knows no
+    value yet: one attribute read.
+    """
+    matcher = _known_matcher
+    if matcher is None or not text:
+        return []
+    kept = [
+        _NOT_KNOWN_CHARS_RE.sub("", text[i : i + _KNOWN_BLOCK])
+        for i in range(0, len(text), _KNOWN_BLOCK)
+    ]
+    squeezed = "".join(kept)
+    runs = _known_runs(squeezed, matcher)
+    if not runs:
+        return []
+    # Most runs stand in the text as one unbroken piece. Such a run is found with `find` and
+    # confirmed by counting the kept characters before it, both in C. Both read only the
+    # blocks that hold the run, so a run that is split (or a far later copy of it) cannot make
+    # one lookup read the rest of the text. Only a run that fails the check takes the index.
+    kept_before = list(itertools.accumulate(map(len, kept), initial=0))
+    blocks: _KnownBlocks | None = None
+    spans: list[tuple[int, int]] = []
+    cursor = kept_at = 0  # `text[:cursor]` holds `kept_at` kept characters
+    for lo, hi in _merged(runs):
+        first = bisect.bisect_right(kept_before, lo) - 1
+        if cursor < first * _KNOWN_BLOCK:  # jump to the block that holds `lo`
+            cursor, kept_at = first * _KNOWN_BLOCK, kept_before[first]
+        last = bisect.bisect_right(kept_before, hi - 1) - 1
+        piece = squeezed[lo:hi]
+        at = text.find(piece, cursor, (last + 1) * _KNOWN_BLOCK)
+        if at >= 0 and kept_at + len(_NOT_KNOWN_CHARS_RE.sub("", text[cursor:at])) == lo:
+            spans.append((at, at + len(piece)))
+            cursor = at + len(piece)
+        else:
+            if blocks is None:
+                blocks = _KnownBlocks(text, kept_before)
+            found = blocks.pieces(lo, hi)
+            spans += found
+            cursor = found[-1][1]
+        kept_at = hi
+    return spans
+
+
+def _known_inside_anchored(text: str, known: list[tuple[int, int]]) -> bool:
+    r"""Report whether every span in ``known`` lies inside an anchored id or UUID match.
+
+    :func:`_sanitize` asks this only after :func:`_fast_path_misses` said its sequential path
+    masks every anchored match as it stands in ``text``. Then a span inside one of the matches
+    ``_ID_RE.finditer(text)`` or ``_UUID_RE.finditer(text)`` (exactly the matches
+    :func:`redact_ids` replaces) is masked by that path already, so the line keeps it. That is
+    what keeps an ordinary bridge line that prints a known id (``environment_id=env_<ULID>``)
+    as cheap as before the store existed. A span the id and UUID masks do not cover (a known
+    value welded, split, or inside a secret) sends the line to the union path: slower, never
+    less masked.
+    """
+    covers = sorted(m.span() for rx in (_ID_RE, _UUID_RE) for m in rx.finditer(text))
+    starts = [start for start, _ in covers]
+    for start, end in known:
+        i = bisect.bisect_right(starts, start) - 1
+        if i < 0 or covers[i][1] < end:
+            return False
+    return True
+
+
+def _render_known_row(row: str, cov: bytearray) -> str:
+    """Mask the covered cells of one screen ``row`` and keep its length.
+
+    A masked run of at least ten cells becomes ``<redacted>`` and the row is padded back to its
+    length at the end. A shorter run becomes the same number of ``*``. So a row never grows,
+    and no trim can cut a mask open or make a word boundary that a shape mask needs (#1359).
+    """
+    parts: list[str] = []
+    i = 0
+    while i < len(row):
+        if not cov[i]:
+            j = cov.find(1, i)
+            j = len(row) if j < 0 else j
+            parts.append(row[i:j])
+        else:
+            j = cov.find(0, i)
+            j = len(row) if j < 0 else j
+            parts.append(_REDACTED if j - i >= len(_REDACTED) else "*" * (j - i))
+        i = j
+    return "".join(parts).ljust(len(row))
+
+
+def redact_known_screen_rows(rows: list[str]) -> list[str]:
+    """Mask every stored value in a screen of already-redacted ``rows``; keep each row's length.
+
+    The rows are read as one text in row order, so a value that a wrap, a hanging indent or a
+    box border splits across rows is found whole. This runs AFTER the shape masks
+    (:meth:`clauster.pty_screen.PtyScreen.frame`), on the rows that leave for the browser, so it
+    can only mask more than they did. The pty keeper runs it with the values it knows, and the
+    ``/ws/pty-screen`` reader runs it again with every value the Clauster process knows
+    (:func:`clauster.pty_screen.read_screen_sidecar`).
+    """
+    spans = _known_spans("".join(rows))
+    if not spans:
+        return list(rows)
+    cov = bytearray(sum(map(len, rows)))
+    for start, end in spans:
+        cov[start:end] = b"\x01" * (end - start)
+    out: list[str] = []
+    offset = 0
+    for row in rows:
+        part = cov[offset : offset + len(row)]
+        out.append(_render_known_row(row, part) if part.find(1) >= 0 else row)
+        offset += len(row)
     return out

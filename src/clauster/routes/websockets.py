@@ -18,11 +18,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from .. import auth, logstream, pty_screen
+from .. import auth, logstream, pty_screen, redact
 from ..dependencies import (
     AllowedOriginsDep,
     AuthenticateDep,
@@ -35,6 +36,7 @@ from ..redact import sanitize_line
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from pathlib import Path
 
     from starlette.requests import HTTPConnection
 
@@ -48,6 +50,99 @@ router = APIRouter()
 # keeper's _SCREEN_FLUSH_INTERVAL (0.25s) so the poll roughly tracks the publish cadence
 # without busy-spinning; frames already seen are skipped by their monotonic ``seq``.
 _SCREEN_POLL_INTERVAL = 0.25
+
+
+#: How much of the top of a bridge log the bridge-log socket reads for the marker lines that
+#: name the bridge's ids. The bridge writes them while it starts, in the first few lines.
+_LOG_HEAD_BYTES = 256 * 1024
+
+
+#: The marker text before the remote-session ids a bridge log names: the same markers
+#: ``bridge_log.parse_bridge_markers`` reads, in one linear pattern. That parser's own
+#: ``[^\n]*`` patterns re-read a line once per marker they start on, which crafted log text
+#: could make cost seconds; the socket runs on every streamed line, so it does not use them.
+_STREAM_ID_RE = re.compile(
+    r"\b(?:environment_id=|environmentId=|Created initial session\s+|Unarchive\s+)"
+    r"((?:env|session)_[A-Za-z0-9]+)"
+    r"|\bbridgeId=([0-9a-fA-F-]{36})(?![0-9a-fA-F-])"
+)
+
+#: The tags the bridge puts on its own log lines. Only a line with such a tag before the id
+#: may add a SECOND id of a kind (a bridge that registers again, or resumes a session after
+#: it created one). Echoed text can carry a tag too, so this does not prove the bridge wrote
+#: the line: with the cap below, it bounds how many ids the store can gain from one stream.
+_BRIDGE_TAG_RE = re.compile(r"\[(?:bridge:[a-z]+|remote-bridge)\]")
+
+#: The most ids of one kind (env, session, bridge) the bridge-log stream of one instance stores,
+#: over all its connections together (:func:`clauster.redact.remember_stream_value`). A real
+#: bridge names one, or two after a re-registration; the cap only bounds a log that names many.
+_STREAM_IDS_PER_KIND = 4
+
+
+def _read_log_head(path: Path) -> str:
+    """Return the whole lines in the first :data:`_LOG_HEAD_BYTES` of ``path``, or ``""``.
+
+    Text after the last newline is dropped: the read limit, or a bridge still writing the
+    line, may have cut an id there, and a cut id must not take the first slot of its kind. The
+    stream reads that line later, once it is whole.
+    """
+    try:
+        with path.open("rb") as fh:
+            head = fh.read(_LOG_HEAD_BYTES)
+    except OSError:
+        return ""
+    return head[: head.rfind(b"\n") + 1].decode("utf-8", errors="replace")
+
+
+def _learn_stream_ids(instance_id: str, text: str, learned: dict[str, set[str]]) -> None:
+    """Store the environment, session and bridge ids the marker lines of ``text`` name (#1621).
+
+    ``learned`` maps each kind (``env``, ``session``, ``bridge``) to the ids this socket stored.
+    The first id of a kind is taken from any marker line, as ``bridge_log.parse_bridge_markers``
+    takes it. A further one is taken only from a line with a bridge tag before the id
+    (:data:`_BRIDGE_TAG_RE`), and only up to :data:`_STREAM_IDS_PER_KIND` per instance. So a
+    bridge that registers a new environment is still masked exactly, and echoed tool output can
+    add only a few values, which then only mask more.
+    """
+    for line in text.split("\n"):
+        tag_end: int | None = None  # where the line's first tag ends; searched once, lazily
+        for hit in _STREAM_ID_RE.finditer(line):
+            value = hit.group(1) or hit.group(2)
+            kind = "bridge" if hit.group(2) else value.partition("_")[0]
+            seen = learned.setdefault(kind, set())
+            if value in seen or len(seen) >= _STREAM_IDS_PER_KIND:
+                continue
+            if seen:
+                # The first tag match also ends first (a tag holds no `[`), so one search per
+                # line answers "is there a tag before this id" for every hit: linear.
+                if tag_end is None:
+                    tag = _BRIDGE_TAG_RE.search(line)
+                    tag_end = tag.end() if tag else len(line) + 1
+                if tag_end > hit.start():
+                    continue  # a second id of this kind, on a line with no tag before it
+            seen.add(value)
+            # The store holds the cap across every connection of this instance's stream, so a
+            # reconnect cannot add up to the cap again (the per-socket check above is only an
+            # early exit). The record's own ids are stored apart and do not count.
+            redact.remember_stream_value(instance_id, value, cap=_STREAM_IDS_PER_KIND)
+
+
+#: How many lines one worker call sanitizes before the socket sends them. A client that goes
+#: away then stops the work at the next slice, not at the end of a whole rotated log.
+_SANITIZE_SLICE = 2000
+
+
+def _sanitize_lines(
+    instance_id: str, lines: list[str], learned: dict[str, set[str]], *, strip: bool
+) -> list[str]:
+    """Learn each line's ids, then sanitize it; run off the event loop (it is CPU work)."""
+    out: list[str] = []
+    for line in lines:
+        # This socket can read the line that first names an id before the runner's own parse
+        # does. Store the id first, so even that line is masked exactly.
+        _learn_stream_ids(instance_id, line, learned)
+        out.append(sanitize_line(line, strip_ansi_seq=strip))
+    return out
 
 
 def _reap_ws_task(task: asyncio.Task) -> None:
@@ -173,9 +268,16 @@ async def ws_bridge_log(
     path = instance.bridge_raw_log_path or instance.bridge_debug_log_path
     strip = config.logs.strip_ansi_in_stream
     offset = await asyncio.to_thread(logstream.initial_offset, path)
+    learned: dict[str, set[str]] = {}
+    iid = instance.instance_id
 
     async def _stream() -> None:
         """Tail the bridge log from the opening offset, pushing each line to the socket."""
+        # The tail starts near the end, past the marker lines at the top of the log. After a
+        # Clauster restart the record may not hold its ids yet, so read them from the head
+        # before the first line goes out (#1621). `learned` is only ever touched by one worker
+        # thread at a time: each is awaited.
+        await asyncio.to_thread(lambda: _learn_stream_ids(iid, _read_log_head(path), learned))
         carry = ""
         local_offset = offset
         while True:
@@ -184,8 +286,16 @@ async def ws_bridge_log(
                 # Buffer whole lines so redaction never misses an id split
                 # across two reads.
                 *lines, carry = (carry + text).split("\n")
-                for line in lines:
-                    await websocket.send_text(sanitize_line(line, strip_ansi_seq=strip))
+                for start in range(0, len(lines), _SANITIZE_SLICE):
+                    sanitized = await asyncio.to_thread(
+                        _sanitize_lines,
+                        iid,
+                        lines[start : start + _SANITIZE_SLICE],
+                        learned,
+                        strip=strip,
+                    )
+                    for line in sanitized:
+                        await websocket.send_text(line)
             await asyncio.sleep(0.5)
 
     try:

@@ -40,6 +40,7 @@ from .. import (
     environments,
     ops,
     prometheus,
+    redact,
 )
 from ..auth import SESSION_USER
 from ..dependencies import (
@@ -238,12 +239,16 @@ def _gather_ghosts(
     try:
         creds = environments.load_credentials(now_ms=int(time.time() * 1000))
     except environments.CredentialsError as exc:
-        raise HTTPException(status_code=503, detail=f"credentials unavailable: {exc}") from exc
+        raise HTTPException(
+            status_code=503, detail=redact.redact_for_disk(f"credentials unavailable: {exc}")
+        ) from exc
     client = environments.EnvironmentsClient(creds)
     try:
         envs = client.list_environments()
     except environments.EnvironmentsAPIError as exc:
-        raise HTTPException(status_code=502, detail=f"environments API error: {exc}") from exc
+        raise HTTPException(
+            status_code=502, detail=redact.redact_for_disk(f"environments API error: {exc}")
+        ) from exc
     # SAFETY: never reap without a trustworthy live set — an incomplete one could
     # see a live bridge as a ghost. Fail closed on ANY liveness-probe failure.
     try:
@@ -251,7 +256,9 @@ def _gather_ghosts(
     except Exception as exc:  # noqa: BLE001 — fail closed: any liveness-probe failure must not let a reap proceed
         raise HTTPException(
             status_code=503,
-            detail=f"refusing to reap — could not determine live bridges: {exc}",
+            detail=redact.redact_for_disk(
+                f"refusing to reap — could not determine live bridges: {exc}"
+            ),
         ) from exc
     # projects_root scopes the classification: this instance may only reap
     # environments inside its own tree (#1100).
@@ -317,7 +324,7 @@ async def api_environment_reap(body: dict, config: ConfigDep) -> dict:
                     client.archive_environment(g.id)
                 reaped.append(g.id)
             except environments.EnvironmentsAPIError as exc:
-                errors[g.id] = str(exc)
+                errors[g.id] = redact.redact_for_disk(str(exc))
         return {
             "action": action,
             "reaped": reaped,
