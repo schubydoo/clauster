@@ -353,8 +353,8 @@ The helpers are `apiKeyHelper`, `awsAuthRefresh`, `awsCredentialExport`,
 `gcpAuthRefresh`, `otelHeadersHelper` and `proxyAuthHelper`. Other values show
 as `********` when they look like a secret. If you leave a mask as it is, the
 save keeps the stored value. If a mask no longer matches a stored value, the
-save is refused (`422`) and nothing is written. This occurs when you rename an
-`env` variable that shows a mask, or when you move or remove an entry of a list
+save is refused (`422`) and the settings file is not changed. This occurs when
+you rename an `env` variable that shows a mask, or when you move or remove an entry of a list
 that holds a mask. Type the real value again. All masks look the same, so to
 change one masked entry of a list, type the real value of every masked entry in
 that list.
@@ -383,8 +383,8 @@ in every settings file, so the tab accepts them at every scope.
 The settings reference gives `bashEditDiffEnabled` and
 `sandbox.allowNestedUserNamespaces` User scope, but Claude Code also reads
 `false` for them from a project or local file, so the tab accepts `false` at
-every scope. Claude Code reads `true` for them only from user settings, so the
-tab refuses `true` at Project and Local scope. If a project or local file
+every scope. Of the three files, Claude Code reads `true` for them only from
+user settings, so the tab refuses `true` at Project and Local scope. If a project or local file
 already holds `true` for one of them, change it to `false` or remove it before
 you save. Clauster checks no other values, so it does not refuse a `mask` entry
 of `sandbox.credentials.envVars` in a project file, although Claude Code drops
@@ -962,7 +962,7 @@ space at the start or the end is part of the name.
 | A plugin install or update fails and the message names a command | The marketplace entry runs a command, and Clauster never accepts one for you | Read the command, then run `claude plugin install` from a terminal on the host |
 | Enable or Disable fails with "is already enabled" or "is installed at project scope, not user" | The badge is the merged state, and the chosen scope already has that value or cannot override it | Pick the scope that the message names, or use the Local scope to override a project setting for yourself |
 | Removing a marketplace returns `404` with "is not declared in user settings" | A different scope declares it | Switch to the scope that declares it and remove it there |
-| A Settings save returns `422` with "Claude Code reads … only from" | The file holds a key that Claude Code ignores at this scope | Remove the key in Raw JSON, or save it at the scope that the message names |
+| A Settings save returns `422` with "Claude Code reads … only from" | The file holds a key (or a `true` value) that Claude Code ignores at this scope | Remove the key in Raw JSON, or save it at the scope that the message names. For a `true` value, set it to `false` |
 
 Need to recover an earlier config? The five most recent pre-save snapshots
 sit next to the file as `clauster.yml.bak-*` — copy one back over

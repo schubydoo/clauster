@@ -496,6 +496,10 @@ def _redact_misc(misc: dict[str, Any]) -> dict[str, Any]:
     env = misc.get(ENV_KEY)
     if isinstance(env, dict):
         redacted[ENV_KEY] = dict.fromkeys(env, cw.REDACTION_SENTINEL)
+    elif env is not None:
+        # A hand-edited env of another shape (a string, a list) can still hold a secret,
+        # so it is masked whole. A save cannot resend it: the mask fails _validate_env.
+        redacted[ENV_KEY] = cw.REDACTION_SENTINEL
     # A credential helper's command can hold the credential itself, so it is masked whole,
     # whatever its value's shape. A resent sentinel keeps the stored value.
     for key in SECRET_HELPER_KEYS & misc.keys():
