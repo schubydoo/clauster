@@ -2690,6 +2690,8 @@ def test_route_list_survives_a_value_tagged_key(write_config, tmp_path, projects
         listed = {item["name"]: item for item in resp.json()["skills"]}
         assert set(listed) == {"bad", "good"}
         assert listed["good"]["description"] == "fine"
+        assert listed["bad"]["description"] == "fine"  # the `=` key reads, as in PyYAML
+        assert "frontmatter_error" not in listed["bad"]
         assert c.get(f"{_FILE_URL}?project=alpha&name=bad").status_code == 200
 
 

@@ -2479,16 +2479,38 @@ def test_a_value_tagged_key_still_counts_as_a_repeated_key(parse) -> None:
         "metadata: {!!yaml k: x}",
         "metadata: {: x}",
         "a: &k key\nmetadata: {*k : x}",
+        "metadata: !!omap [{? [a] : 1}]",
+        "metadata: !!pairs [{? {a: 1} : 1}]",
     ],
 )
 def test_a_tag_or_node_shape_pyyaml_loads_specially_never_escapes_the_seam(parse, extra) -> None:
     # The self-pass on the third round: every PyYAML tag and node shape the seam's own node
-    # walks might read differently from PyYAML's loader. Each loads or is refused; none raises
-    # anything else.
-    try:
-        parse(f"---\nname: a\ndescription: d\n{extra}\n---\nb\n")
-    except cw.InvalidCandidateError:
-        pass
+    # walks might read differently from PyYAML's loader. Each loads or is refused by a check
+    # that means to refuse it; none crashes, not even into the crash wrapper's refusal.
+    text = f"---\nname: a\ndescription: d\n{extra}\n---\nb\n"
+    surfaces = [
+        lambda: parse(text),
+        lambda: config_write_skills.validate_skill_md_content(text),
+        lambda: config_write_subagents.validate_agent_content(text, expected_name="a"),
+    ]
+    for surface in surfaces:
+        try:
+            surface()
+        except cw.InvalidCandidateError as exc:
+            assert "cannot compare" not in str(exc), exc
+            assert "to check" not in str(exc), exc
+
+
+@pytest.mark.parametrize(
+    "extra", ["metadata: !!omap [{? [a] : 1}]", "metadata: !!pairs [{? {a: 1} : 1}]"]
+)
+def test_a_list_or_mapping_key_in_an_ordered_mapping_is_refused(extra: str) -> None:
+    # PyYAML builds `!!omap`/`!!pairs` without hashing a key; the YAML 1.2 view raised
+    # TypeError on it (review on PR 1810).
+    with pytest.raises(cw.InvalidCandidateError, match="a list or a mapping as a key"):
+        config_write_skills.validate_skill_md_content(
+            f"---\nname: a\ndescription: d\n{extra}\n---\nb\n"
+        )
 
 
 _CHECK_CRASHES = [
@@ -2497,6 +2519,8 @@ _CHECK_CRASHES = [
     pytest.param(OverflowError("SECRET-1"), id="OverflowError"),
     pytest.param(TypeError("SECRET-1"), id="TypeError"),
     pytest.param(KeyError("SECRET-1"), id="KeyError"),
+    pytest.param(AttributeError("SECRET-1"), id="AttributeError"),
+    pytest.param(IndexError("SECRET-1"), id="IndexError"),
 ]
 
 

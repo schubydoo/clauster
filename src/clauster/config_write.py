@@ -1390,8 +1390,15 @@ def _yaml12_node(root: yaml.Node) -> Any:
                 for source in reversed(sources):
                     merged.update(value_of(source))
                 continue
-            # A mapping or list key cannot be hashed: PyYAML's load already refused it.
-            own[value_of(key_node)] = value_of(value_node)
+            key = value_of(key_node)
+            if isinstance(key, (dict, list)):
+                # PyYAML's load refuses such a key in a plain mapping, but `!!omap` and
+                # `!!pairs` build their pairs without hashing it (review on PR 1810).
+                raise InvalidCandidateError(
+                    "frontmatter has a list or a mapping as a key, which Claude Code "
+                    "reads differently. Use a plain key"
+                )
+            own[key] = value_of(value_node)
         built.update(merged)
         built.update(own)
     return memo[id(root)]
@@ -1730,7 +1737,9 @@ def yaml12_view(header: str) -> Any:
     bounds the nesting depth, the alias expansion and the merge expansion. Mapping keys keep
     their YAML type here; the caller turns them into JavaScript property names. An explicitly
     tagged scalar other than ``!!str`` becomes a :class:`Yaml12Unknown`. Never evaluates
-    anything. ``RecursionError`` is mapped to :class:`InvalidCandidateError` like the seam's.
+    anything. ``RecursionError`` is mapped to :class:`InvalidCandidateError` like the seam's,
+    and so is a list or mapping key. A caller runs it inside :func:`refuse_check_failures`,
+    so a node shape this view reads differently from PyYAML is a refusal, never a crash.
     The header goes through :func:`cli_frontmatter_text` first, as in the seam.
     """
     try:
