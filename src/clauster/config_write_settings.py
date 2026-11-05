@@ -227,17 +227,54 @@ def _redact_misc(misc: dict[str, Any]) -> dict[str, Any]:
 _MISSING = object()
 
 
-def _orphan_sentinel_path(incoming: Any, stored: Any, path: str) -> str | None:
-    """Return the path of the first sentinel in ``incoming`` with no stored value behind it.
+def _has_sentinel(value: Any) -> bool:
+    """Whether ``value`` holds a :data:`~clauster.config_write.REDACTION_SENTINEL` at any depth."""
+    if isinstance(value, dict):
+        return any(_has_sentinel(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_has_sentinel(v) for v in value)
+    return value == cw.REDACTION_SENTINEL
 
-    :func:`~clauster.config_write.merge_redacted` silently DROPS such a sentinel (there is
-    nothing to keep), so renaming a masked marketplace entry or header on the Settings
-    tab would save a declaration with its credential gone and report success. Paths are
-    matched by dict key and list index, exactly as the merge restores them.
+
+def _unchanged_but_masks(incoming: Any, stored: Any) -> bool:
+    """Whether ``incoming`` equals ``stored`` everywhere except where it holds a sentinel."""
+    if incoming == cw.REDACTION_SENTINEL:
+        return True
+    if isinstance(incoming, dict):
+        return (
+            isinstance(stored, dict)
+            and incoming.keys() == stored.keys()
+            and all(_unchanged_but_masks(v, stored[k]) for k, v in incoming.items())
+        )
+    if isinstance(incoming, list):
+        return (
+            isinstance(stored, list)
+            and len(incoming) == len(stored)
+            and all(_unchanged_but_masks(v, s) for v, s in zip(incoming, stored, strict=True))
+        )
+    return bool(incoming == stored)
+
+
+def _orphan_sentinel_path(incoming: Any, stored: Any, path: str) -> str | None:
+    """Return the path of the first sentinel in ``incoming`` that cannot be matched safely.
+
+    :func:`~clauster.config_write.merge_redacted` silently DROPS a sentinel with no
+    stored value behind it, and restores a list by POSITION. So renaming a masked
+    marketplace entry or header on the Settings tab would save it with its credential
+    gone, and deleting or reordering an element of a list (a ``settings`` source's
+    ``plugins``) would move one entry's credential into another and report success.
+    A dict is matched by key. A list that holds a sentinel must keep its length, and
+    each element that holds one must come back unchanged apart from its sentinels.
     """
     if isinstance(incoming, dict):
         items: Any = incoming.items()
     elif isinstance(incoming, list):
+        if _has_sentinel(incoming):
+            if not isinstance(stored, list) or len(stored) != len(incoming):
+                return path
+            for i, v in enumerate(incoming):
+                if _has_sentinel(v) and not _unchanged_but_masks(v, stored[i]):
+                    return f"{path}.{i}"
         items = enumerate(incoming)
     else:
         return None
@@ -260,11 +297,15 @@ def _reject_orphan_marketplace_sentinels(incoming: dict[str, Any], stored: dict[
     for key in (cwp.EXTRA_MARKETPLACES_KEY, cwp.EXTRA_MARKETPLACES_ALIAS_KEY):
         if key not in incoming:
             continue
-        where = _orphan_sentinel_path(incoming[key], stored.get(key), key)
+        if incoming[key] == cw.REDACTION_SENTINEL and key not in stored:
+            where: str | None = key
+        else:
+            where = _orphan_sentinel_path(incoming[key], stored.get(key), key)
         if where:
             raise cw.InvalidCandidateError(
-                f"{where} is a masked value with no stored value behind it (the entry or key "
-                "was renamed or moved); enter the real value again"
+                f"{where} holds a masked value that no longer matches its stored value (an "
+                "entry or key was renamed, moved or reordered, or a list changed length); "
+                "enter the real value again"
             )
 
 
@@ -344,7 +385,9 @@ def write_project_settings(
     project that has no ``.claude`` dir yet does not fail the atomic writer's
     ``mkstemp`` in a missing directory), then runs the fail-closed Foundation
     pipeline. The candidate is validated *before* the directory is created, so
-    a bad shape (422) leaves the filesystem untouched.
+    a bad shape (422) leaves the filesystem untouched. A masked marketplace value that no
+    longer matches its stored value is refused inside the lock instead (also 422); the
+    settings file is unchanged, though a new ``.claude`` directory may be left behind.
     """
     cw.validate_candidate(incoming, validate_misc_settings)
     path = cw.project_settings_path(project_dir)

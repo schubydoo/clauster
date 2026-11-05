@@ -1026,6 +1026,64 @@ def test_marketplace_write_with_orphaned_mask_is_rejected_whole(tmp_path: Path, 
     assert _on_disk(tmp_path)["extraKnownMarketplaces"] == _HOSTED
 
 
+def _two_plugin_market() -> dict:
+    return {
+        "inline": {
+            "source": {
+                "source": "settings",
+                "name": "inline",
+                "plugins": [
+                    {"name": "a", "mcpServers": {"s": {"env": {"K": "AAA"}}}},
+                    {"name": "b", "mcpServers": {"s": {"env": {"K": "BBB"}}}},
+                ],
+            }
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        pytest.param(lambda p: p[1:], id="delete-first"),
+        pytest.param(lambda p: list(reversed(p)), id="reorder"),
+        pytest.param(lambda p: [*p, p[0]], id="append-copy"),
+        pytest.param(lambda p: [{**p[0], "description": "edited"}, p[1]], id="edit-masked-elem"),
+    ],
+)
+def test_marketplace_list_edit_that_would_shift_a_mask_is_rejected(tmp_path: Path, edit) -> None:
+    # merge_redacted restores a list by POSITION: deleting `a` would give `b` the
+    # credential AAA, and a reorder would swap them. Refuse the write; change nothing.
+    stored = _two_plugin_market()
+    h = _store(tmp_path, {"extraKnownMarketplaces": stored})
+    view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
+    view["inline"]["source"]["plugins"] = edit(view["inline"]["source"]["plugins"])
+    with pytest.raises(cw.InvalidCandidateError, match="masked value"):
+        cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": view}, h)
+    assert _on_disk(tmp_path)["extraKnownMarketplaces"] == stored
+
+
+def test_marketplace_list_resend_unchanged_keeps_each_credential(tmp_path: Path) -> None:
+    stored = _two_plugin_market()
+    h = _store(tmp_path, {"extraKnownMarketplaces": stored})
+    view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
+    cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": view}, h)
+    assert _on_disk(tmp_path)["extraKnownMarketplaces"] == stored
+
+
+def test_masked_whole_declaration_sent_under_a_new_key_is_rejected(tmp_path: Path) -> None:
+    # A malformed string declaration that reads back as a bare sentinel, resent under the
+    # alias key: the merge would drop it and save `{}`. Refuse instead.
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(
+        json.dumps({"extraKnownMarketplaces": "https://u:tok@h.example/m.git"}), encoding="utf-8"
+    )
+    view, h = cws.read_project_settings(tmp_path)
+    assert view["extraKnownMarketplaces"] == cw.REDACTION_SENTINEL
+    with pytest.raises(cw.InvalidCandidateError):
+        cws.write_project_settings(tmp_path, {"additionalMarketplaces": cw.REDACTION_SENTINEL}, h)
+
+
 def test_marketplace_moved_to_alias_with_masks_is_rejected(tmp_path: Path) -> None:
     h = _store(tmp_path, {"extraKnownMarketplaces": _HOSTED})
     view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
