@@ -325,18 +325,39 @@ def test_settings_read_route_names_the_desktop_only_keys(
 ) -> None:
     fake = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
     cfg = write_config(
-        f"claude:\n  binary: {fake}\nstate_dir: {tmp_path}/.s\nconfig_write:\n  enabled: true\n"
+        f"claude:\n  binary: {fake}\nstate_dir: {tmp_path}/.s\n"
+        "config_write:\n  enabled: true\n  allow_user_scope: true\n"
     )
     _seed(
         cw.project_settings_path(projects_root / "alpha"),
         {"sshHostAllowlist": ["*"], "model": "opus"},
+    )
+    # A hand-edited local file can hold a managed one; the read still names it.
+    _seed(
+        projects_root / "alpha" / ".claude" / "settings.local.json",
+        {"disableMobileSimulatorTools": True},
     )
     with TestClient(create_app(load_config(cfg))) as c:
         r = c.get("/api/config-write/settings?project=alpha")
         assert r.status_code == 200
         assert r.json()["desktop_only"] == ["sshHostAllowlist"]
         r2 = c.get("/api/config-write/settings?project=alpha&scope=local")
-        assert r2.json()["desktop_only"] == []
+        assert r2.json()["desktop_only"] == ["disableMobileSimulatorTools"]
+        # sshConfigs saves at User scope (under the isolated HOME), and the read names it.
+        r3 = c.get("/api/config-write/settings?scope=user")
+        put = c.put(
+            "/api/config-write/settings",
+            json={
+                "scope": "user",
+                "confirm": cw.USER_SCOPE_TOKEN,
+                "settings": {"sshConfigs": [{"id": "dev", "name": "Dev", "sshHost": "dev"}]},
+                "hash": r3.json()["hash"],
+            },
+        )
+        assert put.status_code == 200
+        assert c.get("/api/config-write/settings?scope=user").json()["desktop_only"] == [
+            "sshConfigs"
+        ]
 
 
 def test_scope_limited_keys_do_not_overlap_the_carve() -> None:

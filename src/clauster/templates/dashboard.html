@@ -2095,10 +2095,14 @@
               <div class="alert alert-warning py-1 small" data-test="cm-settings-env-error" role="alert"
                    x-show="configMgmt.settings.envError" x-cloak x-text="configMgmt.settings.envError"></div>
               <!-- TASK-490: keys of this file that only Claude Desktop reads (the server lists them). -->
-              <div class="alert alert-info py-1 small" data-test="cm-settings-desktop-only"
+              <!-- text-info-emphasis: plain .alert-info text misses AA contrast (see the note
+                   on the Plugins tab alerts). -->
+              <div class="alert alert-info text-info-emphasis py-1 px-2 mb-2 small"
+                   data-test="cm-settings-desktop-only"
                    x-show="configMgmt.settings.desktopOnly.length" x-cloak>
-                Desktop-only: <code x-text="configMgmt.settings.desktopOnly.join(', ')"></code>.
-                Only Claude Desktop reads these keys. The Claude Code CLI ignores them, so the merged
+                Desktop-only keys in this file:
+                <code x-text="configMgmt.settings.desktopOnly.join(', ')"></code>.
+                Only Claude Desktop reads them. The Claude Code CLI ignores them, so the merged
                 view leaves them out.
               </div>
 

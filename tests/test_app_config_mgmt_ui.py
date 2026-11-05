@@ -202,6 +202,16 @@ def test_settings_env_rows_editor_present_when_enabled(write_config):
     assert 'const CONFIG_MASK = "********"' in html
 
 
+def test_settings_desktop_only_note_is_wired(write_config):
+    # TASK-490: the note names the Desktop-only keys the server lists for the loaded file.
+    html = _html(write_config, _ON)
+    assert 'data-test="cm-settings-desktop-only"' in html
+    assert 'x-show="configMgmt.settings.desktopOnly.length"' in html
+    assert "configMgmt.settings.desktopOnly.join(', ')" in html
+    assert "Only Claude Desktop reads them. The Claude Code CLI ignores them" in html
+    assert "c.settings.desktopOnly = Array.isArray(d.desktop_only)" in html
+
+
 def test_subagents_surface_present_when_enabled(write_config):
     # Slice C adds the subagents list surface (list + per-agent editor + delete).
     html = _html(write_config, _ON)
