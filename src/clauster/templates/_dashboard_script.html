@@ -348,7 +348,7 @@
           ov: {
             rows: [], stored: {}, listed: [], hash: null, orig: "",
             ready: false, loading: false, error: "",
-            addName: "", addValue: "on", confirm: "", busy: false, ops: 0,
+            addName: "", addValue: "on", confirm: "", busy: false, ops: 0, loadId: 0,
           },
         },
         // Plugins + marketplaces (#773 slice F): a CLI-driven list surface, all three
@@ -3543,10 +3543,11 @@
       async _loadSkills(myGen, keepOvEdits) {
         const c = this.configMgmt, local = c.scope === "local";
         c.skills.editing = false; c.skills.deletingName = ""; c.skills.converted = "";
-        // No rows and no earlier scope's error until this scope's map loads. `loading` is
-        // reset too: a superseded map load skips its gen-gated finally, so it would stay set.
+        // No rows and no earlier scope's error until this scope's map loads. The loadId bump
+        // voids a map fetch still in flight for the previous scope or project.
         if (!keepOvEdits) {
-          c.skills.ov.ready = false; c.skills.ov.error = ""; c.skills.ov.loading = false;
+          const ov = c.skills.ov;
+          ov.ready = false; ov.error = ""; ov.loading = false; ov.loadId += 1;
         }
         // A failed folder list still loads the map, with no folder rows, so stored keys
         // stay visible and removable; the list's error shows in the banner.
@@ -3568,7 +3569,7 @@
           if (c.gen !== myGen) return;
           c.skills.list = []; c.error = "Failed to load skills.";
         }
-        await this._loadSkillOverrides(myGen, names, keepOvEdits);
+        await this._loadSkillOverrides(names, keepOvEdits);
       },
       // The rows: listed folder names first, in list order, then each stored key that no
       // folder has, sorted. A stored value Claude Code does not know shows as "?" and saves
@@ -3587,7 +3588,8 @@
       // the select. The full value is still what a save sends.
       configMgmtSkillOvRawLabel(row) {
         const t = row.rawText;
-        return "Not valid: " + (t.length > 40 ? t.slice(0, 40) + "…" : t);
+        const cps = Array.from(t);  // by code point, so a cut never splits a surrogate pair
+        return "Not valid: " + (cps.length > 40 ? cps.slice(0, 40).join("") + "…" : t);
       },
       _skillOvRows(listed, stored) {
         const rows = [], seen = new Set();
@@ -3610,7 +3612,10 @@
           .map(r => [r.name, r.value === "?" ? "?" + r.rawText : r.value])
           .sort((a, b) => (a[0] < b[0] ? -1 : (a[0] > b[0] ? 1 : 0))));
       },
-      async _loadSkillOverrides(myGen, names, keepOvEdits) {
+      // Staleness is `loadId`, not `c.gen`: opening or creating a skill bumps gen without
+      // reloading, and a gen-gated finally would then leave `loading` set for good. Every
+      // scope, project or surface change reloads through _loadSkills, which bumps loadId.
+      async _loadSkillOverrides(names, keepOvEdits) {
         const c = this.configMgmt, ov = c.skills.ov;
         ov.listed = names;
         if (keepOvEdits && ov.ready && this.configMgmtSkillOvDirty()) {
@@ -3627,28 +3632,38 @@
         }
         ov.rows = []; ov.stored = {}; ov.hash = null; ov.orig = this._skillOvSig([]);
         ov.ready = false; ov.error = ""; ov.confirm = ""; ov.addName = "";
+        const id = (ov.loadId += 1);
         ov.loading = true;
         try {
           const res = await fetch(ROOT + "/api/config-write/skills/overrides?" + this._configMgmtQuery());
-          if (c.gen !== myGen) return;
+          if (ov.loadId !== id) return;
           if (this._authExpired(res)) return;
           if (!res.ok) {
             // Show the backend's reason (for example a settings file that is not valid
             // JSON), never empty rows: a save from empty rows would clear the real map.
+            // The banner gets it too (unless the folder list already put an error there):
+            // the panel's own status node may have been hidden while its text was set.
             const d = await res.json().catch(() => ({}));
+            if (ov.loadId !== id) return;
             ov.error = (d && typeof d.detail === "string" && d.detail) || this._configMgmtLoadErr(res);
+            if (!c.error) c.error = ov.error;
             return;
           }
           const d = await res.json();
-          if (c.gen !== myGen) return;
+          if (ov.loadId !== id) return;
           const o = d.overrides;
           const stored = o && typeof o === "object" && !Array.isArray(o) ? o : {};
           ov.rows = this._skillOvRows(names, stored);
           ov.stored = stored; ov.hash = typeof d.hash === "string" ? d.hash : null;
           ov.orig = this._skillOvSig(ov.rows);
           ov.ready = true;
-        } catch (e) { if (c.gen === myGen) ov.error = "Failed to load skill visibility."; }
-        finally { if (c.gen === myGen) ov.loading = false; }
+        } catch (e) {
+          if (ov.loadId === id) {
+            ov.error = "Failed to load skill visibility.";
+            if (!c.error) c.error = ov.error;
+          }
+        }
+        finally { if (ov.loadId === id) ov.loading = false; }
       },
       configMgmtSkillOvDirty() {
         const ov = this.configMgmt.skills.ov;
@@ -3681,7 +3696,8 @@
       },
       configMgmtAddSkillOv(ev) {
         const c = this.configMgmt, ov = c.skills.ov;
-        if (ev && ev.isComposing) return;  // an Enter that ends an IME composition
+        // An Enter that ends an IME composition (Safari reports it as keyCode 229).
+        if (ev && (ev.isComposing || ev.keyCode === 229)) return;
         if (!this.configMgmtCanAddSkillOv()) return;
         const name = ov.addName;
         const row = ov.rows.find(r => r.name === name);
@@ -3721,7 +3737,7 @@
           if (this._authExpired(res)) return;
           if (res.ok) {
             c.saved = true; ov.confirm = "";
-            await this._loadSkillOverrides(gen, ov.listed, false);
+            await this._loadSkillOverrides(ov.listed, false);
             // The confirm and Save hide once nothing is dirty; give focus a visible home.
             if (c.gen === gen) this._focusSkillOvAddName();
           }
