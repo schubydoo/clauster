@@ -110,7 +110,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 from . import config_write as cw
 from . import config_write_plugins as cwp
@@ -311,31 +310,32 @@ def _reject_orphan_marketplace_sentinels(incoming: dict[str, Any], stored: dict[
         _reject_masks_sent_to_a_new_url(incoming[key], stored.get(key), key)
 
 
-def _source_url(entry: Any) -> Any:
-    """Return a marketplace entry's ``source.url``, or ``None`` when it has none."""
-    source = entry.get("source") if isinstance(entry, dict) else None
-    return source.get("url") if isinstance(source, dict) else None
-
-
-def _url_destination(url: Any) -> tuple[Any, ...]:
-    """Return the parts of ``url`` that decide where a request goes: scheme, host, port, path."""
-    if not isinstance(url, str):
-        return ("not-a-string", url)
-    try:
-        parts = urlsplit(url)
-        return (parts.scheme.lower(), (parts.hostname or "").lower(), parts.port, parts.path)
-    except ValueError:  # an unparseable port: compare the raw text instead
-        return ("unparsed", url)
+def _urls(value: Any, path: tuple[Any, ...] = ()) -> dict[tuple[Any, ...], Any]:
+    """Return every ``url`` value under ``value``, at any depth, keyed by its path."""
+    found: dict[tuple[Any, ...], Any] = {}
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if k == "url":
+                found[(*path, k)] = v
+            found.update(_urls(v, (*path, k)))
+    elif isinstance(value, list):
+        for i, v in enumerate(value):
+            found.update(_urls(v, (*path, i)))
+    return found
 
 
 def _reject_masks_sent_to_a_new_url(incoming: Any, stored: Any, key: str) -> None:
-    """Refuse (422) a marketplace entry that keeps masked values while its url changes.
+    """Refuse (422) a marketplace entry that keeps masked values while any of its urls changes.
 
     A masked ``headers`` value or ``headersHelper`` is restored from the stored entry by
-    key. If the entry's ``source.url`` now points somewhere else (scheme, host, port or
-    path), restoring would send the stored credential to the new host. So every masked
-    value in such an entry is refused whole, and the operator retypes the credential for
-    the new host. A url that is itself masked was resent unchanged, so it still matches.
+    key. If a ``url`` in that entry (its ``source.url``, or a nested plugin's) now differs
+    from the stored one, restoring would send the stored credential to a new host. So every
+    masked value in such an entry is refused whole, and the operator retypes the
+    credential. The comparison is the EXACT string: any parsed "same destination" rule
+    is a second URL parser that can disagree with the one Claude Code fetches with (a
+    backslash before ``@`` names a different host to Python's ``urlsplit`` than to a
+    WHATWG parser), and a disagreement there would leak the credential. A url that is
+    itself masked was resent unchanged, so it still matches.
     """
     if not isinstance(incoming, dict):
         return
@@ -343,20 +343,16 @@ def _reject_masks_sent_to_a_new_url(incoming: Any, stored: Any, key: str) -> Non
     for name, entry in incoming.items():
         if not _has_sentinel(entry):
             continue
-        new_url = _source_url(entry)
-        if new_url == cw.REDACTION_SENTINEL:
-            continue
-        old_url = _source_url(stored_map.get(name))
-        if new_url is None and old_url is None:
-            continue
-        if (
-            new_url is None
-            or old_url is None
-            or _url_destination(new_url) != _url_destination(old_url)
-        ):
+        new_urls = _urls(entry)
+        old_urls = _urls(stored_map.get(name))
+        moved = any(
+            url != cw.REDACTION_SENTINEL and old_urls.get(where, _MISSING) != url
+            for where, url in new_urls.items()
+        ) or any(where not in new_urls for where in old_urls)
+        if moved:
             raise cw.InvalidCandidateError(
-                f"{key}.{name}: the marketplace url changed, so its masked credentials cannot "
-                "be kept; retype the credential for the new host"
+                f"{key}.{name}: a marketplace url changed, so its masked credentials cannot "
+                "be kept; retype the credential for the new url"
             )
 
 

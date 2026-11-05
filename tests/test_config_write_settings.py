@@ -1115,11 +1115,18 @@ def test_masked_element_with_a_shortened_nested_list_is_rejected(tmp_path: Path)
         pytest.param("https://plugins.example.com:8443/m.json", id="port"),
         pytest.param("https://plugins.example.com/other.json", id="path"),
         pytest.param(None, id="url-removed"),
+        # Python's urlsplit reads this host as plugins.example.com; a WHATWG parser
+        # (what a Node fetch uses) reads evil.example.com. Only an exact compare is safe.
+        pytest.param("https://evil.example.com\\@plugins.example.com/m.json", id="backslash"),
+        pytest.param("https://Plugins.Example.com/m.json", id="host-case"),
+        pytest.param("https://plugins.example.com:443/m.json", id="default-port"),
     ],
 )
 def test_marketplace_url_change_refuses_masked_credentials(tmp_path: Path, new_url) -> None:
     # A masked header kept by key while the url moves would send the stored credential
     # to the new host. Refuse the write whole; the operator retypes it for the new host.
+    # Any change to the url text counts: a "same destination" parse is a second parser
+    # that can disagree with Claude Code's.
     h = _store(tmp_path, {"extraKnownMarketplaces": _HOSTED})
     view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
     source = view["hosted"]["source"]
@@ -1127,32 +1134,45 @@ def test_marketplace_url_change_refuses_masked_credentials(tmp_path: Path, new_u
         del source["url"]
     else:
         source["url"] = new_url
-    with pytest.raises(cw.InvalidCandidateError, match="retype the credential for the new host"):
+    with pytest.raises(cw.InvalidCandidateError, match="retype the credential for the new url"):
         cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": view}, h)
     assert _on_disk(tmp_path)["extraKnownMarketplaces"] == _HOSTED
 
 
 def test_marketplace_url_unchanged_restores_masked_credentials(tmp_path: Path) -> None:
-    # Same destination (only the host's letter case and another field differ): the
-    # masked header and headersHelper are restored from the stored entry.
+    # Same url, another field edited: the masked header and headersHelper are restored.
     h = _store(tmp_path, {"extraKnownMarketplaces": _HOSTED})
     view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
-    view["hosted"]["source"]["url"] = "https://Plugins.Example.com/m.json"
     view["hosted"]["autoUpdate"] = True
     cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": view}, h)
-    source = _on_disk(tmp_path)["extraKnownMarketplaces"]["hosted"]["source"]
-    assert source["headers"] == {"Cookie": "session=C123"}
-    assert source["headersHelper"] == "/bin/h --t SEK"
-    assert source["url"] == "https://Plugins.Example.com/m.json"
+    entry = _on_disk(tmp_path)["extraKnownMarketplaces"]["hosted"]
+    assert entry["source"] == _HOSTED["hosted"]["source"]
+    assert entry["autoUpdate"] is True
 
 
-def test_url_destination_compares_odd_values_by_their_raw_form() -> None:
-    assert cws._url_destination(123) == ("not-a-string", 123)
-    assert cws._url_destination("https://h.example:notaport/x") == (
-        "unparsed",
-        "https://h.example:notaport/x",
-    )
-    assert cws._url_destination("HTTPS://H.example:443/p") == ("https", "h.example", 443, "/p")
+def test_nested_plugin_url_change_in_a_dict_shaped_plugins_is_refused(tmp_path: Path) -> None:
+    # The binding covers every `url` in the entry, not only `source.url`: a malformed
+    # dict-shaped `plugins` escapes the list rule, so the url check must catch it.
+    stored = {
+        "inline": {
+            "source": {
+                "source": "settings",
+                "name": "inline",
+                "plugins": {
+                    "p": {
+                        "source": {"source": "archive", "url": "https://r.example/p.zip"},
+                        "headers": {"Cookie": "C"},
+                    }
+                },
+            }
+        }
+    }
+    h = _store(tmp_path, {"extraKnownMarketplaces": stored})
+    view = cws.read_project_settings(tmp_path)[0]["extraKnownMarketplaces"]
+    view["inline"]["source"]["plugins"]["p"]["source"]["url"] = "https://evil.example/m.json"
+    with pytest.raises(cw.InvalidCandidateError, match="url changed"):
+        cws.write_project_settings(tmp_path, {"extraKnownMarketplaces": view}, h)
+    assert _on_disk(tmp_path)["extraKnownMarketplaces"] == stored
 
 
 def test_masked_credential_url_resent_unchanged_keeps_url_and_headers(tmp_path: Path) -> None:

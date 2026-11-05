@@ -529,11 +529,12 @@ checked against Claude Code 2.1.318.
   entry or a header that holds one. It also happens when you delete, reorder or
   edit an element of a list (such as a `settings` source's `plugins`) that holds
   one. Type the real values again, then save.
-- **A masked credential stays bound to its marketplace URL.** If you change the
-  scheme, host, port or path of a marketplace `url` on the Settings tab, Clauster
-  refuses the save (`422`) while that entry still holds a masked `headers` value
-  or `headersHelper`. This stops the stored credential from going to the new
-  host. Type the credential for the new host, then save.
+- **A masked credential stays bound to its marketplace URL.** If you change any
+  `url` in a marketplace entry on the Settings tab, Clauster refuses the save
+  (`422`) while that entry still holds a masked `headers` value or
+  `headersHelper`. Any change to the text counts, including the letter case of
+  the host or an added `:443`. This stops the stored credential from going to a
+  new host. Type the credential again, then save.
 - **The `additionalMarketplaces` spelling is read too.** Claude Code 2.1.232 and
   later accept it as another name for `extraKnownMarketplaces`. When a file sets
   both, the canonical key wins, as it does in Claude Code.
