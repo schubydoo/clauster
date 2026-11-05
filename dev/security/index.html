@@ -795,6 +795,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#redaction-guarantee" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Redaction guarantee
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#log-redaction" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1759,6 +1770,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#redaction-guarantee" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Redaction guarantee
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#log-redaction" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2107,6 +2129,101 @@ unlinking a lock file is the very race the pattern avoids. Remove them by hand
 one-time interactive "Enable Remote Control? (y/n)" prompt it can never answer.
 On by default (<code>claude.auto_enable_remote_control</code>); set <code>false</code> to manage the
 flags yourself.</p>
+<h2 id="redaction-guarantee">Redaction guarantee<a class="headerlink" href="#redaction-guarantee" title="Permanent link">&para;</a></h2>
+<p>Clauster masks secrets in two ways. Only the first one is a guarantee.</p>
+<ol>
+<li><strong>Exact values (guaranteed).</strong> Clauster knows some secret values itself. For
+   each bridge, these are the environment id (<code>env_…</code>), the session id
+   (<code>session_…</code>), the code-session id that Clauster derives from it (<code>cse_…</code>)
+   and the bridge id (a UUID). For each background job, this is its <code>cse_…</code>
+   id. An environment id or a session id opens a remote session for anyone who
+   has it. Clauster stores a value in memory whenever a bridge record gets it,
+   for example from the bridge debug log, the bridge pointer file, the connect
+   URL that the pty keeper reads, or the record that rediscovery rebuilds after
+   a restart. It also stores the id from the state file of a background job.
+   From the moment Clauster stores a value, the outputs that reach the browser
+   mask it by exact match: the bridge-log stream, the live pty-screen view,
+   hosted-session frames, transcript turns, <code>error_detail</code>, clone-job errors,
+   agent text and the error texts of the ghost-environment reaper. The on-disk
+   mirror masks it too when <code>logs.redact_session_url</code> is on. The store is never
+   written to disk. Clauster drops the values of an instance when you forget
+   the instance. The match ignores every character outside <code>[A-Za-z0-9_-]</code>, so a
+   wrap, a hanging indent, a box border, padding, an escape sequence or an
+   invisible character cannot split a value past the mask. Each piece of a
+   split value is masked where it stands. A leak of a known value blocks a
+   release.</li>
+<li><strong>Shapes (best effort).</strong> Every other secret is masked by its shape: ids and
+   UUIDs that Clauster did not learn, and third-party tokens that Claude prints.
+   <a href="#log-redaction">Log redaction</a> below describes these masks and their known
+   residue. A new gap in a shape mask goes to a later milestone. It does not
+   block a release.</li>
+</ol>
+<div class="admonition warning">
+<p class="admonition-title">Limits of the exact-value guarantee</p>
+<ul>
+<li>A run of fewer than 7 characters of the random part of a value can show.
+  The random part is the value without its <code>env_</code>, <code>session_</code> or <code>cse_</code>
+  prefix. Such a run shows where the rest of the value is not visible (it
+  scrolled off the screen, the program drew over it, it is not printed yet,
+  or a shape mask already hides it), and in the cases of the next two
+  items. Apart from those cases, a run of 7 or more characters never shows,
+  whole or put back together across rows.</li>
+<li>The bridge-log stream and the hosted <code>stderr</code> and <code>text</code> events are
+  masked one line at a time, and a hosted-session frame one string at a
+  time. If a value is split across lines or strings
+  there, each piece is masked only when it holds 7 or more characters of the
+  random part. The on-disk mirror, a transcript turn, <code>error_detail</code>,
+  clone-job errors and agent text are masked as one block, so a line break
+  inside them does not split a value.</li>
+<li>A <code>_</code> or <code>-</code> between two pieces of a value is not ignored, because a value
+  can hold these characters. Each piece is masked only when it holds 7 or
+  more characters of the random part.</li>
+<li>Hosted sessions stream each reply as many small partial-message frames
+  (<code>content_block_delta</code> events) before the frame that holds the whole
+  message. A value split across those frames cannot be matched, so Clauster
+  empties their text before they reach the WebSocket, the event ring and
+  the replay. The rest of each frame stays: its type, its index and the type
+  of its delta. The frame with the whole message is masked as usual, and the
+  dashboard shows that frame. A client that reads the delta text from the
+  WebSocket gets empty deltas.</li>
+<li>The guarantee starts when Clauster learns the value. The bridge-log stream
+  reads the environment, session and bridge ids from the marker lines itself:
+  from the top of the log when it opens, and from each line before it sends
+  that line. So the line that first names an id is masked too. The stream
+  takes the first id of each kind from any marker line. It takes a further
+  one only from a line with a <code>[bridge:…]</code> or <code>[remote-bridge]</code> tag before
+  the id. The stream keeps at most 4 ids of each kind for each instance,
+  counted over all its connections until the instance is forgotten, so a
+  client that reconnects cannot add more. The ids the instance record holds
+  do not count against this limit.
+  Echoed text can carry such a tag too, so the tag does not prove that the
+  bridge wrote the line. It only limits how many ids the store can gain. On
+  the live
+  pty-screen view, the keeper masks the session id from the first frame after
+  it reads the connect URL. Before that moment, the keeper applies only the
+  shape masks to that id. The Clauster process masks every value it knows
+  again when it relays the frame. <code>error_detail</code> is masked when Clauster
+  records it, so text recorded before Clauster learned an id keeps only the
+  shape masks.</li>
+<li>Clauster stores a value only if it has the form of a real id: letters,
+  digits, <code>_</code> and <code>-</code> only, at least 16 characters after the prefix, and no
+  run of 7 characters that occurs twice. Any other value gets only the shape
+  masks.</li>
+<li>On the live pty-screen view, a masked run of fewer than 10 cells shows as
+  <code>*</code> characters, so that the row keeps its width.</li>
+<li>Fields whose purpose is to give an id to the signed-in operator keep it.
+  These are the instance record (<code>environment_id</code>, <code>starter_session_id</code>,
+  <code>bridge_id</code>, and the <code>url</code> and <code>session_url</code> links behind the Open
+  buttons), <code>starter_session_id</code> in the session detail of <code>clauster mcp</code>,
+  <code>bridge_session_id</code> of a background job, and the ids that the
+  <a href="#ghost-environment-reaper">ghost-environment reaper</a> lists for you to
+  select. Free text in the instance record and in a background-job record
+  is masked. The reaper lists the name and the directory of each
+  environment as the API returns them.</li>
+<li>When <code>logs.redact_session_url</code> is false (the default), the debug log on
+  disk keeps every id verbatim. See <a href="#hybrid-by-default">Hybrid by default</a>.</li>
+</ul>
+</div>
 <h2 id="log-redaction">Log redaction<a class="headerlink" href="#log-redaction" title="Permanent link">&para;</a></h2>
 <p>The bridge debug log is streamed over a WebSocket and sanitized line by line
 (<code>redact.py</code>). Redaction runs against the view a browser <strong>renders</strong>. That view
@@ -2132,9 +2249,10 @@ as <code>userenv_production</code>. Clauster therefore records where each remova
 and re-tries the same masks anchored at those positions. Tab, carriage return and
 newline are never removed. They are visible separators, and the line structure
 depends on them.</p>
-<p>Three layers:</p>
+<p>Three shape layers, on top of the exact values in
+<a href="#redaction-guarantee">Redaction guarantee</a>:</p>
 <ol>
-<li><strong>ID redaction (primary guarantee).</strong> Masks <code>env_</code> / <code>session_</code> / <code>cse_</code>
+<li><strong>ID redaction (best effort).</strong> Masks <code>env_</code> / <code>session_</code> / <code>cse_</code>
    identifiers (the prefix is kept readable) — these act as bearer-equivalent
    credentials in a URL — and <strong>bare UUIDs</strong> (account / instance identifiers the
    bridge prints in full; not bearer credentials, but kept off the stream). The
@@ -2154,9 +2272,10 @@ depends on them.</p>
 boundaries. It will <strong>not</strong> catch a novel/unstructured high-entropy secret —
 a bearer value that isn't literally <code>Bearer …</code>, a raw JWT, or a vendor token
 whose prefix isn't listed. That is acceptable because it is
-defense-in-depth: the primary WebSocket guarantee is the
-<code>env_</code>/<code>session_</code>/<code>cse_</code> + UUID redaction. Add new shapes as they appear
-rather than assuming coverage.</p>
+defense-in-depth: the guarantee is the exact-value masking in
+<a href="#redaction-guarantee">Redaction guarantee</a>, and the
+<code>env_</code>/<code>session_</code>/<code>cse_</code> + UUID shapes back it. Add new shapes as they
+appear rather than assuming coverage.</p>
 </div>
 <div class="admonition warning">
 <p class="admonition-title">Bounded scope: an identifier written mid-token stays visible</p>
@@ -2171,7 +2290,9 @@ deletes the boundary. This bounded scope is for the streamed log and the
 on-disk mirror. On every surface, a secret welded onto an ordinary word
 before it (<code>agentghp_&lt;a&gt;</code>) stays visible. On the live pty-screen view, a
 welded id without the <code>01</code> shape stays visible, unless it starts inside a
-masked token.</p>
+masked token. All of this residue applies only to an id that Clauster does
+not know. A known id is masked wherever it stands, see
+<a href="#redaction-guarantee">Redaction guarantee</a>.</p>
 </div>
 <p>Three shapes do not need a word boundary before them, on the streamed log, the
 on-disk mirror and the live pty-screen view. A UUID is masked wherever it
@@ -2196,7 +2317,7 @@ neutral <code>&lt;redacted&gt;</code> token, without its readable <code>env_</co
 marker. On the streamed log and the on-disk
 mirror, a second identifier joined to the first by <code>_</code>
 (<code>x env_01&lt;a&gt;_session_01&lt;b&gt;</code>) has no word boundary before it, so it stays
-visible. The live pty-screen view masks it.</p>
+visible, unless Clauster knows it. The live pty-screen view masks it.</p>
 <p>The whole value of a <code>bearer</code> header is masked, also when it holds a UUID, an
 identifier or another token (<code>Bearer &lt;UUID&gt;.&lt;b&gt;</code>). On the streamed log and the
 on-disk mirror, an identifier inside the value keeps its readable <code>env_</code>,

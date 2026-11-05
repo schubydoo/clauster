@@ -2144,7 +2144,8 @@ over a WebSocket to the dashboard's live log view.</p>
   <code>logs.redact_session_url: true</code>, which also redacts the on-disk copy). Tail it
   directly when the dashboard is unavailable — but <strong>review it and scrub session
   URLs or secrets before pasting it into a public issue</strong>, even with redaction
-  enabled (the redactor only recognizes known token shapes); the redaction you
+  enabled (the redactor recognizes only the ids Clauster learned and known token
+  shapes); the redaction you
   see in the dashboard does not protect the on-disk copy.
   The on-disk filename is
   <code>&lt;label&gt;-&lt;timestamp&gt;-&lt;seq&gt;.log</code>, where <code>&lt;label&gt;</code> is the bridge label (the project

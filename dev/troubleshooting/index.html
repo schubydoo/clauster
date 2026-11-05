@@ -3131,7 +3131,8 @@ with the default <code>logs.redact_session_url: false</code>, the on-disk log un
 bearer-equivalent credentials. Set <code>logs.redact_session_url: true</code> and
 reproduce if possible, then <strong>review the log and scrub any remaining
 session URLs or secrets before sharing it</strong> — even with redaction
-enabled, the redactor only recognizes known token shapes.</p>
+enabled, the redactor recognizes only the ids Clauster learned and known
+token shapes.</p>
 </div>
 <p><strong>Mechanism:</strong> <a href="../security/#log-redaction">Log redaction</a>.</p>
 
