@@ -1501,8 +1501,21 @@ def load_settings_json_obj(raw: bytes) -> dict[str, Any]:
 
 
 def render_json(data: dict[str, Any]) -> str:
-    """Render ``data`` as pretty JSON with a trailing newline (matches CLI style)."""
-    return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    """Render ``data`` as pretty JSON with a trailing newline (matches CLI style).
+
+    Fail closed on a non-finite number (``inf``, ``-inf``, ``NaN``): ``json.dumps`` would
+    write ``Infinity``/``NaN``, which is not JSON, and the next read of the file (by
+    Clauster or by Claude Code) would refuse it whole. ``allow_nan=False`` makes that an
+    :class:`InvalidCandidateError` (→ 422) raised before the atomic writer replaces the
+    file, so nothing is written. Every settings-file surface renders through here: hooks,
+    MCP (project ``.mcp.json``), skill overrides, settings and permissions.
+    """
+    try:
+        return json.dumps(data, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
+    except ValueError as exc:
+        raise InvalidCandidateError(
+            "the config holds a number JSON cannot store (Infinity or NaN)"
+        ) from exc
 
 
 def project_settings_path(project_dir: Path) -> Path:

@@ -65,6 +65,7 @@ verbatim by the locked atomic replace (never a whole-file clobber).
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -184,9 +185,35 @@ def _is_positive_number(value: Any) -> bool:
     """Whether ``value`` is a number above zero, as the CLI's ``timeout`` schema requires.
 
     A JSON ``true`` is a ``bool``, never a number here. Fractions are allowed: the CLI
-    reads ``timeout`` as ``number().positive()``.
+    reads ``timeout`` as ``number().positive()``. Infinity is refused: ``1e400`` parses to
+    ``inf``, which JSON cannot store, so it would be written as ``Infinity`` and leave a
+    settings file neither Clauster nor Claude Code can read.
     """
-    return isinstance(value, int | float) and not isinstance(value, bool) and value > 0
+    return (
+        isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value > 0
+    )
+
+
+def _all_finite(value: Any) -> bool:
+    """Whether every number nested anywhere in ``value`` is finite (no inf, -inf or NaN).
+
+    Iterative, like :func:`_string_leaves`. Applied to an ``mcp_tool`` ``input``, whose
+    values are free-form JSON, for the same reason :func:`_is_positive_number` refuses
+    infinity.
+    """
+    stack = [value]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, float) and not math.isfinite(node):
+            return False
+        if isinstance(node, dict):
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return True
 
 
 def _is_str_list(value: Any) -> bool:
@@ -256,8 +283,8 @@ _FIELD_CHECKS: dict[str, tuple[Callable[[Any], bool], str]] = {
     "server": (_non_empty_str, "a non-empty string"),
     "tool": (_non_empty_str, "a non-empty string"),
     "input": (
-        lambda v: isinstance(v, dict) and _depth_at_most(v, _MAX_INPUT_DEPTH),
-        f"an object nested at most {_MAX_INPUT_DEPTH} levels deep",
+        lambda v: isinstance(v, dict) and _depth_at_most(v, _MAX_INPUT_DEPTH) and _all_finite(v),
+        f"an object nested at most {_MAX_INPUT_DEPTH} levels deep, with finite numbers only",
     ),
     "prompt": (_non_empty_str, "a non-empty string"),
     "model": (_non_empty_str, "a non-empty string"),
@@ -642,11 +669,17 @@ def _destination(view: dict[str, Any]) -> tuple[Any, ...] | None:
     ``http``: the masked URL without its query and fragment (a URL that differs only
     there still reaches the same endpoint). ``mcp_tool``: the server and tool. Computed
     from the read view on both sides, so a stored hook and the incoming copy of it agree.
+
+    A hand-edited stored hook whose destination fields are not strings (``"server": []``)
+    has no destination: it is never a restore source (a mask cannot restore through it),
+    and it never becomes a dict key, so it cannot block a save that removes or replaces
+    it. Incoming hooks are validated first, so theirs are always strings.
     """
     if view.get("type") == HTTP_TYPE and isinstance(view.get("url"), str):
         return (HTTP_TYPE, view["url"].split("#", 1)[0].split("?", 1)[0])
-    if view.get("type") == MCP_TOOL_TYPE:
-        return (MCP_TOOL_TYPE, view.get("server"), view.get("tool"))
+    server, tool = view.get("server"), view.get("tool")
+    if view.get("type") == MCP_TOOL_TYPE and isinstance(server, str) and isinstance(tool, str):
+        return (MCP_TOOL_TYPE, server, tool)
     return None
 
 

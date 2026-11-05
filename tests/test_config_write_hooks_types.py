@@ -553,6 +553,81 @@ def test_fractional_timeout_is_accepted() -> None:
     hooks.validate_hooks(_block({**MINIMAL["command"], "timeout": 1.5}))
 
 
+_NON_FINITE = [float("inf"), float("-inf"), float("nan")]
+
+
+@pytest.mark.parametrize("bad", _NON_FINITE)
+@pytest.mark.parametrize("hook_type", list(MINIMAL))
+def test_non_finite_timeout_is_refused(hook_type: str, bad: float) -> None:
+    with pytest.raises(cw.InvalidCandidateError, match="'timeout'"):
+        hooks.validate_hooks(_block({**MINIMAL[hook_type], "timeout": bad}))
+
+
+@pytest.mark.parametrize("bad", _NON_FINITE)
+def test_non_finite_number_inside_mcp_input_is_refused(bad: float) -> None:
+    entry = {**MINIMAL["mcp_tool"], "input": {"a": [1, {"b": bad}]}}
+    with pytest.raises(cw.InvalidCandidateError, match="finite numbers only"):
+        hooks.validate_hooks(_block(entry))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"Stop": [{"hooks": [{"type": "command", "command": "x", "timeout": 1e400}]}]}',
+        '{"Stop": [{"hooks": [{"type": "mcp_tool", "server": "s", "tool": "t", '
+        '"input": {"n": NaN}}]}]}',
+        '{"Stop": [{"hooks": [{"type": "mcp_tool", "server": "s", "tool": "t", '
+        '"input": {"n": [-Infinity]}}]}]}',
+    ],
+)
+def test_route_refuses_a_non_finite_number_and_writes_nothing(
+    write_config, tmp_path, projects_root, body: str
+) -> None:
+    """1e400 parses to inf: a 422, never `Infinity` written into settings.json."""
+    settings = projects_root / "alpha" / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text('{"hooks": {}}', encoding="utf-8")
+    before = settings.read_bytes()
+    with _client(write_config, tmp_path) as c:
+        h = c.get(f"{_URL}?project=alpha").json()["hash"]
+        payload = (
+            '{"scope": "project", "project": "alpha", "confirm": "alpha", '
+            f'"hash": "{h}", "hooks": {body}}}'
+        )
+        resp = c.put(_URL, content=payload, headers={"Content-Type": "application/json"})
+        assert resp.status_code == 422
+    assert settings.read_bytes() == before
+
+
+@pytest.mark.parametrize("bad", _NON_FINITE)
+def test_shared_writer_fails_closed_on_a_non_finite_number(tmp_path: Path, bad: float) -> None:
+    """render_json refuses Infinity/NaN for every settings surface, before any write."""
+    path = tmp_path / "settings.json"
+    path.write_text('{"model": "opus"}', encoding="utf-8")
+    before = path.read_bytes()
+    with pytest.raises(cw.InvalidCandidateError, match="Infinity or NaN"):
+        cw.write_settings_subtree(path, "x", {"n": bad}, cw.hash_bytes(before))
+    assert path.read_bytes() == before
+    assert not list(tmp_path.glob("settings.json.*.tmp"))  # no stray temp file
+
+
+@pytest.mark.parametrize("bad", [[], {}, 5, None])
+def test_malformed_stored_mcp_destination_never_blocks_a_save(tmp_path: Path, bad) -> None:
+    """A hand-edited `"server": []` neither 500s every save nor restores through a mask."""
+    odd = {"type": "mcp_tool", "server": bad, "tool": {}, "input": {"api_key": "sk-1"}}
+    path = _seed(tmp_path, {"Stop": [{"hooks": [odd]}]})
+    _, h = hooks.read_project_hooks(tmp_path)
+    # A resent mask cannot restore through it (it is refused, never a 500).
+    resent = {"type": "mcp_tool", "server": "s", "tool": "t", "input": {"api_key": S}}
+    before = path.read_bytes()
+    with pytest.raises(cw.InvalidCandidateError, match="keeps masked values"):
+        hooks.write_project_hooks(tmp_path, {"Stop": [{"hooks": [resent]}]}, h)
+    assert path.read_bytes() == before
+    # Saving `{}` removes it.
+    hooks.write_project_hooks(tmp_path, {}, h)
+    assert _hooks_on_disk(path) == {}
+
+
 @pytest.mark.parametrize(
     "edit",
     [
