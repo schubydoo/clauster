@@ -10,6 +10,7 @@ under the autouse HOME-isolation fixture — the live account is never touched.
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import errno
 import json
@@ -2453,7 +2454,6 @@ def test_a_value_tagged_key_still_counts_as_a_repeated_key(parse) -> None:
         parse("---\nname: a\ndescription: d\nmetadata: {=: x, '=': y}\n---\nb\n")
 
 
-@pytest.mark.parametrize("parse", _both_parsers())
 @pytest.mark.parametrize(
     "extra",
     [
@@ -2483,22 +2483,26 @@ def test_a_value_tagged_key_still_counts_as_a_repeated_key(parse) -> None:
         "metadata: !!pairs [{? {a: 1} : 1}]",
     ],
 )
-def test_a_tag_or_node_shape_pyyaml_loads_specially_never_escapes_the_seam(parse, extra) -> None:
+def test_a_tag_or_node_shape_pyyaml_loads_specially_never_escapes_the_seam(
+    extra, monkeypatch
+) -> None:
     # The self-pass on the third round: every PyYAML tag and node shape the seam's own node
     # walks might read differently from PyYAML's loader. Each loads or is refused by a check
-    # that means to refuse it; none crashes, not even into the crash wrapper's refusal.
+    # that means to refuse it. The crash wrapper is switched off, so a check that crashes
+    # fails this test with its own exception, whatever the wrapper's message says.
+    monkeypatch.setattr(cw, "refuse_check_failures", lambda _what: contextlib.nullcontext())
     text = f"---\nname: a\ndescription: d\n{extra}\n---\nb\n"
     surfaces = [
-        lambda: parse(text),
+        lambda: config_write_subagents.parse_frontmatter(text),
+        lambda: config_write_skills.parse_frontmatter(text),
         lambda: config_write_skills.validate_skill_md_content(text),
         lambda: config_write_subagents.validate_agent_content(text, expected_name="a"),
     ]
     for surface in surfaces:
         try:
             surface()
-        except cw.InvalidCandidateError as exc:
-            assert "cannot compare" not in str(exc), exc
-            assert "to check" not in str(exc), exc
+        except cw.InvalidCandidateError:
+            pass
 
 
 @pytest.mark.parametrize(
