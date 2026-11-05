@@ -1367,6 +1367,13 @@ def test_inline_servers_accept_what_the_agent_loader_reads(item: object) -> None
         # What the agent-file loader skips.
         ([{"a": {"command": "x"}, "b": {"command": "y"}}], "defines 2 servers"),
         ([{"gh": {"command": "x"}}, {"gh": {"command": "y"}}], "defines inline server 'gh' twice"),
+        # YAML can give a definition a number or null key; the 422 still names the keys.
+        ([{"srv": {"command": "x", 1: "y", None: "z"}}], r"unknown keys: \[1, None\]"),
+        ([{"srv": {"type": "http", "url": "u", "oauth": {1: "a", "b": "c"}}}], "unknown keys"),
+        (
+            [{"srv": {"type": "http", "url": "u", "tools": [{"name": "n", 1: "a", "b": "c"}]}}],
+            "unknown",
+        ),
     ],
 )
 def test_inline_servers_refuse_what_the_cli_rejects_or_ignores(
@@ -1413,6 +1420,33 @@ def test_inline_servers_refuse_yaml11_only_spellings(definition: str) -> None:
     text = f"---\nname: x\ndescription: d\nmcpServers:\n  - srv:\n{definition}---\nbody\n"
     with pytest.raises(cw.InvalidCandidateError, match="frontmatter 'mcpServers' inline server"):
         sub.validate_agent_content(text, expected_name="x")
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        "  - srv:\n      command: x\n      env: {A: 1e3}\n",
+        "  - srv:\n      command: x\n      args: [ok, 0o17]\n",
+        "  - srv:\n      command: '09'\n      args:\n        - 09\n",
+        "  - srv:\n      type: http\n      url: https://e.com\n      headers:\n        X: 1.0e3\n",
+        "  - srv:\n      type: http\n      url: https://e.com\n      oauth: {clientId: 1e5}\n",
+        "  - 0o17\n",  # a server-name reference
+    ],
+)
+def test_inline_servers_refuse_strings_yaml12_reads_as_numbers(item: str) -> None:
+    # PyYAML reads each plain value as a string; the CLI's YAML 1.2 reads a number, which its
+    # entry schema refuses, so it skips the server (probed: `env: {A: 1e3}`, `args: [0o17]`).
+    text = f"---\nname: x\ndescription: d\nmcpServers:\n{item}---\nbody\n"
+    with pytest.raises(cw.InvalidCandidateError, match="as a number, not a string"):
+        sub.validate_agent_content(text, expected_name="x")
+
+
+def test_inline_servers_accept_quoted_number_strings() -> None:
+    text = (
+        "---\nname: x\ndescription: d\nmcpServers:\n  - srv:\n      command: x\n"
+        "      args: ['0o17', \"1e3\", --port]\n      env: {A: '1e3', B: 1e3x}\n---\nbody\n"
+    )
+    sub.validate_agent_content(text, expected_name="x")
 
 
 def test_inline_servers_accept_yaml12_spellings() -> None:
@@ -1537,6 +1571,9 @@ def test_inline_conversion_skips_read_only_files(tmp_path: Path) -> None:
         # A `transport` that is not a transport word: never converted, refused on save.
         "---\nname: my-agent\ndescription: d\nmcpServers:\n"
         "  - srv:\n      transport: carrier-pigeon\n      url: https://e.com\n---\nbody\n",
+        # Two top-level mcpServers lines: the line scan cannot tell which one YAML keeps.
+        "---\nname: my-agent\ndescription: d\nmcpServers:\n  - a: {command: x}\n"
+        "mcpServers:\n  - srv:\n      transport: sse\n      url: https://e.com\n---\nbody\n",
         # Nothing to convert: the stdio `env` stays, a multi-key item is the save's problem.
         "---\nname: my-agent\ndescription: d\nmcpServers:\n  - gh\n"
         "  - a: {command: x, env: {A: b}}\n    b: {command: y}\n---\nbody\n",
@@ -1548,14 +1585,24 @@ def test_inline_conversion_falls_back_to_the_raw_file(tmp_path: Path, text: str)
     assert (doc["content"], doc["converted"]) == (text, None)
 
 
-def test_unconverted_inline_field_says_how_to_fix_it_by_hand(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("definition", "fix"),
+    [
+        ("{type: http, url: https://e.com, env: {A: b}}", "remove 'env' by hand."),
+        ("{type: http, transport: http, url: https://e.com}", "remove 'transport' by hand."),
+        # Removing a `transport` that `type` does not back up would only lead to the next
+        # refusal ("a 'url' but no 'type'"), so the fix is the rename the reload makes.
+        ("{transport: sse, url: https://e.com}", "rename 'transport' to 'type' by hand."),
+    ],
+)
+def test_unconverted_inline_field_says_how_to_fix_it_by_hand(
+    tmp_path: Path, definition: str, fix: str
+) -> None:
     # A flow-style definition loads unconverted, so its save must not only say "reload".
-    text = (
-        "---\nname: my-agent\ndescription: d\nmcpServers:\n"
-        "  - srv: {type: http, url: https://e.com, env: {A: b}}\n---\nbody\n"
-    )
-    with pytest.raises(cw.InvalidCandidateError, match="remove it by hand"):
+    text = f"---\nname: my-agent\ndescription: d\nmcpServers:\n  - srv: {definition}\n---\nb\n"
+    with pytest.raises(cw.InvalidCandidateError) as raised:
         sub.write_project_agent(tmp_path, "my-agent", text, None)
+    assert str(raised.value).endswith(fix)
     # A field the converter never touches gets no such hint.
     with pytest.raises(cw.InvalidCandidateError) as exc:
         sub.validate_frontmatter(_servers({"srv": {"command": "x", "cwd": "/"}}))

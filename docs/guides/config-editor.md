@@ -419,7 +419,9 @@ same fields for each transport. It refuses the same values, for example
 `transport`, `env` on an `http`, `sse` or `ws` server, a `url` with no `type`,
 and `"type": "sdk"`. The YAML spelling rules above also apply to the true or
 false fields and the number fields of a definition, for example `alwaysLoad`
-and `timeout`.
+and `timeout`. Quote a text value that looks like a number, for example
+`env: {PORT: "1e3"}` or `args: ["0o17"]`. Claude Code reads the unquoted value
+as a number and skips the server, so the editor refuses it.
 
 The name rule is not the same as on the MCP tab. Claude Code accepts any
 inline server name that is not reserved, so the editor accepts a name with a

@@ -282,7 +282,7 @@ def _validate_oauth(name: str, oauth: Any) -> None:
         raise cw.InvalidCandidateError(f"{label} must be an object")
     unknown = set(oauth) - _OAUTH_KEYS
     if unknown:
-        raise cw.InvalidCandidateError(f"{label} has unknown keys: {sorted(unknown)}")
+        raise cw.InvalidCandidateError(f"{label} has unknown keys: {sorted(unknown, key=str)}")
     if "clientId" in oauth and not isinstance(oauth["clientId"], str):
         raise cw.InvalidCandidateError(f"{label} 'clientId' must be a string")
     if "callbackPort" in oauth:
@@ -325,7 +325,9 @@ def _validate_tool_policies(name: str, entry: dict[str, Any]) -> None:
                 raise cw.InvalidCandidateError(f"{label} items need a string 'name'")
             unknown = set(tool) - {"name", "permission_policy"}
             if unknown:
-                raise cw.InvalidCandidateError(f"{label} item has unknown keys: {sorted(unknown)}")
+                raise cw.InvalidCandidateError(
+                    f"{label} item has unknown keys: {sorted(unknown, key=str)}"
+                )
             if "permission_policy" in tool and not (
                 isinstance(tool["permission_policy"], str)
                 and tool["permission_policy"] in _TOOL_POLICIES
@@ -416,8 +418,10 @@ def _validate_server_fields(name: str, entry: Any) -> None:
         )
     unknown = set(entry) - _KEYS_BY_TRANSPORT[transport]
     if unknown:
+        # `key=str`: a subagent's inline definition comes from YAML, where a key can be a
+        # number or null, and a mixed-type sort would raise TypeError instead of this 422.
         raise cw.InvalidCandidateError(
-            f"{transport} server {name!r} has unknown keys: {sorted(unknown)}"
+            f"{transport} server {name!r} has unknown keys: {sorted(unknown, key=str)}"
         )
     _validate_common_fields(name, entry)
 

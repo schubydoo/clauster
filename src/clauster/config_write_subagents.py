@@ -703,17 +703,31 @@ def _validate_mcp_servers(value: Any, label: str) -> None:
         try:
             _validate_server_fields(server_name, definition)
         except cw.InvalidCandidateError as exc:
-            # The MCP message promises a convert-on-load. Here that is a textual rewrite,
-            # which declines some shapes (a flow-style definition, a merge key), so say what
-            # to do when the reload did not convert it.
-            hint = (
-                " If the editor did not convert it when it loaded the file, remove it by hand"
-                if _convert_legacy_entry(definition)[1]
-                else ""
-            )
             raise cw.InvalidCandidateError(
-                f"{label} inline server {server_name!r}: {exc}.{hint}"
+                f"{label} inline server {server_name!r}: {exc}.{_by_hand_hint(definition)}"
             ) from exc
+
+
+def _by_hand_hint(definition: Any) -> str:
+    """Return the manual fix for a field the convert-on-load handles, or ``""``.
+
+    The MCP message promises a convert-on-load. Here that is a textual rewrite, which
+    declines some shapes (a flow-style definition, a merge key), so the message also says
+    what to change when the reload did not convert it. The first note is the field the
+    validator refuses first (``transport`` before a remote ``env``), and the fix matches
+    what the conversion would do: a ``transport`` with no ``type`` becomes ``type``, so
+    removing it would only lead to the next refusal.
+    """
+    notes = _convert_legacy_entry(definition)[1]
+    if not notes:
+        return ""
+    field = notes[0]["field"]
+    fix = (
+        "rename 'transport' to 'type'"
+        if field == "transport" and "type" not in definition
+        else f"remove {field!r}"
+    )
+    return f" If the editor did not convert it when it loaded the file, {fix} by hand."
 
 
 def _validate_hooks_block(value: Any, label: str) -> None:
@@ -756,9 +770,9 @@ def _validate_env(value: Any, label: str) -> None:
 #: here and a string there, ``010`` is 8 here and 10 there.
 #: :func:`_refuse_yaml11_only_spellings` refuses those for the boolean and number fields.
 #: Other differences are stricter here, for example a plain ``2024-01-01`` is a date to
-#: PyYAML, so it is refused as a ``maxTurns`` that the CLI would read as 2024. Fields this
-#: module checks only as "a string" (``model``, a string field of an inline MCP definition)
-#: are not compared spelling by spelling.
+#: PyYAML, so it is refused as a ``maxTurns`` that the CLI would read as 2024. A top-level
+#: field this module checks only as "a string" (``model``) is not compared spelling by
+#: spelling; the string values of an inline MCP definition are.
 _OPTIONAL_FRONTMATTER_RULES: tuple[tuple[str, _FrontmatterRule], ...] = (
     # Claude Code accepts either a comma-separated string or an array for these —
     # this repo's own shipped subagents use the string form. `tools` must name at least
@@ -953,10 +967,17 @@ def _check_top_level_field(key: str, node: yaml.Node) -> None:
         for item in node.value:
             if isinstance(item, yaml.MappingNode):
                 _check_mapping(item, set(), visit=_check_inline_server)
+            else:
+                # A server-name reference (`- 0o17`) the CLI would read as a number.
+                _refuse_yaml12_number_strings("frontmatter 'mcpServers' server name", item)
 
 
 def _check_inline_server(name: str, node: yaml.Node) -> None:
-    """Check the boolean and number fields of one inline MCP definition and its ``oauth``."""
+    """Check the spelling of each value of one inline MCP definition, ``oauth`` included.
+
+    A boolean or number field must not use a YAML 1.1-only spelling, and a string value
+    must not be one that YAML 1.2 reads as a number (:func:`_refuse_yaml12_number_strings`).
+    """
     if not isinstance(node, yaml.MappingNode):
         return
     label = f"frontmatter 'mcpServers' inline server {name!r}"
@@ -979,8 +1000,43 @@ def _check_inline_server(name: str, node: yaml.Node) -> None:
                     number=oauth_key in _MCP_OAUTH_NUMBER_FIELDS,
                 ),
             )
+        _refuse_yaml12_number_strings(f"{label} {key!r}", value)
 
     _check_mapping(node, set(), visit=field)
+
+
+#: A plain scalar that YAML 1.2 core reads as a number although PyYAML (YAML 1.1) reads a
+#: string: ``1e3`` and ``1.0e3`` (YAML 1.1 wants a dot and a signed exponent), ``0o17``,
+#: and a leading-zero decimal that is not octal to YAML 1.1 (``09``).
+_YAML12_NUMBER_RE = re.compile(
+    r"[-+]?[0-9]+|0o[0-7]+|0x[0-9a-fA-F]+"
+    r"|[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?"
+)
+_STR_TAG = "tag:yaml.org,2002:str"
+
+
+def _refuse_yaml12_number_strings(label: str, node: yaml.Node) -> None:
+    """Refuse a plain string value under ``node`` that the CLI's YAML 1.2 reads as a number.
+
+    Every value of an MCP entry that is not a boolean or a number is a string, and the CLI's
+    entry schema refuses a number there, so it skips the whole server (probed on 2.1.318
+    with ``env: {A: 1e3}`` and ``args: [0o17]``; the quoted ``"1e3"`` connects). Only values
+    are checked, never keys. ⚠️ This is stricter than the CLI for an explicit ``!!str 1e3``,
+    which the composed node cannot tell from a plain ``1e3``. Quoting is the fix for both.
+    """
+    if isinstance(node, yaml.ScalarNode):
+        if node.tag == _STR_TAG and node.style is None and _YAML12_NUMBER_RE.fullmatch(node.value):
+            raise cw.InvalidCandidateError(
+                f"{label}: Claude Code reads {node.value!r} as a number, not a string, and "
+                "skips the server. Quote it"
+            )
+    elif isinstance(node, yaml.SequenceNode):
+        for child in node.value:
+            _refuse_yaml12_number_strings(label, child)
+    elif isinstance(node, yaml.MappingNode):  # pragma: no branch — a node is one of the three
+        _check_mapping(
+            node, set(), visit=lambda _key, value: _refuse_yaml12_number_strings(label, value)
+        )
 
 
 def _refuse_enclosing_references(node: yaml.Node, path: set[int], done: set[int]) -> None:
@@ -1028,7 +1084,10 @@ def _refuse_yaml11_only_spellings(header: str) -> None:
       as a string;
     * the same two spellings in the boolean and number fields of an inline ``mcpServers``
       definition and its ``oauth`` object (``alwaysLoad: yes``, ``timeout: 1_000``). The
-      CLI's entry schema refuses a string there, so it would skip the whole server.
+      CLI's entry schema refuses a string there, so it would skip the whole server;
+    * a plain string value of an inline definition, or a server-name reference, that YAML
+      1.2 reads as a number (``env: {A: 1e3}``, ``args: [0o17]``), which the entry schema
+      refuses for the same reason.
 
     ``header`` already loaded as a mapping, so composing it again yields a mapping node and
     does not fail.
