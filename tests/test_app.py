@@ -379,6 +379,8 @@ def test_live_terminal_client_side_fit_wiring(write_config):
     # parked top-left. The auto margins resolve to 0 when the grid is wider (scale<1), so the
     # top-left transform origin and the shrink-to-fit path stay unchanged.
     assert ".pty-screen-host .xterm { padding: 0; margin-inline: auto; }" in body
+    # Guard (not proof of the centering): the scaled grid stays flush left only while the
+    # transform origin is the top-left corner. A centered origin would shift it off-box.
     assert 'inner.style.transformOrigin = "top left";' in body
     # #673: host is border-box (Tabler reset), so style.height = total box including padding;
     # both padTop and padBottom are added so the content area inside equals the scaled grid height.
