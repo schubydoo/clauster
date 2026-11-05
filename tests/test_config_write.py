@@ -2454,6 +2454,20 @@ def test_a_value_tagged_key_still_counts_as_a_repeated_key(parse) -> None:
         parse("---\nname: a\ndescription: d\nmetadata: {=: x, '=': y}\n---\nb\n")
 
 
+class _CheckCrashedError(BaseException):
+    """A check crashed: no `except Exception` in the seam can turn this into a refusal."""
+
+
+@contextlib.contextmanager
+def _crash_escapes(_what: str):
+    try:
+        yield
+    except cw.InvalidCandidateError:
+        raise
+    except Exception as exc:
+        raise _CheckCrashedError(type(exc).__name__) from exc
+
+
 @pytest.mark.parametrize(
     "extra",
     [
@@ -2488,9 +2502,10 @@ def test_a_tag_or_node_shape_pyyaml_loads_specially_never_escapes_the_seam(
 ) -> None:
     # The self-pass on the third round: every PyYAML tag and node shape the seam's own node
     # walks might read differently from PyYAML's loader. Each loads or is refused by a check
-    # that means to refuse it. The crash wrapper is switched off, so a check that crashes
-    # fails this test with its own exception, whatever the wrapper's message says.
-    monkeypatch.setattr(cw, "refuse_check_failures", lambda _what: contextlib.nullcontext())
+    # that means to refuse it. The crash wrapper is replaced by one that raises a
+    # BaseException no seam handler catches, so a check that crashes fails this test, whatever
+    # the wrapper's message says and whatever handler sits around the check.
+    monkeypatch.setattr(cw, "refuse_check_failures", _crash_escapes)
     text = f"---\nname: a\ndescription: d\n{extra}\n---\nb\n"
     surfaces = [
         lambda: config_write_subagents.parse_frontmatter(text),
