@@ -22,6 +22,7 @@ would raise an unhandled 500 on a ``None`` runner.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
@@ -46,7 +47,7 @@ async def api_config_write_mcp_read(
     if scope not in ("project", "user", "local"):
         raise HTTPException(status_code=422, detail="scope must be 'project', 'user', or 'local'")
 
-    def _notes(project_dir) -> list[dict[str, str]]:
+    def _notes(project_dir: Path) -> list[dict[str, str]]:
         """Name what the reader converted on load (TASK-449.8), for display before a save."""
         return config_write_mcp.read_conversion_notes(
             scope,  # type: ignore[arg-type]

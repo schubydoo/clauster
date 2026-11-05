@@ -235,10 +235,20 @@ def entry_transport(entry: dict[str, Any]) -> str:
     a config file.
     """
     if "transport" in entry:
+        # Promise a reload-and-save fix only where _convert_legacy_entry makes one: a set
+        # `type`, or a plain transport word. Any other value is never converted, so saying
+        # "reload" would send the operator round the same refusal again.
+        value = entry["transport"]
+        convertible = "type" in entry or (isinstance(value, str) and value in _TRANSPORT_ALIASES)
+        hint = (
+            "The editor converts a stored 'transport' to 'type' when it loads the server, "
+            "so reload the server and save it"
+            if convertible
+            else "Remove 'transport' and set 'type' by hand"
+        )
         raise cw.InvalidCandidateError(
             "'transport' is not a Claude Code server field (Claude Code ignores it); use "
-            "'type'. The editor converts a stored 'transport' to 'type' when it loads the "
-            "server, so reload the server and save it"
+            f"'type'. {hint}"
         )
     if "type" not in entry:
         return "stdio"
@@ -528,7 +538,7 @@ def _convert_legacy_entry(entry: Any) -> tuple[Any, list[dict[str, str]]]:
             {
                 "field": "env",
                 "message": f"'env' on a remote server is removed ({_IGNORED_REASON}). "
-                f"It held {count} value(s), shown masked, which Claude Code never read",
+                f"It held {count} value(s), which Claude Code never read",
             }
         )
     return out, notes

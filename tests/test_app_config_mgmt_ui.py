@@ -259,7 +259,8 @@ def test_mcp_surface_present_when_enabled(write_config):
     # TASK-449.8: the convert-on-load notes, in the list and in the editor.
     assert 'data-test="cm-mcp-conversions"' in html
     assert 'data-test="cm-mcp-entry-conversions"' in html
-    assert "configMgmtMcpConversionsFor(" in html
+    # The template's own call (the bare name also matches the method definition).
+    assert "configMgmtMcpConversionsFor(configMgmt.mcp.name)" in html
 
 
 def test_mcp_delete_confirm_suppresses_approvals_confirms(write_config):

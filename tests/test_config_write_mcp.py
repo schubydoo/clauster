@@ -1851,7 +1851,7 @@ def test_conversion_note_counts_masked_env_and_carries_no_value(tmp_path: Path) 
         "project", claude_json=tmp_path / "cj", project_dir=tmp_path
     )
     assert note["field"] == "env"
-    assert "2 value(s), shown masked" in note["message"]
+    assert "2 value(s)" in note["message"]
     assert "never read" in note["message"]
     assert "FAKE4498" not in json.dumps(note)
 
@@ -1928,7 +1928,11 @@ def test_saving_one_converted_entry_fixes_it_and_leaves_siblings(tmp_path: Path)
     ("entry", "match"),
     [
         ({"transport": "sse", "url": "u"}, "converts a stored 'transport'"),
+        ({"type": "http", "transport": "x", "url": "u"}, "converts a stored 'transport'"),
         ({"type": "sse", "url": "u", "env": {"K": "v"}}, "drops a stored remote 'env'"),
+        # Never converted on load, so the message must not promise a reload fix.
+        ({"transport": "${T}", "url": "u"}, "set 'type' by hand"),
+        ({"transport": 5, "url": "u"}, "set 'type' by hand"),
     ],
 )
 def test_a_write_still_carrying_ignored_fields_explains_the_conversion(
@@ -1936,6 +1940,26 @@ def test_a_write_still_carrying_ignored_fields_explains_the_conversion(
 ) -> None:
     with pytest.raises(cw.InvalidCandidateError, match=match):
         mcp.validate_mcp_servers({"s": entry})
+
+
+def test_saving_converted_entries_fixes_user_and_local_scope(tmp_path: Path) -> None:
+    cj = tmp_path / "claude.json"
+    proj = tmp_path / "p"
+    legacy = {"transport": "http", "url": "https://x/mcp", "env": {"K": "v"}}
+    cj.write_text(
+        json.dumps(
+            {"mcpServers": {"u": legacy}, "projects": {str(proj): {"mcpServers": {"l": legacy}}}}
+        ),
+        encoding="utf-8",
+    )
+    user = mcp.read_user_servers(cj)
+    mcp.write_user_server_entry(cj, "u", user["u"], op="edit")
+    local = mcp.read_project_local_servers(cj, proj)
+    mcp.write_project_local_server_entry(cj, proj, "l", local["l"], op="edit")
+    data = json.loads(cj.read_text(encoding="utf-8"))
+    fixed = {"type": "http", "url": "https://x/mcp"}
+    assert data["mcpServers"]["u"] == fixed
+    assert data["projects"][str(proj)]["mcpServers"]["l"] == fixed
 
 
 def test_route_read_returns_conversion_notes(write_config, tmp_path, projects_root) -> None:
@@ -1956,3 +1980,20 @@ def test_route_read_returns_conversion_notes(write_config, tmp_path, projects_ro
     assert [(n["name"], n["field"]) for n in project.json()["conversions"]] == [("s", "transport")]
     assert [(n["name"], n["field"]) for n in user.json()["conversions"]] == [("u", "env")]
     assert local.json()["conversions"] == []
+
+
+def test_route_read_returns_local_scope_conversion_notes(
+    write_config, tmp_path, projects_root
+) -> None:
+    isolated = Path(os.environ["HOME"]) / ".claude.json"
+    key = str((projects_root / "alpha").resolve())
+    isolated.write_text(
+        json.dumps(
+            {"projects": {key: {"mcpServers": {"l": {"transport": "ws", "url": "wss://x"}}}}}
+        ),
+        encoding="utf-8",
+    )
+    with _client(write_config, tmp_path, _ON) as c:
+        local = c.get("/api/config-write/mcp", params={"scope": "local", "project": "alpha"})
+    assert local.json()["servers"]["l"] == {"type": "ws", "url": "wss://x"}
+    assert [(n["name"], n["field"]) for n in local.json()["conversions"]] == [("l", "transport")]

@@ -2752,7 +2752,10 @@
             m.approvals.loading = false;  // non-project has no approvals fetch to gate
             m.approvals.ready = true;     // nothing to load = resolved (panel is hidden anyway)
           }
-        } catch (e) { if (c.gen === myGen) c.error = "Failed to load MCP servers."; }
+        } catch (e) {
+          // Clear the notes too: a stale note could name servers from another project.
+          if (c.gen === myGen) { m.conversions = []; c.error = "Failed to load MCP servers."; }
+        }
       },
       configMgmtNewMcp() {
         const c = this.configMgmt, m = c.mcp;

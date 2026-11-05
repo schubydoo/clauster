@@ -580,7 +580,8 @@ def test_config_mgmt_mcp_converted_entry_shows_note_and_saves_unedited(
                         "url": "https://x.example/sse",
                         "headers": {"X-Api": "kept-4498"},
                         "env": {"K": "v"},
-                    }
+                    },
+                    "clean": {"command": "echo"},
                 }
             }
         ),
@@ -591,6 +592,14 @@ def test_config_mgmt_mcp_converted_entry_shows_note_and_saves_unedited(
     browser.select('[data-test="cm-project"]', "alpha")
     browser.click('[data-test="cm-surface-mcp"]')
     browser.expect_visible('[data-test="cm-mcp-conversions"]')
+    # The wrong-case guard for the empty-baseline trick: an unedited server that needed no
+    # conversion stays unsavable even with the confirm typed, and shows no editor note.
+    browser.click('[data-test="cm-mcp-edit-clean"]')
+    browser.expect_visible('[data-test="cm-mcp-editor"]')
+    browser.fill('[data-test="cm-mcp-confirm"]', "alpha")
+    browser.expect_disabled('[data-test="cm-mcp-save"]')
+    browser.expect_hidden('[data-test="cm-mcp-entry-conversions"]')
+    browser.click('[data-test="cm-mcp-cancel"]')
     browser.click('[data-test="cm-mcp-edit-legacy"]')
     browser.expect_visible('[data-test="cm-mcp-entry-conversions"]')
     browser.fill('[data-test="cm-mcp-confirm"]', "alpha")
