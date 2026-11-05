@@ -58,7 +58,7 @@ Interactive Session mode, this *recaps* the prior conversation rather than truly
   transcript** button that opens the session in the viewer and follows new turns,
   next to its **Open** link to the Claude web app.
 - In-dashboard editor for a project's Claude Code config surfaces — `CLAUDE.md`,
-  `settings.json` (env as friendly key/value rows or raw JSON), permissions (every
+  `settings.json` (every key as a typed row, or raw JSON), permissions (every
   documented `permissions` key as rows, or raw JSON, plus the auto mode classifier
   rules in `autoMode` at user scope), hooks (all five documented hook types:
   command, http, mcp_tool, prompt and agent, one hook per row, or raw JSON), MCP

@@ -313,6 +313,19 @@
     .cm-value-cap { max-width: 12rem; }
     .cm-input-cap { max-width: 16rem; }
     .cm-value-cap-wide { max-width: 20rem; }
+    /* TASK-271 settings key rows: phone-first, the key on its own line above the control
+       and the Remove button; from 576px the key takes a column of its own. */
+    .cm-settings-row {
+      display: grid; grid-template-columns: minmax(0, 1fr) auto;
+      gap: .25rem .5rem; align-items: center;
+      padding: .375rem 0; border-bottom: 1px solid var(--tblr-border-color);
+    }
+    .cm-settings-row-key { grid-column: 1 / -1; overflow-wrap: anywhere; }
+    .cm-settings-row-value { min-width: 0; }
+    @media (min-width: 576px) {
+      .cm-settings-row { grid-template-columns: minmax(8rem, 35%) minmax(0, 1fr) auto; }
+      .cm-settings-row-key { grid-column: auto; }
+    }
     /* TASK-249 skill visibility rows: the name takes the room the select leaves and
        wraps; min-width 0 lets a long unbroken name shrink instead of overflowing. */
     .cm-ov-name { flex: 1 1 10rem; min-width: 0; }
@@ -2077,7 +2090,7 @@
             <div data-test="cm-view-settings"
                  x-show="!configMgmt.loading && !configMgmtNeedsProject() && configMgmt.surface === 'settings'" x-cloak>
               <div class="d-flex justify-content-between align-items-center mb-1">
-                <label class="form-label small mb-0" for="cm-settings">settings.json — env / model / misc</label>
+                <label class="form-label small mb-0" for="cm-settings">settings.json — the keys no other tab edits</label>
                 <!-- #765: friendly env rows vs the raw-JSON escape hatch -->
                 <div class="btn-group btn-group-sm" role="group" aria-label="Settings editor mode">
                   <button type="button" class="btn" data-test="cm-settings-mode-rows"
@@ -2094,6 +2107,10 @@
               <!-- Shape error shows in either mode so a rejected 'Rows' click explains itself. -->
               <div class="alert alert-warning py-1 small" data-test="cm-settings-env-error" role="alert"
                    x-show="configMgmt.settings.envError" x-cloak x-text="configMgmt.settings.envError"></div>
+              <!-- TASK-271: a refused switch to Raw JSON says why here, above the rows, so a
+                   click on a phone (where the row warning can be off screen) explains itself. -->
+              <div class="alert alert-warning py-1 small" data-test="cm-settings-raw-blocked" role="alert"
+                   x-show="configMgmtSettingsRawBlocked()" x-cloak x-text="configMgmtSettingsRawBlocked()"></div>
               <!-- TASK-490: keys of this file that only Claude Desktop reads (the server lists them). -->
               <!-- text-info-emphasis: plain .alert-info text misses AA contrast (see the note
                    on the Plugins tab alerts). -->
@@ -2106,11 +2123,141 @@
                 view leaves them out.
               </div>
 
-              <!-- ROWS: friendly env key/value editor (#765) -->
+              <!-- ROWS (TASK-271): one row per top-level key of the file, typed by its JSON
+                   value, plus the env key/value table (#765). The server sends the editor
+                   type of each documented key and the tab that owns each carved key. -->
               <div x-show="configMgmt.settings.mode === 'rows'" data-test="cm-settings-rows" x-cloak>
+                <div class="text-secondary small mb-2" data-test="cm-settings-keys-empty"
+                     x-show="!configMgmtSettingsRows().length && !configMgmt.settings.envError" x-cloak>
+                  No keys in this file. Add one below.
+                </div>
+                <!-- A list, not a table: on a phone each key sits above its control (see
+                     .cm-settings-row), so a long key name never pushes the control off screen. -->
+                <ul class="list-unstyled mb-1" data-test="cm-settings-keys" aria-label="Settings keys"
+                    x-show="configMgmtSettingsRows().length" x-cloak>
+                    <template x-for="row in configMgmtSettingsRows()" :key="row.id">
+                      <li class="cm-settings-row" data-test="cm-settings-key-row" :data-key="row.key"
+                          :data-kind="row.kind" :data-row-id="row.id">
+                        <div class="cm-settings-row-key font-monospace small"
+                             :id="'cm-settings-key-name-' + row.id" x-text="row.key"></div>
+                        <div class="cm-settings-row-value">
+                          <template x-if="row.kind === 'boolean'">
+                            <label class="form-check form-switch mb-0">
+                              <input type="checkbox" role="switch" class="form-check-input" data-test="cm-settings-bool"
+                                     :id="'cm-settings-key-' + row.id" :name="'cm-settings-key-' + row.id"
+                                     :aria-labelledby="'cm-settings-key-name-' + row.id" x-model="row.value">
+                              <span class="form-check-label small font-monospace" aria-hidden="true"
+                                    x-text="row.value ? 'true' : 'false'"></span>
+                            </label>
+                          </template>
+                          <template x-if="row.kind === 'number'">
+                            <input type="number" step="any" inputmode="decimal"
+                                   class="form-control form-control-sm cm-input-cap" data-test="cm-settings-number"
+                                   {{ NO_AUTOFILL }} :id="'cm-settings-key-' + row.id" :name="'cm-settings-key-' + row.id"
+                                   :aria-labelledby="'cm-settings-key-name-' + row.id" x-model="row.value">
+                          </template>
+                          <template x-if="row.kind === 'enum'">
+                            <select class="form-select form-select-sm cm-input-cap" data-test="cm-settings-enum"
+                                    :id="'cm-settings-key-' + row.id" :name="'cm-settings-key-' + row.id"
+                                    :aria-labelledby="'cm-settings-key-name-' + row.id" x-model="row.value">
+                              <template x-for="opt in row.values" :key="opt">
+                                <!-- :selected, not x-model alone: the options arrive after
+                                     x-model sets the value (same fix as the hook rows). -->
+                                <option :value="opt" :selected="opt === row.value" x-text="opt"></option>
+                              </template>
+                            </select>
+                          </template>
+                          <template x-if="row.kind === 'string'">
+                            <input type="text" class="form-control form-control-sm font-monospace"
+                                   data-test="cm-settings-string" {{ NO_AUTOFILL }} spellcheck="false"
+                                   :id="'cm-settings-key-' + row.id" :name="'cm-settings-key-' + row.id"
+                                   :aria-labelledby="'cm-settings-key-name-' + row.id"
+                                   :title="row.masked ? 'Masked — leave as ******** to keep the stored value' : ''"
+                                   x-model="row.value" @input="configMgmtSettingsRowEdited(row, $event.target.value)">
+                          </template>
+                          <template x-if="row.kind === 'nested'">
+                            <div class="d-flex flex-wrap align-items-center gap-1" data-test="cm-settings-readonly">
+                              <code class="d-inline-block text-truncate cm-value-cap small" :title="row.preview"
+                                    x-text="row.preview"></code>
+                              <span class="text-secondary small" x-text="row.note"></span>
+                              <button type="button" class="btn btn-sm btn-ghost-primary" data-test="cm-settings-edit-raw"
+                                      :aria-label="'Edit in Raw JSON: ' + row.key"
+                                      @click="configMgmtSettingsEditRaw()">Edit in Raw JSON</button>
+                            </div>
+                          </template>
+                          <template x-if="row.kind === 'owned'">
+                            <div class="d-flex flex-wrap align-items-center gap-1" data-test="cm-settings-owned">
+                              <span class="small">Edited on the <span x-text="row.owner"></span> tab.</span>
+                              <button type="button" class="btn btn-sm btn-ghost-primary" data-test="cm-settings-owner-link"
+                                      x-show="configMgmtSurfaceKeyForLabel(row.owner)"
+                                      @click="configMgmtOpenSurfaceByLabel(row.owner)"
+                                      x-text="'Open the ' + row.owner + ' tab'"></button>
+                            </div>
+                          </template>
+                          <template x-if="row.kind === 'env'">
+                            <span class="text-secondary small" data-test="cm-settings-env-summary"
+                                  x-text="configMgmtEnvSummary()"></span>
+                          </template>
+                        </div>
+                        <div class="text-end">
+                          <button type="button" class="btn btn-sm btn-ghost-danger" data-test="cm-settings-key-remove"
+                                  x-show="row.kind !== 'env'" :aria-label="'Remove ' + row.key"
+                                  @click="configMgmtRemoveSettingsKey(row.id)">Remove</button>
+                        </div>
+                      </li>
+                    </template>
+                </ul>
+                <div class="alert alert-warning py-1 small" data-test="cm-settings-number-error" role="alert"
+                     x-show="configMgmtSettingsNumberWarning()" x-cloak x-text="configMgmtSettingsNumberWarning()"></div>
+
+                <!-- Add a key: a documented key from the server's list, or any name typed in. -->
+                <div class="mt-2 mb-3">
+                  <label class="form-label small mb-1" for="cm-settings-add-key">Add a key</label>
+                  <div class="input-group input-group-sm cm-value-cap-wide">
+                    <input type="text" class="form-control font-monospace" id="cm-settings-add-key"
+                           name="cm-settings-add-key" data-test="cm-settings-add-key" list="cm-settings-key-options"
+                           {{ NO_AUTOFILL }} spellcheck="false" placeholder="key name"
+                           aria-describedby="cm-settings-add-hint"
+                           x-model="configMgmt.settings.addKey" @keydown.enter.prevent="configMgmtAddSettingsKey()">
+                    <button type="button" class="btn btn-outline-primary" data-test="cm-settings-add-key-btn"
+                            @click="configMgmtAddSettingsKey()">Add key</button>
+                  </div>
+                  <datalist id="cm-settings-key-options">
+                    <template x-for="k in configMgmtSettingsKeyOptions()" :key="k">
+                      <option :value="k"></option>
+                    </template>
+                  </datalist>
+                  <div class="form-hint small mt-1" id="cm-settings-add-hint">
+                    The list holds the documented keys of one value (a switch, a number, a choice or
+                    text) that Claude Code reads at this scope. A key that is not on it gets a text box,
+                    and the server checks every key when you save.
+                  </div>
+                  {# Keep d-flex OFF this x-show element: Tabler's `.d-flex` is
+                     `display:flex !important`, which beats the inline `display:none` that
+                     x-show sets, so the empty alert would always show. The flex layout lives
+                     on the inner wrapper instead, as for the live-tail banners. #}
+                  <div class="alert alert-warning py-1 small mt-1 mb-0"
+                       data-test="cm-settings-add-error" role="alert"
+                       x-show="configMgmt.settings.addError" x-cloak>
+                    <div class="d-flex flex-wrap align-items-center gap-2">
+                      <span x-text="configMgmt.settings.addError"></span>
+                      <button type="button" class="btn btn-sm btn-ghost-primary" data-test="cm-settings-add-owner-link"
+                              x-show="configMgmtSurfaceKeyForLabel(configMgmt.settings.addOwner)" x-cloak
+                              @click="configMgmtOpenSurfaceByLabel(configMgmt.settings.addOwner)"
+                              x-text="'Open the ' + configMgmt.settings.addOwner + ' tab'"></button>
+                      <button type="button" class="btn btn-sm btn-ghost-primary" data-test="cm-settings-add-raw"
+                              x-show="configMgmt.settings.addRaw" x-cloak
+                              @click="configMgmtSettingsEditRaw()">Edit in Raw JSON</button>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- env: the key/value table (#765), shown while env is a text-to-text object -->
+                <div x-show="configMgmt.settings.envEditable" x-cloak>
+                <div class="form-label small mb-1"><code>env</code> — environment variables</div>
                 <div class="text-secondary small mb-2" data-test="cm-settings-env-empty"
                      x-show="!configMgmt.settings.envRows.length && !configMgmt.settings.envError" x-cloak>
-                  No <code>env</code> variables at this scope. Add one below, or switch to Raw JSON for other keys.
+                  No <code>env</code> variables at this scope. Add one below.
                 </div>
                 <table class="table table-sm mb-1" data-test="cm-settings-env-table"
                        x-show="configMgmt.settings.envRows.length" x-cloak>
@@ -2147,8 +2294,10 @@
                      x-show="configMgmtEnvRowsWarning()" x-cloak x-text="configMgmtEnvRowsWarning()"></div>
                 <button type="button" class="btn btn-sm btn-outline-primary" data-test="cm-settings-env-add"
                         @click="configMgmtAddEnvRow()">Add variable</button>
+                </div>
                 <div class="form-hint small mt-2">
-                  Only <code>env</code> is shown as rows. <code>model</code> and other keys live under Raw JSON.
+                  Each key shows by the JSON type of its value: a switch, a number, a list of the documented
+                  values, or text. Objects and lists are read-only here. Edit them in Raw JSON.
                   Masked values show as <code>********</code> — leave the mask to keep the stored value.
                 </div>
               </div>
@@ -2179,6 +2328,8 @@
                 <div class="mt-2" x-show="configMgmt.settings.showEffective" x-cloak>
                   <div class="alert alert-danger py-1 small" x-show="configMgmt.settings.effectiveError" x-cloak
                        x-text="configMgmt.settings.effectiveError"></div>
+                  <!-- Three columns: scroll sideways inside the modal on a phone, not the view. -->
+                  <div class="table-responsive">
                   <table class="table table-sm mb-0" data-test="cm-effective-table"
                          x-show="configMgmt.settings.effective" x-cloak>
                     <thead><tr><th>Key</th><th>Value</th><th>From</th></tr></thead>
@@ -2193,6 +2344,7 @@
                       </template>
                     </tbody>
                   </table>
+                  </div>
                 </div>
               </div>
             </div>

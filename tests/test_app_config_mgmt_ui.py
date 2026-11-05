@@ -198,8 +198,45 @@ def test_settings_env_rows_editor_present_when_enabled(write_config):
     assert 'data-test="cm-settings-text"' in html
     # The friendly editor + its projection helpers are wired in the Alpine script.
     assert "configMgmtSettingsMode(" in html
-    assert "_settingsEnvSerialized(" in html
+    assert "_settingsRowsSerialized(" in html
     assert 'const CONFIG_MASK = "********"' in html
+
+
+def test_settings_typed_rows_are_wired(write_config):
+    # TASK-271: every top-level key is a typed row, and the editor types and owned-key
+    # tabs come from the read payload, not from a list kept in the script.
+    html = _html(write_config, _ON)
+    for hook in (
+        "cm-settings-keys",
+        "cm-settings-key-row",
+        "cm-settings-bool",
+        "cm-settings-number",
+        "cm-settings-enum",
+        "cm-settings-string",
+        "cm-settings-readonly",
+        "cm-settings-edit-raw",
+        "cm-settings-owned",
+        "cm-settings-owner-link",
+        "cm-settings-add-key",
+        "cm-settings-add-key-btn",
+        "cm-settings-key-remove",
+        "cm-settings-number-error",
+    ):
+        assert f'data-test="{hook}"' in html, hook
+    assert "s.keyTypes = isMap(d.key_types)" in html
+    assert "s.ownedKeys = isMap(d.owned_keys)" in html
+    # No copy of the server's value sets in the page: a select value comes from the payload.
+    assert '"fullscreen"' not in html
+
+
+def test_settings_owned_key_tabs_are_surface_labels(write_config):
+    # The owner link matches the server's tab name against a surface label; a tab name
+    # with no surface would hide the link, so every carved key must name a real tab.
+    from clauster.config_write_settings import OWNED_KEY_TABS
+
+    html = _html(write_config, _ON)
+    for tab in set(OWNED_KEY_TABS.values()):
+        assert f'{{ key: "{tab.lower()}", label: "{tab}" }}' in html, tab
 
 
 def test_settings_desktop_only_note_is_wired(write_config):

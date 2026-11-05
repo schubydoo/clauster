@@ -41,6 +41,12 @@ reads at every scope but with one value it reads only at some
 This is a scope rule, not a key allowlist: every other key still passes through as
 opaque JSON.
 
+**Row types (TASK-271).** :data:`ROW_KEY_TYPES` gives each documented top-level key the
+editor that the tab's Rows mode shows for it (a toggle, a number, a select or text, or
+Raw JSON for an object or a list), and the read payload carries it
+(:func:`row_key_catalog`) so the browser keeps no copy. It is a display hint and refuses
+nothing.
+
 **Redaction decision (#772, applying the #822 lesson) -- flagged for maintainer
 review.** :func:`~clauster.config_write.redact_secrets` only masks a value whose
 *key* -- or an **ancestor** key, since a credential-shaped key marks its whole
@@ -343,6 +349,206 @@ DESKTOP_ONLY_KEYS: dict[str, str] = {
     "sshConfigs": "user or managed settings",
     "sshHostAllowlist": "managed settings",
 }
+
+#: The value type of each documented top-level key that a User, Project or Local settings
+#: file can set, from the Type line of each key in
+#: https://code.claude.com/docs/en/settings-reference (read 2026-11-05, TASK-271). A tuple
+#: lists the preset strings the key takes. The Settings tab's Rows mode uses it to pick an
+#: editor for a key that the operator adds (a toggle, a number, a select or a text box, or
+#: Raw JSON for an ``object`` or a ``list``) and to offer a select for a loaded string that
+#: is one of the listed values. It is a display hint, NOT an allowlist: a key missing here
+#: is a text row and passes through as opaque JSON, a loaded value is shown by its own JSON
+#: type, and nothing here refuses a write. A key that only managed settings or
+#: ``~/.claude.json`` hold, a Desktop-only key and a carved key (:data:`OWNED_KEY_TABS`)
+#: are left out, as is ``env``, which has its own table. Two tuples are not the whole set:
+#: ``theme`` also takes ``custom:<slug>``, and ``timeFormat`` takes any pattern that holds a
+#: ``%``. A select cannot list those, so such a value shows as text, and a new one is typed
+#: in Raw JSON.
+ROW_KEY_TYPES: dict[str, str | tuple[str, ...]] = {
+    # Model and output
+    "advisorModel": "string",
+    "alwaysThinkingEnabled": "boolean",
+    "effortLevel": ("low", "medium", "high", "xhigh"),
+    "enforceAvailableModels": "boolean",
+    "fastMode": "boolean",
+    "fastModePerSessionOptIn": "boolean",
+    "language": "string",
+    "maxEffortLevel": ("low", "medium", "high", "xhigh", "max"),
+    "model": "string",
+    "outputStyle": "string",
+    "promptCacheTtl": ("5m", "1h"),
+    "showThinkingSummaries": "boolean",
+    "subagentPromptCacheTtl": ("5m", "1h"),
+    "switchModelsOnFlag": "boolean",
+    "ultracode": "boolean",
+    # Permissions and auto mode
+    "disableAutoMode": ("disable",),
+    "skipAutoPermissionPrompt": "boolean",
+    "skipDangerousModePermissionPrompt": "boolean",
+    "useAutoModeDuringPlan": "boolean",
+    # Context, memory and files
+    "autoCompactEnabled": "boolean",
+    "autoCompactWindow": "number",
+    "autoMemoryDirectory": "string",
+    "autoMemoryEnabled": "boolean",
+    "bashOutputMaxChars": "number",
+    "fileCheckpointingEnabled": "boolean",
+    "idleCompaction": "boolean",
+    "plansDirectory": "string",
+    "skillListingBudgetFraction": "number",
+    "skillListingMaxDescChars": "number",
+    # Interface and terminal
+    "askUserQuestionTimeout": ("60s", "5m", "10m", "never"),
+    "autoContinueAtUsageLimit": "boolean",
+    "autoScrollEnabled": "boolean",
+    "axScreenReader": "boolean",
+    "bashEditDiffEnabled": "boolean",
+    "defaultShell": ("bash", "powershell"),
+    "dialogExpiry": ("60s", "5m", "10m", "never"),
+    "editorMode": ("normal", "vim"),
+    "emojiCompletionEnabled": "boolean",
+    "keybindingFlavor": ("classic", "readline"),
+    "maxProseWidth": "number",
+    "prefersReducedMotion": "boolean",
+    "promptSuggestionEnabled": "boolean",
+    "respectGitignore": "boolean",
+    "respondToBashCommands": "boolean",
+    "showClearContextOnPlanAccept": "boolean",
+    "showTurnDuration": "boolean",
+    "spinnerTipsEnabled": "boolean",
+    "syntaxHighlightingDisabled": "boolean",
+    "terminalProgressBarEnabled": "boolean",
+    "terminalTitleFromRename": "boolean",
+    "theme": (
+        "auto",
+        "dark",
+        "light",
+        "dark-daltonized",
+        "light-daltonized",
+        "dark-ansi",
+        "light-ansi",
+    ),
+    "timeFormat": ("auto", "12-hour", "24-hour", "24-hour-utc"),
+    "timeZone": "string",
+    "tui": ("default", "fullscreen"),
+    "verbose": "boolean",
+    "viewMode": ("default", "verbose", "focus"),
+    "voiceEnabled": "boolean",
+    "wheelScrollAccelerationEnabled": "boolean",
+    # Git
+    "includeCoAuthoredBy": "boolean",
+    "includeGitInstructions": "boolean",
+    "prUrlTemplate": "string",
+    # Hooks, workflows and skills
+    "disableAllHooks": "boolean",
+    "disableBundledSkills": "boolean",
+    "disableSkillShellExecution": "boolean",
+    "disableWorkflows": "boolean",
+    "enableWorkflows": "boolean",
+    "syncClaudeAiPlugins": "boolean",
+    "syncClaudeAiSkills": "boolean",
+    "workflowKeywordTriggerEnabled": "boolean",
+    "workflowSizeGuideline": ("unrestricted", "small", "medium", "large"),
+    # MCP
+    "disableClaudeAiConnectors": "boolean",
+    "enableAllProjectMcpServers": "boolean",
+    # Agents and teams
+    "agent": "string",
+    "crossSessionInbound": ("accept", "hold", "refuse"),
+    "disableAgentView": "boolean",
+    "isolatePeerMachines": "boolean",
+    "processWrapper": "string",
+    "teammateMode": ("in-process", "auto", "tmux", "iterm2"),
+    # Remote control and notifications
+    "agentPushNotifEnabled": "boolean",
+    "awaySummaryEnabled": "boolean",
+    "disableArtifact": "boolean",
+    "disableDeepLinkRegistration": ("disable",),
+    "disableRemoteControl": "boolean",
+    "enableArtifact": "boolean",
+    "inputNeededNotifEnabled": "boolean",
+    "preferredNotifChannel": (
+        "auto",
+        "terminal_bell",
+        "iterm2",
+        "iterm2_with_bell",
+        "kitty",
+        "ghostty",
+        "notifications_disabled",
+    ),
+    "remoteControlAtStartup": "boolean",
+    # Authentication and providers (each helper is masked on read, see SECRET_HELPER_KEYS)
+    "apiKeyHelper": "string",
+    "awsAuthRefresh": "string",
+    "awsCredentialExport": "string",
+    "forceLoginGatewayUrl": "string",
+    "forceLoginMethod": ("claudeai", "console", "gateway"),
+    "forceLoginOrgUUID": "string",
+    "gcpAuthRefresh": "string",
+    "otelHeadersHelper": "string",
+    # Updates, cleanup and network
+    "autoUpdatesChannel": ("latest", "stable"),
+    "cleanupPeriodDays": "number",
+    "desktopSessionCleanupPeriodDays": "number",
+    "feedbackDrafts": ("notify", "quiet", "off"),
+    "feedbackSurveyRate": "number",
+    "minimumVersion": "string",
+    "skipWebFetchPreflight": "boolean",
+    # Objects and lists: a read-only row, edited in Raw JSON
+    "allowedHttpHookUrls": "list",
+    "allowedMcpServers": "list",
+    "appendPlugins": "list",
+    "attribution": "object",
+    "availableModels": "list",
+    "claudeMdExcludes": "list",
+    "companyAnnouncements": "list",
+    "deniedMcpServers": "list",
+    "disabledMcpjsonServers": "list",
+    "enabledMcpjsonServers": "list",
+    "extraKnownMarketplaces": "object",
+    "fallbackModel": "list",
+    "fileSuggestion": "object",
+    "footerLinksRegexes": "list",
+    "httpHookAllowedEnvVars": "list",
+    "modelOverrides": "object",
+    "modelPicker": "object",
+    "modelSettings": "object",
+    "pluginConfigs": "object",
+    "prependPlugins": "list",
+    "sandbox": "object",
+    "skillOverrides": "object",
+    "spellcheck": "object",
+    "spinnerTipsOverride": "object",
+    "spinnerVerbs": "object",
+    "sshHostCommands": "list",
+    "statusLine": "object",
+    "subagentStatusLine": "object",
+    "vimInsertModeRemaps": "object",
+    "voice": "object",
+    "worktree": "object",
+}
+
+
+def row_key_catalog(scope: cw.Scope) -> dict[str, dict[str, Any]]:
+    """Return the Rows-mode type of each :data:`ROW_KEY_TYPES` key, for the read payload.
+
+    Each entry is ``{"type": "boolean" | "number" | "string" | "object" | "list"}`` or
+    ``{"type": "enum", "values": [...]}``, plus ``"here"``: whether Claude Code reads the
+    key at ``scope`` (:data:`SCOPE_LIMITED_KEYS`). The tab offers only the ``here`` keys of
+    one value (not an object or a list) when the operator adds a row. It never refuses a
+    key itself: a save that names a key Claude Code ignores at ``scope`` gets the refusal
+    of :func:`reject_scope_ignored`.
+    """
+    catalog: dict[str, dict[str, Any]] = {}
+    for key, kind in ROW_KEY_TYPES.items():
+        entry: dict[str, Any] = (
+            {"type": "enum", "values": list(kind)} if isinstance(kind, tuple) else {"type": kind}
+        )
+        limited = SCOPE_LIMITED_KEYS.get(key)
+        entry["here"] = limited is None or scope in _READ_FROM[limited][0]
+        catalog[key] = entry
+    return catalog
+
 
 #: The file each scope writes, for a refusal message.
 _SCOPE_LABEL: dict[str, str] = {
