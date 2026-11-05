@@ -1932,7 +1932,7 @@ on; the User scope additionally requires <code>config_write.allow_user_scope</co
 </tr>
 <tr>
 <td>MCP</td>
-<td>MCP server definitions (add / edit / delete), plus per-server <strong>approvals</strong> for committed <code>.mcp.json</code> servers — Approve / Reject each, or reset all choices behind a typed confirm.</td>
+<td>MCP server definitions (add / edit / delete), as fields or raw JSON, plus per-server <strong>approvals</strong> for committed <code>.mcp.json</code> servers — Approve / Reject each, or reset all choices behind a typed confirm.</td>
 </tr>
 <tr>
 <td>Subagents</td>
@@ -1949,8 +1949,37 @@ on; the User scope additionally requires <code>config_write.allow_user_scope</co
 </tbody>
 </table>
 <h3 id="mcp-server-definitions">MCP server definitions<a class="headerlink" href="#mcp-server-definitions" title="Permanent link">&para;</a></h3>
-<p>The MCP tab edits each server as one JSON object, in the same shape as an
-<code>mcpServers</code> entry in <code>.mcp.json</code>. The editor accepts each field that the
+<p>The MCP tab edits each server in one of two modes. Use the <strong>Fields</strong> and
+<strong>Raw JSON</strong> buttons above the definition to switch between them:</p>
+<ul>
+<li><strong>Fields</strong> is the default. Select the <code>type</code> first. The form then shows the
+  fields for that type: <code>command</code>, <code>args</code> and <code>env</code> for <code>stdio</code>, or <code>url</code>,
+  <code>headers</code> and <code>headersHelper</code> for <code>http</code>, <code>streamable-http</code>, <code>sse</code> and <code>ws</code>.
+  The form also shows the <code>oauth</code> fields (<code>clientId</code>, <code>callbackPort</code>,
+  <code>authServerMetadataUrl</code> and <code>scopes</code>) for <code>http</code>, <code>streamable-http</code> and <code>sse</code>,
+  and <code>timeout</code> and <code>alwaysLoad</code> for every type. Clauster builds the JSON
+  entry from the form, so you do not write JSON for a typical server.</li>
+<li><strong>Raw JSON</strong> shows the server as one JSON object, in the same shape as an
+  <code>mcpServers</code> entry in <code>.mcp.json</code>, without the server name around it. Use it
+  for the fields that the form does not show, such as <code>role</code>, <code>tools</code> or
+  <code>oauth.xaa</code>. A server that has such a field opens in Raw JSON, and a note
+  names the fields. A value with a line break, for example a <code>python -c</code>
+  script in <code>args</code>, also opens in Raw JSON, because each field is one line. So
+  does an <code>env</code> or header name that is empty or has spaces around it, because
+  the form trims each name.</li>
+</ul>
+<p>The switch from Fields to Raw JSON is refused while an <code>env</code> or header row has
+a value but no name, or shares its name with another row. One entry cannot
+hold these rows, so the switch would lose values. A note names the rows. The
+same rows also keep <strong>Save</strong> off.</p>
+<p>In both modes, a masked value shows as <code>********</code>. If you leave the mask in
+place, the save keeps the stored value. If you change the <code>type</code> or a URL of a
+remote server, or the <code>command</code> or <code>args</code> of a stdio server, the save cannot
+keep a masked value (see the list below). The save also cannot keep a mask that
+has no stored value behind it, for example in a row that you renamed. In both
+cases, the editor names each masked value and keeps <strong>Save</strong> off until you
+type each of these values again.</p>
+<p>The editor accepts each field that the
 <a href="https://code.claude.com/docs/en/mcp">Claude Code MCP documentation</a> lists for
 a transport, and each field that the installed <code>claude</code> CLI reads and keeps
 for that transport even when the documentation does not list it:</p>
