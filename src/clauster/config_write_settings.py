@@ -58,7 +58,9 @@ response" as follows:
 * **Every** ``env`` value is masked on read, unconditionally -- not just the
   key/value-shaped subset :func:`~clauster.config_write.redact_secrets` would
   catch. The read view shows ``{"MY_VAR": "********"}`` for every entry,
-  secret-looking or not (see :func:`_redact_misc`).
+  secret-looking or not (see :func:`_redact_misc`). A hand-edited ``env`` of
+  another shape (a string, a list) is masked whole, and resending that mask is
+  refused, because ``env`` must be an object.
 * Every credential helper (:data:`SECRET_HELPER_KEYS`: ``apiKeyHelper``,
   ``awsAuthRefresh``, ``awsCredentialExport``, ``gcpAuthRefresh``,
   ``otelHeadersHelper``, ``proxyAuthHelper``) is masked whole, unconditionally:
@@ -487,7 +489,8 @@ def _redact_misc(misc: dict[str, Any]) -> dict[str, Any]:
 
     Runs the normal structural :func:`~clauster.config_write.redact_secrets`
     heuristic over every key, then unconditionally masks every ``env`` value on
-    top -- the #822-lesson override described in the module docstring -- masks each
+    top (an ``env`` that is not an object is masked whole) -- the #822-lesson
+    override described in the module docstring -- masks each
     :data:`SECRET_HELPER_KEYS` value whole, and
     redacts ``extraKnownMarketplaces`` (and its ``additionalMarketplaces`` alias)
     with :func:`clauster.config_write_plugins.redact_named_map`.

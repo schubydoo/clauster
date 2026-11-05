@@ -113,7 +113,8 @@ def test_otel_headers_helper_is_masked_although_its_name_is_not_secret_shaped(
 
 
 @pytest.mark.parametrize(
-    "env", ["ANTHROPIC_API_KEY=sk-ant-4492 DEPLOY=abc", ["DEPLOY=abc", "TOKEN=sk-live-4492"]]
+    "env",
+    ["ANTHROPIC_API_KEY=sk-ant-4492 DEPLOY=abc", ["DEPLOY=abc", "TOKEN=sk-live-4492"], 4492],
 )
 def test_env_of_another_shape_is_masked_whole_in_the_view_and_merge(
     tmp_path: Path, env: Any
@@ -122,7 +123,7 @@ def test_env_of_another_shape_is_masked_whole_in_the_view_and_merge(
     _seed(cw.project_settings_path(tmp_path), {"env": env})
     view, h = cws.read_project_settings(tmp_path)
     assert view == {"env": S}
-    assert "abc" not in json.dumps(view)
+    assert "abc" not in json.dumps(view) and "4492" not in json.dumps(view)
     merged = cws._compute_effective_settings(user_misc={}, project_misc=view, local_misc={})
     assert merged["env"]["value"] == S
     # Resending the mask fails closed (env must be an object); the file is unchanged.

@@ -347,7 +347,10 @@ No other tab writes these keys in a settings file, so the Settings tab shows the
 - `disabledPlugins`. Claude Code 2.1.318 does not read this key. If a file
   still has it, remove it here.
 
-Every `env` value shows as `********`. The value of each credential helper shows
+Every `env` value shows as `********`. If a hand-edited `env` is not an object,
+it shows as one `********`, and the save is refused (`422`, "'env' must be an
+object") until you replace it with an object in Raw JSON. The value of each
+credential helper shows
 as `********` too, because the command can hold the credential that it prints.
 The helpers are `apiKeyHelper`, `awsAuthRefresh`, `awsCredentialExport`,
 `gcpAuthRefresh`, `otelHeadersHelper` and `proxyAuthHelper`. Other values show
