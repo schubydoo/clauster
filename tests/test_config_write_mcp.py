@@ -2448,14 +2448,26 @@ def test_route_read_takes_entries_hash_and_notes_from_one_read(
         assert body["hash"] == cw.hash_bytes(original)  # the hash of the bytes it showed
     else:
         assert body["hash"] is None
+    if scope == "user":
+        assert "project" not in body  # the user-scope response names no project
+    else:
+        assert body["project"] == "alpha"
 
 
 def test_read_servers_view_matches_the_individual_readers(tmp_path: Path) -> None:
     (tmp_path / ".mcp.json").write_text(json.dumps(_LEGACY_MAP), encoding="utf-8")
-    servers, file_hash, notes = mcp.read_servers_view(
-        "project", claude_json=tmp_path / "cj", project_dir=tmp_path
+    cj = tmp_path / "claude.json"
+    proj = tmp_path / "p"
+    cj.write_text(
+        json.dumps({**_LEGACY_MAP, "projects": {str(proj): {"mcpServers": {"l": _LEGACY_LOCAL}}}}),
+        encoding="utf-8",
     )
-    assert (servers, file_hash) == mcp.read_project_servers(tmp_path)
-    assert notes == mcp.read_conversion_notes(
-        "project", claude_json=tmp_path / "cj", project_dir=tmp_path
-    )
+    project = mcp.read_servers_view("project", claude_json=cj, project_dir=tmp_path)
+    assert project[:2] == mcp.read_project_servers(tmp_path)
+    user = mcp.read_servers_view("user", claude_json=cj, project_dir=proj)
+    assert user[0] == mcp.read_user_servers(cj) and user[1] is None
+    local = mcp.read_servers_view("local", claude_json=cj, project_dir=proj)
+    assert local[0] == mcp.read_project_local_servers(cj, proj) and local[1] is None
+    for scope, view, dir_ in (("project", project, tmp_path), ("user", user, proj)):
+        assert view[2] == mcp.read_conversion_notes(scope, claude_json=cj, project_dir=dir_)
+    assert [(n["name"], n["field"]) for n in local[2]] == [("l", "transport")]

@@ -72,7 +72,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from . import config_write as cw
 
@@ -610,11 +610,11 @@ def read_project_servers(project_dir: Path) -> tuple[dict[str, Any], str]:
     they ever leave this function, so the browser never reads a stored secret. A
     missing file reads as an empty server map.
     """
-    # claude_json is ignored for project scope; the project's own path is passed as filler.
+    # `claude_json` is unused at project scope, which always returns a hash.
     servers, file_hash, _notes = read_servers_view(
-        "project", claude_json=project_dir, project_dir=project_dir
+        "project", claude_json=project_dir / ".mcp.json", project_dir=project_dir
     )
-    return servers, file_hash if file_hash is not None else cw.hash_bytes(b"")
+    return servers, cast(str, file_hash)
 
 
 def _read_bytes_or_empty(path: Path) -> bytes:
