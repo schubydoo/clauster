@@ -495,10 +495,14 @@ not edit them.
 
 ### Plugins and marketplaces
 
-The Plugins tab runs the `claude plugin` command on the host for every change,
-with the scope you chose. Clauster always passes `--scope`, so one change never
-reaches a second settings file. The commands, flags and settings below were
-checked against Claude Code 2.1.318.
+The Plugins tab runs the `claude plugin` command on the host for every change.
+For enable, disable, install, update, uninstall, and marketplace add and
+remove, Clauster passes `--scope` with the scope you chose, so one change never
+reaches a second settings file. The marketplace Update button is the exception:
+`claude plugin marketplace update` takes no `--scope`, because a marketplace's
+checkout is shared by every scope and project. An update therefore refreshes
+that marketplace for every project on the host, not only the one you selected.
+The commands, flags and settings below were checked against Claude Code 2.1.318.
 
 - **Install and update never accept a marketplace command for you.** Some
   marketplace entries install a plugin by running a command, or fetch it with a
@@ -530,11 +534,12 @@ checked against Claude Code 2.1.318.
   edit an element of a list (such as a `settings` source's `plugins`) that holds
   one. Type the real values again, then save.
 - **A masked credential stays bound to its marketplace URL.** If you change any
-  `url` in a marketplace entry on the Settings tab, Clauster refuses the save
-  (`422`) while that entry still holds a masked `headers` value or
-  `headersHelper`. Any change to the text counts, including the letter case of
-  the host or an added `:443`. This stops the stored credential from going to a
-  new host. Type the credential again, then save.
+  `url` in a marketplace entry on the Settings tab, or remove one, Clauster
+  refuses the save (`422`) while that entry still holds any masked value, for
+  example a `headers` value or a `headersHelper`. Any change to the text counts,
+  including the letter case of the host or an added `:443`. This stops the
+  stored credential from going to a new host. Type the credential again, then
+  save.
 - **The `additionalMarketplaces` spelling is read too.** Claude Code 2.1.232 and
   later accept it as another name for `extraKnownMarketplaces`. When a file sets
   both, the canonical key wins, as it does in Claude Code.
