@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 import yaml
 from fastapi.testclient import TestClient
+from httpx import Response
 
 from clauster import config_write as cw
 from clauster import config_write_skills as sk
@@ -827,6 +828,8 @@ def test_validate_skill_overrides_accepts_empty() -> None:
         {"__proto__": "on"},
         {"good-name": "bogus-value"},
         {"good-name": True},
+        {"good-name": ["off"]},  # unhashable: must not leak a bare TypeError
+        {"good-name": {}},
         {5: "on"},
     ],
 )
@@ -1386,6 +1389,108 @@ def test_route_overrides_write_missing_project_dir_is_404(
             },
         )
         assert resp.status_code == 404
+
+
+# --- the payload the Skills tab's visibility panel sends (TASK-249) ----------------------
+#
+# The panel PUTs the WHOLE map it shows: every row that has a value, and no row set to
+# "No override". So a removed row is a key missing from the payload, and the last
+# removal sends {}. These pin that the route replaces the map (never merges), keeps the
+# other settings keys, and answers a refused key with the message the panel shows.
+
+
+def _overrides_put(c: TestClient, overrides: dict, file_hash: str | None) -> Response:
+    return c.put(
+        _OVERRIDES_URL,
+        json={
+            "scope": "project",
+            "project": "alpha",
+            "confirm": "alpha",
+            "overrides": overrides,
+            "hash": file_hash,
+        },
+    )
+
+
+def test_route_overrides_full_map_replace_drops_a_removed_key(
+    write_config, tmp_path, projects_root
+) -> None:
+    settings = projects_root / "alpha" / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(
+        json.dumps({"model": "opus", "skillOverrides": {"gone": "off", "kept": "name-only"}})
+    )
+    with _client(write_config, tmp_path, _ON) as c:
+        h0 = c.get(f"{_OVERRIDES_URL}?project=alpha").json()["hash"]
+        assert _overrides_put(c, {"kept": "off"}, h0).status_code == 200
+        assert c.get(f"{_OVERRIDES_URL}?project=alpha").json()["overrides"] == {"kept": "off"}
+    on_disk = json.loads(settings.read_text(encoding="utf-8"))
+    assert on_disk["model"] == "opus"  # a sibling settings key survives the replace
+
+
+def test_route_overrides_empty_map_clears_every_override(
+    write_config, tmp_path, projects_root
+) -> None:
+    settings = projects_root / "alpha" / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"skillOverrides": {"a": "off"}}))
+    with _client(write_config, tmp_path, _ON) as c:
+        h0 = c.get(f"{_OVERRIDES_URL}?project=alpha").json()["hash"]
+        assert _overrides_put(c, {}, h0).status_code == 200
+        assert c.get(f"{_OVERRIDES_URL}?project=alpha").json()["overrides"] == {}
+
+
+def test_route_overrides_accepts_a_name_the_cli_shows(
+    write_config, tmp_path, projects_root
+) -> None:
+    # A frontmatter name, a bundled skill and a plugin skill: none is a folder name.
+    names = {"My Deploy Skill": "off", "doctor": "name-only", "anthropic-skills:pdf": "on"}
+    with _client(write_config, tmp_path, _ON) as c:
+        h0 = c.get(f"{_OVERRIDES_URL}?project=alpha").json()["hash"]
+        assert _overrides_put(c, names, h0).status_code == 200
+        assert c.get(f"{_OVERRIDES_URL}?project=alpha").json()["overrides"] == names
+
+
+@pytest.mark.parametrize("bad", ["", "__proto__", " lead", "two  spaces", "a<b"])
+def test_route_overrides_refused_key_names_it_and_writes_nothing(
+    write_config, tmp_path, projects_root, bad
+) -> None:
+    # json.dumps keeps "__proto__" as an own key, exactly as the panel's
+    # Object.fromEntries payload does, so the backend rule is what refuses it.
+    with _client(write_config, tmp_path, _ON) as c:
+        h0 = c.get(f"{_OVERRIDES_URL}?project=alpha").json()["hash"]
+        resp = _overrides_put(c, {"ok-skill": "off", bad: "off"}, h0)
+        assert resp.status_code == 422
+        assert resp.json()["detail"] == f"skillOverrides has an invalid skill name: {bad!r}"
+    assert not (projects_root / "alpha" / ".claude" / "settings.json").exists()
+
+
+@pytest.mark.parametrize("bad", [[], {}, ["off"], None, 1, True])
+def test_route_overrides_non_string_value_names_the_key(
+    write_config, tmp_path, projects_root, bad
+) -> None:
+    # The panel sends a stored value it cannot show back unchanged, so the backend must
+    # refuse a hand-edited list or object with a message that names the key, not a bare
+    # "unhashable type" from the membership test.
+    with _client(write_config, tmp_path, _ON) as c:
+        h0 = c.get(f"{_OVERRIDES_URL}?project=alpha").json()["hash"]
+        resp = _overrides_put(c, {"odd": bad}, h0)
+        assert resp.status_code == 422
+        assert resp.json()["detail"].startswith("skillOverrides['odd'] must be one of ")
+    assert not (projects_root / "alpha" / ".claude" / "settings.json").exists()
+
+
+def test_route_overrides_read_returns_an_unlisted_and_an_unknown_value_as_stored(
+    write_config, tmp_path, projects_root
+) -> None:
+    # The panel shows every stored key, also one that matches no skill folder and one
+    # whose value Claude Code does not know, so the read must hand both back unchanged.
+    settings = projects_root / "alpha" / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"skillOverrides": {"orphan": "off", "odd": "maybe"}}))
+    with _client(write_config, tmp_path, _ON) as c:
+        read = c.get(f"{_OVERRIDES_URL}?project=alpha").json()
+    assert read["overrides"] == {"orphan": "off", "odd": "maybe"}
 
 
 # --- plugin-owned content rejected end to end at the route -------------------------------

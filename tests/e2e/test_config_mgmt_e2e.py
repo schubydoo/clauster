@@ -12,6 +12,7 @@ unit-tested; this proves the wired Alpine flow round-trips to a real running ser
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -1052,6 +1053,393 @@ def test_config_mgmt_skill_edit_and_delete_round_trip(
     browser.click('[data-test="cm-skill-delete-go"]')
     browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
     assert not skill_md.parent.exists(), "expected the deleted skill directory to be gone"
+
+
+# --- skill visibility (TASK-249): the Skills tab's `skillOverrides` panel ---------------
+
+
+def _projects_root(server: Server) -> Path:
+    cfg_path = Path(server.state_dir).parent / "clauster.yml"
+    return Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+
+
+def _seed_skill(project_dir: Path, name: str) -> None:
+    skill_md = project_dir / ".claude" / "skills" / name / "SKILL.md"
+    skill_md.parent.mkdir(parents=True, exist_ok=True)
+    skill_md.write_text(f"---\ndescription: {name} skill\n---\nDo it.\n", encoding="utf-8")
+
+
+def _open_skill_visibility(browser: AgentBrowser, server: Server) -> None:
+    """Open the Skills tab for alpha at Project scope and wait for the visibility rows."""
+    _open_modal(browser, server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-skills"]')
+    browser.expect_visible('[data-test="cm-skill-ov-add-name"]')
+
+
+def _save_skill_visibility(browser: AgentBrowser, token: str) -> None:
+    browser.expect_visible('[data-test="cm-skill-ov-confirm"]')
+    browser.fill('[data-test="cm-skill-ov-confirm"]', token)
+    browser.click('[data-test="cm-skill-ov-save"]')
+
+
+def _expect_focused(browser: AgentBrowser, element_id: str, timeout_s: float = 5.0) -> None:
+    """Wait until the element with ``element_id`` holds keyboard focus (set on $nextTick)."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if browser.eval_json("document.activeElement && document.activeElement.id") == element_id:
+            return
+        time.sleep(0.1)
+    raise AssertionError(f"timed out waiting for #{element_id} to have focus")
+
+
+def _add_skill_override(browser: AgentBrowser, name: str, value: str) -> None:
+    browser.fill('[data-test="cm-skill-ov-add-name"]', name)
+    browser.select('[data-test="cm-skill-ov-add-value"]', value)
+    browser.click('[data-test="cm-skill-ov-add"]')
+    browser.expect_visible(f'[data-test="cm-skill-ov-row-{name}"]')
+
+
+def test_config_mgmt_skill_visibility_project_round_trip(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """List, set, add and remove skill overrides at Project scope; the map lands on disk."""
+    alpha = _projects_root(config_mgmt_server) / "alpha"
+    _seed_skill(alpha, "greeter")
+    settings = alpha / ".claude" / "settings.json"
+    settings.write_text(
+        json.dumps({"model": "opus", "skillOverrides": {"orphan": "off"}}), encoding="utf-8"
+    )
+
+    _open_skill_visibility(browser, config_mgmt_server)
+    # A listed folder with no override, and a stored key that matches no folder.
+    browser.expect_value('[data-test="cm-skill-ov-greeter"]', "")
+    browser.expect_hidden('[data-test="cm-skill-ov-unlisted-greeter"]')
+    browser.expect_value('[data-test="cm-skill-ov-orphan"]', "off")
+    browser.expect_visible('[data-test="cm-skill-ov-unlisted-orphan"]')
+    browser.expect_hidden('[data-test="cm-skill-ov-confirm"]')  # nothing changed yet
+
+    browser.select('[data-test="cm-skill-ov-greeter"]', "name-only")
+    browser.select('[data-test="cm-skill-ov-orphan"]', "")  # No override: remove the key
+    _add_skill_override(browser, "doctor", "off")  # a bundled skill: no folder
+    # Add disables itself once the name clears, so focus must return to the name box.
+    _expect_focused(browser, "cm-skill-ov-add-name")
+    _save_skill_visibility(browser, "alpha")
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+    # Save hid itself once nothing was dirty, so focus moves to the name box, not the body.
+    _expect_focused(browser, "cm-skill-ov-add-name")
+
+    on_disk = json.loads(settings.read_text(encoding="utf-8"))
+    assert on_disk["skillOverrides"] == {"greeter": "name-only", "doctor": "off"}
+    assert on_disk["model"] == "opus"
+    # The reload drops the removed key's row and keeps the added one.
+    browser.expect_hidden('[data-test="cm-skill-ov-row-orphan"]')
+    browser.expect_value('[data-test="cm-skill-ov-doctor"]', "off")
+    browser.expect_hidden('[data-test="cm-skill-ov-confirm"]')
+
+
+def test_config_mgmt_skill_visibility_local_and_user_scope(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Local scope writes settings.local.json from the project's rows; User scope writes ~."""
+    alpha = _projects_root(config_mgmt_server) / "alpha"
+    home = Path(config_mgmt_server.state_dir).parent / "home"
+    _seed_skill(alpha, "greeter")
+
+    _open_skill_visibility(browser, config_mgmt_server)
+    browser.click('[data-test="cm-scope-local"]')
+    browser.expect_visible('[data-test="cm-skill-local-note"]')
+    browser.expect_hidden('[data-test="cm-skill-new"]')  # no local skills folder
+    browser.expect_value('[data-test="cm-skill-ov-greeter"]', "")
+    browser.select('[data-test="cm-skill-ov-greeter"]', "off")
+    _save_skill_visibility(browser, "alpha (local)")
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+    local = json.loads((alpha / ".claude" / "settings.local.json").read_text(encoding="utf-8"))
+    assert local["skillOverrides"] == {"greeter": "off"}
+    assert not (alpha / ".claude" / "settings.json").exists()  # Project scope untouched
+
+    _switch_to_user_scope(browser)
+    browser.expect_hidden('[data-test="cm-skill-local-note"]')
+    browser.expect_visible('[data-test="cm-skill-new"]')
+    browser.expect_visible('[data-test="cm-skill-ov-empty"]')  # no user skills, no keys
+    _add_skill_override(browser, "anthropic-skills:pdf", "user-invocable-only")
+    _save_skill_visibility(browser, "USER SCOPE")
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+    user = json.loads((home / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    assert user["skillOverrides"] == {"anthropic-skills:pdf": "user-invocable-only"}
+
+
+def test_config_mgmt_skill_visibility_refused_key_shows_backend_message(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A key the backend refuses shows its message, and nothing is written."""
+    settings = _projects_root(config_mgmt_server) / "alpha" / ".claude" / "settings.json"
+
+    _open_skill_visibility(browser, config_mgmt_server)
+    _add_skill_override(browser, "a<b", "off")  # Claude Code cannot show `<` in a name
+    _save_skill_visibility(browser, "alpha")
+    browser.expect_text(
+        '[data-test="cm-error"]', "skillOverrides has an invalid skill name: 'a<b'"
+    )
+    assert not settings.exists()
+
+    # `__proto__` reaches the backend as an own key, so its rule refuses it by name too.
+    browser.select('[data-test="cm-skill-ov-a<b"]', "")
+    _add_skill_override(browser, "__proto__", "off")
+    _save_skill_visibility(browser, "alpha")
+    browser.expect_text(
+        '[data-test="cm-error"]', "skillOverrides has an invalid skill name: '__proto__'"
+    )
+    assert not settings.exists()
+
+
+def test_config_mgmt_skill_visibility_stale_hash_is_refused(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A settings file changed after the load is not overwritten; the conflict shows."""
+    settings = _projects_root(config_mgmt_server) / "alpha" / ".claude" / "settings.json"
+    _open_skill_visibility(browser, config_mgmt_server)
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps({"skillOverrides": {"elsewhere": "on"}}), encoding="utf-8")
+
+    _add_skill_override(browser, "doctor", "off")
+    _save_skill_visibility(browser, "alpha")
+    browser.expect_text('[data-test="cm-error"]', "Changed on disk")
+    assert json.loads(settings.read_text(encoding="utf-8")) == {
+        "skillOverrides": {"elsewhere": "on"}
+    }
+
+
+# Holds the response of the skill-visibility PUT in the page until `__release249()` runs.
+# The request itself goes out at once, so the write lands on disk while the page still
+# waits: exactly the window in which an operator can click Edit on a skill.
+_HOLD_VISIBILITY_PUT = """(() => {
+  window.__hold249 = new Promise(r => { window.__release249 = r; });
+  const real = window.fetch;
+  window.fetch = function (url, opts) {
+    const p = real.apply(this, arguments);
+    const isPut = opts && opts.method === "PUT" && String(url).includes("/skills/overrides");
+    return isPut ? window.__hold249.then(() => p) : p;
+  };
+  return true;
+})()"""
+
+
+def test_config_mgmt_skill_visibility_save_lands_across_editor_navigation(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Edit clicked during a visibility save does not drop the saved hash and baseline."""
+    alpha = _projects_root(config_mgmt_server) / "alpha"
+    _seed_skill(alpha, "greeter")
+    settings = alpha / ".claude" / "settings.json"
+
+    _open_skill_visibility(browser, config_mgmt_server)
+    browser.select('[data-test="cm-skill-ov-greeter"]', "off")
+    assert browser.eval_json(_HOLD_VISIBILITY_PUT) is True
+    _save_skill_visibility(browser, "alpha")
+
+    # The write lands while the page still waits for the response.
+    deadline = time.monotonic() + 10
+    while not (settings.exists() and "greeter" in settings.read_text(encoding="utf-8")):
+        assert time.monotonic() < deadline, "the held save never reached the server"
+        time.sleep(0.1)
+    browser.click('[data-test="cm-skill-edit-greeter"]')  # bumps the editor's gen
+    browser.expect_visible('[data-test="cm-skill-editor"]')
+    browser.eval_json("(() => { window.__release249(); return true; })()")
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+    browser.click('[data-test="cm-skill-cancel"]')
+
+    # Back in the list: the saved value is the baseline, so nothing reads as unsaved.
+    browser.expect_value('[data-test="cm-skill-ov-greeter"]', "off")
+    browser.expect_hidden('[data-test="cm-skill-ov-changed-greeter"]')
+    browser.expect_hidden('[data-test="cm-skill-ov-confirm"]')
+
+    # A second save uses the new hash, so it is not refused as changed on disk.
+    browser.select('[data-test="cm-skill-ov-greeter"]', "name-only")
+    _save_skill_visibility(browser, "alpha")
+    # "Saved." may still show from the first save, so wait on the outcome instead: the
+    # confirm hides only once the reload makes the new value the baseline.
+    browser.expect_hidden('[data-test="cm-skill-ov-confirm"]', timeout_ms=_SAVE_TIMEOUT)
+    browser.expect_hidden('[data-test="cm-error"]')
+    on_disk = json.loads(settings.read_text(encoding="utf-8"))
+    assert on_disk["skillOverrides"] == {"greeter": "name-only"}
+
+
+def _start_held_visibility_save(browser: AgentBrowser, settings: Path) -> None:
+    """Save greeter=off with the response held, and wait until the write is on disk."""
+    browser.select('[data-test="cm-skill-ov-greeter"]', "off")
+    assert browser.eval_json(_HOLD_VISIBILITY_PUT) is True
+    _save_skill_visibility(browser, "alpha")
+    deadline = time.monotonic() + 10
+    while not (settings.exists() and "greeter" in settings.read_text(encoding="utf-8")):
+        assert time.monotonic() < deadline, "the held save never reached the server"
+        time.sleep(0.1)
+
+
+_MODAL_SCROLL_TOP = (
+    "document.querySelector('[data-test=\"configmgmt-modal\"] .modal-body').scrollTop"
+)
+
+
+def _release_held_save(browser: AgentBrowser) -> None:
+    browser.eval_json("(() => { window.__release249(); return true; })()")
+
+
+def test_config_mgmt_skill_visibility_save_does_not_take_focus_from_delete(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A save that lands while a Delete confirm is open leaves focus in that confirm."""
+    alpha = _projects_root(config_mgmt_server) / "alpha"
+    _seed_skill(alpha, "greeter")
+    settings = alpha / ".claude" / "settings.json"
+
+    _open_skill_visibility(browser, config_mgmt_server)
+    # A short window, so the modal body scrolls: the banner and the confirm are not both
+    # in view, and a wrong "Saved." reveal would move scrollTop.
+    browser.set_viewport(1280, 560)
+    _start_held_visibility_save(browser, settings)
+    browser.scroll_into_view('[data-test="cm-skill-del-greeter"]')
+    browser.click('[data-test="cm-skill-del-greeter"]')
+    browser.expect_visible('[data-test="cm-skill-delete-confirm"]')
+    _expect_focused(browser, "cm-skill-delete-input")
+    time.sleep(0.5)  # let the confirm's own smooth scroll finish before measuring
+    scroll_before = browser.eval_json(_MODAL_SCROLL_TOP)
+    _release_held_save(browser)
+    # The save landed: its reload made "off" the baseline.
+    browser.expect_hidden('[data-test="cm-skill-ov-changed-greeter"]', timeout_ms=_SAVE_TIMEOUT)
+    browser.expect_value('[data-test="cm-skill-ov-greeter"]', "off")
+    time.sleep(0.5)  # past the frames in which a wrong focus move or scroll would happen
+    _expect_focused(browser, "cm-skill-delete-input")
+    # Nor does the "Saved." reveal scroll the operator up to the banner, away from the
+    # confirm. The panel's reload can still shift the layout (scroll anchoring moves
+    # scrollTop down a little), so the pin is the direction: never back toward the top.
+    assert browser.eval_json(_MODAL_SCROLL_TOP) >= scroll_before
+
+
+# Holds the response of the FIRST skills-list GET (`/api/config-write/skills?`, not the
+# file or overrides routes) until `__releaseList249()` runs. Later list GETs pass.
+_HOLD_FIRST_LIST_GET = """(() => {
+  window.__holdList249 = new Promise(r => { window.__releaseList249 = r; });
+  let armed = true;
+  const real = window.fetch;
+  window.fetch = function (url, opts) {
+    const p = real.apply(this, arguments);
+    const isGet = !opts || !opts.method || opts.method === "GET";
+    if (armed && isGet && String(url).includes("/api/config-write/skills?")) {
+      armed = false;
+      return window.__holdList249.then(() => p);
+    }
+    return p;
+  };
+  return true;
+})()"""
+
+
+def test_config_mgmt_skill_list_reload_dropped_after_scope_switch(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A SKILL.md save's list reload that lands after a scope switch does not show."""
+    alpha = _projects_root(config_mgmt_server) / "alpha"
+    _open_skill_visibility(browser, config_mgmt_server)
+    browser.click('[data-test="cm-skill-new"]')
+    browser.expect_visible('[data-test="cm-skill-editor"]')
+    browser.fill('[data-test="cm-skill-name"]', "fresh")
+    browser.fill('[data-test="cm-skill-content"]', "---\ndescription: new\n---\nGo.\n")
+    browser.fill('[data-test="cm-skill-confirm"]', "alpha")
+    assert browser.eval_json(_HOLD_FIRST_LIST_GET) is True
+    browser.click('[data-test="cm-skill-save"]')  # the write lands; its list reload is held
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+    assert (alpha / ".claude" / "skills" / "fresh" / "SKILL.md").exists()
+
+    browser.click('[data-test="cm-scope-local"]')  # no folder list at Local scope
+    browser.expect_visible('[data-test="cm-skill-local-note"]')
+    browser.expect_visible('[data-test="cm-skill-ov-row-fresh"]')  # named by project folders
+    browser.eval_json("(() => { window.__releaseList249(); return true; })()")
+    deadline = time.monotonic() + 1.5
+    while time.monotonic() < deadline:  # the stale Project list would appear in this window
+        assert not browser.is_visible('[data-test="cm-skills-table"]'), "stale list shown"
+        time.sleep(0.1)
+
+
+def test_config_mgmt_skill_visibility_save_dropped_after_surface_switch(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A save that lands after a switch to another tab shows nothing on that tab."""
+    alpha = _projects_root(config_mgmt_server) / "alpha"
+    _seed_skill(alpha, "greeter")
+    settings = alpha / ".claude" / "settings.json"
+
+    _open_skill_visibility(browser, config_mgmt_server)
+    _start_held_visibility_save(browser, settings)
+    browser.click('[data-test="cm-surface-claude-md"]')
+    browser.expect_visible('[data-test="cm-view-claude-md"]')
+    _release_held_save(browser)
+    deadline = time.monotonic() + 1.5
+    while time.monotonic() < deadline:  # a late "Saved." would appear within this window
+        assert not browser.is_visible('[data-test="cm-saved"]'), "a dropped save showed Saved."
+        time.sleep(0.1)
+
+    # Back on Skills, a fresh load shows the value on disk as the baseline.
+    browser.click('[data-test="cm-surface-skills"]')
+    browser.expect_value('[data-test="cm-skill-ov-greeter"]', "off")
+    browser.expect_hidden('[data-test="cm-skill-ov-changed-greeter"]')
+
+
+def test_config_mgmt_skill_save_keeps_unsaved_visibility_choices(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A SKILL.md save reloads the folder list but keeps unsaved visibility choices."""
+    _open_skill_visibility(browser, config_mgmt_server)
+    _add_skill_override(browser, "doctor", "off")
+
+    browser.click('[data-test="cm-skill-new"]')
+    browser.expect_visible('[data-test="cm-skill-editor"]')
+    browser.fill('[data-test="cm-skill-name"]', "fresh")
+    browser.fill('[data-test="cm-skill-content"]', "---\ndescription: new\n---\nGo.\n")
+    browser.fill('[data-test="cm-skill-confirm"]', "alpha")
+    browser.click('[data-test="cm-skill-save"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+    # The new folder gets a row, and the unsaved "doctor" choice is still there to save.
+    browser.expect_value('[data-test="cm-skill-ov-fresh"]', "")
+    browser.expect_value('[data-test="cm-skill-ov-doctor"]', "off")
+    browser.expect_visible('[data-test="cm-skill-ov-confirm"]')
+
+
+def test_config_mgmt_skill_visibility_fits_a_phone_width(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """At 320 px the visibility panel has no horizontal overflow, also with a long name.
+
+    A stored value that Claude Code does not read shows as its own "Not valid" choice.
+    """
+    alpha = _projects_root(config_mgmt_server) / "alpha"
+    _seed_skill(alpha, "a-rather-long-skill-folder-name-that-must-wrap")
+    (alpha / ".claude" / "settings.json").write_text(
+        json.dumps({"skillOverrides": {"orphan": "off", "odd": "maybe"}}), encoding="utf-8"
+    )
+    _open_skill_visibility(browser, config_mgmt_server)
+    browser.expect_value('[data-test="cm-skill-ov-odd"]', "?")
+    browser.expect_text('[data-test="cm-skill-ov-odd"]', 'Not valid: "maybe"')
+    browser.set_viewport(320, 900)  # the session closes after the test, so no restore
+    browser.select(
+        '[data-test="cm-skill-ov-a-rather-long-skill-folder-name-that-must-wrap"]',
+        "user-invocable-only",
+    )
+    browser.expect_visible('[data-test="cm-skill-ov-confirm"]')
+    overflow = browser.eval_json(
+        "(() => { const sels = ['[data-test=\"configmgmt-modal\"] .modal-body',"
+        " '[data-test=\"cm-skill-ov\"]'];"
+        " return sels.map(s => { const e = document.querySelector(s);"
+        " return e ? e.scrollWidth - e.clientWidth : null; }); })()"
+    )
+    assert overflow == [0, 0], overflow
+
+    # The "Not valid" value is sent unchanged, so the backend refuses the save by its key.
+    _save_skill_visibility(browser, "alpha")
+    browser.expect_text('[data-test="cm-error"]', "skillOverrides['odd'] must be one of")
 
 
 def test_config_mgmt_hooks_save_round_trip(

@@ -313,6 +313,14 @@
     .cm-value-cap { max-width: 12rem; }
     .cm-input-cap { max-width: 16rem; }
     .cm-value-cap-wide { max-width: 20rem; }
+    /* TASK-249 skill visibility rows: the name takes the room the select leaves and
+       wraps; min-width 0 lets a long unbroken name shrink instead of overflowing. */
+    .cm-ov-name { flex: 1 1 10rem; min-width: 0; }
+    .cm-keep-spaces { white-space: pre-wrap; }
+    .cm-ov-tag {
+      font-size: .75rem; padding: 0 .35rem;
+      border: 1px solid var(--tblr-border-active-color); border-radius: var(--tblr-border-radius);
+    }
 
     /* #846: login-shepherd mode picker — a segmented toggle, not Tabler's default
        .form-selectgroup. That component's unselected .form-selectgroup-label shares
@@ -3013,12 +3021,23 @@
                  x-show="!configMgmt.loading && !configMgmtNeedsProject() && configMgmt.surface === 'skills'" x-cloak>
               <!-- LIST mode -->
               <div x-show="!configMgmt.skills.editing" x-cloak>
-                <div class="d-flex justify-content-between align-items-center mb-2">
+                {# TASK-249: Local scope has no skills folder, only the visibility map below.
+                   The folder list and its actions show at User and Project scope. #}
+                <div class="text-secondary small mb-2" data-test="cm-skill-local-note"
+                     x-show="configMgmt.scope === 'local'" x-cloak>
+                  Claude Code has no local skills folder. At Local scope, this tab sets skill
+                  visibility for you in this project only.
+                </div>
+                {# :class, not x-show: .d-flex is display:flex !important, which beats the
+                   inline display:none that x-show sets. #}
+                <div class="justify-content-between align-items-center mb-2"
+                     :class="configMgmt.scope === 'local' ? 'd-none' : 'd-flex'">
                   <div class="form-label small mb-0">Skills</div>
                   <button type="button" class="btn btn-sm btn-outline-primary" data-test="cm-skill-new"
                           @click="configMgmtNewSkill()">New skill</button>
                 </div>
-                <div class="text-secondary small" x-show="configMgmt.skills.list.length === 0" x-cloak>
+                <div class="text-secondary small"
+                     x-show="configMgmt.scope !== 'local' && configMgmt.skills.list.length === 0" x-cloak>
                   No skills at this scope.
                 </div>
                 <table class="table table-sm mb-0" data-test="cm-skills-table"
@@ -3061,6 +3080,110 @@
                     <button type="button" class="btn btn-sm btn-danger" data-test="cm-skill-delete-go"
                             :disabled="!configMgmtCanDeleteSkill()" @click="configMgmtDeleteSkill()">Delete</button>
                     <button type="button" class="btn btn-sm" @click="configMgmtCancelDeleteSkill()">Cancel</button>
+                  </div>
+                </div>
+
+                <!-- Skill visibility (TASK-249): the scope's `skillOverrides` map -->
+                <div class="mt-3" data-test="cm-skill-ov">
+                  <div class="form-label small mb-1">Skill visibility</div>
+                  <div class="form-hint small mb-2" id="cm-skill-ov-hint">
+                    Sets <code>skillOverrides</code> in this scope's settings file.
+                    <code>name-only</code> lists a skill without its description.
+                    <code>user-invocable-only</code> hides it from Claude but keeps its
+                    <code>/</code> command. <code>off</code> hides it from both. Pick
+                    <em>No override</em> to remove a key.
+                    <span x-text="configMgmtSkillOvRowsHint()"></span>
+                  </div>
+                  <div class="text-secondary small" x-show="configMgmt.skills.ov.loading" x-cloak>Loading…</div>
+                  <!-- Fail closed: a map that did not load shows its reason, never empty rows
+                       whose save would replace the real map. Always mounted, with the text
+                       swapped, so the live region announces the failure. -->
+                  <div class="text-danger small" data-test="cm-skill-ov-unavailable" role="status"
+                       x-text="configMgmtSkillOvUnavailable()"></div>
+                  <div x-show="!configMgmt.skills.ov.loading && configMgmt.skills.ov.ready" x-cloak>
+                    <div class="text-secondary small mb-2" data-test="cm-skill-ov-empty"
+                         x-show="configMgmt.skills.ov.rows.length === 0" x-cloak>
+                      No skills and no overrides at this scope.
+                    </div>
+                    {# A wrapping list, not a table: at phone width the select drops under
+                       its name instead of pushing the panel wider than the screen. #}
+                    {# role="list": Safari drops the list role from a list-unstyled <ul>. #}
+                    <ul class="list-unstyled mb-2" data-test="cm-skill-ov-table" role="list"
+                        aria-label="Skill visibility: name and override"
+                        x-show="configMgmt.skills.ov.rows.length" x-cloak>
+                      <template x-for="(row, idx) in configMgmt.skills.ov.rows" :key="'ov-' + row.name">
+                        <li class="d-flex flex-wrap align-items-center justify-content-between gap-1 py-1 border-bottom"
+                            :data-test="'cm-skill-ov-row-' + row.name">
+                          <div class="text-break cm-ov-name">
+                            {# pre-wrap: a refused name such as "two  spaces" must show both
+                               spaces, or the operator cannot see why it is refused. #}
+                            <span class="font-monospace cm-keep-spaces" x-text="row.name"></span>
+                            {# Body-colour tags, not tinted badges: the -lt badges fall short
+                               of 4.5:1 at this size. #}
+                            <span x-show="!row.listed" x-cloak
+                                  :data-test="'cm-skill-ov-unlisted-' + row.name"
+                                  class="cm-ov-tag ms-1"
+                                  title="No skill folder here has this name. It can still be a bundled, plugin or frontmatter name.">no skill folder</span>
+                            <span x-show="configMgmtSkillOvChanged(row)" x-cloak
+                                  :data-test="'cm-skill-ov-changed-' + row.name"
+                                  class="cm-ov-tag ms-1 fst-italic">changed</span>
+                          </div>
+                          <select class="form-select form-select-sm w-auto mw-100"
+                                  :data-test="'cm-skill-ov-' + row.name" :name="'cm-skill-ov-' + row.name"
+                                  :aria-label="'Visibility for ' + row.name"
+                                  :aria-describedby="idx === 0 ? 'cm-skill-ov-hint' : null"
+                                  :disabled="configMgmt.skills.ov.busy" x-model="row.value">
+                            <option value="">No override</option>
+                            <option value="on">on</option>
+                            <option value="name-only">name-only</option>
+                            <option value="user-invocable-only">user-invocable-only</option>
+                            <option value="off">off</option>
+                            {# A stored value Claude Code does not read. x-if adds the option
+                               after x-model set the value, so :selected picks it as it renders. #}
+                            <template x-if="row.unknown">
+                              <option value="?" :selected="row.value === '?'"
+                                      x-text="configMgmtSkillOvRawLabel(row)"></option>
+                            </template>
+                          </select>
+                        </li>
+                      </template>
+                    </ul>
+                    <label class="form-label small mb-1" for="cm-skill-ov-add-name">Add a skill name</label>
+                    <div class="d-flex gap-2 align-items-center flex-wrap mb-2">
+                      <input type="text" class="form-control form-control-sm cm-input-cap" id="cm-skill-ov-add-name"
+                             name="cm-skill-ov-add-name" data-test="cm-skill-ov-add-name"
+                             {{ NO_AUTOFILL }} spellcheck="false" placeholder="skill name"
+                             :disabled="configMgmt.skills.ov.busy"
+                             x-model="configMgmt.skills.ov.addName" @keydown.enter.prevent="configMgmtAddSkillOv($event)">
+                      <select class="form-select form-select-sm w-auto" data-test="cm-skill-ov-add-value"
+                              id="cm-skill-ov-add-value" name="cm-skill-ov-add-value"
+                              aria-label="Visibility for the added name" :disabled="configMgmt.skills.ov.busy"
+                              x-model="configMgmt.skills.ov.addValue">
+                        <option value="on">on</option>
+                        <option value="name-only">name-only</option>
+                        <option value="user-invocable-only">user-invocable-only</option>
+                        <option value="off">off</option>
+                      </select>
+                      <button type="button" class="btn btn-sm btn-outline-primary" data-test="cm-skill-ov-add"
+                              :disabled="!configMgmtCanAddSkillOv()" @click="configMgmtAddSkillOv()">Add</button>
+                    </div>
+                    <!-- Hide this confirm while a delete is armed, so only one scope-token
+                         "Type <scope>" input is visible at a time (#1043). -->
+                    <div x-show="configMgmtSkillOvDirty() && !configMgmt.skills.deletingName" x-cloak>
+                      <label class="form-label small mb-1" for="cm-skill-ov-confirm">
+                        Type <code x-text="configMgmtConfirmToken()"></code> to save skill visibility
+                      </label>
+                      <div class="d-flex gap-2 align-items-center flex-wrap">
+                        <input type="text" class="form-control form-control-sm cm-input-cap" id="cm-skill-ov-confirm"
+                               name="cm-skill-ov-confirm" data-test="cm-skill-ov-confirm"
+                               {{ NO_AUTOFILL }} spellcheck="false" x-model="configMgmt.skills.ov.confirm"
+                               :placeholder="configMgmtConfirmToken()">
+                        <button type="button" class="btn btn-sm btn-primary" data-test="cm-skill-ov-save"
+                                :disabled="!configMgmtCanSaveSkillOv()" @click="configMgmtSaveSkillOv()">
+                          <span x-text="configMgmt.skills.ov.busy ? 'Saving…' : 'Save visibility'">Save visibility</span>
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>

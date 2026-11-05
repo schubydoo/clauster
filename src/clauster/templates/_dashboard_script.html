@@ -338,6 +338,19 @@
           // from the file on disk, so the editor counts as dirty until it is saved.
           converted: "",
           confirm: "", busy: false, ops: 0, deletingName: "",
+          listId: 0,  // guards the folder-list fetch (see _loadSkills)
+          // Visibility (TASK-249): the `skillOverrides` settings key, all three scopes. One
+          // row per listed skill folder and per key already in the file, so a key that
+          // matches no folder stays visible and removable. `stored` is the map as read;
+          // `listed` the folder names (the project's at local scope, which has no folder).
+          // `ready` stays false until the map loads, so a failed read shows a notice, not
+          // empty rows whose save would clear real overrides. Own `confirm`/`ops` so a
+          // skill save and a visibility save never share a gate.
+          ov: {
+            rows: [], stored: {}, listed: [], hash: null, orig: "",
+            ready: false, loading: false, error: "",
+            addName: "", addValue: "on", confirm: "", busy: false, ops: 0, loadId: 0,
+          },
         },
         // Plugins + marketplaces (#773 slice F): a CLI-driven list surface, all three
         // scopes. Two panels — installed plugins (enable/disable/update/uninstall +
@@ -381,7 +394,12 @@
       // surfaces (subagents, later MCP/skills/plugins) drive their own inline controls.
       configMgmtDocSurfaces: ["claude-md", "settings", "permissions", "hooks"],
       // Surfaces WITHOUT a project-local scope (Claude Code has no local dir for them).
-      configMgmtNoLocalSurfaces: ["subagents", "skills"],
+      // Skills has a Local scope for its visibility map only (TASK-249): settings.local.json
+      // holds `skillOverrides`, but Claude Code has no local skills folder.
+      configMgmtNoLocalSurfaces: ["subagents"],
+      // The four `skillOverrides` values, used to tell a known stored value from one Claude
+      // Code does not read. The backend's SKILL_OVERRIDE_VALUES decides what a save takes.
+      configMgmtSkillOvValues: ["on", "name-only", "user-invocable-only", "off"],
       // --- read-only transcript viewer (#431) ---
       // order: "desc" (newest-first, default) | "asc" (oldest-first) — sort toggle (#612).
       // q: in-message substring filter; queryTooShort drives the "keep typing" state (#612).
@@ -1768,6 +1786,8 @@
         // `loading` blocks reopen (openConfigMgmt bails on `c.loading`) and a stranded
         // `saving` keeps Save disabled. The gen bump already voids the stale response.
         c.loading = false; c.saving = false;
+        // A late skills list or visibility result must not land after close.
+        c.skills.ov.loadId += 1; c.skills.listId += 1;
         document.body.style.overflow = "";  // release the scroll lock
         if (c.trigger && c.trigger.focus) c.trigger.focus();
       },
@@ -1820,7 +1840,7 @@
         c.mcp.editing = false; c.mcp.deletingName = ""; c.mcp.confirm = "";
         c.mcp.approvals.confirm = ""; c.mcp.approvals.resetConfirm = "";
         c.skills.editing = false; c.skills.deletingName = ""; c.skills.confirm = "";
-        c.skills.converted = "";
+        c.skills.converted = ""; c.skills.ov.confirm = "";
         c.plugins.confirm = ""; c.plugins.installConfirm = "";
         // Some surfaces have no local scope; drop out of local before loading one.
         if (c.scope === "local" && this.configMgmtNoLocalSurfaces.includes(key)) {
@@ -1855,6 +1875,10 @@
       async configMgmtReload() {
         const c = this.configMgmt;
         c.saved = false; c.error = "";
+        // Every scope, project or surface change lands here: void the skill-visibility
+        // map load and save in flight (they ignore c.gen, see _loadSkillOverrides). Before
+        // the early return, so a switch to a scope with no project voids them too.
+        c.skills.ov.loadId += 1; c.skills.listId += 1;
         if (this.configMgmtNeedsProject()) { c.loading = false; return; }
         c.gen = (c.gen || 0) + 1;
         const myGen = c.gen;
@@ -1875,7 +1899,7 @@
         if (surface === "hooks") return this._loadHooks(myGen);
         if (surface === "subagents") return this._loadSubagents(myGen);
         if (surface === "mcp") return this._loadMcp(myGen);
-        if (surface === "skills") return this._loadSkills(myGen);
+        if (surface === "skills") return this._loadSkills(false);
         if (surface === "plugins") return this._loadPlugins(myGen);
         return this._loadJsonSurface(surface, myGen);  // defensive default (all surfaces routed above)
       },
@@ -3519,18 +3543,259 @@
       // v1 writes SKILL.md alone (files = {"SKILL.md": content}); the backend's extra
       // script-confirm token is only required when other files are present, so it is
       // never sent here. Same ops-counter concurrency idiom as subagents.
-      async _loadSkills(myGen) {
-        const c = this.configMgmt;
+      // At Local scope the folder list is the project's (Local has no skills folder): it
+      // only names the visibility rows, so `list` stays empty and no folder action shows.
+      // `keepOvEdits` is set by a skill save or delete: that write never touches
+      // settings.json, so unsaved visibility choices survive it instead of being reloaded.
+      // The list fetch is guarded by `listId`, not `c.gen`, for the reason the map load is:
+      // a SKILL.md save or delete reloads the list while the folder actions stay clickable,
+      // and Edit, New skill or Delete in that window bump gen without changing the scope.
+      async _loadSkills(keepOvEdits) {
+        const c = this.configMgmt, local = c.scope === "local";
+        const listId = (c.skills.listId += 1);
         c.skills.editing = false; c.skills.deletingName = ""; c.skills.converted = "";
+        // No rows and no earlier scope's error until this scope's map loads. The loadId bump
+        // voids a map fetch still in flight for the previous scope or project.
+        if (!keepOvEdits) {
+          const ov = c.skills.ov;
+          ov.ready = false; ov.error = ""; ov.loading = false; ov.loadId += 1;
+        }
+        // A failed folder list still loads the map, with no folder rows, so stored keys
+        // stay visible and removable; the list's error shows in the banner.
+        let names = [];
         try {
-          const res = await fetch(ROOT + "/api/config-write/skills?" + this._configMgmtQuery());
-          if (c.gen !== myGen) return;
+          const q = this._configMgmtQuery(local ? { scope: "project" } : undefined);
+          const res = await fetch(ROOT + "/api/config-write/skills?" + q);
+          if (c.skills.listId !== listId) return;
           if (this._authExpired(res)) return;
-          if (!res.ok) { c.skills.list = []; c.error = this._configMgmtLoadErr(res); return; }
+          if (!res.ok) { c.skills.list = []; c.error = this._configMgmtLoadErr(res); }
+          else {
+            const d = await res.json();
+            if (c.skills.listId !== listId) return;
+            const skills = d.skills || [];
+            c.skills.list = local ? [] : skills;
+            names = skills.map(sk => sk.name);
+          }
+        } catch (e) {
+          if (c.skills.listId !== listId) return;
+          c.skills.list = []; c.error = "Failed to load skills.";
+        }
+        await this._loadSkillOverrides(names, keepOvEdits);
+      },
+      // The rows: listed folder names first, in list order, then each stored key that no
+      // folder has, sorted. A stored value Claude Code does not know shows as "?" and saves
+      // unchanged, so the backend refuses it with its own message until the operator picks.
+      _skillOvRow(name, listed, stored) {
+        const has = Object.prototype.hasOwnProperty.call(stored, name);
+        const raw = has ? stored[name] : undefined;
+        const known = has && this.configMgmtSkillOvValues.indexOf(raw) !== -1;
+        return {
+          name: name, listed: listed, stored: has, raw: raw, unknown: has && !known,
+          value: !has ? "" : (known ? raw : "?"),
+          rawText: has && !known ? JSON.stringify(raw) : "",
+        };
+      },
+      // The "Not valid" option label: the stored value, cut so a long one cannot stretch
+      // the select. The full value is still what a save sends.
+      configMgmtSkillOvRawLabel(row) {
+        const t = row.rawText;
+        const cps = Array.from(t);  // by code point, so a cut never splits a surrogate pair
+        return "Not valid: " + (cps.length > 40 ? cps.slice(0, 40).join("") + "…" : t);
+      },
+      _skillOvRows(listed, stored) {
+        const rows = [], seen = new Set();
+        listed.forEach(n => { if (!seen.has(n)) { seen.add(n); rows.push(this._skillOvRow(n, true, stored)); } });
+        Object.keys(stored).sort().forEach(n => {
+          if (!seen.has(n)) { seen.add(n); rows.push(this._skillOvRow(n, false, stored)); }
+        });
+        return rows;
+      },
+      // The map a save sends: every row with a value. "No override" ("") leaves the key
+      // out, so the PUT (a whole-map replace) removes it. Object.fromEntries makes each
+      // name an own key, also `__proto__`, so the backend rule decides every name.
+      _skillOvPayload() {
+        return Object.fromEntries(this.configMgmt.skills.ov.rows
+          .filter(r => r.value !== "")
+          .map(r => [r.name, r.value === "?" ? r.raw : r.value]));
+      },
+      _skillOvSig(rows) {
+        return JSON.stringify(rows.filter(r => r.value !== "")
+          .map(r => [r.name, r.value === "?" ? "?" + r.rawText : r.value])
+          .sort((a, b) => (a[0] < b[0] ? -1 : (a[0] > b[0] ? 1 : 0))));
+      },
+      // Staleness is `loadId`, not `c.gen`: opening or creating a skill bumps gen without
+      // reloading, and a gen-gated finally would then leave `loading` set for good. Every
+      // scope, project or surface change runs configMgmtReload, and closing the window runs
+      // closeConfigMgmt: both bump loadId, as does each new map load here.
+      // Resolves true when this load is still the current one, so a caller never has to
+      // predict the id it takes.
+      async _loadSkillOverrides(names, keepOvEdits) {
+        const c = this.configMgmt, ov = c.skills.ov;
+        ov.listed = names;
+        if (keepOvEdits && ov.ready && this.configMgmtSkillOvDirty()) {
+          // Refresh which rows are listed folders; keep every value, hash and baseline.
+          const listed = new Set(names), have = new Set();
+          ov.rows = ov.rows.filter(r => {
+            r.listed = listed.has(r.name); have.add(r.name);
+            return r.listed || r.stored || r.value !== "";
+          });
+          names.forEach(n => {
+            if (!have.has(n)) { have.add(n); ov.rows.push(this._skillOvRow(n, true, ov.stored)); }
+          });
+          return true;  // nothing was fetched, so this panel state is still the current one
+        }
+        ov.rows = []; ov.stored = {}; ov.hash = null; ov.orig = this._skillOvSig([]);
+        ov.ready = false; ov.error = ""; ov.confirm = ""; ov.addName = "";
+        const id = (ov.loadId += 1);
+        ov.loading = true;
+        try {
+          const res = await fetch(ROOT + "/api/config-write/skills/overrides?" + this._configMgmtQuery());
+          if (ov.loadId !== id) return;
+          if (this._authExpired(res)) return;
+          if (!res.ok) {
+            // Show the backend's reason (for example a settings file that is not valid
+            // JSON), never empty rows: a save from empty rows would clear the real map.
+            // The banner gets it too (unless the folder list already put an error there):
+            // the panel's own status node may have been hidden while its text was set.
+            const d = await res.json().catch(() => ({}));
+            if (ov.loadId !== id) return;
+            ov.error = (d && typeof d.detail === "string" && d.detail) || this._configMgmtLoadErr(res);
+            if (!c.error) c.error = ov.error;
+            return true;
+          }
           const d = await res.json();
-          if (c.gen !== myGen) return;
-          c.skills.list = d.skills || [];
-        } catch (e) { if (c.gen === myGen) c.error = "Failed to load skills."; }
+          if (ov.loadId !== id) return;
+          const o = d.overrides;
+          const stored = o && typeof o === "object" && !Array.isArray(o) ? o : {};
+          ov.rows = this._skillOvRows(names, stored);
+          ov.stored = stored; ov.hash = typeof d.hash === "string" ? d.hash : null;
+          ov.orig = this._skillOvSig(ov.rows);
+          ov.ready = true;
+        } catch (e) {
+          if (ov.loadId === id) {
+            ov.error = "Failed to load skill visibility.";
+            if (!c.error) c.error = ov.error;
+          }
+        }
+        finally { if (ov.loadId === id) ov.loading = false; }
+        return ov.loadId === id;
+      },
+      configMgmtSkillOvDirty() {
+        const ov = this.configMgmt.skills.ov;
+        return this._skillOvSig(ov.rows) !== ov.orig;
+      },
+      // Text of the always-mounted status node: empty while loading or loaded, so a
+      // screen reader announces a failure when its text appears (not an x-show flip).
+      configMgmtSkillOvUnavailable() {
+        const ov = this.configMgmt.skills.ov;
+        if (ov.loading || ov.ready) return "";
+        return ov.error
+          || "Could not load skill visibility. Change the scope or reopen this window to try again.";
+      },
+      configMgmtSkillOvRowsHint() {
+        const where = this.configMgmt.scope === "local" ? "this project's skill folders"
+          : "the skill folders at this scope";
+        return "Rows show " + where + " and every key already in the file.";
+      },
+      configMgmtSkillOvChanged(row) {
+        // A row whose value differs from the file, so the operator sees what Save writes.
+        const was = !row.stored ? "" : (row.unknown ? "?" : row.raw);
+        return row.value !== was;
+      },
+      // Add a name that no row shows (a bundled, plugin or frontmatter name). The name is
+      // sent as typed, never trimmed or checked here: the backend decides what is valid
+      // and its refusal is the message shown. An existing row only takes the new value.
+      configMgmtCanAddSkillOv() {
+        const ov = this.configMgmt.skills.ov;
+        return ov.ready && !ov.busy && ov.addName !== "";
+      },
+      configMgmtAddSkillOv(ev) {
+        const c = this.configMgmt, ov = c.skills.ov;
+        // An Enter that ends an IME composition (Safari reports it as keyCode 229).
+        if (ev && (ev.isComposing || ev.keyCode === 229)) return;
+        if (!this.configMgmtCanAddSkillOv()) return;
+        const name = ov.addName;
+        const row = ov.rows.find(r => r.name === name);
+        if (row) row.value = ov.addValue;
+        else {
+          const r = this._skillOvRow(name, false, ov.stored);
+          r.value = ov.addValue;
+          ov.rows.push(r);
+        }
+        ov.addName = ""; c.saved = false;
+        this._focusSkillOvAddName();  // the Add button disables itself, so keep focus here
+      },
+      // Retry across a few frames, as revealFeedback does: after a save the input is still
+      // hidden (the panel re-shows on the next render) and disabled (`busy` clears in the
+      // save's finally) when $nextTick runs, and focus() on such an input does nothing.
+      // `onlyIfFree` re-checks on every try, so a focus the operator moved meanwhile wins.
+      _focusSkillOvAddName(onlyIfFree) {
+        const attempt = (tries) => {
+          if (onlyIfFree && !this._skillOvFocusIsFree()) return;
+          const el = document.getElementById("cm-skill-ov-add-name");
+          if (!el || !el.offsetParent || el.disabled) {
+            if (tries > 0) requestAnimationFrame(() => attempt(tries - 1));
+            return;
+          }
+          el.focus({ preventScroll: true });
+        };
+        this.$nextTick(() => attempt(5));
+      },
+      configMgmtCanSaveSkillOv() {
+        const c = this.configMgmt, ov = c.skills.ov;
+        if (ov.busy || !ov.ready || this.configMgmtNeedsProject()) return false;  // fail closed if unloaded
+        if (ov.confirm !== this.configMgmtConfirmToken()) return false;  // type-the-name gate
+        return this.configMgmtSkillOvDirty();
+      },
+      // Guarded by `loadId`, not `c.gen`, like the map load: Edit, New skill and Delete bump
+      // gen for the editor but change neither scope nor project, so a write that succeeded
+      // must still land its new hash and baseline. Only what makes the save stale (a scope,
+      // project or surface change, a closed window, a fresh map load) bumps loadId.
+      async configMgmtSaveSkillOv() {
+        const c = this.configMgmt, ov = c.skills.ov;
+        if (!this.configMgmtCanSaveSkillOv()) return;
+        const id = ov.loadId; ov.ops += 1; ov.busy = true; c.error = ""; c.saved = false;
+        let live = false;  // this save's result still belongs to the panel on screen
+        try {
+          const body = Object.assign(this._configMgmtTarget(), {
+            overrides: this._skillOvPayload(), confirm: ov.confirm, hash: ov.hash,
+          });
+          const res = await fetch(ROOT + "/api/config-write/skills/overrides", {
+            method: "PUT", headers: JSON_HEADERS, body: JSON.stringify(body),
+          });
+          if (ov.loadId !== id) return;
+          if (this._authExpired(res)) return;
+          live = true;
+          if (res.ok) {
+            c.saved = true; ov.confirm = "";
+            live = (await this._loadSkillOverrides(ov.listed, false)) === true;
+            // The confirm and Save hide once nothing is dirty; give focus a visible home,
+            // unless the operator has moved on (for example into a Delete confirm).
+            if (live) this._focusSkillOvAddName(true);
+          }
+          else await this._configMgmtWriteErr(res);
+        } catch (e) {
+          if (ov.loadId === id) { live = true; c.error = "Save failed."; }
+        }
+        finally {
+          ov.ops = Math.max(0, ov.ops - 1); ov.busy = ov.ops > 0;
+          // The banners sit above the panel and Save sits at its foot (#1031). Skip the
+          // scroll when the operator is working elsewhere, so it does not pull them away.
+          if (live && (c.error || c.saved) && this._skillOvFocusIsFree()) {
+            this.revealFeedback(c.error ? '[data-test="cm-error"]' : '[data-test="cm-saved"]');
+          }
+        }
+      },
+      // Focus is "free" unless the operator is on a control outside the visibility panel
+      // (a Delete confirm, the editor). The body, the modal root and the panel itself are
+      // free: Safari and macOS Firefox do not focus a clicked button, so after a click on
+      // Save the focus sits on the nearest focusable ancestor, the tabindex="-1" modal.
+      _skillOvFocusIsFree() {
+        const a = document.activeElement;
+        if (!a || a === document.body) return true;
+        const panel = document.querySelector('[data-test="cm-skill-ov"]');
+        if (panel && panel.contains(a)) return true;
+        return !a.matches('input, textarea, select, button, a[href], [contenteditable="true"]');
       },
       configMgmtNewSkill() {
         const c = this.configMgmt, s = c.skills;
@@ -3591,7 +3856,7 @@
           if (this._authExpired(res)) return;
           if (res.ok) {
             c.saved = true; s.editing = false; s.confirm = ""; s.converted = "";
-            await this._loadSkills(gen);
+            await this._loadSkills(true);
           }
           else await this._configMgmtWriteErr(res);
         } finally { s.ops = Math.max(0, s.ops - 1); s.busy = s.ops > 0; }
@@ -3622,7 +3887,7 @@
           });
           if (c.gen !== gen) return;
           if (this._authExpired(res)) return;
-          if (res.ok) { c.saved = true; s.deletingName = ""; s.confirm = ""; await this._loadSkills(gen); }
+          if (res.ok) { c.saved = true; s.deletingName = ""; s.confirm = ""; await this._loadSkills(true); }
           else await this._configMgmtWriteErr(res);
         } finally { s.ops = Math.max(0, s.ops - 1); s.busy = s.ops > 0; }
       },

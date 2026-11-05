@@ -62,8 +62,9 @@ Interactive Session mode, this *recaps* the prior conversation rather than truly
   documented `permissions` key as rows, or raw JSON, plus the auto mode classifier
   rules in `autoMode` at user scope), hooks (all five documented hook types:
   command, http, mcp_tool, prompt and agent, one hook per row, or raw JSON), MCP
-  servers, subagents, skills, and plugins — at user / project scope (plus local for
-  all but subagents and skills), with secret-shaped values masked on the surfaces
+  servers, subagents, skills (with each skill's visibility), and plugins — at user /
+  project scope (plus local for all but subagents; for skills, local sets visibility
+  only), with secret-shaped values masked on the surfaces
   that carry them (settings `env`, MCP, `autoMode`, hook headers, URL credentials
   and tokens, and MCP tool input). Every write is lost-update-guarded and
   trust-gated; every write is audit-logged to `config_audit.log`.

@@ -163,8 +163,10 @@ on; the User scope additionally requires `config_write.allow_user_scope`.
 Common mechanics across the modal:
 
 - **Scope toggle** — User / Project / Local, with a project picker for the
-  project-level scopes. Subagents and skills have no project-local scope
-  (Claude Code has no local directory for them).
+  project-level scopes. Subagents have no project-local scope (Claude Code has
+  no local directory for them). The Skills tab has a Local scope for
+  [skill visibility](#skill-visibility) only, because Claude Code has no local
+  skills folder.
 - **Typed confirmation** — every document save asks you to type the scope
   name; destructive list actions (delete, reset, plugin install) have their
   own typed confirms.
@@ -192,7 +194,7 @@ The surface tabs:
 | Hooks | The `hooks` key, as rows or raw JSON. |
 | MCP | MCP server definitions (add / edit / delete), as fields or raw JSON, plus per-server **approvals** for committed `.mcp.json` servers — Approve / Reject each, or reset all choices behind a typed confirm. |
 | Subagents | Subagent definition files: list, edit, create, delete. |
-| Skills | Skills: list, a per-skill `SKILL.md` editor, create, delete. See [Skill frontmatter checks](#skill-frontmatter-checks). |
+| Skills | Skills: list, a per-skill `SKILL.md` editor, create, delete, and the visibility of each skill (`skillOverrides`). See [Skill frontmatter checks](#skill-frontmatter-checks) and [Skill visibility](#skill-visibility). |
 | Plugins | Installed plugins (install / uninstall / enable / disable / update) and the marketplaces they come from (add / remove). |
 
 ### MCP server definitions
@@ -783,13 +785,49 @@ not a mapping and not empty: Claude Code then also drops `allowed-tools`. The
 second is a `disallowed-tools` value next to `disallowedTools`: it still hides
 `disallowedTools`.
 
-### Skill names in skillOverrides
+### Skill visibility
 
-In `skillOverrides`, a key is the name of a skill, as Claude Code shows it.
-The key can be a frontmatter `name`, the name of a bundled skill such as
-`doctor`, or a name with a colon. Clauster refuses an empty key, the key
-`__proto__`, and a name that Claude Code cannot show. The values are `on`,
-`name-only`, `user-invocable-only` and `off`.
+The **Skill visibility** panel on the Skills tab edits the `skillOverrides` key
+in the settings file of the scope: `~/.claude/settings.json` at User scope,
+`.claude/settings.json` at Project scope, and `.claude/settings.local.json` at
+Local scope. The key tells Claude Code how to list each skill. A skill that has
+no key is `on`.
+
+| Value | Effect in Claude Code |
+| --- | --- |
+| `on` | Claude Code lists the skill with its description. |
+| `name-only` | Claude Code lists the skill without its description. |
+| `user-invocable-only` | Claude does not see the skill. You can still run it with its `/` command. |
+| `off` | Neither Claude nor you can use the skill. |
+
+The panel shows one row for each skill folder at the scope, and one row for
+each key that is already in the file. At Local scope, the rows show the skill
+folders of the project. A key that matches no folder gets a **no skill folder**
+badge, so you can see it and remove it. A stored value that Claude Code does
+not read shows as **Not valid**. Clauster refuses a save until you choose a
+value for that row.
+
+To change the visibility of skills:
+
+1. Open **Manage Claude Code config**, select the scope and the project, then
+   open the **Skills** tab.
+2. Choose a value for each row. To remove a key from the file, choose
+   **No override**.
+3. To set a skill that has no row, such as the bundled skill `doctor`, type its
+   name in **Add a skill name**, choose a value, then select **Add**.
+4. Type the scope name, then select **Save visibility**.
+
+A save replaces the whole `skillOverrides` map with the rows that have a value.
+It does not change the other keys in the settings file. If the file changed
+after the panel loaded it, Clauster refuses the save and writes nothing. Close
+and reopen the panel to load the file again.
+
+A key is the name of a skill, as Claude Code shows it. The key can be a
+frontmatter `name`, the name of a bundled skill such as `doctor`, or a name with
+a colon such as `anthropic-skills:pdf`. Clauster refuses an empty key, the key
+`__proto__`, and a name that Claude Code cannot show. The refusal names the key,
+and Clauster writes nothing. The panel sends each name as you typed it, so a
+space at the start or the end is part of the name.
 
 ## Troubleshooting and limits
 
