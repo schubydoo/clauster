@@ -2246,3 +2246,24 @@ def test_an_explicitly_tagged_key_never_collides_in_the_yaml12_reading() -> None
     root = yaml.compose('a: {? !!int "5" : x, "5": y}\n', Loader=yaml.SafeLoader)
     # PyYAML reads the first key as 5 and the second as "5": no collision either way.
     assert cw._duplicate_key(root) is None
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize(
+    "keys",
+    [
+        pytest.param("9007199254740993: a\n9007199254740992: b", id="past-2-53"),
+        pytest.param("1e21: a\n1000000000000000000000: b", id="exponent-and-digits"),
+        # Only PyYAML merges these (a Python dict folds 1 and True); the CLI keeps two.
+        pytest.param("1: a\ntrue: b", id="pyyaml-only-one-and-true"),
+        pytest.param("on: a\nyes: b", id="pyyaml-only-on-and-yes"),
+    ],
+)
+def test_keys_one_reading_merges_past_the_obvious_cases_are_refused(parse, keys: str) -> None:
+    with pytest.raises(cw.InvalidCandidateError, match="see differently"):
+        parse(f"---\nname: a\ndescription: d\n{keys}\ndisallowedTools: Bash\n---\nbody\n")
+
+
+def test_the_yaml12_key_of_a_huge_integer_is_infinity() -> None:
+    node = yaml.compose("1" + "0" * 400 + ": a\n", Loader=yaml.SafeLoader).value[0][0]
+    assert cw._yaml12_key(node) == "Infinity"

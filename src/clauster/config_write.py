@@ -1484,8 +1484,15 @@ def _yaml12_key(node: yaml.ScalarNode) -> object:
         return "true" if value else "false"
     if value is None:
         return "null"
-    if isinstance(value, float) and value.is_integer() and abs(value) < 2**53:
-        return str(int(value))
+    if isinstance(value, (int, float)):
+        # A JavaScript number is a double: 2**53 + 1 and 2**53 are one key there.
+        try:
+            number = float(value)
+        except OverflowError:
+            return "Infinity" if value > 0 else "-Infinity"
+        if number.is_integer() and abs(number) < 1e21:
+            return str(int(number))
+        return repr(number)
     return str(value)
 
 
