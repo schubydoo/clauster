@@ -845,6 +845,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#the-settings-tab" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The Settings tab
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#the-permissions-tab" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1633,6 +1644,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#the-settings-tab" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The Settings tab
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#the-permissions-tab" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2010,7 +2032,7 @@ on; the User scope additionally requires <code>config_write.allow_user_scope</co
 </tr>
 <tr>
 <td>Settings</td>
-<td><code>settings.json</code> — friendly rows for <code>env</code> variables, with a Raw JSON escape hatch for other keys, plus a read-only merged ("effective") view showing which scope each value comes from.</td>
+<td><code>settings.json</code> — friendly rows for <code>env</code> variables, with a Raw JSON escape hatch for other keys, plus a read-only merged ("effective") view showing which scopes each value comes from. See <a href="#the-settings-tab">The Settings tab</a>.</td>
 </tr>
 <tr>
 <td>Permissions</td>
@@ -2184,6 +2206,85 @@ row tells the first two apart:</p>
 <li><strong>A skill Clauster cannot read still appears, carrying an error in place of
   the missing information.</strong> One unreadable skill never hides the others.</li>
 </ul>
+<h3 id="the-settings-tab">The Settings tab<a class="headerlink" href="#the-settings-tab" title="Permanent link">&para;</a></h3>
+<p>The Settings tab edits each top-level key of the settings file for the scope,
+except the keys that another tab writes. These are <code>permissions</code> and <code>autoMode</code>
+(the Permissions tab), <code>hooks</code> (the Hooks tab) and <code>enabledPlugins</code> (the Plugins
+tab). A save that names one of them is refused (<code>422</code>), and the error names the
+tab to use. The <code>env</code> variables show as rows, and every other key is in Raw JSON.
+Clauster checks the shape of <code>env</code> only. It does not run or interpret any other
+value. Claude Code reads the values when a session starts.</p>
+<p>No other tab writes these keys in a settings file, so the Settings tab shows them:</p>
+<ul>
+<li><code>enabledMcpjsonServers</code> and <code>disabledMcpjsonServers</code>. The MCP tab shows an
+  approval from a settings file as read-only, with a <code>settings</code> badge. Change
+  it here.</li>
+<li><code>skillOverrides</code>. The Skills tab has no editor for it yet.</li>
+<li><code>disabledPlugins</code>. Claude Code 2.1.318 does not read this key. If a file
+  still has it, remove it here.</li>
+</ul>
+<p>Every <code>env</code> value shows as <code>********</code>. If a hand-edited <code>env</code> is not an object,
+it shows as one <code>********</code>, and the save is refused (<code>422</code>, "'env' must be an
+object") until you replace it with an object in Raw JSON. The value of each
+credential helper shows
+as <code>********</code> too, because the command can hold the credential that it prints.
+The helpers are <code>apiKeyHelper</code>, <code>awsAuthRefresh</code>, <code>awsCredentialExport</code>,
+<code>gcpAuthRefresh</code>, <code>otelHeadersHelper</code> and <code>proxyAuthHelper</code>. Other values show
+as <code>********</code> when they look like a secret. If you leave a mask as it is, the
+save keeps the stored value. If a mask no longer matches a stored value, the
+save is refused (<code>422</code>) and the settings file is not changed. This occurs when
+you rename an <code>env</code> variable that shows a mask, or when you move or remove an entry of a list
+that holds a mask. Type the real value again. All masks look the same, so to
+change one masked entry of a list, type the real value of every masked entry in
+that list.</p>
+<p>The <a href="https://code.claude.com/docs/en/settings-reference">settings reference</a>
+gives each key a scope. Claude Code reads some keys only from user settings,
+only from user and local settings, only from managed settings, or only from
+<code>~/.claude.json</code>. Clauster refuses a save that puts such a key at a scope where
+Claude Code ignores it (<code>422</code>), and the error names the scope that works. For
+example:</p>
+<ul>
+<li><code>skipAutoPermissionPrompt</code>, <code>modelPicker</code> and <code>spellcheck</code> work only at User
+  scope.</li>
+<li><code>useAutoModeDuringPlan</code> and <code>skipDangerousModePermissionPrompt</code> work at User
+  and Local scope.</li>
+<li><code>strictKnownMarketplaces</code> and <code>allowManagedHooksOnly</code> work only in managed
+  settings. Clauster never writes managed settings.</li>
+<li><code>diffTool</code> and <code>autoConnectIde</code> belong in <code>~/.claude.json</code>, which the Claude
+  Code <code>/config</code> command writes.</li>
+</ul>
+<p>If a file already holds such a key, remove the key in Raw JSON before you save
+the file again at that scope. The auto mode key <code>disableAutoMode</code> and the hook
+keys <code>disableAllHooks</code>, <code>allowedHttpHookUrls</code> and <code>httpHookAllowedEnvVars</code> work
+in every settings file, so the tab accepts them at every scope.</p>
+<p>The settings reference gives <code>bashEditDiffEnabled</code> and
+<code>sandbox.allowNestedUserNamespaces</code> User scope, but Claude Code also reads
+<code>false</code> for them from a project or local file, so the tab accepts <code>false</code> at
+every scope. Of the three files, Claude Code reads <code>true</code> for them only from
+user settings, so the tab refuses <code>true</code> at Project and Local scope. If a project or local file
+already holds <code>true</code> for one of them, change it to <code>false</code> or remove it before
+you save. Clauster checks no other values, so it does not refuse a <code>mask</code> entry
+of <code>sandbox.credentials.envVars</code> in a project file, although Claude Code drops
+that entry.</p>
+<p>Some keys are Desktop-only: only Claude Desktop reads them, and the Claude Code
+CLI ignores them. The tab keeps the scope that the settings reference gives
+each one. <code>sshConfigs</code> works at User scope only. <code>sshHostAllowlist</code>,
+<code>browserExternalPageTools</code>, <code>disableBrowserExternalNavigation</code>,
+<code>disableDesktopLocalSessions</code> and <code>disableMobileSimulatorTools</code> work only in
+managed settings, so the tab refuses them at every scope. The refusal says that
+only Claude Desktop reads the key. If the file that you load holds a
+Desktop-only key, a note above the editor names it, and the merged view leaves
+it out.</p>
+<p>At Project and Local scope, the merged ("effective") view shows the value that
+Claude Code applies from the three files. Local settings override project
+settings, and project settings override user settings. Claude Code merges an
+object such as <code>env</code> key by key and combines the lists from each file. A plain
+value from a higher scope replaces the lower one, and <code>fallbackModel</code> comes
+whole from one file. A key or value that a file is not allowed to set is left
+out. When more than one file makes up a value, the <strong>From</strong> column names each file.
+Managed settings and the <code>--settings</code> flag are not part of the view.</p>
+<p>If a scope fails to load, the tab clears its rows. A save therefore cannot write
+the values of the scope that you looked at before into the new scope.</p>
 <h3 id="the-permissions-tab">The Permissions tab<a class="headerlink" href="#the-permissions-tab" title="Permanent link">&para;</a></h3>
 <p>The rows editor shows every key that the Claude Code
 <a href="https://code.claude.com/docs/en/settings-reference#permissions">settings reference</a>
@@ -2431,7 +2532,7 @@ that scope is refused (<code>422</code>). Remove it in Raw JSON. To change a plu
 change the plugin.</p>
 <p>The <code>disableAllHooks</code>, <code>allowedHttpHookUrls</code>, and <code>httpHookAllowedEnvVars</code>
 settings are top-level keys, not part of the <code>hooks</code> key, so the Hooks tab does
-not edit them.</p>
+not edit them. Edit them on <a href="#the-settings-tab">the Settings tab</a>.</p>
 <h3 id="plugins-and-marketplaces">Plugins and marketplaces<a class="headerlink" href="#plugins-and-marketplaces" title="Permanent link">&para;</a></h3>
 <p>The Plugins tab runs the <code>claude plugin</code> command on the host for every change.
 For enable, disable, install, update, uninstall, and marketplace add and
@@ -2797,6 +2898,11 @@ space at the start or the end is part of the name.</p>
 <td>Removing a marketplace returns <code>404</code> with "is not declared in user settings"</td>
 <td>A different scope declares it</td>
 <td>Switch to the scope that declares it and remove it there</td>
+</tr>
+<tr>
+<td>A Settings save returns <code>422</code> with "Claude Code reads … only from"</td>
+<td>The file holds a key (or a <code>true</code> value) that Claude Code ignores at this scope</td>
+<td>Remove the key in Raw JSON, or save it at the scope that the message names. For a <code>true</code> value, set it to <code>false</code></td>
 </tr>
 </tbody>
 </table>
