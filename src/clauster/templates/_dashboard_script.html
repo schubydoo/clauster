@@ -4919,6 +4919,39 @@
         if (METRICS_SHOW_DISK && m.disk_read_bps == null) s += "; disk I/O isn't available on this platform";
         return s + ".";
       },
+      // One live session's share of its bridge's sample (backlog TASK-342), for the
+      // session sub-row. `m.sessions` is keyed by the session's local_uuid and carries the
+      // pid it was measured at; the row must match on BOTH. The tracked-session list and
+      // the metrics batch poll on separate cadences, so a pid that changed between them
+      // gets no chip rather than another process's figure. Own-property lookup only: the
+      // key is CLI output, and a key like "__proto__" must not read the prototype. Absent
+      // is the normal answer whenever the backend could not place the session's pid
+      // inside this bridge's process tree.
+      bridgeSessionMetrics(rk, s) {
+        if (!METRICS_ENABLED) return null;
+        if (this.statusOf(rk) !== "running") return null;
+        const m = this.metrics[rk];
+        const per = m && m.running ? m.sessions : null;
+        const id = s.local_uuid || "";
+        if (!per || typeof per !== "object" || !id || !Object.prototype.hasOwnProperty.call(per, id)) return null;
+        const e = per[id];
+        return e && e.pid === s.pid ? e : null;
+      },
+      bridgeSessionMetricsLabel(rk, s) {
+        const e = this.bridgeSessionMetrics(rk, s);
+        if (!e) return null;
+        return Math.round(e.cpu_percent) + "% CPU · " + Math.round(e.rss_bytes / 1048576) + " MB";
+      },
+      bridgeSessionMetricsTitle(rk, s) {
+        const e = this.bridgeSessionMetrics(rk, s);
+        if (!e) return "";
+        const cpuNote = this.metrics[rk].cpu_normalized
+          ? "CPU% is the share of total host capacity (all cores)"
+          : "CPU% is summed across cores (can exceed 100%)";
+        return "Live usage of this session's own processes (" + e.procs + " process" + (e.procs === 1 ? "" : "es") +
+               ": the session and the tools it started), part of the bridge figure above: " + cpuNote +
+               "; memory is summed RSS.";
+      },
       qrSrc(name) {
         const id = this.bridgeIdOf(name);
         if (!id) return "";

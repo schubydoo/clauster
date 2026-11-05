@@ -41,7 +41,7 @@ Key modules under `src/clauster/`:
 | `db/` | Persistence layer: `engine.py` (resolves the SQLite `clauster.db` URL under `state_dir`), `models.py`/`stores.py` (SQLAlchemy schema + record stores), `bootstrap.py` (startup Alembic-to-head + one-time legacy-JSON import, both fail-closed), and the packaged Alembic `migrations/`; the `stores.py` layer includes an append-only `session_events` lifecycle history (`SessionHistoryStore`) that backs the Projects last-used / cost sort. |
 | `state.py` | Legacy `state.json` store — now an import source only (the live store is `clauster.db`). |
 | `models.py` | Domain models. |
-| `metrics.py` | Per-bridge resource sampling (CPU / memory / disk). |
+| `metrics.py` | Per-bridge resource sampling (CPU / memory / disk), split per live session by process subtree. |
 | `usage.py` | Token + approximate-cost rollup from session transcripts. |
 | `notify.py` | Outbound lifecycle notifications via Apprise (optional `notify` extra). |
 | `webhooks.py` | Outbound HTTP lifecycle webhooks (opt-in extension seam) — POST on spawn/ready/stop/crash plus bg-settled/permission-needed/clone-done, fail-open, with an opt-in SSRF deny-list. |

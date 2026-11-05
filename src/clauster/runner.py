@@ -23,6 +23,7 @@ import subprocess
 import sys
 import time
 import unicodedata
+from collections import Counter
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -336,6 +337,33 @@ _TREE_REAP_WAIT = 2.0
 # How long shutdown() waits for in-flight fire-and-forget notify sends to finish
 # before cancelling them — bounds shutdown while letting a quick send complete.
 _NOTIFY_DRAIN_GRACE = 2.0
+# How far a session process's start may sit from the `startedAt` that `claude agents --json`
+# reports for it before its first metrics figure is refused (TASK-342). Measured about 1s
+# on a live Linux bridge (the CLI stamps the session just after the process starts); the
+# slack allows a loaded host. This tight bound is used only where the epoch is fixed at
+# exec (macOS, Windows). On Linux the live epoch moves with the wall clock (#1399), so
+# there the coarse `procutil._DRIFT_EPOCH_TOLERANCE` applies instead, as elsewhere.
+_SESSION_START_SLACK_SECONDS = 30.0
+
+
+def _same_start(
+    pinned: tuple[float | None, int | None],
+    seen: tuple[float | None, int | None],
+    *,
+    drift_prone: bool,
+) -> bool:
+    """Whether two ``proc_start_pair`` identities name the same process (TASK-342).
+
+    Ticks decide when both sides have them: they are boot-relative, so no clock correction
+    moves them. Otherwise the epochs decide, but only where the epoch is fixed at exec; on a
+    drift-prone platform an epoch-only pair cannot prove identity, so the answer is no and
+    the figure is dropped rather than guessed.
+    """
+    if pinned[1] is not None and seen[1] is not None:
+        return pinned[1] == seen[1]
+    if drift_prone or pinned[0] is None or seen[0] is None:
+        return False
+    return abs(pinned[0] - seen[0]) <= procutil._EXACT_PROC_START_TOLERANCE
 
 
 class SessionRunner:
@@ -485,6 +513,9 @@ class SessionRunner:
         # in unit tests and whenever the hosted channel is unused — poll_once then sees
         # no hosted sessions to claim and attributes exactly as before.
         self._hosted_instances: Callable[[], list[RemoteControlInstance]] | None = None
+        # Start identity of each session process a metrics figure was first measured on,
+        # per bridge, keyed by (local_uuid, pid) (TASK-342; see `_vet_session_figures`).
+        self._session_pins: dict[str, dict[tuple[str, int], tuple[float | None, int | None]]] = {}
         # Poll + metrics background loops (#1157): the two long-lived loops the server runs
         # while up — the liveness/cross-check/prune poll (`poll_once` / `_poll_forever`) and
         # the server-side metrics sampler (`_refresh_metrics_cache` / `_metrics_refresh_forever`).
@@ -783,10 +814,18 @@ class SessionRunner:
         not wear the CPU/RAM of the other bridges sharing its project. A cache entry whose
         instance vanished from the registry between refreshes is dropped, never
         misattributed; :meth:`metrics_snapshots` folds the same entries per project for
-        callers that genuinely want a project total.
+        callers that genuinely want a project total. Each sample's per-session ``sessions``
+        breakdown (backlog TASK-342) is copied too, so a caller cannot mutate the cache.
         """
         return {
-            iid: dict(sample)
+            iid: {
+                **sample,
+                **(
+                    {"sessions": {k: dict(v) for k, v in sample["sessions"].items()}}
+                    if "sessions" in sample
+                    else {}
+                ),
+            }
             for iid, sample in self._metrics_cache.items()
             if iid in self._instances  # forgotten since the last refresh
         }
@@ -803,7 +842,9 @@ class SessionRunner:
         ``disk_*`` rates summed when any bridge reports them (``None`` when none do),
         plus ``bridges``: how many live bridges the figure covers. A cache entry whose
         instance vanished from the registry between refreshes is dropped, never
-        misattributed.
+        misattributed. The per-session ``sessions`` breakdown is left out: it describes
+        one bridge, and a project figure carrying the first bridge's sessions would credit
+        them to the whole project.
         """
         out: dict[str, dict] = {}
         for iid, sample in self._metrics_cache.items():
@@ -812,7 +853,8 @@ class SessionRunner:
                 continue
             agg = out.get(inst.project)
             if agg is None:
-                out[inst.project] = {**sample, "bridges": 1}
+                folded = {k: v for k, v in sample.items() if k != "sessions"}
+                out[inst.project] = {**folded, "bridges": 1}
                 continue
             agg["bridges"] += 1
             agg["procs"] += sample["procs"]
@@ -832,10 +874,15 @@ class SessionRunner:
         sum. Returns the sample dict on success, or ``None`` when the bridge is not running,
         has no pid, fails the create-time guard (recycled pid), or the sampler returns
         nothing. Exceptions propagate to the gather caller, which isolates them per bridge.
+
+        The sample also breaks the total down per live session (backlog TASK-342), keyed by
+        the session's ``local_uuid``; see :meth:`_session_pids_for`.
         """
         pid = inst.bridge_pid
         if inst.status is not InstanceStatus.RUNNING or pid is None:
             return None
+        # Read on the loop, before the thread hop: `_sessions` is the poll loop's list.
+        tracked = self._session_pids_for(inst)
         start = inst.bridge_proc_start
         if start is not None:
             # Via the shared identity core rather than a hand-rolled epoch compare, so this
@@ -859,12 +906,103 @@ class SessionRunner:
                 boot_id=inst.bridge_boot_id,
             ):
                 return None  # PID reused onto an unrelated process — skip
-        return await asyncio.to_thread(
+        sample = await asyncio.to_thread(
             metrics.sample_tree,
             pid,
             interval=self._config.metrics.sample_interval_seconds,
             normalize_cpu=self._config.metrics.normalize_cpu,
+            sessions={p: s.local_uuid for p, s in tracked.items()},
         )
+        if sample is not None:
+            sample["sessions"] = self._vet_session_figures(
+                inst.instance_id, tracked, sample.get("sessions", {})
+            )
+        return sample
+
+    def _session_pids_for(self, inst: RemoteControlInstance) -> dict[int, WorkingSession]:
+        """Map the pid of each live session under ``inst`` to that session (TASK-342).
+
+        The pid is the one ``claude agents --json`` reports for the session, which for a
+        standard bridge is the bridge's own child ``claude`` process. The source is the same
+        TRACKED join that lists the sessions under the bridge row, so a sub-row can only
+        carry a figure for a session the row already shows. The sampler then reports a pid
+        only when it is inside this bridge's process tree, so a stale pid that left the tree
+        gets no figure.
+
+        Empty for a pty bridge: it hosts one session, and the bridge figure already is that
+        session. A pid that two sessions both name, a ``local_uuid`` two pids both carry,
+        and a session with no ``local_uuid`` are left out, because no figure could be put
+        on one row without guessing.
+        """
+        if inst.resume_mode == "pty":
+            return {}
+        mine = [
+            s
+            for s in self._sessions
+            if s.attribution is Attribution.TRACKED
+            and s.parent_instance == inst.instance_id
+            and s.local_uuid
+        ]
+        pids = Counter(s.pid for s in mine)
+        uuids = Counter(s.local_uuid for s in mine)
+        return {s.pid: s for s in mine if pids[s.pid] == 1 and uuids[s.local_uuid] == 1}
+
+    def _vet_session_figures(
+        self, iid: str, tracked: dict[int, WorkingSession], figures: dict[str, dict]
+    ) -> dict[str, dict]:
+        """Keep a session's figure only while its pid is still the process first measured.
+
+        ``claude agents --json`` names a session by pid, and a pid outlives its process: if
+        the session exits and the pid is reused inside the same bridge tree before the next
+        agents poll, the sampler would measure the new process under the old session. So
+        the first figure for a (session, pid) pins that process's start identity
+        (``procutil.proc_start_pair``), and a later figure whose identity differs is
+        dropped. The pin compares boot-relative ticks where they exist, which no clock
+        correction moves (see the ``bridge_start_ticks`` heal), and the epoch only where
+        it is fixed at exec (macOS, Windows). The pin stays after a mismatch, so a reused
+        pid is never adopted for that session.
+
+        A FIRST figure must also have started near the session's own ``startedAt``, which
+        catches a pid reused before the first measurement: within 30s where the epoch is
+        fixed at exec, and within the coarse hour bound on Linux, where the live epoch
+        moves with the wall clock (#1399) and a tight compare would refuse real sessions.
+        Only an identity that can match itself on this platform is pinned (ticks on
+        Linux), so a figure without one is dropped and never poisons the pin for a later,
+        complete read. Pins for sessions that left the tracked list, and for bridges that
+        left the registry, are forgotten.
+        """
+        drift_prone = procutil.start_time_is_drift_prone()
+        slack = procutil._DRIFT_EPOCH_TOLERANCE if drift_prone else _SESSION_START_SLACK_SECONDS
+        self._session_pins = {k: v for k, v in self._session_pins.items() if k in self._instances}
+        live = {(s.local_uuid, p) for p, s in tracked.items()}
+        pins = {k: v for k, v in self._session_pins.get(iid, {}).items() if k in live}
+        kept: dict[str, dict] = {}
+        for uuid, figure in figures.items():
+            entry = dict(figure)
+            epoch, ticks = entry.pop("start", (None, None))
+            session = tracked.get(entry["pid"])
+            if session is None or session.local_uuid != uuid:
+                continue
+            seen = (epoch, ticks)
+            if not _same_start(seen, seen, drift_prone=drift_prone):
+                continue  # nothing on this platform can identify the process by
+            key = (uuid, session.pid)
+            prior = pins.get(key)
+            if prior is None:
+                gap = abs(epoch - session.started_at / 1000) if epoch is not None else None
+                if gap is not None and gap > slack:
+                    # Silent on the page by design; logged so that a platform where
+                    # `startedAt` means something else is diagnosable. No uuid in the line.
+                    _log.debug(
+                        "session figure refused: process started %.0fs from its startedAt", gap
+                    )
+                    continue  # not the process the CLI saw start this session
+                pins[key] = prior = seen
+            if not _same_start(prior, seen, drift_prone=drift_prone):
+                continue
+            kept[uuid] = entry
+        self._session_pins[iid] = pins
+        return kept
 
     async def _refresh_metrics_cache(self) -> None:
         """Re-sample every running bridge into ``_metrics_cache`` (delegates to PollLoop).

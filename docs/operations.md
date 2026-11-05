@@ -199,7 +199,16 @@ The live resource metrics (CPU / memory / disk shown on a running session's row)
 are a separate, dashboard-only fetch. Each row shows **its own bridge's** usage:
 the dashboard reads `/api/metrics`, keyed by instance id, so two bridges of one
 project — a Server Mode bridge and an Interactive Session, say — never report each
-other's figures. `/api/projects/{name}/metrics` still returns the project **total**,
+other's figures. Each live session listed under a standard bridge also shows its own
+CPU and memory: the session process and the tools that it started, taken from the
+same sample, so the figure is a part of the bridge figure. The session's process is
+the pid that `claude agents --json` reports for it. A session shows no figure when
+Clauster does not find that pid inside the bridge's process tree, or when the process
+at that pid is not the one that Clauster first measured for the session (a reused
+pid). Clauster leaves
+the figure out in that case, and does not estimate it. The figures are in the
+`sessions` field of each `/api/metrics` entry, keyed by session id.
+`/api/projects/{name}/metrics` still returns the project **total**,
 summed across that project's live bridges. Neither is part of the Prometheus
 exposition, and both are governed by the `metrics` config block, not
 `observability`. **Disk I/O is unavailable on macOS** — `psutil` has no per-process

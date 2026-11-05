@@ -17,6 +17,7 @@ real bridge lifecycle with a clean slate per test.
 
 from __future__ import annotations
 
+import contextlib
 import http.client
 import json
 import os
@@ -29,6 +30,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import NamedTuple
 
+import psutil
 import pytest
 from _driver import AgentBrowser
 
@@ -639,6 +641,108 @@ def tracked_session_server(
         extra="  agents_json_poll_interval_seconds: 1\n",
         extra_env={"FAKE_CLAUDE_AGENTS_FILE": str(tmp / "agents.json")},
     )
+
+
+@pytest.fixture
+def session_child_server(
+    tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
+) -> Iterator[Server]:
+    """Like ``tracked_session_server``, with a real session child under each bridge.
+
+    ``FAKE_CLAUDE_SESSION_CHILD_FILE`` makes the fake bridge start one child process and
+    write its pid to ``<state_dir>/../session-child.pid``, the way a real standard bridge
+    runs each session as its own ``claude`` child. A test lists that pid in
+    ``agents.json`` to get a session that the metrics sampler can place inside the
+    bridge's process tree (backlog TASK-342). Metrics refresh every second.
+
+    Teardown stops what the test started, pass or fail. ``SessionRunner.shutdown()``
+    leaves bridges running by design, and the child keeps its bridge parent, so stopping
+    the server alone would leave both sleeping for up to ten minutes. See
+    :func:`_reap_bridge_trees`, which fails the test loudly if any of them survives.
+    """
+    tmp = tmp_path_factory.mktemp("e2e-session-child")
+    server_gen = _start_server(
+        tmp,
+        mutable_projects_tree,
+        extra="  agents_json_poll_interval_seconds: 1\nmetrics:\n  poll_seconds: 1\n",
+        extra_env={
+            "FAKE_CLAUDE_AGENTS_FILE": str(tmp / "agents.json"),
+            "FAKE_CLAUDE_SESSION_CHILD_FILE": str(tmp / "session-child.pid"),
+        },
+    )
+    server = next(server_gen)
+    try:
+        yield server
+    finally:
+        # Capture the server's process tree while it is up, then stop the server (its own
+        # `finally`), then kill and wait for what was captured. Nested, so neither a failed
+        # capture nor a failed server stop skips the reap; the completeness verdict is
+        # raised only after the reap, so it cannot leak what the capture did find.
+        captured: list[psutil.Process] = []
+        gap: str | None = None
+        try:
+            captured = _server_descendants(server)
+            gap = _capture_gap(server, captured, tmp / "session-child.pid")
+        finally:
+            try:
+                server_gen.close()
+            finally:
+                _reap_bridge_trees(captured)
+        if gap:
+            pytest.fail(gap)
+
+
+def _server_descendants(server: Server) -> list[psutil.Process]:
+    """Return every process the test server started: its bridges and their trees.
+
+    Taken from the server process's own tree, so nothing outside it can be named: not a
+    stale ``bridge_pid`` of a stopped row, and never the live dogfood service or its
+    bridges that share this host. Empty when the server already exited: its children
+    were reparented away, and only a name match could find them, which is never used.
+    """
+    assert server.proc is not None
+    if server.proc.poll() is not None:
+        return []
+    with contextlib.suppress(psutil.Error):
+        return psutil.Process(server.proc.pid).children(recursive=True)
+    return []
+
+
+def _capture_gap(
+    server: Server, captured: list[psutil.Process], child_pid_file: Path
+) -> str | None:
+    """Return why the capture may have missed a process, or None when it is complete.
+
+    The session child is a grandchild of the server, so it must be in the captured tree.
+    A pid file that names a live process outside it fails the test, which proves the
+    capture is complete rather than empty by accident.
+    """
+    assert server.proc is not None
+    if server.proc.poll() is not None:
+        return "the server exited during the test; its bridges could not be stopped"
+    if not child_pid_file.exists():
+        return None
+    child = int(child_pid_file.read_text(encoding="utf-8"))
+    if child not in {p.pid for p in captured} and psutil.pid_exists(child):
+        return f"session child {child} is running outside the server's tree"
+    return None
+
+
+def _reap_bridge_trees(procs: list[psutil.Process], timeout: float = 15.0) -> None:
+    """Kill ``procs`` and wait for every one to exit; fail loudly if any survives.
+
+    The server is already stopped, so each bridge is an orphan that the OS reaps (no
+    zombie for ``wait_procs`` to wait on). That needs a reaping init, which a CI runner
+    and this host have; in a container whose PID 1 does not reap, this would fail with
+    a zombie, which is a false alarm, not a leak. psutil's ``kill`` refuses a pid that a
+    new process now holds, so a recycled pid is never signalled.
+    """
+    for p in procs:
+        with contextlib.suppress(psutil.Error):
+            p.kill()
+    _gone, alive = psutil.wait_procs(procs, timeout=timeout)
+    if alive:
+        pytest.fail(f"session_child_server teardown left processes running: {alive}")
 
 
 @pytest.fixture

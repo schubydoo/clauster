@@ -140,7 +140,8 @@ clone:
 # usage:
 #   mode: cost               # cost | tokens | off
 
-# Live per-bridge resource metrics (CPU / memory / disk). On by default (docs/reference/config.md, metrics section).
+# Live per-bridge resource metrics (CPU / memory / disk), plus CPU / memory per live session
+# under a standard bridge. On by default (docs/reference/config.md, metrics section).
 # metrics:
 #   enabled: true
 
