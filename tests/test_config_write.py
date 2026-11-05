@@ -2123,6 +2123,8 @@ def test_the_flow_list_check_treats_a_too_deep_value_as_not_a_list() -> None:
         pytest.param("x: &é v\nhint: [a] [b]", id="anchor-non-ascii"),
         pytest.param("x: &a v\ny: *a.b\nhint: [a] [b]", id="alias-with-a-dot"),
         pytest.param("x: [:a]\nhint: [a] [b]", id="flow-item-starts-with-colon"),
+        # PyYAML cannot start a token at a tab after a value; YAML 1.2 reads a comment.
+        pytest.param("disallowedTools: Bash\t# , Read", id="tab-then-hash-in-a-value"),
     ],
 )
 def test_syntax_only_yaml_1_2_accepts_is_refused_not_retried(parse, lines: str) -> None:
@@ -2146,7 +2148,7 @@ def test_syntax_only_yaml_1_2_accepts_is_refused_not_retried(parse, lines: str) 
 def test_syntax_only_pyyaml_accepts_is_refused(parse, lines: str) -> None:
     # eemeli/yaml refuses each of these, so the CLI reads its retry text or no fields at
     # all: `[Bash] # deny` would become a string, and Bash would no longer be denied.
-    with pytest.raises(cw.InvalidCandidateError, match="that YAML 1.1 accepts"):
+    with pytest.raises(cw.InvalidCandidateError, match="see differently"):
         parse(f"---\nname: a\ndescription: d\n{lines}\n---\nbody\n")
 
 
@@ -2159,3 +2161,47 @@ def test_a_comment_after_white_space_still_loads(parse, lines: str) -> None:
 def test_the_lone_cr_position_names_the_line() -> None:
     with pytest.raises(cw.InvalidCandidateError, match="line 2, column 5"):
         cw.load_frontmatter_yaml("a: 1\nb: x\rc: y\n", what="f")
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize(
+    "lines",
+    [
+        pytest.param("x: [a,#c\n  b]\ndisallowedTools: [Bash] # deny", id="hash-after-comma"),
+        pytest.param("x: [#c\n  a]", id="hash-after-open-bracket"),
+        pytest.param("x: {#c\n  a: 1}", id="hash-after-open-brace"),
+        pytest.param('x: "a\nb"\ndisallowedTools: Bash', id="double-quoted-at-column-0"),
+        pytest.param("x: 'a\nb'", id="single-quoted-at-column-0"),
+        pytest.param("x: a\nx: b\ndisallowedTools: Bash", id="duplicate-top-level-key"),
+        pytest.param(
+            "hooks:\n  Stop:\n    - hooks:\n        - {type: command, command: a, command: b}",
+            id="duplicate-nested-key",
+        ),
+    ],
+)
+def test_more_syntax_the_two_yaml_versions_read_differently_is_refused(parse, lines) -> None:
+    # Each is accepted by PyYAML and refused, or read otherwise, by eemeli/yaml (YAML 1.2).
+    # The CLI would then read fewer fields (or none) than the editor checked.
+    with pytest.raises(cw.InvalidCandidateError, match="see differently"):
+        parse(f"---\nname: a\ndescription: d\n{lines}\n---\nbody\n")
+
+
+@pytest.mark.parametrize("parse", _both_parsers())
+@pytest.mark.parametrize(
+    "lines",
+    [
+        'x: "a\n  b"',  # a quoted value that goes on indented
+        "x: [a, # c\n  b]",  # a comment after a space
+        "# a comment line\nx: 1",
+        "a: &m {k: 1}\nb: {<<: *m, j: 2}",  # merge keys are not duplicates
+        "url: http://x/#frag",  # a '#' with no space before it stays in a plain value
+    ],
+)
+def test_the_same_syntax_written_portably_still_loads(parse, lines: str) -> None:
+    parse(f"---\nname: a\ndescription: d\n{lines}\n---\nbody\n")  # no raise
+
+
+def test_a_tab_used_as_indentation_or_a_reserved_character_still_takes_the_retry() -> None:
+    # Both YAML versions refuse these, so the CLI retries, and so does the seam.
+    assert cw.cli_frontmatter_text("m:\n\tk: v\n") == "m:\n  k: v\n"
+    assert cw.cli_frontmatter_text("x: @y\n") == 'x: "@y"\n'

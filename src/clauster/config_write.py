@@ -1393,25 +1393,41 @@ _CLI_LEADING_TABS_RE = re.compile(r"(?:\A|(?<=\n)|(?<=\r))\t+")
 
 
 def _is_yaml11_only_syntax_error(exc: yaml.YAMLError) -> bool:
-    """Whether ``exc`` is PyYAML refusing syntax that YAML 1.2 accepts.
+    r"""Whether ``exc`` is PyYAML refusing syntax that YAML 1.2 accepts.
 
     Then the CLI's first parse succeeds where PyYAML's fails, so the header must not take
     the retry: the CLI reads it as written, and the retry would quote its values into other
     strings. The seam refuses such a header instead. The known cases, each checked against
     eemeli/yaml (YAML 1.2): a second anchor of one name (YAML 1.2 does not require unique
     anchors), an anchor or alias name with a character other than letters, digits, ``_``
-    and ``-`` (``&a.b``, ``&é``), and a flow item that starts with ``:`` (``[:a]``).
+    and ``-`` (``&a.b``, ``&é``), a flow item that starts with ``:`` (``[:a]``), and a tab
+    after a value (``Bash\t# note``: PyYAML cannot start a token there, YAML 1.2 reads the
+    tab as white space and the ``#`` as a comment). A tab used as indentation is refused by
+    both, and that one does take the retry (which turns it into spaces).
     """
     if isinstance(exc, ComposerError):
         return exc.problem == "second occurrence"
     if isinstance(exc, ScannerError):
-        return exc.context in ("while scanning an anchor", "while scanning an alias")
+        if exc.context in ("while scanning an anchor", "while scanning an alias"):
+            return True
+        return _is_tab_after_content(exc)
     if isinstance(exc, ParserError):
         return (
             exc.context == "while parsing a flow node"
             and exc.problem == "expected the node content, but found ':'"
         )
     return False
+
+
+def _is_tab_after_content(exc: ScannerError) -> bool:
+    """Whether PyYAML stopped at a tab that has something other than blanks before it."""
+    mark = exc.problem_mark
+    if exc.context != "while scanning for the next token" or mark is None or mark.buffer is None:
+        return False
+    if "'\\t'" not in (exc.problem or ""):
+        return False
+    line_start = mark.buffer.rfind("\n", 0, mark.pointer) + 1
+    return mark.buffer[line_start : mark.pointer].strip(" \t") != ""
 
 
 def _is_yaml_list(text: str) -> bool:
@@ -1455,19 +1471,50 @@ def _cli_retry_text(header: str) -> str:
     return _CLI_LEADING_TABS_RE.sub(lambda tabs: "  " * len(tabs.group()), "\n".join(lines))
 
 
-#: Tokens after which YAML 1.2 needs white space before a ``#`` comment. PyYAML reads
-#: ``"a"#b`` or ``[x]#b`` as a value and a comment; YAML 1.2 refuses both.
-_CLOSING_TOKENS = (yaml.FlowSequenceEndToken, yaml.FlowMappingEndToken)
+def _duplicate_key(root: yaml.Node) -> yaml.Node | None:
+    """Return a mapping key that repeats in its mapping, or None (``<<`` merge keys aside).
+
+    PyYAML keeps the last value. YAML 1.2 requires unique keys, so a strict parser refuses
+    the header; Bun.YAML's choice is not verified. Either way the two may read different
+    values, so the seam refuses it. Iterative, and each node is walked once.
+    """
+    seen: set[int] = set()
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, yaml.CollectionNode) or id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, yaml.MappingNode):
+            keys: set[tuple[str, str]] = set()
+            for key_node, value_node in node.value:
+                if isinstance(key_node, yaml.ScalarNode) and key_node.tag != _YAML_MERGE_TAG:
+                    spelled = (key_node.tag, key_node.value)
+                    if spelled in keys:
+                        return key_node
+                    keys.add(spelled)
+                stack.extend((key_node, value_node))
+        else:
+            stack.extend(node.value)
+    return None
 
 
 def _yaml12_refuses(text: str) -> tuple[int, int] | None:
-    r"""Return the (line, column) of syntax PyYAML accepts and YAML 1.2 refuses, or None.
+    """Return the (line, column) of syntax PyYAML accepts and YAML 1.2 refuses, or None.
 
-    The CLI's first parse then fails, so it reads the retry text, or no fields at all, while
-    PyYAML's reading of the header is what this tier would check. The known cases, checked
-    against eemeli/yaml: a lone carriage return (a line break to PyYAML; eemeli refuses the
-    header), and a ``#`` right after a quoted scalar or a closing ``]``/``}``. A ``\r`` at the
-    very end is the CRLF closing fence's (:func:`frontmatter_header`) and is allowed.
+    The CLI's first parse then fails, so it reads the retry text, or no fields at all, or
+    it reads another value, while PyYAML's reading is what this tier would check. The known
+    cases, checked against eemeli/yaml (YAML 1.2):
+
+    * a lone carriage return (a line break to PyYAML; eemeli refuses the header). A carriage
+      return at the very end is the CRLF closing fence's (:func:`frontmatter_header`) and is
+      fine;
+    * a ``#`` right after any token, with no space before it: after a quoted value, a
+      ``]``/``}``, or a ``[``, ``{`` or ``,`` inside a flow collection (``[a,#c``). This also
+      refuses a few spellings both read alike (``{a:#c 1}``), which only refuses more;
+    * a quoted value that continues on a line starting at column 0;
+    * a key that repeats in its mapping (:func:`_duplicate_key`).
+
     ``text`` already composed, so scanning it cannot fail.
     """
     body = text[:-1] if text.endswith("\r") else text
@@ -1477,11 +1524,19 @@ def _yaml12_refuses(text: str) -> tuple[int, int] | None:
         at = lone_cr.start()
         return body.count("\n", 0, at), at - (body.rfind("\n", 0, at) + 1)
     for token in yaml.scan(text, Loader=yaml.SafeLoader):
-        closes = isinstance(token, _CLOSING_TOKENS) or (
-            isinstance(token, yaml.ScalarToken) and token.style in ('"', "'")
-        )
-        if closes and text.startswith("#", token.end_mark.index):
-            return token.end_mark.line, token.end_mark.column
+        end = token.end_mark
+        # Zero-width tokens (stream, block start and end) sit before a comment line, not on it.
+        if end.index > token.start_mark.index and text.startswith("#", end.index):
+            return end.line, end.column
+        if not isinstance(token, yaml.ScalarToken):
+            continue
+        if not token.plain and end.line != token.start_mark.line:
+            raw = text[token.start_mark.index : end.index]
+            if any(line[:1] not in ("", " ", "\t", "\r") for line in raw.split("\n")[1:]):
+                return token.start_mark.line, token.start_mark.column
+    duplicate = _duplicate_key(yaml.compose(text, Loader=yaml.SafeLoader))
+    if duplicate is not None:
+        return duplicate.start_mark.line, duplicate.start_mark.column
     return None
 
 
@@ -1864,9 +1919,9 @@ def load_frontmatter_yaml(header: str, *, what: str, line_offset: int = 0) -> An
         # Positions only — invariant 4.
         raise InvalidCandidateError(
             f"{what} has syntax at line {where[0] + 1 + line_offset}, column {where[1] + 1} "
-            "that YAML 1.1 accepts and the YAML 1.2 that Claude Code reads refuses: a lone "
-            "carriage return, or a '#' right after a quoted value or a closing bracket. Put "
-            "a space before the '#', or use LF or CRLF line endings"
+            "that YAML 1.1 and the YAML 1.2 that Claude Code reads see differently: a lone "
+            "carriage return, a '#' with no space before it, a space or tab before a '#' "
+            "inside a value, a quoted value that goes on at column 0, or a repeated key"
         )
     if isinstance(value, (dict, list)):
         # Composing again is safe here: the load above already bounded nesting, aliases and
