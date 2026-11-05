@@ -308,19 +308,19 @@ def _cli_tool_entries(items: list[str]) -> list[str]:
                 if in_parens:
                     current += char
                 else:
-                    if current.strip():
-                        entries.append(current.strip())
+                    if current.strip(_JS_WHITESPACE):
+                        entries.append(current.strip(_JS_WHITESPACE))
                     current = ""
             elif char == " ":
                 if in_parens:
                     current += char
-                elif current.strip():
-                    entries.append(current.strip())
+                elif current.strip(_JS_WHITESPACE):
+                    entries.append(current.strip(_JS_WHITESPACE))
                     current = ""
-            elif current or char.strip():
+            elif current or char.strip(_JS_WHITESPACE):
                 current += char
-        if current.strip():
-            entries.append(current.strip())
+        if current.strip(_JS_WHITESPACE):
+            entries.append(current.strip(_JS_WHITESPACE))
     return entries
 
 
@@ -334,7 +334,9 @@ def _validate_string_or_string_list(value: Any, label: str) -> None:
     """
     if isinstance(value, str):
         items = [value]
-    elif isinstance(value, list) and all(isinstance(v, str) and v.strip() for v in value):
+    elif isinstance(value, list) and all(
+        isinstance(v, str) and v.strip(_JS_WHITESPACE) for v in value
+    ):
         items = value
     elif isinstance(value, list):
         raise cw.InvalidCandidateError(f"{label} must be a list of non-empty strings")
@@ -378,7 +380,9 @@ def _optional_string_list_items(value: Any, label: str) -> list[str]:
         return []
     if isinstance(value, str):
         return [value]
-    if isinstance(value, list) and all(isinstance(v, str) and v.strip() for v in value):
+    if isinstance(value, list) and all(
+        isinstance(v, str) and v.strip(_JS_WHITESPACE) for v in value
+    ):
         return value
     raise cw.InvalidCandidateError(f"{label} must be a string or a list of non-empty strings")
 
@@ -687,9 +691,12 @@ def _validate_env(value: Any, label: str) -> None:
 #: ``maxTurns``) — the maintainer's call on TASK-449.5. A value the CLI rejects or silently
 #: ignores is refused. ⚠️ Every check sees the value as PyYAML (YAML 1.1) loaded it, and the
 #: CLI loads YAML 1.2, so a few spellings read differently: a plain ``yes`` is a boolean
-#: here and a string there (:func:`_refuse_yaml11_only_booleans` closes that gap for the
-#: boolean fields), and a plain ``2024-01-01`` is a date here, so it is refused as a
-#: ``maxTurns`` that the CLI would read as 2024. The gaps that remain fail closed.
+#: here and a string there, ``010`` is 8 here and 10 there.
+#: :func:`_refuse_yaml11_only_spellings` refuses those for the boolean and number fields.
+#: Other differences are stricter here, for example a plain ``2024-01-01`` is a date to
+#: PyYAML, so it is refused as a ``maxTurns`` that the CLI would read as 2024. Fields this
+#: module checks only as "a string" or "an object" (``model``, an inline MCP definition)
+#: are not compared spelling by spelling.
 _OPTIONAL_FRONTMATTER_RULES: tuple[tuple[str, _FrontmatterRule], ...] = (
     # Claude Code accepts either a comma-separated string or an array for these —
     # this repo's own shipped subagents use the string form. `tools` must name at least
@@ -797,38 +804,99 @@ def validate_agent_content(candidate: Any, *, expected_name: str | None = None) 
     validate_frontmatter(frontmatter, expected_name=expected_name)
     header = _FRONTMATTER_RE.match(candidate)
     if header is not None:  # pragma: no branch — always, once parse_frontmatter accepted it
-        _refuse_yaml11_only_booleans(header.group(1))
+        _refuse_yaml11_only_spellings(header.group(1))
 
 
-#: The fields where a boolean is accepted, and the YAML 1.2 core spellings of a boolean.
-_BOOLEAN_FIELDS = ("background", "omitClaudeMd")
+#: Line breaks to YAML 1.1 (PyYAML) but ordinary characters to YAML 1.2 (the CLI): NEL,
+#: LINE SEPARATOR and PARAGRAPH SEPARATOR. A header with one reads as different keys in
+#: the two (``tools: Read # c<LS>disallowedTools: Bash`` hides the denylist from the CLI).
+_YAML11_ONLY_LINE_BREAKS = ("\x85", "\u2028", "\u2029")
+
+#: The fields whose loaded value this module checks as a boolean or a number, and the
+#: YAML 1.2 core spellings those loaded values must come from.
+_BOOLEAN_FIELDS = frozenset({"background", "omitClaudeMd"})
+_NUMBER_FIELDS = frozenset({"maxTurns", "autoCompactWindow", "effort"})
 _YAML12_BOOLEANS = frozenset({"true", "True", "TRUE", "false", "False", "FALSE"})
+#: Decimal without a leading zero, or hex, which both versions read alike. YAML 1.1 also
+#: reads ``010`` (octal 8), ``0b101``, ``1_000`` and ``1:30`` (sexagesimal) as integers;
+#: YAML 1.2 reads ``010`` as 10 and the others as strings.
+_YAML12_INT_RE = re.compile(r"[-+]?(?:0|[1-9][0-9]*)|0x[0-9a-fA-F]+")
+_YAML12_FLOAT_RE = re.compile(r"[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?")
+_BOOL_TAG = "tag:yaml.org,2002:bool"
+_INT_TAG = "tag:yaml.org,2002:int"
+_FLOAT_TAG = "tag:yaml.org,2002:float"
+_MERGE_TAG = "tag:yaml.org,2002:merge"
 
 
-def _refuse_yaml11_only_booleans(header: str) -> None:
-    """Refuse ``yes``/``no``/``on``/``off`` (and kin) as the value of a boolean field.
+def _check_spelling(key: str, node: yaml.Node) -> None:
+    """Refuse a checked field whose value PyYAML and the CLI's YAML 1.2 read differently."""
+    if not isinstance(node, yaml.ScalarNode):
+        return
+    if key in _BOOLEAN_FIELDS and node.tag == _BOOL_TAG and node.value not in _YAML12_BOOLEANS:
+        raise cw.InvalidCandidateError(
+            f"frontmatter {key!r}: Claude Code reads {node.value!r} as a string, not a "
+            "boolean, and ignores it. Write true or false"
+        )
+    if key in _NUMBER_FIELDS and (
+        (node.tag == _INT_TAG and not _YAML12_INT_RE.fullmatch(node.value))
+        or (node.tag == _FLOAT_TAG and not _YAML12_FLOAT_RE.fullmatch(node.value))
+    ):
+        raise cw.InvalidCandidateError(
+            f"frontmatter {key!r}: {node.value!r} is a number to YAML 1.1 but not, or not "
+            "the same number, to the YAML 1.2 that Claude Code reads. Write a plain decimal"
+        )
 
-    PyYAML follows YAML 1.1, where a plain ``yes`` is ``True``; the CLI's loader follows
-    YAML 1.2, where it is the string ``"yes"``, which ``background`` logs as invalid and
-    ``omitClaudeMd`` ignores. :func:`validate_frontmatter` sees only the loaded ``True``,
-    so this looks at how the value is SPELLED: a plain scalar that PyYAML resolved to a
-    boolean must be one of the YAML 1.2 spellings. ``header`` already loaded as a mapping,
-    so composing it again yields a mapping node and does not fail.
+
+def _check_mapping(node: yaml.MappingNode, seen: set[int]) -> None:
+    """Check each checked field of ``node``, following ``<<`` merge keys into their sources.
+
+    ``compose`` leaves merges unflattened, so a ``<<: {background: yes}`` would otherwise
+    never be looked at. A source is checked even where an explicit key overrides it, which
+    only ever refuses more. ``seen`` stops an alias cycle.
     """
-    root = yaml.compose(header, Loader=yaml.SafeLoader)
-    for key_node, value_node in root.value:
-        if (
-            isinstance(key_node, yaml.ScalarNode)
-            and key_node.value in _BOOLEAN_FIELDS
-            and isinstance(value_node, yaml.ScalarNode)
-            and value_node.style is None
-            and value_node.tag == "tag:yaml.org,2002:bool"
-            and value_node.value not in _YAML12_BOOLEANS
-        ):
-            raise cw.InvalidCandidateError(
-                f"frontmatter {key_node.value!r}: Claude Code reads {value_node.value!r} as a "
-                "string, not a boolean, and ignores it. Write true or false"
+    if id(node) in seen:
+        return
+    seen.add(id(node))
+    for key_node, value_node in node.value:
+        if key_node.tag == _MERGE_TAG:
+            sources = (
+                value_node.value if isinstance(value_node, yaml.SequenceNode) else [value_node]
             )
+            for source in sources:
+                # Always a mapping: PyYAML's load already refused a merge of anything else.
+                if isinstance(source, yaml.MappingNode):  # pragma: no branch
+                    _check_mapping(source, seen)
+        # A non-scalar key cannot be hashed into a dict, so the load already refused it.
+        elif isinstance(key_node, yaml.ScalarNode):  # pragma: no branch
+            _check_spelling(key_node.value, value_node)
+
+
+def _refuse_yaml11_only_spellings(header: str) -> None:
+    """Refuse header text that PyYAML (YAML 1.1) and the CLI (YAML 1.2) read differently.
+
+    Every check in :func:`validate_frontmatter` sees the value as PyYAML loaded it. This
+    looks at how the checked values are SPELLED, so a value is not accepted on a reading
+    the CLI does not share:
+
+    * a NEL / LINE SEPARATOR / PARAGRAPH SEPARATOR anywhere in the header (a line break
+      only to YAML 1.1, so the two see different keys);
+    * a ``background``/``omitClaudeMd`` boolean spelled ``yes``/``no``/``on``/``off`` (a
+      string to YAML 1.2, which the CLI logs or ignores), plain, quoted with an explicit
+      ``!!bool``, or brought in through a ``<<`` merge;
+    * a ``maxTurns``/``autoCompactWindow``/``effort`` number spelled the YAML 1.1 way
+      (``010``, ``0b101``, ``1_000``, ``1:30``), which YAML 1.2 reads as another number or
+      as a string.
+
+    ``header`` already loaded as a mapping, so composing it again yields a mapping node and
+    does not fail.
+    """
+    for char in _YAML11_ONLY_LINE_BREAKS:
+        if char in header:
+            raise cw.InvalidCandidateError(
+                f"frontmatter contains {char!r}, a line break to YAML 1.1 but not to the "
+                "YAML 1.2 that Claude Code reads. Remove it"
+            )
+    _check_mapping(yaml.compose(header, Loader=yaml.SafeLoader), set())
 
 
 # ---------------------------------------------------------------------------
@@ -960,7 +1028,8 @@ def _indent_as_list_items(block: list[str]) -> list[str] | None:
     An entry line, at the block's own indent ``n``, gains ``- `` at column ``n``; every
     deeper line, and any comment at or past ``n``, gains two spaces, so it stays under its
     entry. No scalar is touched, so every value keeps its exact spelling and quoting and
-    reads the same under any YAML version. Returns None for a shape this cannot shift
+    reads the same in YAML 1.1 and 1.2 (the caller refuses a NEL/LS/PS character, the one
+    case where the two disagree on where a line ends). Returns None for a shape this cannot shift
     safely: a tab in the indentation, or a content line shallower than the first entry.
     """
     indent: int | None = None
@@ -1013,6 +1082,10 @@ def _mcp_servers_as_list(text: str) -> str | None:
         return None
     servers = frontmatter.get("mcpServers")
     if not isinstance(servers, dict) or not servers:
+        return None
+    if any(char in match.group(1) for char in _YAML11_ONLY_LINE_BREAKS):
+        # PyYAML splits lines there and YAML 1.2 does not, so re-indenting "the next line"
+        # would add two spaces inside a value for the CLI. (Its save is refused anyway.)
         return None
     lines = match.group(1).splitlines(keepends=True)
     starts = [i for i, line in enumerate(lines) if _MCP_SERVERS_KEY_LINE_RE.match(line)]

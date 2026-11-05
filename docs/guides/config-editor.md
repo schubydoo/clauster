@@ -275,8 +275,8 @@ whole save and writes nothing.
 
 Clauster reads YAML 1.1 and Claude Code reads YAML 1.2, so a few unquoted
 spellings mean different things to the two. Clauster refuses the ones it can
-detect. For example, write `true`, not `yes`, and quote a value that must stay
-a string.
+detect. For example, write `true`, not `yes`. Write a plain decimal number,
+not `010`, `0b101` or `1_000`. Quote a value that must stay a string.
 Clauster never runs a hook command and never connects to an MCP server from
 this editor.
 

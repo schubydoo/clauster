@@ -448,6 +448,78 @@ def test_yaml12_booleans_and_quoted_strings_still_save(spelling: str) -> None:
     sub.validate_agent_content(text + "---\nbody\n", expected_name="x")  # no raise
 
 
+@pytest.mark.parametrize(
+    "header",
+    [
+        # Through a merge key: compose does not flatten merges.
+        "<<: {background: yes}",
+        "base: &d {background: on}\n<<: *d",
+        "a: &a {omitClaudeMd: yes}\n<<: [*a]",
+        # Quoted, with an explicit tag: still `yes` to YAML 1.2.
+        'background: !!bool "yes"',
+        "omitClaudeMd: !!bool 'on'",
+        # YAML 1.1-only number spellings: another number, or a string, to YAML 1.2.
+        "autoCompactWindow: 02000000",  # 524288 here, 2000000 (out of range) there
+        "maxTurns: 010",
+        "maxTurns: 0b101",
+        "maxTurns: 0_5",
+        "maxTurns: 1:30",
+        "effort: 0b11",
+        "maxTurns: 5.0_0",
+    ],
+)
+def test_yaml11_only_spellings_are_refused(header: str) -> None:
+    text = f"---\nname: x\ndescription: d\n{header}\n---\nbody\n"
+    with pytest.raises(cw.InvalidCandidateError, match="YAML 1.2|true or false"):
+        sub.validate_agent_content(text, expected_name="x")
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "maxTurns: 5\nautoCompactWindow: 200000\neffort: 3",
+        "maxTurns: 0x10",  # hex: the same number to both versions
+        "maxTurns: 5.0\neffort: -2",
+        "<<: {maxTurns: 5, background: true}",
+        "a: &a {maxTurns: 5}\n<<: [*a, *a]",  # the same source twice is checked once
+        "maxTurns: '010'",  # quoted: a string to both, which the CLI's parseInt reads as 10
+    ],
+)
+def test_yaml12_number_spellings_still_save(header: str) -> None:
+    text = f"---\nname: x\ndescription: d\n{header}\n---\nbody\n"
+    sub.validate_agent_content(text, expected_name="x")  # no raise
+
+
+@pytest.mark.parametrize("char", ["\x85", " ", " "])
+def test_yaml11_only_line_breaks_are_refused_and_never_converted(
+    tmp_path: Path, char: str
+) -> None:
+    # `tools: Read # c<LS>disallowedTools: Bash` is two keys to PyYAML and one to the
+    # CLI's YAML 1.2, which then never sees the denylist.
+    text = f"---\nname: x\ndescription: d\ntools: Read # c{char}disallowedTools: Bash\n---\nb\n"
+    with pytest.raises(cw.InvalidCandidateError, match="line break"):
+        sub.validate_agent_content(text, expected_name="x")
+    mapped = f"---\nname: x\ndescription: d{char}\nmcpServers:\n  srv:\n    command: x\n---\nb\n"
+    assert sub._mcp_servers_as_list(mapped) is None
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        {"name": "x", "description": "d", "disallowedTools": "﻿*"},
+        {"name": "x", "description": "d", "disallowedTools": "*﻿"},
+        {"name": "x", "description": "d", "disallowedTools": ["Bash", "﻿*"]},
+        {"name": "x", "description": "d", "tools": "﻿"},
+        {"name": "x", "description": "d", "tools": ["﻿"]},
+    ],
+)
+def test_tool_lists_trim_like_javascript(candidate: dict) -> None:
+    # JavaScript's trim() removes a BOM where Python's strip() keeps it, so a BOM-wrapped
+    # `*` is a bare `*` to the CLI, and a BOM alone is no tool at all.
+    with pytest.raises(cw.InvalidCandidateError):
+        sub.validate_frontmatter(candidate)
+
+
 @pytest.mark.parametrize(("key", "value"), _CLI_PARSED_VALUES)
 def test_validate_frontmatter_accepts_every_cli_parsed_value(key: str, value: object) -> None:
     sub.validate_frontmatter({"name": "x", "description": "d", key: value})  # no raise
@@ -468,6 +540,8 @@ def test_validate_frontmatter_accepts_every_cli_parsed_value(key: str, value: ob
         (10**400, None),
         ("٥", None),  # an Arabic-Indic five: JavaScript reads ASCII digits only
         ("５", None),  # a fullwidth five
+        ("٥e3", None),  # Python's float() reads 5000; the exponent pattern is ASCII-only
+        ("１,０００", None),  # fullwidth digits in the grouped form
         ("\x85 5", None),  # NEL is whitespace to Python, not to JavaScript
         ("﻿5", 5),  # the BOM is whitespace to JavaScript, not to Python
         ("200_000", 200000),
