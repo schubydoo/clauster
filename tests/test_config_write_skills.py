@@ -3067,6 +3067,20 @@ def _replace_with(make):
     [
         pytest.param(_grow_in_place, id="grown-in-place"),
         pytest.param(_replace_with(lambda p: p.mkdir()), id="now-a-dir"),
+        pytest.param(_replace_with(lambda p: p.write_bytes(_DEEP_MD)), id="now-another-file"),
+        pytest.param(_replace_with(lambda p: None), id="removed"),
+        pytest.param(
+            _replace_with(lambda p: (p.write_bytes(b"x"), p.chmod(0o000))),
+            id="now-an-unreadable-file",
+            marks=pytest.mark.skipif(
+                os.name != "posix" or os.geteuid() == 0, reason="needs POSIX mode bits, non-root"
+            ),
+        ),
+        pytest.param(
+            _replace_with(lambda p: p.symlink_to(p.parent / "elsewhere")),
+            id="now-a-symlink",
+            marks=needs_symlink,
+        ),
         pytest.param(
             _replace_with(lambda p: os.mkfifo(p)),
             id="now-a-fifo",
@@ -3077,8 +3091,10 @@ def _replace_with(make):
 def test_write_skill_refuses_a_file_changed_after_the_listing(
     tmp_path: Path, monkeypatch, change
 ) -> None:
-    # a.md grew, or a directory or a FIFO now sits where the listing saw it. The open
-    # never blocks (O_NONBLOCK), leaks no descriptor, and the save refuses before a promote.
+    # a.md grew, was removed, or another file, a directory, a symlink or a FIFO now sits
+    # where the listing saw it. Each gives the same refusal on every OS (on Windows the
+    # open of a directory fails with PermissionError first). The open never blocks
+    # (O_NONBLOCK), leaks no descriptor, and the save refuses before a promote.
     skill_dir = _stored(tmp_path)
     a_md = skill_dir / "refs" / "deep" / "a.md"
     _swap_after_listing(
@@ -3225,8 +3241,8 @@ def _case_insensitive(directory: Path) -> bool:
 
 
 def test_write_skill_replaces_a_read_only_member_named_in_another_case(tmp_path: Path) -> None:
-    # macOS and Windows: `scripts/RUN.sh` names the stored `scripts/run.sh`. The kept copy
-    # of a read-only file is replaced in staging, not written through (a 500 before).
+    # macOS and Windows: `scripts/RUN.sh` names the stored `scripts/run.sh`, so that
+    # read-only file is replaced: never copied, never written through (a 500 before).
     if not _case_insensitive(tmp_path):
         pytest.skip("needs a case-insensitive file system")
     skill_dir = _stored(tmp_path)
@@ -3237,6 +3253,569 @@ def test_write_skill_replaces_a_read_only_member_named_in_another_case(tmp_path:
         confirm_scripts=sk.SCRIPT_CONFIRM_TOKEN,
     )
     assert (skill_dir / "scripts" / "RUN.sh").read_bytes() == b"echo new\n"
+
+
+def test_write_skill_near_cap_replacement_in_another_case_fits(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Greptile P2. On a case-insensitive file system, `scripts/RUN.sh` replaces the stored
+    # `scripts/run.sh`, so the stored bytes must not count: kept a.md + sent fits exactly.
+    if not _case_insensitive(tmp_path):
+        pytest.skip("needs a case-insensitive file system")
+    skill_dir = _stored(tmp_path)
+    monkeypatch.setattr(sk, "MAX_TOTAL_BYTES", len(_DEEP_MD) + len(_VALID_MD) + 2)
+    _save(
+        tmp_path,
+        {sk.SKILL_FILENAME: _VALID_MD, "scripts/RUN.sh": "ok"},
+        confirm_scripts=sk.SCRIPT_CONFIRM_TOKEN,
+    )
+    assert (skill_dir / "scripts" / "RUN.sh").read_bytes() == b"ok"
+    assert (skill_dir / "refs" / "deep" / "a.md").read_bytes() == _DEEP_MD
+
+
+def _as_if_case_insensitive(monkeypatch, skill_dir: Path, sent: str, stored: str) -> None:
+    """Make the walk see ``sent`` resolve to the stored ``stored``, as APFS or NTFS would."""
+    real_lstat = sk.os.lstat
+
+    def _lstat(path, *args, **kwargs):
+        if Path(path) == skill_dir / sent:
+            path = skill_dir / stored
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(sk.os, "lstat", _lstat)
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0, reason="needs POSIX mode bits and a non-root user"
+)
+def test_write_skill_matches_a_member_by_the_file_systems_own_name_rules(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Linux stand-in for the case above: the file system answers that `scripts/RUN.sh` is
+    # the stored `scripts/run.sh`. The stored copy is neither counted nor opened, so a
+    # near-cap save fits, and an unreadable old copy does not block its replacement.
+    skill_dir = _stored(tmp_path)
+    (skill_dir / "scripts" / "run.sh").chmod(0o000)
+    _as_if_case_insensitive(monkeypatch, skill_dir, "scripts/RUN.sh", "scripts/run.sh")
+    monkeypatch.setattr(sk, "MAX_TOTAL_BYTES", len(_DEEP_MD) + len(_VALID_MD) + 2)
+    _save(
+        tmp_path,
+        {sk.SKILL_FILENAME: _VALID_MD, "scripts/RUN.sh": "ok"},
+        confirm_scripts=sk.SCRIPT_CONFIRM_TOKEN,
+    )
+    assert (skill_dir / "scripts" / "RUN.sh").read_bytes() == b"ok"
+    # The listing, not exists(): on APFS `run.sh` "exists" whenever `RUN.sh` does.
+    assert os.listdir(skill_dir / "scripts") == ["RUN.sh"]  # replaced, as on APFS or NTFS
+
+
+def _hard_link_or_skip(src: Path, dst: Path) -> None:
+    try:
+        os.link(src, dst)
+    except OSError:
+        pytest.skip("hard links (under this name) unavailable")
+
+
+@pytest.mark.parametrize(
+    ("stored", "other", "sent"),
+    [
+        ("run.sh", "RUN.sh", "RUN.sh"),  # case
+        ("é.md", "é.md", "é.md"),  # NFC and NFD
+    ],
+    ids=["case", "normalization"],
+)
+def test_write_skill_keeps_a_differently_spelled_hard_link_when_both_names_are_stored(
+    tmp_path: Path, stored: str, other: str, sent: str
+) -> None:
+    # On a file system that keeps both spellings apart (ext4), two names are two members,
+    # even as hard links of one file: sending one must not drop the other.
+    skill_dir = _stored(tmp_path)
+    (skill_dir / "refs" / stored).write_bytes(b"kept\n")
+    if (skill_dir / "refs" / other).exists():
+        pytest.skip("this file system does not keep both spellings apart")
+    _hard_link_or_skip(skill_dir / "refs" / stored, skill_dir / "refs" / other)
+    _save(
+        tmp_path,
+        {sk.SKILL_FILENAME: _VALID_MD, f"refs/{sent}": "new\n"},
+        confirm_scripts=sk.SCRIPT_CONFIRM_TOKEN,
+    )
+    assert sorted(os.listdir(skill_dir / "refs")) == sorted(["deep", stored, other])
+    assert (skill_dir / "refs" / stored).read_bytes() == b"kept\n"
+    assert (skill_dir / "refs" / sent).read_bytes() == b"new\n"
+
+
+@pytest.mark.parametrize(("stored", "sent"), [("run.sh", "RUN.sh"), ("ss.md", "ß.md")])
+def test_write_skill_keeps_a_separate_file_that_only_folds_to_the_sent_name(
+    tmp_path: Path, stored: str, sent: str
+) -> None:
+    # A fold alone never replaces: where the file system keeps the names apart (ext4 for
+    # case, NTFS and APFS for ss and ß), the stored file is a different member and stays.
+    skill_dir = _stored(tmp_path)
+    (skill_dir / "refs" / stored).write_bytes(b"kept\n")
+    if (skill_dir / "refs" / sent).exists():
+        pytest.skip("this file system treats the two names as one")
+    _save(
+        tmp_path,
+        {sk.SKILL_FILENAME: _VALID_MD, f"refs/{sent}": "new\n"},
+        confirm_scripts=sk.SCRIPT_CONFIRM_TOKEN,
+    )
+    assert (skill_dir / "refs" / stored).read_bytes() == b"kept\n"
+    assert (skill_dir / "refs" / sent).read_bytes() == b"new\n"
+
+
+@needs_symlink
+def test_write_skill_refuses_a_key_through_a_stored_symlink_loop(tmp_path: Path) -> None:
+    # Python 3.11 and 3.12 raise RuntimeError from Path.resolve() on a loop. The lookup of
+    # the keys never resolves, so the walk refuses the link with a 422, never a 500.
+    skill_dir = _stored(tmp_path)
+    (skill_dir / "loop").symlink_to("loop")
+    with pytest.raises(cw.InvalidCandidateError, match="'loop' is a symlink"):
+        _save(
+            tmp_path,
+            {sk.SKILL_FILENAME: _VALID_MD, "loop/x.md": "x\n"},
+            confirm_scripts=sk.SCRIPT_CONFIRM_TOKEN,
+        )
+    _assert_no_orphans(tmp_path / "skills")
+
+
+def test_write_skill_keeps_a_hard_link_of_a_replaced_member(tmp_path: Path) -> None:
+    # The same file under another name is a different member: replacing a.md keeps b.md.
+    skill_dir = _stored(tmp_path)
+    try:
+        os.link(skill_dir / "refs" / "deep" / "a.md", skill_dir / "refs" / "deep" / "b.md")
+    except OSError:
+        pytest.skip("hard links unavailable")
+    _save(
+        tmp_path,
+        {sk.SKILL_FILENAME: _VALID_MD, "refs/deep/a.md": "new\n"},
+        confirm_scripts=sk.SCRIPT_CONFIRM_TOKEN,
+    )
+    assert (skill_dir / "refs" / "deep" / "a.md").read_bytes() == b"new\n"
+    assert (skill_dir / "refs" / "deep" / "b.md").read_bytes() == _DEEP_MD
+
+
+def _during_named_write(monkeypatch, member: str, action) -> None:
+    """Run ``action(staging_path)`` right before the build creates a named member's file."""
+    real_create = sk._create_exclusive
+
+    def _create(path, data):
+        if ".staging-" in str(path) and Path(path).as_posix().endswith(member):
+            action(Path(path))
+        return real_create(path, data)
+
+    monkeypatch.setattr(sk, "_create_exclusive", _create)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode bits")
+def test_write_skill_keeps_staging_private_until_the_promote(tmp_path: Path, monkeypatch) -> None:
+    # Greptile P1 (a). A stored 0o777 directory must not make staging writable by another
+    # user while the build still writes: staging and every directory in it are 0o700 then.
+    skill_dir = _stored(tmp_path)
+    (skill_dir / "refs").chmod(0o777)
+    seen: dict[str, int] = {}
+
+    def _record(target: Path) -> None:
+        staging = next(p for p in target.parents if ".staging-" in p.name)
+        for rel in ("", "refs", "refs/deep", "refs/fresh"):
+            seen[rel] = (staging / rel).stat().st_mode & 0o7777
+
+    # refs/fresh is new: it is made for the named member, and is owner-only as well.
+    _during_named_write(monkeypatch, "refs/fresh/new.md", _record)
+    _save(
+        tmp_path,
+        {sk.SKILL_FILENAME: _VALID_MD, "refs/fresh/new.md": "new\n"},
+        confirm_scripts=sk.SCRIPT_CONFIRM_TOKEN,
+    )
+    assert seen == {"": 0o700, "refs": 0o700, "refs/deep": 0o700, "refs/fresh": 0o700}
+    assert (skill_dir / "refs").stat().st_mode & 0o777 == 0o777  # its final mode, at promote
+    (tmp_path / "default-mode").mkdir()  # a new directory's mode under this umask
+    default = (tmp_path / "default-mode").stat().st_mode & 0o777
+    assert (skill_dir / "refs" / "fresh").stat().st_mode & 0o777 == default
+    assert (skill_dir / "refs" / "fresh" / "new.md").read_bytes() == b"new\n"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode bits")
+def test_write_skill_never_takes_group_or_world_write_on_the_skill_dir(tmp_path: Path) -> None:
+    skill_dir = _stored(tmp_path)
+    skill_dir.chmod(0o3777)  # setgid + sticky + group and world write
+    (skill_dir / "refs").chmod(0o1777)  # world-writable and sticky, like /tmp
+    _save(tmp_path, {sk.SKILL_FILENAME: _md(description="new")})
+    # setgid and the group and world write go. The sticky bit stays: on refs, it is what
+    # stops another user from renaming over or deleting the owner's files.
+    assert skill_dir.stat().st_mode & 0o7777 == 0o1755
+    assert (skill_dir / "refs").stat().st_mode & 0o7777 == 0o1777
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode bits")
+def test_write_skill_sets_final_dir_modes_deepest_first(tmp_path: Path, monkeypatch) -> None:
+    # os.chmod follows symlinks in the path, so each directory above the one it changes
+    # must still be owner-only: the root opens last.
+    skill_dir = _stored(tmp_path)
+    (skill_dir / "refs").chmod(0o755)
+    real_chmod = sk.os.chmod
+    checked: list[str] = []
+
+    def _chmod(path, mode, *args, **kwargs):
+        path = Path(path)
+        staging = next((p for p in [path, *path.parents] if ".staging-" in p.name), None)
+        if staging is not None and path.is_dir():
+            for above in path.parents:
+                if above == staging.parent:
+                    break
+                assert above.stat().st_mode & 0o777 == 0o700, (path, above)
+            checked.append(path.relative_to(staging).as_posix())
+        return real_chmod(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(sk.os, "chmod", _chmod)
+    _save(tmp_path, {sk.SKILL_FILENAME: _md(description="new")})
+    assert checked[-1] == "."  # the root last
+    assert set(checked) == {".", "refs", "refs/deep", "scripts"}
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode bits")
+def test_write_skill_new_dirs_take_the_umask(tmp_path: Path) -> None:
+    old = os.umask(0o077)
+    try:
+        sk.write_skill(
+            tmp_path,
+            "s",
+            {sk.SKILL_FILENAME: _VALID_MD, "fresh/x.md": "x\n"},
+            expected_hash=None,
+            confirm_scripts=sk.SCRIPT_CONFIRM_TOKEN,
+        )
+    finally:
+        os.umask(old)
+    skill_dir = tmp_path / "skills" / "s"
+    assert skill_dir.stat().st_mode & 0o777 == 0o700
+    assert (skill_dir / "fresh").stat().st_mode & 0o777 == 0o700
+
+
+def _another_group() -> int | None:
+    if os.name != "posix":
+        return None
+    others = [g for g in os.getgroups() if g != os.getegid()]
+    return others[0] if others else None
+
+
+def _chown_or_skip(path: Path, gid: int | None) -> None:
+    # A runner's group list (opendirectoryd on macOS) may name a group chown refuses.
+    try:
+        os.chown(path, -1, gid)
+    except PermissionError:
+        pytest.skip(f"cannot give a file group {gid} here")
+
+
+@pytest.mark.skipif(_another_group() is None, reason="needs a second group the user is in")
+def test_write_skill_keeps_the_stored_group(tmp_path: Path) -> None:
+    skill_dir = _stored(tmp_path)
+    gid = _another_group()
+    for member in ("refs", "scripts/run.sh"):
+        _chown_or_skip(skill_dir / member, gid)
+        (skill_dir / member).chmod(0o770)
+    _save(tmp_path, {sk.SKILL_FILENAME: _md(description="new")})
+    for member in ("refs", "scripts/run.sh"):
+        info = (skill_dir / member).stat()
+        assert (info.st_gid, info.st_mode & 0o777) == (gid, 0o770)
+
+
+@pytest.mark.skipif(_another_group() is None, reason="needs a second group the user is in")
+def test_write_skill_clears_group_bits_it_cannot_keep_for_the_stored_group(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # When the stored group cannot be set back, the group bits go: they never pass to the
+    # group the new copy happens to get (`staff` on macOS holds every local account).
+    skill_dir = _stored(tmp_path)
+    gid = _another_group()
+    for member in ("refs", "scripts/run.sh"):
+        _chown_or_skip(skill_dir / member, gid)
+        (skill_dir / member).chmod(0o770)
+
+    def _no_chown(*_args, **_kwargs):
+        raise PermissionError("not a member")
+
+    monkeypatch.setattr(sk.os, "chown", _no_chown)
+    _save(tmp_path, {sk.SKILL_FILENAME: _md(description="new")})
+    for member in ("refs", "scripts/run.sh"):
+        assert (skill_dir / member).stat().st_mode & 0o777 == 0o700
+
+
+def test_write_skill_a_key_reaching_a_stored_dir_replaces_nothing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Only a stored FILE can be replaced: a key that the file system maps to a stored
+    # directory (`Refs` reaching `refs` on APFS or NTFS) leaves the directory and its files.
+    # Simulated on a case-sensitive file system; the real case is the test below.
+    if _case_insensitive(tmp_path):
+        pytest.skip("simulates a case-insensitive lookup on a case-sensitive file system")
+    skill_dir = _stored(tmp_path)
+    _as_if_case_insensitive(monkeypatch, skill_dir, "Refs", "refs")
+    _save(
+        tmp_path,
+        {sk.SKILL_FILENAME: _VALID_MD, "Refs": "x\n"},
+        confirm_scripts=sk.SCRIPT_CONFIRM_TOKEN,
+    )
+    assert (skill_dir / "refs" / "deep" / "a.md").read_bytes() == _DEEP_MD
+
+
+def test_write_skill_refuses_a_key_that_is_a_stored_dir_in_another_case(tmp_path: Path) -> None:
+    # macOS and Windows: `Refs` IS the stored directory `refs`, so a file there would
+    # replace the directory and its files. The save refuses, and the directory stays.
+    if not _case_insensitive(tmp_path):
+        pytest.skip("needs a case-insensitive file system")
+    skill_dir = _stored(tmp_path)
+    with pytest.raises(cw.InvalidCandidateError, match="'Refs' is a directory in the skill"):
+        _save(
+            tmp_path,
+            {sk.SKILL_FILENAME: _VALID_MD, "Refs": "x\n"},
+            confirm_scripts=sk.SCRIPT_CONFIRM_TOKEN,
+        )
+    assert (skill_dir / "refs" / "deep" / "a.md").read_bytes() == _DEEP_MD
+    _assert_no_orphans(tmp_path / "skills")
+
+
+def test_write_skill_keeps_a_file_whose_name_folds_to_the_key_but_is_not_what_it_maps_to(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # The file system maps the key `SS.md` to another file (`other.md`, as an NTFS 8.3
+    # short name maps to its long name), not to the stored `ss.md` whose name folds to it.
+    # Neither a fold nor the identity alone is proof: both files stay.
+    if _case_insensitive(tmp_path):
+        pytest.skip("simulates the lookup on a case-sensitive file system")
+    skill_dir = _stored(tmp_path)
+    (skill_dir / "refs" / "ss.md").write_bytes(b"kept\n")
+    (skill_dir / "refs" / "other.md").write_bytes(b"other\n")
+    _as_if_case_insensitive(monkeypatch, skill_dir, "refs/SS.md", "refs/other.md")
+    _save(
+        tmp_path,
+        {sk.SKILL_FILENAME: _VALID_MD, "refs/SS.md": "new\n"},
+        confirm_scripts=sk.SCRIPT_CONFIRM_TOKEN,
+    )
+    assert (skill_dir / "refs" / "ss.md").read_bytes() == b"kept\n"
+    assert (skill_dir / "refs" / "other.md").read_bytes() == b"other\n"
+
+
+def test_write_skill_keeps_every_hard_link_when_the_key_spells_one(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # `a.md` and `b.md` are hard links of one file, and the key `A.md` maps to `a.md`.
+    # Identity cannot tell hard links apart, so neither is taken as replaced: both stay.
+    if _case_insensitive(tmp_path):
+        pytest.skip("simulates the lookup on a case-sensitive file system")
+    skill_dir = _stored(tmp_path)
+    deep = skill_dir / "refs" / "deep"
+    _hard_link_or_skip(deep / "a.md", deep / "b.md")
+    _as_if_case_insensitive(monkeypatch, skill_dir, "refs/deep/A.md", "refs/deep/a.md")
+    _save(
+        tmp_path,
+        {sk.SKILL_FILENAME: _VALID_MD, "refs/deep/A.md": "new\n"},
+        confirm_scripts=sk.SCRIPT_CONFIRM_TOKEN,
+    )
+    assert sorted(os.listdir(deep)) == ["A.md", "a.md", "b.md"]
+    assert (deep / "a.md").read_bytes() == _DEEP_MD
+    assert (deep / "b.md").read_bytes() == _DEEP_MD
+
+
+def test_write_skill_keeps_a_hard_link_named_like_an_8dot3_alias(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # NTFS: `ssnamelong.md` has the short name `SSNAME~1.MD`, and `ßname~1.md` is a hard
+    # link of it under a separate name. The key `SSNAME~1.MD` reaches the shared inode, and
+    # only `ßname~1.md` folds to it, but the key never names that file. It must stay.
+    if _case_insensitive(tmp_path):
+        pytest.skip("simulates the lookup on a case-sensitive file system")
+    skill_dir = _stored(tmp_path)
+    refs = skill_dir / "refs"
+    (refs / "ssnamelong.md").write_bytes(b"long\n")
+    _hard_link_or_skip(refs / "ssnamelong.md", refs / "ßname~1.md")
+    _as_if_case_insensitive(monkeypatch, skill_dir, "refs/SSNAME~1.MD", "refs/ssnamelong.md")
+    _save(
+        tmp_path,
+        {sk.SKILL_FILENAME: _VALID_MD, "refs/SSNAME~1.MD": "new\n"},
+        confirm_scripts=sk.SCRIPT_CONFIRM_TOKEN,
+    )
+    assert (refs / "ßname~1.md").read_bytes() == b"long\n"
+    assert (refs / "ssnamelong.md").read_bytes() == b"long\n"
+
+
+def test_write_skill_keeps_a_file_with_a_hard_link_elsewhere(tmp_path: Path, monkeypatch) -> None:
+    # The only entry in its directory, but it has another hard link elsewhere: a link that
+    # appears between the listing and the lookup looks the same, so it is not proof.
+    if _case_insensitive(tmp_path):
+        pytest.skip("simulates the lookup on a case-sensitive file system")
+    skill_dir = _stored(tmp_path)
+    deep = skill_dir / "refs" / "deep"
+    _hard_link_or_skip(deep / "a.md", skill_dir / "refs" / "elsewhere.md")
+    _as_if_case_insensitive(monkeypatch, skill_dir, "refs/deep/A.md", "refs/deep/a.md")
+    _save(
+        tmp_path,
+        {sk.SKILL_FILENAME: _VALID_MD, "refs/deep/A.md": "new\n"},
+        confirm_scripts=sk.SCRIPT_CONFIRM_TOKEN,
+    )
+    assert (deep / "a.md").read_bytes() == _DEEP_MD
+
+
+def test_write_skill_matches_nothing_on_a_file_system_without_inodes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Some SMB or FUSE mounts report st_ino 0 for every file, so every entry looks like
+    # the same object. Identity then proves nothing, and the stored file stays.
+    if _case_insensitive(tmp_path):
+        pytest.skip("simulates the lookup on a case-sensitive file system")
+    skill_dir = _stored(tmp_path)
+    deep = skill_dir / "refs" / "deep"
+    real_lstat = sk.os.lstat
+    redirect = {deep / "A.md": deep / "a.md"}
+
+    def _lstat(path, *args, **kwargs):
+        path = redirect.get(Path(path), path)
+        info = real_lstat(path, *args, **kwargs)
+        if Path(path).parent == deep:
+            fields = list(info[:10])
+            fields[1] = 0  # st_ino
+            return os.stat_result(fields)
+        return info
+
+    monkeypatch.setattr(sk.os, "lstat", _lstat)
+    _save(
+        tmp_path,
+        {sk.SKILL_FILENAME: _VALID_MD, "refs/deep/A.md": "new\n"},
+        confirm_scripts=sk.SCRIPT_CONFIRM_TOKEN,
+    )
+    assert (deep / "a.md").read_bytes() == _DEEP_MD
+
+
+def test_write_skill_keeps_the_file_when_the_key_reaches_nothing_in_the_listing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # A race: the lookup of the key reaches an object that is not in the listing it just
+    # read. That proves nothing either: no match (never an IndexError, a 500), file kept.
+    if _case_insensitive(tmp_path):
+        pytest.skip("simulates the lookup on a case-sensitive file system")
+    skill_dir = _stored(tmp_path)
+    outside = tmp_path / "outside.md"
+    outside.write_bytes(b"outside\n")
+    _as_if_case_insensitive(monkeypatch, skill_dir, "refs/deep/A.md", "../../outside.md")
+    _save(
+        tmp_path,
+        {sk.SKILL_FILENAME: _VALID_MD, "refs/deep/A.md": "new\n"},
+        confirm_scripts=sk.SCRIPT_CONFIRM_TOKEN,
+    )
+    assert (skill_dir / "refs" / "deep" / "a.md").read_bytes() == _DEEP_MD
+
+
+def test_write_skill_refuses_two_keys_for_one_path(tmp_path: Path) -> None:
+    skill_dir = _stored(tmp_path)
+    with pytest.raises(
+        cw.InvalidCandidateError, match="'refs//x.md' names a file that is already in the save"
+    ):
+        _save(
+            tmp_path,
+            {sk.SKILL_FILENAME: _VALID_MD, "refs/x.md": "1\n", "refs//x.md": "2\n"},
+            confirm_scripts=sk.SCRIPT_CONFIRM_TOKEN,
+        )
+    assert not (skill_dir / "refs" / "x.md").exists()
+    _assert_no_orphans(tmp_path / "skills")
+
+
+def test_write_skill_refuses_a_key_that_collides_with_a_kept_copy(tmp_path: Path) -> None:
+    # macOS and Windows: `scripts/RUN.sh` reaches the stored `scripts/run.sh`, but run.sh
+    # has another hard link, so the save cannot prove that the key names it. run.sh is
+    # kept, the key then collides with its copy in staging, and the save refuses.
+    if not _case_insensitive(tmp_path):
+        pytest.skip("needs a case-insensitive file system")
+    skill_dir = _stored(tmp_path)
+    _hard_link_or_skip(skill_dir / "scripts" / "run.sh", skill_dir / "refs" / "link.sh")
+    with pytest.raises(cw.InvalidCandidateError, match="names a file that is already in the save"):
+        _save(
+            tmp_path,
+            {sk.SKILL_FILENAME: _VALID_MD, "scripts/RUN.sh": "new\n"},
+            confirm_scripts=sk.SCRIPT_CONFIRM_TOKEN,
+        )
+    assert (skill_dir / "scripts" / "run.sh").read_bytes() == _RUN_SH
+    _assert_no_orphans(tmp_path / "skills")
+
+
+def test_write_skill_keeps_both_names_when_a_key_fits_two_hard_links(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # NTFS or APFS: `ss.md` and `ß.md` are two names (hard links of one file), and the
+    # key `SS.md` maps to `ss.md`. Both names fold to the key, so the save cannot tell
+    # which one the key names, and keeps both rather than drop one.
+    if _case_insensitive(tmp_path):
+        pytest.skip("simulates the lookup on a case-sensitive file system")
+    skill_dir = _stored(tmp_path)
+    (skill_dir / "refs" / "ss.md").write_bytes(b"kept\n")
+    _hard_link_or_skip(skill_dir / "refs" / "ss.md", skill_dir / "refs" / "ß.md")
+    _as_if_case_insensitive(monkeypatch, skill_dir, "refs/SS.md", "refs/ss.md")
+    _save(
+        tmp_path,
+        {sk.SKILL_FILENAME: _VALID_MD, "refs/SS.md": "new\n"},
+        confirm_scripts=sk.SCRIPT_CONFIRM_TOKEN,
+    )
+    assert (skill_dir / "refs" / "ss.md").read_bytes() == b"kept\n"
+    assert (skill_dir / "refs" / "ß.md").read_bytes() == b"kept\n"
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0, reason="needs POSIX mode bits and a non-root user"
+)
+def test_write_skill_reports_the_open_error_when_the_recheck_cannot_look(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # The open fails (EACCES), and the lstat that checks for a change fails for another
+    # reason than "gone": that is not a change, so the open's own error is reported.
+    skill_dir = _stored(tmp_path)
+    run_sh = skill_dir / "scripts" / "run.sh"
+    run_sh.chmod(0o000)
+    real_lstat = sk.os.lstat
+
+    def _lstat(path, *args, **kwargs):
+        if Path(path) == run_sh:
+            raise OSError(5, "lstat I/O error")
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(sk.os, "lstat", _lstat)
+    try:
+        with pytest.raises(
+            cw.InvalidCandidateError, match="could not be kept as stored: Permission denied"
+        ):
+            _save(tmp_path, {sk.SKILL_FILENAME: _md(description="new")})
+    finally:
+        run_sh.chmod(0o755)
+
+
+@pytest.mark.skipif(_open_fds() is None, reason="needs /proc/self/fd to count descriptors")
+def test_create_exclusive_closes_the_descriptor_when_fdopen_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    def _boom(*_args, **_kwargs):
+        raise OSError("fdopen failed")
+
+    monkeypatch.setattr(sk.os, "fdopen", _boom)
+    before = _open_fds()
+    with pytest.raises(OSError, match="fdopen failed"):
+        sk._create_exclusive(tmp_path / "new.md", b"x")
+    assert _open_fds() == before
+
+
+@needs_symlink
+def test_write_skill_refuses_a_symlink_planted_at_a_named_path(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Greptile P1 (b). A symlink planted after the lexists check and before the write makes the
+    # save refuse. The write never follows it, and nothing is promoted.
+    skill_dir = _stored(tmp_path)
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"outside\n")
+    _during_named_write(monkeypatch, "refs/planted.md", lambda p: p.symlink_to(outside))
+    with pytest.raises(cw.InvalidCandidateError, match="'refs/planted.md' changed while"):
+        _save(
+            tmp_path,
+            {sk.SKILL_FILENAME: _md(description="new"), "refs/planted.md": "mine\n"},
+            confirm_scripts=sk.SCRIPT_CONFIRM_TOKEN,
+        )
+    assert outside.read_bytes() == b"outside\n"
+    assert (skill_dir / sk.SKILL_FILENAME).read_bytes() == _VALID_MD.encode()
+    _assert_no_orphans(tmp_path / "skills")
 
 
 def test_write_skill_create_keeps_files_of_a_dir_without_skill_md(tmp_path: Path) -> None:

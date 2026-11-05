@@ -697,11 +697,26 @@ such as `Bash`, a tab, then `# note`.
 A skill save writes only the files that it sends. The Skills editor sends
 `SKILL.md` alone. So a save replaces `SKILL.md` and keeps every other file in
 the skill directory, for example `scripts/` and reference files. The kept
-files stay byte for byte as they were. On Linux and macOS they also keep their
-file modes, except the setuid and setgid bits, which Clauster clears. A
-directory keeps its mode too, but its owner always gets read, write and search
-access, so that the next save can remove the old copy. Clauster removes files
-from a skill only when you delete the whole skill.
+files stay byte for byte as they were. Clauster removes files from a skill only
+when you delete the whole skill.
+
+On Linux and macOS, the kept files and directories also keep their modes and
+their group, with these changes:
+
+- Clauster clears the setuid and setgid bits. A directory keeps its sticky bit.
+- The owner of a directory always gets read, write and search access, so that
+  the next save can remove the old copy.
+- The skill directory itself never gets group or world write access.
+- If you are not a member of the stored group, Clauster clears the group bits.
+  It never gives them to another group.
+
+While Clauster builds the new copy, every directory in it is private to the
+owner. Clauster sets the final modes only as the last step before the new copy
+replaces the old one. Clauster does not keep the file owner, access control
+lists, or extended attributes.
+
+On Windows, Clauster keeps no modes. The new copy gets the access rules of the
+skills directory that holds it, also while Clauster builds it.
 
 Clauster refuses the save and writes nothing in these cases:
 
@@ -713,6 +728,11 @@ Clauster refuses the save and writes nothing in these cases:
   changes while Clauster copies it.
 - A sent path is a directory in the stored skill, or it is inside a path that
   the stored skill holds as a file.
+- A sent path names a stored file under another spelling, and Clauster cannot
+  prove which file it is. Examples are a case variant of a file that has a hard
+  link, or a Windows short name such as `LONGNA~1.MD`. Send the file under its
+  stored name. On macOS and Windows, a plain case variant such as `RUN.sh` for
+  a stored `run.sh` replaces that file.
 - The kept files and the sent files together are larger than 2 MiB, the size
   limit for one skill directory. Clauster never drops a file to make the skill
   fit.
