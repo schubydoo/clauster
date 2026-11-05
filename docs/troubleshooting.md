@@ -465,23 +465,28 @@ hook) run from such a session fails to start, for example because it cannot load
 that names the process.
 
 **Most likely cause:** an older Clauster release started the bridge, the
-background agent or the claustrum daemon. Older releases passed the binary's own runtime environment to
-every process they started: its `_MEI…` unpack directory in `LD_LIBRARY_PATH`,
-and the `_PYI_*` variables. The programs in the session then load the binary's
-bundled libraries, or look for an unpack directory that a Clauster restart already
-deleted. Current releases remove these variables before they start a process.
+background agent or the claustrum daemon. Older releases passed the binary's own
+runtime environment to every process they started: its `_MEI…` unpack directory
+in `LD_LIBRARY_PATH`, and the `_PYI_*` variables. The programs in the session
+then load the binary's bundled libraries, or look for an unpack directory that a
+Clauster restart already deleted. Current releases remove these variables before
+they start a process.
 
 **The fix:** upgrade Clauster first. A process keeps the environment it started
 with, and bridges, pty keepers, background agents and the claustrum daemon all
-outlive a Clauster restart. So an upgrade alone does not change them. Restart each old one:
+outlive a Clauster restart. So an upgrade alone does not change them. Restart
+each old one:
 
 1. For a standard bridge, click **Stop** on its dashboard card, then click
    **Resume**.
 2. For an Interactive Session (pty) bridge, click **Stop** on its card, then
    click **Resume**. Stop also ends the pty keeper that holds the bridge, and
    Resume starts a new keeper.
-3. For a background agent, wait until it ends, then click **Resume**. Resume
-   starts a new background job, with a new id, that continues the conversation.
+3. For a background agent, wait until it finishes its task, then click
+   **Resume**. If it waits for your input or a permission answer, answer it
+   first. Resume starts a new background job, with a new id, that continues the
+   conversation. If its row shows no **Resume**, the agent has no recorded
+   session, and you cannot resume it.
    Do not click **Stop** first: Stop removes the agent from the list, and you
    cannot resume it after that. Claude Code starts background agents from its
    own supervisor process, which Clauster does not manage. If new agents still
