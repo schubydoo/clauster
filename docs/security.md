@@ -307,18 +307,22 @@ Clauster masks secrets in two ways. Only the first one is a guarantee.
    (`session_…`), the code-session id that Clauster derives from it (`cse_…`)
    and the bridge id (a UUID). For each background job, this is its `cse_…`
    id. An environment id or a session id opens a remote session for anyone who
-   has it. Clauster stores each value in memory at the moment it learns it:
-   from the bridge debug log, the bridge pointer file, the connect URL that the
-   pty keeper reads, or the state file of a background job. The store is never
-   written to disk. Clauster drops the values of an instance when you forget
-   the instance. After that moment, every output that reaches the browser masks
-   the value by exact match: the bridge-log stream, the live pty-screen view,
+   has it. Clauster stores a value in memory whenever a bridge record gets it,
+   for example from the bridge debug log, the bridge pointer file, the connect
+   URL that the pty keeper reads, or the record that rediscovery rebuilds after
+   a restart. It also stores the id from the state file of a background job.
+   From the moment Clauster stores a value, the outputs that reach the browser
+   mask it by exact match: the bridge-log stream, the live pty-screen view,
    hosted-session frames, transcript turns, `error_detail`, clone-job errors,
-   agent text, and the on-disk mirror when `logs.redact_session_url` is on. The
-   match ignores every character outside `[A-Za-z0-9_-]`, so a wrap, a hanging
-   indent, a box border, padding, an escape sequence or an invisible character
-   cannot split a value past the mask. Each piece of a split value is masked
-   where it stands. A leak of a known value blocks a release.
+   agent text and the error texts of the ghost-environment reaper. The on-disk
+   mirror masks it too when `logs.redact_session_url` is on. The store is never
+   written to disk. Clauster drops the values of an instance when you forget
+   the instance. The match ignores every character outside `[A-Za-z0-9_-]`, so a
+   wrap, a hanging indent, a box border, padding, an escape sequence or an
+   invisible character cannot split a value past the mask. Each piece of a
+   split value is masked where it stands. A leak of a known value blocks a
+   release. One gap is still open (hosted partial-message frames, see the
+   limits below).
 2. **Shapes (best effort).** Every other secret is masked by its shape: ids and
    UUIDs that Clauster did not learn, and third-party tokens that Claude prints.
    [Log redaction](#log-redaction) below describes these masks and their known
@@ -328,15 +332,22 @@ Clauster masks secrets in two ways. Only the first one is a guarantee.
 !!! warning "Limits of the exact-value guarantee"
     - A run of fewer than 7 characters of the random part of a value can show.
       The random part is the value without its `env_`, `session_` or `cse_`
-      prefix. Such a run shows only where the rest of the value is not visible:
-      it scrolled off the screen, the program drew over it, it is not printed
-      yet, or a shape mask already hides it. A run of 7 or more characters never
-      shows, whole or put back together across rows.
-    - The bridge-log stream, transcript turns and hosted-session frames are
-      masked one line at a time. If a value is split across lines there, each
-      piece is masked only when it holds 7 or more characters of the random
-      part. The on-disk mirror, `error_detail`, clone-job errors and agent text
-      are masked as one block, so there a line break does not split a value.
+      prefix. Such a run shows where the rest of the value is not visible (it
+      scrolled off the screen, the program drew over it, it is not printed yet,
+      or a shape mask already hides it), and in the cases of the next three
+      items. Apart from those cases, a run of 7 or more characters never shows,
+      whole or put back together across rows.
+    - The bridge-log stream is masked one line at a time, and a hosted-session
+      frame one string at a time. If a value is split across lines or strings
+      there, each piece is masked only when it holds 7 or more characters of the
+      random part. The on-disk mirror, a transcript turn, `error_detail`,
+      clone-job errors and agent text are masked as one block, so a line break
+      inside them does not split a value.
+    - Open gap: hosted sessions also stream reply text as many small
+      partial-message frames, before the frame that holds the whole message.
+      Each partial frame is masked on its own, so a value split across them is
+      not masked there. The dashboard does not show these frames, but they reach
+      its WebSocket. The frame with the whole message is masked.
     - A `_` or `-` between two pieces of a value is not ignored, because a value
       can hold these characters. Each piece is masked only when it holds 7 or
       more characters of the random part.
@@ -344,11 +355,17 @@ Clauster masks secrets in two ways. Only the first one is a guarantee.
       reads the environment, session and bridge ids from the marker lines itself:
       from the top of the log when it opens, and from each line before it sends
       that line. So the line that first names an id is masked too. The stream
-      takes the first id of each kind from any line. It takes a further one only
-      from a line that the bridge wrote itself (a `[bridge:…]` or
-      `[remote-bridge]` line), and at most 4 of each kind. On the live pty-screen
-      view, the keeper masks the session id from the first frame after it reads
-      the connect URL. Before that moment, only the shape masks apply.
+      takes the first id of each kind from any marker line. It takes a further
+      one only from a line with a `[bridge:…]` or `[remote-bridge]` tag before
+      the id, and at most 4 of each kind for each open stream. Echoed text can
+      carry such a tag too, so the tag does not prove that the bridge wrote the
+      line. It only limits how many ids the store can gain. On the live
+      pty-screen view, the keeper masks the session id from the first frame after
+      it reads the connect URL. Before that moment, the keeper applies only the
+      shape masks to that id. The Clauster process masks every value it knows
+      again when it relays the frame. `error_detail` is masked when Clauster
+      records it, so text recorded before Clauster learned an id keeps only the
+      shape masks.
     - Clauster stores a value only if it has the form of a real id: letters,
       digits, `_` and `-` only, at least 16 characters after the prefix, and no
       run of 7 characters that occurs twice. Any other value gets only the shape
@@ -361,9 +378,7 @@ Clauster masks secrets in two ways. Only the first one is a guarantee.
       buttons), `starter_session_id` in the session detail of `clauster mcp`,
       `bridge_session_id` of a background job, and the ids that the
       [ghost-environment reaper](#ghost-environment-reaper) lists for you to
-      select. Free text in the instance record and in a background-job record
-      is masked. The reaper returns the error text of the environments API as
-      it is, under the id it belongs to.
+      select. Free text in these responses is masked.
     - When `logs.redact_session_url` is false (the default), the debug log on
       disk keeps every id verbatim. See [Hybrid by default](#hybrid-by-default).
 

@@ -64,12 +64,13 @@ _LOG_HEAD_BYTES = 256 * 1024
 _STREAM_ID_RE = re.compile(
     r"\b(?:environment_id=|environmentId=|Created initial session\s+|Unarchive\s+)"
     r"((?:env|session)_[A-Za-z0-9]+)"
-    r"|\bbridgeId=([0-9a-fA-F-]{36})"
+    r"|\bbridgeId=([0-9a-fA-F-]{36})(?![0-9a-fA-F-])"
 )
 
-#: The tags of the lines the bridge itself writes. Only such a line may add a SECOND id of a
-#: kind (a bridge that registers again, or resumes a session after it created one): tool
-#: output the bridge echoes into its log can then not grow the store.
+#: The tags the bridge puts on its own log lines. Only a line with such a tag before the id
+#: may add a SECOND id of a kind (a bridge that registers again, or resumes a session after
+#: it created one). Echoed text can carry a tag too, so this does not prove the bridge wrote
+#: the line: with the cap below, it bounds how many ids the store can gain from one stream.
 _BRIDGE_TAG_RE = re.compile(r"\[(?:bridge:[a-z]+|remote-bridge)\]")
 
 #: The most ids of one kind (env, session, bridge) one socket stores. A real bridge names one,
@@ -81,29 +82,40 @@ def _read_log_head(path: Path) -> str:
     """Return the first :data:`_LOG_HEAD_BYTES` of ``path`` as text, or ``""`` if unreadable."""
     try:
         with path.open("rb") as fh:
-            return fh.read(_LOG_HEAD_BYTES).decode("utf-8", errors="replace")
+            head = fh.read(_LOG_HEAD_BYTES)
     except OSError:
         return ""
+    if len(head) == _LOG_HEAD_BYTES:  # the read stopped mid-line: a cut id must not count
+        head = head[: head.rfind(b"\n") + 1]
+    return head.decode("utf-8", errors="replace")
 
 
 def _learn_stream_ids(instance_id: str, text: str, learned: dict[str, set[str]]) -> None:
     """Store the environment, session and bridge ids the marker lines of ``text`` name (#1621).
 
     ``learned`` maps each kind (``env``, ``session``, ``bridge``) to the ids this socket stored.
-    The first id of a kind is taken from any line, as ``bridge_log.parse_bridge_markers`` takes
-    it. A further one is taken only from a line the bridge wrote itself (:data:`_BRIDGE_TAG_RE`
-    before the id) and only up to :data:`_STREAM_IDS_PER_KIND`. So a bridge that registers a new
-    environment is still masked exactly, and echoed tool output cannot grow the store.
+    The first id of a kind is taken from any marker line, as ``bridge_log.parse_bridge_markers``
+    takes it. A further one is taken only from a line with a bridge tag before the id
+    (:data:`_BRIDGE_TAG_RE`), and only up to :data:`_STREAM_IDS_PER_KIND` per stream. So a
+    bridge that registers a new environment is still masked exactly, and echoed tool output can
+    add only a few values, which then only mask more.
     """
     for line in text.split("\n"):
+        tag_end: int | None = None  # where the line's first tag ends; searched once, lazily
         for hit in _STREAM_ID_RE.finditer(line):
             value = hit.group(1) or hit.group(2)
             kind = "bridge" if hit.group(2) else value.partition("_")[0]
             seen = learned.setdefault(kind, set())
             if value in seen or len(seen) >= _STREAM_IDS_PER_KIND:
                 continue
-            if seen and _BRIDGE_TAG_RE.search(line, 0, hit.start()) is None:
-                continue  # a second id of this kind, but not from a line the bridge wrote
+            if seen:
+                # The first tag match also ends first (a tag holds no `[`), so one search per
+                # line answers "is there a tag before this id" for every hit: linear.
+                if tag_end is None:
+                    tag = _BRIDGE_TAG_RE.search(line)
+                    tag_end = tag.end() if tag else len(line) + 1
+                if tag_end > hit.start():
+                    continue  # a second id of this kind, on a line with no tag before it
             seen.add(value)
             redact.remember_known_values(instance_id, value)
 

@@ -487,11 +487,17 @@ def test_a_fake_marker_first_cannot_shut_out_the_real_id() -> None:
     assert not _leaks(redact.sanitize_line(f"xyz{ENV}"), ENV)
 
 
-def test_an_owner_that_adds_a_stored_value_does_not_grow_the_matcher() -> None:
-    redact.remember_known_values("a", ENV, SESSION)
-    size = len(redact._known_matcher.values)
-    redact.remember_known_values("background-jobs:call", ENV)  # a per-call owner re-adds it
-    assert len(redact._known_matcher.values) == size
+def test_a_replace_that_changes_no_value_keeps_the_matcher() -> None:
+    # The supervisor's per-call owner: remember, replace the shared owner, forget. Each of
+    # these leaves the union of values as it was, so none may recompile the matcher.
+    redact.remember_known_values("background-jobs", ENV)
+    before = redact._known_matcher
+    redact.remember_known_values("background-jobs:call", ENV)
+    redact.replace_known_values("background-jobs", [ENV])
+    redact.replace_known_values("background-jobs", [])  # the call owner still holds ENV
+    assert redact._known_matcher is before
+    redact.forget_known_values("background-jobs:call")
+    assert redact._known_matcher is None
 
 
 def test_stream_learns_at_most_a_few_ids_of_a_kind() -> None:
@@ -523,6 +529,65 @@ def test_stream_id_pattern_is_linear_on_crafted_lines() -> None:
         ws_module._learn_stream_ids("iid-1", line, learned)
         assert time.perf_counter() - start < 1.0
     assert learned == {}
+    # Dense untagged hits after a first id: each one used to rescan the line for a tag.
+    dense = f"environment_id={ENV} " + "".join(
+        f"[b] environment_id=env_{i} " for i in range(11_000)
+    )
+    start = time.perf_counter()
+    ws_module._learn_stream_ids("iid-1", dense, learned)
+    assert time.perf_counter() - start < 1.0
+    assert learned["env"] == {ENV}
+
+
+def test_stream_ignores_a_tag_after_the_id() -> None:
+    from clauster.routes import websockets as ws_module
+
+    env2 = "env_01Tq4Wr6Ey8Uz2Ix9Oc3Pv5Ab7"
+    learned: dict[str, set[str]] = {}
+    ws_module._learn_stream_ids("iid-1", f"[bridge:api] environment_id={ENV}", learned)
+    ws_module._learn_stream_ids("iid-1", f"echo environment_id={env2} [bridge:api]", learned)
+    assert learned["env"] == {ENV}
+
+
+def test_stream_learns_a_resumed_session_from_a_remote_bridge_line() -> None:
+    from clauster.routes import websockets as ws_module
+
+    resumed = "session_01Pz8Ox6Ny4Mw2Lv9Ku7Jt5Is3"
+    learned: dict[str, set[str]] = {}
+    ws_module._learn_stream_ids(
+        "iid-1", f"[bridge:init] Created initial session {SESSION}", learned
+    )
+    ws_module._learn_stream_ids("iid-1", f"t [remote-bridge] Unarchive {resumed}", learned)
+    assert learned["session"] == {SESSION, resumed}
+
+
+def test_log_head_cut_at_the_limit_drops_the_partial_line(tmp_path: Path, monkeypatch) -> None:
+    from clauster.routes import websockets as ws_module
+
+    monkeypatch.setattr(ws_module, "_LOG_HEAD_BYTES", 32)
+    log = tmp_path / "x.log"
+    log.write_bytes(b"first line\nenvironment_id=env_01Xk3PqR8sTvW2yZ4bNc6dFg\n")
+    assert ws_module._read_log_head(log) == "first line\n"
+
+
+def test_ws_bridge_log_sends_every_line_in_order_across_slices(
+    runner_config, tmp_path: Path, monkeypatch
+) -> None:
+    from clauster.routes import websockets as ws_module
+
+    monkeypatch.setattr(ws_module, "_SANITIZE_SLICE", 2)
+    log = tmp_path / "alpha.log"
+    _append(log, "")
+    instance = _bare_instance(log)
+    with _client(runner_config, instance) as client:
+        with client.websocket_connect("/ws/bridge-log/alpha") as ws:
+            # Seven lines (an odd count), the last one a terminator: a slice that drops a line
+            # ends the read early, rather than leaving the test waiting for a line forever.
+            _append(log, "".join(f"line {i}\n" for i in range(6)) + "end\n")
+            got: list[str] = []
+            while (line := ws.receive_text()) != "end":
+                got.append(line)
+            assert got == [f"line {i}" for i in range(6)]
 
 
 def test_log_head_of_an_unreadable_file_is_empty(tmp_path: Path) -> None:

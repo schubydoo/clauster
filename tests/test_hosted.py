@@ -3337,6 +3337,28 @@ async def test_manager_reattach_daemon_error_is_recorded(fake_claustrum, tmp_pat
     assert "reattach failed" in (inst.error_detail or "")
 
 
+async def test_manager_reattach_error_text_is_redacted(fake_claustrum, tmp_path, monkeypatch):
+    # The error text reaches the browser in the instance record, so it is redacted like every
+    # other error_detail (#1621): here a known id welded into the exception text.
+    from clauster import redact
+
+    known = "env_01Xk3PqR8sTvW2yZ4bNc6dFg"
+    redact.remember_known_values("iid-1", known)
+    fake = await fake_claustrum()
+    store = HostedStateStore(tmp_path)
+    pid = await _spawn_gen1(fake, store)
+    client = _BoomReattachClient()
+
+    async def _boom(process_id, from_seq=0):
+        raise DaemonUnreachable(f"daemon gone at xyz{known}")
+
+    monkeypatch.setattr(client, "reattach", _boom)
+    mgr = HostedManager(store)
+    await mgr.reattach_all(client)
+    detail = mgr.get_instance(pid).error_detail or ""
+    assert "reattach failed" in detail and known[6:] not in detail
+
+
 async def test_concurrent_persist_serializes_writes_no_lost_update(fake_claustrum, tmp_path):
     # Audit #30: spawn/stop/aclose/poll can all call _persist concurrently. The persist
     # lock must serialize snapshot→save→_last_saved so a slower writer carrying an OLDER

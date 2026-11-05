@@ -2,4 +2,4 @@
 default: minor
 ---
 
-Mask the session and environment ids that Clauster learns by exact match on every browser-facing output, also where a weld, a wrap or a split hides them from the shape masks.
+Mask the session and environment ids that Clauster learns by exact match on the browser-facing outputs, also where a weld or a wrap hides them from the shape masks.

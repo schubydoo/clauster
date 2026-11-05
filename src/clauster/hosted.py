@@ -58,7 +58,7 @@ from .models import (
     is_session_uuid,
     new_instance_id,
 )
-from .redact import sanitize_line
+from .redact import redact_for_disk, sanitize_line
 from .state import KeyedStore
 
 logger = logging.getLogger(__name__)
@@ -1532,7 +1532,7 @@ class HostedManager:
                 result = await session.reattach(instance.daemon_last_seq, history_loader=loader)
             except ClaustrumError as exc:
                 instance.status = InstanceStatus.ERROR
-                instance.error_detail = f"reattach failed: {exc}"
+                instance.error_detail = redact_for_disk(f"reattach failed: {exc}")
                 logger.warning("hosted: reattach of %s failed: %s", process_id, exc)
                 continue
             if not result.get("found"):

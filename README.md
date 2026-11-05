@@ -96,11 +96,11 @@ start them, watch them, and pick them up from your phone.
   viewer, and per-project cost and token totals.
 - **In-app editing** — edit a project's Claude Code config surfaces and an allowlist
   of operational `clauster.yml` settings, without reaching for SSH.
-- **Safety** — workspace-trust prompts before a first spawn, session and environment
-  ids that Clauster learns masked by exact match on every browser-facing output (see
-  the [redaction guarantee](https://schubydoo.github.io/clauster/latest/security/#redaction-guarantee);
-  the on-disk bridge log stays verbatim unless you set `logs.redact_session_url`), and
-  an auth model that fails closed on a network bind.
+- **Safety** — workspace-trust prompts before a first spawn, masking by exact match of
+  the session and environment ids that Clauster learns on the browser-facing outputs
+  (see the [redaction guarantee](https://schubydoo.github.io/clauster/latest/security/#redaction-guarantee)
+  and its limits; the on-disk bridge log stays verbatim unless you set
+  `logs.redact_session_url`), and an auth model that fails closed on a network bind.
 - **Interactive Sessions** — an opt-in pty mode with true resume and a read-only live
   terminal view.
 - **Extras** — outbound notifications and webhooks, a Prometheus endpoint, a
