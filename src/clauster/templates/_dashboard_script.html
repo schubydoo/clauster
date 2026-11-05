@@ -643,7 +643,11 @@
         if (this.readiness.busy) return;
         this.readiness.busy = true;
         try {
-          const r = await fetch(ROOT + "/api/doctor");
+          // A hung doctor run must not leave the pill on "Checking…" for good: abort it,
+          // and the catch below reports the run as not run.
+          const opts = typeof AbortSignal.timeout === "function"
+            ? { signal: AbortSignal.timeout(30000) } : {};
+          const r = await fetch(ROOT + "/api/doctor", opts);
           if (this._authExpired(r)) return;
           if (!r.ok) { this._readinessFailed("the server answered HTTP " + r.status); return; }
           const d = await r.json();
@@ -652,7 +656,7 @@
           this.readiness.error = null;
           this.readiness.loaded = true;
         } catch (e) {
-          this._readinessFailed("the request failed");
+          this._readinessFailed("the request failed or timed out");
         } finally { this.readiness.busy = false; }
       },
       // TASK-291: a failed check run drops any earlier result, so a stale "all passed"
@@ -682,6 +686,9 @@
         return this.readiness.showAll || !issues.length ? this.readiness.checks : issues;
       },
       readinessSummary() {
+        const st = this.readinessState();
+        if (st === "checking") return "Checking…";
+        if (st === "unavailable") return "Checks not run" + (this.readiness.error ? ": " + this.readiness.error : "");
         const n = this.readiness.checks.length;
         const b = this.readinessBlockers().length, w = this.readinessWarnings().length;
         let s = this.readinessPassedCount() + " of " + n + (n === 1 ? " check" : " checks") + " passed";
@@ -696,7 +703,7 @@
         if (st === "blocking") return this.readinessBlockers().length + " blocking";
         if (st === "warning") {
           const w = this.readinessWarnings().length;
-          return w + (w === 1 ? " check" : " checks");
+          return w + (w === 1 ? " warning" : " warnings");
         }
         const p = this.readinessPassedCount();
         return p + (p === 1 ? " check passed" : " checks passed");
@@ -716,6 +723,8 @@
         return "System readiness — every check passed (affects every launch on this host); click to see them";
       },
       readinessPillClass() {
+        // The outline-warning text colour at rest is set in dashboard.html (.readiness-pill):
+        // the plain warning token fails AA for small text on white.
         return { blocking: "btn-danger", warning: "btn-outline-warning",
                  unavailable: "btn-outline-warning" }[this.readinessState()] || "btn-ghost-secondary";
       },

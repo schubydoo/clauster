@@ -273,6 +273,13 @@
     .hosted-stream { max-height: 360px; overflow-y: auto; font-size: .875rem; }
     .check-glyph { width: 1.1rem; }
     .check-name { min-width: 9rem; }
+    .min-w-0 { min-width: 0; }
+    /* TASK-291: the readiness pill's outline-warning text at rest uses the AA-safe
+       emphasis token (the plain warning token is ~2.1:1 on white). Hover/active keep
+       Tabler's filled foreground, which a !important utility class would override. */
+    .readiness-pill.btn-outline-warning:not(:hover):not(:active) {
+      color: var(--tblr-warning-text-emphasis);
+    }
     .inline-flex-center { display: inline-flex; align-items: center; }
     .input-group-narrow { max-width: 320px; }
     .modal-backdrop-dim { background: rgba(0, 0, 0, .4); }
@@ -675,18 +682,20 @@
         <!-- Severity-aware: solid red + "blocking" only when a check actually blocks a
              start; warnings get a quieter outline pill (you can still launch). -->
         <!-- TASK-291: the pill shows in every state, so "all passed" and "the checks did
-             not run" never look the same. Passed is a calm ghost pill ("N checks passed");
-             a run that failed or returned no rows is an outline-warning "Checks not run",
-             never a check mark. readinessState() holds the rules. -->
-        <button type="button" class="btn btn-sm" x-cloak data-test="readiness-pill"
+             not run" never look the same. Passed is a calm ghost pill with a passed count;
+             a run that failed or returned no rows is an outline-warning pill that says the
+             checks did not run, never a check mark. readinessState() holds the rules. -->
+        <button type="button" class="btn btn-sm readiness-pill" x-cloak data-test="readiness-pill"
                 :data-state="readinessState()"
                 :class="readinessPillClass()"
                 :disabled="readinessState() === 'checking'"
                 :aria-expanded="readiness.showPanel ? 'true' : 'false'"
+                aria-controls="readiness-panel"
                 @click="toggleReadinessPanel()"
                 :title="readinessPillTitle()">
           <svg class="ico me-1 text-success" aria-hidden="true" x-show="readinessState() === 'passed'"><use href="#ic-check"/></svg><svg
                class="ico me-1" aria-hidden="true" x-show="['blocking', 'warning', 'unavailable'].includes(readinessState())"><use href="#ic-alert"/></svg><span
+                class="visually-hidden">System readiness: </span><span
                 x-text="readinessPillText()">Checking…</span></button>
         <button type="button" class="btn btn-icon btn-ghost-secondary" aria-label="Edit configuration"
                 title="Edit configuration" :disabled="configEditor.loading" @click="openConfig()">
@@ -737,14 +746,17 @@
       </div>
 
       <!-- ===== Readiness detail (collapsed; opened by the header pill) ===== -->
-      <div class="mb-3" x-show="readiness.loaded && readiness.showPanel" x-cloak data-test="readiness-panel">
+      <div class="mb-3" x-show="readiness.loaded && readiness.showPanel" x-cloak
+           id="readiness-panel" data-test="readiness-panel">
         <div class="card">
           <div class="card-status-start" :class="readinessStripeClass()"></div>
           <div class="card-header">
-            <div>
+            <div class="flex-fill min-w-0">
               <h3 class="card-title">Before you start a session</h3>
+              <!-- The one live region: always mounted, so a pass turning into "not run"
+                   is a text change a screen reader announces, not a display toggle. -->
               <div class="text-secondary small" data-test="readiness-summary" role="status"
-                   x-show="readiness.checks.length > 0" x-text="readinessSummary()"></div>
+                   x-text="readinessSummary()"></div>
             </div>
             <div class="card-actions btn-list">
               <button type="button" class="btn btn-sm btn-ghost-secondary" @click="toggleReadinessAll()"
@@ -756,10 +768,10 @@
               <button type="button" class="btn btn-sm btn-ghost-secondary" @click="closeReadinessPanel()">Close</button>
             </div>
           </div>
-          <div class="card-body py-2" data-test="readiness-unavailable" role="status"
+          <div class="card-body py-2" data-test="readiness-unavailable"
                x-show="readinessState() === 'unavailable'">
-            <svg class="ico me-1 text-warning" aria-hidden="true"><use href="#ic-alert"/></svg>The
-            readiness checks did not run<span x-show="readiness.error">: <span x-text="readiness.error"></span></span>.
+            <svg class="ico me-1 text-warning-emphasis" aria-hidden="true"><use href="#ic-alert"/></svg>Clauster
+            could not confirm the readiness checks<span x-show="readiness.error">: <span x-text="readiness.error"></span></span>.
             Readiness is unknown, which is not a pass. Select Re-check to try again, or run
             <code>clauster doctor</code> on the host.
           </div>

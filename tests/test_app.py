@@ -1127,8 +1127,14 @@ def test_readiness_pill_shows_every_state(write_config):
     assert ':data-state="readinessState()"' in pill.group(0)
     assert "readinessState()" in page and "readinessPillText()" in page
     assert '" checks passed"' in page  # the calm all-green summary
-    assert '"Checks not run"' in page  # the did-not-run state, never a pass
-    assert "_readinessFailed(" in page
+    assert 'if (st === "unavailable") return "Checks not run";' in page  # never a pass
+    # Both failure paths of the loader report "not run", and busy always resets.
+    load = page[page.index("async loadReadiness() {") :]
+    load = load[: load.index("_readinessFailed(why) {")]
+    assert 'if (!r.ok) { this._readinessFailed("the server answered HTTP "' in load
+    assert "} catch (e) {\n          this._readinessFailed(" in load
+    assert "finally { this.readiness.busy = false; }" in load
+    assert "AbortSignal.timeout(" in load  # a hung run cannot stay "Checking…" for good
     # A failed run drops the stale rows, so an old pass cannot survive a failed re-check.
     failed = page[page.index("_readinessFailed(why) {") :]
     assert "this.readiness.checks = [];" in failed[: failed.index("},")]
@@ -1139,6 +1145,11 @@ def test_readiness_pill_shows_every_state(write_config):
     assert state.index('"unavailable"') < state.index('return "passed"')
     for hook in ("readiness-panel", "readiness-summary", "readiness-unavailable", "readiness-row"):
         assert f'data-test="{hook}"' in page
+    # The summary is the one live region: always mounted (no x-show), so a state change is
+    # a text change that a screen reader announces.
+    summary = re.search(r'<div[^>]*data-test="readiness-summary"[^>]*>', page, re.S)
+    assert summary and 'role="status"' in summary.group(0)
+    assert "x-show" not in summary.group(0)
 
 
 def test_readiness_vocab_is_unified_and_scoped(write_config):

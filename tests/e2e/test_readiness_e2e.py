@@ -60,14 +60,21 @@ def _settle(browser: AgentBrowser) -> str:
     raise AssertionError(f"readiness pill never settled; last state {state!r}")
 
 
-def _stub_doctor(browser: AgentBrowser, status: int, body: dict) -> None:
-    """Answer ``/api/doctor`` with ``status``/``body`` and re-run the real loader."""
+def _stub_doctor(browser: AgentBrowser, status: int | None, body: dict | None = None) -> None:
+    """Answer ``/api/doctor`` with ``status``/``body`` and re-run the real loader.
+
+    ``status=None`` makes the request reject, as a network failure or a timeout does.
+    """
+    answer = (
+        "Promise.reject(new TypeError('Failed to fetch'))"
+        if status is None
+        else "Promise.resolve(new Response(" + json.dumps(json.dumps(body)) + ","
+        "{status:" + str(status) + ",headers:{'Content-Type':'application/json'}}))"
+    )
     browser.eval_js(
         "(async function(){const d=" + _ROOT + ";"
         "if(!window.__realFetch)window.__realFetch=window.fetch;"
-        "window.fetch=(u,o)=>String(u).endsWith('/api/doctor')"
-        "?Promise.resolve(new Response(" + json.dumps(json.dumps(body)) + ","
-        "{status:" + str(status) + ",headers:{'Content-Type':'application/json'}}))"
+        "window.fetch=(u,o)=>String(u).endsWith('/api/doctor')?" + answer + ""
         ":window.__realFetch(u,o);"
         "await d.loadReadiness();return 1})()"
     )
@@ -140,7 +147,39 @@ def test_failed_recheck_after_a_pass_shows_not_run_never_a_stale_pass(
     browser.expect_count(_ROW, 0)
     browser.expect_visible(_UNAVAILABLE)
     browser.expect_text(_UNAVAILABLE, "HTTP 500")
-    browser.expect_hidden(_SUMMARY)
+    # The live region stays mounted and now carries the failure, not the old pass.
+    browser.expect_text(_SUMMARY, "Checks not run: the server answered HTTP 500")
+
+
+def test_rejected_request_shows_not_run(browser: AgentBrowser, open_server: str) -> None:
+    """A request that rejects (network failure, timeout) is "Checks not run" too."""
+    browser.goto(open_server)
+    _settle(browser)
+    _stub_doctor(browser, None)
+
+    browser.expect_attr(_PILL, "data-state", "unavailable")
+    _open_panel(browser)
+    browser.expect_text(_UNAVAILABLE, "the request failed or timed out")
+    browser.expect_count(_ROW, 0)
+
+
+def test_warning_stays_visible_and_toggle_reveals_the_passing_rows(
+    browser: AgentBrowser, open_server: str
+) -> None:
+    """One warning -> "1 warning" on the pill; the panel shows it, then all rows on toggle."""
+    warn = {"name": "git", "status": "warn", "detail": "git not on PATH"}
+    browser.goto(open_server)
+    _settle(browser)
+    _stub_doctor(browser, 200, {"ok": True, "checks": [*_ALL_OK["checks"], warn]})
+
+    browser.expect_attr(_PILL, "data-state", "warning")
+    browser.expect_text(_PILL, "1 warning")
+    _open_panel(browser)
+    browser.expect_count(_ROW, 1)
+    browser.expect_count(f'{_ROW}[data-status="warn"]', 1)
+    browser.expect_text(_SUMMARY, "3 of 4 checks passed · 1 warning")
+    browser.click(_TOGGLE)
+    browser.expect_count(_ROW, 4)
 
 
 def test_empty_check_list_is_not_a_pass(browser: AgentBrowser, open_server: str) -> None:
