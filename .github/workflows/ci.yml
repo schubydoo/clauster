@@ -451,7 +451,7 @@ jobs:
           # match cleanly (the manager itself lives in the shared renovate-config
           # preset, keyed to the `ALPINE_MUSL_IMAGE` name + this annotation).
           # renovate: datasource=docker depName=alpine versioning=docker
-          ALPINE_MUSL_IMAGE: "alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a"
+          ALPINE_MUSL_IMAGE: "alpine:3.24.4@sha256:93b41ef40b1677fce8fcc64ff4af09daddfacf5040afde618bc46c1e2d1cc7d4"
         run: |
           set -euo pipefail
           docker run --rm -v "$PWD":/src:ro \
