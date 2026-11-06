@@ -2578,6 +2578,11 @@
         const p = this.configMgmt.permissions;
         return p.autoModeOrig !== "" && p.autoModeText === "";
       },
+      configMgmtAutoModeRemovingNote() {
+        if (!this.configMgmtAutoModeRemoving()) return "";
+        return "autoMode block marked for removal. Type " + this.configMgmtConfirmToken()
+          + " and press Save to remove it.";
+      },
       configMgmtRemoveAutoMode() {
         this.configMgmt.permissions.autoModeText = "";
         this._configMgmtFocusLater('[data-test="cm-automode-keep"]');

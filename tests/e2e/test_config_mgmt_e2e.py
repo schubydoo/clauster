@@ -2577,8 +2577,14 @@ def test_config_mgmt_stored_auto_mode_is_read_only_and_removable(
     # Keep undoes a Remove, and the save stays off.
     browser.click('[data-test="cm-automode-remove"]')
     browser.expect_visible('[data-test="cm-automode-removing"]')
+    # The pending removal is announced, and focus moves to Keep (Remove just hid).
+    browser.expect_text('[data-test="cm-automode-live"]', "marked for removal")
+    assert browser.eval_json(
+        "document.activeElement === document.querySelector('[data-test=\"cm-automode-keep\"]')"
+    )
     browser.click('[data-test="cm-automode-keep"]')
     browser.expect_visible('[data-test="cm-automode-remove"]')
+    assert browser.get_text('[data-test="cm-automode-live"]') == ""
     browser.fill('[data-test="cm-confirm"]', confirm)
     browser.expect_visible('[data-test="cm-save"][disabled]')
 

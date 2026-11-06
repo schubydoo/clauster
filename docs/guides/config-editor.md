@@ -171,10 +171,10 @@ Common mechanics across the modal:
   name; destructive list actions (delete, reset, plugin install) have their
   own typed confirms.
 - **Secret masking** — the Settings, MCP, Hooks, Subagents, and Skills
-  surfaces, and the `autoMode` box on the Permissions tab, mask secret-shaped
-  values on read. The MCP surface also masks every `env` and `headers` value,
-  the `headersHelper` command, and the strings in `oauth`, whatever their key
-  names. It also masks the query values, the fragment and the token-like path
+  surfaces, and the `autoMode` box and read-only view on the Permissions tab,
+  mask secret-shaped values on read. The MCP surface also masks every `env`
+  and `headers` value, the `headersHelper` command, and the strings in
+  `oauth`, whatever their key names. It also masks the query values, the fragment and the token-like path
   segments of a server `url`. A masked value left untouched keeps the stored
   secret on write. If
   Clauster cannot match a mask to its stored value, it refuses the save and
@@ -486,10 +486,11 @@ starts with **No forced mode** (`inherit`). For this reason, a project offers
 `inherit` only when it sets `allow_bypass_permissions: true`. See the
 [bypassPermissions footgun gate](../security.md#bypasspermissions-footgun-gate).
 
-At User scope, the box under the rows edits `autoMode`, the rules for the auto
-mode classifier. `autoMode` is a top-level key next to `permissions`, so the
-Settings tab does not show it. The box takes a JSON object with the lists `environment`, `allow`,
-`soft_deny` and `hard_deny`, and the Boolean `classifyAllShell`. Put the entry
+At User scope, the box under the rows edits `autoMode`, the rules for the
+auto mode classifier. `autoMode` is a top-level key next to `permissions`, so
+the Settings tab does not show it. The box takes a JSON object with the lists
+`environment`, `allow`, `soft_deny` and `hard_deny`, and the Boolean
+`classifyAllShell`. Put the entry
 `"$defaults"` in a list to keep the built-in rules at that position. A list
 without it replaces the built-in rules for that section. A `soft_deny` or
 `hard_deny` list without `"$defaults"` removes the built-in blocks, including

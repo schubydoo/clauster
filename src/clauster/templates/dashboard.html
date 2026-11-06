@@ -2461,7 +2461,7 @@
                           x-model="configMgmt.permissions.text" {{ NO_AUTOFILL }}></textarea>
                 <div class="form-hint small mt-1">
                   The <code>permissions</code> object Claude Code enforces, edited as JSON. Put
-                  <code>autoMode</code> in the auto mode section below, not here: it is a separate top-level key.
+                  <code>autoMode</code> in the auto mode section below (at User scope), not here: it is a separate top-level key.
                 </div>
               </div>
 
@@ -2490,14 +2490,14 @@
                 <!-- Project/Local: no box, because Claude Code ignores autoMode in this file. -->
                 <div x-show="configMgmt.scope !== 'user'" x-cloak data-test="cm-automode-repo">
                   <div class="form-label small mb-1">autoMode — auto mode classifier rules</div>
-                  <div class="small" data-test="cm-automode-none" x-show="!configMgmtAutoModeStored()">
+                  <div class="small" data-test="cm-automode-none" x-show="!configMgmtAutoModeStored()" x-cloak>
                     Claude Code reads <code>autoMode</code> only from User scope.
                     {% if config_write_allow_user_scope %}<button type="button" class="btn btn-sm btn-outline-primary ms-1"
                             data-test="cm-automode-switch-user" @click="configMgmtAutoModeToUser()">Switch to User scope</button>
                     {% else %}<span data-test="cm-automode-host-hint">User-scope editing is off in this Clauster
                     configuration, so edit <code>~/.claude/settings.json</code> on the host.</span>{% endif %}
                   </div>
-                  <div data-test="cm-automode-stored" x-show="configMgmtAutoModeStored()">
+                  <div data-test="cm-automode-stored" x-show="configMgmtAutoModeStored()" x-cloak>
                     <div class="alert alert-warning py-1 small mb-1" role="note" id="cm-automode-ignored"
                          data-test="cm-automode-ignored">
                       Ignored by Claude Code: this file holds an <code>autoMode</code> block, but Claude Code reads
@@ -2506,21 +2506,27 @@
                       editing is off in this Clauster configuration, so edit <code>~/.claude/settings.json</code> on
                       the host.{% endif %}
                     </div>
-                    <pre class="small mb-1 text-break detail-pre" data-test="cm-automode-readonly"
+                    <pre class="small mb-1 text-break detail-pre" data-test="cm-automode-readonly" role="region"
                          tabindex="0" aria-label="Stored autoMode block (read-only)" aria-describedby="cm-automode-ignored"
                          :class="configMgmtAutoModeRemoving() ? 'text-decoration-line-through' : ''"
                          x-text="configMgmt.permissions.autoModeOrig"></pre>
-                    <div x-show="!configMgmtAutoModeRemoving()">
+                    <div x-show="!configMgmtAutoModeRemoving()" x-cloak>
                       <button type="button" class="btn btn-sm btn-outline-danger" data-test="cm-automode-remove"
+                              aria-label="Remove it: remove the stored autoMode block"
                               @click="configMgmtRemoveAutoMode()">Remove it</button>
                     </div>
-                    <div class="small" x-show="configMgmtAutoModeRemoving()" data-test="cm-automode-removing">
+                    <div class="small" x-show="configMgmtAutoModeRemoving()" x-cloak data-test="cm-automode-removing">
                       Marked for removal. Type <code x-text="configMgmtConfirmToken()"></code> below and press Save to
                       remove only the <code>autoMode</code> key from this file.
                       <button type="button" class="btn btn-sm btn-outline-secondary ms-1" data-test="cm-automode-keep"
+                              aria-label="Keep it: keep the stored autoMode block"
                               @click="configMgmtKeepAutoMode()">Keep it</button>
                     </div>
                   </div>
+                  {# A note toggled in by x-show is skipped by screen readers (see cm-saved-live),
+                     so the pending removal is announced from this always-mounted region. #}
+                  <div class="visually-hidden" role="status" data-test="cm-automode-live"
+                       x-text="configMgmtAutoModeRemovingNote()"></div>
                 </div>
               </div>
             </div>

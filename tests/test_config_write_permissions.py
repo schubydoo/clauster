@@ -1214,6 +1214,32 @@ def test_route_project_and_local_remove_stored_auto_mode(
     assert list(stored["permissions"]) == ["deny", "allow"]  # sent as loaded, not rebuilt
 
 
+@pytest.mark.parametrize("stored_auto_mode", [{"allow": ["inert"]}, {}, "junk", ["x"]])
+def test_remove_auto_mode_adds_no_permissions_key(tmp_path: Path, stored_auto_mode) -> None:
+    """TASK-509: a file with no ``permissions`` key gets none from the Remove write.
+
+    The tab reads an absent block as ``{}`` and resends it, so the write must not turn
+    that into a new key: only ``autoMode`` changes, whatever shape it held.
+    """
+    settings = cw.project_settings_path(tmp_path)
+    settings.parent.mkdir(parents=True)
+    settings.write_bytes(json.dumps({"autoMode": stored_auto_mode, "model": "opus"}).encode())
+    block, _am, h = perms.read_project_permissions(tmp_path)
+    assert block == {}
+    perms.write_project_permissions(tmp_path, block, h, auto_mode={})
+    assert json.loads(settings.read_bytes()) == {"model": "opus"}
+
+
+def test_empty_permissions_still_replace_a_stored_block(tmp_path: Path) -> None:
+    # Clearing every rule is a real write: a stored block becomes the empty one.
+    settings = cw.project_settings_path(tmp_path)
+    settings.parent.mkdir(parents=True)
+    settings.write_bytes(json.dumps({"permissions": {"allow": ["Bash(ls:*)"]}}).encode())
+    _b, _am, h = perms.read_project_permissions(tmp_path)
+    perms.write_project_permissions(tmp_path, {}, h, auto_mode=None)
+    assert json.loads(settings.read_bytes()) == {"permissions": {}}
+
+
 @pytest.mark.parametrize("scope", ["project", "local"])
 def test_project_and_local_refuse_default_mode_auto(tmp_path: Path, scope: str) -> None:
     writer = (

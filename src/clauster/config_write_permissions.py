@@ -185,7 +185,7 @@ def validate_permissions(candidate: Any) -> None:
         # The likeliest mistake (TASK-449.1): autoMode pasted inside permissions.
         raise cw.InvalidCandidateError(
             "autoMode is a top-level settings key, not part of permissions; "
-            "put it in the auto mode rules section instead"
+            "put it in the auto mode rules section at User scope instead"
         )
     unknown = set(candidate) - _PERMISSION_KEYS
     if unknown:
@@ -361,8 +361,10 @@ def _locked_write(
     """Locked stale-hash-guarded write of ``permissions`` (and ``autoMode``) at ``path``.
 
     The caller must have already validated both values. ``permissions`` is replaced
-    wholesale. ``auto_mode`` ``None`` leaves the stored ``autoMode`` as it is; an empty
-    dict removes the key; any other dict replaces it after :func:`_merge_auto_mode`
+    wholesale, except that an empty one is not added to a file that has no such key (the
+    Permissions tab's autoMode Remove resends the empty block it read, and must change
+    only ``autoMode``, TASK-509). ``auto_mode`` ``None`` leaves the stored ``autoMode`` as
+    it is; an empty dict removes the key; any other dict replaces it after :func:`_merge_auto_mode`
     restores each resent sentinel from the stored value (or refuses the write). Both
     keys change in one locked replace, so they never race each other.
     """
@@ -375,7 +377,8 @@ def _locked_write(
         elif cw.hash_bytes(current_bytes) != expected_hash:
             raise cw.StaleConfigWriteError("config file changed on disk since it was loaded")
         current = cw.load_settings_json_obj(current_bytes)
-        current[PERMISSIONS_KEY] = incoming
+        if incoming or PERMISSIONS_KEY in current:
+            current[PERMISSIONS_KEY] = incoming
         if auto_mode is not None:
             if auto_mode:
                 current[AUTO_MODE_KEY] = _merge_auto_mode(auto_mode, current.get(AUTO_MODE_KEY))
