@@ -544,7 +544,8 @@ def test_route_plugins_list_success(write_config, tmp_path, projects_root, monke
         resp = c.get("/api/config-write/plugins?scope=project&project=alpha")
         assert resp.status_code == 200
         body = resp.json()
-        assert body["plugins"] == payload
+        # An entry with no `scope` field is never treated as installed here (TASK-523).
+        assert body["plugins"] == [{**payload[0], "atScope": False}]
         assert body["project"] == "alpha"  # project scope carries the project key
 
 
@@ -863,8 +864,8 @@ def test_route_plugins_action_uninstall_not_found_is_404(
 def test_route_plugins_action_update_success(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
-    argv_file = tmp_path / "argv.json"
-    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_ARGV_FILE", str(argv_file))
+    argv_log = tmp_path / "argv.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_ARGV_LOG", str(argv_log))
     with _client(write_config, tmp_path, _ON) as c:
         resp = c.post(
             "/api/config-write/plugins/action",
@@ -877,8 +878,13 @@ def test_route_plugins_action_update_success(
         )
         assert resp.status_code == 200
         assert "project" not in resp.json()
-    argv = json.loads(argv_file.read_text())["argv"]
-    assert argv == ["update", "hello@market", "--scope", "user"]
+    # TASK-517: a `list` read on each side of the update, which is the only mutation.
+    calls = [json.loads(line)["argv"] for line in argv_log.read_text().splitlines()]
+    assert calls == [
+        ["list", "--json"],
+        ["update", "hello@market", "--scope", "user"],
+        ["list", "--json"],
+    ]
 
 
 def test_route_plugins_action_bad_op_is_422(write_config, tmp_path, projects_root) -> None:
@@ -1312,8 +1318,8 @@ def test_route_marketplaces_action_remove_not_found_is_404(
 def test_route_marketplaces_action_update_all(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
-    argv_file = tmp_path / "argv.json"
-    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_ARGV_FILE", str(argv_file))
+    argv_log = tmp_path / "argv.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_ARGV_LOG", str(argv_log))
     with _client(write_config, tmp_path, _ON) as c:
         resp = c.post(
             "/api/config-write/marketplaces/action",
@@ -1325,15 +1331,19 @@ def test_route_marketplaces_action_update_all(
             },
         )
         assert resp.status_code == 200
-    argv = json.loads(argv_file.read_text())["argv"]
-    assert argv == ["marketplace", "update"]
+    calls = [json.loads(line)["argv"] for line in argv_log.read_text().splitlines()]
+    assert calls == [
+        ["marketplace", "list", "--json"],
+        ["marketplace", "update"],
+        ["marketplace", "list", "--json"],
+    ]
 
 
 def test_route_marketplaces_action_update_one(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
-    argv_file = tmp_path / "argv.json"
-    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_ARGV_FILE", str(argv_file))
+    argv_log = tmp_path / "argv.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_ARGV_LOG", str(argv_log))
     with _client(write_config, tmp_path, _ON) as c:
         resp = c.post(
             "/api/config-write/marketplaces/action",
@@ -1346,8 +1356,12 @@ def test_route_marketplaces_action_update_one(
             },
         )
         assert resp.status_code == 200
-    argv = json.loads(argv_file.read_text())["argv"]
-    assert argv == ["marketplace", "update", "market"]
+    calls = [json.loads(line)["argv"] for line in argv_log.read_text().splitlines()]
+    assert calls == [
+        ["marketplace", "list", "--json"],
+        ["marketplace", "update", "market"],
+        ["marketplace", "list", "--json"],
+    ]
 
 
 def test_route_marketplaces_action_bad_op_is_422(write_config, tmp_path, projects_root) -> None:
@@ -1981,3 +1995,514 @@ def test_route_marketplaces_action_remove_not_declared_is_404(
             },
         )
         assert resp.status_code == 404
+
+
+# --- TASK-523: the install scope of each listed plugin -------------------------------
+#
+# `plugin list --json` (claude 2.1.319) lists every install, other projects' too: a
+# `user` entry, and `project`/`local` entries with the `projectPath` they belong to.
+
+
+def _entry(pid: str, scope: str | None, project_path: Path | None = None, **extra) -> dict:
+    """Build one `plugin list --json` entry in the shape claude 2.1.319 prints."""
+    e: dict = {"id": pid, "version": "1.0.0", "enabled": True, **extra}
+    if scope is not None:
+        e["scope"] = scope
+    if project_path is not None:
+        e["projectPath"] = str(project_path)
+    return e
+
+
+def test_annotate_marks_only_installs_at_this_scope_and_project(tmp_path: Path) -> None:
+    root = tmp_path
+    alpha, beta = root / "alpha", root / "beta"
+    alpha.mkdir()
+    beta.mkdir()
+    entries = [
+        _entry("u@m", "user"),
+        _entry("p@m", "project", alpha),
+        _entry("l@m", "local", alpha),
+        _entry("o@m", "project", beta),
+        _entry("x@m", "project", tmp_path.parent / "elsewhere"),
+        _entry("g@m", "managed"),
+        _entry("n@m", None),
+    ]
+    at_project = {
+        e["id"]: e for e in plugins.annotate_plugin_scopes(entries, "project", alpha, root)
+    }
+    assert {k for k, e in at_project.items() if e["atScope"]} == {"p@m"}
+    assert at_project["p@m"]["projectName"] == "alpha"
+    assert at_project["l@m"]["projectName"] == "alpha"
+    assert at_project["o@m"]["projectName"] == "beta"  # another project's install
+    assert at_project["x@m"]["projectName"] is None  # outside projects_root
+    assert "projectName" not in at_project["u@m"]
+    assert at_project["u@m"]["scope"] == "user"  # the CLI's own field is kept
+    at_local = plugins.annotate_plugin_scopes(entries, "local", alpha, root)
+    assert {e["id"] for e in at_local if e["atScope"]} == {"l@m"}
+    at_user = plugins.annotate_plugin_scopes(entries, "user", None, root)
+    assert {e["id"] for e in at_user if e["atScope"]} == {"u@m"}
+
+
+def test_annotate_never_matches_a_missing_or_odd_project_path(tmp_path: Path) -> None:
+    entries = [
+        {"id": "a@m", "scope": "project"},
+        {"id": "b@m", "scope": "project", "projectPath": 7},
+        {"id": "c@m", "scope": "project", "projectPath": "bad\x00path"},
+        "not-a-dict",
+    ]
+    out = plugins.annotate_plugin_scopes(entries, "project", tmp_path, tmp_path)
+    assert [e["atScope"] for e in out[:3]] == [False, False, False]
+    assert all(e["projectName"] is None for e in out[:3])
+    assert out[3] == "not-a-dict"
+
+
+def test_route_plugins_list_marks_the_install_scope(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    payload = [
+        _entry("u@m", "user"),
+        _entry("p@m", "project", projects_root / "alpha"),
+        _entry("o@m", "project", projects_root / "beta"),
+    ]
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_STDOUT", json.dumps(payload))
+    with _client(write_config, tmp_path, _ON) as c:
+        rows = c.get("/api/config-write/plugins?scope=project&project=alpha").json()["plugins"]
+        user_rows = c.get("/api/config-write/plugins?scope=user").json()["plugins"]
+    by_id = {r["id"]: r for r in rows}
+    assert [by_id[k]["atScope"] for k in ("u@m", "p@m", "o@m")] == [False, True, False]
+    assert by_id["u@m"]["scope"] == "user"
+    assert by_id["o@m"]["projectName"] == "beta"
+    assert [r["atScope"] for r in user_rows] == [True, False, False]
+
+
+# --- TASK-517: what an update changed ------------------------------------------------
+
+
+def test_describe_plugin_update_reports_the_version_change(tmp_path: Path) -> None:
+    before = [_entry("d@m", "user", lastUpdated="t1")]
+    after = [_entry("d@m", "user", version="1.1.0", lastUpdated="t2")]
+    msg = plugins.describe_plugin_update("d@m", "user", None, before, after)
+    assert msg == "Updated d@m from version 1.0.0 to version 1.1.0."
+
+
+def test_describe_plugin_update_says_already_up_to_date(tmp_path: Path) -> None:
+    same = [_entry("d@m", "user", lastUpdated="t1", installPath="/c/1.0.0")]
+    msg = plugins.describe_plugin_update("d@m", "user", None, same, json.loads(json.dumps(same)))
+    assert msg == "d@m is already up to date (version 1.0.0)."
+
+
+def test_describe_plugin_update_same_version_but_reinstalled(tmp_path: Path) -> None:
+    before = [_entry("d@m", "user", lastUpdated="t1")]
+    after = [_entry("d@m", "user", lastUpdated="t2")]
+    msg = plugins.describe_plugin_update("d@m", "user", None, before, after)
+    assert msg == "Updated d@m. It is still at version 1.0.0."
+
+
+def test_describe_plugin_update_matches_the_entry_at_this_scope_and_project(
+    tmp_path: Path,
+) -> None:
+    alpha = tmp_path / "alpha"
+    alpha.mkdir()
+    before = [
+        _entry("d@m", "user", version="9.0.0"),
+        _entry("d@m", "project", tmp_path / "beta", version="5.0.0"),
+        _entry("d@m", "project", alpha, version="1.0.0", lastUpdated="t1"),
+    ]
+    after = [
+        _entry("d@m", "user", version="9.0.0"),
+        _entry("d@m", "project", tmp_path / "beta", version="6.0.0"),
+        _entry("d@m", "project", alpha, version="1.0.0", lastUpdated="t1"),
+    ]
+    msg = plugins.describe_plugin_update("d@m", "project", alpha, before, after)
+    assert msg == "d@m is already up to date (version 1.0.0)."
+
+
+def test_describe_plugin_update_never_guesses_when_a_read_is_missing(tmp_path: Path) -> None:
+    before = [_entry("d@m", "user")]
+    unread = plugins.describe_plugin_update("d@m", "user", None, before, None)
+    assert unread == (
+        "The update of d@m ran, but Clauster could not read the installed version afterwards."
+    )
+    gone = plugins.describe_plugin_update("d@m", "user", None, before, [])
+    assert gone == "The update of d@m ran, but the plugin is no longer listed at this scope."
+    fresh = plugins.describe_plugin_update("d@m", "user", None, [], [_entry("d@m", "user")])
+    assert fresh == "Updated d@m. It is now at version 1.0.0."
+    no_version = [{"id": "d@m", "scope": "user"}]
+    assert plugins.describe_plugin_update("d@m", "user", None, no_version, no_version) == (
+        "d@m is already up to date (version unknown)."
+    )
+
+
+def test_describe_plugin_update_masks_the_message() -> None:
+    leak = "https://u:tok3n-value@h.example/x"
+    before = [_entry("d@m", "user")]
+    after = [_entry("d@m", "user", version=leak)]
+    msg = plugins.describe_plugin_update("d@m", "user", None, before, after)
+    assert "tok3n-value" not in msg
+    assert msg.startswith("Updated d@m from version 1.0.0 to version ")
+
+
+def _write_marketplace(location: Path, names: list[str]) -> None:
+    """Write a marketplace checkout at ``location`` offering plugins ``names``."""
+    (location / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+    doc = {"name": "m", "plugins": [{"name": n, "source": f"./plugins/{n}"} for n in names]}
+    (location / ".claude-plugin" / "marketplace.json").write_bytes(json.dumps(doc).encode())
+
+
+def test_read_marketplace_plugin_names_dir_file_and_failures(tmp_path: Path, monkeypatch) -> None:
+    checkout = tmp_path / "checkout"
+    _write_marketplace(checkout, ["a", "b"])
+    assert plugins._read_marketplace_plugin_names(str(checkout)) == ["a", "b"]
+    file_only = checkout / ".claude-plugin" / "marketplace.json"
+    assert plugins._read_marketplace_plugin_names(str(file_only)) == ["a", "b"]
+    assert plugins._read_marketplace_plugin_names(str(tmp_path / "absent")) is None
+    assert plugins._read_marketplace_plugin_names(None) is None
+    bad = tmp_path / "bad.json"
+    bad.write_bytes(b"{not json")
+    assert plugins._read_marketplace_plugin_names(str(bad)) is None
+    no_list = tmp_path / "nolist.json"
+    no_list.write_bytes(b'{"plugins": {"a": 1}}')
+    assert plugins._read_marketplace_plugin_names(str(no_list)) is None
+    odd = tmp_path / "odd.json"
+    odd.write_bytes(b'{"plugins": [{"name": "a"}, {"name": 3}, "x"]}')
+    assert plugins._read_marketplace_plugin_names(str(odd)) == ["a", "", ""]
+    monkeypatch.setattr(plugins, "MARKETPLACE_FILE_MAX_BYTES", 8)
+    assert plugins._read_marketplace_plugin_names(str(checkout)) is None  # oversized
+
+
+def test_read_marketplace_plugin_names_unreadable_file_is_none(
+    tmp_path: Path, monkeypatch
+) -> None:
+    checkout = tmp_path / "checkout"
+    _write_marketplace(checkout, ["a"])
+
+    def denied(*_a, **_k):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(Path, "open", denied)
+    assert plugins._read_marketplace_plugin_names(str(checkout)) is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="mkfifo is POSIX-only")
+def test_read_marketplace_plugin_names_never_opens_a_fifo(tmp_path: Path) -> None:
+    import os
+
+    fifo = tmp_path / "pipe.json"
+    os.mkfifo(fifo)
+    assert plugins._read_marketplace_plugin_names(str(fifo)) is None  # would block if opened
+
+
+def test_marketplace_plugin_names_reads_each_install_location(tmp_path: Path) -> None:
+    _write_marketplace(tmp_path / "one", ["a"])
+    listing = [
+        {"name": "one", "source": "directory", "installLocation": str(tmp_path / "one")},
+        {"name": "two", "source": "github", "installLocation": str(tmp_path / "missing")},
+        {"source": "nameless"},
+    ]
+    run, calls = _fake_run(stdout=json.dumps(listing))
+    assert plugins.marketplace_plugin_names("claude", tmp_path, None, run=run) == {
+        "one": ["a"],
+        "two": None,
+    }
+    assert plugins.marketplace_plugin_names("claude", tmp_path, "one", run=run) == {"one": ["a"]}
+    assert calls[0]["argv"][1:] == ["plugin", "marketplace", "list", "--json"]
+
+
+def test_describe_marketplace_update_unchanged_and_changed() -> None:
+    same = plugins.describe_marketplace_update("m", {"m": ["a", "b"]}, {"m": ["b", "a"]})
+    assert same == "Refreshed marketplace m. Its plugin list did not change (2 plugins)."
+    one = plugins.describe_marketplace_update("m", {"m": ["a"]}, {"m": ["a"]})
+    assert one == "Refreshed marketplace m. Its plugin list did not change (1 plugin)."
+    grew = plugins.describe_marketplace_update("m", {"m": ["a", "b"]}, {"m": ["a", "b", "c"]})
+    assert grew == ("Refreshed marketplace m. It now offers 3 plugins (before: 2). Added: c.")
+    shrank = plugins.describe_marketplace_update("m", {"m": ["a", "b"]}, {"m": ["a"]})
+    assert shrank == "Refreshed marketplace m. It now offers 1 plugin (before: 2). Removed: b."
+    swapped = plugins.describe_marketplace_update("m", {"m": ["a", "b"]}, {"m": ["a", "z"]})
+    assert swapped == (
+        "Refreshed marketplace m. It now offers 2 plugins (before: 2). Added: z. Removed: b."
+    )
+
+
+def test_describe_marketplace_update_caps_the_names_shown() -> None:
+    new = [f"p{i}" for i in range(8)] + ["x" * 100]
+    msg = plugins.describe_marketplace_update("m", {"m": []}, {"m": new})
+    assert "Added: p0, p1, p2, p3, p4 and 4 more." in msg
+    long = plugins.describe_marketplace_update("m", {"m": []}, {"m": ["y" * 100]})
+    assert "y" * 81 not in long and "y" * 80 + "…" in long
+
+
+def test_describe_marketplace_update_masks_names_before_the_cut() -> None:
+    # A short credential URL as a plugin name: the final mask of the sentence hides it.
+    short = plugins.describe_marketplace_update("m", {"m": []}, {"m": ["https://u:pw-x@h.io/"]})
+    assert "pw-x" not in short
+    # A long one: a cut inside `user:pass@` would drop the `@` the mask keys on.
+    long_secret = "https://u:" + "S" * 100 + "@h.example/x"
+    long = plugins.describe_marketplace_update("m", {"m": []}, {"m": [long_secret]})
+    assert "SSSS" not in long
+
+
+def test_read_marketplace_plugin_names_refuses_a_symlink_out_of_the_checkout(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside.json"
+    outside.write_bytes(b'{"plugins": [{"name": "leak"}]}')
+    checkout = tmp_path / "checkout"
+    (checkout / ".claude-plugin").mkdir(parents=True)
+    try:
+        (checkout / ".claude-plugin" / "marketplace.json").symlink_to(outside)
+    except OSError:
+        pytest.skip("this host cannot create symlinks")
+    assert plugins._read_marketplace_plugin_names(str(checkout)) is None
+
+
+def test_describe_marketplace_update_never_guesses_an_unread_list() -> None:
+    unread = (
+        "Refreshed marketplace m. Clauster could not read its plugin list, so it cannot tell "
+        "whether the list changed."
+    )
+    assert plugins.describe_marketplace_update("m", {"m": None}, {"m": ["a"]}) == unread
+    assert plugins.describe_marketplace_update("m", {"m": ["a"]}, None) == unread
+    assert plugins.describe_marketplace_update("m", {}, {}) == unread  # not listed at all
+    every = plugins.describe_marketplace_update(None, {"a": ["x"], "b": ["y"]}, {"a": ["x"]})
+    assert every.startswith("Refreshed marketplace a. Its plugin list did not change (1 plugin).")
+    assert "Refreshed marketplace b. Clauster could not read its plugin list" in every
+    assert plugins.describe_marketplace_update(None, {}, {}) == (
+        "Refreshed the marketplaces. No marketplace is listed."
+    )
+
+
+def _update_plugin(c: TestClient) -> dict:
+    resp = c.post(
+        "/api/config-write/plugins/action",
+        json={"scope": "user", "confirm": cw.USER_SCOPE_TOKEN, "op": "update", "plugin": "d@m"},
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+def test_route_plugin_update_says_already_up_to_date(write_config, tmp_path, monkeypatch) -> None:
+    # The fake lists the same entry before and after: the CLI changed nothing.
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_LIST_STDOUT", json.dumps([_entry("d@m", "user")]))
+    with _client(write_config, tmp_path, _ON) as c:
+        body = _update_plugin(c)
+    assert body["message"] == "d@m is already up to date (version 1.0.0)."
+
+
+def test_route_plugin_update_reports_the_new_version(write_config, tmp_path, monkeypatch) -> None:
+    reads = iter([[_entry("d@m", "user")], [_entry("d@m", "user", version="1.2.0")]])
+    monkeypatch.setattr(plugins, "cli_list_plugins", lambda *a, **k: next(reads))
+    with _client(write_config, tmp_path, _ON) as c:
+        body = _update_plugin(c)
+    assert body["message"] == "Updated d@m from version 1.0.0 to version 1.2.0."
+
+
+def test_route_plugin_update_at_project_scope_matches_the_project_install(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    # The route must pass the project dir: a user-scope-only match would say "no longer
+    # listed" for every project or local update.
+    alpha = projects_root / "alpha"
+    reads = iter(
+        [
+            [_entry("d@m", "project", alpha)],
+            [_entry("d@m", "project", alpha, version="1.1.0")],
+        ]
+    )
+    monkeypatch.setattr(plugins, "cli_list_plugins", lambda *a, **k: next(reads))
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.post(
+            "/api/config-write/plugins/action",
+            json={
+                "scope": "project",
+                "project": "alpha",
+                "confirm": "alpha",
+                "op": "update",
+                "plugin": "d@m",
+            },
+        )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["message"] == "Updated d@m from version 1.0.0 to version 1.1.0."
+
+
+@pytest.mark.parametrize(
+    ("route", "body"),
+    [
+        (
+            "/api/config-write/plugins/action",
+            {
+                "scope": "project",
+                "project": "alpha",
+                "confirm": "nope",
+                "op": "update",
+                "plugin": "d@m",
+            },
+        ),
+        (
+            "/api/config-write/plugins/action",
+            {
+                "scope": "project",
+                "project": "../x",
+                "confirm": "../x",
+                "op": "update",
+                "plugin": "d@m",
+            },
+        ),
+        (
+            "/api/config-write/marketplaces/action",
+            {
+                "scope": "project",
+                "project": "alpha",
+                "confirm": "nope",
+                "op": "update",
+                "name": "m",
+            },
+        ),
+        (
+            "/api/config-write/marketplaces/action",
+            {
+                "scope": "project",
+                "project": "../x",
+                "confirm": "../x",
+                "op": "update",
+                "name": "m",
+            },
+        ),
+    ],
+)
+def test_route_update_refused_by_a_gate_spawns_nothing(
+    write_config, tmp_path, projects_root, monkeypatch, route, body
+) -> None:
+    # The before-read must sit after the confirm and path gates, so a refusal runs no CLI.
+    argv_log = tmp_path / "argv.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_ARGV_LOG", str(argv_log))
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.post(route, json=body)
+    assert resp.status_code == 400
+    assert not argv_log.exists()
+
+
+def test_route_plugin_update_failed_read_after_is_reported_not_400(
+    write_config, tmp_path, monkeypatch
+) -> None:
+    calls = {"n": 0}
+
+    def flaky(*_a, **_k):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise plugins.PluginCliError("claude plugin list exited 1: boom")
+        return [_entry("d@m", "user")]
+
+    monkeypatch.setattr(plugins, "cli_list_plugins", flaky)
+    with _client(write_config, tmp_path, _ON) as c:
+        body = _update_plugin(c)
+    assert "could not read the installed version afterwards" in body["message"]
+
+
+def test_route_plugin_update_failed_read_before_runs_nothing(
+    write_config, tmp_path, monkeypatch
+) -> None:
+    argv_log = tmp_path / "argv.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_ARGV_LOG", str(argv_log))
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_EXIT_CODE_LIST", "1")
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.post(
+            "/api/config-write/plugins/action",
+            json={
+                "scope": "user",
+                "confirm": cw.USER_SCOPE_TOKEN,
+                "op": "update",
+                "plugin": "d@m",
+            },
+        )
+    assert resp.status_code == 400
+    calls = [json.loads(line)["argv"] for line in argv_log.read_text().splitlines()]
+    assert calls == [["list", "--json"]]  # the update itself never ran
+
+
+def test_route_plugin_non_update_ops_carry_no_message(
+    write_config, tmp_path, projects_root
+) -> None:
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.post(
+            "/api/config-write/plugins/action",
+            json={
+                "scope": "project",
+                "project": "alpha",
+                "confirm": "alpha",
+                "op": "disable",
+                "plugin": "d@m",
+            },
+        )
+    assert resp.status_code == 200
+    assert "message" not in resp.json()
+
+
+def _update_marketplace(c: TestClient) -> dict:
+    resp = c.post(
+        "/api/config-write/marketplaces/action",
+        json={"scope": "user", "confirm": cw.USER_SCOPE_TOKEN, "op": "update", "name": "m"},
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+@pytest.mark.parametrize(
+    ("after", "expected"),
+    [
+        (["a", "b"], "Refreshed marketplace m. Its plugin list did not change (2 plugins)."),
+        (
+            ["a", "b", "c"],
+            "Refreshed marketplace m. It now offers 3 plugins (before: 2). Added: c.",
+        ),
+    ],
+)
+def test_route_marketplace_update_reports_the_plugin_list(
+    write_config, tmp_path, monkeypatch, after, expected
+) -> None:
+    checkout = tmp_path / "mkt-checkout"
+    _write_marketplace(checkout, ["a", "b"])
+    listing = [{"name": "m", "source": "directory", "installLocation": str(checkout)}]
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_MARKETPLACE_LIST_STDOUT", json.dumps(listing))
+    real_update = plugins.cli_marketplace_update
+
+    def update_and_refresh(binary, cwd, name, **kwargs):
+        real_update(binary, cwd, name, **kwargs)
+        _write_marketplace(checkout, after)  # what the CLI's refresh would leave on disk
+
+    monkeypatch.setattr(plugins, "cli_marketplace_update", update_and_refresh)
+    with _client(write_config, tmp_path, _ON) as c:
+        body = _update_marketplace(c)
+    assert body["message"] == expected
+
+
+def test_route_marketplace_update_failed_read_before_runs_nothing(
+    write_config, tmp_path, monkeypatch
+) -> None:
+    argv_log = tmp_path / "argv.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_ARGV_LOG", str(argv_log))
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_EXIT_CODE_MARKETPLACE_LIST", "1")
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.post(
+            "/api/config-write/marketplaces/action",
+            json={"scope": "user", "confirm": cw.USER_SCOPE_TOKEN, "op": "update", "name": "m"},
+        )
+    assert resp.status_code == 400
+    calls = [json.loads(line)["argv"] for line in argv_log.read_text().splitlines()]
+    assert calls == [["marketplace", "list", "--json"]]
+
+
+def test_route_marketplace_update_failed_read_after_is_reported_not_400(
+    write_config, tmp_path, monkeypatch
+) -> None:
+    calls = {"n": 0}
+
+    def flaky(*_a, **_k):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise plugins.PluginCliError("claude plugin marketplace list exited 1: boom")
+        return {"m": ["a"]}
+
+    monkeypatch.setattr(plugins, "marketplace_plugin_names", flaky)
+    with _client(write_config, tmp_path, _ON) as c:
+        body = _update_marketplace(c)
+    assert "could not read its plugin list" in body["message"]

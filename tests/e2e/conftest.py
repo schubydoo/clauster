@@ -454,14 +454,28 @@ def config_mgmt_plugins_server(
     two distinct list shapes (`plugin list --json` and `plugin marketplace list
     --json`) for the surface to render rows. Action verbs (enable/disable/...) return
     exit 0 by default, so a round-trip through the wired POST → reload succeeds.
+
+    The plugin list carries what claude 2.1.319 prints (TASK-523): ``hello@market``
+    installed at Project scope in ``alpha``, and ``shared@market`` at User scope.
     """
     tmp = tmp_path_factory.mktemp("e2e-configmgmt-plugins")
+    alpha = mutable_projects_tree / "alpha"
+    plugin_list = [
+        {
+            "id": "hello@market",
+            "version": "1.0.0",
+            "scope": "project",
+            "enabled": True,
+            "projectPath": str(alpha),
+        },
+        {"id": "shared@market", "version": "2.0.0", "scope": "user", "enabled": True},
+    ]
     yield from _start_server(
         tmp,
         mutable_projects_tree,
         extra="config_write:\n  enabled: true\n  allow_user_scope: true\n",
         extra_env={
-            "FAKE_CLAUDE_PLUGIN_LIST_STDOUT": '[{"id": "hello@market", "enabled": true}]',
+            "FAKE_CLAUDE_PLUGIN_LIST_STDOUT": json.dumps(plugin_list),
             "FAKE_CLAUDE_PLUGIN_MARKETPLACE_LIST_STDOUT": (
                 '[{"name": "market", "source": "github", "repo": "owner/repo"}]'
             ),

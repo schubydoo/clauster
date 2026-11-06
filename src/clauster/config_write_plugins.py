@@ -72,7 +72,10 @@ against the current docs (``code.claude.com/docs/en/plugins/cli-reference``,
   directly. Confirmed live: the ``enabled`` field in ``list --json`` genuinely
   depends on invocation cwd (a project-scope entry reads ``enabled: true`` only
   from *that* project's directory, ``false`` elsewhere) — the cwd this module
-  spawns from is not cosmetic. ``list --json`` now also carries a plugin's
+  spawns from is not cosmetic. Each entry carries its install ``scope`` (and, for a
+  project/local install, its ``projectPath``), and the list holds every install from
+  every cwd, other projects' too (2.1.319, TASK-523; see :func:`annotate_plugin_scopes`).
+  ``list --json`` now also carries a plugin's
   ``mcpServers`` definitions, which can hold ``env``/``headers`` credentials, so its
   output goes through :func:`redact_plugin_display` before it leaves this module.
 * ``claude plugin marketplace add <source> --scope ... [--sparse ...]`` — source
@@ -121,6 +124,7 @@ path segments are masked in place, and a credential URL (``scheme://user@host``)
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from collections.abc import Callable
@@ -669,6 +673,16 @@ def cli_list_marketplaces(
     the result. The result is redacted (:func:`redact_plugin_display`): a ``git`` or
     ``url`` entry's ``url`` can embed credentials.
     """
+    return redact_plugin_display(_list_marketplaces_raw(binary, cwd, run=run))
+
+
+def _list_marketplaces_raw(binary: str, cwd: Path, *, run: RunFn) -> list[Any]:
+    """Return the UNREDACTED ``marketplace list --json`` entries, for this module's own use.
+
+    Only :func:`cli_list_marketplaces` (which redacts) and :func:`marketplace_plugin_names`
+    (which reads each ``installLocation`` and returns plugin names only) call this; the raw
+    entries never leave the module.
+    """
     proc = _run(binary, ["marketplace", "list", "--json"], cwd=cwd, run=run)
     _raise_for_failure("marketplace-list", "", proc)
     try:
@@ -680,7 +694,279 @@ def cli_list_marketplaces(
         ) from exc
     if not isinstance(data, list):
         raise PluginCliError("claude plugin marketplace list returned a non-list JSON value")
-    return redact_plugin_display(data)
+    return data
+
+
+# ---------------------------------------------------------------------------
+# Install scope of each listed plugin (TASK-523)
+# ---------------------------------------------------------------------------
+#
+# ``plugin list --json`` returns every install the CLI knows, whatever the cwd: a
+# ``user`` entry, and ``project``/``local`` entries that carry the ``projectPath`` they
+# belong to, including other projects' (confirmed on 2.1.319). ``update`` and
+# ``uninstall`` work only at the entry's own scope and project ("Plugin "x" is not
+# installed at scope project", "is installed in user scope, not project"), so the tab
+# must know which entries are installed where it is looking.
+
+
+def _same_dir(raw: Any, project_dir: Path) -> bool:
+    """Return whether the path text ``raw`` names ``project_dir`` (resolved, case-folded)."""
+    if not isinstance(raw, str) or not raw:
+        return False
+    try:
+        left, right = Path(raw).resolve(), project_dir.resolve()
+    except (OSError, ValueError, RuntimeError):
+        return False
+    return os.path.normcase(str(left)) == os.path.normcase(str(right))
+
+
+def installed_at(entry: Any, scope: str, project_dir: Path | None) -> bool:
+    """Return whether a ``plugin list`` entry is installed at ``scope`` (in ``project_dir``).
+
+    A ``user`` entry matches user scope. A ``project`` or ``local`` entry matches only when
+    its ``projectPath`` is ``project_dir``. An entry with no ``scope`` field, or another
+    value (``managed``), never matches: Clauster does not guess where it lives.
+    """
+    if not isinstance(entry, dict) or entry.get("scope") != scope:
+        return False
+    if scope == "user":
+        return True
+    return project_dir is not None and _same_dir(entry.get("projectPath"), project_dir)
+
+
+def _project_name(raw: Any, projects_root: Path) -> str | None:
+    """Return the project name (posix path under ``projects_root``) for ``raw``, or ``None``."""
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        rel = Path(raw).resolve().relative_to(projects_root.resolve())
+    except (OSError, ValueError, RuntimeError):
+        return None
+    name = rel.as_posix()
+    return None if name in ("", ".") else name
+
+
+def annotate_plugin_scopes(
+    entries: list[Any], scope: str, project_dir: Path | None, projects_root: Path
+) -> list[Any]:
+    """Return copies of ``entries`` with ``atScope`` and, where it applies, ``projectName``.
+
+    ``atScope`` is :func:`installed_at` for the scope (and project) the tab is viewing.
+    ``projectName`` is set on a ``project`` or ``local`` entry whose ``projectPath`` lies
+    under ``projects_root``, so the tab can link to that project's scope; ``None`` when it
+    lies elsewhere. The entry's own fields, ``scope`` included, are kept as the CLI gave them.
+    """
+    out: list[Any] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            out.append(entry)
+            continue
+        annotated = dict(entry)
+        annotated["atScope"] = installed_at(entry, scope, project_dir)
+        if entry.get("scope") in ("project", "local"):
+            annotated["projectName"] = _project_name(entry.get("projectPath"), projects_root)
+        out.append(annotated)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# What an update changed (TASK-517): a read before and after, never a guess
+# ---------------------------------------------------------------------------
+
+#: ``plugin list --json`` fields that a real update changes. ``version`` can stay the same
+#: when only the commit moved, but ``lastUpdated`` and ``installPath`` change with every
+#: re-install; an "already at the latest version" run changes none (confirmed on 2.1.319).
+#: ``gitCommitSha`` is compared too, for a CLI that starts to list it.
+_UPDATE_FIELDS = ("version", "lastUpdated", "installPath", "gitCommitSha")
+
+
+def _version_text(entry: dict[str, Any]) -> str:
+    """Return ``version X`` for an entry, or ``version unknown`` when it carries none."""
+    version = entry.get("version")
+    return f"version {version}" if isinstance(version, str) and version else "version unknown"
+
+
+def describe_plugin_update(
+    plugin_id: str,
+    scope: str,
+    project_dir: Path | None,
+    before: list[Any],
+    after: list[Any] | None,
+) -> str:
+    """Return what a ``plugin update`` did, from ``plugin list`` reads before and after it.
+
+    ``after`` is ``None`` when the read after the update failed: the message then says the
+    update ran and the version could not be read, and claims nothing else. The entry is
+    matched by id AND scope (and project, :func:`installed_at`), because one id can be
+    installed at more than one scope. The message is masked line by line before it leaves.
+    """
+
+    def find(entries: list[Any]) -> dict[str, Any] | None:
+        """Return the entry for ``plugin_id`` installed at this scope and project, or None."""
+        return next(
+            (
+                e
+                for e in entries
+                if isinstance(e, dict)
+                and e.get("id") == plugin_id
+                and installed_at(e, scope, project_dir)
+            ),
+            None,
+        )
+
+    old = find(before)
+    new = find(after) if after is not None else None
+    if after is None:
+        msg = (
+            f"The update of {plugin_id} ran, but Clauster could not read the installed "
+            "version afterwards."
+        )
+    elif new is None:
+        msg = f"The update of {plugin_id} ran, but the plugin is no longer listed at this scope."
+    elif old is None:
+        msg = f"Updated {plugin_id}. It is now at {_version_text(new)}."
+    elif old.get("version") != new.get("version"):
+        msg = f"Updated {plugin_id} from {_version_text(old)} to {_version_text(new)}."
+    elif any(old.get(k) != new.get(k) for k in _UPDATE_FIELDS):
+        msg = f"Updated {plugin_id}. It is still at {_version_text(new)}."
+    else:
+        msg = f"{plugin_id} is already up to date ({_version_text(new)})."
+    return cw.redact_secret_lines(msg)
+
+
+#: Upper bound on one marketplace file read for the update summary. The official
+#: marketplace's file is about 190 KB (2026-11-06); a larger file is not read at all, so a
+#: pathological file cannot parse into millions of objects twice per update.
+MARKETPLACE_FILE_MAX_BYTES = 8 * 1024 * 1024
+
+#: How many plugin names an update summary lists before "and N more".
+_NAMES_SHOWN = 5
+
+#: A plugin name longer than this is cut in the summary (the name is marketplace text).
+_NAME_SHOWN_MAX = 80
+
+
+def _read_marketplace_plugin_names(location: Any) -> list[str] | None:
+    """Return the plugin names a marketplace checkout offers, or ``None`` if unreadable.
+
+    ``location`` is the CLI's own ``installLocation``: a directory holding
+    ``.claude-plugin/marketplace.json`` (git and directory sources), or the file itself.
+    Read-only and for display only. A path that is not a regular file (a FIFO would block
+    the read), an oversized file, or invalid JSON yields ``None``. In a checkout directory,
+    a ``marketplace.json`` that resolves outside that directory (a committed symlink) is
+    not read either. A plugin entry with no string ``name`` counts as ``""`` so the total
+    stays the file's own count.
+    """
+    if not isinstance(location, str) or not location:
+        return None
+    path = Path(location)
+    try:
+        if path.is_dir():
+            root = path.resolve()
+            path = path / ".claude-plugin" / "marketplace.json"
+            if not path.resolve().is_relative_to(root):
+                return None
+        if not path.is_file():
+            return None
+        with path.open("rb") as fh:
+            raw = fh.read(MARKETPLACE_FILE_MAX_BYTES + 1)
+    except OSError:
+        return None
+    if len(raw) > MARKETPLACE_FILE_MAX_BYTES:
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, RecursionError):  # UnicodeDecodeError is a ValueError
+        return None
+    plugins = data.get("plugins") if isinstance(data, dict) else None
+    if not isinstance(plugins, list):
+        return None
+    return [
+        p["name"] if isinstance(p, dict) and isinstance(p.get("name"), str) else ""
+        for p in plugins
+    ]
+
+
+def marketplace_plugin_names(
+    binary: str, cwd: Path, name: str | None, *, run: RunFn = subprocess.run
+) -> dict[str, list[str] | None]:
+    """Return ``{marketplace: plugin names or None}`` for ``name`` (or every marketplace).
+
+    Reads ``marketplace list --json`` for each ``installLocation``, then that checkout's
+    ``marketplace.json`` (:func:`_read_marketplace_plugin_names`). A failed list raises
+    :class:`PluginCliError`, as :func:`cli_list_marketplaces` does.
+    """
+    out: dict[str, list[str] | None] = {}
+    for entry in _list_marketplaces_raw(binary, cwd, run=run):
+        if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+            continue
+        if name is not None and entry["name"] != name:
+            continue
+        out[entry["name"]] = _read_marketplace_plugin_names(entry.get("installLocation"))
+    return out
+
+
+def _plugins_text(count: int) -> str:
+    """Return ``1 plugin`` / ``N plugins``."""
+    return f"{count} plugin" if count == 1 else f"{count} plugins"
+
+
+def _names_text(names: list[str]) -> str:
+    """Return up to :data:`_NAMES_SHOWN` names, each masked, then cut, then ``and N more``.
+
+    Masked BEFORE the cut: a cut inside a credential URL's ``user:pass@`` drops the ``@``
+    the line redaction keys on, and the rest of the secret would show unmasked.
+    """
+    masked = [cw.redact_secret_lines(n) for n in names]
+    shown = [n if len(n) <= _NAME_SHOWN_MAX else n[:_NAME_SHOWN_MAX] + "…" for n in masked]
+    text = ", ".join(shown[:_NAMES_SHOWN])
+    if len(shown) > _NAMES_SHOWN:
+        text += f" and {len(shown) - _NAMES_SHOWN} more"
+    return text
+
+
+def describe_marketplace_update(
+    name: str | None,
+    before: dict[str, list[str] | None],
+    after: dict[str, list[str] | None] | None,
+) -> str:
+    """Return what a ``marketplace update`` did, from plugin-name reads before and after it.
+
+    One sentence group per marketplace: the plugin list did not change (with its count),
+    or it now offers N plugins with the names added and removed. A side that could not be
+    read (``None``, or ``after`` as a whole when the read after the refresh failed) says so
+    instead of claiming a result. The message is masked line by line before it leaves.
+    """
+    targets = [name] if name is not None else sorted(set(before) | set(after or {}))
+    if not targets:
+        return "Refreshed the marketplaces. No marketplace is listed."
+    parts: list[str] = []
+    for target in targets:
+        old = before.get(target)
+        new = after.get(target) if after is not None else None
+        if old is None or new is None:
+            parts.append(
+                f"Refreshed marketplace {target}. Clauster could not read its plugin list, "
+                "so it cannot tell whether the list changed."
+            )
+        elif sorted(old) == sorted(new):
+            parts.append(
+                f"Refreshed marketplace {target}. Its plugin list did not change "
+                f"({_plugins_text(len(new))})."
+            )
+        else:
+            text = (
+                f"Refreshed marketplace {target}. It now offers {_plugins_text(len(new))} "
+                f"(before: {len(old)})."
+            )
+            added = sorted(set(new) - set(old) - {""})
+            removed = sorted(set(old) - set(new) - {""})
+            if added:
+                text += f" Added: {_names_text(added)}."
+            if removed:
+                text += f" Removed: {_names_text(removed)}."
+            parts.append(text)
+    return cw.redact_secret_lines(" ".join(parts))
 
 
 # ---------------------------------------------------------------------------

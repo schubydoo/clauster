@@ -781,7 +781,39 @@ reaches a second settings file. The marketplace Update button is the exception:
 checkout is shared by every scope and project. An update therefore refreshes
 that marketplace for every project on the host, not only the one you selected.
 The commands, flags and settings below were checked against Claude Code 2.1.318.
+The scope rules and the update results below were checked against Claude Code
+2.1.319.
 
+- **Each plugin row shows the scope that the plugin is installed at.** The
+  plugin list holds every install on the host, at every scope, also the
+  installs of other projects. Claude Code updates or uninstalls a plugin only
+  at the scope (and project) where it is installed. At any other scope it
+  refuses, for example with "Plugin is not installed at scope project". So the
+  tab shows Update and Uninstall only on a row that is installed at the scope
+  and project you are looking at.
+- **Enable and Disable also work from a scope that outranks the install
+  scope.** For a User-scope plugin, they work at Project and Local scope. For a
+  Project-scope plugin, they work at Local scope of the same project. Claude
+  Code then writes the plugin in `enabledPlugins` of that project's
+  `.claude/settings.json` (Project) or `.claude/settings.local.json` (Local).
+  The value overrides the lower scope for that project only, and the file of
+  the install scope does not change. Claude Code refuses the other direction,
+  for example a Local-scope plugin at Project scope.
+- **A plugin that is installed at another scope is read-only for every other
+  action.** Its row tells you where it is installed, and a link switches the
+  editor to that scope (and to its project, when the project is under
+  `projects_root`). The link to User scope shows only when
+  `config_write.allow_user_scope` is on. A row that has no scope, or the Managed
+  scope, offers no action.
+- **Update says what it did.** Clauster reads the plugin list before and after
+  the update. It then shows the version change ("Updated x from version 1.0.0
+  to version 1.1.0."), or "already up to date" with the version. The marketplace
+  Update reads the marketplace's own plugin list (the `marketplace.json` file in
+  its checkout) before and after. It then shows whether that list changed, how
+  many plugins the marketplace now offers, and which names were added or
+  removed. If a read after the update fails, the message says that the update
+  ran and that Clauster could not read the result. If the read before the update
+  fails, Clauster does not run the update and shows the error.
 - **Install and update never accept a marketplace command for you.** Some
   marketplace entries install a plugin by running a command, or fetch it with a
   `headersHelper` command. Claude Code shows that command and asks before it

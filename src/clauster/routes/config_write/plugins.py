@@ -50,6 +50,11 @@ async def api_config_write_plugins_list(
         )
     except config_write.ConfigWriteError as exc:
         raise _base.map_config_write_error(exc) from exc
+    # The CLI lists installs at every scope, other projects' too (TASK-523): mark which
+    # ones this scope (and project) can update or uninstall.
+    plugins = config_write_plugins.annotate_plugin_scopes(
+        plugins, scope, None if scope == "user" else cwd, config.projects_root
+    )
     # Omit `project` for user scope (where it is a meaningless "") to match the
     # sibling routes (/plugins/enabled, /marketplaces/declared, the action POSTs).
     result: dict[str, Any] = {"scope": scope, "plugins": plugins}
@@ -169,6 +174,15 @@ async def api_config_write_plugins_action(
 
     cwd = _base.plugin_cli_cwd(config, runner, scope, project or "")
     binary = config.claude.binary
+    project_dir = None if scope == "user" else cwd
+    # TASK-517: an update reports what it changed, from a `plugin list` read before and
+    # after it. A failed read BEFORE fails the request closed, with nothing run yet.
+    before: list[Any] = []
+    if op == "update":
+        try:
+            before = await asyncio.to_thread(config_write_plugins.cli_list_plugins, binary, cwd)
+        except config_write.ConfigWriteError as exc:
+            raise _base.map_config_write_error(exc) from exc
 
     def _work() -> None:
         """Run the requested plugin verb through the CLI."""
@@ -217,7 +231,18 @@ async def api_config_write_plugins_action(
             ".claude/settings.local.json",
             ignore_backup_sibling=True,
         )
-    result = {"scope": scope, "plugin": plugin_id, "op": op, "ok": True}
+    result: dict[str, Any] = {"scope": scope, "plugin": plugin_id, "op": op, "ok": True}
+    if op == "update":
+        # The update committed: a failed read AFTER it must not turn into a 400. The
+        # message says the version could not be read instead.
+        after: list[Any] | None
+        try:
+            after = await asyncio.to_thread(config_write_plugins.cli_list_plugins, binary, cwd)
+        except config_write.ConfigWriteError:
+            after = None
+        result["message"] = config_write_plugins.describe_plugin_update(
+            plugin_id, scope, project_dir, before, after
+        )
     if scope != "user":
         result["project"] = project
     return result

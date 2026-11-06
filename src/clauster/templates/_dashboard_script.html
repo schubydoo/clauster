@@ -379,6 +379,7 @@
           confirm: "",                       // scope-token confirm, shared by all actions
           installId: "", installConfirm: "", // install form: plugin id + strong retype-id
           addSource: "",                     // marketplace add: source (url / owner/repo / path)
+          result: "",                        // the last update's server-built summary (TASK-517)
           busy: false, ops: 0,
         },
       },
@@ -1852,7 +1853,7 @@
         // lingering `true` would auto-expand (and re-fetch) on the next switch back
         // to project/local without the operator clicking the toggle again.
         c.settings.showEffective = false;
-        this.configMgmtReload();
+        return this.configMgmtReload();
       },
       configMgmtSetSurface(key) {
         const c = this.configMgmt;
@@ -4334,19 +4335,107 @@
         // action can fire against stale rows.
         const c = this.configMgmt, pl = c.plugins;
         const gen = c.gen, origin = document.activeElement;
-        pl.ops += 1; pl.busy = true; c.error = ""; c.saved = false;
+        pl.ops += 1; pl.busy = true; c.error = ""; c.saved = false; pl.result = "";
         try {
           const res = await fetch(ROOT + url, {
             method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body),
           });
           if (c.gen !== gen) return;
           if (this._authExpired(res)) return;
-          if (res.ok) { c.saved = true; await this._loadPlugins(gen); }
+          if (res.ok) {
+            // An update returns what it changed (TASK-517); every other action has no
+            // `message`, and the banner falls back to "Saved.".
+            const d = await res.json().catch(() => ({}));
+            if (c.gen !== gen) return;
+            pl.result = d && typeof d.message === "string" ? d.message : "";
+            c.saved = true; await this._loadPlugins(gen);
+          }
           else await this._configMgmtWriteErr(res);
         } catch (e) { this._configMgmtWriteFailed(e, gen, "Action failed."); }
         finally {
           pl.ops = Math.max(0, pl.ops - 1); pl.busy = pl.ops > 0;
           if (c.gen === gen) this._configMgmtRevealResult(origin);
+        }
+      },
+      // The cm-saved banner text: an update's summary on the Plugins tab, else "Saved.".
+      configMgmtSavedText() {
+        const c = this.configMgmt;
+        return c.surface === "plugins" && c.plugins.result ? c.plugins.result : "Saved.";
+      },
+      // --- install scope of each listed plugin (TASK-523) ---
+      // `plugin list --json` lists installs at every scope, other projects' too. The
+      // server marks `atScope` (this scope and project) and `projectName` (a project or
+      // local install's project under projects_root). Update/Uninstall need `atScope`.
+      // Enable/Disable also work from a scope that outranks the install's (claude 2.1.319):
+      // a User-scope plugin from Project or Local, and a Project-scope plugin from Local in
+      // the same project. The CLI writes that scope's override. It refuses the reverse.
+      _configMgmtScopeWord(scope) {
+        return { user: "User", project: "Project", local: "Local", managed: "Managed" }[scope] || "";
+      },
+      configMgmtPluginScopeLabel(p) {
+        return this._configMgmtScopeWord(p.scope) || "scope unknown";
+      },
+      configMgmtPluginScopeTitle(p) {
+        const word = this._configMgmtScopeWord(p.scope);
+        if (!word) return "The CLI did not say which scope this plugin is installed at.";
+        if ((p.scope === "project" || p.scope === "local") && p.projectName) {
+          return "Installed at " + word + " scope in " + p.projectName;
+        }
+        return "Installed at " + word + " scope";
+      },
+      configMgmtPluginCanToggle(p) {
+        const c = this.configMgmt;
+        if (p.atScope === true || p.scope === "user") return true;
+        return p.scope === "project" && c.scope === "local" && !!p.projectName && p.projectName === c.project;
+      },
+      configMgmtPluginElsewhereNote(p) {
+        const word = this._configMgmtScopeWord(p.scope);
+        if (!word) return "The CLI did not say which scope this plugin is installed at, so no action is offered.";
+        if (p.scope === "managed") return "Installed by managed settings. Clauster does not change it.";
+        if (p.scope === "user") {
+          const there = {{ config_write_allow_user_scope | tojson }}
+            ? "Update and Uninstall work at User scope."
+            : "Update and Uninstall work at User scope, which this Clauster does not edit (config_write.allow_user_scope).";
+          return "Installed at User scope. Enable and Disable here write the override for the scope you are viewing. " + there;
+        }
+        if (!p.projectName) return "Installed at " + word + " scope for a folder outside the projects root.";
+        if (p.projectName !== this.configMgmt.project) {
+          return "Installed at " + word + " scope in " + p.projectName + ".";
+        }
+        if (this.configMgmtPluginCanToggle(p)) {
+          return "Installed at Project scope. Enable and Disable here write the Local override. Update and Uninstall work at Project scope.";
+        }
+        return "Installed at " + word + " scope. Manage it there.";
+      },
+      // The switch-scope link text, or "" when no scope in this editor can act on the row.
+      configMgmtPluginScopeLink(p) {
+        if (p.atScope) return "";
+        if (p.scope === "user") return {{ config_write_allow_user_scope | tojson }} ? "Switch to User scope" : "";
+        if (p.scope !== "project" && p.scope !== "local") return "";
+        if (!p.projectName || !this.projectNames.includes(p.projectName)) return "";
+        const word = this._configMgmtScopeWord(p.scope);
+        return p.projectName === this.configMgmt.project
+          ? "Switch to " + word + " scope"
+          : "Open " + p.projectName + " at " + word + " scope";
+      },
+      // The reload hides the whole view (and so the clicked link), which would drop focus
+      // to <body>: move it to the scope confirm, the next thing the operator types.
+      async configMgmtOpenPluginScope(p) {
+        const c = this.configMgmt;
+        if (!this.configMgmtPluginScopeLink(p)) return;
+        if (p.scope !== "user" && p.projectName !== c.project) {
+          c.project = p.projectName;
+        }
+        if (c.scope === p.scope) {
+          // Same scope, another project: the project select's own reload path.
+          c.confirm = ""; c.error = ""; c.saved = false;
+          await this.configMgmtReload();
+        } else {
+          await this.configMgmtSetScope(p.scope);
+        }
+        // Only while this view is still the one showing (no later switch or close).
+        if (c.open && !c.loading && c.surface === "plugins") {
+          this.revealFeedback("#cm-plugin-confirm", true);
         }
       },
       configMgmtPluginAction(id, op) {

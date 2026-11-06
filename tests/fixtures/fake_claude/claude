@@ -379,6 +379,9 @@ def run_plugin(args):
                                   test can assert exactly what clauster invoked
                                   (including the spawn cwd, which several #771
                                   routes resolve deliberately per scope).
+      FAKE_CLAUDE_PLUGIN_ARGV_LOG  = path to APPEND one {"argv", "cwd"} JSON line per
+                                  call, for a route that runs several verbs (an
+                                  update reads `list` before and after it, TASK-517).
     """
     verb = args[0] if args else ""
     key = verb.upper().replace("-", "_")
@@ -390,6 +393,13 @@ def run_plugin(args):
         record = {"argv": args, "cwd": os.getcwd()}
         with open(os.environ["FAKE_CLAUDE_PLUGIN_ARGV_FILE"], "w") as fh:
             json.dump(record, fh)
+    if os.environ.get("FAKE_CLAUDE_PLUGIN_ARGV_LOG"):
+        import json
+
+        with open(
+            os.environ["FAKE_CLAUDE_PLUGIN_ARGV_LOG"], "a", encoding="utf-8", newline="\n"
+        ) as fh:
+            fh.write(json.dumps({"argv": args, "cwd": os.getcwd()}) + "\n")
     stdout = os.environ.get("FAKE_CLAUDE_PLUGIN_STDOUT", "")
     # The plugins UI reads two distinct list shapes in one surface load (`plugin list
     # --json` -> [{id,enabled}] and `plugin marketplace list --json` -> [{name,source}]),

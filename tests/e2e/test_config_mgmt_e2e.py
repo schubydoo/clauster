@@ -2329,6 +2329,68 @@ def test_config_mgmt_plugins_tab_lists_and_acts(
     browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
 
 
+def test_config_mgmt_plugins_rows_follow_the_install_scope(
+    browser: AgentBrowser, config_mgmt_plugins_server: Server
+) -> None:
+    """Each row shows its install scope and offers only the actions that work there.
+
+    TASK-523: at Project scope a User-scope plugin keeps Enable/Disable (the CLI writes the
+    project's override) but has no Update/Uninstall, which the CLI refuses there; it links to
+    User scope instead. At User scope the Project-scope plugin is read-only with a link back.
+    TASK-517: an Update says what happened, here that the plugin was already up to date.
+    """
+    shared, hello = "shared@market", "hello@market"
+    _open_modal(browser, config_mgmt_plugins_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-plugins"]')
+    browser.expect_text(f'[data-test="cm-plugin-scope-{shared}"]', "User")
+    browser.expect_text(f'[data-test="cm-plugin-scope-{hello}"]', "Project")
+    # The Project-scope install has every action; the User-scope one has no failing action.
+    assert browser.get_count(f'[data-test="cm-plugin-update-{hello}"]') == 1
+    assert browser.get_count(f'[data-test="cm-plugin-uninstall-{hello}"]') == 1
+    assert browser.get_count(f'[data-test="cm-plugin-update-{shared}"]') == 0
+    assert browser.get_count(f'[data-test="cm-plugin-uninstall-{shared}"]') == 0
+    assert not browser.is_visible(f'[data-test="cm-plugin-readonly-{hello}"]')
+    browser.expect_text(f'[data-test="cm-plugin-readonly-{shared}"]', "Installed at User scope")
+    # Disable on the User-scope plugin is offered at Project scope, and it succeeds.
+    browser.fill('[data-test="cm-plugin-confirm"]', "alpha")
+    browser.click(f'[data-test="cm-plugin-disable-{shared}"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+    # The link switches the editor to User scope, where Update and Uninstall appear.
+    browser.click(f'[data-test="cm-plugin-switch-scope-{shared}"]')
+    browser.expect_attr('[data-test="cm-scope-user"]', "aria-pressed", "true")
+    browser.expect_visible(f'[data-test="cm-plugin-update-{shared}"]')
+    # The reload hid the clicked link; focus moves to the scope confirm, not <body>.
+    _expect_focused(browser, "cm-plugin-confirm")
+    assert browser.get_count(f'[data-test="cm-plugin-update-{hello}"]') == 0
+    assert browser.get_count(f'[data-test="cm-plugin-disable-{hello}"]') == 0
+    browser.expect_text(f'[data-test="cm-plugin-switch-scope-{hello}"]', "Switch to Project scope")
+    # Update at the plugin's own scope reports the result, not a bare "Saved.".
+    browser.fill('[data-test="cm-plugin-confirm"]', "USER SCOPE")
+    browser.click(f'[data-test="cm-plugin-update-{shared}"]')
+    browser.expect_text(
+        '[data-test="cm-saved"]',
+        "shared@market is already up to date (version 2.0.0).",
+        timeout_ms=_SAVE_TIMEOUT,
+    )
+
+    # And back: the Project-scope plugin's link returns to Project scope in alpha.
+    browser.click(f'[data-test="cm-plugin-switch-scope-{hello}"]')
+    browser.expect_attr('[data-test="cm-scope-project"]', "aria-pressed", "true")
+    browser.expect_visible(f'[data-test="cm-plugin-update-{hello}"]')
+
+    # At Local scope the Project-scope plugin keeps Disable (Local outranks Project) and
+    # loses Update/Uninstall; the User-scope plugin keeps Disable too.
+    browser.click('[data-test="cm-scope-local"]')
+    browser.expect_attr('[data-test="cm-scope-local"]', "aria-pressed", "true")
+    browser.expect_text(f'[data-test="cm-plugin-readonly-{hello}"]', "Local override")
+    browser.expect_visible(f'[data-test="cm-plugin-disable-{hello}"]')
+    browser.expect_visible(f'[data-test="cm-plugin-disable-{shared}"]')
+    assert browser.get_count(f'[data-test="cm-plugin-update-{hello}"]') == 0
+    assert browser.get_count(f'[data-test="cm-plugin-uninstall-{hello}"]') == 0
+
+
 def test_config_mgmt_mcp_approvals_round_trip(
     browser: AgentBrowser, config_mgmt_server: Server
 ) -> None:
