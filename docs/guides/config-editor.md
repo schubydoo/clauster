@@ -602,12 +602,20 @@ characters is not masked if it has fewer than 8 letters and digits, or only
 letters, or only digits. Do not put a secret in them.
 
 If Clauster cannot read the frontmatter the way Claude Code reads it, every
-frontmatter line shows as `********`. This happens when the frontmatter is not
-valid YAML to Clauster, when it holds `---` before its closing fence, when it
-holds a line break that only YAML 1.1 knows, when only Claude Code reads its
-opening fence, or when it is valid only after Claude Code re-quotes it and it
-holds the text `url`, `http:`, `https:`, `ws:`, `wss:` or a backslash. A save of such a file is refused, except for the last case. To
-change it, type the whole frontmatter again or edit the file on the host.
+frontmatter line shows as `********`. This happens in these cases:
+
+- The frontmatter is not valid YAML to Clauster.
+- It holds `---` before its closing fence.
+- It holds a line break that only YAML 1.1 knows.
+- Only Claude Code reads its opening fence.
+- It holds the text `url`, `http:`, `https:`, `ws:`, `wss:` or a backslash, and
+  it is valid only after Claude Code re-quotes it, or it holds syntax that YAML
+  1.2 refuses. An example of that syntax is a quoted value that continues on a
+  line that starts at column 0.
+
+A save of such a file is refused, except when the frontmatter is valid only
+after Claude Code re-quotes it. To change the file, type the whole frontmatter
+again or edit the file on the host.
 
 A masked line keeps its stored text on save only when every other character of
 the line is unchanged. For a frontmatter `url`, the scheme, the host, the port,

@@ -1760,6 +1760,19 @@ def _url_nodes(root: yaml.Node) -> list[yaml.ScalarNode]:
 _MAY_HOLD_URL_RE = re.compile(r"url|https?:|wss?:|\\", re.IGNORECASE)
 
 
+def _yaml12_may_refuse(source: str, root: yaml.Node | None) -> bool:
+    """Whether YAML 1.2 may refuse ``source`` that PyYAML composed to ``root``.
+
+    Claude Code then reads its re-quoting retry, where the lines after a quoted value that
+    continues at column 0 can become real keys (:func:`~clauster.config_write.
+    _yaml12_refuses`). A check that cannot finish counts as a refusal (fail closed).
+    """
+    try:
+        return cw._yaml12_refuses(source, root) is not None
+    except (*cw._CHECK_FAILURES, RecursionError):
+        return True
+
+
 def _mask_header_urls(header: str, *, readable: bool) -> str:
     """Return a frontmatter ``header`` with each ``url`` value shown as :func:`mask_url` shows it.
 
@@ -1775,10 +1788,12 @@ def _mask_header_urls(header: str, *, readable: bool) -> str:
     Every non-blank line is masked whole where it may not: a header that does not compose
     (Claude Code's YAML 1.2 can still read it, for example a tab before a comment), one
     that holds ``---`` (Claude Code ends the header there), one with a YAML 1.1-only line
-    break, a fence only Claude Code reads (``readable`` false), and a header that composes
-    only through Claude Code's re-quoting retry and may hold a URL (the CLI may not need the
-    retry and read it as written). A save refuses all but the last of these, so masking
-    them whole costs a retype at most. The line count never changes.
+    break, a fence only Claude Code reads (``readable`` false), and a header that may hold a
+    URL (:data:`_MAY_HOLD_URL_RE`) and either composes only through Claude Code's
+    re-quoting retry (the CLI may not need the retry and read it as written) or holds
+    syntax YAML 1.2 refuses (the CLI then reads the retry, :func:`_yaml12_may_refuse`). A
+    save refuses all but the retry case, so masking them whole costs a retype at most. The
+    line count never changes.
     """
     lines = header.splitlines(keepends=True)
     try:
@@ -1792,7 +1807,10 @@ def _mask_header_urls(header: str, *, readable: bool) -> str:
         or not composed
         or "---" in header
         or any(char in header for char in "\x85\u2028\u2029")
-        or (source != header and _MAY_HOLD_URL_RE.search(header) is not None)
+        or (
+            _MAY_HOLD_URL_RE.search(header) is not None
+            and (source != header or _yaml12_may_refuse(source, root))
+        )
     ):
         return "".join(_masked_whole(line) for line in lines)
     if root is None:

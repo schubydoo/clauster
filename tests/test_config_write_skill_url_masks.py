@@ -194,9 +194,20 @@ _TAB_COMMENT = "---\nname: x\t# note\nmcpServers:\n  srv:\n    type: http\n"
         # reads one description here and no url at all.
         '---\ndescription: "see #1\nmcpServers:\n  srv:\n    type: http\n'
         '    url: https:h.example.com/p?k=qv-dash\n ---"\n---\n',
-        # A line break to YAML 1.1 only.
-        "---\ndescription: a\u2028b\nmcpServers:\n  - a:\n"
+        # A line break to YAML 1.1 only, in a header that PyYAML composes.
+        "---\ndescription: a\u2028  b\nmcpServers:\n  - a:\n"
         "      url: https://h.example.com/?k=qv-u2028\n---\n",
+        # A quoted value that continues at column 0: PyYAML reads one description, YAML 1.2
+        # refuses it, and Claude Code's retry closes the quote on its first line, so the
+        # lines after it become real keys.
+        '---\ndescription: "abc #x\nmcpServers:\n  srv:\n    type: http\n'
+        '    url: https://h.example.com/p?k=qv-col0\nz: y"\n---\n',
+        "---\ndescription: 'abc #x\nmcpServers:\n  srv:\n    type: http\n"
+        "    url: https://h.example.com/p?k=qv-col0sq\nz: y'\n---\n",
+        # Escapes spell the key and the scheme. YAML 1.2 reads this as written; PyYAML needs
+        # the retry, which turns both lines into strings. Only the backslash shows a URL.
+        '---\nx: {a: b?c}\nmcpServers: {srv: {type: http, "u\\x72l": '
+        '"\\x68ttps://h.example.com/p?k=qv-esc"}}\n---\n',
         # A no-break space after the fence: Claude Code reads a header, FRONTMATTER_RE does not.
         "---\u00a0\nmcpServers:\n  - a:\n      url: https://h.example.com/?k=qv-nbsp\n---\n",
     ],
@@ -210,6 +221,19 @@ def test_a_header_this_editor_cannot_read_as_the_cli_does_is_masked_whole(
     assert len(content.splitlines()) == len(stored.splitlines())
     header = content.splitlines()[1 : content.splitlines().index("---", 1)]
     assert header and all(line in ("", MASK) for line in header)
+
+
+def test_a_yaml12_check_that_cannot_finish_masks_the_header_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*_args: object) -> None:
+        raise ValueError("cannot finish")
+
+    monkeypatch.setattr(cw, "_yaml12_refuses", broken)
+    _place(tmp_path, _MCP)
+    content = sk.read_skill_file(tmp_path, "s")[0]
+    assert "qv-" not in content
+    assert "mcp.example.com" not in content
 
 
 def test_a_retry_header_with_a_url_masked_whole_still_saves_unchanged(tmp_path: Path) -> None:
