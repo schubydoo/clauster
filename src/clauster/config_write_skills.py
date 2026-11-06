@@ -1859,30 +1859,48 @@ def _spells_skill_md(relative: str) -> bool:
     The resolver reads ``./SKILL.md``, ``SKILL.md/``, ``.//SKILL.md`` and ``SKILL.md/.`` (and
     ``.\SKILL.md`` on Windows) as ``SKILL.md``, because :class:`pathlib.Path` drops the
     ``.`` parts and the separators, and a case variant reaches the same file on macOS and
-    Windows. Case is compared casefolded on every OS, so this can only call more keys
-    ``SKILL.md``, never fewer.
+    Windows. Windows also opens ``SKILL.md`` for ``SKILL.md.``, ``SKILL.md `` and
+    ``SKILL.md::$DATA``, so trailing dots and spaces and a ``:`` suffix are dropped first.
+    Every rule applies on every OS, so this can only call more keys ``SKILL.md``, never
+    fewer.
     """
     parts = Path(relative).parts
-    return len(parts) == 1 and parts[0].casefold() == SKILL_FILENAME.casefold()
+    if len(parts) != 1:
+        return False
+    stem = parts[0].split(":", 1)[0].rstrip(" .")
+    return stem.casefold() == SKILL_FILENAME.casefold()
 
 
-def _is_skill_md(skill_dir: Path, relative: str) -> bool:
-    """Whether the member ``relative`` of ``skill_dir`` reaches the skill's ``SKILL.md``.
+def _is_skill_md(skill_dir: Path, name: str, info: os.stat_result | None) -> bool:
+    """Whether a member file of ``skill_dir`` gets the ``SKILL.md`` view (TASK-525).
 
-    Decided from what the path reaches, never from the request string alone: a spelling
-    the resolver reads as ``SKILL.md`` (:func:`_spells_skill_md` with exact case), or any
-    path whose file is the same object as ``SKILL.md`` (a case variant on a case-insensitive
-    file system, a symlink, a hard link). The read view and the restore both decide by
-    this, so ``SKILL.md`` gets its frontmatter masks under every name (TASK-525).
+    Decided from the file that was read, never from the request string: ``name`` is its
+    final name once every link is followed, and ``info`` its stat (None when nothing is
+    there). True when that name spells ``SKILL.md`` (:func:`_spells_skill_md`), which takes
+    a link to this or another skill's ``SKILL.md`` and a case variant; when the file has more
+    than one hard link, since it can then be any ``SKILL.md`` under another name; and when
+    it is the same object as this skill's ``SKILL.md``. A member wrongly given the view only
+    shows more masks, and the read and the restore both decide by this one function.
     """
-    if Path(relative).parts == (SKILL_FILENAME,):
+    if _spells_skill_md(name):
+        return True
+    if info is None:
+        return False
+    if info.st_nlink > 1:
         return True
     try:
-        member = os.stat(skill_dir / relative)
-        skill_md = os.stat(skill_dir / SKILL_FILENAME)
+        own = os.stat(skill_dir / SKILL_FILENAME)
+    except OSError:
+        return False  # this skill has no SKILL.md, so the file cannot be it
+    return _same_object(info, own)
+
+
+def _lstat_or_none(path: Path) -> os.stat_result | None:
+    """Return ``os.lstat(path)``, or None when nothing can be stat'd there."""
+    try:
+        return os.lstat(path)
     except (OSError, ValueError):
-        return False  # one of them is not there, so they are not one file
-    return _same_object(member, skill_md)
+        return None
 
 
 def _member_view(text: str, *, skill_md: bool) -> str:
@@ -1964,8 +1982,12 @@ def _read_skill_file(
         target = fw.resolve_contained_path(skills_root, f"{name}/{relative}")
     except fw.PathEscapeError as exc:
         raise cw.PathEscapeError(str(exc)) from exc
+    info: os.stat_result | None = None
     try:
-        raw = target.read_bytes()
+        # One open: the view below is decided from the stat of the file these bytes are.
+        with open(target, "rb") as fh:
+            info = os.fstat(fh.fileno())
+            raw = fh.read()
         exists = True
     except FileNotFoundError:
         raw = b""
@@ -1975,8 +1997,9 @@ def _read_skill_file(
     except UnicodeDecodeError as exc:
         raise cw.InvalidCandidateError(f"{relative} is not valid UTF-8") from exc
     note = None
-    # From what the path reaches, not from its spelling: `./SKILL.md` is SKILL.md too.
-    skill_md = _is_skill_md(skills_root / name, relative)
+    # From the file read, not from the request string: `./SKILL.md`, a link to any skill's
+    # SKILL.md and a hard link all get the SKILL.md view (`target` is fully resolved).
+    skill_md = _is_skill_md(skills_root / name, target.name, info)
     if convert and exists and skill_md:
         conversion = _convert_ignored_fields(text)
         if conversion is not None:
@@ -2149,7 +2172,10 @@ def _keep_masked_lines(
         else:
             stored = _read_stored_member(skills_root, name, relative)
         # The same decision the read made, so a mask binds through the view that showed it.
-        is_md = _is_skill_md(skills_root / name, relative)
+        # A stored member read above is a regular file and no link (`_read_stored_member`).
+        is_md = relative == SKILL_FILENAME or _is_skill_md(
+            skills_root / name, Path(relative).name, _lstat_or_none(skills_root / name / relative)
+        )
         restored, lines = cw.restore_masked_lines(
             content,
             stored,
@@ -2270,8 +2296,9 @@ def write_skill(
         # it would get the script checks and the script view instead (TASK-525).
         if relative != SKILL_FILENAME and _spells_skill_md(relative):
             raise cw.InvalidCandidateError(
-                f"{relative!r} names {SKILL_FILENAME} under another spelling or case. "
-                f"Nothing was written. Send it once, as {SKILL_FILENAME!r}"
+                f"{relative!r} names {SKILL_FILENAME} under another spelling or case, which is "
+                "the same file on macOS or Windows. Nothing was written. Send it once, as "
+                f"{SKILL_FILENAME!r}"
             )
 
     extra_files = [k for k in files if k != SKILL_FILENAME]

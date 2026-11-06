@@ -489,7 +489,48 @@ def test_a_link_to_skill_md_gets_its_view(tmp_path: Path, kind: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "relative", ["./SKILL.md", "SKILL.md/", ".//SKILL.md", "SKILL.md/.", "skill.md", "Skill.MD"]
+    ("kind", "relative"),
+    [
+        ("member-symlink", "x.md"),
+        ("dir-symlink", "sub/SKILL.md"),
+        ("hardlink", "y.md"),
+    ],
+)
+def test_a_link_to_another_skills_skill_md_gets_its_view(
+    tmp_path: Path, kind: str, relative: str
+) -> None:
+    # Containment is against the skills root, so a member can reach skill b's SKILL.md.
+    other = _place(tmp_path, _MCP, name="b")
+    own = _place(tmp_path, "---\ndescription: d\n---\nRun it.\n", name="a").parent
+    try:
+        if kind == "member-symlink":
+            (own / "x.md").symlink_to(Path("..") / "b" / sk.SKILL_FILENAME)
+        elif kind == "dir-symlink":
+            (own / "sub").symlink_to(Path("..") / "b", target_is_directory=True)
+        else:
+            os.link(other, own / "y.md")
+    except (OSError, NotImplementedError) as exc:  # pragma: no cover - Windows without rights
+        pytest.skip(f"cannot make a {kind} here: {exc}")
+    for read in (sk.read_skill_file, sk.read_skill_file_for_edit):
+        content = read(tmp_path, "a", relative)[0]
+        assert "qv-mcp-one" not in content
+        assert _MCP_VIEW_LINE in content
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "./SKILL.md",
+        "SKILL.md/",
+        ".//SKILL.md",
+        "SKILL.md/.",
+        "skill.md",
+        "Skill.MD",
+        # Windows opens SKILL.md for each of these.
+        "SKILL.md.",
+        "SKILL.md ",
+        "SKILL.md::$DATA",
+    ],
 )
 def test_a_save_refuses_another_spelling_of_skill_md(
     write_config, tmp_path, projects_root, relative: str
@@ -532,3 +573,13 @@ def test_a_save_through_a_hard_link_binds_with_the_skill_md_view(tmp_path: Path)
     )
     assert path.read_bytes() == _MCP.encode("utf-8")
     assert link.read_bytes() == _MCP.encode("utf-8")
+
+
+def test_a_member_of_a_skill_without_skill_md_gets_the_line_view(tmp_path: Path) -> None:
+    member = tmp_path / "skills" / "s" / "notes.md"
+    member.parent.mkdir(parents=True)
+    stored = "---\nurl: https://h.example.com/?k=qv-plain\n---\ntoken: qv-line\n"
+    member.write_bytes(stored.encode("utf-8"))
+    content = sk.read_skill_file(tmp_path, "s", "notes.md")[0]
+    # No SKILL.md to be: only the line masks apply, as for any script.
+    assert content == stored.replace("qv-line", MASK)
