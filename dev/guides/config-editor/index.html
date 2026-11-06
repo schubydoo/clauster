@@ -2026,10 +2026,10 @@ on; the User scope additionally requires <code>config_write.allow_user_scope</co
   name; destructive list actions (delete, reset, plugin install) have their
   own typed confirms.</li>
 <li><strong>Secret masking</strong> — the Settings, MCP, Hooks, Subagents, and Skills
-  surfaces, and the <code>autoMode</code> box on the Permissions tab, mask secret-shaped
-  values on read. The MCP surface also masks every <code>env</code> and <code>headers</code> value,
-  the <code>headersHelper</code> command, and the strings in <code>oauth</code>, whatever their key
-  names. It also masks the query values, the fragment and the token-like path
+  surfaces, and the <code>autoMode</code> box and read-only view on the Permissions tab,
+  mask secret-shaped values on read. The MCP surface also masks every <code>env</code>
+  and <code>headers</code> value, the <code>headersHelper</code> command, and the strings in
+  <code>oauth</code>, whatever their key names. It also masks the query values, the fragment and the token-like path
   segments of a server <code>url</code>. A masked value left untouched keeps the stored
   secret on write. If
   Clauster cannot match a mask to its stored value, it refuses the save and
@@ -2373,10 +2373,11 @@ refused at every scope, so Clauster never writes it. A hand-written
 starts with <strong>No forced mode</strong> (<code>inherit</code>). For this reason, a project offers
 <code>inherit</code> only when it sets <code>allow_bypass_permissions: true</code>. See the
 <a href="../../security/#bypasspermissions-footgun-gate">bypassPermissions footgun gate</a>.</p>
-<p>The box under the rows edits <code>autoMode</code>, the rules for the auto mode classifier.
-<code>autoMode</code> is a top-level key next to <code>permissions</code>, so the Settings tab does
-not show it. The box takes a JSON object with the lists <code>environment</code>, <code>allow</code>,
-<code>soft_deny</code> and <code>hard_deny</code>, and the Boolean <code>classifyAllShell</code>. Put the entry
+<p>At User scope, the box under the rows edits <code>autoMode</code>, the rules for the
+auto mode classifier. <code>autoMode</code> is a top-level key next to <code>permissions</code>, so
+the Settings tab does not show it. The box takes a JSON object with the lists
+<code>environment</code>, <code>allow</code>, <code>soft_deny</code> and <code>hard_deny</code>, and the Boolean
+<code>classifyAllShell</code>. Put the entry
 <code>"$defaults"</code> in a list to keep the built-in rules at that position. A list
 without it replaces the built-in rules for that section. A <code>soft_deny</code> or
 <code>hard_deny</code> list without <code>"$defaults"</code> removes the built-in blocks, including
@@ -2386,12 +2387,21 @@ the block for force push and the data-exfiltration rule. Run
 <p>Claude Code reads <code>autoMode</code> from User settings, managed settings and the
 <code>--settings</code> flag, and it reads <code>defaultMode: "auto"</code> from User and managed
 settings. It ignores both in a project or local settings file, so that a
-repository cannot add its own classifier rules. Clauster therefore refuses a
-save of either one at Project or Local scope, and the error names User scope.
-If <code>config_write.allow_user_scope</code> is off, the tab has no User scope, so edit
-<code>~/.claude/settings.json</code> on the host instead. A Project or Local save with an
-empty box is accepted, and it removes an <code>autoMode</code> block that is already in
-that file.</p>
+repository cannot add its own classifier rules. For this reason, the tab has no
+<code>autoMode</code> box at Project or Local scope:</p>
+<ul>
+<li>If the file has no <code>autoMode</code> block, the tab says that Claude Code reads
+  <code>autoMode</code> only from User scope, and a <strong>Switch to User scope</strong> button opens
+  the box there. If <code>config_write.allow_user_scope</code> is off, the tab has no User
+  scope, so it tells you to edit <code>~/.claude/settings.json</code> on the host instead.</li>
+<li>If the file has an <code>autoMode</code> block, the tab shows it read-only, masked as
+  below, and marked as ignored by Claude Code. <strong>Remove it</strong> marks the block for
+  removal (<strong>Keep it</strong> undoes that). Type the scope name and press <strong>Save</strong> to
+  remove the <code>autoMode</code> key from the file. The save leaves every other key in
+  the file as it is.</li>
+</ul>
+<p>A save at Project or Local scope that sends a non-empty <code>autoMode</code> or
+<code>defaultMode: "auto"</code> is refused, and the error names User scope.</p>
 <p>If the text of an <code>autoMode</code> entry holds a secret-shaped value anywhere, the
 entry shows as <code>********</code>. A secret-shaped value is a URL with a user name or
 password, a <code>${...}</code> reference, or a <code>key: value</code> line with a secret-shaped key.
