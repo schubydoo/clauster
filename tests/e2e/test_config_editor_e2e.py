@@ -76,7 +76,7 @@ def test_config_editor_save_result_scrolls_into_view(
     browser.fill(fx, "7")
     if stale:  # the file changes on disk after the load, so the save is refused (409)
         text = cfg_path.read_text(encoding="utf-8") + "\n# edited\n"
-        cfg_path.write_text(text, encoding="utf-8")
+        cfg_path.write_text(text, encoding="utf-8", newline="\n")
     top = browser.eval_json(
         "(() => { const b = document.querySelector('[data-test=\"cfg-modal\"] .modal-body');"
         " b.scrollTop = b.scrollHeight; return b.scrollTop; })()"

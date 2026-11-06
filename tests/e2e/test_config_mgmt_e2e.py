@@ -2675,6 +2675,41 @@ def test_config_mgmt_network_error_reveals_error(
     browser.expect_text('[data-test="cm-save"]', "Save")  # not stuck at "Saving…"
 
 
+# Holds every config-write PUT, then rejects it like a dropped network on `__fail508()`.
+_HOLD_THEN_FAIL_PUT = """(() => {
+  window.__hold508f = new Promise(r => { window.__fail508 = r; });
+  const real = window.fetch;
+  window.fetch = function (url, opts) {
+    if (opts && opts.method === "PUT" && String(url).includes("/api/config-write/")) {
+      return window.__hold508f.then(() => Promise.reject(new TypeError("Failed to fetch")));
+    }
+    return real.apply(this, arguments);
+  };
+  return true;
+})()"""
+
+
+def test_config_mgmt_failed_write_after_scope_switch_stays_silent(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A write that fails after the operator switched scope does not blame the new scope."""
+    _open_settings_rows(browser, config_mgmt_server)
+    _add_settings_key(browser, "verbose")
+    browser.click(_row("verbose", "cm-settings-bool"))
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    assert browser.eval_json(_HOLD_THEN_FAIL_PUT) is True
+    browser.click('[data-test="cm-save"]')
+    browser.expect_text('[data-test="cm-save"]', "Saving")  # the PUT is in flight
+    _switch_to_user_scope(browser)
+    browser.expect_hidden(_row("verbose"))  # the User scope's rows replaced alpha's edit
+    browser.eval_json("(() => { window.__fail508(); return true; })()")
+    browser.expect_text('[data-test="cm-save"]', "Save")  # the failed write finished
+    time.sleep(0.5)  # past the frames in which a stale error would land
+    assert not browser.is_visible('[data-test="cm-error"]')
+    assert browser.get_count('[data-test="cm-error-live"]') == 1
+    assert browser.get_text('[data-test="cm-error-live"]') == ""
+
+
 def test_config_mgmt_plugins_action_reveals_saved(
     browser: AgentBrowser, config_mgmt_plugins_server: Server
 ) -> None:
