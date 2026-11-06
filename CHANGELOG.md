@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.4.0 (2026-11-06)
+
+[Compare with 1.3.3](https://github.com/schubydoo/clauster/compare/v1.3.3...v1.4.0)
+
+### Features
+
+- Each live session under a standard bridge in Active sessions now shows its own CPU and memory, measured from the session's process and the tools it started, as a part of the bridge figure. ([#1821](https://github.com/schubydoo/clauster/pull/1821))
+- Each live session under a bridge in Active sessions now has a Live transcript button that opens it in the in-app transcript viewer and follows it live, next to its claude.ai Open link. ([#1813](https://github.com/schubydoo/clauster/pull/1813))
+- Mask the session and environment ids that Clauster learns by exact match on the browser-facing outputs, also where a weld or a wrap hides them from the shape masks; hosted partial-message delta frames now arrive with empty text. ([#1805](https://github.com/schubydoo/clauster/pull/1805))
+- The config editor Hooks tab accepts every hook event, type and field that Claude Code documents or reads, and masks http hook headers, URL credentials and URL tokens and secret-shaped MCP tool input on read. ([#1802](https://github.com/schubydoo/clauster/pull/1802))
+- The `inherit` permission mode now requires `allow_bypass_permissions: true` on the project, as `bypassPermissions` does, and is otherwise refused; a background resume now passes `instance_defaults.permission_mode` instead of no permission mode. ([#1809](https://github.com/schubydoo/clauster/pull/1809))
+- The MCP config editor now accepts every server field Claude Code documents or its CLI reads (`ws`, `streamable-http`, `headersHelper`, `oauth`, `timeout`, `alwaysLoad`, `tools`, `toolPermissions` and more), masks every `env`/`headers` value and `headersHelper` on read, keeps a masked credential only while the server's type and url, or command and args, are exactly unchanged, and refuses what Claude Code rejects or ignores (dotted or reserved names, and `transport` or a remote `env`, which a stored server gets converted on load so the next save fixes it). ([#1806](https://github.com/schubydoo/clauster/pull/1806))
+- The config editor MCP tab adds or edits a server through fields for its type (command, args and env, or url, headers, headers helper, OAuth, timeout and alwaysLoad), keeps Raw JSON for the other fields, and asks you to retype masked values when a URL, the type, or the command changes. ([#1815](https://github.com/schubydoo/clauster/pull/1815))
+- The Permissions tab now edits every documented `permissions` key, and the auto mode classifier rules (`autoMode`) at User scope; it refuses `autoMode` and `defaultMode: "auto"` in project and local settings, where Claude Code ignores them. ([#1801](https://github.com/schubydoo/clauster/pull/1801))
+- The Plugins and Settings tabs now mask marketplace `headers`, `headersHelper` and URL credentials, and plugin MCP `env`/`headers`/`args`, on read; the Plugins tab also reads the `additionalMarketplaces` alias, shows each marketplace's location, and returns 404 for a marketplace that the chosen scope does not declare. ([#1807](https://github.com/schubydoo/clauster/pull/1807))
+- The dashboard System readiness pill now shows in every state: "N checks passed" when all checks pass, and "Checks not run" when the checks fail to load, so a pass is never confused with a check that did not run. ([#1814](https://github.com/schubydoo/clauster/pull/1814))
+- Remove the per-launch sandbox option: a `sandbox` value is now ignored with a warning, the instance field `sandbox_mode` is deprecated and fixed at `"default"`, and to sandbox sessions you set `sandbox.enabled` in a Claude Code settings file. ([#1816](https://github.com/schubydoo/clauster/pull/1816))
+- The Settings tab masks every credential helper, merges the effective view as Claude Code does, and now refuses a key at a scope where Claude Code ignores it and a mask with no stored value behind it; a failed load clears the previous scope's rows. ([#1817](https://github.com/schubydoo/clauster/pull/1817))
+- The config editor Settings tab's Rows mode now shows every top-level key as a row, typed by its value (a switch, a number, a list of the documented values, or text), with objects and lists read-only and an Add a key field. ([#1827](https://github.com/schubydoo/clauster/pull/1827))
+- The Skills editor now reads every SKILL.md frontmatter field the way Claude Code reads it (including frontmatter Claude Code re-quotes when it is not valid YAML), accepts a skill with no frontmatter, checks skill `hooks` with the Hooks tab's rules, and refuses values Claude Code rejects or ignores, hooks outside `hooks`, and YAML 1.1-only spellings in subagent and skill frontmatter (such as a nested `yes` or `1_000`), and it opens a file with ignored single-value fields converted, so a save fixes it. ([#1810](https://github.com/schubydoo/clauster/pull/1810))
+- The Skills tab of the config editor now shows and sets the visibility of each skill (`skillOverrides`) at User, Project and Local scope, including keys that match no skill folder. ([#1823](https://github.com/schubydoo/clauster/pull/1823))
+- The config editor accepts every subagent frontmatter value Claude Code reads and now refuses values it rejects or ignores, refuses an `mcpServers` map on write (the editor shows it converted to the list form, so a save fixes the file), and treats all six built-in agents as read-only. ([#1804](https://github.com/schubydoo/clauster/pull/1804))
+- The Subagents editor now checks each inline `mcpServers` definition with the MCP tab's field rules and refuses a reserved name, an item with two servers, or a repeated inline name, and it converts a stored `transport` or remote `env` on load so the next save fixes it. ([#1811](https://github.com/schubydoo/clauster/pull/1811))
+- The Subagents editor now masks frontmatter secret values as `********` and keeps the stored value when a mask is saved unchanged, and the Skills editor now keeps a masked line on save instead of writing the mask over it; a mask that cannot be bound to its stored value is now refused. ([#1824](https://github.com/schubydoo/clauster/pull/1824))
+- The read-only transcript viewer shows "showing X of Y turns" (with "matching" under a search), and Load more shows how many older or newer turns are left. ([#1808](https://github.com/schubydoo/clauster/pull/1808))
+
+### Fixes
+
+- At Project and Local scope the Permissions tab no longer offers an `autoMode` box that can only be refused: it shows a note with a switch to User scope, or a stored block read-only with a Remove action. ([#1836](https://github.com/schubydoo/clauster/pull/1836))
+- Spawned bridges and sessions no longer inherit the standalone binary's PyInstaller environment, and `doctor` names the ones an older binary started. ([#1828](https://github.com/schubydoo/clauster/pull/1828))
+- Direct Sessions survive the claustrum daemon closing an idle connection: Clauster pings it every 90 s, reconnects and reattaches on a drop, and shows a session it cannot recover as an error. ([#1834](https://github.com/schubydoo/clauster/pull/1834))
+- Saves and plugin actions in "Manage Claude Code config" now scroll their result into view, announce it to screen readers and report a network failure, and the Clauster config editor's Save scrolls its result into view. ([#1831](https://github.com/schubydoo/clauster/pull/1831))
+- The hooks rows editor shows only the inputs of each row's type, and its event and type lists show their full value with no sideways scroll. ([#1830](https://github.com/schubydoo/clauster/pull/1830))
+- When reading a Direct Session's output fails, the session now ends visibly: it is marked as an error, its open permission prompts resolve without being allowed, the view shows "stream lost", and the agent is killed so that a Resume does not run beside it. ([#1800](https://github.com/schubydoo/clauster/pull/1800))
+- The read-only live terminal now centers its fixed 120x40 grid in a wider panel instead of leaving all the spare space on the right. ([#1812](https://github.com/schubydoo/clauster/pull/1812))
+- The Skills editor masks a token in the query string or path of a `url` in the frontmatter of `SKILL.md` and of any other skill file, and a resent masked url keeps its stored value only when the rest of the line is unchanged. ([#1839](https://github.com/schubydoo/clauster/pull/1839))
+- The config editor masks a token in the query string or path of a marketplace or MCP server URL, and keeps the stored URL on save only when the rest of the URL is unchanged. ([#1832](https://github.com/schubydoo/clauster/pull/1832))
+- The Plugins tab shows each plugin's install scope, offers Update and Uninstall only where Claude Code allows them, and says what an Update changed instead of only "Saved.". ([#1838](https://github.com/schubydoo/clauster/pull/1838))
+- Settings tab rows now suggest the documented values in a text box instead of a select, save any other value with a warning, and let Add a key pick text, true/false or number. ([#1837](https://github.com/schubydoo/clauster/pull/1837))
+- A skill save no longer deletes the skill's other files. ([#1826](https://github.com/schubydoo/clauster/pull/1826))
+
 ## 1.3.3 (2026-11-02)
 
 [Compare with 1.3.2](https://github.com/schubydoo/clauster/compare/v1.3.2...v1.3.3)
