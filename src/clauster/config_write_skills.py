@@ -72,7 +72,7 @@ elsewhere, so every read path here runs its content through
 #766 primitive shipped for exactly this case — before returning it:
 :func:`read_skill_file` for a file body, and :func:`list_skills` for the surfaced
 ``description`` / ``frontmatter_error`` metadata. This is a deliberate, DIFFERENT
-choice than CLAUDE.md's, not an oversight. A ``url`` value in the ``SKILL.md`` frontmatter
+choice than CLAUDE.md's, not an oversight. A ``url`` value in the frontmatter of any member
 is also given the URL view the MCP and Hooks tabs use (:func:`_member_view`, TASK-525).
 
 **Frontmatter: what the CLI reads (TASK-449.6).** The key set follows the frontmatter
@@ -1871,61 +1871,31 @@ def _spells_skill_md(relative: str) -> bool:
     return stem.casefold() == SKILL_FILENAME.casefold()
 
 
-def _is_skill_md(skill_dir: Path, name: str, info: os.stat_result | None) -> bool:
-    """Whether a member file of ``skill_dir`` gets the ``SKILL.md`` view (TASK-525).
-
-    Decided from the file that was read, never from the request string: ``name`` is its
-    final name once every link is followed, and ``info`` its stat (None when nothing is
-    there). True when that name spells ``SKILL.md`` (:func:`_spells_skill_md`), which takes
-    a link to this or another skill's ``SKILL.md`` and a case variant; when the file has more
-    than one hard link, since it can then be any ``SKILL.md`` under another name; and when
-    it is the same object as this skill's ``SKILL.md``. A member wrongly given the view only
-    shows more masks, and the read and the restore both decide by this one function.
-    """
-    if _spells_skill_md(name):
-        return True
-    if info is None:
-        return False
-    if info.st_nlink > 1:
-        return True
-    try:
-        own = os.stat(skill_dir / SKILL_FILENAME)
-    except OSError:
-        return False  # this skill has no SKILL.md, so the file cannot be it
-    return _same_object(info, own)
-
-
-def _lstat_or_none(path: Path) -> os.stat_result | None:
-    """Return ``os.lstat(path)``, or None when nothing can be stat'd there."""
-    try:
-        return os.lstat(path)
-    except (OSError, ValueError):
-        return None
-
-
-def _member_view(text: str, *, skill_md: bool) -> str:
+def _member_view(text: str) -> str:
     """Return the editor's read view of one skill member holding ``text``.
 
-    Every member is masked line by line (:func:`~clauster.config_write.redact_secret_lines`).
-    ``SKILL.md`` (``skill_md``, decided by :func:`_is_skill_md`) also has each ``url`` value
-    in its frontmatter masked first (:func:`_mask_header_urls`), as the MCP and Hooks tabs
-    mask a URL. The write path binds a resent mask through this same function
-    (:func:`_keep_masked_lines`), so the read and the restore never disagree.
+    Every member is masked line by line (:func:`~clauster.config_write.redact_secret_lines`),
+    and each ``url`` value in a leading frontmatter block is masked first
+    (:func:`_mask_header_urls`), as the MCP and Hooks tabs mask a URL (TASK-525). Decided
+    from the text alone, never from the member's name or file identity: a request can reach
+    a ``SKILL.md`` as ``./SKILL.md``, through a link to any skill's ``SKILL.md`` or through a
+    hard link, and a save breaks a hard link while it keeps the text. A member without a
+    frontmatter fence gets only the line masks, as before. The write path binds a resent
+    mask through this same function (:func:`_keep_masked_lines`), so the read and the
+    restore never disagree.
     """
-    if skill_md:
-        bom = "\ufeff" if text.startswith("\ufeff") else ""
-        core = text[len(bom) :]
-        match = _FRONTMATTER_RE.match(core)
-        readable = match is not None
-        if match is not None:
-            header, start = cw.frontmatter_header(core, match), match.start(1)
-        else:
-            # A fence that Claude Code reads and this surface does not (a save refuses it):
-            # the header the CLI reads is masked whole.
-            cli = _CLI_FENCE_RE.match(core)
-            header, start = (cli.group(1), cli.start(1)) if cli else ("", 0)
-        masked = _mask_header_urls(header, readable=readable)
-        text = bom + core[:start] + masked + core[start + len(header) :]
+    bom = "\ufeff" if text.startswith("\ufeff") else ""
+    core = text[len(bom) :]
+    match = _FRONTMATTER_RE.match(core)
+    if match is not None:
+        header, start = cw.frontmatter_header(core, match), match.start(1)
+    else:
+        # A fence that Claude Code reads and this surface does not (a save refuses it):
+        # the header the CLI reads is masked whole.
+        cli = _CLI_FENCE_RE.match(core)
+        header, start = (cli.group(1), cli.start(1)) if cli else ("", 0)
+    masked = _mask_header_urls(header, readable=match is not None)
+    text = bom + core[:start] + masked + core[start + len(header) :]
     return cw.redact_secret_lines(text)
 
 
@@ -1982,12 +1952,8 @@ def _read_skill_file(
         target = fw.resolve_contained_path(skills_root, f"{name}/{relative}")
     except fw.PathEscapeError as exc:
         raise cw.PathEscapeError(str(exc)) from exc
-    info: os.stat_result | None = None
     try:
-        # One open: the view below is decided from the stat of the file these bytes are.
-        with open(target, "rb") as fh:
-            info = os.fstat(fh.fileno())
-            raw = fh.read()
+        raw = target.read_bytes()
         exists = True
     except FileNotFoundError:
         raw = b""
@@ -1997,10 +1963,8 @@ def _read_skill_file(
     except UnicodeDecodeError as exc:
         raise cw.InvalidCandidateError(f"{relative} is not valid UTF-8") from exc
     note = None
-    # From the file read, not from the request string: `./SKILL.md`, a link to any skill's
-    # SKILL.md and a hard link all get the SKILL.md view (`target` is fully resolved).
-    skill_md = _is_skill_md(skills_root / name, target.name, info)
-    if convert and exists and skill_md:
+    # The normalized key, not the request string: `./SKILL.md` converts as SKILL.md does.
+    if convert and exists and Path(relative).parts == (SKILL_FILENAME,):
         conversion = _convert_ignored_fields(text)
         if conversion is not None:
             text, removed = conversion
@@ -2012,7 +1976,7 @@ def _read_skill_file(
             )
     # Redact AFTER converting: the conversion only removes lines, so the text it returns
     # holds nothing that was not in the file, and the redactor still sees all of it.
-    content = _member_view(text, skill_md=skill_md)
+    content = _member_view(text)
     return content, cw.hash_bytes(raw), exists, note
 
 
@@ -2171,16 +2135,10 @@ def _keep_masked_lines(
             stored = skill_md
         else:
             stored = _read_stored_member(skills_root, name, relative)
-        # The same decision the read made, so a mask binds through the view that showed it.
-        # A stored member read above is a regular file and no link (`_read_stored_member`).
-        is_md = relative == SKILL_FILENAME or _is_skill_md(
-            skills_root / name, Path(relative).name, _lstat_or_none(skills_root / name / relative)
-        )
+        # The read view, which depends on the text only, so a mask binds through the view
+        # that showed it whatever the member is called.
         restored, lines = cw.restore_masked_lines(
-            content,
-            stored,
-            what=relative,
-            view=lambda text, is_md=is_md: _member_view(text, skill_md=is_md),
+            content, stored, what=relative, view=_member_view
         )
         size = len(restored.encode("utf-8"))
         cap = MAX_SKILL_MD_BYTES if relative == SKILL_FILENAME else MAX_FILE_BYTES

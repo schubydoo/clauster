@@ -595,9 +595,10 @@ visible, for example `https://mcp.example.com/v1?key=********`. A URL with a
 user name or password, or with a `${...}` reference, shows as one `********`. If
 the value covers more than one line, holds an escape, or has an anchor or a tag
 in front of it, each line of the value shows as one `********`. A `url` line in
-the Markdown body gets only the line masks above. A file gets this view under
-every path that reaches a `SKILL.md`, for example `./SKILL.md`, a link to the
-`SKILL.md` of this skill or of another skill, or a hard link. A save refuses
+the Markdown body gets only the line masks above. Every file of the skill that
+starts with a frontmatter block gets this view, whatever its name. So `SKILL.md`
+gets it under every path that reaches it, for example `./SKILL.md` or a link,
+and so does a copy of it. A save refuses
 (`422`) a file key that names `SKILL.md` under another spelling or case, for
 example `./SKILL.md`, `skill.md` or `SKILL.md.`, because macOS or Windows opens
 `SKILL.md` for it. Send the file once, as `SKILL.md`.

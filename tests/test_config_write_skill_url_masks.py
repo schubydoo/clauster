@@ -555,7 +555,10 @@ def test_a_save_refuses_another_spelling_of_skill_md(
     assert sorted(p.name for p in path.parent.iterdir()) == [sk.SKILL_FILENAME]
 
 
-def test_a_save_through_a_hard_link_binds_with_the_skill_md_view(tmp_path: Path) -> None:
+@pytest.mark.parametrize("named", [True, False])
+def test_a_hard_link_stays_masked_after_a_save_breaks_it(tmp_path: Path, named: bool) -> None:
+    # A save rebuilds the skill tree, so the hard link becomes a plain copy of the text.
+    # The view follows the text, so the copy stays masked on the next read.
     path = _place(tmp_path, _MCP)
     link = path.parent / "other.md"
     try:
@@ -563,23 +566,31 @@ def test_a_save_through_a_hard_link_binds_with_the_skill_md_view(tmp_path: Path)
     except (OSError, NotImplementedError) as exc:  # pragma: no cover - no hard links here
         pytest.skip(f"cannot make a hard link here: {exc}")
     content, file_hash = _view(tmp_path)
-    linked = sk.read_skill_file(tmp_path, "s", "other.md")[0]
+    files = {sk.SKILL_FILENAME: content}
+    if named:
+        files["other.md"] = sk.read_skill_file(tmp_path, "s", "other.md")[0]
     sk.write_skill(
-        tmp_path,
-        "s",
-        {sk.SKILL_FILENAME: content, "other.md": linked},
-        expected_hash=file_hash,
-        confirm_scripts=sk.SCRIPT_CONFIRM_TOKEN,
+        tmp_path, "s", files, expected_hash=file_hash, confirm_scripts=sk.SCRIPT_CONFIRM_TOKEN
     )
     assert path.read_bytes() == _MCP.encode("utf-8")
     assert link.read_bytes() == _MCP.encode("utf-8")
+    assert os.stat(link).st_nlink == 1
+    shown = sk.read_skill_file(tmp_path, "s", "other.md")[0]
+    assert "qv-mcp-one" not in shown
+    assert _MCP_VIEW_LINE in shown
 
 
-def test_a_member_of_a_skill_without_skill_md_gets_the_line_view(tmp_path: Path) -> None:
+def test_any_member_with_frontmatter_gets_the_url_view(tmp_path: Path) -> None:
+    # The view depends on the text, never on the member's name: a member that is not
+    # SKILL.md gets the url masks too, and one without a fence gets only the line masks.
     member = tmp_path / "skills" / "s" / "notes.md"
     member.parent.mkdir(parents=True)
     stored = "---\nurl: https://h.example.com/?k=qv-plain\n---\ntoken: qv-line\n"
     member.write_bytes(stored.encode("utf-8"))
     content = sk.read_skill_file(tmp_path, "s", "notes.md")[0]
-    # No SKILL.md to be: only the line masks apply, as for any script.
-    assert content == stored.replace("qv-line", MASK)
+    assert content == f"---\nurl: https://h.example.com/?k={MASK}\n---\ntoken: {MASK}\n"
+    script = member.parent / "run.sh"
+    script.write_bytes(b"curl https://h.example.com/?k=qv-script\n")
+    assert sk.read_skill_file(tmp_path, "s", "run.sh")[0] == (
+        "curl https://h.example.com/?k=qv-script\n"
+    )
