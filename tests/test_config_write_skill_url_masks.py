@@ -637,3 +637,32 @@ def test_a_comment_only_header_is_shown_as_stored(tmp_path: Path) -> None:
     stored = "---\n# see the url docs\n---\nRun it.\n"
     _place(tmp_path, stored)
     assert sk.read_skill_file(tmp_path, "s")[0] == stored
+
+
+@pytest.mark.parametrize("extra", ["", "a: ---x\n"])
+def test_a_url_with_a_split_scheme_is_masked(tmp_path: Path, extra: str) -> None:
+    # WHATWG drops the line break, so this reads as an https url with no `https:` text in
+    # the file. Only the `url` key keeps the no-url early return from showing it.
+    _place(
+        tmp_path,
+        f"---\n{extra}hooks:\n  PostToolUse:\n    - hooks:\n        - type: http\n"
+        "          url: |-\n            htt\n            ps://h.example.com/p?k=qv-split\n"
+        "---\nb\n",
+    )
+    assert "qv-split" not in sk.read_skill_file(tmp_path, "s")[0]
+
+
+def test_the_cap_counts_bytes_not_characters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Three-byte characters: under the cap in characters, over it in bytes.
+    def no_parse(_header: str) -> str:
+        raise AssertionError("a header over the cap must not be parsed")
+
+    monkeypatch.setattr(cw, "cli_frontmatter_text", no_parse)
+    member = tmp_path / "skills" / "s" / "wide.md"
+    member.parent.mkdir(parents=True)
+    wide = "€" * (sk.MAX_FILE_BYTES // 3 + 10)
+    member.write_bytes(f"---\nurl: x\nd: {wide}\n---\n".encode())
+    content = sk.read_skill_file(tmp_path, "s", "wide.md")[0]
+    assert content.splitlines()[1] == MASK

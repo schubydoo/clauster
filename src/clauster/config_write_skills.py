@@ -1804,7 +1804,7 @@ def _mask_header_urls(header: str, *, readable: bool) -> str:
     lines = header.splitlines(keepends=True)
     if _MAY_HOLD_URL_RE.search(header) is None:
         return header
-    if len(header) > MAX_FILE_BYTES:
+    if len(header.encode("utf-8")) > MAX_FILE_BYTES:
         return "".join(_masked_whole(line) for line in lines)
     try:
         source = cw.cli_frontmatter_text(header)
