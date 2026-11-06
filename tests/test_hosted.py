@@ -3324,6 +3324,8 @@ async def test_manager_public_persist_invokes_store(fake_claustrum, tmp_path):
 class _BoomReattachClient:
     """A stub daemon client whose reattach raises — isolates the error path."""
 
+    lost = False  # the connection itself is fine; only the reattach fails
+
     def stream(self, process_id):
         class _Stream:
             def subscribe(self):
@@ -4727,6 +4729,8 @@ async def test_restore_stops_at_aclose(fake_claustrum, tmp_path):
         await mgr.aclose()
         await mgr.reattach_all(client)
         assert "process.reattach" not in fake.calls
+        assert set(store.load()) == {"old"}  # the unreached row is not pruned
+        assert mgr.restored is False
 
 
 async def test_no_orphan_probe_after_an_accepted_kill(fake_claustrum, monkeypatch):
@@ -4786,3 +4790,27 @@ async def test_lost_reasons_are_redacted(fake_claustrum, monkeypatch):
         c = await _spawn(mgr2, client2)
         await mgr2.fail_unreachable(f"reconnect failed: {secret}")
         assert secret not in (mgr2.get_instance(c.claustrum_process_id).error_detail or "")
+
+
+async def test_reattach_failing_on_a_dropped_connection_probes_for_an_orphan(
+    fake_claustrum, tmp_path, monkeypatch
+):
+    # The connection dropped in the middle of a restore pass: the agent may still run, so
+    # the row is probed and a survivor gets Kill instead of a bare, resumable ERROR.
+    async def _orphan(_instance):
+        return True
+
+    monkeypatch.setattr(HostedManager, "_is_orphan", staticmethod(_orphan))
+    store = HostedStateStore(tmp_path / "hosted_state.json")
+    store.save({"old": {"project": "proj", "label": "hosted:proj", "agent_pid": 4242}})
+    fake = await fake_claustrum()
+    client = ClaustrumClient(fake.socket_path, fake.token)
+    await client.connect()
+    await client.ping()
+    fake.disconnect_all()
+    await asyncio.wait_for(client.wait_lost(), timeout=2.0)
+    mgr = HostedManager(store)
+    await mgr.reattach_all(client)
+    row = mgr.get_instance("old")
+    assert row.is_orphan and row.status is InstanceStatus.CRASHED
+    await client.close()

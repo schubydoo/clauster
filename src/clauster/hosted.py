@@ -1180,6 +1180,7 @@ class HostedManager:
         self._unloaded: dict[str, dict] | None = None
         # Serializes the restore pass (startup, or the first connect after a failed one)
         # against the reconnect hook, so the two never reattach the same rows at once.
+        # Lock order: this lock, then a per-id lock, then _persist_lock.
         self._restore_lock = asyncio.Lock()
 
     @property
@@ -1676,6 +1677,11 @@ class HostedManager:
                     record_keys=records.keys(),
                     history_for=history_for,
                 )
+        if self._closing:
+            # Stopped early by aclose(), which already persisted with the unreached rows
+            # merged in. Marking the store restored now, and persisting, would prune
+            # every stored row this pass never reached (TASK-518 review catch).
+            return [self._synced(inst) for inst in self._instances.values()]
         self._restored = True
         await self._persist()
         return [self._synced(inst) for inst in self._instances.values()]
@@ -1737,11 +1743,20 @@ class HostedManager:
             # (app.py) — a junk cursor failed the whole app boot. One coercion site.
             result = await session.reattach(instance.daemon_last_seq, history_loader=loader)
         except ClaustrumError as exc:
-            instance.status = InstanceStatus.ERROR
-            instance.error_detail = redact_for_disk(f"reattach failed: {exc}")
+            detail = redact_for_disk(f"reattach failed: {exc}")
             logger.warning(
                 "hosted: reattach of %s failed: %s", process_id, redact_for_disk(str(exc))
             )
+            if client.lost:
+                # The connection dropped during the pass, so the agent may well still run
+                # on the daemon. Probe for it, so a survivor is offered as an orphan with
+                # Kill and a Resume never starts a second agent beside it.
+                await self._mark_unfound(
+                    instance, lost_status=InstanceStatus.ERROR, lost_detail=detail
+                )
+                return
+            instance.status = InstanceStatus.ERROR
+            instance.error_detail = detail
             return
         if not result.get("found"):
             await self._mark_unfound(

@@ -187,8 +187,8 @@ A new Direct Session also reconnects first, so it does not fail because of an
 old, closed connection. The reattach of the running sessions happens in the
 background and does not delay the new session. If Clauster could not reach the
 daemon when it started, it does not retry by itself. The next new Direct Session
-or Resume connects, and that first connection also reattaches the sessions
-recorded in `clauster.db`, the same as a normal start.
+connects, and that first connection also reattaches the sessions recorded in
+`clauster.db`, the same as a normal start.
 
 !!! warning "systemd can undo all of this"
     The survival table assumes nothing reaps the child processes. Under a

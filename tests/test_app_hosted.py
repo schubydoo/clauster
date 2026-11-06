@@ -286,6 +286,30 @@ def test_spawn_hosted_when_ensure_fails_is_503(write_config, monkeypatch):
     assert manager.spawn_calls == []
 
 
+def test_spawn_hosted_ensure_oserror_is_503(write_config, monkeypatch):
+    # ensure() prepares the state dir and reads the token file, which can raise OSError.
+    monkeypatch.setattr(instances_module, "is_trusted", lambda *a, **k: True)
+    monkeypatch.setattr(claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
+    daemon = _ReconnectingDaemon(error=PermissionError("state dir not writable"))
+    app = _app(write_config, daemon=daemon)
+    with TestClient(app) as client:
+        r = client.post("/api/instances", json={"project": "alpha", "channel": "hosted"})
+    assert r.status_code == 503
+    assert "state dir not writable" in r.json()["detail"]
+
+
+def test_spawn_hosted_ensure_error_detail_is_redacted(write_config, monkeypatch):
+    secret = "sk-ant-api03-" + "A" * 40
+    monkeypatch.setattr(instances_module, "is_trusted", lambda *a, **k: True)
+    monkeypatch.setattr(claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
+    daemon = _ReconnectingDaemon(error=ClaustrumError(f"boom {secret}"))
+    app = _app(write_config, daemon=daemon)
+    with TestClient(app) as client:
+        r = client.post("/api/instances", json={"project": "alpha", "channel": "hosted"})
+    assert r.status_code == 503
+    assert secret not in r.json()["detail"]
+
+
 def test_spawn_hosted_without_daemon_is_503(write_config, projects_root):
     app = _app(write_config, daemon=None)  # claustrum disabled → no daemon
     with TestClient(app) as client:
