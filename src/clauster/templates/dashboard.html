@@ -2461,37 +2461,72 @@
                           x-model="configMgmt.permissions.text" {{ NO_AUTOFILL }}></textarea>
                 <div class="form-hint small mt-1">
                   The <code>permissions</code> object Claude Code enforces, edited as JSON. Put
-                  <code>autoMode</code> in the box below, not here: it is a separate top-level key.
+                  <code>autoMode</code> in the auto mode section below (at User scope), not here: it is a separate top-level key.
                 </div>
               </div>
 
               <!-- TASK-449.1: the top-level autoMode block (auto mode classifier rules), a
                    sibling of `permissions`, edited as JSON in both modes. Claude Code reads it
-                   from User settings only, so the backend refuses rules at project/local scope;
-                   the note says so before the user types. -->
+                   from User settings only. TASK-509: so only User scope gets the box; Project
+                   and Local show a note, or a stored block read-only with a Remove action
+                   (the backend still refuses rules there). -->
               <div class="mt-3" data-test="cm-automode">
-                <label class="form-label small mb-1" for="cm-automode-text">autoMode — auto mode classifier rules</label>
-                <div class="alert alert-warning py-1 small" data-test="cm-automode-scope-warning" role="note"
-                     id="cm-automode-scope-warning" x-show="configMgmt.scope !== 'user'" x-cloak>
-                  Claude Code reads <code>autoMode</code> only from User settings and ignores it in
-                  this file.
-                  {% if config_write_allow_user_scope %}Switch to User scope to save auto mode rules.{% else %}User-scope
-                  editing is off in this Clauster configuration, so edit <code>~/.claude/settings.json</code> on the
-                  host.{% endif %}
-                  To remove a block that is already in this file, clear the box and save.
+                <!-- User scope: the one scope Claude Code reads autoMode from, so the box. -->
+                <div x-show="configMgmt.scope === 'user'" x-cloak data-test="cm-automode-edit">
+                  <label class="form-label small mb-1" for="cm-automode-text">autoMode — auto mode classifier rules</label>
+                  <textarea id="cm-automode-text" class="form-control form-control-sm font-monospace" rows="8"
+                            data-test="cm-automode-text" spellcheck="false" aria-describedby="cm-automode-hint"
+                            placeholder='{ "allow": ["$defaults", "Pushing to our staging bucket is allowed"] }'
+                            x-model="configMgmt.permissions.autoModeText" {{ NO_AUTOFILL }}></textarea>
+                  <div class="form-hint small mt-1" id="cm-automode-hint">
+                    A JSON object with the lists <code>environment</code>, <code>allow</code>,
+                    <code>soft_deny</code> and <code>hard_deny</code> (prose rules for the classifier, never run
+                    by Clauster) and the Boolean <code>classifyAllShell</code>. Put <code>"$defaults"</code> in a
+                    list to keep the built-in rules at that position; a list without it replaces them. Leave the
+                    box empty for no block. An entry that holds a secret shows as <code>********</code>: leave the
+                    mask to keep the stored value.
+                  </div>
                 </div>
-                <textarea id="cm-automode-text" class="form-control form-control-sm font-monospace" rows="8"
-                          data-test="cm-automode-text" spellcheck="false"
-                          :aria-describedby="configMgmt.scope !== 'user' ? 'cm-automode-scope-warning cm-automode-hint' : 'cm-automode-hint'"
-                          placeholder='{ "allow": ["$defaults", "Pushing to our staging bucket is allowed"] }'
-                          x-model="configMgmt.permissions.autoModeText" {{ NO_AUTOFILL }}></textarea>
-                <div class="form-hint small mt-1" id="cm-automode-hint">
-                  A JSON object with the lists <code>environment</code>, <code>allow</code>,
-                  <code>soft_deny</code> and <code>hard_deny</code> (prose rules for the classifier, never run
-                  by Clauster) and the Boolean <code>classifyAllShell</code>. Put <code>"$defaults"</code> in a
-                  list to keep the built-in rules at that position; a list without it replaces them. Leave the
-                  box empty for no block. An entry that holds a secret shows as <code>********</code>: leave the
-                  mask to keep the stored value.
+                <!-- Project/Local: no box, because Claude Code ignores autoMode in this file. -->
+                <div x-show="configMgmt.scope !== 'user'" x-cloak data-test="cm-automode-repo">
+                  <div class="form-label small mb-1">autoMode — auto mode classifier rules</div>
+                  <div class="small" data-test="cm-automode-none" x-show="!configMgmtAutoModeStored()" x-cloak>
+                    Claude Code reads <code>autoMode</code> only from User scope.
+                    {% if config_write_allow_user_scope %}<button type="button" class="btn btn-sm btn-outline-primary ms-1"
+                            data-test="cm-automode-switch-user" @click="configMgmtAutoModeToUser()">Switch to User scope</button>
+                    {% else %}<span data-test="cm-automode-host-hint">User-scope editing is off in this Clauster
+                    configuration, so edit <code>~/.claude/settings.json</code> on the host.</span>{% endif %}
+                  </div>
+                  <div data-test="cm-automode-stored" x-show="configMgmtAutoModeStored()" x-cloak>
+                    <div class="alert alert-warning py-1 small mb-1" role="note" id="cm-automode-ignored"
+                         data-test="cm-automode-ignored">
+                      Ignored by Claude Code: this file holds an <code>autoMode</code> block, but Claude Code reads
+                      <code>autoMode</code> only from User scope.
+                      {% if config_write_allow_user_scope %}Switch to User scope to save auto mode rules.{% else %}User-scope
+                      editing is off in this Clauster configuration, so edit <code>~/.claude/settings.json</code> on
+                      the host.{% endif %}
+                    </div>
+                    <pre class="small mb-1 text-break detail-pre" data-test="cm-automode-readonly" role="region"
+                         tabindex="0" aria-label="Stored autoMode block (read-only)" aria-describedby="cm-automode-ignored"
+                         :class="configMgmtAutoModeRemoving() ? 'text-decoration-line-through' : ''"
+                         x-text="configMgmt.permissions.autoModeOrig"></pre>
+                    <div x-show="!configMgmtAutoModeRemoving()" x-cloak>
+                      <button type="button" class="btn btn-sm btn-outline-danger" data-test="cm-automode-remove"
+                              aria-label="Remove it: remove the stored autoMode block"
+                              @click="configMgmtRemoveAutoMode()">Remove it</button>
+                    </div>
+                    <div class="small" x-show="configMgmtAutoModeRemoving()" x-cloak data-test="cm-automode-removing">
+                      Marked for removal. Type <code x-text="configMgmtConfirmToken()"></code> below and press Save to
+                      remove only the <code>autoMode</code> key from this file.
+                      <button type="button" class="btn btn-sm btn-outline-secondary ms-1" data-test="cm-automode-keep"
+                              aria-label="Keep it: keep the stored autoMode block"
+                              @click="configMgmtKeepAutoMode()">Keep it</button>
+                    </div>
+                  </div>
+                  {# A note toggled in by x-show is skipped by screen readers (see cm-saved-live),
+                     so the pending removal is announced from this always-mounted region. #}
+                  <div class="visually-hidden" role="status" data-test="cm-automode-live"
+                       x-text="configMgmtAutoModeRemovingNote()"></div>
                 </div>
               </div>
             </div>

@@ -2560,10 +2560,50 @@
         p.flags = flags; p.flagsOrig = flagsOrig;
         p.defaultMode = dm; p.rowsError = ""; return true;
       },
-      // The autoMode box changed since it was loaded (TASK-449.1).
+      // The autoMode box changed since it was loaded (TASK-449.1). Project and Local
+      // scope have no box (TASK-509): there the only change is a Remove, so a save there
+      // never sends any autoMode but the empty one that removes the block.
       _permissionsAutoModeDirty() {
-        const p = this.configMgmt.permissions;
+        const c = this.configMgmt, p = c.permissions;
+        if (c.scope !== "user") return this.configMgmtAutoModeRemoving();
         return p.autoModeText !== p.autoModeOrig;
+      },
+      // TASK-509: a stored autoMode block at Project or Local scope shows read-only
+      // (server-masked). Remove marks it by emptying the text; the footer typed confirm
+      // and Save then send `{}`, which removes only the autoMode key. Keep undoes it.
+      configMgmtAutoModeStored() {
+        return this.configMgmt.permissions.autoModeOrig !== "";
+      },
+      configMgmtAutoModeRemoving() {
+        const p = this.configMgmt.permissions;
+        return p.autoModeOrig !== "" && p.autoModeText === "";
+      },
+      configMgmtAutoModeRemovingNote() {
+        if (!this.configMgmtAutoModeRemoving()) return "";
+        return "autoMode block marked for removal. Type " + this.configMgmtConfirmToken()
+          + " and press Save to remove it.";
+      },
+      configMgmtRemoveAutoMode() {
+        this.configMgmt.permissions.autoModeText = "";
+        this._configMgmtFocusLater('[data-test="cm-automode-keep"]');
+      },
+      configMgmtKeepAutoMode() {
+        const p = this.configMgmt.permissions;
+        p.autoModeText = p.autoModeOrig;
+        this._configMgmtFocusLater('[data-test="cm-automode-remove"]');
+      },
+      // "Switch to User scope" hides with the Project/Local view, so focus lands on the
+      // now-pressed User scope button rather than falling to the page.
+      configMgmtAutoModeToUser() {
+        this.configMgmtSetScope("user");
+        this._configMgmtFocusLater('[aria-label="Config scope"] [aria-pressed="true"]');
+      },
+      // The clicked button hides on the next frame, so hand focus to the one that replaces it.
+      _configMgmtFocusLater(selector) {
+        this.$nextTick(() => {
+          const el = document.querySelector(selector);
+          if (el) el.focus();
+        });
       },
       configMgmtPermissionsMode(mode) {
         const p = this.configMgmt.permissions;

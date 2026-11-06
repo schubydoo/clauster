@@ -299,23 +299,44 @@ def test_config_mgmt_permissions_failed_load_clears_previous_rows(
     browser.expect_visible('[data-test="cm-save"][disabled]')  # nothing to save over
 
 
-def test_config_mgmt_auto_mode_project_scope_explains_refusal(
+def _open_permissions_at(browser: AgentBrowser, server: Server, scope: str) -> None:
+    """Open alpha's Permissions tab at Project or Local scope and wait for its load."""
+    _open_modal(browser, server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    if scope == "local":
+        browser.click('[data-test="cm-scope-local"]')
+    browser.click('[data-test="cm-surface-permissions"]')
+    browser.expect_visible('[data-test="cm-permissions-rows"]')
+    browser.expect_visible('[data-test="cm-automode-repo"]')
+
+
+def test_config_mgmt_auto_mode_project_scope_none_stored_offers_user_scope(
     browser: AgentBrowser, config_mgmt_server: Server
 ) -> None:
-    """At project scope the tab warns first, and a save is refused with a User-scope hint."""
-    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
-    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+    """TASK-509: no box at Project scope, only a note and a switch to User scope."""
+    _open_permissions_at(browser, config_mgmt_server, "project")
+    browser.expect_visible('[data-test="cm-automode-none"]')
+    assert "only from User scope" in browser.get_text('[data-test="cm-automode-none"]')
+    browser.expect_hidden('[data-test="cm-automode-text"]')  # nothing to type into
+    browser.expect_hidden('[data-test="cm-automode-stored"]')
+    browser.click('[data-test="cm-automode-switch-user"]')
+    browser.expect_hidden('[data-test="cm-project"]')
+    browser.expect_visible('[data-test="cm-automode-text"]')  # the box lives at User scope
+    browser.expect_attr('[data-test="cm-scope-user"]', "aria-pressed", "true")
+    assert browser.eval_json(
+        "document.activeElement === document.querySelector('[data-test=\"cm-scope-user\"]')"
+    ), "focus should land on the pressed User scope button, not fall to the page"
 
-    _open_modal(browser, config_mgmt_server)
-    browser.select('[data-test="cm-project"]', "alpha")
-    browser.click('[data-test="cm-surface-permissions"]')
-    browser.expect_visible('[data-test="cm-automode-scope-warning"]')
-    browser.fill('[data-test="cm-automode-text"]', json.dumps(_MAINTAINER_AUTO_MODE))
-    browser.fill('[data-test="cm-confirm"]', "alpha")
-    browser.click('[data-test="cm-save"]')
-    browser.expect_visible('[data-test="cm-error"]', timeout_ms=_SAVE_TIMEOUT)
-    assert "User scope" in browser.get_text('[data-test="cm-error"]')
-    assert not (projects_root / "alpha" / ".claude" / "settings.json").exists()
+
+def test_config_mgmt_auto_mode_without_user_scope_names_the_host_file(
+    browser: AgentBrowser, config_mgmt_project_only_server: Server
+) -> None:
+    """TASK-509: with User-scope editing off, the note names the host file, no button."""
+    _open_permissions_at(browser, config_mgmt_project_only_server, "project")
+    browser.expect_visible('[data-test="cm-automode-host-hint"]')
+    assert "~/.claude/settings.json" in browser.get_text('[data-test="cm-automode-host-hint"]')
+    assert browser.get_count('[data-test="cm-automode-switch-user"]') == 0
+    browser.expect_hidden('[data-test="cm-automode-text"]')
 
 
 def test_config_mgmt_permissions_rows_new_keys_round_trip(
@@ -2525,23 +2546,58 @@ def _expect_error_announced(browser: AgentBrowser, text: str) -> None:
     assert browser.get_attr('[data-test="cm-error-live"]', "role") == "alert"
 
 
-def test_config_mgmt_refused_local_auto_mode_save_reveals_error(
-    browser: AgentBrowser, config_mgmt_server: Server
+@pytest.mark.parametrize(
+    ("scope", "filename", "confirm"),
+    [("project", "settings.json", "alpha"), ("local", "settings.local.json", "alpha (local)")],
+)
+def test_config_mgmt_stored_auto_mode_is_read_only_and_removable(
+    browser: AgentBrowser, config_mgmt_server: Server, scope: str, filename: str, confirm: str
 ) -> None:
-    """The reported case: a Local autoMode save is refused and the refusal is in view."""
-    _open_modal(browser, config_mgmt_server)
+    """TASK-509: a stored block shows read-only and masked; Remove + Save drops only it."""
+    path = _projects_root(config_mgmt_server) / "alpha" / ".claude" / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    seeded = {
+        "model": "opus",
+        "permissions": {"deny": [], "allow": ["Bash(ls:*)"]},
+        "autoMode": {"allow": ["$defaults", "Mirror: https://ci:hunter2@git.example.com/acme"]},
+    }
+    path.write_bytes(json.dumps(seeded).encode("utf-8"))
+
+    _open_permissions_at(browser, config_mgmt_server, scope)
     _short_window(browser)
-    browser.select('[data-test="cm-project"]', "alpha")
-    browser.click('[data-test="cm-scope-local"]')
-    browser.click('[data-test="cm-surface-permissions"]')
-    browser.expect_visible('[data-test="cm-automode-text"]')
-    browser.fill('[data-test="cm-automode-text"]', json.dumps(_MAINTAINER_AUTO_MODE))
-    browser.fill('[data-test="cm-confirm"]', "alpha (local)")
+    browser.expect_visible('[data-test="cm-automode-readonly"]')
+    shown = browser.get_text('[data-test="cm-automode-readonly"]')
+    assert "********" in shown and "$defaults" in shown
+    assert "hunter2" not in shown  # the read-only view is the masked read
+    assert "Ignored by Claude Code" in browser.get_text('[data-test="cm-automode-ignored"]')
+    browser.expect_hidden('[data-test="cm-automode-text"]')
+    browser.expect_hidden('[data-test="cm-automode-none"]')
+    browser.expect_visible('[data-test="cm-save"][disabled]')  # nothing to save yet
+
+    # Keep undoes a Remove, and the save stays off.
+    browser.click('[data-test="cm-automode-remove"]')
+    browser.expect_visible('[data-test="cm-automode-removing"]')
+    # The pending removal is announced, and focus moves to Keep (Remove just hid).
+    browser.expect_text('[data-test="cm-automode-live"]', "marked for removal")
+    assert browser.eval_json(
+        "document.activeElement === document.querySelector('[data-test=\"cm-automode-keep\"]')"
+    )
+    browser.click('[data-test="cm-automode-keep"]')
+    browser.expect_visible('[data-test="cm-automode-remove"]')
+    assert browser.get_text('[data-test="cm-automode-live"]') == ""
+    browser.fill('[data-test="cm-confirm"]', confirm)
+    browser.expect_visible('[data-test="cm-save"][disabled]')
+
+    browser.click('[data-test="cm-automode-remove"]')
+    browser.expect_visible('[data-test="cm-automode-removing"]')
+    browser.expect_visible('[data-test="cm-save"]:not([disabled])')
     _park_modal_body_at_foot(browser)
     browser.click('[data-test="cm-save"]')
-    _expect_in_modal_view(browser, '[data-test="cm-error"]')
-    assert "user settings" in browser.get_text('[data-test="cm-error"]')
-    _expect_error_announced(browser, "user settings")
+    _expect_in_modal_view(browser, '[data-test="cm-saved"]')  # the result is in view
+    browser.expect_visible('[data-test="cm-automode-none"]')  # reloaded: no block now
+
+    stored = json.loads(path.read_bytes())
+    assert stored == {"model": "opus", "permissions": {"deny": [], "allow": ["Bash(ls:*)"]}}
 
 
 def test_config_mgmt_refused_settings_save_reveals_error(
