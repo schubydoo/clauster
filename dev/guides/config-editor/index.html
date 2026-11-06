@@ -2547,14 +2547,15 @@ and nothing is written. A <code>timeout</code> must be a number of seconds above
 CLI requires.
 Clauster stores each hook as data and never runs it. It does not run a command,
 send a request to a URL, call an MCP tool, or send a prompt to a model.</p>
-<p>In Rows view, each row is one hook: the event, the matcher, the type, the main
-field of that type, and the timeout.</p>
+<p>In Rows view, each hook has two lines. The first line holds the event, the
+matcher, and the type. The second line holds the handler inputs of the selected
+type and only those, then the timeout and the Remove button.</p>
 <table>
 <thead>
 <tr>
 <th>Type</th>
 <th>What Claude Code does when the hook fires</th>
-<th>Handler column</th>
+<th>Handler inputs</th>
 </tr>
 </thead>
 <tbody>
