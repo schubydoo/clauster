@@ -676,10 +676,11 @@ CLI requires.
 Clauster stores each hook as data and never runs it. It does not run a command,
 send a request to a URL, call an MCP tool, or send a prompt to a model.
 
-In Rows view, each row is one hook: the event, the matcher, the type, the main
-field of that type, and the timeout.
+In Rows view, each hook has two lines. The first line holds the event, the
+matcher, and the type. The second line holds the handler inputs of the selected
+type and only those, then the timeout and the Remove button.
 
-| Type | What Claude Code does when the hook fires | Handler column |
+| Type | What Claude Code does when the hook fires | Handler inputs |
 | --- | --- | --- |
 | `command` | Runs a shell command | Command |
 | `http` | Sends the event data as an HTTP POST to a URL | URL |
