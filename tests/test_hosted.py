@@ -4377,6 +4377,23 @@ async def test_rebind_onto_a_client_that_is_already_lost_does_nothing(fake_claus
         assert "process.reattach" not in fake.calls
 
 
+async def test_a_retried_restore_also_rebinds_sessions_left_on_the_dead_connection(
+    fake_claustrum,
+):
+    # A pass that stopped on a dropped connection leaves the store unrestored but can
+    # already have attached sessions to that connection. The retry skips them, so the
+    # hook must rebind them too, or they stay "running" on the dead client (Greptile).
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        inst = await _spawn(mgr, client)
+        pid = inst.claustrum_process_id
+        mgr._restored = False  # the state such a stopped pass leaves behind
+        async with _dropped(fake, client) as fresh:
+            await fresh.ping()
+            await mgr.on_connected(fresh, history_for=None)
+            assert mgr.session(pid).client is fresh
+        assert "process.reattach" in fake.calls
+
+
 async def test_rebind_onto_a_client_that_was_closed_does_nothing(fake_claustrum):
     # A queued hook can run after a newer ensure() closed this connection; close() does
     # not mark it lost, so the guard must read is_open (Greptile on PR 1834).
@@ -4638,9 +4655,11 @@ async def test_on_connected_restores_first_then_rebinds(fake_claustrum, monkeypa
 
         monkeypatch.setattr(mgr, "rebind_all", rebind_all)
         await mgr.on_connected(client, history_for=None)  # nothing restored yet
-        assert mgr.restored is True and calls == []
+        # The restore runs first, then the rebind (a no-op for the sessions the pass
+        # just attached to this client).
+        assert mgr.restored is True and calls == ["rebind_all"]
         await mgr.on_connected(client, history_for=None)
-        assert calls == ["rebind_all"]
+        assert calls == ["rebind_all", "rebind_all"]
 
 
 async def test_a_hook_during_the_startup_restore_waits_and_rebinds(fake_claustrum, monkeypatch):

@@ -1626,11 +1626,15 @@ class HostedManager:
         afterwards it rebinds the running ones (:meth:`rebind_all`). The check runs
         under the restore lock: a hook that fires while the startup pass still runs
         waits for it and then rebinds, instead of starting a second, concurrent pass.
+
+        A retried restore is followed by a rebind too: an earlier pass that stopped on
+        a dropped connection can have attached some sessions to it, and the retried
+        pass skips those (they are in ``_sessions``), so only the rebind moves them.
+        Sessions the pass just attached to ``client`` are skipped by the rebind.
         """
         async with self._restore_lock:
             if not self._restored:
                 await self._reattach_all_locked(client, history_for=history_for)
-                return
         await self.rebind_all(client)
 
     async def _reattach_all_locked(
