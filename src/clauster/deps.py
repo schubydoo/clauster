@@ -526,7 +526,7 @@ _SHAWL_VERSION = "v1.9.0"
 # are the release's checksums.txt asset digests (refreshed by scripts/check_binary_dep_pins.py and
 # fail-closed at install, exactly like Shawl above). Same `# renovate:` customManager pattern.
 # renovate: datasource=github-releases depName=schubydoo/claustrum
-_CLAUSTRUM_VERSION = "v1.17.0"
+_CLAUSTRUM_VERSION = "v1.19.0"
 _CLAUSTRUM_VER_BARE = _CLAUSTRUM_VERSION.removeprefix("v")  # tag "v1.7.1" -> asset infix "1.7.1"
 
 # (platform_marker, GoReleaser OS token, arch_marker, archive ext, sha256 of the archive)
@@ -536,42 +536,42 @@ _CLAUSTRUM_VARIANTS: tuple[tuple[str, str, str, str, str], ...] = (
         "Linux",
         "x86_64",
         "tar.gz",
-        "8339ba75818b95b6b32a3a116b55e06e0a2fb909e16b981b56f989e1c4137b2c",
+        "96cc0b9b8a4a7aaf6e3eda42a777070af646d1a9af7a407244a8af3d160e55a7",
     ),
     (
         "linux",
         "Linux",
         "arm64",
         "tar.gz",
-        "fd6c2ff9906de13d99639f223af7e44f472993fbc6b16e8ad1e59f4bf111b91b",
+        "3f80b2f48545fb39a8204c26da35f355db4b6436f6453bbc8b19101d299672a9",
     ),
     (
         "darwin",
         "Darwin",
         "x86_64",
         "tar.gz",
-        "2925e6701181ef1cfbf01d0da2416c71beeb143674a6578b647c75f8653d4368",
+        "09f068ece13f8022355e531d6ae5101c2917c4f1d1212860573e2d31b902b203",
     ),
     (
         "darwin",
         "Darwin",
         "arm64",
         "tar.gz",
-        "cb1eaabef20b6e286320529d1ae507e50a9af9b4730f37224ed75cbfe15d2546",
+        "72d718cbe0c83169af6b30dc0a78b255890ca46141b09f3ec54969d6d0051810",
     ),
     (
         "win32",
         "Windows",
         "x86_64",
         "zip",
-        "da1544da51be91d4fd95ab5fc7b206b9756851299382e19d87463802ea7e82e8",
+        "454a9a1ad20b2d34ea4b20eb92c1e7d890f69cd566931d60e2362f245ae8902a",
     ),
     (
         "win32",
         "Windows",
         "arm64",
         "zip",
-        "4621943703833481993c3ccc218d6d4568aad79fea5d667ada9e466fcdf36d5b",
+        "6c942a5158dd915f9ab42cebc850f94abd37ebbf4136c274470ec8e1508d00c1",
     ),
 )
 
