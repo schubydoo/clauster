@@ -591,18 +591,23 @@ example the `url` of a server in `mcpServers` or of an `http` hook in `hooks`.
 It masks the value as the [Hooks tab](#the-hooks-tab) masks a URL. Each query
 value, the fragment, and each token-like path segment show as `********`. The
 scheme, the host, the port, the plain path, and the plain query keys stay
-visible, for example `https://mcp.example.com/v1?key=********`. If the value
-covers more than one line, holds an escape, or has an anchor or a tag in front
-of it, each line of the value shows as one `********`. A `url` line in the
-Markdown body gets only the line masks above.
+visible, for example `https://mcp.example.com/v1?key=********`. A URL with a
+user name or password, or with a `${...}` reference, shows as one `********`. If
+the value covers more than one line, holds an escape, or has an anchor or a tag
+in front of it, each line of the value shows as one `********`. A `url` line in
+the Markdown body gets only the line masks above.
 
 Some URL text is not masked. A path segment or query key shorter than 20
 characters is not masked if it has fewer than 8 letters and digits, or only
-letters, or only digits. Do not put a secret in them. If the frontmatter is not
-valid YAML as written, or holds `---` before its closing fence, the editor
-cannot find the `url` values. It then masks each frontmatter line that holds
-`:/` as one `********`, but a value that continues on the next line can still
-show part of a token there.
+letters, or only digits. Do not put a secret in them.
+
+If Clauster cannot read the frontmatter the way Claude Code reads it, every
+frontmatter line shows as `********`. This happens when the frontmatter is not
+valid YAML to Clauster, when it holds `---` before its closing fence, when it
+holds a line break that only YAML 1.1 knows, when only Claude Code reads its
+opening fence, or when it is valid only after Claude Code re-quotes it and it
+holds the text `url`, `http:`, `https:`, `ws:`, `wss:` or a backslash. A save of such a file is refused, except for the last case. To
+change it, type the whole frontmatter again or edit the file on the host.
 
 A masked line keeps its stored text on save only when every other character of
 the line is unchanged. For a frontmatter `url`, the scheme, the host, the port,

@@ -1754,7 +1754,13 @@ def _url_nodes(root: yaml.Node) -> list[yaml.ScalarNode]:
     return list(found.values())
 
 
-def _mask_header_urls(header: str) -> str:
+#: Text that may spell a destination URL in a header whose structure this editor cannot
+#: trust to be the CLI's: a ``url`` key, an http(s) or ws(s) scheme (WHATWG needs no ``//``
+#: after it), or a backslash, which can escape either one in a double-quoted scalar.
+_MAY_HOLD_URL_RE = re.compile(r"url|https?:|wss?:|\\", re.IGNORECASE)
+
+
+def _mask_header_urls(header: str, *, readable: bool) -> str:
     """Return a frontmatter ``header`` with each ``url`` value shown as :func:`mask_url` shows it.
 
     Found by its node in the composed YAML, so a ``url`` in a flow mapping, behind an
@@ -1762,30 +1768,41 @@ def _mask_header_urls(header: str) -> str:
     value's source text is one line and reads as the value (a plain scalar, or a quoted one
     with no escape), only that text is replaced by its URL view: the scheme, host, port,
     plain path and plain query keys stay visible (TASK-525). Any other spelling (a
-    multi-line or block value, an escape, an anchor or tag before the value, or a header
-    that loads only through Claude Code's re-quoting retry) has every line of the value
-    masked whole. A header that does not compose has no value to find, one that composes
-    only through the retry is not YAML as written, and in one that holds ``---`` Claude Code
-    ends the header earlier and can read other values. In these, as a best effort, every
-    line that holds ``:/`` is masked whole as well. The line count never changes.
+    multi-line or block value, an escape, an anchor or tag before the value) has every line
+    of the value masked whole.
+
+    The node positions are trusted only where PyYAML reads the structure Claude Code reads.
+    Every non-blank line is masked whole where it may not: a header that does not compose
+    (Claude Code's YAML 1.2 can still read it, for example a tab before a comment), one
+    that holds ``---`` (Claude Code ends the header there), one with a YAML 1.1-only line
+    break, a fence only Claude Code reads (``readable`` false), and a header that composes
+    only through Claude Code's re-quoting retry and may hold a URL (the CLI may not need the
+    retry and read it as written). A save refuses all but the last of these, so masking
+    them whole costs a retype at most. The line count never changes.
     """
     lines = header.splitlines(keepends=True)
     try:
         source = cw.cli_frontmatter_text(header)
         root = yaml.compose(source, Loader=yaml.SafeLoader)
+        composed = True
     except (yaml.YAMLError, RecursionError):
-        source, root = header, None
-    whole: set[int] = set()
-    if root is None or source != header or "---" in header:
-        # No node to find, a header that is not YAML as written (the CLI reads a re-quoted
-        # copy, where a URL can sit inside a string), or one that Claude Code ends at an
-        # earlier `---`: mask by shape as well.
-        whole.update(index for index, line in enumerate(lines) if ":/" in line)
+        source, root, composed = header, None, False
+    if (
+        not readable
+        or not composed
+        or "---" in header
+        or any(char in header for char in "\x85\u2028\u2029")
+        or (source != header and _MAY_HOLD_URL_RE.search(header) is not None)
+    ):
+        return "".join(_masked_whole(line) for line in lines)
+    if root is None:
+        return header  # an empty or comment-only header holds no value
     starts = list(itertools.accumulate(map(len, source.splitlines(keepends=True)), initial=0))
     if len(starts) != len(lines) + 1:  # pragma: no cover - the retry keeps every line
         return "".join(_masked_whole(line) for line in lines)
     spans: dict[int, list[tuple[int, int, str]]] = {}
-    for node in [] if root is None else _url_nodes(root):
+    whole: set[int] = set()
+    for node in _url_nodes(root):
         shown = mask_url(node.value)
         if shown == node.value:
             continue
@@ -1807,12 +1824,14 @@ def _mask_header_urls(header: str) -> str:
     out: list[str] = []
     for index, line in enumerate(lines):
         if index in whole:
-            line = _masked_whole(line)
-        else:
-            # Right to left, so an earlier offset on the line stays valid.
-            for start, stop, shown in sorted(spans.get(index, ()), reverse=True):
-                line = line[:start] + shown + line[stop:]
-        out.append(line)
+            out.append(_masked_whole(line))
+            continue
+        # One pass, left to right: the pieces between the spans, then each span's view.
+        prev = 0
+        for start, stop, shown in sorted(spans.get(index, ())):
+            out += (line[prev:start], shown)
+            prev = stop
+        out.append(line[prev:])
     return "".join(out)
 
 
@@ -1829,14 +1848,15 @@ def _member_view(relative: str, text: str) -> str:
         bom = "\ufeff" if text.startswith("\ufeff") else ""
         core = text[len(bom) :]
         match = _FRONTMATTER_RE.match(core)
+        readable = match is not None
         if match is not None:
             header, start = cw.frontmatter_header(core, match), match.start(1)
         else:
             # A fence that Claude Code reads and this surface does not (a save refuses it):
-            # mask the header the CLI reads.
+            # the header the CLI reads is masked whole.
             cli = _CLI_FENCE_RE.match(core)
             header, start = (cli.group(1), cli.start(1)) if cli else ("", 0)
-        masked = _mask_header_urls(header)
+        masked = _mask_header_urls(header, readable=readable)
         text = bom + core[:start] + masked + core[start + len(header) :]
     return cw.redact_secret_lines(text)
 

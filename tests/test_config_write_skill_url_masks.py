@@ -167,29 +167,68 @@ def test_every_spelling_of_a_frontmatter_url_is_masked(
     assert len(content.splitlines()) == len(stored.splitlines())
 
 
+#: A tab before a comment: a syntax error to PyYAML (YAML 1.1) only, so Claude Code's YAML
+#: 1.2 reads the header as written and this editor cannot compose it at all.
+_TAB_COMMENT = "---\nname: x\t# note\nmcpServers:\n  srv:\n    type: http\n"
+
+
 @pytest.mark.parametrize(
     "stored",
     [
-        # The header does not compose: every line that holds a URL is masked whole.
+        # Composes neither as written nor through the retry, yet YAML 1.2 reads each url:
+        # WHATWG takes a backslash as a slash and needs no `//` after a web scheme.
+        _TAB_COMMENT + "    url: https:\\\\h.example.com\\p?k=qv-c1\n---\nRun it.\n",
+        _TAB_COMMENT + "    url: https:h.example.com/p?k=qv-c2\n---\nRun it.\n",
+        _TAB_COMMENT + "    url:\n      https://h.example.com/p?k=\n      qv-c3\n---\n",
+        # A duplicate anchor, which PyYAML refuses, around a block url split over lines.
+        "---\na: &n 1\nb: &n 2\nmcpServers:\n  srv:\n    url: |-\n      https:\n"
+        "      //h.example.com/p?k=qv-c4\n---\n",
         "---\nm: [x\nurl: https://h.example.com/?k=qv-bad\n---\nRun it.\n",
-        # Composes only through Claude Code's re-quoting retry, which reads it as a string.
+        # Composes only through Claude Code's re-quoting retry, which reads it as a string;
+        # YAML 1.2 may need no retry and read the mapping as written.
         "---\nmcpServers: [{name: a, url: https://h.example.com/?k=qv-retry}]\n---\n",
+        "---\nmcpServers: {srv: {type: http, url: https:h.example.com/p?k=qv-flow}}\n---\n",
         # Tabs: YAML refuses them, Claude Code's retry turns them into spaces and reads it.
         "---\nmcpServers:\n\t- a:\n\t\t\turl: https://h.example.com/p?k=qv-tab\n---\n",
-        # Claude Code ends the header at the first `---`, even in the middle of a line.
-        "---\ndescription: a --- b\nmcpServers:\n  - a:\n"
-        "      url: >-\n        https://h.example.com/?k=qv-dash\n---\n",
+        # Claude Code ends the header at the first `---`, even in a quoted string. PyYAML
+        # reads one description here and no url at all.
+        '---\ndescription: "see #1\nmcpServers:\n  srv:\n    type: http\n'
+        '    url: https:h.example.com/p?k=qv-dash\n ---"\n---\n',
+        # A line break to YAML 1.1 only.
+        "---\ndescription: a\u2028b\nmcpServers:\n  - a:\n"
+        "      url: https://h.example.com/?k=qv-u2028\n---\n",
         # A no-break space after the fence: Claude Code reads a header, FRONTMATTER_RE does not.
         "---\u00a0\nmcpServers:\n  - a:\n      url: https://h.example.com/?k=qv-nbsp\n---\n",
     ],
 )
-def test_a_header_this_editor_cannot_read_as_the_cli_does_is_masked_by_shape(
+def test_a_header_this_editor_cannot_read_as_the_cli_does_is_masked_whole(
     tmp_path: Path, stored: str
 ) -> None:
     _place(tmp_path, stored)
     content = sk.read_skill_file(tmp_path, "s")[0]
     assert "qv-" not in content
     assert len(content.splitlines()) == len(stored.splitlines())
+    header = content.splitlines()[1 : content.splitlines().index("---", 1)]
+    assert header and all(line in ("", MASK) for line in header)
+
+
+def test_a_retry_header_with_a_url_masked_whole_still_saves_unchanged(tmp_path: Path) -> None:
+    stored = (
+        "---\ndescription: d\nargument-hint: [a] [b]\nmcpServers:\n  - a:\n"
+        "      url: https://h.example.com/?k=qv-r\n---\nRun it.\n"
+    )
+    path = _place(tmp_path, stored)
+    content, file_hash = _view(tmp_path)
+    assert "qv-" not in content and "argument-hint" not in content
+    _save(tmp_path, content.replace("Run it.", "Run it now."), file_hash)
+    assert path.read_bytes() == stored.replace("Run it.", "Run it now.").encode("utf-8")
+
+
+def test_a_retry_header_with_no_url_is_shown_as_stored(tmp_path: Path) -> None:
+    # The common retry case: an unquoted `[...]` hint. Nothing in it can be a URL.
+    stored = "---\ndescription: d\nargument-hint: [filename] [format]\n---\nRun it.\n"
+    _place(tmp_path, stored)
+    assert sk.read_skill_file(tmp_path, "s")[0] == stored
 
 
 def test_the_markdown_body_is_not_given_the_url_view(tmp_path: Path) -> None:
