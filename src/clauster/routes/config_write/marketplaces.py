@@ -152,6 +152,16 @@ async def api_config_write_marketplaces_action(
 
     cwd = _base.plugin_cli_cwd(config, runner, scope, project or "")
     binary = config.claude.binary
+    # TASK-517: an update reports whether each marketplace's plugin list changed, from a
+    # read of its checkout before and after. A failed read BEFORE fails closed, nothing run.
+    before: dict[str, list[str] | None] = {}
+    if op == "update":
+        try:
+            before = await asyncio.to_thread(
+                config_write_plugins.marketplace_plugin_names, binary, cwd, name
+            )
+        except config_write.ConfigWriteError as exc:
+            raise _base.map_config_write_error(exc) from exc
 
     def _work() -> None:
         """Run the requested marketplace verb through the CLI."""
@@ -192,6 +202,16 @@ async def api_config_write_marketplaces_action(
             ignore_backup_sibling=True,
         )
     result: dict[str, Any] = {"scope": scope, "op": op, "ok": True}
+    if op == "update":
+        # The refresh committed: a failed read AFTER it is reported, never a 400.
+        after: dict[str, list[str] | None] | None
+        try:
+            after = await asyncio.to_thread(
+                config_write_plugins.marketplace_plugin_names, binary, cwd, name
+            )
+        except config_write.ConfigWriteError:
+            after = None
+        result["message"] = config_write_plugins.describe_marketplace_update(name, before, after)
     if name is not None:
         result["name"] = name
     if source is not None:

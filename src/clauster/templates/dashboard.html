@@ -2035,11 +2035,11 @@
             <div class="alert alert-danger py-2" data-test="cm-error" aria-hidden="true"
                  x-show="configMgmt.error" x-cloak x-text="configMgmt.error"></div>
             <div class="alert alert-success py-2" data-test="cm-saved" aria-hidden="true"
-                 x-show="configMgmt.saved" x-cloak>Saved.</div>
+                 x-show="configMgmt.saved" x-cloak x-text="configMgmtSavedText()">Saved.</div>
             <div class="visually-hidden" role="alert" data-test="cm-error-live"
                  x-text="configMgmt.error"></div>
             <div class="visually-hidden" role="status" data-test="cm-saved-live"
-                 x-text="configMgmt.saved ? 'Saved.' : ''"></div>
+                 x-text="configMgmt.saved ? configMgmtSavedText() : ''"></div>
 
             <!-- Scope toggle: User (gated on allow_user_scope) / Project / Local -->
             <div class="mb-2">
@@ -3478,31 +3478,57 @@
               <!-- Installed plugins -->
               <div class="form-label small mb-1">Installed plugins</div>
               <div class="text-secondary small" x-show="configMgmt.plugins.list.length === 0" x-cloak>
-                No plugins installed at this scope.
+                No plugins are installed.
               </div>
               <table class="table table-sm mb-2" data-test="cm-plugins-table"
                      x-show="configMgmt.plugins.list.length" x-cloak>
-                <caption class="visually-hidden">Installed plugins: id, state, and actions</caption>
+                <caption class="visually-hidden">Installed plugins: id, install scope, state, and actions</caption>
                 <tbody>
-                  <template x-for="p in configMgmt.plugins.list" :key="p.id">
-                    <tr>
+                  {# The CLI lists installs at every scope, other projects' too (TASK-523).
+                     Update and Uninstall work only at the install's own scope and project
+                     (p.atScope). Enable and Disable of a User-scope plugin also work at
+                     Project and Local scope: the CLI writes a per-project override there.
+                     Any other row is read-only, with a link to the scope that can act. #}
+                  <template x-for="p in configMgmt.plugins.list" :key="p.id + '|' + (p.scope || '') + '|' + (p.projectPath || '')">
+                    <tr :data-test="'cm-plugin-row-' + p.id + '-' + (p.scope || 'unknown')">
                       <td>
                         <span class="fw-medium font-monospace" x-text="p.id"></span>
+                        <span class="visually-hidden">, installed at</span>
+                        <span class="badge bg-azure-lt ms-1" :data-test="'cm-plugin-scope-' + p.id"
+                              :title="configMgmtPluginScopeTitle(p)" x-text="configMgmtPluginScopeLabel(p)"></span>
+                        <span class="visually-hidden">scope,</span>
                         <span class="badge ms-1" :class="p.enabled ? 'bg-success-lt' : 'bg-secondary-lt'"
                               x-text="p.enabled ? 'enabled' : 'disabled'"></span>
+                        <div class="text-secondary small" x-show="!p.atScope" x-cloak
+                             :data-test="'cm-plugin-readonly-' + p.id">
+                          <span x-text="configMgmtPluginElsewhereNote(p)"></span>
+                          <button type="button" class="btn btn-link btn-sm p-0 align-baseline"
+                                  x-show="configMgmtPluginScopeLink(p)" x-cloak
+                                  :data-test="'cm-plugin-switch-scope-' + p.id"
+                                  :aria-label="configMgmtPluginScopeLink(p) + ' for ' + p.id"
+                                  @click="configMgmtOpenPluginScope(p)" x-text="configMgmtPluginScopeLink(p)"></button>
+                        </div>
                       </td>
                       <td class="text-end">
                         <span class="d-inline-flex gap-1 flex-wrap justify-content-end">
-                          <button type="button" class="btn btn-sm btn-ghost-secondary" x-show="!p.enabled" x-cloak
-                                  :data-test="'cm-plugin-enable-' + p.id"
-                                  :disabled="!configMgmtCanPluginAct()" @click="configMgmtPluginAction(p.id, 'enable')">Enable</button>
-                          <button type="button" class="btn btn-sm btn-ghost-secondary" x-show="p.enabled" x-cloak
-                                  :data-test="'cm-plugin-disable-' + p.id"
-                                  :disabled="!configMgmtCanPluginAct()" @click="configMgmtPluginAction(p.id, 'disable')">Disable</button>
-                          <button type="button" class="btn btn-sm btn-ghost-secondary"
-                                  :disabled="!configMgmtCanPluginAct()" @click="configMgmtPluginAction(p.id, 'update')">Update</button>
-                          <button type="button" class="btn btn-sm btn-ghost-danger"
-                                  :disabled="!configMgmtCanPluginAct()" @click="configMgmtPluginAction(p.id, 'uninstall')">Uninstall</button>
+                          <template x-if="configMgmtPluginCanToggle(p)">
+                            <span class="d-inline-flex gap-1">
+                              <button type="button" class="btn btn-sm btn-ghost-secondary" x-show="!p.enabled" x-cloak
+                                      :data-test="'cm-plugin-enable-' + p.id"
+                                      :disabled="!configMgmtCanPluginAct()" @click="configMgmtPluginAction(p.id, 'enable')">Enable</button>
+                              <button type="button" class="btn btn-sm btn-ghost-secondary" x-show="p.enabled" x-cloak
+                                      :data-test="'cm-plugin-disable-' + p.id"
+                                      :disabled="!configMgmtCanPluginAct()" @click="configMgmtPluginAction(p.id, 'disable')">Disable</button>
+                            </span>
+                          </template>
+                          <template x-if="p.atScope">
+                            <span class="d-inline-flex gap-1">
+                              <button type="button" class="btn btn-sm btn-ghost-secondary" :data-test="'cm-plugin-update-' + p.id"
+                                      :disabled="!configMgmtCanPluginAct()" @click="configMgmtPluginAction(p.id, 'update')">Update</button>
+                              <button type="button" class="btn btn-sm btn-ghost-danger" :data-test="'cm-plugin-uninstall-' + p.id"
+                                      :disabled="!configMgmtCanPluginAct()" @click="configMgmtPluginAction(p.id, 'uninstall')">Uninstall</button>
+                            </span>
+                          </template>
                         </span>
                       </td>
                     </tr>

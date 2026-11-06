@@ -633,10 +633,14 @@ def test_write_results_are_announced_once_by_persistent_live_regions(write_confi
         '<div class="visually-hidden" role="alert" data-test="cm-error-live"\n'
         '                 x-text="configMgmt.error"></div>'
     ) in html
+    # The banner and its region read the same text: "Saved.", or a plugin update's summary
+    # (TASK-517), so a screen reader hears what the operator sees.
     assert (
         '<div class="visually-hidden" role="status" data-test="cm-saved-live"\n'
-        "                 x-text=\"configMgmt.saved ? 'Saved.' : ''\"></div>"
+        "                 x-text=\"configMgmt.saved ? configMgmtSavedText() : ''\"></div>"
     ) in html
+    saved_tag = html[html.index('data-test="cm-saved"') :].split(">")[0]
+    assert 'x-text="configMgmtSavedText()"' in saved_tag
     for banner in ("cm-error", "cm-saved"):
         tag = html[html.index(f'data-test="{banner}"') :].split(">")[0]
         assert 'aria-hidden="true"' in tag, banner
