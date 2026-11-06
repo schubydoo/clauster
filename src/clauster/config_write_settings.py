@@ -891,6 +891,101 @@ def _reject_orphan_sentinels(incoming: dict[str, Any], stored: dict[str, Any]) -
             _reject_masks_sent_to_a_new_url(incoming[key], stored.get(key), key)
 
 
+def _partly_masked(value: Any) -> bool:
+    """Whether ``value`` is a string that holds the sentinel but is not the sentinel."""
+    return (
+        isinstance(value, str)
+        and value != cw.REDACTION_SENTINEL
+        and cw.REDACTION_SENTINEL in value
+    )
+
+
+def _url_refusal(where: str) -> cw.InvalidCandidateError:
+    """Return the 422 for a partly masked url that cannot be bound to a stored url."""
+    return cw.InvalidCandidateError(
+        f"{where} keeps a masked part ({cw.REDACTION_SENTINEL}), but another part of the url "
+        "changed, or no stored url matches it at this place; the stored value is not sent "
+        "to a new url. Type the full url"
+    )
+
+
+def _restore_masked_urls(
+    incoming: Any, stored: Any, shown: Any, path: str, *, in_list: bool = False
+) -> tuple[Any, bool]:
+    """Put each partly masked marketplace ``url`` back to its stored url, or refuse (→ 422).
+
+    The read view masks a token in a url's query or path in place (``?token=********``,
+    :func:`clauster.config_write_hooks.mask_url`). Such a url keeps the stored url at the
+    same path only when it is EXACTLY the read view (``shown``) of that stored url: every
+    unmasked character unchanged, compared as text and never parsed (TASK-474). Anything
+    else that holds the mask is refused, because it cannot be bound to a stored value and
+    would otherwise be written as the literal sentinel. A url that IS the sentinel is left
+    to :func:`~clauster.config_write.merge_redacted` and the checks after this, as before.
+
+    A list is matched by position, so a list element that holds such a url must come back
+    exactly as it was read, in a list of the stored length (the rule
+    :func:`_orphan_sentinel_path` applies to a whole-value mask). Only the outermost list
+    on the path is compared, so the walk stays linear. Returns ``(value, restored)``.
+    """
+    if isinstance(incoming, dict):
+        held = stored if isinstance(stored, dict) else {}
+        seen = shown if isinstance(shown, dict) else {}
+        out: dict[Any, Any] = {}
+        restored = False
+        for k, v in incoming.items():
+            where = f"{path}.{k}"
+            if k == "url" and _partly_masked(v):
+                if not isinstance(held.get(k), str) or seen.get(k) != v:
+                    raise _url_refusal(where)
+                out[k], restored = held[k], True
+            else:
+                out[k], sub = _restore_masked_urls(
+                    v, held.get(k), seen.get(k), where, in_list=in_list
+                )
+                restored = restored or sub
+        return out, restored
+    if isinstance(incoming, list):
+        held_list = stored if isinstance(stored, list) else []
+        seen_list = shown if isinstance(shown, list) else []
+        out_list: list[Any] = []
+        restored = False
+        for i, v in enumerate(incoming):
+            new, sub = _restore_masked_urls(
+                v,
+                held_list[i] if i < len(held_list) else None,
+                seen_list[i] if i < len(seen_list) else None,
+                f"{path}.{i}",
+                in_list=True,
+            )
+            if (
+                sub
+                and not in_list
+                and (len(incoming) != len(held_list) or i >= len(seen_list) or v != seen_list[i])
+            ):
+                raise _url_refusal(f"{path}.{i}")
+            out_list.append(new)
+            restored = restored or sub
+        return out_list, restored
+    return incoming, False
+
+
+def _restore_marketplace_urls(incoming: dict[str, Any], stored: dict[str, Any]) -> dict[str, Any]:
+    """Return ``incoming`` with the partly masked urls of both marketplace keys restored.
+
+    See :func:`_restore_masked_urls`. Only these two keys get an in-place url mask on read
+    (:func:`_redact_misc`), so only they can carry one back. ``incoming`` is not mutated.
+    """
+    keys = (cwp.EXTRA_MARKETPLACES_KEY, cwp.EXTRA_MARKETPLACES_ALIAS_KEY)
+    if not any(key in incoming for key in keys):
+        return incoming
+    shown = _redact_misc(stored)
+    out = dict(incoming)
+    for key in keys:
+        if key in incoming:
+            out[key] = _restore_masked_urls(incoming[key], stored.get(key), shown.get(key), key)[0]
+    return out
+
+
 def _urls(value: Any, path: tuple[Any, ...] = ()) -> dict[tuple[Any, ...], Any]:
     """Return every ``url`` value under ``value``, at any depth, keyed by its path."""
     found: dict[tuple[Any, ...], Any] = {}
@@ -982,8 +1077,9 @@ def _locked_write_misc(path: Path, incoming: dict[str, Any], expected_hash: str 
             raise cw.StaleConfigWriteError("config file changed on disk since it was loaded")
         current = cw.load_settings_json_obj(current_bytes)
         stored_misc = _misc_view(current)
-        _reject_orphan_sentinels(incoming, stored_misc)
-        merged_misc = cw.merge_redacted(incoming, stored_misc)
+        restored = _restore_marketplace_urls(incoming, stored_misc)
+        _reject_orphan_sentinels(restored, stored_misc)
+        merged_misc = cw.merge_redacted(restored, stored_misc)
         # Replace the whole non-owned partition; every owned key keeps its value
         # (the file is re-rendered, so byte layout and key order are not preserved).
         for key in list(current):

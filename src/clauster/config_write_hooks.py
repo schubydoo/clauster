@@ -547,6 +547,54 @@ def _mask_url(url: str) -> str:
     return _url_view(url)[0]
 
 
+def mask_url(url: str) -> str:
+    """Return the read view of a URL stored outside a hook: an MCP server or marketplace url.
+
+    The same masker as an ``http`` hook's URL (:func:`_url_view`), so every query value,
+    the fragment and each token-like path segment or query key show as the sentinel
+    (TASK-474). Three differences, each one only adds masking to what these surfaces
+    showed before:
+
+    * A value that :func:`~clauster.config_write.redact_secrets` masks whole (a
+      ``scheme://user@`` credential URL, a ``${...}`` interpolation) stays masked whole.
+    * A ``ws://``/``wss://`` URL is masked as the ``http://``/``https://`` URL with the same
+      text after the scheme: WHATWG parses both pairs the same way. Its own scheme shows.
+    * Any other value (a ``git@host:owner/repo.git`` source, a ``git://`` URL) is shown as
+      stored unless it holds ``?`` or ``#``, and then it is masked whole. A token in such a
+      value's path is not detected. Two shapes are masked whole as well, because the WHATWG
+      parser Claude Code runs on still reads them as an http(s) or ws(s) URL with any
+      credential in them: a value that starts (after control characters or spaces) with one
+      of those schemes and a ``:`` but not ``://`` (``https:/user:pw@host``), and a value
+      with a tab or line break, which that parser strips anywhere.
+
+    The write side binds a resent view back by exact text against this same function's
+    output for the stored value, so the read and the restore can never disagree.
+    """
+    if cw.redact_secrets(url) == cw.REDACTION_SENTINEL:
+        return cw.REDACTION_SENTINEL
+    scheme, sep, rest = url.partition("://")
+    low = scheme.lower()
+    if sep and low in ("http", "https"):
+        return _mask_url(url)
+    if sep and low in ("ws", "wss"):
+        as_http = f"http{low[2:]}"
+        view = _mask_url(f"{as_http}://{rest}")
+        return view if view == cw.REDACTION_SENTINEL else scheme + view[len(as_http) :]
+    if (
+        "?" in url
+        or "#" in url
+        or any(ch in url for ch in "\t\r\n")
+        or _LENIENT_WEB_SCHEME_RE.match(url)
+    ):
+        return cw.REDACTION_SENTINEL
+    return url
+
+
+#: A value a WHATWG parser reads as an http(s) or ws(s) URL although it is not spelled
+#: ``scheme://`` exactly: leading C0 controls or spaces, then the scheme and a colon.
+_LENIENT_WEB_SCHEME_RE = re.compile(r"[\x00-\x20]*(?:https?|wss?):", re.IGNORECASE)
+
+
 #: The documented fields that carry no secret and show plain on read when their value is
 #: valid: the hook's behavior (``command``, ``args``, ``prompt``, ...), which the operator
 #: reviews before a save. ``url``, ``headers`` and ``input`` are masked (:func:`_redact_entry`).

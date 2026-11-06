@@ -174,7 +174,9 @@ Common mechanics across the modal:
   surfaces, and the `autoMode` box on the Permissions tab, mask secret-shaped
   values on read. The MCP surface also masks every `env` and `headers` value,
   the `headersHelper` command, and the strings in `oauth`, whatever their key
-  names. A masked value left untouched keeps the stored secret on write. If
+  names. It also masks the query values, the fragment and the token-like path
+  segments of a server `url`. A masked value left untouched keeps the stored
+  secret on write. If
   Clauster cannot match a mask to its stored value, it refuses the save and
   writes nothing. The CLAUDE.md surface and the `permissions` rules return the
   raw content, because they round-trip the exact text on write. For what the
@@ -223,8 +225,21 @@ a value but no name, or shares its name with another row. One entry cannot
 hold these rows, so the switch would lose values. A note names the rows. The
 same rows also keep **Save** off.
 
-In both modes, a masked value shows as `********`. If you leave the mask in
-place, the save keeps the stored value. If you change the `type` or a URL of a
+In both modes, a masked value shows as `********`. A server `url` is masked as
+the [Hooks tab](#the-hooks-tab) masks an `http` hook URL: every query value, the
+fragment, and each path segment or query key that looks like a token show as
+`********`. The scheme, the host, the port, the plain path, and the plain query
+keys stay visible, for example `https://mcp.example.com/v1?key=********`. A
+`ws` or `wss` URL is masked in the same way. A URL with a user name or password,
+or a `${...}` reference, shows as one `********`. A URL path segment or query
+key shorter than 20 characters is not masked if it has fewer than 8 letters and
+digits, or only letters, or only digits. Do not put a secret there.
+
+If you leave the mask in place, the save keeps the stored value. A `url` that
+holds a mask keeps the stored URL only when every visible character of it is
+unchanged. Clauster compares the text exactly. If you change any part of such a
+URL, for example the host, the path, or a query key, the save is refused
+(`422`). Type the full URL again. If you change the `type` or a URL of a
 remote server, or the `command` or `args` of a stdio server, the save cannot
 keep a masked value (see the list below). The save also cannot keep a mask that
 has no stored value behind it, for example in a row that you renamed. In both
@@ -508,9 +523,10 @@ The Subagents editor shows each secret value in the frontmatter as `********`.
 Each field is masked as the tab that owns its shape masks it:
 
 - In an inline `mcpServers` definition, every `env` and `headers` value, a
-  `headersHelper` command, and a URL with a user name or password are masked,
-  as on the MCP tab. A server name is not a secret, so a server called
-  `oauth-gw` keeps its `type` and `url` visible.
+  `headersHelper` command, a URL with a user name or password, and the query
+  values and token-like path segments of a `url` are masked, as on the MCP
+  tab. A server name is not a secret, so a server called `oauth-gw` keeps its
+  `type` and the plain parts of its `url` visible.
 - In `hooks`, the parts of a hook URL and the `headers` values that the
   [Hooks tab](#the-hooks-tab) masks are masked.
 - Every non-empty `env` value is masked.
@@ -772,11 +788,20 @@ The commands, flags and settings below were checked against Claude Code 2.1.318.
   `https://user:token@host/repo.git`, shows as `********`.
 - **Clauster masks credentials in what it reads.** It masks every `headers`,
   `env` and MCP server `args` value, every `headersHelper` command, and every URL
-  that carries a user name or password. This applies to the marketplace list, to
-  the marketplaces that a scope declares (`extraKnownMarketplaces`), and to the
+  that carries a user name or password. Every other `url` is masked as the
+  [Hooks tab](#the-hooks-tab) masks an `http` hook URL: each query value (for
+  example `?token=` or `?sig=`), the fragment, and each path segment that looks
+  like a token show as `********`. The host and the plain query keys stay
+  visible. A path segment or query key under 20 characters is not masked if it
+  has fewer than 8 letters and digits, or only letters, or only digits. Do not
+  put a credential there. This applies to the marketplace list, to the
+  marketplaces that a scope declares (`extraKnownMarketplaces`), and to the
   MCP server definitions in the plugin list. A masked value is never written
-  back. A token in a URL query string, such as `?sig=...`, is not detected. Do
-  not put a credential there.
+  back. A value that is not an `http`, `https`, `ws` or `wss` URL, such as
+  `git@host:owner/repo.git`, shows as stored, or as one `********` if it holds
+  `?` or `#`. A token in the path of such a value is not detected.
+  Marketplace add refuses (`422`) a source that holds `********`, for example a
+  masked URL copied from the list. Type the full URL.
 - **The Settings tab masks `extraKnownMarketplaces` in the same way.** If you
   save the Raw JSON with a masked value unchanged, Clauster keeps the stored
   value. An `args` list shows as one `********`, so you keep it whole or type
@@ -791,7 +816,12 @@ The commands, flags and settings below were checked against Claude Code 2.1.318.
   example a `headers` value or a `headersHelper`. Any change to the text counts,
   including the letter case of the host or an added `:443`. This stops the
   stored credential from going to a new host. Type the credential again, then
-  save.
+  save. A `url` that shows a masked query value or path segment keeps the
+  stored URL only when every visible character of it is unchanged. Any change to
+  it, or a rename of its entry, refuses the save (`422`). Inside a list, such as
+  a `settings` source's `plugins`, the element that holds the URL must also be
+  unchanged and keep its place, and the list must keep its length. Type the
+  full URL again.
 - **The `additionalMarketplaces` spelling is read too.** Claude Code 2.1.232 and
   later accept it as another name for `extraKnownMarketplaces`. When a file sets
   both, the canonical key wins, as it does in Claude Code.
