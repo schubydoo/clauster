@@ -49,7 +49,13 @@ from typing import Any, TypeGuard, cast, get_args
 from pydantic import ValidationError
 
 from . import procutil
-from .claustrum_client import ClaustrumClient, ClaustrumError, ProcessStream, _Subscriber
+from .claustrum_client import (
+    ClaustrumClient,
+    ClaustrumError,
+    DaemonUnreachable,
+    ProcessStream,
+    _Subscriber,
+)
 from .config import INHERIT_PERMISSION_MODE, PermissionMode
 from .hosted_events import GapRangeEvent, HostedEvent, StdinFrame
 from .models import (
@@ -1747,10 +1753,12 @@ class HostedManager:
             logger.warning(
                 "hosted: reattach of %s failed: %s", process_id, redact_for_disk(str(exc))
             )
-            if client.lost:
-                # The connection dropped during the pass, so the agent may well still run
-                # on the daemon. Probe for it, so a survivor is offered as an orphan with
-                # Kill and a Resume never starts a second agent beside it.
+            if client.lost or isinstance(exc, DaemonUnreachable):
+                # The connection dropped during the pass (a write can fail before the
+                # reader sees the EOF), or the request timed out on a slow daemon that
+                # still owns the agent: either way it may well still run. Probe for it,
+                # so a survivor is offered as an orphan with Kill and a Resume never
+                # starts a second agent beside it. The timeout is included on purpose.
                 await self._mark_unfound(
                     instance, lost_status=InstanceStatus.ERROR, lost_detail=detail
                 )

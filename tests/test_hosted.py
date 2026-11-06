@@ -4814,3 +4814,29 @@ async def test_reattach_failing_on_a_dropped_connection_probes_for_an_orphan(
     row = mgr.get_instance("old")
     assert row.is_orphan and row.status is InstanceStatus.CRASHED
     await client.close()
+
+
+async def test_reattach_write_failure_before_eof_probes_for_an_orphan(
+    fake_claustrum, tmp_path, monkeypatch
+):
+    # The write of process.reattach can fail before the reader sees the EOF, so the client
+    # is not yet marked lost. That is still a dropped connection: probe for a survivor.
+    async def _orphan(_instance):
+        return True
+
+    async def _write_fails(self, *_args, **_kwargs):
+        raise DaemonUnreachable("claustrum write failed for process.reattach")
+
+    monkeypatch.setattr(HostedManager, "_is_orphan", staticmethod(_orphan))
+    monkeypatch.setattr(HostedSession, "reattach", _write_fails)
+    store = HostedStateStore(tmp_path / "hosted_state.json")
+    store.save({"old": {"project": "proj", "label": "hosted:proj", "agent_pid": 4242}})
+    fake = await fake_claustrum()
+    client = ClaustrumClient(fake.socket_path, fake.token)
+    await client.connect()
+    assert not client.lost
+    mgr = HostedManager(store)
+    await mgr.reattach_all(client)
+    row = mgr.get_instance("old")
+    assert row.is_orphan and row.status is InstanceStatus.CRASHED
+    await client.close()
