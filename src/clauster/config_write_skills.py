@@ -1853,16 +1853,48 @@ def _mask_header_urls(header: str, *, readable: bool) -> str:
     return "".join(out)
 
 
-def _member_view(relative: str, text: str) -> str:
-    """Return the editor's read view of the skill member ``relative`` holding ``text``.
+def _spells_skill_md(relative: str) -> bool:
+    r"""Whether the member key ``relative`` spells ``SKILL.md``, in any case or path spelling.
+
+    The resolver reads ``./SKILL.md``, ``SKILL.md/``, ``.//SKILL.md`` and ``SKILL.md/.`` (and
+    ``.\SKILL.md`` on Windows) as ``SKILL.md``, because :class:`pathlib.Path` drops the
+    ``.`` parts and the separators, and a case variant reaches the same file on macOS and
+    Windows. Case is compared casefolded on every OS, so this can only call more keys
+    ``SKILL.md``, never fewer.
+    """
+    parts = Path(relative).parts
+    return len(parts) == 1 and parts[0].casefold() == SKILL_FILENAME.casefold()
+
+
+def _is_skill_md(skill_dir: Path, relative: str) -> bool:
+    """Whether the member ``relative`` of ``skill_dir`` reaches the skill's ``SKILL.md``.
+
+    Decided from what the path reaches, never from the request string alone: a spelling
+    the resolver reads as ``SKILL.md`` (:func:`_spells_skill_md` with exact case), or any
+    path whose file is the same object as ``SKILL.md`` (a case variant on a case-insensitive
+    file system, a symlink, a hard link). The read view and the restore both decide by
+    this, so ``SKILL.md`` gets its frontmatter masks under every name (TASK-525).
+    """
+    if Path(relative).parts == (SKILL_FILENAME,):
+        return True
+    try:
+        member = os.stat(skill_dir / relative)
+        skill_md = os.stat(skill_dir / SKILL_FILENAME)
+    except (OSError, ValueError):
+        return False  # one of them is not there, so they are not one file
+    return _same_object(member, skill_md)
+
+
+def _member_view(text: str, *, skill_md: bool) -> str:
+    """Return the editor's read view of one skill member holding ``text``.
 
     Every member is masked line by line (:func:`~clauster.config_write.redact_secret_lines`).
-    ``SKILL.md`` also has each ``url`` value in its frontmatter masked first
-    (:func:`_mask_header_urls`), as the MCP and Hooks tabs mask a URL. The write path binds
-    a resent mask through this same function (:func:`_keep_masked_lines`), so the read and
-    the restore never disagree.
+    ``SKILL.md`` (``skill_md``, decided by :func:`_is_skill_md`) also has each ``url`` value
+    in its frontmatter masked first (:func:`_mask_header_urls`), as the MCP and Hooks tabs
+    mask a URL. The write path binds a resent mask through this same function
+    (:func:`_keep_masked_lines`), so the read and the restore never disagree.
     """
-    if relative == SKILL_FILENAME:
+    if skill_md:
         bom = "\ufeff" if text.startswith("\ufeff") else ""
         core = text[len(bom) :]
         match = _FRONTMATTER_RE.match(core)
@@ -1943,7 +1975,9 @@ def _read_skill_file(
     except UnicodeDecodeError as exc:
         raise cw.InvalidCandidateError(f"{relative} is not valid UTF-8") from exc
     note = None
-    if convert and exists and relative == SKILL_FILENAME:
+    # From what the path reaches, not from its spelling: `./SKILL.md` is SKILL.md too.
+    skill_md = _is_skill_md(skills_root / name, relative)
+    if convert and exists and skill_md:
         conversion = _convert_ignored_fields(text)
         if conversion is not None:
             text, removed = conversion
@@ -1955,7 +1989,7 @@ def _read_skill_file(
             )
     # Redact AFTER converting: the conversion only removes lines, so the text it returns
     # holds nothing that was not in the file, and the redactor still sees all of it.
-    content = _member_view(relative, text)
+    content = _member_view(text, skill_md=skill_md)
     return content, cw.hash_bytes(raw), exists, note
 
 
@@ -2114,11 +2148,13 @@ def _keep_masked_lines(
             stored = skill_md
         else:
             stored = _read_stored_member(skills_root, name, relative)
+        # The same decision the read made, so a mask binds through the view that showed it.
+        is_md = _is_skill_md(skills_root / name, relative)
         restored, lines = cw.restore_masked_lines(
             content,
             stored,
             what=relative,
-            view=lambda text, relative=relative: _member_view(relative, text),
+            view=lambda text, is_md=is_md: _member_view(text, skill_md=is_md),
         )
         size = len(restored.encode("utf-8"))
         cap = MAX_SKILL_MD_BYTES if relative == SKILL_FILENAME else MAX_FILE_BYTES
@@ -2229,6 +2265,14 @@ def write_skill(
         raise cw.InvalidCandidateError("files must be a non-empty object")
     if SKILL_FILENAME not in files:
         raise cw.InvalidCandidateError(f"files must include {SKILL_FILENAME!r}")
+    for relative in files:
+        # Every check below picks the SKILL.md checks by the exact key; another spelling of
+        # it would get the script checks and the script view instead (TASK-525).
+        if relative != SKILL_FILENAME and _spells_skill_md(relative):
+            raise cw.InvalidCandidateError(
+                f"{relative!r} names {SKILL_FILENAME} under another spelling or case. "
+                f"Nothing was written. Send it once, as {SKILL_FILENAME!r}"
+            )
 
     extra_files = [k for k in files if k != SKILL_FILENAME]
     if extra_files and confirm_scripts != SCRIPT_CONFIRM_TOKEN:

@@ -12,6 +12,7 @@ named like a credential, so gitleaks and CodeQL do not flag the test data.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -400,3 +401,134 @@ def test_the_view_and_the_restore_are_linear_in_url_lines(
     _save(tmp_path, content, file_hash)
     assert len(calls) == 2 * n
     assert path.read_bytes() == stored.encode("utf-8")
+
+
+# --- other spellings of SKILL.md (Greptile on PR 1839) -----------------------------------
+#
+# The resolver reads `./SKILL.md` and friends as SKILL.md, and a case variant, a symlink or
+# a hard link reaches the same file. The view must follow the file, not the request string.
+
+_ROUTE_CFG = "config_write:\n  enabled: true\n"
+
+
+def _route_client(write_config, tmp_path: Path) -> TestClient:
+    cfg = write_config(f"claude:\n  binary: {FAKE_CLAUDE}\nstate_dir: {tmp_path}/.s\n{_ROUTE_CFG}")
+    return TestClient(create_app(load_config(cfg)))
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "./SKILL.md",
+        "SKILL.md/",
+        ".//SKILL.md",
+        "SKILL.md/.",
+        "././SKILL.md",
+        # Reaches SKILL.md where the file system ignores case (macOS, Windows), and nothing
+        # elsewhere. Either way the token must not show.
+        "skill.md",
+        "Skill.MD",
+        # A backslash separates path parts on Windows only.
+        ".\\SKILL.md",
+    ],
+)
+def test_the_route_masks_skill_md_under_every_spelling(
+    write_config, tmp_path, projects_root, relative: str
+) -> None:
+    _place(projects_root / "alpha" / ".claude", _MCP, name="greeter")
+    with _route_client(write_config, tmp_path) as c:
+        got = c.get(
+            "/api/config-write/skills/file",
+            params={"project": "alpha", "name": "greeter", "relative": relative},
+        )
+    assert "qv-mcp-one" not in got.text
+    if got.status_code == 200 and got.json()["exists"]:
+        assert _MCP_VIEW_LINE in got.json()["content"]
+
+
+@pytest.mark.parametrize("relative", ["./SKILL.md", "SKILL.md/", ".//SKILL.md", "SKILL.md/."])
+def test_a_spelling_the_resolver_reads_as_skill_md_gets_its_view(
+    write_config, tmp_path, projects_root, relative: str
+) -> None:
+    _place(projects_root / "alpha" / ".claude", _MCP, name="greeter")
+    with _route_client(write_config, tmp_path) as c:
+        got = c.get(
+            "/api/config-write/skills/file",
+            params={"project": "alpha", "name": "greeter", "relative": relative},
+        )
+    assert got.status_code == 200
+    assert got.json()["exists"] is True
+    assert _MCP_VIEW_LINE in got.json()["content"]
+
+
+def test_the_route_refuses_a_dotdot_spelling(write_config, tmp_path, projects_root) -> None:
+    _place(projects_root / "alpha" / ".claude", _MCP, name="greeter")
+    with _route_client(write_config, tmp_path) as c:
+        got = c.get(
+            "/api/config-write/skills/file",
+            params={"project": "alpha", "name": "greeter", "relative": "sub/../SKILL.md"},
+        )
+    assert got.status_code == 400  # a path escape
+    assert "qv-mcp-one" not in got.text
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink"])
+def test_a_link_to_skill_md_gets_its_view(tmp_path: Path, kind: str) -> None:
+    path = _place(tmp_path, _MCP)
+    link = path.parent / "other.md"
+    try:
+        if kind == "symlink":
+            link.symlink_to(sk.SKILL_FILENAME)
+        else:
+            os.link(path, link)
+    except (OSError, NotImplementedError) as exc:  # pragma: no cover - Windows without rights
+        pytest.skip(f"cannot make a {kind} here: {exc}")
+    content = sk.read_skill_file(tmp_path, "s", "other.md")[0]
+    assert "qv-mcp-one" not in content
+    assert _MCP_VIEW_LINE in content
+
+
+@pytest.mark.parametrize(
+    "relative", ["./SKILL.md", "SKILL.md/", ".//SKILL.md", "SKILL.md/.", "skill.md", "Skill.MD"]
+)
+def test_a_save_refuses_another_spelling_of_skill_md(
+    write_config, tmp_path, projects_root, relative: str
+) -> None:
+    path = _place(projects_root / "alpha" / ".claude", _MCP, name="greeter")
+    content, file_hash = _view(projects_root / "alpha" / ".claude", name="greeter")
+    body = {
+        "scope": "project",
+        "project": "alpha",
+        "confirm": "alpha",
+        "name": "greeter",
+        "files": {sk.SKILL_FILENAME: content, relative: content},
+        "hash": file_hash,
+        "confirm_scripts": sk.SCRIPT_CONFIRM_TOKEN,
+    }
+    with _route_client(write_config, tmp_path) as c:
+        got = c.put("/api/config-write/skills", json=body)
+    assert got.status_code == 422
+    assert "under another spelling or case" in got.json()["detail"]
+    assert "qv-mcp-one" not in got.text
+    assert path.read_bytes() == _MCP.encode("utf-8")
+    assert sorted(p.name for p in path.parent.iterdir()) == [sk.SKILL_FILENAME]
+
+
+def test_a_save_through_a_hard_link_binds_with_the_skill_md_view(tmp_path: Path) -> None:
+    path = _place(tmp_path, _MCP)
+    link = path.parent / "other.md"
+    try:
+        os.link(path, link)
+    except (OSError, NotImplementedError) as exc:  # pragma: no cover - no hard links here
+        pytest.skip(f"cannot make a hard link here: {exc}")
+    content, file_hash = _view(tmp_path)
+    linked = sk.read_skill_file(tmp_path, "s", "other.md")[0]
+    sk.write_skill(
+        tmp_path,
+        "s",
+        {sk.SKILL_FILENAME: content, "other.md": linked},
+        expected_hash=file_hash,
+        confirm_scripts=sk.SCRIPT_CONFIRM_TOKEN,
+    )
+    assert path.read_bytes() == _MCP.encode("utf-8")
+    assert link.read_bytes() == _MCP.encode("utf-8")
