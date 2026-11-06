@@ -131,6 +131,7 @@ from fastapi import HTTPException
 
 from . import claude_cli, procutil
 from . import config_write as cw
+from . import config_write_hooks as cwh
 from .config_write_hooks import mask_url
 
 #: Signature every injected subprocess runner must match (``subprocess.run``'s).
@@ -335,13 +336,11 @@ def validate_marketplace_source(value: Any) -> None:
         )
     if _SOURCE_LEADING_DASH_RE.match(value):
         raise cw.InvalidCandidateError(
-            f"marketplace source {value!r} must not start with '-' "
+            f"marketplace source {mask_url(value)!r} must not start with '-' "
             "(would be parsed as a CLI option)"
         )
     if _CONTROL_CHAR_RE.search(value):
-        raise cw.InvalidCandidateError(
-            f"marketplace source {value!r} contains a control character"
-        )
+        raise cw.InvalidCandidateError("marketplace source contains a control character")
 
 
 def _run(
@@ -394,6 +393,20 @@ def _run(
         ) from exc
 
 
+def _shown_source(ident: str) -> str:
+    """Return ``ident`` (a plugin id or marketplace source) as an error message may show it.
+
+    The read view (:func:`~clauster.config_write_hooks.mask_url`). Where that masks a whole
+    ``http(s)`` URL for its ``user:password@`` part, the http hook view is used instead, so
+    the host and path stay visible to diagnose a failed ``marketplace add`` while the
+    credential, the query values and the fragment stay masked.
+    """
+    view = mask_url(ident)
+    if view == cw.REDACTION_SENTINEL:
+        view = cwh._mask_url(ident)
+    return cw.redact_secret_lines(view)
+
+
 def _raise_for_failure(op: str, ident: str, proc: subprocess.CompletedProcess) -> None:
     """Classify a nonzero ``claude plugin`` exit into a typed error, or return on success.
 
@@ -418,7 +431,13 @@ def _raise_for_failure(op: str, ident: str, proc: subprocess.CompletedProcess) -
     """
     if proc.returncode == 0:
         return
-    detail = cw.redact_secret_lines((proc.stderr or proc.stdout or "").strip())
+    # `ident` is a marketplace SOURCE for `marketplace-add`, and a git or url source can
+    # embed credentials (`https://user:token@host/repo.git`) or a token in its query string
+    # (TASK-474). The CLI often repeats it (`fatal: repository '<source>' not found`), so
+    # every copy is replaced by its masked view before the line redaction runs.
+    shown = _shown_source(ident)
+    raw = (proc.stderr or proc.stdout or "").strip()
+    detail = cw.redact_secret_lines(raw.replace(ident, shown) if ident else raw)
     absent = (op not in _NEVER_NOT_FOUND_OPS and bool(_NOT_FOUND_RE.search(detail))) or (
         op == "marketplace-remove" and bool(_NOT_DECLARED_RE.search(detail))
     )
@@ -426,9 +445,6 @@ def _raise_for_failure(op: str, ident: str, proc: subprocess.CompletedProcess) -
         if op.startswith("marketplace"):
             raise MarketplaceNotFoundError(detail)
         raise PluginNotFoundError(detail)
-    # `ident` is a marketplace SOURCE for `marketplace-add`, and a git or url source can
-    # embed credentials (`https://user:token@host/repo.git`), so it is redacted as well.
-    shown = cw.redact_secret_lines(ident)
     raise PluginCliError(f"claude plugin {op} {shown!r} exited {proc.returncode}: {detail}")
 
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,7 @@ from clauster import config_write_subagents as sub
 from clauster.app import create_app
 from clauster.config import load_config
 from clauster.config_write_hooks import mask_url
+from conftest import FAKE_CLAUDE
 
 MASK = cw.REDACTION_SENTINEL
 _ON = "config_write:\n  enabled: true\n  allow_user_scope: true\n"
@@ -100,6 +102,8 @@ def _no_digits(message: str) -> None:
         pytest.param(f" https://bot:{_HIDDEN}@h.example.com/r.git", MASK, id="leading-space"),
         pytest.param(f"WSS:\\\\bot:{_HIDDEN}@h.example.com/r", MASK, id="wss-backslashes"),
         pytest.param(f"git://h.example.com/r\n{_HIDDEN}", MASK, id="line-break"),
+        pytest.param(f"git://h.example.com/r.git#{_HIDDEN}", MASK, id="other-scheme-fragment"),
+        pytest.param(f"\x01https:/bot:{_HIDDEN}@h.example.com/r", MASK, id="leading-c0-control"),
     ],
 )
 def test_mask_url_view(url: str, view: str) -> None:
@@ -342,6 +346,39 @@ def test_marketplace_add_audit_line_masks_the_query_token(
     audit = (tmp_path / ".s" / "config_audit.log").read_text(encoding="utf-8")
     assert _HIDDEN not in audit
     assert _REPO_VIEW in audit
+
+
+@pytest.mark.parametrize(
+    ("source", "view"),
+    [
+        pytest.param(_REPO_URL, _REPO_VIEW, id="query"),
+        pytest.param(
+            f"https://bot:{_HIDDEN}@git.example.com/q.git?sig={_HIDDEN}",
+            # The line redaction then folds `https://********@` into `********@`.
+            f"{MASK}@git.example.com/q.git?sig={MASK}",
+            id="credential-and-query-keeps-host",
+        ),
+    ],
+)
+def test_marketplace_add_failure_detail_masks_the_query_token(
+    tmp_path: Path, source: str, view: str
+) -> None:
+    # The CLI repeats the source in its error; neither copy may reach the 400 in clear.
+    def run(argv, **kwargs):
+        stderr = f"fatal: repository '{argv[4]}' not found"
+        return subprocess.CompletedProcess(list(argv), 1, stdout="", stderr=stderr)
+
+    with pytest.raises(plugins.PluginCliError) as exc:
+        plugins.cli_marketplace_add(str(FAKE_CLAUDE), tmp_path, source, "user", run=run)
+    assert _HIDDEN not in str(exc.value)
+    assert str(exc.value).count(view) == 2  # the quoted source and the CLI's own copy
+
+
+@pytest.mark.parametrize("source", [f"-{_REPO_URL}", f"{_REPO_URL}\x07"])
+def test_marketplace_source_refusals_do_not_echo_the_query_token(source: str) -> None:
+    with pytest.raises(cw.InvalidCandidateError) as exc:
+        plugins.validate_marketplace_source(source)
+    assert _HIDDEN not in str(exc.value)
 
 
 # --- Settings tab ------------------------------------------------------------------------
