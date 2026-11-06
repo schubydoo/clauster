@@ -1568,6 +1568,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#a-direct-session-shows-claustrum-connection-dropped-or-the-reconnect-failed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A Direct Session shows "claustrum connection dropped" or "the reconnect failed"
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -2369,6 +2380,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#a-direct-session-shows-claustrum-connection-dropped-or-the-reconnect-failed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A Direct Session shows "claustrum connection dropped" or "the reconnect failed"
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -3030,7 +3052,33 @@ deliberate — those frames are gone from the daemon and Clauster will not
 pretend the stream is continuous. The conversation itself is unaffected: the
 session keeps running and <code>claude</code> has still written its own transcript to
 disk. Restarting Clauster promptly, or keeping sessions shorter, narrows the
-window.</p>
+window. The same marker can show after Clauster reconnected to the daemon while
+it kept running: see
+<a href="../concepts/how-it-works/#when-the-daemon-connection-drops">When the daemon connection drops</a>.</p>
+<h3 id="a-direct-session-shows-claustrum-connection-dropped-or-the-reconnect-failed">A Direct Session shows "claustrum connection dropped" or "the reconnect failed"<a class="headerlink" href="#a-direct-session-shows-claustrum-connection-dropped-or-the-reconnect-failed" title="Permanent link">&para;</a></h3>
+<p><strong>What you see:</strong> a Direct Session card shows the red <code>Error</code> badge with one of
+these texts. The server log has a <code>hosted: session &lt;id&gt; marked lost: ...</code> line
+for the session. If the daemon
+closed the connection, an earlier line says <code>claustrum: the daemon closed the
+connection; reconnecting</code>.</p>
+<ul>
+<li><code>claustrum connection dropped and the daemon no longer has this session</code></li>
+<li><code>claustrum connection lost; reattach failed: ...</code></li>
+<li><code>claustrum daemon connection lost and the reconnect failed: ...</code></li>
+</ul>
+<p><strong>Most likely cause:</strong> the connection to the claustrum daemon ended, and Clauster
+could not move the session to a new connection. In the first case the daemon
+reconnected but no longer had the process: the process ended, or the daemon
+restarted and lost it. In the other two cases the daemon did not answer, or
+Clauster could not reach or start a daemon. Read <code>daemon.log</code> in the <code>claustrum/</code>
+directory under <code>state_dir</code> for the reason that the daemon gives.</p>
+<p>A card with the orange <code>orphan</code> badge instead means that the <code>claude</code> process
+still runs without a daemon session. Its text says <code>survived a daemon restart</code>,
+also when only the connection was lost.</p>
+<p>The transcript is not lost. If the card offers <strong>Resume</strong>, use it to continue the
+conversation in a new agent. If it offers <strong>Kill</strong>, the old <code>claude</code> process is
+still running: kill it first. Before you resume after <code>the reconnect failed</code>,
+make sure that the old <code>claude</code> process is not still running on the host.</p>
 <h2 id="getting-more-detail">Getting more detail<a class="headerlink" href="#getting-more-detail" title="Permanent link">&para;</a></h2>
 <h3 id="raising-the-log-level">Raising the log level<a class="headerlink" href="#raising-the-log-level" title="Permanent link">&para;</a></h3>
 <blockquote>

@@ -600,6 +600,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#when-the-daemon-connection-drops" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When the daemon connection drops
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -1482,6 +1493,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#when-the-daemon-connection-drops" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When the daemon connection drops
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -1683,6 +1705,36 @@ thing: it means frames were evicted before they could be replayed to your
 browser. The conversation is still restored from the transcript — what a gap
 over that range covers is the non-conversation output, stderr lines and control
 frames, which the transcript does not hold.</p>
+<h3 id="when-the-daemon-connection-drops">When the daemon connection drops<a class="headerlink" href="#when-the-daemon-connection-drops" title="Permanent link">&para;</a></h3>
+<p>The claustrum daemon closes a connection that carries no traffic for 5 minutes.
+A running process does not count as traffic, so a quiet Direct Session (for
+example, one that waits at a permission prompt) is enough. Clauster sends a
+<code>server.ping</code> on its connection every 90 seconds, so this close does not occur
+while Clauster runs.</p>
+<p>The connection can still end for other reasons, for example a daemon restart.
+If the daemon closes the connection, Clauster reconnects at once. A connection
+that stays open but stops answering is found by the next <code>/healthz</code> check or the
+next new Direct Session, and Clauster then reconnects. After the reconnect,
+Clauster reattaches each running Direct Session from the last output frame it
+holds. The session continues in the same view: open
+permission prompts stay open, and output that the agent wrote during the drop
+is replayed. If the daemon dropped some of that output from its replay buffer,
+the view shows the <code>· output lost (N frames) ·</code> marker at that point.</p>
+<p>A session that cannot continue does not stay "running". If the daemon no longer
+has the process, the card shows the red <code>Error</code> badge with
+<code>claustrum connection dropped and the daemon no longer has this session</code>. If the
+reattach itself fails, Clauster ends the agent over the new connection and the
+card shows <code>claustrum connection lost; reattach failed</code>. If Clauster cannot
+reconnect at all, every running Direct Session shows <code>claustrum daemon
+connection lost and the reconnect failed</code>. In each case, a <code>claude</code> process that
+is still alive is shown as an orphan with <strong>Kill</strong>, the same as after a daemon
+restart, so that <strong>Resume</strong> never starts a second agent beside it.</p>
+<p>A new Direct Session also reconnects first, so it does not fail because of an
+old, closed connection. The reattach of the running sessions happens in the
+background and does not delay the new session. If Clauster could not reach the
+daemon when it started, it does not retry by itself. The next new Direct Session
+connects, and that first connection also reattaches the sessions recorded in
+<code>clauster.db</code>, the same as a normal start.</p>
 <div class="admonition warning">
 <p class="admonition-title">systemd can undo all of this</p>
 <p>The survival table assumes nothing reaps the child processes. Under a
