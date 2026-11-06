@@ -24,6 +24,11 @@ class _StubDaemon:
         self.ensured = False
         self.closed = False
         self.client = None  # no live client → lifespan skips hosted reattach (CL-6)
+        self.hooks: dict | None = None
+
+    def set_connection_hooks(self, *, on_reconnect, on_unreachable) -> None:
+        """Record the reconnect hooks the lifespan wires (TASK-518)."""
+        self.hooks = {"on_reconnect": on_reconnect, "on_unreachable": on_unreachable}
 
     async def ensure(self):
         """Record that the lifespan asked us to come up."""
@@ -85,3 +90,38 @@ def test_healthz_omits_claustrum_when_disabled(write_config, tmp_path):
     with TestClient(create_app(config)) as client:
         body = client.get("/healthz").json()
     assert "claustrum" not in body
+
+
+def test_lifespan_wires_the_reconnect_hooks_to_the_hosted_manager(
+    write_config, tmp_path, monkeypatch
+):
+    # TASK-518: a reconnect must reach the LIVE manager's rebind_all / fail_unreachable.
+    made: list[_StubDaemon] = []
+
+    class _Recording(_StubDaemon):
+        def __init__(self, config) -> None:  # noqa: ANN001 - mirrors the real signature
+            super().__init__(config)
+            made.append(self)
+
+    monkeypatch.setattr(app_module, "ClaustrumDaemon", _Recording)
+    config = _enabled_config(write_config, tmp_path)
+    app = create_app(config)
+    calls: list[tuple[str, object]] = []
+
+    async def on_connected(client, *, history_for):
+        calls.append(("on_connected", client))
+        assert callable(history_for)  # the transcript resolver, for a restore pass
+
+    async def fail_unreachable(reason):
+        calls.append(("fail_unreachable", reason))
+
+    with TestClient(app) as client:
+        hosted = app.state.hosted
+        monkeypatch.setattr(hosted, "on_connected", on_connected)
+        monkeypatch.setattr(hosted, "fail_unreachable", fail_unreachable)
+        hooks = made[0].hooks
+        assert hooks is not None
+        sentinel = object()
+        client.portal.call(hooks["on_reconnect"], sentinel)
+        client.portal.call(hooks["on_unreachable"], "gone")
+    assert calls == [("on_connected", sentinel), ("fail_unreachable", "gone")]

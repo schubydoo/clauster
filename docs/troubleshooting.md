@@ -697,7 +697,37 @@ deliberate — those frames are gone from the daemon and Clauster will not
 pretend the stream is continuous. The conversation itself is unaffected: the
 session keeps running and `claude` has still written its own transcript to
 disk. Restarting Clauster promptly, or keeping sessions shorter, narrows the
-window.
+window. The same marker can show after Clauster reconnected to the daemon while
+it kept running: see
+[When the daemon connection drops](concepts/how-it-works.md#when-the-daemon-connection-drops).
+
+### A Direct Session shows "claustrum connection dropped" or "the reconnect failed"
+
+**What you see:** a Direct Session card shows the red `Error` badge with one of
+these texts. The server log has a `hosted: session <id> marked lost: ...` line
+for the session. If the daemon
+closed the connection, an earlier line says `claustrum: the daemon closed the
+connection; reconnecting`.
+
+- `claustrum connection dropped and the daemon no longer has this session`
+- `claustrum connection lost; reattach failed: ...`
+- `claustrum daemon connection lost and the reconnect failed: ...`
+
+**Most likely cause:** the connection to the claustrum daemon ended, and Clauster
+could not move the session to a new connection. In the first case the daemon
+reconnected but no longer had the process: the process ended, or the daemon
+restarted and lost it. In the other two cases the daemon did not answer, or
+Clauster could not reach or start a daemon. Read `daemon.log` in the `claustrum/`
+directory under `state_dir` for the reason that the daemon gives.
+
+A card with the orange `orphan` badge instead means that the `claude` process
+still runs without a daemon session. Its text says `survived a daemon restart`,
+also when only the connection was lost.
+
+The transcript is not lost. If the card offers **Resume**, use it to continue the
+conversation in a new agent. If it offers **Kill**, the old `claude` process is
+still running: kill it first. Before you resume after `the reconnect failed`,
+make sure that the old `claude` process is not still running on the host.
 
 ## Getting more detail
 

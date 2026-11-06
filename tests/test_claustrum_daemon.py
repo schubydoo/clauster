@@ -25,9 +25,10 @@ from pathlib import Path
 import psutil
 import pytest
 
-from clauster.claustrum_client import AuthRejected, DaemonUnreachable
+from clauster.claustrum_client import AuthRejected, ClaustrumClient, DaemonUnreachable
 from clauster.claustrum_daemon import ClaustrumDaemon, DaemonSpawnError
 from clauster.config import ClausterConfig
+from conftest import wait_until
 
 # The daemon lifecycle runs on Windows too: the fake binary detaches (DETACHED_PROCESS
 # instead of fork) and serves a named pipe there, advertised via rpc.pipe. Only the
@@ -839,3 +840,335 @@ def test_check_unix_socket_path_skipped_off_posix(monkeypatch):
     monkeypatch.setattr(cd, "_af_unix_in_use", lambda: False)
     long_sock = Path("/tmp") / ("x" * 300) / "d.sock"
     cd._check_unix_socket_path(long_sock)  # non-posix → no-op, must not raise
+
+
+# -- reconnect after the daemon ends the connection (TASK-518) --------------
+
+
+def _hooks():
+    """Record every connection-hook call, as (kind, argument)."""
+    calls: list[tuple[str, object]] = []
+
+    async def on_reconnect(client):
+        calls.append(("reconnect", client))
+
+    async def on_unreachable(reason):
+        calls.append(("unreachable", reason))
+
+    return calls, on_reconnect, on_unreachable
+
+
+async def _in_process_daemon(make_daemon, fake_claustrum, **kwargs):
+    """A ClaustrumDaemon pointed at an in-process fake; it can never spawn one."""
+    fake = await fake_claustrum()
+    daemon = make_daemon(
+        socket_path=fake.socket_path,
+        token=fake.token,
+        binary="/nonexistent/claustrum-binary",
+        **kwargs,
+    )
+    calls, on_reconnect, on_unreachable = _hooks()
+    daemon.set_connection_hooks(on_reconnect=on_reconnect, on_unreachable=on_unreachable)
+    return fake, daemon, calls
+
+
+async def test_watcher_reconnects_after_the_daemon_closes_the_connection(
+    make_daemon, fake_claustrum
+):
+    # The idle close: the daemon ends the connection with a plain EOF. The watcher drops
+    # the dead client, reconnects, and hands the new client to on_reconnect.
+    fake, daemon, calls = await _in_process_daemon(make_daemon, fake_claustrum)
+    first = await daemon.ensure()
+    assert calls == []  # the first connection is not a reconnect
+
+    fake.disconnect_all()
+    await wait_until(lambda: calls)
+    kind, second = calls[0]
+    assert kind == "reconnect"
+    assert second is not first and second is daemon.client
+    assert first.lost
+    assert (await second.ping())["pong"] is True
+    assert daemon.status()["running"] is True and daemon.status()["error"] is None
+
+
+async def test_spawn_after_the_daemon_closed_the_connection(make_daemon, fake_claustrum):
+    # The prod report: spawn after a quiet period wrote into the dead cached client
+    # ("claustrum write failed for process.spawn"). Through ensure() it succeeds.
+    from clauster.hosted import HostedManager
+
+    fake, daemon, _calls = await _in_process_daemon(make_daemon, fake_claustrum)
+    first = await daemon.ensure()
+    fake.disconnect_all()
+    await asyncio.wait_for(first.wait_lost(), timeout=2.0)
+    with pytest.raises(DaemonUnreachable):  # the cached client is dead...
+        await first.spawn("p-old", "claude")
+
+    client = await daemon.ensure()  # ...but ensure() hands back a live one
+    manager = HostedManager()
+    instance = await manager.spawn(
+        client,
+        project="alpha",
+        label="hosted:alpha",
+        cwd="/work",
+        claude_binary="/usr/bin/claude",
+        permission_mode="acceptEdits",
+    )
+    assert instance.status == "running"
+    assert fake.spawned
+    await manager.aclose()
+
+
+async def test_ensure_that_replaces_a_dead_client_runs_the_hook(make_daemon, fake_claustrum):
+    fake, daemon, calls = await _in_process_daemon(make_daemon, fake_claustrum)
+    first = await daemon.ensure()
+    first._keepalive_task.cancel()
+    # Kill the watcher first so ensure(), not the watcher, does the replacing.
+    daemon._watch_task.cancel()
+    fake.disconnect_all()
+    await asyncio.wait_for(first.wait_lost(), timeout=2.0)
+
+    second = await daemon.ensure()
+    assert second is not first
+    await wait_until(lambda: calls)
+    assert calls == [("reconnect", second)]
+    assert await daemon.ensure() is second
+    await asyncio.sleep(0.05)
+    assert len(calls) == 1  # a healthy cached client is no reconnect
+
+
+async def test_the_hook_runs_outside_the_callers_task(make_daemon, fake_claustrum):
+    # A hosted spawn that triggers the reconnect must not wait for every session's
+    # reattach, and cancelling that request must not cut the reattach short.
+    fake, daemon, _calls = await _in_process_daemon(make_daemon, fake_claustrum)
+    release = asyncio.Event()
+    finished: list[object] = []
+
+    async def slow_reconnect(client):
+        await release.wait()
+        finished.append(client)
+
+    async def unused(_reason):  # pragma: no cover - never reached here
+        raise AssertionError
+
+    daemon.set_connection_hooks(on_reconnect=slow_reconnect, on_unreachable=unused)
+    first = await daemon.ensure()
+    daemon._watch_task.cancel()
+    fake.disconnect_all()
+    await asyncio.wait_for(first.wait_lost(), timeout=2.0)
+
+    # ensure() returns while the hook still waits: a spawn request neither waits for
+    # the reattach nor, by going away, can cut it short (it is not the hook's task).
+    second = await asyncio.wait_for(daemon.ensure(), timeout=2.0)
+    assert finished == []
+    assert daemon._hook_task is not None and not daemon._hook_task.done()
+    release.set()
+    await wait_until(lambda: finished)
+    assert finished == [second]
+
+
+async def test_hook_runs_are_serialized_in_order(make_daemon, fake_claustrum):
+    _fake, daemon, _calls = await _in_process_daemon(make_daemon, fake_claustrum)
+    order: list[str] = []
+    release = asyncio.Event()
+
+    async def hook(arg):
+        if arg == "first":
+            await release.wait()
+        order.append(arg)
+
+    daemon._schedule_hook(hook, "first")
+    daemon._schedule_hook(hook, "second")
+    await asyncio.sleep(0.05)
+    assert order == []  # the second run waits for the first
+    release.set()
+    await wait_until(lambda: len(order) == 2)
+    assert order == ["first", "second"]
+
+
+async def test_probe_that_drops_a_hung_client_reconnects_in_the_background(
+    make_daemon, fake_claustrum, monkeypatch
+):
+    # A connection that is open but no longer answers: probe() drops it, and a
+    # background ensure() reconnects and runs the hook, as the watcher would.
+    import clauster.claustrum_daemon as daemon_module
+
+    fake, daemon, calls = await _in_process_daemon(make_daemon, fake_claustrum)
+    first = await daemon.ensure()
+    monkeypatch.setattr(daemon_module, "_HEALTH_PING_TIMEOUT", 0.05)
+    fake.hang_methods.add("server.ping")
+    status = await daemon.probe()
+    assert status["running"] is False
+    fake.hang_methods.discard("server.ping")
+    await wait_until(lambda: calls)
+    kind, second = calls[0]
+    assert kind == "reconnect" and second is not first and daemon.client is second
+
+
+async def test_failed_reconnect_from_ensure_runs_on_unreachable(make_daemon, fake_claustrum):
+    # A route's ensure() that finds the cached client dead and cannot reconnect
+    # fails the running sessions too, not only the caller.
+    fake, daemon, calls = await _in_process_daemon(make_daemon, fake_claustrum)
+    await daemon.ensure()
+    daemon._watch_task.cancel()
+    await fake.stop()
+    with pytest.raises(DaemonSpawnError):
+        await daemon.ensure()
+    await wait_until(lambda: calls)
+    assert calls[0][0] == "unreachable"
+
+
+async def test_ensure_after_aclose_is_refused(make_daemon, fake_claustrum):
+    _fake, daemon, _calls = await _in_process_daemon(make_daemon, fake_claustrum)
+    await daemon.ensure()
+    await daemon.aclose()
+    with pytest.raises(DaemonUnreachable, match="shut down"):
+        await daemon.ensure()
+    assert daemon._watch_task is None
+
+
+async def test_aclose_cancels_a_hook_still_running(make_daemon, fake_claustrum):
+    _fake, daemon, _calls = await _in_process_daemon(make_daemon, fake_claustrum)
+    started = asyncio.Event()
+
+    async def hang(_arg):
+        started.set()
+        await asyncio.Event().wait()
+
+    await daemon.ensure()
+    daemon._schedule_hook(hang, None)
+    await asyncio.wait_for(started.wait(), timeout=2.0)
+    task = daemon._hook_task
+    await daemon.aclose()
+    assert task is not None and task.cancelled()
+
+
+async def test_failed_reconnect_runs_on_unreachable(make_daemon, fake_claustrum):
+    fake, daemon, calls = await _in_process_daemon(make_daemon, fake_claustrum)
+    await daemon.ensure()
+    await fake.stop()  # the daemon is gone and the bogus binary cannot respawn it
+
+    await wait_until(lambda: calls)
+    kind, reason = calls[0]
+    assert kind == "unreachable"
+    assert "reconnect failed" in str(reason)
+    assert daemon.client is None
+    assert daemon.status()["error"]
+
+
+async def test_aclose_stops_the_watcher(make_daemon, fake_claustrum):
+    fake, daemon, calls = await _in_process_daemon(make_daemon, fake_claustrum)
+    await daemon.ensure()
+    watcher = daemon._watch_task
+    await daemon.aclose()
+    assert watcher is not None and watcher.cancelled()
+    fake.disconnect_all()
+    await asyncio.sleep(0.1)
+    assert calls == [] and daemon.client is None
+
+
+async def test_watcher_ignores_a_client_it_no_longer_owns(make_daemon, fake_claustrum):
+    # probe() or ensure() may already have replaced the client the watcher waits on.
+    fake, daemon, calls = await _in_process_daemon(make_daemon, fake_claustrum)
+    first = await daemon.ensure()
+    stale = ClaustrumClient(fake.socket_path, fake.token, keepalive_interval=None)
+    await stale.connect()
+    await stale.ping()
+    watcher = asyncio.create_task(daemon._watch(stale))
+    fake.disconnect_all()
+    await asyncio.wait_for(watcher, timeout=2.0)
+    await stale.close()
+    # The real watcher of `first` still reconnects; the stale one did nothing extra.
+    await wait_until(lambda: calls)
+    assert [kind for kind, _ in calls] == ["reconnect"]
+    assert first.lost
+
+
+async def test_a_failing_hook_is_logged_not_raised(make_daemon, fake_claustrum, caplog):
+    fake, daemon, _calls = await _in_process_daemon(make_daemon, fake_claustrum)
+
+    async def boom(_client):
+        raise RuntimeError("hook bug")
+
+    async def unused(_reason):  # pragma: no cover - never reached here
+        raise AssertionError
+
+    daemon.set_connection_hooks(on_reconnect=boom, on_unreachable=unused)
+    caplog.set_level(logging.ERROR, logger="clauster.claustrum_daemon")
+    first = await daemon.ensure()
+    fake.disconnect_all()
+    await wait_until(lambda: daemon.client is not None and daemon.client is not first)
+    await wait_until(lambda: "connection hook failed" in caplog.text)
+
+
+async def test_hooks_are_optional(make_daemon, fake_claustrum):
+    fake = await fake_claustrum()
+    daemon = make_daemon(socket_path=fake.socket_path, token=fake.token)
+    first = await daemon.ensure()
+    fake.disconnect_all()
+    await wait_until(lambda: daemon.client is not None and daemon.client is not first)
+
+
+async def test_first_connect_after_a_failed_startup_runs_the_hook(make_daemon, fake_claustrum):
+    # No startup reattach happened, so the first connection must run the hook: the app
+    # then reattaches the stored sessions over it.
+    fake, daemon, calls = await _in_process_daemon(make_daemon, fake_claustrum)
+    await fake.stop()
+    with pytest.raises(DaemonSpawnError):
+        await daemon.ensure()
+    assert calls == []  # nothing was connected, so nothing is unreachable
+    await fake.start()
+    client = await daemon.ensure()
+    await wait_until(lambda: calls)
+    assert calls == [("reconnect", client)]
+
+
+async def test_cancelled_reconnect_in_ensure_finishes_in_the_background(
+    make_daemon, fake_claustrum
+):
+    # A hosted spawn that found the cached client dead and was cancelled mid-reconnect
+    # (its HTTP client went away) must not leave the manager with no client at all.
+    fake, daemon, calls = await _in_process_daemon(make_daemon, fake_claustrum)
+    first = await daemon.ensure()
+    daemon._watch_task.cancel()
+    fake.disconnect_all()
+    await asyncio.wait_for(first.wait_lost(), timeout=2.0)
+
+    gate = asyncio.Event()
+    entered = asyncio.Event()
+    real = daemon._connect_or_spawn
+
+    async def slow():
+        entered.set()
+        await gate.wait()
+        return await real()
+
+    daemon._connect_or_spawn = slow
+    caller = asyncio.create_task(daemon.ensure())
+    # Cancel only once the caller is inside the reconnect: the dead client is dropped
+    # and closed by then on every OS, so where the cancel lands is not a race.
+    await asyncio.wait_for(entered.wait(), timeout=2.0)
+    assert daemon.client is None
+    entered.clear()
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    del daemon._connect_or_spawn  # the background recovery uses the real one
+    gate.set()
+    await wait_until(lambda: calls)
+    kind, second = calls[0]
+    assert kind == "reconnect" and daemon.client is second
+
+
+async def test_connect_that_lands_after_aclose_starts_no_task(make_daemon, fake_claustrum):
+    # aclose() began while ensure() was connecting: no watcher or hook it would not cancel.
+    _fake, daemon, _calls = await _in_process_daemon(make_daemon, fake_claustrum)
+    real = daemon._connect_or_spawn
+
+    async def connect_then_close():
+        client = await real()
+        daemon._closing = True
+        return client
+
+    daemon._connect_or_spawn = connect_then_close
+    await daemon.ensure()
+    assert daemon._watch_task is None and not daemon._tasks

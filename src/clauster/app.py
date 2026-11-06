@@ -30,7 +30,7 @@ from . import (
     usage,
 )
 from .auth import LoginThrottle
-from .claustrum_client import ClaustrumError
+from .claustrum_client import ClaustrumClient, ClaustrumError
 from .claustrum_daemon import ClaustrumDaemon
 from .clone_jobs import CloneJobManager
 from .config import ClausterConfig
@@ -462,6 +462,15 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         )
         return turns
 
+    async def _on_claustrum_connect(client: ClaustrumClient) -> None:
+        """Move the hosted sessions onto a new daemon connection (TASK-518).
+
+        A reconnect rebinds the running sessions. If the startup connect failed, the
+        stored sessions were never reattached, so the first connection reattaches them
+        instead: the agents may still run on the daemon.
+        """
+        await app.state.hosted.on_connected(client, history_for=_hosted_history)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Start the poll loop and hosted daemon on startup; detach from both on shutdown.
@@ -480,6 +489,13 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         if config.claustrum.enabled:
             daemon = ClaustrumDaemon(config)
             app.state.claustrum_daemon = daemon
+            # TASK-518: when the daemon ends our connection, the daemon manager
+            # reconnects and these move the running hosted sessions over, or fail them
+            # visibly. Late-bound through app.state so they always reach the live manager.
+            daemon.set_connection_hooks(
+                on_reconnect=_on_claustrum_connect,
+                on_unreachable=lambda reason: app.state.hosted.fail_unreachable(reason),
+            )
             try:
                 await daemon.ensure()  # connect-or-spawn the hosted-channel daemon
                 # CL-6: reattach hosted sessions that kept running on the daemon

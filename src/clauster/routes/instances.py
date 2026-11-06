@@ -49,6 +49,7 @@ from ..dependencies import (
 from ..engine import ambiguity_hint
 from ..hosted import NO_PROJECT_RESUME_DETAIL, HostedSessionError
 from ..models import InstanceStatus, RemoteControlInstance, WorkingSession
+from ..redact import redact_for_disk
 from ..runner import (
     InstanceStillLive,
     InvalidSpawnOption,
@@ -160,9 +161,14 @@ async def _hosted_prereqs(
 
     Shared by hosted spawn and resume; raises the same HTTP errors the spawn path
     has always used (503 no daemon / 503 binary missing, 409 untrusted directory).
+
+    The client comes from :meth:`ClaustrumDaemon.ensure`, never from the cached
+    ``daemon.client``: ensure pings the cached connection and replaces a dead one, so
+    a spawn after the daemon closed an idle connection does not write into a dead
+    socket (TASK-518). It runs last, after the cheap checks, because it may spawn a
+    daemon.
     """
-    client = daemon.client if daemon is not None else None
-    if client is None:
+    if daemon is None:
         raise HTTPException(
             status_code=503,
             detail="hosted channel unavailable: claustrum daemon not connected",
@@ -177,6 +183,16 @@ async def _hosted_prereqs(
         binary = await asyncio.to_thread(claude_cli.resolve_binary, config.claude.binary)
     except claude_cli.ClaudeNotFound as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    try:
+        client = await daemon.ensure()
+    except (ClaustrumError, OSError) as exc:
+        # OSError: ensure() prepares the state dir and reads the token file first.
+        raise HTTPException(
+            status_code=503,
+            detail=redact_for_disk(
+                f"hosted channel unavailable: claustrum daemon not connected: {exc}"
+            ),
+        ) from exc
     return client, path, binary
 
 
