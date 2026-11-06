@@ -264,8 +264,8 @@
           // top of the view until the row that blocked it is fixed.
           keyRows: [], keyTypes: {}, ownedKeys: {}, envEditable: true,
           // `addType` is the value type picked for "Add a key" (TASK-511): string, boolean
-          // or number.
-          addKey: "", addType: "string", addError: "", addOwner: "", addRaw: false, rawBlocked: false,
+          // or number. `addTypeAuto` is true while that pick came from the key name.
+          addKey: "", addType: "string", addTypeAuto: false, addError: "", addOwner: "", addRaw: false, rawBlocked: false,
         },
         // JSON surfaces sharing _loadJsonSurface/_saveJsonSurface (#773 slice B).
         // Permissions (#958 Part 5): a friendly rows editor over allow/deny/ask +
@@ -2152,7 +2152,9 @@
           try { if (new RegExp(row.pattern).test(v)) return ""; }
           catch (e) { /* a pattern this browser cannot compile: warn, as for any other value */ }
         }
-        return "Not one of the known values (" + row.values.join(", ") + "). It saves as typed.";
+        const known = "(" + row.values.join(", ") + ")";
+        if (v === "") return "Empty. Type or pick one of the known values " + known + ".";
+        return "Not one of the known values " + known + ". It saves as typed.";
       },
       // The keys whose row shows that warning, for the note at the top of the view.
       configMgmtSettingsOffListKeys() {
@@ -2308,13 +2310,18 @@
           .sort();
       },
       // The key name in "Add a key" changed: a documented key of one value preselects its
-      // type (TASK-511). It is only a suggestion; the operator can change the pick, and a
-      // name the server does not list keeps the current pick.
+      // type (TASK-511). It is only a suggestion: the operator can change the pick. A name
+      // the server does not list undoes a preselection (back to text) but keeps a pick the
+      // operator made (`addTypeAuto` tells the two apart).
       configMgmtSettingsAddKeyTyped() {
         const s = this.configMgmt.settings;
         const k = (s.addKey || "").trim();
         const type = this._hasOwn(s.keyTypes, k) ? s.keyTypes[k] : null;
-        if (type && ["string", "boolean", "number"].includes(type.type)) s.addType = type.type;
+        if (type && ["string", "boolean", "number"].includes(type.type)) {
+          s.addType = type.type; s.addTypeAuto = true;
+        } else if (s.addTypeAuto) {
+          s.addType = "string"; s.addTypeAuto = false;
+        }
       },
       // Add a row for the typed key, with the editor of the picked type (text, a switch
       // that starts off, or an empty number box). The key goes to the server as typed,
@@ -2346,7 +2353,7 @@
         // Keep the env row last, so a new key lands among the other keys.
         const envAt = s.keyRows.findIndex((r) => r.kind === "env" && !r.inFile);
         if (envAt === -1) s.keyRows.push(row); else s.keyRows.splice(envAt, 0, row);
-        s.addKey = ""; s.addType = "string";
+        s.addKey = ""; s.addType = "string"; s.addTypeAuto = false;
         this.$nextTick(() => {
           const ctl = document.querySelector(
             '[data-test="cm-settings-key-row"][data-row-id="' + row.id + '"] input, ' +

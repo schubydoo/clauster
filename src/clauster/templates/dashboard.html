@@ -325,14 +325,16 @@
        and the Remove button; from 576px the key takes a column of its own. */
     .cm-settings-row {
       display: grid; grid-template-columns: minmax(0, 1fr) auto;
-      gap: .25rem .5rem; align-items: center;
+      gap: .25rem .5rem; align-items: start;
       padding: .375rem 0; border-bottom: 1px solid var(--tblr-border-color);
     }
     .cm-settings-row-key { grid-column: 1 / -1; overflow-wrap: anywhere; }
     .cm-settings-row-value { min-width: 0; }
     @media (min-width: 576px) {
       .cm-settings-row { grid-template-columns: minmax(8rem, 35%) minmax(0, 1fr) auto; }
-      .cm-settings-row-key { grid-column: auto; }
+      /* Rows align at the top, so a warning under a text box never moves the key name
+         or the Remove button; this lines the key up with the first line of its control. */
+      .cm-settings-row-key { grid-column: auto; padding-top: .3rem; }
     }
     /* TASK-249 skill visibility rows: the name takes the room the select leaves and
        wraps; min-width 0 lets a long unbroken name shrink instead of overflowing. */
@@ -2144,7 +2146,9 @@
               <!-- TASK-511: the known values are suggestions, so a value outside them saves.
                    This note names the keys near the top of the view, where a save result
                    scrolls to; each row also says it beside its text box. -->
-              <div class="alert alert-warning py-1 small" data-test="cm-settings-offlist"
+              <!-- text-warning-emphasis: plain .alert-warning text misses AA contrast in the
+                   light theme (as for the info note above). -->
+              <div class="alert alert-warning text-warning-emphasis py-1 small" data-test="cm-settings-offlist"
                    x-show="configMgmtSettingsOffListKeys().length" x-cloak>
                 These keys hold a value that is not on the list of known values:
                 <code x-text="configMgmtSettingsOffListKeys().join(', ')"></code>.
@@ -2265,7 +2269,8 @@
                            @keydown.enter.prevent="configMgmtAddSettingsKey()">
                     <select class="form-select flex-grow-0 w-auto" id="cm-settings-add-type"
                             name="cm-settings-add-type" data-test="cm-settings-add-type"
-                            aria-describedby="cm-settings-add-hint" x-model="configMgmt.settings.addType">
+                            aria-describedby="cm-settings-add-hint" x-model="configMgmt.settings.addType"
+                            @change="configMgmt.settings.addTypeAuto = false">
                       <option value="string">text</option>
                       <option value="boolean">true/false</option>
                       <option value="number">number</option>
@@ -2348,8 +2353,9 @@
                 </div>
                 <div class="form-hint small mt-2">
                   Each key shows by the JSON type of its value: a switch, a number, or text. A text box
-                  suggests the documented values of its key. Clear the box to see them all. Any other
-                  value saves as typed, with a warning. Edit objects and lists in Raw JSON.
+                  suggests the documented values of its key. To see them all, clear the box, then press
+                  the Down arrow key. Any other value saves as typed, with a warning. Edit objects and
+                  lists in Raw JSON.
                   Masked values show as <code>********</code> — leave the mask to keep the stored value.
                 </div>
               </div>

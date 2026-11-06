@@ -533,9 +533,12 @@ ROW_KEY_TYPES: dict[str, str | tuple[str, ...]] = {
 
 #: The documented open forms of a string key whose other values :data:`ROW_KEY_TYPES`
 #: lists, as a JavaScript-compatible regular expression, from the same docs page and read
-#: date: ``theme`` also takes ``custom:<slug>``, and ``timeFormat`` takes any pattern that
-#: holds a ``%``. A value that matches is a known value, so the tab shows no warning for
-#: it. Like the table, it is a suggestion hint and refuses nothing.
+#: date: ``theme`` also takes ``custom:<slug>`` (the pattern accepts any text after
+#: ``custom:``, since the docs do not define a slug), and ``timeFormat`` takes any pattern
+#: that holds a ``%``. A value that matches is a known value, so the tab shows no warning
+#: for it. Keep each pattern to the syntax that Python and the browser read alike (the
+#: tests check it): no backslash and no ``(?`` group. Like the table, it is a suggestion
+#: hint and refuses nothing.
 ROW_VALUE_PATTERNS: dict[str, str] = {
     "theme": "^custom:.",
     "timeFormat": "%",

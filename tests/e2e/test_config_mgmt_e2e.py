@@ -619,7 +619,9 @@ def test_config_mgmt_settings_add_and_remove_key_rows(
     browser.fill(_row("someFutureKey", "cm-settings-string"), "abc")
     _add_settings_key(browser, "theme")
     browser.expect_value(_row("theme", "cm-settings-string"), "")
+    browser.expect_text(_row("theme", "cm-settings-value-warning"), "Empty. Type or pick one")
     browser.fill(_row("theme", "cm-settings-string"), "dark")
+    browser.expect_hidden(_row("theme", "cm-settings-value-warning"))
     _add_settings_key(browser, "cleanupPeriodDays")
     # An empty number box blocks the save until it holds a number.
     browser.fill('[data-test="cm-confirm"]', "alpha")
@@ -718,6 +720,12 @@ def test_config_mgmt_settings_add_key_type_picker(
     browser.expect_value(picker, "number")
     browser.fill('[data-test="cm-settings-add-key"]', "verbose")
     browser.expect_value(picker, "boolean")
+    # A name the server does not list undoes the preselection, but keeps an operator pick.
+    browser.fill('[data-test="cm-settings-add-key"]', "verboseX")
+    browser.expect_value(picker, "string")
+    browser.select(picker, "number")
+    browser.fill('[data-test="cm-settings-add-key"]', "verboseY")
+    browser.expect_value(picker, "number")
     # Keys the server does not list, one per type the operator picks.
     _add_settings_key(browser, "futureFlag", "boolean")
     browser.click(_row("futureFlag", "cm-settings-bool"))

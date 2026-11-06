@@ -360,8 +360,9 @@ file is one row, and the editor follows the JSON type of the value:
   save.
 - A string is a text box. When the
   [settings reference](https://code.claude.com/docs/en/settings-reference) names
-  values for the key, for example `tui` or `theme`, the box suggests them. Clear
-  the box to see all the suggestions. You can type any value, and it saves as you
+  values for the key, for example `tui` or `theme`, the box suggests them. To see
+  all the suggestions, clear the box, then press the Down arrow key. You can type
+  any value, and it saves as you
   typed it. A value that is not one of the known values shows a warning on its
   row and in a note at the top of the tab. The save is not refused. The known
   values also cover a custom theme (`custom:<slug>`) and a `timeFormat` pattern

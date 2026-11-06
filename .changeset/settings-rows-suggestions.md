@@ -2,4 +2,4 @@
 default: patch
 ---
 
-The Settings tab's preset-value selects are now text boxes that suggest the documented values and save any other value with a warning, Add a key lets you pick text, true/false or number, and the row notes are reworded.
+Settings tab rows now suggest the documented values in a text box instead of a select, save any other value with a warning, and let Add a key pick text, true/false or number.

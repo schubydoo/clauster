@@ -95,6 +95,9 @@ def test_value_patterns_cover_the_documented_open_forms() -> None:
     for key, pattern in cws.ROW_VALUE_PATTERNS.items():
         assert isinstance(cws.ROW_KEY_TYPES[key], tuple), key
         re.compile(pattern)
+        # Python-only syntax (\A, (?P<n>...), inline flags) compiles in both engines but
+        # matches differently in the browser, so the patterns stay in the shared subset.
+        assert re.fullmatch(r"[\w%:^$.*+\-]+", pattern), key
     assert re.search(cws.ROW_VALUE_PATTERNS["theme"], "custom:solarized")
     assert not re.search(cws.ROW_VALUE_PATTERNS["theme"], "custom:")
     assert not re.search(cws.ROW_VALUE_PATTERNS["theme"], "dakr")
