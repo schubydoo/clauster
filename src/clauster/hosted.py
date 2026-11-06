@@ -1670,7 +1670,10 @@ class HostedManager:
             inst.instance_id for pid, inst in self._instances.items() if pid not in records
         }
         for process_id, fields in records.items():
-            if self._closing:
+            # A closed or lost client stops the pass: a queued hook can run after probe()
+            # or ensure() replaced this connection, and reattaching over it would mark
+            # every stored row lost although a newer connection could reattach it.
+            if self._closing or not client.is_open:
                 break
             if process_id in self._sessions:
                 continue  # already attached and pumping: never rebuild it over itself
@@ -1685,10 +1688,11 @@ class HostedManager:
                     record_keys=records.keys(),
                     history_for=history_for,
                 )
-        if self._closing:
+        if self._closing or not client.is_open:
             # Stopped early by aclose(), which already persisted with the unreached rows
-            # merged in. Marking the store restored now, and persisting, would prune
-            # every stored row this pass never reached (TASK-518 review catch).
+            # merged in, or by a connection that closed or dropped: the next connection's
+            # hook runs the pass again. Marking the store restored now, and persisting,
+            # would prune every stored row this pass never reached (TASK-518 review catch).
             return [self._synced(inst) for inst in self._instances.values()]
         self._restored = True
         await self._persist()
@@ -1868,7 +1872,11 @@ class HostedManager:
                 instance = self._instances.get(key)
                 if (
                     self._closing
-                    or client.lost
+                    # Not only a lost client: a queued hook can run after probe() or
+                    # ensure() already closed this connection for a newer one, and a
+                    # closed client is not marked lost. Moving a session onto it would
+                    # fail the session for no reason.
+                    or not client.is_open
                     or session is None
                     or instance is None
                     or session.status != InstanceStatus.RUNNING
@@ -1891,7 +1899,7 @@ class HostedManager:
                     )
                     killed = False
                     # Not during shutdown: the agent would otherwise survive the restart.
-                    if not client.lost and not self._closing:
+                    if client.is_open and not self._closing:
                         try:
                             await client.kill(key, signal="KILL")
                             killed = True

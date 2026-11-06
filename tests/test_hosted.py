@@ -3325,6 +3325,7 @@ class _BoomReattachClient:
     """A stub daemon client whose reattach raises — isolates the error path."""
 
     lost = False  # the connection itself is fine; only the reattach fails
+    is_open = True
 
     def stream(self, process_id):
         class _Stream:
@@ -4376,6 +4377,20 @@ async def test_rebind_onto_a_client_that_is_already_lost_does_nothing(fake_claus
         assert "process.reattach" not in fake.calls
 
 
+async def test_rebind_onto_a_client_that_was_closed_does_nothing(fake_claustrum):
+    # A queued hook can run after a newer ensure() closed this connection; close() does
+    # not mark it lost, so the guard must read is_open (Greptile on PR 1834).
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        inst = await _spawn(mgr, client)
+        async with _dropped(fake, client) as fresh:
+            await fresh.ping()
+            await fresh.close()
+            assert not fresh.lost
+            await mgr.rebind_all(fresh)
+        assert "process.reattach" not in fake.calls
+        assert mgr.session(inst.claustrum_process_id) is not None
+
+
 async def test_a_partial_line_before_a_replay_gap_is_dropped(fake_claustrum):
     # A held line head must not be glued onto the first bytes after evicted frames:
     # here that would turn a permission prompt into text nobody can answer.
@@ -4795,28 +4810,35 @@ async def test_lost_reasons_are_redacted(fake_claustrum, monkeypatch):
         assert "reconnect failed" in detail and secret not in detail
 
 
-async def test_reattach_failing_on_a_dropped_connection_probes_for_an_orphan(
+async def test_restore_pass_on_a_dropped_connection_leaves_the_rows_for_the_next_one(
     fake_claustrum, tmp_path, monkeypatch
 ):
-    # The connection dropped in the middle of a restore pass: the agent may still run, so
-    # the row is probed and a survivor gets Kill instead of a bare, resumable ERROR.
-    async def _orphan(_instance):
-        return True
+    # A queued hook can hand the restore pass a connection that already dropped or was
+    # closed for a newer one. The pass must not mark the stored rows lost over it: it
+    # stops, leaves the store unrestored, and the next connection's hook reattaches them.
+    async def _orphan(_instance):  # pragma: no cover - must not be reached
+        raise AssertionError("no row is classified over a dead connection")
 
     monkeypatch.setattr(HostedManager, "_is_orphan", staticmethod(_orphan))
     store = HostedStateStore(tmp_path / "hosted_state.json")
     store.save({"old": {"project": "proj", "label": "hosted:proj", "agent_pid": 4242}})
     fake = await fake_claustrum()
-    client = ClaustrumClient(fake.socket_path, fake.token)
-    await client.connect()
-    await client.ping()
-    fake.disconnect_all()
-    await asyncio.wait_for(client.wait_lost(), timeout=2.0)
-    mgr = HostedManager(store)
-    await mgr.reattach_all(client)
-    row = mgr.get_instance("old")
-    assert row.is_orphan and row.status is InstanceStatus.CRASHED
-    await client.close()
+    for close_it in (False, True):
+        client = ClaustrumClient(fake.socket_path, fake.token)
+        await client.connect()
+        await client.ping()
+        if close_it:
+            await client.close()
+            assert not client.lost
+        else:
+            fake.disconnect_all()
+            await asyncio.wait_for(client.wait_lost(), timeout=2.0)
+        mgr = HostedManager(store)
+        await mgr.reattach_all(client)
+        assert mgr.get_instance("old") is None
+        assert not mgr.restored
+        assert "old" in store.load()
+        await client.close()
 
 
 async def test_reattach_write_failure_before_eof_probes_for_an_orphan(
