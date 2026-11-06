@@ -2464,9 +2464,52 @@ editor cannot mask it in place. It then shows a note and not the file. Edit
 that file on the host.</p>
 <p>The Skills editor masks each file line by line: a <code>key: value</code> line with a
 secret-shaped key, a <code>${...}</code> reference, or a URL with a user name or password.
-The body of <code>SKILL.md</code> is masked too, because skills often hold commands. A
-masked line keeps its stored text on save only when every other character of
-the line is unchanged. Each stored line is kept at most once, in order, so a
+The body of <code>SKILL.md</code> is masked too, because skills often hold commands.</p>
+<p>In the frontmatter of <code>SKILL.md</code>, the editor also masks every <code>url</code> value, for
+example the <code>url</code> of a server in <code>mcpServers</code> or of an <code>http</code> hook in <code>hooks</code>.
+It masks the value as the <a href="#the-hooks-tab">Hooks tab</a> masks a URL. Each query
+value, the fragment, and each token-like path segment show as <code>********</code>. The
+scheme, the host, the port, the plain path, and the plain query keys stay
+visible, for example <code>https://mcp.example.com/v1?key=********</code>. A URL with a
+user name or password, or with a <code>${...}</code> reference, shows as one <code>********</code>. If
+the value covers more than one line, holds an escape, or has an anchor or a tag
+in front of it, each line of the value shows as one <code>********</code>.</p>
+<p>The editor decides this view from the text of a file, not from its name. Every
+file of the skill that starts with a frontmatter block gets it. So <code>SKILL.md</code>
+gets it under every path that reaches it, for example <code>./SKILL.md</code> or a link,
+and a copy of it gets it too. Only the frontmatter block gets the view. A <code>url</code>
+line in the Markdown body, or in a later document of a YAML file, gets only the
+line masks above. A save refuses (<code>422</code>) a file key that names <code>SKILL.md</code> under
+another spelling or case, for example <code>./SKILL.md</code>, <code>skill.md</code> or <code>SKILL.md.</code>,
+because macOS or Windows opens <code>SKILL.md</code> for it. Send the file once, as
+<code>SKILL.md</code>.</p>
+<p>Some URL text is not masked. A path segment or query key shorter than 20
+characters is not masked if it has fewer than 8 letters and digits, or only
+letters, or only digits. Do not put a secret in them.</p>
+<p>If Clauster cannot read a frontmatter block the way Claude Code reads it, every
+line of the block shows as <code>********</code>. This applies only to a block that holds
+the text <code>url</code> (in any case), <code>http:</code>, <code>https:</code>, <code>ws:</code>, <code>wss:</code> or a backslash.
+A block without any of them gets only the line masks. These are the cases:</p>
+<ul>
+<li>The block is not valid YAML to Clauster.</li>
+<li>It holds <code>---</code> before its closing fence.</li>
+<li>It holds a line break that only YAML 1.1 knows.</li>
+<li>Only Claude Code reads its opening fence.</li>
+<li>It is valid only after Claude Code re-quotes it.</li>
+<li>It holds syntax that YAML 1.2 refuses, for example a quoted value that
+  continues on a line that starts at column 0.</li>
+<li>It is larger than the 256 KiB file cap.</li>
+</ul>
+<p>For <code>SKILL.md</code>, a save of such a file is refused, except when the frontmatter is
+valid only after Claude Code re-quotes it. To change the file, type the whole
+frontmatter again or edit the file on the host.</p>
+<p>A masked line keeps its stored text on save only when every other character of
+the line is unchanged. For a frontmatter <code>url</code>, the scheme, the host, the port,
+the path, and every query key must be unchanged, and no query parameter can be
+added. Otherwise the save is refused (<code>422</code>) and nothing is written. A kept line
+must also stay where the editor masks it. A masked <code>url</code> line that you move into
+the Markdown body is refused, because the body would show its token. Each stored
+line is kept at most once, in order, so a
 copied masked line is refused. If two stored lines look the same when masked, a
 save that adds or removes one of them is refused too. A
 masked line in the frontmatter is kept only while <code>hooks</code> and <code>mcpServers</code> are
