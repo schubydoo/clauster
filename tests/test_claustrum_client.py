@@ -756,3 +756,73 @@ async def test_write_failure_is_daemon_unreachable(fake_claustrum, monkeypatch):
         monkeypatch.setattr(client._writer, "write", _broken)
         with pytest.raises(DaemonUnreachable, match="write failed for server.ping"):
             await client.ping()
+
+
+async def test_close_finishes_and_honours_a_cancel_aimed_at_its_caller(fake_claustrum):
+    # close() awaits the tasks it cancels. A cancel aimed at close()'s caller that lands
+    # in one of those awaits must not be swallowed (the caller would run on, here into a
+    # wait that never ends), and close() must still release the socket first.
+    fake = await fake_claustrum()
+    client = ClaustrumClient(fake.socket_path, fake.token, keepalive_interval=None)
+    await client.connect()
+    await client.ping()
+    started = asyncio.Event()
+
+    async def slow_to_stop():
+        started.set()
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.2)  # takes a while to stop, as a pipe close can
+
+    client._keepalive_task = asyncio.ensure_future(slow_to_stop())
+    await started.wait()
+    after_close: list[str] = []
+
+    async def caller():
+        await client.close()
+        after_close.append("ran on")  # must not happen: the caller was cancelled
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(caller())
+    await asyncio.sleep(0.05)  # inside close(), awaiting the slow keepalive task
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=2.0)
+    assert after_close == []
+    assert client._writer is None and client._reader_task is None
+
+
+@pytest.mark.parametrize("where", ["reader", "wait_closed"])
+async def test_close_holds_a_cancel_at_any_of_its_awaits(fake_claustrum, monkeypatch, where):
+    fake = await fake_claustrum()
+    client = ClaustrumClient(fake.socket_path, fake.token, keepalive_interval=None)
+    await client.connect()
+    await client.ping()
+    started = asyncio.Event()
+
+    async def slow_to_stop():
+        started.set()
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.2)
+
+    if where == "reader":
+        real_reader = client._reader_task
+        real_reader.cancel()
+        client._reader_task = asyncio.ensure_future(slow_to_stop())
+    else:
+
+        async def slow_wait_closed():
+            started.set()
+            await asyncio.sleep(10)
+
+        monkeypatch.setattr(client._writer, "wait_closed", slow_wait_closed)
+    task = asyncio.create_task(client.close())
+    await asyncio.wait_for(started.wait(), timeout=2.0)
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=2.0)
+    assert client._writer is None and client._reader_task is None

@@ -36,7 +36,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-import contextlib
 import json
 import logging
 import sys
@@ -386,20 +385,33 @@ class ClaustrumClient:
             self._keepalive_task = asyncio.ensure_future(self._keepalive(self._keepalive_interval))
 
     async def close(self) -> None:
-        """Cancel the reader and keepalive, close the socket, and fail pending requests."""
+        """Cancel the reader and keepalive, close the socket, and fail pending requests.
+
+        A cancel aimed at the caller that lands in one of the awaits below is held
+        until the cleanup is done, then re-raised. It used to be swallowed with the
+        cancelled task's own CancelledError: the caller then ran on as if never
+        cancelled, which hung a test on the Windows proactor loop, where closing a
+        pipe takes more loop turns.
+        """
         self._closed = True
+        current = asyncio.current_task()
+        cancelled = False
         if self._keepalive_task is not None:
             self._keepalive_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            try:
                 await self._keepalive_task
+            except asyncio.CancelledError:
+                cancelled = current is not None and current.cancelling() > 0
             self._keepalive_task = None
         if self._reader_task is not None:
             self._reader_task.cancel()
             try:
                 await self._reader_task
-            except (asyncio.CancelledError, OSError):
-                # OSError: the reader already ended on a connection reset, which it
-                # re-raises; the loss was latched then, so closing must not raise it again.
+            except asyncio.CancelledError:
+                cancelled = cancelled or (current is not None and current.cancelling() > 0)
+            except OSError:
+                # The reader already ended on a connection reset, which it re-raises;
+                # the loss was latched then, so closing must not raise it again.
                 pass
             self._reader_task = None
         if self._writer is not None:
@@ -408,14 +420,23 @@ class ClaustrumClient:
                 await self._writer.wait_closed()
             except (OSError, TimeoutError):
                 pass
+            except asyncio.CancelledError:
+                cancelled = True  # nothing else awaited here: the cancel is the caller's
             self._writer = None
         self._reader = None
         self._fail_pending(DaemonUnreachable("connection closed"))
+        if cancelled:
+            raise asyncio.CancelledError
 
     @property
     def lost(self) -> bool:
         """Whether the daemon ended this connection without a :meth:`close` from us."""
         return self._lost.is_set()
+
+    @property
+    def is_open(self) -> bool:
+        """Whether this connection can still carry a request: connected, not closed, not lost."""
+        return self._writer is not None and not self._closed and not self._lost.is_set()
 
     async def wait_lost(self) -> None:
         """Return once the daemon has ended this connection (see :attr:`lost`)."""

@@ -1184,6 +1184,10 @@ class HostedManager:
         # rows it has not loaded, because the store's save() prunes absent rows.
         self._restored = False
         self._unloaded: dict[str, dict] | None = None
+        # Ids this process removed (forget, resume's retire) while not yet restored. The
+        # unloaded-row merge never writes them back, whether or not the snapshot above
+        # was read before the removal (review catch).
+        self._removed: set[str] = set()
         # Serializes the restore pass (startup, or the first connect after a failed one)
         # against the reconnect hook, so the two never reattach the same rows at once.
         # Lock order: this lock, then a per-id lock, then _persist_lock.
@@ -1449,8 +1453,7 @@ class HostedManager:
                 boot_id=old.agent_boot_id,
             )
         self._instances.pop(hosted_id, None)
-        if self._unloaded is not None:
-            self._unloaded.pop(hosted_id, None)  # or a persist before restore writes it back
+        self._removed.add(hosted_id)  # or a persist before restore writes it back
         # Prune this id's lock too: resume retires the old hosted_id permanently (the
         # resumed agent runs under a fresh id), so the old lock would otherwise strand
         # in _id_locks. Safe under the held lock, same as forget().
@@ -1539,8 +1542,7 @@ class HostedManager:
                 await session.detach()
             self._sessions.pop(key, None)
             self._instances.pop(key, None)
-            if self._unloaded is not None:
-                self._unloaded.pop(key, None)  # or a persist before restore writes it back
+            self._removed.add(key)  # or a persist before restore writes it back
             # Prune the per-id lock so _id_locks doesn't grow unbounded — it's keyed by
             # the fresh per-session UUID, not by a finite stable set like the runner's
             # spawn locks. Safe under the held lock: a coroutine already waiting on this
@@ -1926,6 +1928,11 @@ class HostedManager:
         reach their agents, so each row is classified like a restart's lost row: an
         agent that still runs is offered as an orphan with Kill. After :meth:`aclose`
         this does nothing.
+
+        Only sessions whose own connection is gone are touched. This hook runs queued
+        behind earlier ones, so by the time it runs a later ``ensure()`` may have
+        connected again and spawned a session on the new connection; that session is
+        healthy and must not be retired (review catch).
         """
         detail = redact_for_disk(reason)
         for key in list(self._sessions):
@@ -1937,6 +1944,7 @@ class HostedManager:
                     or session is None
                     or instance is None
                     or session.status != InstanceStatus.RUNNING
+                    or session.client.is_open
                 ):
                     continue
                 await session.fail_lost(detail)
@@ -1961,6 +1969,10 @@ class HostedManager:
         false only when a kill was just accepted for the agent.
         """
         logger.warning("hosted: session %s marked lost: %s", key, detail)
+        # Sync BEFORE the session leaves the registry (review catch): a session uuid that
+        # an init frame delivered since the last poll lives only on the session, and
+        # without it the error row would lose Resume. The status set below wins.
+        self._synced(instance)
         await session.detach()
         self._sessions.pop(key, None)
         if probe_orphan:
@@ -2086,7 +2098,11 @@ class HostedManager:
                     stored = await asyncio.to_thread(self._store.load)
                     self._unloaded = {p: r for p, r in stored.items() if p not in subset}
                 subset = {
-                    **{p: r for p, r in self._unloaded.items() if p not in subset},
+                    **{
+                        p: r
+                        for p, r in self._unloaded.items()
+                        if p not in subset and p not in self._removed
+                    },
                     **subset,
                 }
             if subset == self._last_saved:

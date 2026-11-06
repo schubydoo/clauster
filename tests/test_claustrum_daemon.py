@@ -1134,15 +1134,21 @@ async def test_cancelled_reconnect_in_ensure_finishes_in_the_background(
     await asyncio.wait_for(first.wait_lost(), timeout=2.0)
 
     gate = asyncio.Event()
+    entered = asyncio.Event()
     real = daemon._connect_or_spawn
 
     async def slow():
+        entered.set()
         await gate.wait()
         return await real()
 
     daemon._connect_or_spawn = slow
     caller = asyncio.create_task(daemon.ensure())
-    await wait_until(lambda: daemon.client is None)
+    # Cancel only once the caller is inside the reconnect: the dead client is dropped
+    # and closed by then on every OS, so where the cancel lands is not a race.
+    await asyncio.wait_for(entered.wait(), timeout=2.0)
+    assert daemon.client is None
+    entered.clear()
     caller.cancel()
     with pytest.raises(asyncio.CancelledError):
         await caller
