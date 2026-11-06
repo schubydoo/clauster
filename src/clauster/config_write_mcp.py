@@ -795,7 +795,7 @@ def _destination(entry: dict[str, Any], stored: dict[str, Any]) -> tuple[Any, ..
     return transport, _url_texts(entry, stored)
 
 
-def _check_destination(name: str, entry: Any, stored: Any) -> None:
+def _check_destination(name: str, entry: Any, stored: Any, *, masked: bool) -> None:
     """Refuse a masked value whose server now points somewhere else (→ 422).
 
     ``merge_redacted`` restores a sentinel by KEY. Without this check, changing a server's
@@ -815,10 +815,15 @@ def _check_destination(name: str, entry: Any, stored: Any) -> None:
     Any other masked value in the entry (a masked ``args`` element or ``command``) is bound
     by the same check, since it is handed to that program too.
     A remote entry that turns into stdio, or the reverse, changes ``type`` and is refused.
+
+    ``masked`` is True when the entry as SENT held any mask, including a partly masked url
+    that :func:`_restore_masked_url` already put back. The restored url no longer holds the
+    sentinel, but it still carries a stored credential, so the entry is bound exactly as if
+    the mask were still there (a changed ``type`` with a restored url is refused).
     """
     if not isinstance(entry, dict) or not isinstance(stored, dict):
         return
-    if not contains_sentinel(entry):
+    if not masked:
         return
     stored_entry = _convert_legacy_entry(stored)[0]
     now = _destination(entry, stored_entry)
@@ -904,6 +909,7 @@ def _merge_kept(incoming: Any, stored: Any, path: str = "") -> Any:
     A partly masked ``url`` is first put back to the stored url, or refused
     (:func:`_restore_masked_url`), so the checks below compare the real url text.
     """
+    sent = incoming
     if path:
         incoming = _restore_masked_url(path, incoming, stored)
     else:
@@ -920,12 +926,14 @@ def _merge_kept(incoming: Any, stored: Any, path: str = "") -> Any:
             "type the real value"
         )
     if path:
-        _check_destination(path, incoming, stored)
+        _check_destination(path, incoming, stored, masked=contains_sentinel(sent))
     else:
         # A whole server map; the writers validated it as an object before the lock.
         stored_map = stored if isinstance(stored, dict) else {}
         for name, entry in incoming.items():
-            _check_destination(str(name), entry, stored_map.get(name))
+            _check_destination(
+                str(name), entry, stored_map.get(name), masked=contains_sentinel(sent.get(name))
+            )
     return cw.merge_redacted(incoming, stored)
 
 

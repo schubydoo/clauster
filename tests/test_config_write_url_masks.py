@@ -191,6 +191,22 @@ def test_mcp_masked_url_under_a_new_name_is_refused(tmp_path: Path) -> None:
     assert (tmp_path / ".mcp.json").read_bytes() == before
 
 
+def test_mcp_restored_url_under_a_changed_type_is_refused(tmp_path: Path) -> None:
+    # The restored url holds no mask any more, but it carries the stored credential, so a
+    # changed transport must still be refused (Greptile on PR 1832).
+    before = _seed_mcp(tmp_path)
+    shown, h = mcp.read_project_servers(tmp_path)
+    moved = {**shown["s"], "type": "sse"}
+    for write in (
+        lambda: mcp.write_project_server_entry(tmp_path, "s", moved, op="edit"),
+        lambda: mcp.write_project_servers(tmp_path, {"s": moved}, h),
+    ):
+        with pytest.raises(cw.InvalidCandidateError, match="type or a url changed") as exc:
+            write()
+        _no_digits(str(exc.value))
+    assert (tmp_path / ".mcp.json").read_bytes() == before
+
+
 def test_mcp_restore_leaves_a_non_object_entry_and_refuses_a_non_object_stored() -> None:
     # A hand-edited non-object entry has no url to restore; a non-object stored entry has
     # no url to keep, so a partly masked url is refused.
@@ -532,4 +548,8 @@ def test_subagent_inline_server_url_is_masked_and_bound(tmp_path: Path) -> None:
     moved = doc["content"].replace("mcp.example.com", "evil.example.com")
     with pytest.raises(cw.InvalidCandidateError, match="Type the full url"):
         sub.write_project_agent(tmp_path, "my-agent", moved, doc["hash"])
+    assert path.read_bytes() == _AGENT.encode("utf-8")
+    retyped = doc["content"].replace("type: http", "type: sse")
+    with pytest.raises(cw.InvalidCandidateError, match="type or a url changed"):
+        sub.write_project_agent(tmp_path, "my-agent", retyped, doc["hash"])
     assert path.read_bytes() == _AGENT.encode("utf-8")
