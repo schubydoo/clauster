@@ -47,6 +47,46 @@ def test_config_editor_persists_tier_a_change(
     assert list(cfg_path.parent.glob("clauster.yml.bak-*")), "expected a config backup"
 
 
+def _expect_in_cfg_body_view(browser: AgentBrowser, selector: str) -> None:
+    """Poll until ``selector`` is visible and wholly inside the editor body's scrollport."""
+    browser.expect_visible(selector)
+    deadline = time.monotonic() + 5  # the reveal scrolls smoothly, so give it a beat
+    while not browser.eval_json(
+        "(() => { const b = document.querySelector('[data-test=\"cfg-modal\"] .modal-body')"
+        ".getBoundingClientRect();"
+        f" const r = document.querySelector('{selector}').getBoundingClientRect();"
+        " return r.top >= b.top && r.bottom <= b.bottom; })()"
+    ):
+        assert time.monotonic() < deadline, f"{selector} stayed outside the visible modal body"
+        time.sleep(0.25)
+
+
+@pytest.mark.parametrize("stale", [False, True], ids=["saved", "stale"])
+def test_config_editor_save_result_scrolls_into_view(
+    browser: AgentBrowser, config_server: Server, stale: bool
+) -> None:
+    """The editor's Save sits in the footer and its banners at the body top (TASK-508)."""
+    cfg_path = Path(config_server.state_dir).parent / "clauster.yml"
+    browser.goto(config_server.url)
+    browser.expect_visible('[data-project="alpha"]')
+    browser.set_viewport(1280, 560)  # the session closes after the test, so no restore
+    browser.click('[aria-label="Edit configuration"]')
+    fx = '[id="cfg-usage.fx_rate"]'
+    browser.expect_visible(fx)
+    browser.fill(fx, "7")
+    if stale:  # the file changes on disk after the load, so the save is refused (409)
+        text = cfg_path.read_text(encoding="utf-8") + "\n# edited\n"
+        cfg_path.write_text(text, encoding="utf-8", newline="\n")
+    top = browser.eval_json(
+        "(() => { const b = document.querySelector('[data-test=\"cfg-modal\"] .modal-body');"
+        " b.scrollTop = b.scrollHeight; return b.scrollTop; })()"
+    )
+    assert top > 0, "the modal body does not scroll, so the test would prove nothing"
+    browser.click('[data-test="cfg-save"]')
+    banner = '[data-test="cfg-error"]' if stale else '[data-test="cfg-saved"]'
+    _expect_in_cfg_body_view(browser, banner)
+
+
 def test_config_editor_enum_selects_reflect_saved_value(
     browser: AgentBrowser, enum_config_server: Server
 ) -> None:

@@ -1730,7 +1730,8 @@
               fields are managed in the config file / CLI and are not shown here.
             </p>
             <div class="text-secondary" x-show="configEditor.loading" x-cloak>Loading…</div>
-            <div class="alert alert-danger py-2" x-show="configEditor.error" x-cloak x-text="configEditor.error"></div>
+            <div class="alert alert-danger py-2" data-test="cfg-error" x-show="configEditor.error" x-cloak
+                 x-text="configEditor.error"></div>
             <div class="alert alert-success py-2" data-test="cfg-saved" x-show="configEditor.saved" x-cloak>
               <div>Saved — restart Clauster to apply.
                 <a href="https://schubydoo.github.io/clauster/operations/#restart" target="_blank" rel="noopener noreferrer"
@@ -2027,8 +2028,18 @@
               Manage this host's Claude Code configuration. Every write asks you to type
               the scope name to confirm, and secret-shaped values are masked.
             </p>
-            <div class="alert alert-danger py-2" data-test="cm-error" x-show="configMgmt.error" x-cloak x-text="configMgmt.error"></div>
-            <div class="alert alert-success py-2" data-test="cm-saved" x-show="configMgmt.saved" x-cloak>Saved.</div>
+            {# The banners are VISUAL only (aria-hidden): a live region toggled in via x-show
+               (display:none to visible) is skipped by NVDA and VoiceOver. The persistent
+               regions below are always mounted and change text instead, so a screen reader
+               hears each write result once and reads it once in browse mode (TASK-508). #}
+            <div class="alert alert-danger py-2" data-test="cm-error" aria-hidden="true"
+                 x-show="configMgmt.error" x-cloak x-text="configMgmt.error"></div>
+            <div class="alert alert-success py-2" data-test="cm-saved" aria-hidden="true"
+                 x-show="configMgmt.saved" x-cloak>Saved.</div>
+            <div class="visually-hidden" role="alert" data-test="cm-error-live"
+                 x-text="configMgmt.error"></div>
+            <div class="visually-hidden" role="status" data-test="cm-saved-live"
+                 x-text="configMgmt.saved ? 'Saved.' : ''"></div>
 
             <!-- Scope toggle: User (gated on allow_user_scope) / Project / Local -->
             <div class="mb-2">
