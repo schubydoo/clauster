@@ -272,6 +272,10 @@ class ClaustrumDaemon:
             # including a first one that came after the startup attempt failed.
             replaced = self._had_connection or self._first_connect_failed
             self._had_connection = True
+            if self._closing:
+                # aclose() began while we connected and has already taken its snapshot of
+                # the tasks: start none it would not cancel. It drops this client next.
+                return client
             self._start_watch(client)
             if replaced:
                 self._schedule_hook(self._on_reconnect, client)

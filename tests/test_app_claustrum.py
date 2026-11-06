@@ -108,33 +108,20 @@ def test_lifespan_wires_the_reconnect_hooks_to_the_hosted_manager(
     app = create_app(config)
     calls: list[tuple[str, object]] = []
 
-    async def rebind_all(client):
-        calls.append(("rebind_all", client))
-
-    async def reattach_all(client, *, history_for):
-        calls.append(("reattach_all", client))
-        assert callable(history_for)
+    async def on_connected(client, *, history_for):
+        calls.append(("on_connected", client))
+        assert callable(history_for)  # the transcript resolver, for a restore pass
 
     async def fail_unreachable(reason):
         calls.append(("fail_unreachable", reason))
 
     with TestClient(app) as client:
         hosted = app.state.hosted
-        monkeypatch.setattr(hosted, "rebind_all", rebind_all)
-        monkeypatch.setattr(hosted, "reattach_all", reattach_all)
+        monkeypatch.setattr(hosted, "on_connected", on_connected)
         monkeypatch.setattr(hosted, "fail_unreachable", fail_unreachable)
         hooks = made[0].hooks
         assert hooks is not None
         sentinel = object()
-        # The stub daemon had no client, so no startup reattach ran: the first
-        # connection reattaches the stored sessions; a later one rebinds them.
-        assert hosted.restored is False
-        client.portal.call(hooks["on_reconnect"], sentinel)
-        monkeypatch.setattr(hosted, "_restored", True)
         client.portal.call(hooks["on_reconnect"], sentinel)
         client.portal.call(hooks["on_unreachable"], "gone")
-    assert calls == [
-        ("reattach_all", sentinel),
-        ("rebind_all", sentinel),
-        ("fail_unreachable", "gone"),
-    ]
+    assert calls == [("on_connected", sentinel), ("fail_unreachable", "gone")]

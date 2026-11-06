@@ -4609,3 +4609,180 @@ async def test_persist_before_reattach_keeps_rows_it_never_loaded(fake_claustrum
         assert mgr2.restored is True
         await mgr2.forget("old-session")
         assert store.load() == {}
+
+
+async def test_on_connected_restores_first_then_rebinds(fake_claustrum, monkeypatch):
+    calls: list[str] = []
+    async with _manager(fake_claustrum) as (_fake, client, mgr):
+
+        async def rebind_all(_client):
+            calls.append("rebind_all")
+
+        monkeypatch.setattr(mgr, "rebind_all", rebind_all)
+        await mgr.on_connected(client, history_for=None)  # nothing restored yet
+        assert mgr.restored is True and calls == []
+        await mgr.on_connected(client, history_for=None)
+        assert calls == ["rebind_all"]
+
+
+async def test_a_hook_during_the_startup_restore_waits_and_rebinds(fake_claustrum, monkeypatch):
+    # The connection dropped while the startup reattach_all was still running: the hook
+    # must not start a second restore pass over the same rows.
+    async with _manager(fake_claustrum) as (_fake, client, mgr):
+        gate = asyncio.Event()
+        real = mgr._reattach_all_locked
+        passes: list[str] = []
+
+        async def slow_restore(c, *, history_for=None):
+            passes.append("restore")
+            await gate.wait()
+            return await real(c, history_for=history_for)
+
+        async def rebind_all(_client):
+            passes.append("rebind")
+
+        monkeypatch.setattr(mgr, "_reattach_all_locked", slow_restore)
+        monkeypatch.setattr(mgr, "rebind_all", rebind_all)
+        startup = asyncio.create_task(mgr.reattach_all(client))
+        await wait_until(lambda: passes)
+        hook = asyncio.create_task(mgr.on_connected(client, history_for=None))
+        await asyncio.sleep(0.05)
+        assert passes == ["restore"]  # the hook waits for the lock
+        gate.set()
+        await asyncio.wait_for(asyncio.gather(startup, hook), timeout=2.0)
+        assert passes == ["restore", "rebind"]
+
+
+async def test_restore_skips_a_session_that_is_already_attached(fake_claustrum, tmp_path):
+    store = HostedStateStore(tmp_path / "hosted_state.json")
+    fake = await fake_claustrum()
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        inst = await _spawn(mgr, client)
+        pid = inst.claustrum_process_id
+        session = mgr.session(pid)
+        await mgr.reattach_all(client)  # the stored row is this live session
+        assert mgr.session(pid) is session
+        assert "process.reattach" not in fake.calls
+        await mgr.aclose()
+
+
+async def test_resume_refuses_a_row_a_restore_is_still_reattaching(fake_claustrum):
+    async with _manager(fake_claustrum) as (_fake, _client, mgr):
+        row = RemoteControlInstance(
+            project="proj",
+            label="hosted:proj",
+            channel="hosted",
+            claustrum_process_id="restoring",
+            claude_session_uuid="0b0c4f5e-1d2a-4b3c-8d9e-0f1a2b3c4d5e",
+            status=InstanceStatus.STARTING,
+        )
+        mgr._instances["restoring"] = row
+        with pytest.raises(HostedSessionError, match="still running"):
+            await mgr.resume(_client, "restoring", cwd="/tmp/proj", claude_binary=_BIN)
+
+
+async def test_spawn_registers_before_the_proc_reads(fake_claustrum, monkeypatch):
+    # A drop during the /proc hops must find the new session in the registry.
+    seen: list[bool] = []
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+
+        def pair(pid):
+            seen.append(any(s.agent_pid == pid for s in mgr._sessions.values()))
+            return (None, None)
+
+        monkeypatch.setattr(procutil, "proc_start_pair", pair)
+        fake.support_want_pid = True  # the fake answers pid 4242, so the hops run
+        await _spawn(mgr, client)
+        assert seen == [True]
+
+
+async def test_restore_finishing_after_aclose_detaches(fake_claustrum, tmp_path, monkeypatch):
+    store = HostedStateStore(tmp_path / "hosted_state.json")
+    fake = await fake_claustrum()
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        first = HostedManager(store)
+        inst = await _spawn(first, client)
+        pid = inst.claustrum_process_id
+        await first.aclose()
+        mgr = HostedManager(store)
+        real_reattach = HostedSession.reattach
+
+        async def reattach_then_close(self, from_seq=0, *, history_loader=None):
+            result = await real_reattach(self, from_seq, history_loader=history_loader)
+            mgr._closing = True  # aclose() ran while this pass was in flight
+            return result
+
+        monkeypatch.setattr(HostedSession, "reattach", reattach_then_close)
+        await mgr.reattach_all(client)
+        assert mgr.session(pid)._pump_task is None  # no pump outlives the shutdown
+
+
+async def test_restore_stops_at_aclose(fake_claustrum, tmp_path):
+    store = HostedStateStore(tmp_path / "hosted_state.json")
+    store.save({"old": {"project": "proj", "label": "hosted:proj"}})
+    fake = await fake_claustrum()
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        await mgr.aclose()
+        await mgr.reattach_all(client)
+        assert "process.reattach" not in fake.calls
+
+
+async def test_no_orphan_probe_after_an_accepted_kill(fake_claustrum, monkeypatch):
+    # The agent was just killed, so it must not be offered as a surviving orphan.
+    async def _orphan(_instance):
+        return True
+
+    monkeypatch.setattr(HostedManager, "_is_orphan", staticmethod(_orphan))
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        inst = await _spawn(mgr, client)
+        pid = inst.claustrum_process_id
+        async with _dropped(fake, client) as fresh:
+            fake.hang_methods.add("process.reattach")
+            fresh._request_timeout = 0.05
+            await mgr.rebind_all(fresh)
+        row = mgr.get_instance(pid)
+        assert row.status is InstanceStatus.ERROR and not row.is_orphan
+
+
+async def test_no_kill_during_shutdown(fake_claustrum, monkeypatch):
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        inst = await _spawn(mgr, client)
+        session = mgr.session(inst.claustrum_process_id)
+        real_rebind = session.rebind
+
+        async def close_then_fail(new_client):
+            mgr._closing = True
+            return await real_rebind(new_client)
+
+        monkeypatch.setattr(session, "rebind", close_then_fail)
+        async with _dropped(fake, client) as fresh:
+            fake.hang_methods.add("process.reattach")
+            fresh._request_timeout = 0.05
+            await mgr.rebind_all(fresh)
+        assert fake.killed == []  # the agent survives the restart
+
+
+async def test_lost_reasons_are_redacted(fake_claustrum, monkeypatch):
+    # The `lost` event goes to the browser and error_detail to disk: both pass through
+    # redact_for_disk, because a daemon error text can quote anything.
+    secret = "sk-ant-api03-" + "A" * 40
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        a = await _spawn(mgr, client)
+        queue = mgr.session(a.claustrum_process_id).subscribe()
+        async with _dropped(fake, client) as fresh:
+
+            def adopt(_stream):
+                raise ClaustrumError(f"boom {secret}")
+
+            monkeypatch.setattr(fresh, "adopt_stream", adopt)
+            await mgr.rebind_all(fresh)
+        lost = await _drain_until(queue, "lost")
+        assert secret not in lost["reason"]
+        assert secret not in (mgr.get_instance(a.claustrum_process_id).error_detail or "")
+    # fail_unreachable's reason too.
+    async with _manager(fake_claustrum) as (_fake2, client2, mgr2):
+        c = await _spawn(mgr2, client2)
+        await mgr2.fail_unreachable(f"reconnect failed: {secret}")
+        assert secret not in (mgr2.get_instance(c.claustrum_process_id).error_detail or "")

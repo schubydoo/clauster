@@ -1151,3 +1151,18 @@ async def test_cancelled_reconnect_in_ensure_finishes_in_the_background(
     await wait_until(lambda: calls)
     kind, second = calls[0]
     assert kind == "reconnect" and daemon.client is second
+
+
+async def test_connect_that_lands_after_aclose_starts_no_task(make_daemon, fake_claustrum):
+    # aclose() began while ensure() was connecting: no watcher or hook it would not cancel.
+    _fake, daemon, _calls = await _in_process_daemon(make_daemon, fake_claustrum)
+    real = daemon._connect_or_spawn
+
+    async def connect_then_close():
+        client = await real()
+        daemon._closing = True
+        return client
+
+    daemon._connect_or_spawn = connect_then_close
+    await daemon.ensure()
+    assert daemon._watch_task is None and not daemon._tasks

@@ -469,11 +469,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         stored sessions were never reattached, so the first connection reattaches them
         instead: the agents may still run on the daemon.
         """
-        hosted = app.state.hosted
-        if hosted.restored:
-            await hosted.rebind_all(client)
-        else:
-            await hosted.reattach_all(client, history_for=_hosted_history)
+        await app.state.hosted.on_connected(client, history_for=_hosted_history)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

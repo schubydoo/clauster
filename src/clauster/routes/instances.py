@@ -49,6 +49,7 @@ from ..dependencies import (
 from ..engine import ambiguity_hint
 from ..hosted import NO_PROJECT_RESUME_DETAIL, HostedSessionError
 from ..models import InstanceStatus, RemoteControlInstance, WorkingSession
+from ..redact import redact_for_disk
 from ..runner import (
     InstanceStillLive,
     InvalidSpawnOption,
@@ -184,10 +185,13 @@ async def _hosted_prereqs(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     try:
         client = await daemon.ensure()
-    except ClaustrumError as exc:
+    except (ClaustrumError, OSError) as exc:
+        # OSError: ensure() prepares the state dir and reads the token file first.
         raise HTTPException(
             status_code=503,
-            detail=f"hosted channel unavailable: claustrum daemon not connected: {exc}",
+            detail=redact_for_disk(
+                f"hosted channel unavailable: claustrum daemon not connected: {exc}"
+            ),
         ) from exc
     return client, path, binary
 

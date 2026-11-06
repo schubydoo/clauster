@@ -704,7 +704,8 @@ it kept running: see
 ### A Direct Session shows "claustrum connection dropped" or "the reconnect failed"
 
 **What you see:** a Direct Session card shows the red `Error` badge with one of
-these texts. The server log has a `hosted:` line for the session. If the daemon
+these texts. The server log has a `hosted: session <id> marked lost: ...` line
+for the session. If the daemon
 closed the connection, an earlier line says `claustrum: the daemon closed the
 connection; reconnecting`.
 

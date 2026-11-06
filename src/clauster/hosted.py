@@ -1178,6 +1178,9 @@ class HostedManager:
         # rows it has not loaded, because the store's save() prunes absent rows.
         self._restored = False
         self._unloaded: dict[str, dict] | None = None
+        # Serializes the restore pass (startup, or the first connect after a failed one)
+        # against the reconnect hook, so the two never reattach the same rows at once.
+        self._restore_lock = asyncio.Lock()
 
     @property
     def restored(self) -> bool:
@@ -1264,6 +1267,21 @@ class HostedManager:
         await session.start(
             cwd=cwd, permission_mode=permission_mode, resume_uuid=resume_uuid, want_pid=True
         )
+        # Registered at once, before the thread hops below (TASK-518 review catch): a
+        # connection drop inside them would otherwise run its rebind_all over a registry
+        # that does not hold this session yet, leaving it "running" on the dead client.
+        instance = RemoteControlInstance(
+            project=project,
+            label=label,
+            channel="hosted",
+            permission_mode=permission_mode,
+            claustrum_process_id=process_id,
+            agent_pid=session.agent_pid,
+            status=InstanceStatus.RUNNING,
+            started_at=datetime.now(UTC),
+        )
+        self._sessions[process_id] = session
+        self._instances[process_id] = instance
         # Measure our OWN start identity for the (CT-1-reported) pid — that's what
         # CL-8 orphan validation compares against, NOT the daemon's startTime token
         # (decision (b)). Both halves in ONE `proc_start_pair` read (#1404): sampling the
@@ -1286,21 +1304,9 @@ class HostedManager:
         # per-pid one, so it needs no atomic sample with this pid's ticks. Only stamped when we
         # have a pid to guard — with none there is nothing to compare a boot id against.
         boot_id = await asyncio.to_thread(procutil.proc_boot_id) if session.agent_pid else None
-        instance = RemoteControlInstance(
-            project=project,
-            label=label,
-            channel="hosted",
-            permission_mode=permission_mode,
-            claustrum_process_id=process_id,
-            agent_pid=session.agent_pid,
-            agent_proc_start=proc_start,
-            agent_start_ticks=start_ticks,
-            agent_boot_id=boot_id,
-            status=InstanceStatus.RUNNING,
-            started_at=datetime.now(UTC),
-        )
-        self._sessions[process_id] = session
-        self._instances[process_id] = instance
+        instance.agent_proc_start = proc_start
+        instance.agent_start_ticks = start_ticks
+        instance.agent_boot_id = boot_id
         return instance
 
     async def send(self, hosted_id: str, text: str) -> None:
@@ -1383,7 +1389,11 @@ class HostedManager:
         # poll/get_instance happened since the init frame (don't depend on the caller).
         old = self._synced(old)
         old_session = self._sessions.get(hosted_id)
-        if old_session is not None and old_session.status in ("running", "starting"):
+        if (
+            old_session is not None and old_session.status in ("running", "starting")
+        ) or old.status in (InstanceStatus.RUNNING, InstanceStatus.STARTING):
+            # The row's own status too, like forget(): a row a restore pass is still
+            # reattaching has no session yet, and resuming it would start a second agent.
             raise HostedSessionError(f"hosted session {hosted_id} is still running")
         resume_uuid = old.claude_session_uuid
         if not resume_uuid:
@@ -1432,6 +1442,8 @@ class HostedManager:
                 boot_id=old.agent_boot_id,
             )
         self._instances.pop(hosted_id, None)
+        if self._unloaded is not None:
+            self._unloaded.pop(hosted_id, None)  # or a persist before restore writes it back
         # Prune this id's lock too: resume retires the old hosted_id permanently (the
         # resumed agent runs under a fresh id), so the old lock would otherwise strand
         # in _id_locks. Safe under the held lock, same as forget().
@@ -1520,6 +1532,8 @@ class HostedManager:
                 await session.detach()
             self._sessions.pop(key, None)
             self._instances.pop(key, None)
+            if self._unloaded is not None:
+                self._unloaded.pop(key, None)  # or a persist before restore writes it back
             # Prune the per-id lock so _id_locks doesn't grow unbounded — it's keyed by
             # the fresh per-session UUID, not by a finite stable set like the runner's
             # spawn locks. Safe under the held lock: a coroutine already waiting on this
@@ -1582,6 +1596,40 @@ class HostedManager:
         *,
         history_for: Callable[[RemoteControlInstance], list[dict[str, Any]]] | None = None,
     ) -> list[RemoteControlInstance]:
+        """Restore persisted hosted sessions; see :meth:`_reattach_all_locked`.
+
+        Held under the restore lock, so it never runs at the same time as the
+        reconnect hook (:meth:`on_connected`), which may reattach too.
+        """
+        async with self._restore_lock:
+            return await self._reattach_all_locked(client, history_for=history_for)
+
+    async def on_connected(
+        self,
+        client: ClaustrumClient,
+        *,
+        history_for: Callable[[RemoteControlInstance], list[dict[str, Any]]] | None,
+    ) -> None:
+        """Move the hosted sessions onto a new daemon connection (TASK-518).
+
+        The daemon manager's ``on_reconnect`` hook. Before the stored sessions were
+        restored (the startup connect failed), this restores them over ``client``;
+        afterwards it rebinds the running ones (:meth:`rebind_all`). The check runs
+        under the restore lock: a hook that fires while the startup pass still runs
+        waits for it and then rebinds, instead of starting a second, concurrent pass.
+        """
+        async with self._restore_lock:
+            if not self._restored:
+                await self._reattach_all_locked(client, history_for=history_for)
+                return
+        await self.rebind_all(client)
+
+    async def _reattach_all_locked(
+        self,
+        client: ClaustrumClient,
+        *,
+        history_for: Callable[[RemoteControlInstance], list[dict[str, Any]]] | None = None,
+    ) -> list[RemoteControlInstance]:
         """Restore persisted hosted sessions on startup, reattaching the live ones.
 
         For each persisted record: an intentionally-stopped one is rebuilt as a
@@ -1613,71 +1661,105 @@ class HostedManager:
             inst.instance_id for pid, inst in self._instances.items() if pid not in records
         }
         for process_id, fields in records.items():
-            instance = self._instance_from_record(process_id, fields)
-            self._unique_instance_id(instance, seen_instance_ids, records.keys())
-            self._instances[process_id] = instance
-            # From the row, not the raw record, for the same reason as the uuid below:
-            # the mapper is the one place a persisted value is type-checked. Both agree
-            # for every value today (`bool(...)` vs truthiness), so this is consistency,
-            # not a fix — but the raw-record read is the pattern that produced one.
-            if instance.intentional_stop:
-                instance.status = InstanceStatus.STOPPED
-                continue
-            # reattach() never builds argv (it binds by process id), so the binary is
-            # unused here — a respawn path (CL-7) re-resolves it from config.
-            session = HostedSession(
-                client,
-                process_id,
-                "",
-                on_permission_needed=self._on_permission_needed,
-            )
-            # Pre-set the live session's uuid ONLY when the persisted value is a usable
-            # session id, so the `_capture_session_uuid` latch stays OPEN for anything else.
-            # An empty / non-string value never reached the session (the mapper nulled it),
-            # and #1419 keeps an off-shape NON-empty value on the record for repair — but a
-            # found-daemon row must still re-latch the real id from its replayed init frame,
-            # exactly as it did before #1419, so an off-shape (or absent) value is left off
-            # the session here. The record keeps the bytes regardless (`_synced` only copies
-            # a truthy session uuid back), and a later respawn is refused at the argv seam:
-            # `build_hosted_argv` rejects the off-shape `--resume` slot. Reading the rebuilt
-            # row, never the raw `fields`, keeps this the one place a persisted value is
-            # normalized (the assignment is unvalidated — no `validate_assignment`).
-            if is_session_uuid(instance.claude_session_uuid):
-                session.claude_session_uuid = instance.claude_session_uuid
-            # A loader, not a pre-read list: reattach runs it AFTER the RPC has fixed
-            # the daemon's lastSeq. Reading first would suppress frames emitted during
-            # the read — see HostedSession._rehydrate.
-            loader = partial(self._load_history, history_for, instance)
-            try:
-                # Reuse the cursor `_instance_from_record` already coerced rather than
-                # re-deriving it from the raw record: a bare `int()` here raised
-                # ValueError/TypeError/OverflowError on a junk persisted value, which is
-                # not a ClaustrumError, so it escaped the handler below AND the lifespan's
-                # (app.py) — a junk cursor failed the whole app boot. One coercion site.
-                result = await session.reattach(instance.daemon_last_seq, history_loader=loader)
-            except ClaustrumError as exc:
-                instance.status = InstanceStatus.ERROR
-                instance.error_detail = redact_for_disk(f"reattach failed: {exc}")
-                logger.warning(
-                    "hosted: reattach of %s failed: %s", process_id, redact_for_disk(str(exc))
+            if self._closing:
+                break
+            if process_id in self._sessions:
+                continue  # already attached and pumping: never rebuild it over itself
+            # Per-id lock: a pass the reconnect hook runs overlaps live routes, and a
+            # Resume of this row must not spawn a second agent while it reattaches.
+            async with self._lock_for(process_id):
+                await self._restore_record(
+                    client,
+                    process_id,
+                    fields,
+                    seen_instance_ids=seen_instance_ids,
+                    record_keys=records.keys(),
+                    history_for=history_for,
                 )
-                continue
-            if not result.get("found"):
-                await self._mark_unfound(
-                    instance,
-                    lost_status=InstanceStatus.CRASHED,
-                    lost_detail="daemon restarted; session lost",
-                )
-                continue
-            # A clean reattach: drop the salvage's "record was unreadable" note so it does
-            # not later render as this running session's ENDING reason (the WARNING logged at
-            # salvage time stays the durable record). Only that note is cleared.
-            if instance.error_detail == _UNREADABLE_RECORD_DETAIL:
-                instance.error_detail = None
-            self._sessions[process_id] = session
         self._restored = True
         await self._persist()
         return [self._synced(inst) for inst in self._instances.values()]
+
+    async def _restore_record(
+        self,
+        client: ClaustrumClient,
+        process_id: str,
+        fields: dict,
+        *,
+        seen_instance_ids: set[str],
+        record_keys: Collection[str],
+        history_for: Callable[[RemoteControlInstance], list[dict[str, Any]]] | None,
+    ) -> None:
+        """Restore one persisted record: the loop body of :meth:`_reattach_all_locked`.
+
+        The caller holds the record's per-id lock.
+        """
+        instance = self._instance_from_record(process_id, fields)
+        self._unique_instance_id(instance, seen_instance_ids, record_keys)
+        self._instances[process_id] = instance
+        # From the row, not the raw record, for the same reason as the uuid below:
+        # the mapper is the one place a persisted value is type-checked. Both agree
+        # for every value today (`bool(...)` vs truthiness), so this is consistency,
+        # not a fix — but the raw-record read is the pattern that produced one.
+        if instance.intentional_stop:
+            instance.status = InstanceStatus.STOPPED
+            return
+        # reattach() never builds argv (it binds by process id), so the binary is
+        # unused here — a respawn path (CL-7) re-resolves it from config.
+        session = HostedSession(
+            client,
+            process_id,
+            "",
+            on_permission_needed=self._on_permission_needed,
+        )
+        # Pre-set the live session's uuid ONLY when the persisted value is a usable
+        # session id, so the `_capture_session_uuid` latch stays OPEN for anything else.
+        # An empty / non-string value never reached the session (the mapper nulled it),
+        # and #1419 keeps an off-shape NON-empty value on the record for repair — but a
+        # found-daemon row must still re-latch the real id from its replayed init frame,
+        # exactly as it did before #1419, so an off-shape (or absent) value is left off
+        # the session here. The record keeps the bytes regardless (`_synced` only copies
+        # a truthy session uuid back), and a later respawn is refused at the argv seam:
+        # `build_hosted_argv` rejects the off-shape `--resume` slot. Reading the rebuilt
+        # row, never the raw `fields`, keeps this the one place a persisted value is
+        # normalized (the assignment is unvalidated — no `validate_assignment`).
+        if is_session_uuid(instance.claude_session_uuid):
+            session.claude_session_uuid = instance.claude_session_uuid
+        # A loader, not a pre-read list: reattach runs it AFTER the RPC has fixed
+        # the daemon's lastSeq. Reading first would suppress frames emitted during
+        # the read — see HostedSession._rehydrate.
+        loader = partial(self._load_history, history_for, instance)
+        try:
+            # Reuse the cursor `_instance_from_record` already coerced rather than
+            # re-deriving it from the raw record: a bare `int()` here raised
+            # ValueError/TypeError/OverflowError on a junk persisted value, which is
+            # not a ClaustrumError, so it escaped the handler below AND the lifespan's
+            # (app.py) — a junk cursor failed the whole app boot. One coercion site.
+            result = await session.reattach(instance.daemon_last_seq, history_loader=loader)
+        except ClaustrumError as exc:
+            instance.status = InstanceStatus.ERROR
+            instance.error_detail = redact_for_disk(f"reattach failed: {exc}")
+            logger.warning(
+                "hosted: reattach of %s failed: %s", process_id, redact_for_disk(str(exc))
+            )
+            return
+        if not result.get("found"):
+            await self._mark_unfound(
+                instance,
+                lost_status=InstanceStatus.CRASHED,
+                lost_detail="daemon restarted; session lost",
+            )
+            return
+        # A clean reattach: drop the salvage's "record was unreadable" note so it does
+        # not later render as this running session's ENDING reason (the WARNING logged at
+        # salvage time stays the durable record). Only that note is cleared.
+        if instance.error_detail == _UNREADABLE_RECORD_DETAIL:
+            instance.error_detail = None
+        self._sessions[process_id] = session
+        if self._closing:
+            # aclose() ran while this reattach was in flight (a hook-run pass): the
+            # pump it just started must not outlive the shutdown.
+            await session.detach()
 
     async def _mark_unfound(
         self,
@@ -1783,7 +1865,8 @@ class HostedManager:
                         exc_info=not isinstance(exc, ClaustrumError),
                     )
                     killed = False
-                    if not client.lost:
+                    # Not during shutdown: the agent would otherwise survive the restart.
+                    if not client.lost and not self._closing:
                         try:
                             await client.kill(key, signal="KILL")
                             killed = True
@@ -1854,6 +1937,7 @@ class HostedManager:
         take the orphan path that kills a surviving agent first. ``probe_orphan`` is
         false only when a kill was just accepted for the agent.
         """
+        logger.warning("hosted: session %s marked lost: %s", key, detail)
         await session.detach()
         self._sessions.pop(key, None)
         if probe_orphan:
