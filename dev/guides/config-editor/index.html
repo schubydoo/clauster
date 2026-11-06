@@ -2029,7 +2029,9 @@ on; the User scope additionally requires <code>config_write.allow_user_scope</co
   surfaces, and the <code>autoMode</code> box on the Permissions tab, mask secret-shaped
   values on read. The MCP surface also masks every <code>env</code> and <code>headers</code> value,
   the <code>headersHelper</code> command, and the strings in <code>oauth</code>, whatever their key
-  names. A masked value left untouched keeps the stored secret on write. If
+  names. It also masks the query values, the fragment and the token-like path
+  segments of a server <code>url</code>. A masked value left untouched keeps the stored
+  secret on write. If
   Clauster cannot match a mask to its stored value, it refuses the save and
   writes nothing. The CLAUDE.md surface and the <code>permissions</code> rules return the
   raw content, because they round-trip the exact text on write. For what the
@@ -2106,8 +2108,20 @@ on; the User scope additionally requires <code>config_write.allow_user_scope</co
 a value but no name, or shares its name with another row. One entry cannot
 hold these rows, so the switch would lose values. A note names the rows. The
 same rows also keep <strong>Save</strong> off.</p>
-<p>In both modes, a masked value shows as <code>********</code>. If you leave the mask in
-place, the save keeps the stored value. If you change the <code>type</code> or a URL of a
+<p>In both modes, a masked value shows as <code>********</code>. A server <code>url</code> is masked as
+the <a href="#the-hooks-tab">Hooks tab</a> masks an <code>http</code> hook URL: every query value, the
+fragment, and each path segment or query key that looks like a token show as
+<code>********</code>. The scheme, the host, the port, the plain path, and the plain query
+keys stay visible, for example <code>https://mcp.example.com/v1?key=********</code>. A
+<code>ws</code> or <code>wss</code> URL is masked in the same way. A URL with a user name or password,
+or a <code>${...}</code> reference, shows as one <code>********</code>. A URL path segment or query
+key shorter than 20 characters is not masked if it has fewer than 8 letters and
+digits, or only letters, or only digits. Do not put a secret there.</p>
+<p>If you leave the mask in place, the save keeps the stored value. A <code>url</code> that
+holds a mask keeps the stored URL only when every visible character of it is
+unchanged. Clauster compares the text exactly. If you change any part of such a
+URL, for example the host, the path, or a query key, the save is refused
+(<code>422</code>). Type the full URL again. If you change the <code>type</code> or a URL of a
 remote server, or the <code>command</code> or <code>args</code> of a stdio server, the save cannot
 keep a masked value (see the list below). The save also cannot keep a mask that
 has no stored value behind it, for example in a row that you renamed. In both
@@ -2392,9 +2406,10 @@ accepted, and it deletes those entries.</p>
 Each field is masked as the tab that owns its shape masks it:</p>
 <ul>
 <li>In an inline <code>mcpServers</code> definition, every <code>env</code> and <code>headers</code> value, a
-  <code>headersHelper</code> command, and a URL with a user name or password are masked,
-  as on the MCP tab. A server name is not a secret, so a server called
-  <code>oauth-gw</code> keeps its <code>type</code> and <code>url</code> visible.</li>
+  <code>headersHelper</code> command, a URL with a user name or password, and the query
+  values and token-like path segments of a <code>url</code> are masked, as on the MCP
+  tab. A server name is not a secret, so a server called <code>oauth-gw</code> keeps its
+  <code>type</code> and the plain parts of its <code>url</code> visible.</li>
 <li>In <code>hooks</code>, the parts of a hook URL and the <code>headers</code> values that the
   <a href="#the-hooks-tab">Hooks tab</a> masks are masked.</li>
 <li>Every non-empty <code>env</code> value is masked.</li>
@@ -2663,11 +2678,20 @@ The commands, flags and settings below were checked against Claude Code 2.1.318.
   <code>https://user:token@host/repo.git</code>, shows as <code>********</code>.</li>
 <li><strong>Clauster masks credentials in what it reads.</strong> It masks every <code>headers</code>,
   <code>env</code> and MCP server <code>args</code> value, every <code>headersHelper</code> command, and every URL
-  that carries a user name or password. This applies to the marketplace list, to
-  the marketplaces that a scope declares (<code>extraKnownMarketplaces</code>), and to the
+  that carries a user name or password. Every other <code>url</code> is masked as the
+  <a href="#the-hooks-tab">Hooks tab</a> masks an <code>http</code> hook URL: each query value (for
+  example <code>?token=</code> or <code>?sig=</code>), the fragment, and each path segment that looks
+  like a token show as <code>********</code>. The host and the plain query keys stay
+  visible. A path segment or query key under 20 characters is not masked if it
+  has fewer than 8 letters and digits, or only letters, or only digits. Do not
+  put a credential there. This applies to the marketplace list, to the
+  marketplaces that a scope declares (<code>extraKnownMarketplaces</code>), and to the
   MCP server definitions in the plugin list. A masked value is never written
-  back. A token in a URL query string, such as <code>?sig=...</code>, is not detected. Do
-  not put a credential there.</li>
+  back. A value that is not an <code>http</code>, <code>https</code>, <code>ws</code> or <code>wss</code> URL, such as
+  <code>git@host:owner/repo.git</code>, shows as stored, or as one <code>********</code> if it holds
+  <code>?</code> or <code>#</code>. A token in the path of such a value is not detected.
+  Marketplace add refuses (<code>422</code>) a source that holds <code>********</code>, for example a
+  masked URL copied from the list. Type the full URL.</li>
 <li><strong>The Settings tab masks <code>extraKnownMarketplaces</code> in the same way.</strong> If you
   save the Raw JSON with a masked value unchanged, Clauster keeps the stored
   value. An <code>args</code> list shows as one <code>********</code>, so you keep it whole or type
@@ -2682,7 +2706,12 @@ The commands, flags and settings below were checked against Claude Code 2.1.318.
   example a <code>headers</code> value or a <code>headersHelper</code>. Any change to the text counts,
   including the letter case of the host or an added <code>:443</code>. This stops the
   stored credential from going to a new host. Type the credential again, then
-  save.</li>
+  save. A <code>url</code> that shows a masked query value or path segment keeps the
+  stored URL only when every visible character of it is unchanged. Any change to
+  it, or a rename of its entry, refuses the save (<code>422</code>). Inside a list, such as
+  a <code>settings</code> source's <code>plugins</code>, the element that holds the URL must also be
+  unchanged and keep its place, and the list must keep its length. Type the
+  full URL again.</li>
 <li><strong>The <code>additionalMarketplaces</code> spelling is read too.</strong> Claude Code 2.1.232 and
   later accept it as another name for <code>extraKnownMarketplaces</code>. When a file sets
   both, the canonical key wins, as it does in Claude Code.</li>
