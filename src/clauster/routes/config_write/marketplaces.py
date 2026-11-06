@@ -24,6 +24,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 
 from ... import config_write, config_write_plugins
+from ...config_write_hooks import mask_url
 from ...dependencies import ConfigDep, RunnerDep, RunnerOrNoneDep
 from . import _base
 
@@ -171,7 +172,8 @@ async def api_config_write_marketplaces_action(
             watch=_base.config_write_watch(runner, cwd),
             surface="marketplaces",
             scope=scope,  # type: ignore[arg-type]
-            target=(name or source or ""),
+            # A source url can carry a token in its query string (TASK-474).
+            target=(name or mask_url(source or "")),
             action=op,  # type: ignore[arg-type]
             actor=_base.SESSION_USER,
         )

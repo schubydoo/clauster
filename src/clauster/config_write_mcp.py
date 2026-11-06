@@ -75,6 +75,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from . import config_write as cw
+from .config_write_hooks import mask_url
 
 logger = logging.getLogger(__name__)
 
@@ -614,6 +615,12 @@ def _redact_entry(entry: Any) -> Any:
     helper = out.get("headersHelper")
     if isinstance(helper, str) and helper:
         out["headersHelper"] = cw.REDACTION_SENTINEL
+    url = entry.get("url")
+    if isinstance(url, str):
+        # A token in the query string or path (`?token=…`) passes redact_secrets: mask the
+        # url as the Hooks tab masks an http hook's (TASK-474). `_restore_masked_url` binds
+        # a resent view back to the stored url.
+        out["url"] = mask_url(url)
     return out
 
 
@@ -830,10 +837,50 @@ def _check_destination(name: str, entry: Any, stored: Any) -> None:
         )
 
 
+def _restore_masked_url(name: str, entry: Any, stored: Any) -> Any:
+    """Return ``entry`` with a partly masked ``url`` put back to the stored url, or refuse (→ 422).
+
+    The read view masks a token in a url's query or path in place (``?token=********``,
+    :func:`_redact_entry`). Such a url keeps the stored url only when it is EXACTLY the read
+    view of the stored entry's url: every unmasked character (scheme, host, port, path,
+    query keys) unchanged, compared as text and never parsed. Anything else that holds the
+    mask (a changed host or path, an added query key, a new server) is refused, because the
+    mask cannot be bound to a stored value and would otherwise be written as the literal
+    sentinel. A url that IS the sentinel is left to :func:`~clauster.config_write.merge_redacted`
+    and :func:`_check_destination`, as before. The message names the server, never a value
+    or its size.
+    """
+    if not isinstance(entry, dict):
+        return entry
+    url = entry.get("url")
+    if (
+        not isinstance(url, str)
+        or url == cw.REDACTION_SENTINEL
+        or cw.REDACTION_SENTINEL not in url
+    ):
+        return entry
+    held = stored.get("url") if isinstance(stored, dict) else None
+    if (
+        not isinstance(held, str)
+        or _redact_entry(_convert_legacy_entry(stored)[0]).get("url") != url
+    ):
+        raise cw.InvalidCandidateError(
+            f"server {name!r} has a url that keeps a masked part '********', but another "
+            "part of the url changed or no stored url matches it; the stored value is not "
+            "sent to a new destination. Type the full url"
+        )
+    return {**entry, "url": held}
+
+
 def contains_sentinel(value: Any) -> bool:
-    """Whether the redaction sentinel appears anywhere in ``value`` (dicts and lists)."""
-    if value == cw.REDACTION_SENTINEL:
-        return True
+    """Whether the redaction sentinel appears anywhere in ``value`` (dicts and lists).
+
+    A string counts when it holds the sentinel anywhere, not only when it is the sentinel:
+    a url read view masks a token in place (``?token=********``), and such a url must take
+    the keep-stored path (:func:`_merge_kept`), never the CLI or a verbatim write.
+    """
+    if isinstance(value, str):
+        return cw.REDACTION_SENTINEL in value
     if isinstance(value, dict):
         return any(contains_sentinel(v) for v in value.values())
     if isinstance(value, list):
@@ -853,7 +900,19 @@ def _merge_kept(incoming: Any, stored: Any, path: str = "") -> Any:
     Runs inside the locked writers, over the value read under the lock, so a stored value
     removed by a concurrent edit is caught too. Raising here aborts the transaction before
     anything is written.
+
+    A partly masked ``url`` is first put back to the stored url, or refused
+    (:func:`_restore_masked_url`), so the checks below compare the real url text.
     """
+    if path:
+        incoming = _restore_masked_url(path, incoming, stored)
+    else:
+        # A whole server map; the writers validated it as an object before the lock.
+        held_map = stored if isinstance(stored, dict) else {}
+        incoming = {
+            name: _restore_masked_url(str(name), entry, held_map.get(name))
+            for name, entry in incoming.items()
+        }
     missing = _unbacked_sentinel(incoming, stored, path)
     if missing is not None:
         raise cw.InvalidCandidateError(

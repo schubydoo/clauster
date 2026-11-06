@@ -3506,10 +3506,12 @@
         }
         return JSON.stringify(v === undefined ? null : v);
       },
-      // The dotted path of every masked value in `v` ("headers.Authorization", "args[1]").
+      // The dotted path of every masked value in `v` ("headers.Authorization", "args[1]"). A
+      // string that holds the mask counts too: a url's token is masked in place
+      // (`?token=********`), and the backend keeps it only while the rest of the url is unchanged.
       _mcpMaskedPaths(v, path, out) {
         out = out || [];
-        if (v === CONFIG_MASK) out.push(path || "the definition");
+        if (typeof v === "string" && v.includes(CONFIG_MASK)) out.push(path || "the definition");
         else if (Array.isArray(v)) v.forEach((x, i) => this._mcpMaskedPaths(x, path + "[" + i + "]", out));
         else if (v !== null && typeof v === "object") {
           for (const k of Object.keys(v)) this._mcpMaskedPaths(v[k], path ? path + "." + k : k, out);
@@ -3604,11 +3606,12 @@
           masked.join(", ") + ".";
       },
       // Whether an input still holds a mask that the retype warning asks the operator to replace.
+      // A url can hold one in place (`?key=********`), so any string that holds it counts.
       configMgmtMcpNeedsRetype(value) {
-        return value === CONFIG_MASK && this.configMgmtMcpRetypeWarning() !== "";
+        return this.configMgmtMcpIsMasked(value) && this.configMgmtMcpRetypeWarning() !== "";
       },
       configMgmtMcpIsMasked(value) {
-        return value === CONFIG_MASK;
+        return typeof value === "string" && value.includes(CONFIG_MASK);
       },
       // Why the last Raw JSON click was refused. `rawBlocked` holds the row problems at that
       // click; any edit that changes them hides the note for good, so it never comes back
