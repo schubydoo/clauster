@@ -62,9 +62,10 @@ jobs:
       - name: Install agent-browser CLI
         # Pinned + integrity-checked via tests/e2e/package-lock.json (`npm ci`),
         # instead of an unpinned `npm i -g` (the global install Scorecard flags as
-        # Pinned-Dependencies). Pinned exactly and NOT Renovate-tracked — bump the lockfile
-        # deliberately + re-verify on CI, not just locally (see tests/e2e/package.json for
-        # the version history and the two driver-side guards newer versions need).
+        # Pinned-Dependencies). Pinned exactly. Renovate tracks tests/e2e/package.json (npm
+        # manager) and bumps it per the shared Renovate config; this e2e check is not a
+        # required check, so re-verify a bump on CI, not just locally (see
+        # tests/e2e/package.json for the version history and the driver-side guards).
         # Put node_modules/.bin on PATH so `agent-browser` resolves for later steps
         # and scripts/e2e.sh without a global install.
         working-directory: tests/e2e
