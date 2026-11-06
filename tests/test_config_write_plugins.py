@@ -2037,10 +2037,37 @@ def test_annotate_marks_only_installs_at_this_scope_and_project(tmp_path: Path) 
     assert at_project["x@m"]["projectName"] is None  # outside projects_root
     assert "projectName" not in at_project["u@m"]
     assert at_project["u@m"]["scope"] == "user"  # the CLI's own field is kept
+    in_project = {k for k, e in at_project.items() if e.get("inProject")}
+    assert in_project == {"p@m", "l@m"}  # this project's installs, whatever their scope
+    assert at_project["o@m"]["inProject"] is False
+    assert "inProject" not in at_project["u@m"]
     at_local = plugins.annotate_plugin_scopes(entries, "local", alpha, root)
     assert {e["id"] for e in at_local if e["atScope"]} == {"l@m"}
     at_user = plugins.annotate_plugin_scopes(entries, "user", None, root)
     assert {e["id"] for e in at_user if e["atScope"]} == {"u@m"}
+    assert not any(e.get("inProject") for e in at_user)  # user scope has no project
+
+
+def test_annotate_a_symlink_alias_project_is_the_same_project(tmp_path: Path) -> None:
+    # Greptile, PR 1838: `resolve_project_dir` accepts an in-root alias -> real, and
+    # discovery lists the alias as its own project. The CLI records the REAL path, so a
+    # name compare in the browser ("real" != "alias") hid this project's own actions.
+    real = tmp_path / "real"
+    real.mkdir()
+    try:
+        (tmp_path / "alias").symlink_to(real, target_is_directory=True)
+    except OSError:
+        pytest.skip("this host cannot create symlinks")
+    project_dir = cw.resolve_project_dir(tmp_path, "alias")
+    entries = [_entry("p@m", "project", real), _entry("l@m", "local", real)]
+    for selected in (project_dir, tmp_path / "alias"):  # resolved, and as typed
+        out = {
+            e["id"]: e
+            for e in plugins.annotate_plugin_scopes(entries, "local", selected, tmp_path)
+        }
+        assert out["p@m"]["inProject"] is True
+        assert out["l@m"]["atScope"] is True
+        assert out["p@m"]["projectName"] == "real"  # the display name stays the real one
 
 
 def test_annotate_never_matches_a_missing_or_odd_project_path(tmp_path: Path) -> None:
@@ -2052,8 +2079,26 @@ def test_annotate_never_matches_a_missing_or_odd_project_path(tmp_path: Path) ->
     ]
     out = plugins.annotate_plugin_scopes(entries, "project", tmp_path, tmp_path)
     assert [e["atScope"] for e in out[:3]] == [False, False, False]
+    assert [e["inProject"] for e in out[:3]] == [False, False, False]
     assert all(e["projectName"] is None for e in out[:3])
     assert out[3] == "not-a-dict"
+
+
+def test_route_plugins_list_marks_an_alias_project_install_in_project(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    alias = projects_root / "alpha-link"
+    try:
+        alias.symlink_to(projects_root / "alpha", target_is_directory=True)
+    except OSError:
+        pytest.skip("this host cannot create symlinks")
+    payload = [_entry("p@m", "project", (projects_root / "alpha").resolve())]
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_STDOUT", json.dumps(payload))
+    with _client(write_config, tmp_path, _ON) as c:
+        rows = c.get("/api/config-write/plugins?scope=local&project=alpha-link").json()
+    row = rows["plugins"][0]
+    assert row["inProject"] is True and row["atScope"] is False
+    assert row["projectName"] == "alpha"
 
 
 def test_route_plugins_list_marks_the_install_scope(
@@ -2200,11 +2245,14 @@ def test_marketplace_plugin_names_reads_each_install_location(tmp_path: Path) ->
         {"source": "nameless"},
     ]
     run, calls = _fake_run(stdout=json.dumps(listing))
-    assert plugins.marketplace_plugin_names("claude", tmp_path, None, run=run) == {
+    # The fake binary, as the sibling tests pass: `_run` resolves it before `run` is called,
+    # so a bare "claude" depends on the host PATH (it failed on the CI musl leg).
+    binary = str(FAKE_CLAUDE)
+    assert plugins.marketplace_plugin_names(binary, tmp_path, None, run=run) == {
         "one": ["a"],
         "two": None,
     }
-    assert plugins.marketplace_plugin_names("claude", tmp_path, "one", run=run) == {"one": ["a"]}
+    assert plugins.marketplace_plugin_names(binary, tmp_path, "one", run=run) == {"one": ["a"]}
     assert calls[0]["argv"][1:] == ["plugin", "marketplace", "list", "--json"]
 
 
@@ -2253,6 +2301,56 @@ def test_read_marketplace_plugin_names_refuses_a_symlink_out_of_the_checkout(
     except OSError:
         pytest.skip("this host cannot create symlinks")
     assert plugins._read_marketplace_plugin_names(str(checkout)) is None
+
+
+def test_read_marketplace_plugin_names_survives_a_symlink_loop(tmp_path: Path) -> None:
+    # Greptile, PR 1838: on Python 3.11/3.12 `resolve()` raises RuntimeError on a loop
+    # (3.13+ returns a path). It escaped the OSError handler and turned an update into a 500.
+    checkout = tmp_path / "checkout"
+    (checkout / ".claude-plugin").mkdir(parents=True)
+    link = checkout / ".claude-plugin" / "marketplace.json"
+    try:
+        link.symlink_to(link)
+    except OSError:
+        pytest.skip("this host cannot create symlinks")
+    assert plugins._read_marketplace_plugin_names(str(checkout)) is None
+
+
+class _LoopingPath(type(Path())):
+    """A Path whose resolve() fails as Python 3.11/3.12 does on a symlink loop."""
+
+    def resolve(self, strict: bool = False):
+        raise RuntimeError(f"Symlink loop from {str(self)!r}")
+
+
+def test_read_marketplace_plugin_names_treats_a_resolve_runtime_error_as_unread(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # The same failure forced on every Python version, so it does not depend on 3.12.
+    checkout = tmp_path / "checkout"
+    _write_marketplace(checkout, ["a"])
+    monkeypatch.setattr(plugins, "Path", _LoopingPath)
+    assert plugins._read_marketplace_plugin_names(str(checkout)) is None
+
+
+def test_route_marketplace_update_loop_after_the_update_is_reported_not_500(
+    write_config, tmp_path, monkeypatch
+) -> None:
+    # The refresh commits, THEN the checkout's marketplace.json resolves into a loop.
+    checkout = tmp_path / "mkt-checkout"
+    _write_marketplace(checkout, ["a"])
+    listing = [{"name": "m", "source": "directory", "installLocation": str(checkout)}]
+    monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_MARKETPLACE_LIST_STDOUT", json.dumps(listing))
+    real_update = plugins.cli_marketplace_update
+
+    def update_then_loop(binary, cwd, name, **kwargs):
+        real_update(binary, cwd, name, **kwargs)
+        monkeypatch.setattr(plugins, "Path", _LoopingPath)
+
+    monkeypatch.setattr(plugins, "cli_marketplace_update", update_then_loop)
+    with _client(write_config, tmp_path, _ON) as c:
+        body = _update_marketplace(c)
+    assert "could not read its plugin list" in body["message"]
 
 
 def test_describe_marketplace_update_never_guesses_an_unread_list() -> None:
@@ -2393,6 +2491,49 @@ def test_route_plugin_update_failed_read_after_is_reported_not_400(
         return [_entry("d@m", "user")]
 
     monkeypatch.setattr(plugins, "cli_list_plugins", flaky)
+    with _client(write_config, tmp_path, _ON) as c:
+        body = _update_plugin(c)
+    assert "could not read the installed version afterwards" in body["message"]
+
+
+#: Nesting that `json.loads` parses on 3.12+ but the recursive redaction walk cannot. 3.11
+#: already refuses it at parse time (past about 491 levels), so there these tests only show
+#: the parse guard; both paths must end as PluginCliError.
+_DEEP = "[" * 1500 + "]" * 1500
+
+
+@pytest.mark.parametrize(
+    ("reader", "stdout"),
+    [
+        (
+            "cli_list_plugins",
+            f'[{{"id": "d@m", "mcpServers": {{"s": {{"args": 1, "x": {_DEEP}}}}}}}]',
+        ),
+        ("cli_list_marketplaces", f'[{{"name": "m", "x": {_DEEP}}}]'),
+    ],
+)
+def test_list_readers_turn_too_deep_output_into_plugin_cli_error(
+    tmp_path: Path, reader: str, stdout: str
+) -> None:
+    run, _calls = _fake_run(stdout=stdout)
+    with pytest.raises(plugins.PluginCliError):
+        getattr(plugins, reader)(str(FAKE_CLAUDE), tmp_path, run=run)
+
+
+def test_route_plugin_update_too_deep_read_after_is_reported_not_500(
+    write_config, tmp_path, monkeypatch
+) -> None:
+    # PR 1838 review: the redaction walk raised RecursionError past the parse, so the read
+    # after a committed update returned a 500.
+    real_list = plugins.cli_list_plugins
+    deep_run, _calls = _fake_run(stdout=f'[{{"id": "d@m", "scope": "user", "x": {_DEEP}}}]')
+    reads = iter(
+        [
+            lambda b, cwd: [_entry("d@m", "user")],
+            lambda b, cwd: real_list(b, cwd, run=deep_run),
+        ]
+    )
+    monkeypatch.setattr(plugins, "cli_list_plugins", lambda b, cwd, **_k: next(reads)(b, cwd))
     with _client(write_config, tmp_path, _ON) as c:
         body = _update_plugin(c)
     assert "could not read the installed version afterwards" in body["message"]

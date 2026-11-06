@@ -581,7 +581,13 @@ def cli_list_plugins(
         raise PluginCliError(f"claude plugin list returned invalid JSON: {exc}") from exc
     if not isinstance(data, list):
         raise PluginCliError("claude plugin list returned a non-list JSON value")
-    return [_redact_plugin_entry(entry) for entry in data]
+    try:
+        return [_redact_plugin_entry(entry) for entry in data]
+    except RecursionError as exc:
+        # `json.loads` parses nesting well past the depth the recursive redaction walk can
+        # take (1500 levels parse on 3.12+). Uncaught, a committed `plugin update`
+        # whose read after the update hit it returned a 500 (PR 1838 review).
+        raise PluginCliError("claude plugin list returned output nested too deeply") from exc
 
 
 def cli_plugin_details(
@@ -673,7 +679,13 @@ def cli_list_marketplaces(
     the result. The result is redacted (:func:`redact_plugin_display`): a ``git`` or
     ``url`` entry's ``url`` can embed credentials.
     """
-    return redact_plugin_display(_list_marketplaces_raw(binary, cwd, run=run))
+    data = _list_marketplaces_raw(binary, cwd, run=run)
+    try:
+        return redact_plugin_display(data)
+    except RecursionError as exc:  # the same parse-deeper-than-the-walk gap as plugin list
+        raise PluginCliError(
+            "claude plugin marketplace list returned output nested too deeply"
+        ) from exc
 
 
 def _list_marketplaces_raw(binary: str, cwd: Path, *, run: RunFn) -> list[Any]:
@@ -749,12 +761,16 @@ def _project_name(raw: Any, projects_root: Path) -> str | None:
 def annotate_plugin_scopes(
     entries: list[Any], scope: str, project_dir: Path | None, projects_root: Path
 ) -> list[Any]:
-    """Return copies of ``entries`` with ``atScope`` and, where it applies, ``projectName``.
+    """Return copies of ``entries`` with ``atScope`` and, where they apply, project fields.
 
     ``atScope`` is :func:`installed_at` for the scope (and project) the tab is viewing.
-    ``projectName`` is set on a ``project`` or ``local`` entry whose ``projectPath`` lies
-    under ``projects_root``, so the tab can link to that project's scope; ``None`` when it
-    lies elsewhere. The entry's own fields, ``scope`` included, are kept as the CLI gave them.
+    A ``project`` or ``local`` entry also gets ``inProject``: whether its ``projectPath`` is
+    ``project_dir`` (resolved, so a project name that is a symlink alias of another one
+    still matches; always ``False`` at user scope). The tab decides "same project" from
+    this, never by comparing names. It also gets ``projectName``, the posix path under
+    ``projects_root`` (``None`` when it lies elsewhere), so the tab can link to that
+    project's scope. The entry's own fields, ``scope`` included, are kept as the CLI gave
+    them.
     """
     out: list[Any] = []
     for entry in entries:
@@ -764,6 +780,9 @@ def annotate_plugin_scopes(
         annotated = dict(entry)
         annotated["atScope"] = installed_at(entry, scope, project_dir)
         if entry.get("scope") in ("project", "local"):
+            annotated["inProject"] = project_dir is not None and _same_dir(
+                entry.get("projectPath"), project_dir
+            )
             annotated["projectName"] = _project_name(entry.get("projectPath"), projects_root)
         out.append(annotated)
     return out
@@ -870,7 +889,9 @@ def _read_marketplace_plugin_names(location: Any) -> list[str] | None:
             return None
         with path.open("rb") as fh:
             raw = fh.read(MARKETPLACE_FILE_MAX_BYTES + 1)
-    except OSError:
+    except (OSError, RuntimeError):
+        # RuntimeError: Python 3.11/3.12 `resolve()` raises it on a symlink loop (3.13
+        # does not). Uncaught it would turn a committed update into a 500.
         return None
     if len(raw) > MARKETPLACE_FILE_MAX_BYTES:
         return None

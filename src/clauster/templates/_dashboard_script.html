@@ -4364,8 +4364,11 @@
       },
       // --- install scope of each listed plugin (TASK-523) ---
       // `plugin list --json` lists installs at every scope, other projects' too. The
-      // server marks `atScope` (this scope and project) and `projectName` (a project or
-      // local install's project under projects_root). Update/Uninstall need `atScope`.
+      // server marks `atScope` (this scope and project), `inProject` (a project or local
+      // install of the selected project, by resolved path, so a symlink alias matches) and
+      // `projectName` (that install's project under projects_root, for display and links).
+      // "Same project" is always `inProject`, never a name compare. Update/Uninstall need
+      // `atScope`.
       // Enable/Disable also work from a scope that outranks the install's (claude 2.1.319):
       // a User-scope plugin from Project or Local, and a Project-scope plugin from Local in
       // the same project. The CLI writes that scope's override. It refuses the reverse.
@@ -4386,7 +4389,7 @@
       configMgmtPluginCanToggle(p) {
         const c = this.configMgmt;
         if (p.atScope === true || p.scope === "user") return true;
-        return p.scope === "project" && c.scope === "local" && !!p.projectName && p.projectName === c.project;
+        return p.scope === "project" && c.scope === "local" && p.inProject === true;
       },
       configMgmtPluginElsewhereNote(p) {
         const word = this._configMgmtScopeWord(p.scope);
@@ -4398,8 +4401,8 @@
             : "Update and Uninstall work at User scope, which this Clauster does not edit (config_write.allow_user_scope).";
           return "Installed at User scope. Enable and Disable here write the override for the scope you are viewing. " + there;
         }
-        if (!p.projectName) return "Installed at " + word + " scope for a folder outside the projects root.";
-        if (p.projectName !== this.configMgmt.project) {
+        if (p.inProject !== true) {
+          if (!p.projectName) return "Installed at " + word + " scope for a folder outside the projects root.";
           return "Installed at " + word + " scope in " + p.projectName + ".";
         }
         if (this.configMgmtPluginCanToggle(p)) {
@@ -4412,18 +4415,19 @@
         if (p.atScope) return "";
         if (p.scope === "user") return {{ config_write_allow_user_scope | tojson }} ? "Switch to User scope" : "";
         if (p.scope !== "project" && p.scope !== "local") return "";
-        if (!p.projectName || !this.projectNames.includes(p.projectName)) return "";
         const word = this._configMgmtScopeWord(p.scope);
-        return p.projectName === this.configMgmt.project
-          ? "Switch to " + word + " scope"
-          : "Open " + p.projectName + " at " + word + " scope";
+        if (p.inProject === true) return "Switch to " + word + " scope";  // same directory
+        if (!p.projectName || !this.projectNames.includes(p.projectName)) return "";
+        return "Open " + p.projectName + " at " + word + " scope";
       },
       // The reload hides the whole view (and so the clicked link), which would drop focus
       // to <body>: move it to the scope confirm, the next thing the operator types.
       async configMgmtOpenPluginScope(p) {
         const c = this.configMgmt;
         if (!this.configMgmtPluginScopeLink(p)) return;
-        if (p.scope !== "user" && p.projectName !== c.project) {
+        // Another project's install: select its project. The selected one (also through a
+        // symlink alias) keeps the project the operator chose.
+        if (p.scope !== "user" && p.inProject !== true) {
           c.project = p.projectName;
         }
         if (c.scope === p.scope) {

@@ -2365,7 +2365,10 @@ def test_config_mgmt_plugins_rows_follow_the_install_scope(
     _expect_focused(browser, "cm-plugin-confirm")
     assert browser.get_count(f'[data-test="cm-plugin-update-{hello}"]') == 0
     assert browser.get_count(f'[data-test="cm-plugin-disable-{hello}"]') == 0
-    browser.expect_text(f'[data-test="cm-plugin-switch-scope-{hello}"]', "Switch to Project scope")
+    # User scope has no selected project, so the link names the install's project.
+    browser.expect_text(
+        f'[data-test="cm-plugin-switch-scope-{hello}"]', "Open alpha at Project scope"
+    )
     # Update at the plugin's own scope reports the result, not a bare "Saved.".
     browser.fill('[data-test="cm-plugin-confirm"]', "USER SCOPE")
     browser.click(f'[data-test="cm-plugin-update-{shared}"]')
@@ -2389,6 +2392,43 @@ def test_config_mgmt_plugins_rows_follow_the_install_scope(
     browser.expect_visible(f'[data-test="cm-plugin-disable-{shared}"]')
     assert browser.get_count(f'[data-test="cm-plugin-update-{hello}"]') == 0
     assert browser.get_count(f'[data-test="cm-plugin-uninstall-{hello}"]') == 0
+
+    # Another project's install is read-only here, and its link selects that project.
+    other = "other@market"
+    browser.expect_text(f'[data-test="cm-plugin-readonly-{other}"]', "in beta")
+    assert browser.get_count(f'[data-test="cm-plugin-disable-{other}"]') == 0
+    assert browser.get_count(f'[data-test="cm-plugin-enable-{other}"]') == 0
+    browser.expect_text(
+        f'[data-test="cm-plugin-switch-scope-{other}"]', "Open beta at Project scope"
+    )
+    browser.click(f'[data-test="cm-plugin-switch-scope-{other}"]')
+    browser.expect_attr('[data-test="cm-scope-project"]', "aria-pressed", "true")
+    browser.expect_value('[data-test="cm-project"]', "beta")
+    browser.expect_visible(f'[data-test="cm-plugin-update-{other}"]')
+
+
+def test_config_mgmt_plugins_symlink_alias_is_the_same_project(
+    browser: AgentBrowser, config_mgmt_plugins_alias_server: Server
+) -> None:
+    """A project selected through a symlink alias keeps its own plugin actions.
+
+    Greptile, PR 1838: ``alpha-link`` resolves to ``alpha``, where the CLI records the
+    install. A name compare ("alpha" vs "alpha-link") hid Disable at Local scope and sent
+    the link to "another" project. The server's ``inProject`` decides it instead.
+    """
+    hello = "hello@market"
+    _open_modal(browser, config_mgmt_plugins_alias_server)
+    browser.select('[data-test="cm-project"]', "alpha-link")
+    browser.click('[data-test="cm-surface-plugins"]')
+    browser.expect_visible(f'[data-test="cm-plugin-update-{hello}"]')  # atScope, by path
+    browser.click('[data-test="cm-scope-local"]')
+    browser.expect_attr('[data-test="cm-scope-local"]', "aria-pressed", "true")
+    browser.expect_text(f'[data-test="cm-plugin-readonly-{hello}"]', "Local override")
+    browser.expect_visible(f'[data-test="cm-plugin-disable-{hello}"]')
+    browser.expect_text(f'[data-test="cm-plugin-switch-scope-{hello}"]', "Switch to Project scope")
+    browser.click(f'[data-test="cm-plugin-switch-scope-{hello}"]')
+    browser.expect_attr('[data-test="cm-scope-project"]', "aria-pressed", "true")
+    browser.expect_value('[data-test="cm-project"]', "alpha-link")  # the chosen project stays
 
 
 def test_config_mgmt_mcp_approvals_round_trip(

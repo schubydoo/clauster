@@ -456,10 +456,35 @@ def config_mgmt_plugins_server(
     exit 0 by default, so a round-trip through the wired POST → reload succeeds.
 
     The plugin list carries what claude 2.1.319 prints (TASK-523): ``hello@market``
-    installed at Project scope in ``alpha``, and ``shared@market`` at User scope.
+    installed at Project scope in ``alpha``, ``shared@market`` at User scope, and
+    ``other@market`` at Project scope in ``beta``.
     """
     tmp = tmp_path_factory.mktemp("e2e-configmgmt-plugins")
-    alpha = mutable_projects_tree / "alpha"
+    yield from _start_plugins_server(tmp, mutable_projects_tree)
+
+
+@pytest.fixture
+def config_mgmt_plugins_alias_server(
+    tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
+) -> Iterator[Server]:
+    """The plugins server, plus a project ``alpha-link`` that is a symlink to ``alpha``.
+
+    Discovery lists the alias as its own project and ``resolve_project_dir`` resolves it to
+    ``alpha``, where the CLI records its installs (Greptile, PR 1838).
+    """
+    try:
+        (mutable_projects_tree / "alpha-link").symlink_to(
+            mutable_projects_tree / "alpha", target_is_directory=True
+        )
+    except OSError:
+        pytest.skip("this host cannot create symlinks")
+    tmp = tmp_path_factory.mktemp("e2e-configmgmt-plugins-alias")
+    yield from _start_plugins_server(tmp, mutable_projects_tree)
+
+
+def _start_plugins_server(tmp: Path, mutable_projects_tree: Path) -> Iterator[Server]:
+    """Start the server both plugins fixtures share (see :func:`config_mgmt_plugins_server`)."""
+    alpha = (mutable_projects_tree / "alpha").resolve()  # the CLI records the real path
     plugin_list = [
         {
             "id": "hello@market",
@@ -469,6 +494,13 @@ def config_mgmt_plugins_server(
             "projectPath": str(alpha),
         },
         {"id": "shared@market", "version": "2.0.0", "scope": "user", "enabled": True},
+        {  # another project's install: the CLI lists it from every project's cwd
+            "id": "other@market",
+            "version": "3.0.0",
+            "scope": "project",
+            "enabled": False,
+            "projectPath": str((mutable_projects_tree / "beta").resolve()),
+        },
     ]
     yield from _start_server(
         tmp,
