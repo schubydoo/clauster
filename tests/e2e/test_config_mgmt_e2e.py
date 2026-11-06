@@ -2006,7 +2006,12 @@ def test_config_mgmt_hooks_rows_fit_the_modal(
     # their longest option and the matcher keeps its floor. goto() set the viewport, so
     # resize after the page is open (the session closes after the test).
     browser.set_viewport(375, 1000)
-    time.sleep(0.3)  # the resize relayout lands on the next frame
+    # Prove the phone layout is the one measured: the page is 375 px and the wrapper scrolls.
+    phone = browser.eval_json(
+        '(() => { const v = document.querySelector(\'[data-test="cm-hooks-rows"]'
+        " .table-responsive'); return [window.innerWidth, v.scrollWidth, v.clientWidth]; })()"
+    )
+    assert phone[0] == 375 and phone[1] > phone[2], phone
     for name, need, have in browser.eval_json(_HOOK_SELECT_WIDTHS):
         assert need <= have, ("phone", name, need, have)
     matcher = browser.eval_json(
