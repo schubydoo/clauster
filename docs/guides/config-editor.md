@@ -358,23 +358,34 @@ file is one row, and the editor follows the JSON type of the value:
 - A Boolean is a switch.
 - A number is a number box. A save sends a number, and an empty box blocks the
   save.
-- A string is a list of values when the settings reference gives the key a set
-  of preset values, for example `tui` or `theme`. Clauster sends that set when the
-  tab loads. Any other string is a text box, and a value outside the set is text
-  too. To set a value that the list does not hold, such as a custom theme or a
-  `timeFormat` pattern, use Raw JSON.
-- An object, a list or `null` is a read-only row. Use **Edit in Raw JSON** to
-  change it. A save writes it back unchanged.
+- A string is a text box. When the
+  [settings reference](https://code.claude.com/docs/en/settings-reference) names
+  values for the key, for example `tui` or `theme`, the box suggests them. Clear
+  the box to see all the suggestions. You can type any value, and it saves as you
+  typed it. A value that is not one of the known values shows a warning on its
+  row and in a note at the top of the tab. The save is not refused. The known
+  values also cover a custom theme (`custom:<slug>`) and a `timeFormat` pattern
+  that holds a `%`.
+- An object, a list or `null` shows its value, its type and an **Edit in Raw
+  JSON** button. A save writes it back unchanged.
 - `env` has its own table of variables below the rows.
+
+The known values are suggestions only. Clauster copies them by hand from the
+settings reference (read on 2026-11-05) and does not check them against the
+installed `claude`. They can lag behind Claude Code: a value that a newer Claude
+Code reads can show the warning, and a misspelled value saves too. The warning is
+the only check that Clauster makes on these values.
 
 Each value saves with the JSON type that it had when it loaded, unless you change
 it. For example, the string `"1"` stays a string. To add a key, type its name in
-**Add a key**, or pick one of the suggestions. The suggestions are the documented
-keys of one value (a switch, a number, a choice or text) that Claude Code reads at
-the current scope. A documented key gets its editor, and a new switch starts off.
-A documented key that holds an object or a list is added in Raw JSON, and the tab
-says so. Any other name gets a text box, and Clauster sends it as you typed it. If
-you type a key that another tab edits, the tab names that tab and links to it.
+**Add a key**, or pick one of the suggestions, then pick the type of the value:
+text, true/false or number. The key suggestions are the documented keys of one
+value that Claude Code reads at the current scope. When you type a documented
+key, the tab selects its type for you, and you can change it. A new switch starts
+off, and a new number box starts empty. A documented key that holds an object or
+a list is added in Raw JSON, and the tab says so. Clauster sends any other name as
+you typed it. If you type a key that another tab edits, the tab names that tab
+and links to it.
 The browser does not decide whether Claude Code reads a key at a scope. The server
 checks every key when you save, and the error gives its reason. Raw JSON shows
 the same keys as JSON. A switch between the two modes keeps every value. While a

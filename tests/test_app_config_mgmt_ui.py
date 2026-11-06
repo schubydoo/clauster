@@ -219,13 +219,16 @@ def test_settings_typed_rows_are_wired(write_config):
         "cm-settings-key-row",
         "cm-settings-bool",
         "cm-settings-number",
-        "cm-settings-enum",
         "cm-settings-string",
+        "cm-settings-suggestions",
+        "cm-settings-value-warning",
+        "cm-settings-offlist",
         "cm-settings-readonly",
         "cm-settings-edit-raw",
         "cm-settings-owned",
         "cm-settings-owner-link",
         "cm-settings-add-key",
+        "cm-settings-add-type",
         "cm-settings-add-key-btn",
         "cm-settings-key-remove",
         "cm-settings-number-error",
@@ -233,8 +236,23 @@ def test_settings_typed_rows_are_wired(write_config):
         assert f'data-test="{hook}"' in html, hook
     assert "s.keyTypes = isMap(d.key_types)" in html
     assert "s.ownedKeys = isMap(d.owned_keys)" in html
-    # No copy of the server's value sets in the page: a select value comes from the payload.
+    # No copy of the server's value sets in the page: a suggestion comes from the payload.
     assert '"fullscreen"' not in html
+    # TASK-511: no Settings row is a select, so no value can be hidden or blocked by one.
+    assert 'data-test="cm-settings-enum"' not in html
+    assert 'row.kind === "enum"' not in html and "row.kind === 'enum'" not in html
+
+
+def test_settings_row_wording(write_config):
+    # TASK-510: the heading and the notes say what the row is and where to edit it; no
+    # note calls a value read-only next to the button that opens its editor.
+    html = _html(write_config, _ON)
+    assert "Other settings in settings.json" in html
+    assert "the keys no other tab edits" not in html
+    assert "read-only here." not in html
+    assert '"An object."' in html and '"A list."' in html and '"A null value."' in html
+    assert "variables. Edit them in the env table below." in html
+    assert "Objects and lists are read-only here" not in html
 
 
 def test_settings_owned_key_tabs_are_surface_labels(write_config):
