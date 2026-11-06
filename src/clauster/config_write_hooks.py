@@ -465,8 +465,27 @@ def _token_like(segment: str) -> bool:
     return len(alnum) >= 8 and any(c.isalpha() for c in alnum) and any(c.isdigit() for c in alnum)
 
 
-#: A URL host with an optional all-digit port: a bracketed IPv6 literal or a name.
-_HOST_PORT_RE = re.compile(r"(\[[^\]]*\]|[^:\[\]]*)(:\d*)?")
+def _is_host_port(host: str) -> bool:
+    """Whether ``host`` is a URL host with an optional all-digit port.
+
+    The host is a bracketed IPv6 literal (``[`` up to the first ``]``) or a name with no
+    ``:``, ``[`` or ``]``; an optional ``:`` and decimal digits follow. Plain string scans,
+    linear in the length, replace a regular expression that CodeQL flagged as polynomial
+    (code-scanning alert 184). The accepted set is unchanged; the oracle test in
+    ``tests/test_config_write_hooks_host_port.py`` compares the two.
+    """
+    if host.startswith("["):
+        close = host.find("]")
+        if close == -1:
+            return False
+        port = host[close + 1 :]
+    else:
+        colon = host.find(":")
+        end = len(host) if colon == -1 else colon
+        if "[" in host[:end] or "]" in host[:end]:
+            return False
+        port = host[end:]
+    return not port or (port[0] == ":" and all(c.isdecimal() for c in port[1:]))
 
 
 def _url_view(url: str) -> tuple[str, list[str]]:
@@ -503,7 +522,7 @@ def _url_view(url: str) -> tuple[str, list[str]]:
             end = min(end, i)
     authority, rest = rest[:end], rest[end:]
     host = authority.rsplit("@", 1)[-1]
-    if not _HOST_PORT_RE.fullmatch(host) or urlsplit(url).netloc != authority:
+    if not _is_host_port(host) or urlsplit(url).netloc != authority:
         # The authority did not end where some URL parser ends it: in
         # `https://user:pw\\@evil/x` this text split (and WHATWG) reads `user:pw` as
         # host:port, but urlsplit reads userinfo up to the last `@`, and an all-digit
