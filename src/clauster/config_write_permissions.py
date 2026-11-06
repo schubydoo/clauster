@@ -185,7 +185,7 @@ def validate_permissions(candidate: Any) -> None:
         # The likeliest mistake (TASK-449.1): autoMode pasted inside permissions.
         raise cw.InvalidCandidateError(
             "autoMode is a top-level settings key, not part of permissions; "
-            "put it in the auto mode rules box instead"
+            "put it in the auto mode rules section instead"
         )
     unknown = set(candidate) - _PERMISSION_KEYS
     if unknown:

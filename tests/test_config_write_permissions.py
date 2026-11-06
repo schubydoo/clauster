@@ -1156,6 +1156,64 @@ def test_route_project_and_local_refuse_maintainer_auto_mode(
     assert not (projects_root / "alpha" / ".claude" / filename).exists()  # nothing written
 
 
+@pytest.mark.parametrize(
+    ("scope", "confirm", "filename"),
+    [
+        ("project", "alpha", "settings.json"),
+        ("local", "alpha (local)", "settings.local.json"),
+    ],
+)
+def test_route_project_and_local_remove_stored_auto_mode(
+    write_config, tmp_path, projects_root, scope: str, confirm: str, filename: str
+) -> None:
+    """TASK-509: the tab's Remove sends ``autoMode: {}`` with the permissions as loaded.
+
+    Only the autoMode key goes; every other key, and the permissions block, stay. The
+    read the tab shows read-only is masked, and a non-empty block is still refused.
+    """
+    path = projects_root / "alpha" / ".claude" / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    masked_entry = "Source control: https://ci:hunter2@git.example.com/acme"
+    seeded = {
+        "model": "opus",
+        "permissions": {"deny": [], "allow": ["Bash(ls:*)"]},
+        "autoMode": {"allow": ["$defaults", masked_entry]},
+        "env": {"A": "1"},
+    }
+    path.write_bytes(json.dumps(seeded).encode("utf-8"))
+    with _client(write_config, tmp_path, _ON) as c:
+        read0 = c.get(f"{_URL}?scope={scope}&project=alpha").json()
+        assert read0["autoMode"] == {"allow": ["$defaults", cw.REDACTION_SENTINEL]}
+        assert "hunter2" not in json.dumps(read0)
+        target = {"scope": scope, "project": "alpha", "confirm": confirm}
+        # Defense in depth: resending the stored (masked) block is still refused.
+        refused = c.put(
+            _URL,
+            json={
+                **target,
+                "hash": read0["hash"],
+                "permissions": read0["permissions"],
+                "autoMode": read0["autoMode"],
+            },
+        )
+        assert refused.status_code == 422
+        assert "User scope" in refused.json()["detail"]
+        removed = c.put(
+            _URL,
+            json={
+                **target,
+                "hash": read0["hash"],
+                "permissions": read0["permissions"],
+                "autoMode": {},
+            },
+        )
+        assert removed.status_code == 200, removed.text
+        assert c.get(f"{_URL}?scope={scope}&project=alpha").json()["autoMode"] is None
+    stored = json.loads(path.read_bytes())
+    assert stored == {k: v for k, v in seeded.items() if k != "autoMode"}
+    assert list(stored["permissions"]) == ["deny", "allow"]  # sent as loaded, not rebuilt
+
+
 @pytest.mark.parametrize("scope", ["project", "local"])
 def test_project_and_local_refuse_default_mode_auto(tmp_path: Path, scope: str) -> None:
     writer = (

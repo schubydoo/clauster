@@ -344,6 +344,15 @@ def config_mgmt_server(
     )
 
 
+@pytest.fixture
+def config_mgmt_project_only_server(
+    tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
+) -> Iterator[Server]:
+    """Like ``config_mgmt_server`` but with ``allow_user_scope`` off (no User scope)."""
+    tmp = tmp_path_factory.mktemp("e2e-configmgmt-project-only")
+    yield from _start_server(tmp, mutable_projects_tree, extra="config_write:\n  enabled: true\n")
+
+
 class SetupServer(NamedTuple):
     """A running first-run setup wizard under test (#978).
 

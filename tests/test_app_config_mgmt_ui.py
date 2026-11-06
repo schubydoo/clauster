@@ -103,13 +103,22 @@ def test_permissions_rows_editor_present_when_enabled(write_config):
 
 
 def test_permissions_new_keys_and_auto_mode_box_present(write_config):
-    # TASK-449.3: the switches; TASK-449.1: the autoMode box and its scope note.
+    # TASK-449.3: the switches; TASK-449.1: the autoMode box (User scope only, TASK-509).
     html = _html(write_config, _ON_USER)
     assert 'data-test="cm-perm-flags"' in html
     assert "'cm-perm-flag-' + flag.key" in html
     assert 'data-test="cm-automode-text"' in html
-    assert 'data-test="cm-automode-scope-warning"' in html
+    assert 'x-show="configMgmt.scope === \'user\'" x-cloak data-test="cm-automode-edit"' in html
+    # TASK-509: Project/Local get a note + switch button, or the stored block read-only.
+    assert 'x-show="configMgmt.scope !== \'user\'" x-cloak data-test="cm-automode-repo"' in html
+    assert 'data-test="cm-automode-switch-user"' in html
+    assert 'data-test="cm-automode-host-hint"' not in html
+    assert 'data-test="cm-automode-readonly"' in html
+    assert 'x-text="configMgmt.permissions.autoModeOrig"' in html
+    assert '@click="configMgmtRemoveAutoMode()">Remove it</button>' in html
     assert "Switch to User scope to save auto mode rules." in html
+    # A Project/Local save sends autoMode only for a Remove, never other text.
+    assert 'if (c.scope !== "user") return this.configMgmtAutoModeRemoving();' in html
     # The additionalDirectories bucket and the four switches are in the Alpine state.
     assert 'key: "additionalDirectories"' in html
     for key in (
@@ -120,14 +129,11 @@ def test_permissions_new_keys_and_auto_mode_box_present(write_config):
     ):
         assert f'key: "{key}"' in html
     assert "body.autoMode = am" in html
-    # The scope note is described to screen readers only where it shows.
-    assert (
-        ":aria-describedby=\"configMgmt.scope !== 'user' ? "
-        "'cm-automode-scope-warning cm-automode-hint' : 'cm-automode-hint'\""
-    ) in html
+    assert 'aria-describedby="cm-automode-hint"' in html
+    assert 'aria-describedby="cm-automode-ignored"' in html
     assert 'aria-describedby="cm-perm-flags-hint"' in html
     # ...and each reference has its target, so none dangles.
-    for target in ("cm-perm-flags-hint", "cm-automode-hint", "cm-automode-scope-warning"):
+    for target in ("cm-perm-flags-hint", "cm-automode-hint", "cm-automode-ignored"):
         assert f'id="{target}"' in html
     # A failed load clears the text/orig/hash too, so an emptied row set cannot save over
     # the file with the previous target's hash (the catch path keeps them otherwise).
@@ -138,6 +144,8 @@ def test_auto_mode_note_without_user_scope_points_at_the_host_file(write_config)
     # With allow_user_scope off there is no User button, so the note must not offer one.
     html = _html(write_config, _ON)
     assert "Switch to User scope to save auto mode rules." not in html
+    assert 'data-test="cm-automode-switch-user"' not in html
+    assert 'data-test="cm-automode-host-hint"' in html
     assert "editing is off in this Clauster configuration" in html
 
 

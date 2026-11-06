@@ -486,9 +486,9 @@ starts with **No forced mode** (`inherit`). For this reason, a project offers
 `inherit` only when it sets `allow_bypass_permissions: true`. See the
 [bypassPermissions footgun gate](../security.md#bypasspermissions-footgun-gate).
 
-The box under the rows edits `autoMode`, the rules for the auto mode classifier.
-`autoMode` is a top-level key next to `permissions`, so the Settings tab does
-not show it. The box takes a JSON object with the lists `environment`, `allow`,
+At User scope, the box under the rows edits `autoMode`, the rules for the auto
+mode classifier. `autoMode` is a top-level key next to `permissions`, so the
+Settings tab does not show it. The box takes a JSON object with the lists `environment`, `allow`,
 `soft_deny` and `hard_deny`, and the Boolean `classifyAllShell`. Put the entry
 `"$defaults"` in a list to keep the built-in rules at that position. A list
 without it replaces the built-in rules for that section. A `soft_deny` or
@@ -500,12 +500,21 @@ the block for force push and the data-exfiltration rule. Run
 Claude Code reads `autoMode` from User settings, managed settings and the
 `--settings` flag, and it reads `defaultMode: "auto"` from User and managed
 settings. It ignores both in a project or local settings file, so that a
-repository cannot add its own classifier rules. Clauster therefore refuses a
-save of either one at Project or Local scope, and the error names User scope.
-If `config_write.allow_user_scope` is off, the tab has no User scope, so edit
-`~/.claude/settings.json` on the host instead. A Project or Local save with an
-empty box is accepted, and it removes an `autoMode` block that is already in
-that file.
+repository cannot add its own classifier rules. For this reason, the tab has no
+`autoMode` box at Project or Local scope:
+
+- If the file has no `autoMode` block, the tab says that Claude Code reads
+  `autoMode` only from User scope, and a **Switch to User scope** button opens
+  the box there. If `config_write.allow_user_scope` is off, the tab has no User
+  scope, so it tells you to edit `~/.claude/settings.json` on the host instead.
+- If the file has an `autoMode` block, the tab shows it read-only, masked as
+  below, and marked as ignored by Claude Code. **Remove it** marks the block for
+  removal (**Keep it** undoes that). Type the scope name and press **Save** to
+  remove the `autoMode` key from the file. The save leaves every other key in
+  the file as it is.
+
+A save at Project or Local scope that sends a non-empty `autoMode` or
+`defaultMode: "auto"` is refused, and the error names User scope.
 
 If the text of an `autoMode` entry holds a secret-shaped value anywhere, the
 entry shows as `********`. A secret-shaped value is a URL with a user name or
