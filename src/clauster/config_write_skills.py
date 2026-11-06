@@ -1754,9 +1754,9 @@ def _url_nodes(root: yaml.Node) -> list[yaml.ScalarNode]:
     return list(found.values())
 
 
-#: Text that may spell a destination URL in a header whose structure this editor cannot
-#: trust to be the CLI's: a ``url`` key, an http(s) or ws(s) scheme (WHATWG needs no ``//``
-#: after it), or a backslash, which can escape either one in a double-quoted scalar.
+#: Text that may spell a destination URL in a header: a ``url`` key, an http(s) or ws(s)
+#: scheme (WHATWG needs no ``//`` after it), or a backslash, which can escape either one in
+#: a double-quoted scalar. A header without any of them holds no ``url`` value.
 _MAY_HOLD_URL_RE = re.compile(r"url|https?:|wss?:|\\", re.IGNORECASE)
 
 
@@ -1792,10 +1792,20 @@ def _mask_header_urls(header: str, *, readable: bool) -> str:
     URL (:data:`_MAY_HOLD_URL_RE`) and either composes only through Claude Code's
     re-quoting retry (the CLI may not need the retry and read it as written) or holds
     syntax YAML 1.2 refuses (the CLI then reads the retry, :func:`_yaml12_may_refuse`). A
-    save refuses all but the retry case, so masking them whole costs a retype at most. The
-    line count never changes.
+    save of ``SKILL.md`` refuses all but the retry case, so masking them whole costs a
+    retype at most. The line count never changes.
+
+    Two checks on the text come first. A header with no text a ``url`` key can be spelled
+    with (:data:`_MAY_HOLD_URL_RE`: ``url`` in any case, or a backslash escape) holds no
+    ``url`` value and is returned as it is. A header longer than :data:`MAX_FILE_BYTES`,
+    which no save can write, is masked whole without being parsed, so a large member on
+    disk costs one pass to show.
     """
     lines = header.splitlines(keepends=True)
+    if _MAY_HOLD_URL_RE.search(header) is None:
+        return header
+    if len(header) > MAX_FILE_BYTES:
+        return "".join(_masked_whole(line) for line in lines)
     try:
         source = cw.cli_frontmatter_text(header)
         root = yaml.compose(source, Loader=yaml.SafeLoader)
@@ -1807,10 +1817,8 @@ def _mask_header_urls(header: str, *, readable: bool) -> str:
         or not composed
         or "---" in header
         or any(char in header for char in "\x85\u2028\u2029")
-        or (
-            _MAY_HOLD_URL_RE.search(header) is not None
-            and (source != header or _yaml12_may_refuse(source, root))
-        )
+        or source != header
+        or _yaml12_may_refuse(source, root)
     ):
         return "".join(_masked_whole(line) for line in lines)
     if root is None:

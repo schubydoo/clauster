@@ -594,3 +594,46 @@ def test_any_member_with_frontmatter_gets_the_url_view(tmp_path: Path) -> None:
     assert sk.read_skill_file(tmp_path, "s", "run.sh")[0] == (
         "curl https://h.example.com/?k=qv-script\n"
     )
+
+
+def test_a_header_with_no_url_text_is_shown_as_stored(tmp_path: Path) -> None:
+    # A Markdown reference that opens with a `---` rule and holds a table matches the CLI
+    # fence, but nothing in it can spell a url key, so no line is masked.
+    member = tmp_path / "skills" / "s" / "ref.md"
+    member.parent.mkdir(parents=True)
+    stored = "---\n# Ref\n| a | b |\n|---|---|\n| 1 | 2 |\n"
+    member.write_bytes(stored.encode("utf-8"))
+    assert sk.read_skill_file(tmp_path, "s", "ref.md")[0] == stored
+
+
+def test_a_header_over_the_file_cap_is_masked_whole_without_parsing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_parse(_header: str) -> str:
+        raise AssertionError("a header over the cap must not be parsed")
+
+    monkeypatch.setattr(cw, "cli_frontmatter_text", no_parse)
+    member = tmp_path / "skills" / "s" / "big.md"
+    member.parent.mkdir(parents=True)
+    lines = "url: https://h.example.com/?k=qv-big\n" * (sk.MAX_FILE_BYTES // 30)
+    member.write_bytes(f"---\n{lines}---\nbody\n".encode())
+    content = sk.read_skill_file(tmp_path, "s", "big.md")[0]
+    assert "qv-big" not in content
+    assert content.splitlines()[1] == MASK
+
+
+@pytest.mark.parametrize("relative", [sk.SKILL_FILENAME, "./SKILL.md"])
+def test_the_edit_read_converts_skill_md_under_its_normalized_name(
+    tmp_path: Path, relative: str
+) -> None:
+    _place(tmp_path, "---\ndescription: d\neffort: banana\n---\nRun it.\n")
+    content, _hash, _exists, note = sk.read_skill_file_for_edit(tmp_path, "s", relative)
+    assert note is not None and "'effort'" in note
+    assert "effort" not in content
+
+
+def test_a_comment_only_header_is_shown_as_stored(tmp_path: Path) -> None:
+    # It composes to nothing, so Claude Code reads no field and no url from it.
+    stored = "---\n# see the url docs\n---\nRun it.\n"
+    _place(tmp_path, stored)
+    assert sk.read_skill_file(tmp_path, "s")[0] == stored
