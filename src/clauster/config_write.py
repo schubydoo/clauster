@@ -642,13 +642,20 @@ def _split_eol(line: str) -> tuple[str, str]:
     return line, ""
 
 
-def restore_masked_lines(incoming: str, stored: str, *, what: str) -> tuple[str, set[int]]:
+def restore_masked_lines(
+    incoming: str, stored: str, *, what: str, view: Callable[[str], str]
+) -> tuple[str, set[int]]:
     """Put the stored text back into each line of ``incoming`` that still holds a mask.
 
-    The write-side twin of :func:`redact_secret_lines`. A line that holds
-    :data:`REDACTION_SENTINEL` keeps a stored line only when the masked view of that stored
-    line is EXACTLY the incoming line. Every unmasked character of the line (a host, a path,
-    the key) must therefore be unchanged, and the text is compared, never parsed. The k-th
+    The write-side twin of the read view ``view``: :func:`redact_secret_lines`, or a view
+    that masks more (the Skills editor also masks a frontmatter ``url``, TASK-525). ``view``
+    must keep the line count of the text it masks. A line that holds
+    :data:`REDACTION_SENTINEL` keeps a stored line only when the view of that stored line
+    (the line of ``view(stored)``) is EXACTLY the incoming line. Every unmasked character of
+    the line (a host, a path, the key) must therefore be unchanged, and the text is
+    compared, never parsed. After the restore, ``view`` of the restored text must show each
+    restored line exactly as it was sent: a kept line that the view would now show in clear
+    (a frontmatter ``url`` moved into the Markdown body) is refused. The k-th
     incoming line with a view takes the k-th stored line with it, so each stored line is
     kept at most once: more masked lines than stored ones are refused, and the restored
     text is never longer than the sent text plus the stored text (no request can multiply
@@ -666,14 +673,22 @@ def restore_masked_lines(incoming: str, stored: str, *, what: str) -> tuple[str,
 
     Linear in the size of both texts: what the loop needs about each group of stored lines
     with one view (does it hold different texts, does the incoming count fit it) is worked
-    out once, before the loop, and the loop keeps one cursor per group.
+    out once, before the loop, and the loop keeps one cursor per group. ``view`` runs twice,
+    once over the stored text and once over the restored text.
     """
+    stored_lines = stored.splitlines(keepends=True)
+    shown_lines = view(stored).splitlines(keepends=True)
+    if len(shown_lines) != len(stored_lines):
+        raise InvalidCandidateError(
+            f"{what} holds the mask {REDACTION_SENTINEL}, but its stored text cannot be "
+            "masked line for line, so no stored value can be kept. Type the real values"
+        )
     by_view: dict[str, list[str]] = {}
-    for line in stored.splitlines(keepends=True):
+    for line, shown_line in zip(stored_lines, shown_lines, strict=True):
         body, _eol = _split_eol(line)
-        view = redact_secret_lines(body)
-        if REDACTION_SENTINEL in view:
-            by_view.setdefault(view, []).append(body)
+        shown, _eol = _split_eol(shown_line)
+        if REDACTION_SENTINEL in shown:
+            by_view.setdefault(shown, []).append(body)
     lines = incoming.splitlines(keepends=True)
     wanted: dict[str, int] = {}
     for line in lines:
@@ -684,9 +699,9 @@ def restore_masked_lines(incoming: str, stored: str, *, what: str) -> tuple[str,
     # one for one with the stored ones (more than stored is refused; a group of different
     # texts needs the same number on both sides).
     fits: dict[str, bool] = {}
-    for view, count in wanted.items():
-        held = by_view.get(view, [])
-        fits[view] = count <= len(held) and (count == len(held) or len(set(held)) == 1)
+    for shown, count in wanted.items():
+        held = by_view.get(shown, [])
+        fits[shown] = count <= len(held) and (count == len(held) or len(set(held)) == 1)
     taken: dict[str, int] = {}
     restored: set[int] = set()
     out: list[str] = []
@@ -712,7 +727,18 @@ def restore_masked_lines(incoming: str, stored: str, *, what: str) -> tuple[str,
         taken[body] = k + 1
         out.append(held[k] + eol)
         restored.add(index)
-    return "".join(out), restored
+    text = "".join(out)
+    again = view(text).splitlines(keepends=True)
+    moved = len(again) != len(lines) or any(
+        _split_eol(again[index])[0] != _split_eol(lines[index])[0] for index in restored
+    )
+    if moved:
+        raise InvalidCandidateError(
+            f"{what} keeps a masked value {REDACTION_SENTINEL} on a line where the editor "
+            "would no longer mask it, for example a 'url' line moved out of the "
+            "frontmatter. Put the line back where it was, or type the real value"
+        )
+    return text, restored
 
 
 #: Request-scoped sink for the redacted argv of the ``claude …`` commands a config-write

@@ -584,9 +584,57 @@ that file on the host.
 
 The Skills editor masks each file line by line: a `key: value` line with a
 secret-shaped key, a `${...}` reference, or a URL with a user name or password.
-The body of `SKILL.md` is masked too, because skills often hold commands. A
-masked line keeps its stored text on save only when every other character of
-the line is unchanged. Each stored line is kept at most once, in order, so a
+The body of `SKILL.md` is masked too, because skills often hold commands.
+
+In the frontmatter of `SKILL.md`, the editor also masks every `url` value, for
+example the `url` of a server in `mcpServers` or of an `http` hook in `hooks`.
+It masks the value as the [Hooks tab](#the-hooks-tab) masks a URL. Each query
+value, the fragment, and each token-like path segment show as `********`. The
+scheme, the host, the port, the plain path, and the plain query keys stay
+visible, for example `https://mcp.example.com/v1?key=********`. A URL with a
+user name or password, or with a `${...}` reference, shows as one `********`. If
+the value covers more than one line, holds an escape, or has an anchor or a tag
+in front of it, each line of the value shows as one `********`.
+
+The editor decides this view from the text of a file, not from its name. Every
+file of the skill that starts with a frontmatter block gets it. So `SKILL.md`
+gets it under every path that reaches it, for example `./SKILL.md` or a link,
+and a copy of it gets it too. Only the frontmatter block gets the view. A `url`
+line in the Markdown body, or in a later document of a YAML file, gets only the
+line masks above. A save refuses (`422`) a file key that names `SKILL.md` under
+another spelling or case, for example `./SKILL.md`, `skill.md` or `SKILL.md.`,
+because macOS or Windows opens `SKILL.md` for it. Send the file once, as
+`SKILL.md`.
+
+Some URL text is not masked. A path segment or query key shorter than 20
+characters is not masked if it has fewer than 8 letters and digits, or only
+letters, or only digits. Do not put a secret in them.
+
+If Clauster cannot read a frontmatter block the way Claude Code reads it, every
+line of the block shows as `********`. This applies only to a block that holds
+the text `url` (in any case), `http:`, `https:`, `ws:`, `wss:` or a backslash.
+A block without any of them gets only the line masks. These are the cases:
+
+- The block is not valid YAML to Clauster.
+- It holds `---` before its closing fence.
+- It holds a line break that only YAML 1.1 knows.
+- Only Claude Code reads its opening fence.
+- It is valid only after Claude Code re-quotes it.
+- It holds syntax that YAML 1.2 refuses, for example a quoted value that
+  continues on a line that starts at column 0.
+- It is larger than the 256 KiB file cap.
+
+For `SKILL.md`, a save of such a file is refused, except when the frontmatter is
+valid only after Claude Code re-quotes it. To change the file, type the whole
+frontmatter again or edit the file on the host.
+
+A masked line keeps its stored text on save only when every other character of
+the line is unchanged. For a frontmatter `url`, the scheme, the host, the port,
+the path, and every query key must be unchanged, and no query parameter can be
+added. Otherwise the save is refused (`422`) and nothing is written. A kept line
+must also stay where the editor masks it. A masked `url` line that you move into
+the Markdown body is refused, because the body would show its token. Each stored
+line is kept at most once, in order, so a
 copied masked line is refused. If two stored lines look the same when masked, a
 save that adds or removes one of them is refused too. A
 masked line in the frontmatter is kept only while `hooks` and `mcpServers` are
