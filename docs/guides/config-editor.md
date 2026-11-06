@@ -584,9 +584,33 @@ that file on the host.
 
 The Skills editor masks each file line by line: a `key: value` line with a
 secret-shaped key, a `${...}` reference, or a URL with a user name or password.
-The body of `SKILL.md` is masked too, because skills often hold commands. A
-masked line keeps its stored text on save only when every other character of
-the line is unchanged. Each stored line is kept at most once, in order, so a
+The body of `SKILL.md` is masked too, because skills often hold commands.
+
+In the `SKILL.md` frontmatter, the editor also masks every `url` value, for
+example the `url` of a server in `mcpServers` or of an `http` hook in `hooks`.
+It masks the value as the [Hooks tab](#the-hooks-tab) masks a URL. Each query
+value, the fragment, and each token-like path segment show as `********`. The
+scheme, the host, the port, the plain path, and the plain query keys stay
+visible, for example `https://mcp.example.com/v1?key=********`. If the value
+covers more than one line, holds an escape, or has an anchor or a tag in front
+of it, each line of the value shows as one `********`. A `url` line in the
+Markdown body gets only the line masks above.
+
+Some URL text is not masked. A path segment or query key shorter than 20
+characters is not masked if it has fewer than 8 letters and digits, or only
+letters, or only digits. Do not put a secret in them. If the frontmatter is not
+valid YAML as written, or holds `---` before its closing fence, the editor
+cannot find the `url` values. It then masks each frontmatter line that holds
+`:/` as one `********`, but a value that continues on the next line can still
+show part of a token there.
+
+A masked line keeps its stored text on save only when every other character of
+the line is unchanged. For a frontmatter `url`, the scheme, the host, the port,
+the path, and every query key must be unchanged, and no query parameter can be
+added. Otherwise the save is refused (`422`) and nothing is written. A kept line
+must also stay where the editor masks it. A masked `url` line that you move into
+the Markdown body is refused, because the body would show its token. Each stored
+line is kept at most once, in order, so a
 copied masked line is refused. If two stored lines look the same when masked, a
 save that adds or removes one of them is refused too. A
 masked line in the frontmatter is kept only while `hooks` and `mcpServers` are

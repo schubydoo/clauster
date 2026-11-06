@@ -973,12 +973,19 @@ def test_one_stored_line_is_kept_at_most_once(tmp_path: Path) -> None:
     copies = f"TOKEN={MASK}\n" * 4000
     started = time.monotonic()
     with pytest.raises(cw.InvalidCandidateError, match="not sent back one for one"):
-        cw.restore_masked_lines(copies, long_line + "\n", what="x.sh")
+        cw.restore_masked_lines(copies, long_line + "\n", what="x.sh", view=cw.redact_secret_lines)
     assert time.monotonic() - started < 0.5
     # Two copies of a line stored once are refused too; one copy is kept.
     with pytest.raises(cw.InvalidCandidateError, match="one for one"):
-        cw.restore_masked_lines(f"token: {MASK}\ntoken: {MASK}\n", "token: x\n", what="f")
-    assert cw.restore_masked_lines(f"token: {MASK}\n", "token: x\n", what="f")[0] == "token: x\n"
+        cw.restore_masked_lines(
+            f"token: {MASK}\ntoken: {MASK}\n", "token: x\n", what="f", view=cw.redact_secret_lines
+        )
+    assert (
+        cw.restore_masked_lines(
+            f"token: {MASK}\n", "token: x\n", what="f", view=cw.redact_secret_lines
+        )[0]
+        == "token: x\n"
+    )
 
 
 def test_the_restored_skill_must_fit_the_directory_cap(tmp_path: Path) -> None:
@@ -1224,7 +1231,9 @@ def test_a_masked_member_behind_a_symlinked_directory_is_refused(tmp_path: Path)
 
 
 def test_restore_masked_lines_reports_the_lines_it_restored() -> None:
-    restored, lines = cw.restore_masked_lines(f"a\ntoken: {MASK}\nb", "token: x\na\n", what="f")
+    restored, lines = cw.restore_masked_lines(
+        f"a\ntoken: {MASK}\nb", "token: x\na\n", what="f", view=cw.redact_secret_lines
+    )
     assert (restored, lines) == ("a\ntoken: x\nb", {1})
 
 
@@ -1247,7 +1256,9 @@ def test_restore_masked_lines_is_linear_in_repeated_lines(
     # One stored line more than sent, so the group test must really look at the group (with
     # equal counts it is not needed at all, and the counter would read zero).
     stored = "TOKEN=x\n" * (n + 1)
-    restored, lines = cw.restore_masked_lines(f"TOKEN={MASK}\n" * n, stored, what="f")
+    restored, lines = cw.restore_masked_lines(
+        f"TOKEN={MASK}\n" * n, stored, what="f", view=cw.redact_secret_lines
+    )
     assert restored == "TOKEN=x\n" * n and len(lines) == n
     # Linear: the group is looked at once (n + 1 elements), never once per line. The lower
     # bound makes the test fail loudly if the code stops using `set` for it, rather than

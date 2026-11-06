@@ -72,7 +72,8 @@ elsewhere, so every read path here runs its content through
 #766 primitive shipped for exactly this case — before returning it:
 :func:`read_skill_file` for a file body, and :func:`list_skills` for the surfaced
 ``description`` / ``frontmatter_error`` metadata. This is a deliberate, DIFFERENT
-choice than CLAUDE.md's, not an oversight.
+choice than CLAUDE.md's, not an oversight. A ``url`` value in the ``SKILL.md`` frontmatter
+is also given the URL view the MCP and Hooks tabs use (:func:`_member_view`, TASK-525).
 
 **Frontmatter: what the CLI reads (TASK-449.6).** The key set follows the frontmatter
 reference at https://code.claude.com/docs/en/skills#frontmatter-reference. The accepted
@@ -108,6 +109,7 @@ makes to a kept member in the instant between the copy and the swap is lost.
 
 from __future__ import annotations
 
+import bisect
 import itertools
 import math
 import os
@@ -123,7 +125,7 @@ import yaml
 
 from . import config_file_writer as fw
 from . import config_write as cw
-from .config_write_hooks import RECOGNIZED_EVENTS, validate_hooks
+from .config_write_hooks import RECOGNIZED_EVENTS, mask_url, validate_hooks
 
 #: The skill's required entrypoint file (Claude Code's own convention).
 SKILL_FILENAME = "SKILL.md"
@@ -1004,7 +1006,8 @@ _OPENING_FENCE_RE = re.compile(r"\A---[ \t]*\r?(?:\n|\Z)")
 _EMPTY_FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n---[ \t]*(?:\r?\n|\Z)")
 #: When the CLI reads frontmatter at all: its ``ok`` regex, ``/^---\s*\n([\s\S]*?)---/``,
 #: where JavaScript's ``\s`` also takes a no-break space, a form feed or a BOM.
-_CLI_FENCE_RE = re.compile(f"---[{_JS_WHITESPACE}]*\n[\\s\\S]*?---")
+#: Group 1 is the header the CLI reads.
+_CLI_FENCE_RE = re.compile(f"---[{_JS_WHITESPACE}]*\n([\\s\\S]*?)---")
 
 
 def _split_skill_md(content: str) -> tuple[dict[str, Any], str | None, str]:
@@ -1717,6 +1720,127 @@ def list_skills(base: Path) -> list[dict[str, Any]]:
     return out
 
 
+def _masked_whole(line: str) -> str:
+    """Return ``line`` with its text replaced by the mask; a blank line stays as it is."""
+    body = line.splitlines()[0] if line else ""
+    return line if not body.strip() else cw.REDACTION_SENTINEL + line[len(body) :]
+
+
+def _url_nodes(root: yaml.Node) -> list[yaml.ScalarNode]:
+    """Return each scalar node that a ``url`` key holds anywhere under ``root``, once each.
+
+    Iterative, with a visited set, so an alias or a merge key that reuses a node costs one
+    visit and a cyclic node graph ends.
+    """
+    found: dict[int, yaml.ScalarNode] = {}
+    seen: set[int] = set()
+    stack: list[yaml.Node] = [root]
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, yaml.MappingNode):
+            for key, value in node.value:
+                stack += (key, value)
+                if (
+                    isinstance(key, yaml.ScalarNode)
+                    and key.value == "url"
+                    and isinstance(value, yaml.ScalarNode)
+                ):
+                    found[id(value)] = value
+        elif isinstance(node, yaml.SequenceNode):
+            stack += node.value
+    return list(found.values())
+
+
+def _mask_header_urls(header: str) -> str:
+    """Return a frontmatter ``header`` with each ``url`` value shown as :func:`mask_url` shows it.
+
+    Found by its node in the composed YAML, so a ``url`` in a flow mapping, behind an
+    alias, or under a merge key is found as well as a plain ``url:`` line. Where the
+    value's source text is one line and reads as the value (a plain scalar, or a quoted one
+    with no escape), only that text is replaced by its URL view: the scheme, host, port,
+    plain path and plain query keys stay visible (TASK-525). Any other spelling (a
+    multi-line or block value, an escape, an anchor or tag before the value, or a header
+    that loads only through Claude Code's re-quoting retry) has every line of the value
+    masked whole. A header that does not compose has no value to find, one that composes
+    only through the retry is not YAML as written, and in one that holds ``---`` Claude Code
+    ends the header earlier and can read other values. In these, as a best effort, every
+    line that holds ``:/`` is masked whole as well. The line count never changes.
+    """
+    lines = header.splitlines(keepends=True)
+    try:
+        source = cw.cli_frontmatter_text(header)
+        root = yaml.compose(source, Loader=yaml.SafeLoader)
+    except (yaml.YAMLError, RecursionError):
+        source, root = header, None
+    whole: set[int] = set()
+    if root is None or source != header or "---" in header:
+        # No node to find, a header that is not YAML as written (the CLI reads a re-quoted
+        # copy, where a URL can sit inside a string), or one that Claude Code ends at an
+        # earlier `---`: mask by shape as well.
+        whole.update(index for index, line in enumerate(lines) if ":/" in line)
+    starts = list(itertools.accumulate(map(len, source.splitlines(keepends=True)), initial=0))
+    if len(starts) != len(lines) + 1:  # pragma: no cover - the retry keeps every line
+        return "".join(_masked_whole(line) for line in lines)
+    spans: dict[int, list[tuple[int, int, str]]] = {}
+    for node in [] if root is None else _url_nodes(root):
+        shown = mask_url(node.value)
+        if shown == node.value:
+            continue
+        begin, end = node.start_mark.index, node.end_mark.index
+        first = bisect.bisect_right(starts, begin) - 1
+        last = bisect.bisect_right(starts, max(end - 1, begin)) - 1
+        quote = 0 if node.style is None else 1
+        inner = (begin + quote, end - quote)
+        if (
+            source == header
+            and first == last
+            and node.style in (None, "'", '"')
+            and header[inner[0] : inner[1]] == node.value
+        ):
+            local = (inner[0] - starts[first], inner[1] - starts[first], shown)
+            spans.setdefault(first, []).append(local)
+        else:
+            whole.update(range(first, last + 1))
+    out: list[str] = []
+    for index, line in enumerate(lines):
+        if index in whole:
+            line = _masked_whole(line)
+        else:
+            # Right to left, so an earlier offset on the line stays valid.
+            for start, stop, shown in sorted(spans.get(index, ()), reverse=True):
+                line = line[:start] + shown + line[stop:]
+        out.append(line)
+    return "".join(out)
+
+
+def _member_view(relative: str, text: str) -> str:
+    """Return the editor's read view of the skill member ``relative`` holding ``text``.
+
+    Every member is masked line by line (:func:`~clauster.config_write.redact_secret_lines`).
+    ``SKILL.md`` also has each ``url`` value in its frontmatter masked first
+    (:func:`_mask_header_urls`), as the MCP and Hooks tabs mask a URL. The write path binds
+    a resent mask through this same function (:func:`_keep_masked_lines`), so the read and
+    the restore never disagree.
+    """
+    if relative == SKILL_FILENAME:
+        bom = "\ufeff" if text.startswith("\ufeff") else ""
+        core = text[len(bom) :]
+        match = _FRONTMATTER_RE.match(core)
+        if match is not None:
+            header, start = cw.frontmatter_header(core, match), match.start(1)
+        else:
+            # A fence that Claude Code reads and this surface does not (a save refuses it):
+            # mask the header the CLI reads.
+            cli = _CLI_FENCE_RE.match(core)
+            header, start = (cli.group(1), cli.start(1)) if cli else ("", 0)
+        masked = _mask_header_urls(header)
+        text = bom + core[:start] + masked + core[start + len(header) :]
+    return cw.redact_secret_lines(text)
+
+
 def read_skill_file(
     base: Path, name: str, relative: str = SKILL_FILENAME
 ) -> tuple[str, str, bool]:
@@ -1793,7 +1917,7 @@ def _read_skill_file(
             )
     # Redact AFTER converting: the conversion only removes lines, so the text it returns
     # holds nothing that was not in the file, and the redactor still sees all of it.
-    content = cw.redact_secret_lines(text)
+    content = _member_view(relative, text)
     return content, cw.hash_bytes(raw), exists, note
 
 
@@ -1914,10 +2038,10 @@ def _keep_masked_lines(
 ) -> dict[str, Any]:
     """Return ``files`` with each mask from the read view bound back to its stored line.
 
-    The read path masks every member line by line (:func:`~clauster.config_write.
-    redact_secret_lines`), body and scripts included, so the write path restores line by
-    line too (:func:`~clauster.config_write.restore_masked_lines`), against the stored
-    member at the same path. ``skill_md`` is the stored ``SKILL.md`` text, from the same
+    The read path masks every member line by line (:func:`_member_view`), body and scripts
+    included, so the write path restores line by line too
+    (:func:`~clauster.config_write.restore_masked_lines`, given that same view), against the
+    stored member at the same path. ``skill_md`` is the stored ``SKILL.md`` text, from the same
     read the stale-hash guard checked, so its masks bind to the bytes the operator loaded.
     A mask with no stored line to bind to is refused. A member without a mask is returned
     as sent.
@@ -1952,7 +2076,12 @@ def _keep_masked_lines(
             stored = skill_md
         else:
             stored = _read_stored_member(skills_root, name, relative)
-        restored, lines = cw.restore_masked_lines(content, stored, what=relative)
+        restored, lines = cw.restore_masked_lines(
+            content,
+            stored,
+            what=relative,
+            view=lambda text, relative=relative: _member_view(relative, text),
+        )
         size = len(restored.encode("utf-8"))
         cap = MAX_SKILL_MD_BYTES if relative == SKILL_FILENAME else MAX_FILE_BYTES
         total += size - len(content.encode("utf-8"))
@@ -1967,16 +2096,27 @@ def _keep_masked_lines(
     return out
 
 
+#: A ``url:`` line whose whole value is the mask: :func:`mask_url` shows a credential URL
+#: or a ``${...}`` reference so (TASK-525). Group 2 is an optional quote around the mask.
+_WHOLE_URL_MASK_RE = re.compile(
+    rf"^([ \t]*(?:-[ \t]+)*url[ \t]*:[ \t]+)([\"']?){re.escape(cw.REDACTION_SENTINEL)}\2"
+    r"([ \t]*(?:#[^\r\n]*)?\r?)$",
+    re.MULTILINE,
+)
+
+
 def _neutralized(sent: str) -> str:
     """Return ``sent`` with each mask replaced by a plain stand-in no check refuses by itself.
 
     A masked credential URL (``********@host``, the whole ``scheme://user@`` part masked)
     becomes ``http://x@host``, the same length, so a URL check still sees a URL and its
-    columns stay exact. Every other mask becomes a distinct short token (``x0``, ``x1``,
+    columns stay exact. A ``url:`` value that is the mask alone becomes ``http://x``, also
+    the same length. Every other mask becomes a distinct short token (``x0``, ``x1``,
     ...), so two masked keys do not collide as one repeated key. A token is never longer
     than the 8-character mask below ten million masks, so the text never grows.
     """
-    text = sent.replace(f"{cw.REDACTION_SENTINEL}@", "http://x@")
+    text = _WHOLE_URL_MASK_RE.sub(r"\1\2http://x\2\3", sent)
+    text = text.replace(f"{cw.REDACTION_SENTINEL}@", "http://x@")
     counter = itertools.count()
     return re.sub(re.escape(cw.REDACTION_SENTINEL), lambda _m: f"x{next(counter)}", text)
 
@@ -2091,7 +2231,7 @@ def write_skill(
     elif current_hash != expected_hash:
         raise cw.StaleConfigWriteError(f"skill {name!r} changed on disk since it was loaded")
 
-    # TASK-427: the editor shows every member masked (`redact_secret_lines`), so a save can
+    # TASK-427: the editor shows every member masked (`_member_view`), so a save can
     # send a mask back. Put the stored line back where the mask is bound to it, or refuse;
     # never write the literal `********` over the stored value. Then validate what will be
     # written: a kept line comes from the file on disk, not from the checked candidate.
