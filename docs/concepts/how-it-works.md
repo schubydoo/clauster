@@ -155,6 +155,40 @@ browser. The conversation is still restored from the transcript — what a gap
 over that range covers is the non-conversation output, stderr lines and control
 frames, which the transcript does not hold.
 
+### When the daemon connection drops
+
+The claustrum daemon closes a connection that carries no traffic for 5 minutes.
+A running process does not count as traffic, so a quiet Direct Session (for
+example, one that waits at a permission prompt) is enough. Clauster sends a
+`server.ping` on its connection every 90 seconds, so this close does not occur
+while Clauster runs.
+
+The connection can still end for other reasons, for example a daemon restart.
+If the daemon closes the connection, Clauster reconnects at once. A connection
+that stays open but stops answering is found by the next `/healthz` check or the
+next new Direct Session, and Clauster then reconnects. After the reconnect,
+Clauster reattaches each running Direct Session from the last output frame it
+holds. The session continues in the same view: open
+permission prompts stay open, and output that the agent wrote during the drop
+is replayed. If the daemon dropped some of that output from its replay buffer,
+the view shows the `· output lost (N frames) ·` marker at that point.
+
+A session that cannot continue does not stay "running". If the daemon no longer
+has the process, the card shows the red `Error` badge with
+`claustrum connection dropped and the daemon no longer has this session`. If the
+reattach itself fails, Clauster ends the agent over the new connection and the
+card shows `claustrum connection lost; reattach failed`. If Clauster cannot
+reconnect at all, every running Direct Session shows `claustrum daemon
+connection lost and the reconnect failed`. In each case, a `claude` process that
+is still alive is shown as an orphan with **Kill**, the same as after a daemon
+restart, so that **Resume** never starts a second agent beside it.
+
+A new Direct Session also reconnects first, so it does not fail because of an
+old, closed connection. The reattach of the running sessions happens in the
+background and does not delay the new session. If Clauster could not reach the
+daemon when it started, the first later connection reattaches the sessions
+recorded in `clauster.db`, the same as a normal start.
+
 !!! warning "systemd can undo all of this"
     The survival table assumes nothing reaps the child processes. Under a
     systemd unit with the default `KillMode=control-group`, a

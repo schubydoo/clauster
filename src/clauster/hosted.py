@@ -106,6 +106,12 @@ _REHYDRATE_MAX_TURNS = 200
 _REHYDRATE_ROLES: frozenset[str] = frozenset({"user", "assistant", "system"})
 
 
+# The reason a session shows when a reconnect found its process gone (TASK-518): the
+# live view's `lost` event and the row's error_detail carry the same words.
+_RECONNECT_LOST_DETAIL = "claustrum connection dropped and the daemon no longer has this session"
+_REATTACH_FAILED_PREFIX = "claustrum connection lost; reattach failed"
+
+
 class HostedSessionError(ClaustrumError):
     """Raised when a hosted-session operation is invalid for the current state."""
 
@@ -291,6 +297,11 @@ class HostedSession:
         return self._process_id
 
     @property
+    def client(self) -> ClaustrumClient:
+        """The daemon connection this session currently runs over."""
+        return self._client
+
+    @property
     def pending_requests(self) -> list[_ControlRequest]:
         """Snapshot of parked control requests awaiting a response (CL-5 surfaces these)."""
         return list(self._pending.values())
@@ -427,6 +438,87 @@ class HostedSession:
         self.status = InstanceStatus.RUNNING if result.get("running") else InstanceStatus.STOPPED
         self._pump_task = asyncio.create_task(self._pump(backlog))
         return result
+
+    async def rebind(self, client: ClaustrumClient) -> dict[str, Any]:
+        """Continue this running session over a new daemon connection (TASK-518).
+
+        The daemon ended the old connection, but the agent kept running under it
+        (claustrum ``streams.md``: a process survives the disconnect). This moves the
+        session to ``client`` *in place*: the ring, the browser subscribers and the
+        parked permission prompts stay, so an open view goes on streaming and a prompt
+        that waited through the drop can still be answered.
+
+        The :class:`ProcessStream` stays too, adopted by the new client, and the
+        reattach asks from the stream's own ``last_seq``. The stream holds any partial
+        line of the frame at that seq, so the replay completes the line instead of
+        losing its head. Events the old connection delivered but the pump had not
+        routed yet are kept as a backlog and routed first.
+
+        Ring order is the one :meth:`reattach` gives: old events, then the ``gap``
+        marker when the daemon's replay buffer evicted frames past our cursor, then
+        the replay. The daemon sends the replay *before* the result, so the marker
+        cannot go through :meth:`_emit` here. It goes into the backlog, between the
+        events it separates.
+
+        Returns the daemon's reattach result. On ``found: false`` the agent is gone:
+        the session latches ERROR with a ``lost`` event (fail closed) and nothing is
+        pumped. Any failure after the pump stopped, a cancel included, also latches
+        ERROR before it propagates, so the session is never left "running" with no
+        pump. Each of these latches runs with no await before it, so a second cancel
+        cannot skip it.
+        """
+        if self.status != InstanceStatus.RUNNING or self._stream is None:
+            raise HostedSessionError(f"cannot rebind a {self.status} hosted session")
+        stream = self._stream
+        old_source = self._source
+        try:
+            await self._teardown()  # cancel the pump; its finally drops the subscription
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                # _teardown() swallows CancelledError around the pump it awaits, which
+                # also eats a cancel aimed at us (a shutdown). Honour it here.
+                raise asyncio.CancelledError
+            backlog: list[Mapping[str, Any]] = []
+            while old_source is not None and not old_source.empty():
+                backlog.append(old_source.get_nowait())
+            client.adopt_stream(stream)
+            self._client = client
+            self._stream = stream
+            self._source = stream.subscribe()
+            from_seq = stream.last_seq
+            stream.begin_replay(from_seq)
+            result = await client.reattach(self._process_id, from_seq)
+        except BaseException as exc:
+            self._drop_subscription()
+            cause = str(exc) if isinstance(exc, ClaustrumError) else type(exc).__name__
+            self._latch_lost(redact_for_disk(f"{_REATTACH_FAILED_PREFIX}: {cause}"))
+            raise
+        if not result.get("found"):
+            self._drop_subscription()
+            self._latch_lost(_RECONNECT_LOST_DETAIL)
+            return result
+        gap = self._replay_gap(result.get("firstSeq"), from_seq)
+        if gap is not None:
+            backlog.append({**gap, "type": "replay_gap"})
+            # Synchronous with the report, as in reattach(): the evicted range is gone.
+            self.daemon_last_seq = max(self.daemon_last_seq, gap["to_seq"] - 1)
+        self._pump_task = asyncio.create_task(self._pump(backlog))
+        return result
+
+    async def fail_lost(self, reason: str) -> None:
+        """Stop pumping and latch ERROR with a visible ``lost`` event (fail closed).
+
+        For a session whose daemon connection is gone and could not be replaced, so
+        no kill can reach the agent: unlike :meth:`_fail_closed`, this sends none.
+        """
+        await self._teardown()
+        self._latch_lost(reason)
+
+    def _latch_lost(self, reason: str) -> None:
+        """Latch ERROR first, then resolve parked requests and emit ``lost``."""
+        self.status = InstanceStatus.ERROR
+        self._resolve_parked()
+        self._emit({"type": "lost", "reason": reason})
 
     def _drop_subscription(self) -> None:
         """Release the stream subscription for a start/reattach that will never pump."""
@@ -630,6 +722,18 @@ class HostedSession:
         ``first_seq`` is untrusted daemon-supplied JSON, so it goes through
         :func:`_as_seq`; a non-int (or an in-range value) means no gap to report.
         """
+        gap = self._replay_gap(first_seq, from_seq)
+        if gap is None:
+            return None
+        self._emit(gap)
+        return gap["to_seq"]
+
+    def _replay_gap(self, first_seq: Any, from_seq: int) -> GapRangeEvent | None:
+        """Log and return the ``gap`` marker for an evicted replay range, or None.
+
+        The detection half of :meth:`_note_replay_gap`, without the emit, so
+        :meth:`rebind` can place the marker in its backlog instead.
+        """
         first = _as_seq(first_seq)
         if first is None or first <= from_seq + 1:
             return None
@@ -640,9 +744,7 @@ class HostedSession:
             first - 1,
             self._process_id,
         )
-        gap: GapRangeEvent = {"type": "gap", "from_seq": from_seq, "to_seq": first}
-        self._emit(gap)
-        return first
+        return {"type": "gap", "from_seq": from_seq, "to_seq": first}
 
     def _rehydrate(self, history: list[dict[str, Any]] | None, last_seq: Any) -> None:
         """Restore a reattached session's prior conversation into the ring (#1045).
@@ -778,6 +880,15 @@ class HostedSession:
                     return
                 elif etype == "overflow":
                     self._emit({"type": "gap", "dropped": event.get("dropped", 0)})
+                elif etype == "replay_gap":
+                    # Only rebind() puts this in a backlog; the daemon never sends it.
+                    self._emit(
+                        {
+                            "type": "gap",
+                            "from_seq": event["from_seq"],
+                            "to_seq": event["to_seq"],
+                        }
+                    )
         except asyncio.CancelledError:
             raise
         except ClaustrumError as exc:  # daemon loss mid-pump (CL-4b)
@@ -1061,6 +1172,17 @@ class HostedManager:
         # .get()/.pop()-staying-KeyError-safe). Distinct from _persist_lock: never
         # held together, so no lock-ordering inversion.
         self._id_locks: dict[str, asyncio.Lock] = {}
+        # Set by aclose(): the reconnect hooks (rebind_all, fail_unreachable) then do nothing.
+        self._closing = False
+        # Set once reattach_all has loaded the store. Until then _persist keeps the stored
+        # rows it has not loaded, because the store's save() prunes absent rows.
+        self._restored = False
+        self._unloaded: dict[str, dict] | None = None
+
+    @property
+    def restored(self) -> bool:
+        """Whether :meth:`reattach_all` has loaded the persisted sessions."""
+        return self._restored
 
     def list_instances(self) -> list[RemoteControlInstance]:
         """Snapshot of every hosted instance, each synced to its live session state."""
@@ -1447,6 +1569,9 @@ class HostedManager:
         killing them (``stop``). :meth:`reattach_all` restores them next start. A
         final persist flushes the freshest ``daemon_last_seq`` cursor for each.
         """
+        # Latched first: a reconnect hook still running must not move a session onto a
+        # new connection, or persist, after the sessions were detached here.
+        self._closing = True
         for session in list(self._sessions.values()):
             await session.detach()
         await self._persist()
@@ -1538,47 +1663,11 @@ class HostedManager:
                 )
                 continue
             if not result.get("found"):
-                # The new daemon doesn't know this process. If -keep-children left the
-                # agent running (CL-8), its (pid, start-time pair) still matches a live
-                # process → it's an orphan we can recover; otherwise it's truly lost.
-                instance.status = InstanceStatus.CRASHED
-                if await self._is_orphan(instance):
-                    instance.is_orphan = True
-                    # Heal a boot-id-less live orphan (a pre-#1401 row, or one spawned before
-                    # the column existed): `_is_orphan` just judged it live in THIS boot on its
-                    # drift-immune ticks, so the current boot id is its boot. Stamp it — the
-                    # `_persist` below writes it — so the row gains the cross-boot defense across
-                    # the next restart instead of standing on ticks-plus-coarse-epoch forever,
-                    # the hosted twin of the bridge poll's self-heal (#1401). Gated on the ticks
-                    # so a row judged only on the drifting epoch never reaches it, and on
-                    # drift-prone so a non-Linux row (no boot id to read) is left alone.
-                    if (
-                        instance.agent_boot_id is None
-                        and instance.agent_start_ticks is not None
-                        and procutil.start_time_is_drift_prone()
-                    ):
-                        if healed := await asyncio.to_thread(procutil.proc_boot_id):
-                            instance.agent_boot_id = healed
-                    # A salvaged row can be an orphan AND have lost its `project` — the
-                    # per-field salvage keeps the pid evidence while a model-rejected project
-                    # falls back to empty. Naming Resume for such a row points at a button the
-                    # dashboard does not render and an endpoint that answers 409 (#1381), so
-                    # the offer is dropped and only the action that works is named.
-                    #
-                    # Both halves of the dashboard's gate, not just `project`: it renders
-                    # Resume on `claude_session_uuid_usable && project`, and a row can lose
-                    # the uuid the same per-field way. `_as_session_uuid` now KEEPS an
-                    # off-shape non-empty uuid (#1419), so the mirror tests it for SHAPE with
-                    # the same `is_session_uuid` predicate the display gate uses — not
-                    # truthiness, which would name Resume for a value `build_hosted_argv`
-                    # would only 409 on. Testing one half named an action the other half hid.
-                    instance.error_detail = (
-                        "survived a daemon restart — Resume to recover, or Kill"
-                        if instance.project and is_session_uuid(instance.claude_session_uuid)
-                        else "survived a daemon restart — Kill to clean up"
-                    )
-                else:
-                    instance.error_detail = "daemon restarted; session lost"
+                await self._mark_unfound(
+                    instance,
+                    lost_status=InstanceStatus.CRASHED,
+                    lost_detail="daemon restarted; session lost",
+                )
                 continue
             # A clean reattach: drop the salvage's "record was unreadable" note so it does
             # not later render as this running session's ENDING reason (the WARNING logged at
@@ -1586,8 +1675,194 @@ class HostedManager:
             if instance.error_detail == _UNREADABLE_RECORD_DETAIL:
                 instance.error_detail = None
             self._sessions[process_id] = session
+        self._restored = True
         await self._persist()
         return [self._synced(inst) for inst in self._instances.values()]
+
+    async def _mark_unfound(
+        self,
+        instance: RemoteControlInstance,
+        *,
+        lost_status: InstanceStatus,
+        lost_detail: str,
+    ) -> None:
+        """Classify a row whose process the daemon answered ``found: false`` for.
+
+        Shared by :meth:`reattach_all` and :meth:`rebind_all`. The row must already be
+        out of ``_sessions``, so :meth:`_synced` cannot overwrite what is set here. If
+        -keep-children left the agent running (CL-8), its (pid, start-time pair) still
+        matches a live process: it is an orphan we can recover, with Kill offered so a
+        Resume never starts a second agent beside it. Otherwise it is truly lost and
+        gets ``lost_status`` with ``lost_detail``.
+        """
+        instance.status = InstanceStatus.CRASHED
+        if await self._is_orphan(instance):
+            instance.is_orphan = True
+            # Heal a boot-id-less live orphan (a pre-#1401 row, or one spawned before
+            # the column existed): `_is_orphan` just judged it live in THIS boot on its
+            # drift-immune ticks, so the current boot id is its boot. Stamp it — the
+            # caller's `_persist` writes it — so the row gains the cross-boot defense across
+            # the next restart instead of standing on ticks-plus-coarse-epoch forever,
+            # the hosted twin of the bridge poll's self-heal (#1401). Gated on the ticks
+            # so a row judged only on the drifting epoch never reaches it, and on
+            # drift-prone so a non-Linux row (no boot id to read) is left alone.
+            if (
+                instance.agent_boot_id is None
+                and instance.agent_start_ticks is not None
+                and procutil.start_time_is_drift_prone()
+            ):
+                if healed := await asyncio.to_thread(procutil.proc_boot_id):
+                    instance.agent_boot_id = healed
+            # A salvaged row can be an orphan AND have lost its `project` — the
+            # per-field salvage keeps the pid evidence while a model-rejected project
+            # falls back to empty. Naming Resume for such a row points at a button the
+            # dashboard does not render and an endpoint that answers 409 (#1381), so
+            # the offer is dropped and only the action that works is named.
+            #
+            # Both halves of the dashboard's gate, not just `project`: it renders
+            # Resume on `claude_session_uuid_usable && project`, and a row can lose
+            # the uuid the same per-field way. `_as_session_uuid` now KEEPS an
+            # off-shape non-empty uuid (#1419), so the mirror tests it for SHAPE with
+            # the same `is_session_uuid` predicate the display gate uses — not
+            # truthiness, which would name Resume for a value `build_hosted_argv`
+            # would only 409 on. Testing one half named an action the other half hid.
+            instance.error_detail = (
+                "survived a daemon restart — Resume to recover, or Kill"
+                if instance.project and is_session_uuid(instance.claude_session_uuid)
+                else "survived a daemon restart — Kill to clean up"
+            )
+        else:
+            instance.status = lost_status
+            instance.error_detail = lost_detail
+
+    async def rebind_all(self, client: ClaustrumClient) -> None:
+        """Reattach every running session over a new daemon connection (TASK-518).
+
+        The daemon manager calls this after it replaced a connection the daemon ended.
+        Each session moves in place (:meth:`HostedSession.rebind`), so open views keep
+        streaming. A session that cannot move becomes a visible error row, never a
+        silent "running" one (invariant 1):
+
+        * ``found: false``: the daemon no longer has the process.
+        * a failed reattach: the session already latched ERROR. If the new connection
+          still works, the agent is also killed over it, as :meth:`HostedSession._fail_closed`
+          does: an ERROR row is one Resume accepts and Stop treats as ended, so a live
+          agent behind it would get a second agent beside it.
+
+        Either way the session is retired from ``_sessions`` and the row classified
+        like a restart's lost row (:meth:`_mark_unfound`), so an agent that still runs
+        is offered as an orphan with Kill. Each session is handled under its per-id
+        lock, so a concurrent stop, resume or forget of the same id waits instead of
+        racing the reattach. After :meth:`aclose` this does nothing.
+        """
+        for key in list(self._sessions):
+            async with self._lock_for(key):
+                session = self._sessions.get(key)
+                instance = self._instances.get(key)
+                if (
+                    self._closing
+                    or client.lost
+                    or session is None
+                    or instance is None
+                    or session.status != InstanceStatus.RUNNING
+                    or session.client is client
+                ):
+                    continue
+                try:
+                    result = await session.rebind(client)
+                except Exception as exc:
+                    # Any fault, not only a daemon error: one bad session must not leave
+                    # the rest of the loop on the dead client (reattach_all's rule).
+                    # rebind() has already latched ERROR on this session.
+                    cause = str(exc) if isinstance(exc, ClaustrumError) else type(exc).__name__
+                    reason = redact_for_disk(f"{_REATTACH_FAILED_PREFIX}: {cause}")
+                    logger.warning(
+                        "hosted: rebind of %s failed: %s",
+                        key,
+                        reason,
+                        exc_info=not isinstance(exc, ClaustrumError),
+                    )
+                    killed = False
+                    if not client.lost:
+                        try:
+                            await client.kill(key, signal="KILL")
+                            killed = True
+                        except ClaustrumError as kill_exc:
+                            logger.warning(
+                                "hosted: could not end agent %s after a failed reattach: %s",
+                                key,
+                                kill_exc,
+                            )
+                    # A kill the daemon accepted ends the agent; probing for an orphan right
+                    # after it could still see the dying process and offer it as a survivor.
+                    await self._retire_lost(
+                        key, session, instance, reason, probe_orphan=not killed
+                    )
+                    continue
+                if not result.get("found"):
+                    logger.warning("hosted: the daemon no longer has %s after a reconnect", key)
+                    await self._retire_lost(
+                        key, session, instance, _RECONNECT_LOST_DETAIL, probe_orphan=True
+                    )
+                elif self._closing:
+                    # aclose() detached the sessions while this reattach was in flight; the
+                    # pump rebind() just started must not outlive the shutdown.
+                    await session.detach()
+        if not self._closing:
+            await self._persist()
+
+    async def fail_unreachable(self, reason: str) -> None:
+        """Mark every running session as an error: the daemon cannot be reached.
+
+        The daemon manager calls this when the reconnect after a lost connection
+        failed. The sessions have no stream and no way to answer a prompt, so leaving
+        them "running" would be the silent failure invariant 1 forbids. No kill can
+        reach their agents, so each row is classified like a restart's lost row: an
+        agent that still runs is offered as an orphan with Kill. After :meth:`aclose`
+        this does nothing.
+        """
+        detail = redact_for_disk(reason)
+        for key in list(self._sessions):
+            async with self._lock_for(key):
+                session = self._sessions.get(key)
+                instance = self._instances.get(key)
+                if (
+                    self._closing
+                    or session is None
+                    or instance is None
+                    or session.status != InstanceStatus.RUNNING
+                ):
+                    continue
+                await session.fail_lost(detail)
+                await self._retire_lost(key, session, instance, detail, probe_orphan=True)
+        if not self._closing:
+            await self._persist()
+
+    async def _retire_lost(
+        self,
+        key: str,
+        session: HostedSession,
+        instance: RemoteControlInstance,
+        detail: str,
+        *,
+        probe_orphan: bool,
+    ) -> None:
+        """Retire a session that lost its daemon backing (caller holds the per-id lock).
+
+        The session has already latched ERROR and told its viewers. Taking it out of
+        ``_sessions`` lets :meth:`_mark_unfound` set the row, and makes a later Resume
+        take the orphan path that kills a surviving agent first. ``probe_orphan`` is
+        false only when a kill was just accepted for the agent.
+        """
+        await session.detach()
+        self._sessions.pop(key, None)
+        if probe_orphan:
+            await self._mark_unfound(
+                instance, lost_status=InstanceStatus.ERROR, lost_detail=detail
+            )
+        else:
+            instance.status = InstanceStatus.ERROR
+            instance.error_detail = detail
 
     @staticmethod
     async def _load_history(
@@ -1685,11 +1960,28 @@ class HostedManager:
         revoked perms) degrades to a stale reattach cursor — never a failed spawn/stop
         or a 500 on the dashboard poll. ``_last_saved`` is left unchanged on failure so
         the next persist retries.
+
+        **Before :meth:`reattach_all` has run, stored rows are kept, not pruned.** The
+        store's ``save`` deletes every row absent from what it is given, and until the
+        reattach the registry holds none of the stored rows. A hosted spawn through the
+        first connection after a failed startup connect, or a shutdown with claustrum
+        unavailable, would otherwise delete every earlier session's record while its
+        agent may still run on the daemon (TASK-518 review catch).
         """
         if self._store is None:
             return
         async with self._persist_lock:
             subset = {pid: self._record(self._synced(i)) for pid, i in self._instances.items()}
+            if not self._restored:
+                if self._unloaded is None:
+                    # Read once: the rows stored before this process registered any of its
+                    # own. A later forget() of a session spawned here must still prune it.
+                    stored = await asyncio.to_thread(self._store.load)
+                    self._unloaded = {p: r for p, r in stored.items() if p not in subset}
+                subset = {
+                    **{p: r for p, r in self._unloaded.items() if p not in subset},
+                    **subset,
+                }
             if subset == self._last_saved:
                 return
             try:

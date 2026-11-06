@@ -70,6 +70,9 @@ def test_shutdown_drops_claustrum_daemon_connection(write_config, tmp_path, monk
             self.closed = False
             self.client = None  # no live client → lifespan skips hosted reattach
 
+        def set_connection_hooks(self, *, on_reconnect, on_unreachable) -> None:
+            """Accept the lifespan's reconnect hooks (unused here)."""
+
         async def ensure(self):
             """Record connect-or-spawn."""
             self.ensured = True

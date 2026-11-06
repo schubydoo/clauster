@@ -17,6 +17,14 @@ The handshake is **connect-or-spawn**, in that order:
   daemon is detached — reparented to ``init`` on POSIX, ``DETACHED_PROCESS`` on
   Windows), then polls the transport until the first authed ping succeeds.
 
+The daemon closes a connection after 5 minutes with no traffic (claustrum PR 289).
+The client's keepalive ping prevents that, but a connection can still end (a daemon
+restart, a crash). Each connection therefore has a watcher task: when the daemon ends
+it, the watcher drops the dead client and reconnects through :meth:`ensure`. A
+reconnect that replaced an earlier connection calls the ``on_reconnect`` hook, which
+reattaches the running hosted sessions. A reconnect that fails calls
+``on_unreachable``, which marks them as errors (fail closed).
+
 Fail-closed: a daemon that cannot be reached or rejects the token leaves
 :meth:`ClaustrumDaemon.status` carrying the error and never raises into the app
 lifespan — bridges are unaffected and (future) hosted spawns are refused. The
@@ -39,6 +47,7 @@ import secrets
 import stat
 import sys
 import time
+from collections.abc import Awaitable, Callable, Coroutine
 from pathlib import Path
 from typing import Any
 
@@ -154,6 +163,16 @@ class ClaustrumDaemon:
         # concurrent callers can't race into double-spawns or close a connection
         # another waiter just established.
         self._lock = asyncio.Lock()
+        # TASK-518: the watcher of the current connection, the background tasks it and
+        # probe() start (reconnects and hook runs), and the hooks themselves.
+        self._watch_task: asyncio.Task[None] | None = None
+        self._tasks: set[asyncio.Task[None]] = set()
+        self._hook_task: asyncio.Task[None] | None = None
+        self._had_connection = False
+        self._first_connect_failed = False
+        self._closing = False
+        self._on_reconnect: Callable[[ClaustrumClient], Awaitable[None]] | None = None
+        self._on_unreachable: Callable[[str], Awaitable[None]] | None = None
 
     @property
     def client(self) -> ClaustrumClient | None:
@@ -168,6 +187,25 @@ class ClaustrumDaemon:
         file beside this path.
         """
         return self._socket
+
+    def set_connection_hooks(
+        self,
+        *,
+        on_reconnect: Callable[[ClaustrumClient], Awaitable[None]],
+        on_unreachable: Callable[[str], Awaitable[None]],
+    ) -> None:
+        """Register what runs when the daemon connection is replaced or cannot come back.
+
+        ``on_reconnect`` gets the new client for each new connection, except the first
+        one when the first :meth:`ensure` attempt made it: the app lifespan reattaches
+        the stored sessions over that one itself. A first connection made after that
+        attempt failed does run the hook, because no startup reattach happened.
+        ``on_unreachable`` gets the reason when a reconnect after an earlier connection
+        fails. Both run in a task this manager owns, one run at a time and in order, and
+        :meth:`aclose` cancels a run still in progress.
+        """
+        self._on_reconnect = on_reconnect
+        self._on_unreachable = on_unreachable
 
     def status(self) -> dict[str, Any]:
         """Return a small, log-safe health dict (never includes the token)."""
@@ -185,7 +223,12 @@ class ClaustrumDaemon:
         A cached connection is revalidated with a bounded ping before reuse — a
         daemon that died after startup is dropped and reconnected/respawned
         rather than handed back dead. Serialized by the lifecycle lock so
-        concurrent callers spawn at most one daemon.
+        concurrent callers spawn at most one daemon. Each new connection gets a
+        watcher (:meth:`_watch`). A connection that replaced an earlier one schedules
+        the ``on_reconnect`` hook; a failed reconnect after an earlier connection
+        schedules ``on_unreachable``. Neither runs in the caller's task (see
+        :meth:`_schedule_hook`), so a hosted spawn never waits for, or cancels, the
+        reattach of other sessions.
 
         Returns the live :class:`ClaustrumClient`. Raises :class:`AuthRejected`
         if a running daemon rejects the persisted token (Clauster must not spawn
@@ -196,34 +239,163 @@ class ClaustrumDaemon:
         ``running:false, error:null`` and leaving the cause in the lifespan log.
         """
         async with self._lock:
-            if self._client is not None:
-                if await self._is_alive(self._client):
-                    return self._client
-                # Cached connection is dead — drop it and reconnect/spawn below.
-                await self._client.close()
-                self._client = None
-            return await self._connect_or_spawn()
+            if self._closing:
+                # A late caller after aclose() would start a watcher nobody cancels.
+                raise DaemonUnreachable("claustrum daemon manager is shut down")
+            try:
+                if self._client is not None:
+                    if await self._is_alive(self._client):
+                        return self._client
+                    # Cached connection is dead — drop it and reconnect/spawn below.
+                    await self._drop_client(self._client)
+                client = await self._connect_or_spawn()
+            except Exception as exc:
+                if self._had_connection:
+                    # Sessions may still sit on the connection that ended, and it cannot
+                    # be replaced: fail them visibly rather than leave them "running".
+                    self._schedule_hook(
+                        self._on_unreachable,
+                        f"claustrum daemon connection lost and the reconnect failed: {exc}",
+                    )
+                else:
+                    self._first_connect_failed = True
+                raise
+            except BaseException:
+                # Cancelled (a hosted spawn whose client went away) after the dead client
+                # was dropped: finish the reconnect in the background, or the sessions on
+                # it would wait for the next spawn to call ensure().
+                if self._had_connection and self._client is None and not self._closing:
+                    self._track(self._recover())
+                raise
+            # The first connection the app's startup made needs no hook: the lifespan
+            # reattaches the stored sessions over it. Any other new connection does,
+            # including a first one that came after the startup attempt failed.
+            replaced = self._had_connection or self._first_connect_failed
+            self._had_connection = True
+            self._start_watch(client)
+            if replaced:
+                self._schedule_hook(self._on_reconnect, client)
+        return client
 
     async def probe(self) -> dict[str, Any]:
         """Live health for ``/healthz``: ping the cached client, drop it if dead.
 
-        Unlike :meth:`ensure` this never reconnects or spawns — it reports the
-        current truth and clears a dead connection so the next :meth:`ensure`
-        recovers. There is no background reconnect task — recovery is caller-driven.
+        It reports the current truth and never makes the caller wait for a reconnect.
+        A connection the daemon *closed* never gets here, because its watcher
+        reconnects on the EOF. This catches a connection that is open but no longer
+        answers: it is dropped, and a background :meth:`ensure` reconnects it and runs
+        the hooks, the same recovery the watcher runs. Without that, the sessions on
+        the dropped connection stayed "running" until some spawn happened to call
+        :meth:`ensure`.
         """
         async with self._lock:
             if self._client is not None and not await self._is_alive(self._client):
-                await self._client.close()
-                self._client = None
+                # Recovery first, before any await of the drop: a probe cancelled inside
+                # the close would otherwise leave no one to reconnect. The task waits on
+                # this lock. No guard needed: ensure() is serialized, so a recovery that
+                # overlaps one still running finds the client already back, and one that
+                # starts during aclose() finds ensure() refusing.
+                self._track(self._recover())
                 self._error = "claustrum daemon connection lost"
+                await self._drop_client(self._client)
             return self.status()
 
     async def aclose(self) -> None:
-        """Drop Clauster's connection; leave the daemon running."""
+        """Drop Clauster's connection and stop its background tasks; leave the daemon up."""
+        self._closing = True
+        tasks = [t for t in (self._watch_task, *self._tasks) if t is not None]
+        self._watch_task = None
+        current = asyncio.current_task()
+        tasks = [t for t in tasks if t is not current]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         async with self._lock:
             if self._client is not None:
-                await self._client.close()
-                self._client = None
+                await self._drop_client(self._client)
+
+    async def _drop_client(self, client: ClaustrumClient) -> None:
+        """Close the cached ``client`` and stop its watcher (caller holds the lock).
+
+        The watcher is cancelled unless it is the caller: a watcher dropping its own
+        dead client goes on to reconnect, and ends once it has.
+        """
+        self._client = None
+        watcher = self._watch_task
+        if watcher is not None and watcher is not asyncio.current_task():
+            watcher.cancel()
+            self._watch_task = None
+        await client.close()
+
+    def _start_watch(self, client: ClaustrumClient) -> None:
+        """Start the watcher for a new connection (caller holds the lock).
+
+        Every path that replaces a client runs :meth:`_drop_client` first, so the
+        previous watcher is already cancelled, or it is the caller and ends by itself.
+        """
+        self._watch_task = asyncio.create_task(self._watch(client))
+
+    async def _watch(self, client: ClaustrumClient) -> None:
+        """Wait for the daemon to end ``client``'s connection, then reconnect.
+
+        The daemon sends no frame when it closes a connection, so the reader's EOF
+        is the only signal. Without this task a dead client stayed cached: every
+        later hosted spawn wrote into it and failed, and every running session lost
+        its stream with its row still showing "running" (TASK-518).
+        """
+        await client.wait_lost()
+        async with self._lock:
+            if self._client is not client or self._closing:
+                return  # already replaced or shut down by someone else
+            await self._drop_client(client)
+            self._error = "claustrum daemon connection lost"
+        logger.warning("claustrum: the daemon closed the connection; reconnecting")
+        await self._recover()
+
+    async def _recover(self) -> None:
+        """Reconnect after a dropped connection; :meth:`ensure` schedules the hook.
+
+        Any failure is logged, never raised: this runs in a background task, where
+        an exception would end it unread. ``ensure`` has already scheduled
+        ``on_unreachable`` for it.
+        """
+        try:
+            await self.ensure()
+        except Exception as exc:
+            logger.warning("claustrum: reconnect after a lost connection failed: %s", exc)
+
+    def _track(self, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
+        """Run ``coro`` as a background task that :meth:`aclose` cancels."""
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
+
+    def _schedule_hook(self, hook: Callable[[Any], Awaitable[None]] | None, arg: Any) -> None:
+        """Run a connection hook in a background task, after the run before it.
+
+        Not in the caller's task: the caller is often a hosted spawn request, which
+        would otherwise wait for every session's reattach, and whose cancellation (a
+        client disconnect) would cut a reattach short. In order: two quick reconnects
+        must not let the older run move sessions onto the older, dead client last.
+        """
+        if hook is None:
+            return
+        self._hook_task = self._track(self._run_hook(self._hook_task, hook, arg))
+
+    @staticmethod
+    async def _run_hook(
+        previous: asyncio.Task[None] | None,
+        hook: Callable[[Any], Awaitable[None]],
+        arg: Any,
+    ) -> None:
+        """Wait for the ``previous`` hook run, then run ``hook``; log a fault in it."""
+        if previous is not None:
+            await asyncio.wait([previous])
+        try:
+            await hook(arg)
+        except Exception:
+            logger.exception("claustrum: connection hook failed")
 
     async def _connect_or_spawn(self) -> ClaustrumClient:
         """Connect to a running daemon or spawn one (caller holds the lock)."""

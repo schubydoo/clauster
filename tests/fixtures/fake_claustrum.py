@@ -89,6 +89,8 @@ class FakeClaustrum:
         self.spawned: list[dict[str, Any]] = []
         self.stdin_received: dict[str, bytes] = {}
         self.killed: list[dict[str, Any]] = []
+        # Every authed method name, in arrival order (keepalive-cadence assertions).
+        self.calls: list[str] = []
         # Methods that receive no reply (to exercise client request timeouts).
         self.hang_methods: set[str] = set()
         self._processes: dict[str, _Process] = {}
@@ -194,6 +196,14 @@ class FakeClaustrum:
         await self._push(proc, frame)
         return proc.seq
 
+    def forget(self, process_id: str) -> None:
+        """Drop a process and its buffer, so a later reattach answers ``found: false``.
+
+        Models the daemon forgetting an exited process, or a daemon restart that
+        lost it.
+        """
+        self._processes.pop(process_id, None)
+
     def disconnect_all(self) -> None:
         """Drop every live connection (simulates a mid-stream daemon loss)."""
         for writer in list(self._writers):
@@ -246,6 +256,8 @@ class FakeClaustrum:
             )
             return
         method = req.get("method")
+        if isinstance(method, str):
+            self.calls.append(method)
         if method in self.hang_methods:
             return  # deliberately no reply
         params = req.get("params") or {}

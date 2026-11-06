@@ -17,6 +17,7 @@ import sys
 import pytest
 
 from clauster.claustrum_client import (
+    _KEEPALIVE_SECONDS,
     _STDIN_CHUNK_BYTES,
     AuthRejected,
     ClaustrumClient,
@@ -636,3 +637,122 @@ async def test_read_loop_isolates_a_bad_frame(caplog):
 
     assert fut.done() and fut.result() == {"ok": True}  # loop survived the bad frame
     assert any("dispatching frame" in r.getMessage() for r in caplog.records)
+
+
+# -- keepalive + connection loss (TASK-518) --------------------------------
+
+
+def test_default_keepalive_sits_inside_the_daemons_window():
+    # claustrum closes a connection after 5 min of silence and asks for a server.ping
+    # every 60 to 120 s; the default must stay inside that window.
+    assert 60 <= _KEEPALIVE_SECONDS <= 120
+
+
+async def test_keepalive_pings_on_a_quiet_connection(fake_claustrum):
+    fake = await fake_claustrum()
+    async with ClaustrumClient(fake.socket_path, fake.token, keepalive_interval=0.05):
+        await wait_until(lambda: fake.calls.count("server.ping") >= 3)
+
+
+async def test_keepalive_off_sends_nothing(fake_claustrum):
+    fake = await fake_claustrum()
+    async with ClaustrumClient(fake.socket_path, fake.token, keepalive_interval=None) as client:
+        await asyncio.sleep(0.2)
+        assert fake.calls == []
+        assert client._keepalive_task is None
+
+
+async def test_keepalive_logs_a_failed_ping_and_keeps_going(fake_claustrum, caplog):
+    fake = await fake_claustrum()
+    fake.hang_methods.add("server.ping")  # the ping is sent but never answered
+    caplog.set_level(logging.WARNING, logger="clauster.claustrum_client")
+    async with ClaustrumClient(
+        fake.socket_path, fake.token, request_timeout=0.05, keepalive_interval=0.02
+    ):
+        await wait_until(lambda: fake.calls.count("server.ping") >= 2)
+        await wait_until(lambda: "keepalive ping failed" in caplog.text)
+
+
+async def test_keepalive_ends_when_the_connection_is_lost(fake_claustrum):
+    fake = await fake_claustrum()
+    client = ClaustrumClient(fake.socket_path, fake.token, keepalive_interval=0.02)
+    await client.connect()
+    await client.ping()  # a round trip, so the fake has registered the connection
+    fake.disconnect_all()
+    await asyncio.wait_for(client.wait_lost(), timeout=2.0)
+    task = client._keepalive_task
+    assert task is not None
+    await asyncio.wait_for(task, timeout=2.0)  # returns on its own, no cancel needed
+    await client.close()
+
+
+async def test_lost_connection_latches_and_refuses_at_once(fake_claustrum):
+    # The prod failure: the daemon closed an idle connection and the next request was
+    # written into it. Now the loss is latched and a request fails without waiting.
+    fake = await fake_claustrum()
+    client = ClaustrumClient(fake.socket_path, fake.token, request_timeout=30.0)
+    await client.connect()
+    await client.ping()  # a round trip, so the fake has registered the connection
+    assert client.lost is False
+    fake.disconnect_all()
+    await asyncio.wait_for(client.wait_lost(), timeout=2.0)
+    assert client.lost is True
+    with pytest.raises(DaemonUnreachable, match="not open"):
+        await asyncio.wait_for(client.spawn("p1", "claude"), timeout=1.0)
+    await client.close()
+
+
+async def test_close_is_not_a_loss(fake_claustrum):
+    fake = await fake_claustrum()
+    client = ClaustrumClient(fake.socket_path, fake.token)
+    await client.connect()
+    await client.close()
+    assert client.lost is False
+
+
+async def test_close_tolerates_a_reader_that_ended_on_a_reset():
+    client = ClaustrumClient("/nonexistent", "tok", keepalive_interval=None)
+
+    async def _reset() -> None:
+        raise ConnectionResetError("peer reset")
+
+    client._reader_task = asyncio.ensure_future(_reset())
+    await asyncio.sleep(0)
+    await client.close()  # must not re-raise the reader's OSError
+
+
+async def test_adopted_stream_continues_across_connections(fake_claustrum):
+    # A reattach on a new connection feeds the SAME ProcessStream, so a line split
+    # across the drop is completed, not cut.
+    fake = await fake_claustrum()
+    first = ClaustrumClient(fake.socket_path, fake.token)
+    await first.connect()
+    await first.spawn("p1", "claude")
+    stream = first.stream("p1")
+    queue = stream.subscribe()
+    seq = await fake.emit("p1", "stdout", b"abc")  # no newline: held as a partial line
+    await wait_until(lambda: stream.last_seq == seq)
+    fake.disconnect_all()
+    await asyncio.wait_for(first.wait_lost(), timeout=2.0)
+    await fake.emit("p1", "stdout", b"def\n")  # emitted while nobody is attached
+
+    async with ClaustrumClient(fake.socket_path, fake.token) as second:
+        second.adopt_stream(stream)
+        assert second.stream("p1") is stream
+        await second.reattach("p1", stream.last_seq)
+        event = await _drain(queue)
+    assert event["line"] == "abcdef"
+    await first.close()
+
+
+async def test_write_failure_is_daemon_unreachable(fake_claustrum, monkeypatch):
+    # The socket write itself can still fail (EPIPE) before the reader sees the EOF.
+    fake = await fake_claustrum()
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+
+        def _broken(_data):
+            raise BrokenPipeError("peer closed")
+
+        monkeypatch.setattr(client._writer, "write", _broken)
+        with pytest.raises(DaemonUnreachable, match="write failed for server.ping"):
+            await client.ping()

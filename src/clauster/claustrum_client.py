@@ -11,8 +11,9 @@ Out of scope for this module (owned elsewhere): connect-or-spawn daemon lifecycl
 (CL-2 ``claustrum_daemon``), the hosted-session spawn/redact/broadcast pipeline
 (CL-4 ``hosted``), and reattach-on-startup (CL-6 ``hosted_state`` + the ``app``
 lifespan). The :meth:`ClaustrumClient.reattach` RPC those build on is provided
-here; there is no background auto-reconnect-with-backoff anywhere yet — recovery
-is caller-driven.
+here. The client sends a ``server.ping`` keepalive on its connection and latches
+:attr:`ClaustrumClient.lost` when the daemon closes it; reconnecting is the
+daemon manager's job (:mod:`clauster.claustrum_daemon`), not this module's.
 
 Wire contract (``claustrum/docs/PROTOCOL.md``), the parts this client honors:
 
@@ -35,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import contextlib
 import json
 import logging
 import sys
@@ -62,6 +64,13 @@ _DEFAULT_QUEUE_MAXSIZE = 2048
 
 # Unauthorized; surfaced as AuthRejected rather than a generic RpcError.
 _AUTH_ERROR_CODE = -32001
+
+# The daemon closes a connection after 5 minutes with no read and no write in either
+# direction, and attached processes do not count (claustrum docs/DAEMON.md,
+# "Idle-connection close"). The close lands between 5m0s and about 5m30s of quiet, and
+# claustrum asks clients to send ``server.ping`` every 60 to 120 seconds. 90 s sits in
+# the middle of that window, so one late or lost ping still leaves time for the next.
+_KEEPALIVE_SECONDS = 90.0
 
 
 class ClaustrumError(Exception):
@@ -142,6 +151,8 @@ class ProcessStream:
         self._subscribers: list[_Subscriber] = []
         # Per-channel byte buffers for line re-assembly across split frames.
         self._buffers: dict[str, bytes] = {"stdout": b"", "stderr": b""}
+        # Set by begin_replay(): the seq a reattach asked to continue from.
+        self._replay_from: int | None = None
 
     def subscribe(self) -> asyncio.Queue[Mapping[str, Any]]:
         """Register a watcher and return its private bounded event queue."""
@@ -152,6 +163,17 @@ class ProcessStream:
     def unsubscribe(self, queue: asyncio.Queue[Mapping[str, Any]]) -> None:
         """Drop a watcher's queue (called when its consumer goes away)."""
         self._subscribers = [s for s in self._subscribers if s.queue is not queue]
+
+    def begin_replay(self, from_seq: int) -> None:
+        """Expect a reattach replay that continues this stream after ``from_seq``.
+
+        If the first frame that arrives is more than one above ``from_seq``, the
+        daemon evicted the frames between (the gap rule of ``process.reattach``). A
+        partial line held from before the gap would then be joined to unrelated
+        bytes, and a whole line after it (a permission prompt, say) would turn into
+        text nobody can answer. So the held partial lines are dropped at that point.
+        """
+        self._replay_from = from_seq
 
     def _broadcast(self, event: DaemonStreamEvent) -> None:
         """Offer ``event`` to every subscribed watcher queue."""
@@ -167,6 +189,10 @@ class ProcessStream:
         seq = frame.get("seq")
         if not isinstance(seq, int) or seq <= self.last_seq:
             return
+        if self._replay_from is not None:
+            if seq > self._replay_from + 1:
+                self._buffers = {"stdout": b"", "stderr": b""}
+            self._replay_from = None
         self.last_seq = seq
         stream = frame.get("stream")
         if stream == "exit":
@@ -297,6 +323,12 @@ class ClaustrumClient:
     :meth:`reattach`, …) and read each spawned process's output via
     :meth:`stream`. :meth:`close` cancels the reader and drops the connection.
     Usable as an async context manager.
+
+    While connected, a background task sends ``server.ping`` every
+    ``keepalive_interval`` seconds so the daemon's idle-connection close never fires
+    (``None`` turns it off). When the daemon ends the connection anyway, :attr:`lost`
+    turns true, :meth:`wait_lost` returns, and every later request fails at once with
+    :class:`DaemonUnreachable` instead of writing into a dead socket.
     """
 
     def __init__(
@@ -306,6 +338,7 @@ class ClaustrumClient:
         *,
         request_timeout: float = 30.0,
         queue_maxsize: int = _DEFAULT_QUEUE_MAXSIZE,
+        keepalive_interval: float | None = _KEEPALIVE_SECONDS,
     ) -> None:
         """Store connection params; no socket is dialed until :meth:`connect`."""
         self._socket_path = socket_path
@@ -315,6 +348,11 @@ class ClaustrumClient:
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._reader_task: asyncio.Task[None] | None = None
+        self._keepalive_interval = keepalive_interval
+        self._keepalive_task: asyncio.Task[None] | None = None
+        # Set by the reader when the daemon ends the connection (EOF, a read error, or a
+        # protocol violation) while we did not ask for a close. Replaced on each connect.
+        self._lost = asyncio.Event()
         self._next_id = 0
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._streams: dict[str, ProcessStream] = {}
@@ -342,16 +380,26 @@ class ClaustrumClient:
         except (OSError, TimeoutError) as exc:
             raise DaemonUnreachable(f"cannot connect to claustrum at {self._socket_path}") from exc
         self._closed = False
+        self._lost = asyncio.Event()
         self._reader_task = asyncio.ensure_future(self._read_loop())
+        if self._keepalive_interval is not None:
+            self._keepalive_task = asyncio.ensure_future(self._keepalive(self._keepalive_interval))
 
     async def close(self) -> None:
-        """Cancel the reader, close the socket, and fail any pending requests."""
+        """Cancel the reader and keepalive, close the socket, and fail pending requests."""
         self._closed = True
+        if self._keepalive_task is not None:
+            self._keepalive_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._keepalive_task
+            self._keepalive_task = None
         if self._reader_task is not None:
             self._reader_task.cancel()
             try:
                 await self._reader_task
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, OSError):
+                # OSError: the reader already ended on a connection reset, which it
+                # re-raises; the loss was latched then, so closing must not raise it again.
                 pass
             self._reader_task = None
         if self._writer is not None:
@@ -364,6 +412,15 @@ class ClaustrumClient:
         self._reader = None
         self._fail_pending(DaemonUnreachable("connection closed"))
 
+    @property
+    def lost(self) -> bool:
+        """Whether the daemon ended this connection without a :meth:`close` from us."""
+        return self._lost.is_set()
+
+    async def wait_lost(self) -> None:
+        """Return once the daemon has ended this connection (see :attr:`lost`)."""
+        await self._lost.wait()
+
     # -- streams -----------------------------------------------------------
 
     def stream(self, process_id: str) -> ProcessStream:
@@ -373,6 +430,15 @@ class ClaustrumClient:
             stream = ProcessStream(process_id, queue_maxsize=self._queue_maxsize)
             self._streams[process_id] = stream
         return stream
+
+    def adopt_stream(self, stream: ProcessStream) -> None:
+        """Route a process's frames on this connection into an existing ``stream``.
+
+        For a reattach after a reconnect: the stream keeps its subscribers, its ``seq``
+        de-duplication and any partial line it holds, so the replay continues it
+        without a lost or doubled byte.
+        """
+        self._streams[stream.process_id] = stream
 
     # -- RPC methods -------------------------------------------------------
 
@@ -485,7 +551,10 @@ class ClaustrumClient:
         This is the single chokepoint where the auth token is attached — and it
         is never logged: failures mention only the method.
         """
-        if self._writer is None or self._closed:
+        if self._writer is None or self._closed or self._lost.is_set():
+            # A lost connection is refused here, before the write: a socket the daemon
+            # closed can still accept bytes on our side, and the request would then wait
+            # the full request timeout for an answer no reader will ever deliver.
             raise DaemonUnreachable("claustrum connection is not open")
         message: dict[str, Any] = {"jsonrpc": "2.0", "id": request_id, "method": method}
         if params is not None:
@@ -513,8 +582,8 @@ class ClaustrumClient:
                     # conforming daemon never sends one — every line is well under the 1 MiB
                     # cap — so treat it as a fatal protocol violation and stop the reader
                     # cleanly here. Otherwise the ValueError escapes this task as a
-                    # never-retrieved exception. The finally below fails pending calls;
-                    # future calls then time out and the daemon health probe reconnects.
+                    # never-retrieved exception. The finally below latches the loss and
+                    # fails pending calls; the daemon manager then reconnects.
                     logger.warning(
                         "claustrum: frame exceeded the %d-byte line limit; closing reader",
                         _MAX_LINE_BYTES,
@@ -536,7 +605,25 @@ class ClaustrumClient:
             raise
         finally:
             if not self._closed:
+                self._lost.set()
                 self._fail_pending(DaemonUnreachable("claustrum connection lost"))
+
+    async def _keepalive(self, interval: float) -> None:
+        """Send ``server.ping`` every ``interval`` seconds until the connection ends.
+
+        The daemon closes a connection that carries no traffic in either direction for
+        5 minutes, and a quiet session (one waiting at a permission prompt) is enough to
+        trigger it. A failed ping is logged and the loop goes on; a lost connection ends
+        the loop, because the reader has already latched :attr:`lost` for the manager.
+        """
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await self.ping()
+            except ClaustrumError as exc:
+                if self._lost.is_set() or self._closed:
+                    return
+                logger.warning("claustrum: keepalive ping failed: %s", exc)
 
     def _dispatch(self, raw: bytes) -> None:
         """Route one inbound frame to its process stream or its pending request, dropping junk."""

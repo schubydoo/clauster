@@ -87,7 +87,13 @@ class _StubManager:
         if self.spawn_error is not None:
             raise self.spawn_error
         self.spawn_calls.append(
-            {"project": project, "cwd": cwd, "binary": claude_binary, "pm": permission_mode}
+            {
+                "project": project,
+                "cwd": cwd,
+                "binary": claude_binary,
+                "pm": permission_mode,
+                "client": client,
+            }
         )
         return self.seed()
 
@@ -152,7 +158,9 @@ class _StubManager:
     async def resume(self, client, hosted_id, *, cwd, claude_binary):
         if self.resume_error is not None:
             raise self.resume_error
-        self.resumed.append({"id": hosted_id, "cwd": cwd, "binary": claude_binary})
+        self.resumed.append(
+            {"id": hosted_id, "cwd": cwd, "binary": claude_binary, "client": client}
+        )
         # Mirror the production contract: the dead row is retired, a fresh one is live.
         self.instances.pop(hosted_id, None)
         new = RemoteControlInstance(
@@ -175,6 +183,9 @@ class _StubDaemon:
 
     @property
     def client(self):
+        return self._client
+
+    async def ensure(self):
         return self._client
 
     async def aclose(self) -> None:
@@ -229,6 +240,50 @@ def test_spawn_hosted_ignores_the_removed_sandbox_option(write_config, monkeypat
     assert r.status_code == 201, r.text
     assert r.json()["warnings"] == [SANDBOX_REMOVED_NOTE]
     assert len(manager.spawn_calls) == 1
+
+
+class _ReconnectingDaemon(_StubDaemon):
+    """A daemon whose cached client is dead and whose ensure() hands back a new one."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        super().__init__(client=object())  # the dead cached connection
+        self.fresh = object()
+        self.error = error
+        self.ensure_calls = 0
+
+    async def ensure(self):
+        self.ensure_calls += 1
+        if self.error is not None:
+            raise self.error
+        return self.fresh
+
+
+def test_spawn_hosted_uses_ensure_not_the_cached_client(write_config, monkeypatch):
+    # TASK-518: the route took `daemon.client` as is, and after the daemon closed an idle
+    # connection every spawn wrote into the dead socket. It must go through ensure().
+    monkeypatch.setattr(instances_module, "is_trusted", lambda *a, **k: True)
+    monkeypatch.setattr(claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
+    manager = _StubManager()
+    daemon = _ReconnectingDaemon()
+    app = _app(write_config, manager=manager, daemon=daemon)
+    with TestClient(app) as client:
+        r = client.post("/api/instances", json={"project": "alpha", "channel": "hosted"})
+    assert r.status_code == 201, r.text
+    assert daemon.ensure_calls == 1
+    assert manager.spawn_calls[0]["client"] is daemon.fresh
+
+
+def test_spawn_hosted_when_ensure_fails_is_503(write_config, monkeypatch):
+    monkeypatch.setattr(instances_module, "is_trusted", lambda *a, **k: True)
+    monkeypatch.setattr(claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
+    manager = _StubManager()
+    daemon = _ReconnectingDaemon(error=ClaustrumError("claustrum binary not found"))
+    app = _app(write_config, manager=manager, daemon=daemon)
+    with TestClient(app) as client:
+        r = client.post("/api/instances", json={"project": "alpha", "channel": "hosted"})
+    assert r.status_code == 503
+    assert "not connected: claustrum binary not found" in r.json()["detail"]
+    assert manager.spawn_calls == []
 
 
 def test_spawn_hosted_without_daemon_is_503(write_config, projects_root):
@@ -359,6 +414,9 @@ class _NoopDaemon:
 
     def __init__(self, _config: object) -> None:
         self.client = object()
+
+    def set_connection_hooks(self, *, on_reconnect, on_unreachable) -> None:
+        pass
 
     async def ensure(self) -> None:
         pass
@@ -682,6 +740,19 @@ def test_resume_routes_hosted_to_manager(write_config, projects_root, monkeypatc
     assert manager.resumed[0]["binary"] == "/usr/bin/claude"
     assert r.json()["claustrum_process_id"] == "hid-2"  # the fresh resumed instance
     assert _HID not in manager.instances  # dead row retired, not left as a duplicate
+
+
+def test_resume_hosted_uses_ensure_not_the_cached_client(write_config, monkeypatch):
+    monkeypatch.setattr(instances_module, "is_trusted", lambda *a, **k: True)
+    monkeypatch.setattr(claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
+    manager = _StubManager()
+    manager.seed()
+    daemon = _ReconnectingDaemon()
+    app = _app(write_config, manager=manager, daemon=daemon)
+    with TestClient(app) as client:
+        r = client.post(f"/api/instances/{_HID}/resume")
+    assert r.status_code == 200, r.text
+    assert manager.resumed[0]["client"] is daemon.fresh
 
 
 def test_resume_hosted_without_daemon_is_503(write_config, projects_root):
@@ -1042,12 +1113,17 @@ class _LiveFakeDaemon:
         """The underlying fake daemon (for test-side frame injection)."""
         return self._fake
 
-    async def ensure(self) -> None:
-        """Start the fake daemon and connect a real client on the running loop."""
-        await self._fake.start()
-        self._client = ClaustrumClient(self._fake.socket_path, self._fake.token)
-        await self._client.connect()
+    def set_connection_hooks(self, *, on_reconnect, on_unreachable) -> None:
+        """Accept the lifespan's reconnect hooks (this stand-in never reconnects)."""
+
+    async def ensure(self) -> ClaustrumClient:
+        """Start the fake daemon once and connect a real client on the running loop."""
+        if self._client is None:
+            await self._fake.start()
+            self._client = ClaustrumClient(self._fake.socket_path, self._fake.token)
+            await self._client.connect()
         self.ensured = True
+        return self._client
 
     async def aclose(self) -> None:
         """Close the client and stop the fake daemon."""
