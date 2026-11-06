@@ -516,10 +516,13 @@ _XSHOW_GUARD_CONFIGS = [
         "config_write:\n  enabled: true\n  allow_user_scope: true\n", id="config-write-on"
     ),
 ]
-# Known offenders, each with the task that removes it. A fixed offender must leave this list
-# in the same change (checked below), so the list cannot hide a new one.
+# Known offenders, keyed by their full x-show attribute, each with the task that removes it.
+# The config-write render must hold each one exactly once (checked below), so a fixed
+# offender must leave this list and a new tag cannot hide behind an entry.
 _XSHOW_GUARD_KNOWN = {
-    'x-show="configMgmtMcpApprovalsDirty()': "TASK-493: the MCP approvals save bar",
+    'x-show="configMgmtMcpApprovalsDirty() && !configMgmt.mcp.deletingName"': (
+        "TASK-493: the MCP approvals save bar"
+    ),
 }
 
 
@@ -542,11 +545,12 @@ def test_no_xshow_element_carries_important_display_utility(write_config, extra)
         for tag in tag_re.finditer(page)
         if "x-show=" in tag.group(0) and display_util.search(tag.group(0))
     ]
-    known = {key for key in _XSHOW_GUARD_KNOWN for tag in tags if key in tag}
     if extra:
-        # The config-panel render must hold every known offender, else one was fixed and its
-        # entry is stale (and the render proves the panel is really in the page).
-        assert known == set(_XSHOW_GUARD_KNOWN), set(_XSHOW_GUARD_KNOWN) - known
+        # The config-panel render must hold every known offender exactly once, else one was
+        # fixed and its entry is stale, or a second tag shares it (and the render proves the
+        # panel is really in the page).
+        counts = {key: sum(key in tag for tag in tags) for key in _XSHOW_GUARD_KNOWN}
+        assert all(n == 1 for n in counts.values()), counts
     offenders = [tag[:140] for tag in tags if not any(key in tag for key in _XSHOW_GUARD_KNOWN)]
     assert not offenders, (
         "element(s) carry both x-show and an !important `d-*` display utility, which overrides "

@@ -2002,6 +2002,17 @@ def test_config_mgmt_hooks_rows_fit_the_modal(
         " .table-responsive'); return [v.scrollWidth, v.clientWidth]; })()"
     )
     assert scroll[0] <= scroll[1], scroll
+    # On a phone the wrapper scrolls sideways, but no control is squeezed: the selects keep
+    # their longest option and the matcher keeps its floor. goto() set the viewport, so
+    # resize after the page is open (the session closes after the test).
+    browser.set_viewport(375, 1000)
+    time.sleep(0.3)  # the resize relayout lands on the next frame
+    for name, need, have in browser.eval_json(_HOOK_SELECT_WIDTHS):
+        assert need <= have, ("phone", name, need, have)
+    matcher = browser.eval_json(
+        f"document.querySelector('{_ROW0} [data-test=\"cm-hook-matcher\"]').offsetWidth"
+    )
+    assert matcher >= 120, ("phone", matcher)
 
 
 def test_config_mgmt_hooks_http_headers_fall_back_to_raw_masked(

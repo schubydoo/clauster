@@ -312,8 +312,10 @@
        the modal with no sideways scroll. A .form-select is width:100%, which a table
        cell squeezes to a few characters; at width:auto a select is as wide as its
        longest option ("UserPromptExpansion", "mcp_tool") and a cell cannot squeeze it.
-       Below the modal-lg width the .table-responsive wrapper scrolls instead. */
+       The matcher input gets a floor for the same reason. Below the modal-lg width the
+       .table-responsive wrapper scrolls instead of squeezing them. */
     .cm-hooks-table .form-select { width: auto; }
+    .cm-hooks-table .cm-hook-matcher-input { min-width: 9rem; }
     .cm-hooks-table .cm-hook-main > td { border-bottom-width: 0; }
     .cm-value-cap { max-width: 12rem; }
     .cm-input-cap { max-width: 16rem; }
@@ -2548,7 +2550,7 @@
                           </select>
                         </td>
                         <td>
-                          <input type="text" class="form-control form-control-sm font-monospace"
+                          <input type="text" class="form-control form-control-sm font-monospace cm-hook-matcher-input"
                                  data-test="cm-hook-matcher" {{ NO_AUTOFILL }} spellcheck="false"
                                  :id="'cm-hook-matcher-' + row.id" :name="'cm-hook-matcher-' + row.id"
                                  placeholder="(any)" :aria-label="'Matcher for hook ' + (idx + 1)"
