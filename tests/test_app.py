@@ -507,7 +507,27 @@ def test_dashboard_active_zone_precedes_projects_in_dom(write_config):
     assert re.search(r"\border\s*:\s*-1\b", page) is None
 
 
-def test_no_xshow_element_carries_important_display_utility(write_config):
+# Renders the guard below scans. The config panel is gated on `config_write.enabled`, so a
+# render with it off never shows the panel: that is how the hooks mcp_tool inputs (TASK-513)
+# passed this guard while they showed on every hook row.
+_XSHOW_GUARD_CONFIGS = [
+    pytest.param("", id="default"),
+    pytest.param(
+        "config_write:\n  enabled: true\n  allow_user_scope: true\n", id="config-write-on"
+    ),
+]
+# Known offenders, keyed by their full x-show attribute, each with the task that removes it.
+# The config-write render must hold each one exactly once (checked below), so a fixed
+# offender must leave this list and a new tag cannot hide behind an entry.
+_XSHOW_GUARD_KNOWN = {
+    'x-show="configMgmtMcpApprovalsDirty() && !configMgmt.mcp.deletingName"': (
+        "TASK-493: the MCP approvals save bar"
+    ),
+}
+
+
+@pytest.mark.parametrize("extra", _XSHOW_GUARD_CONFIGS)
+def test_no_xshow_element_carries_important_display_utility(write_config, extra):
     # Class-level regression guard for the false-banner bug. Alpine's `x-show` hides an element
     # with an inline `display:none`, but Tabler's display utilities (`.d-flex`, `.d-none`,
     # `.d-grid`, …) are all `display:… !important`, which OVERRIDES that inline hide — so any
@@ -515,16 +535,23 @@ def test_no_xshow_element_carries_important_display_utility(write_config):
     # regardless of state. Put the display utility on an inner wrapper instead. Scanning the whole
     # rendered dashboard keeps the entire class dead: this caught the live-tail "reconnecting" /
     # "disconnected" banners AND the pty-mode resume hint, all of which stayed visible wrongly.
-    page = _client(write_config).get("/").text
+    page = TestClient(create_app(load_config(write_config(extra)))).get("/").text
     # Match a full opening tag, allowing quoted attribute values to contain '>' (e.g. an x-show
     # expression like `length > 6`), so the tag boundary isn't cut short mid-attribute.
     tag_re = re.compile(r"""<[a-zA-Z](?:"[^"]*"|'[^']*'|[^>"'])*>""")
     display_util = re.compile(r"\bd-(flex|inline-flex|block|inline-block|grid|none)\b")
-    offenders = [
-        tag.group(0)[:140]
+    tags = [
+        tag.group(0)
         for tag in tag_re.finditer(page)
         if "x-show=" in tag.group(0) and display_util.search(tag.group(0))
     ]
+    if extra:
+        # The config-panel render must hold every known offender exactly once, else one was
+        # fixed and its entry is stale, or a second tag shares it (and the render proves the
+        # panel is really in the page).
+        counts = {key: sum(key in tag for tag in tags) for key in _XSHOW_GUARD_KNOWN}
+        assert all(n == 1 for n in counts.values()), counts
+    offenders = [tag[:140] for tag in tags if not any(key in tag for key in _XSHOW_GUARD_KNOWN)]
     assert not offenders, (
         "element(s) carry both x-show and an !important `d-*` display utility, which overrides "
         "x-show's inline display:none and pins them visible regardless of state — move the "

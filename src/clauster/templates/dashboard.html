@@ -307,9 +307,16 @@
        restores the intended max-widths the CSP was blocking). */
     .cm-name-col { width: 40%; }
     .cm-hook-timeout-col { width: 6.5rem; }
-    /* Six columns of selects/inputs: keep each control readable and let the
-       .table-responsive wrapper scroll on a phone instead of squeezing them. */
-    .cm-hooks-table { min-width: 42rem; }
+    /* TASK-513 hooks rows: each hook is a tbody of two lines, the event, matcher and type
+       on the first and the handler, timeout and Remove on the second, so the table fits
+       the modal with no sideways scroll. A .form-select is width:100%, which a table
+       cell squeezes to a few characters; at width:auto a select is as wide as its
+       longest option ("UserPromptExpansion", "mcp_tool") and a cell cannot squeeze it.
+       The matcher input gets a floor for the same reason. Below the modal-lg width the
+       .table-responsive wrapper scrolls instead of squeezing them. */
+    .cm-hooks-table .form-select { width: auto; }
+    .cm-hooks-table .cm-hook-matcher-input { min-width: 9rem; }
+    .cm-hooks-table .cm-hook-main > td { border-bottom-width: 0; }
     .cm-value-cap { max-width: 12rem; }
     .cm-input-cap { max-width: 16rem; }
     .cm-value-cap-wide { max-width: 20rem; }
@@ -2507,24 +2514,29 @@
               <div class="alert alert-warning py-1 small" data-test="cm-hooks-rows-error" role="alert"
                    x-show="configMgmt.hooks.rowsError" x-cloak x-text="configMgmt.hooks.rowsError"></div>
 
-              <!-- ROWS: one hook per row (event / matcher / type / its main field(s) / timeout) -->
+              <!-- ROWS: one hook per tbody: event / matcher / type on the first line, then
+                   the type's handler inputs, the timeout and remove on the second, so the tab
+                   order reaches the handler before Remove. -->
               <div x-show="configMgmt.hooks.mode === 'rows'" data-test="cm-hooks-rows" x-cloak>
                 <div class="text-secondary small mb-2" data-test="cm-hooks-empty"
                      x-show="!configMgmt.hooks.rows.length && !configMgmt.hooks.rowsError" x-cloak>
                   No hooks at this scope. Add one below, or switch to Raw JSON.
                 </div>
-                <!-- Six columns: scroll sideways inside the modal on a phone, not the page. -->
+                <!-- Scroll sideways inside the modal on a phone, not the page. -->
                 <div class="table-responsive">
                 <table class="table table-sm mb-1 cm-hooks-table" data-test="cm-hooks-table"
                        x-show="configMgmt.hooks.rows.length" x-cloak>
-                  <caption class="visually-hidden">Hooks: event, matcher, type, handler, timeout, and remove action</caption>
+                  <caption class="visually-hidden">Hooks: each hook has two lines, the event, matcher and type,
+                    then the handler, timeout and remove action</caption>
                   <thead><tr>
-                    <th>Event</th><th>Matcher</th><th>Type</th><th>Handler</th>
+                    <th>Event</th><th>Matcher</th><th>Type</th>
                     <th class="cm-hook-timeout-col">Timeout&nbsp;(s)</th><th class="text-end">Remove</th>
                   </tr></thead>
-                  <tbody>
-                    <template x-for="(row, idx) in configMgmt.hooks.rows" :key="row.id">
-                      <tr :data-test="'cm-hook-row-' + idx">
+                  <!-- One tbody per hook (a table may hold many) so the two lines of a hook
+                       stay one x-for clone. -->
+                  <template x-for="(row, idx) in configMgmt.hooks.rows" :key="row.id">
+                    <tbody :data-test="'cm-hook-row-' + idx">
+                      <tr class="cm-hook-main">
                         <td>
                           <select class="form-select form-select-sm" data-test="cm-hook-event"
                                   :id="'cm-hook-event-' + row.id" :name="'cm-hook-event-' + row.id"
@@ -2538,7 +2550,7 @@
                           </select>
                         </td>
                         <td>
-                          <input type="text" class="form-control form-control-sm font-monospace"
+                          <input type="text" class="form-control form-control-sm font-monospace cm-hook-matcher-input"
                                  data-test="cm-hook-matcher" {{ NO_AUTOFILL }} spellcheck="false"
                                  :id="'cm-hook-matcher-' + row.id" :name="'cm-hook-matcher-' + row.id"
                                  placeholder="(any)" :aria-label="'Matcher for hook ' + (idx + 1)"
@@ -2553,10 +2565,13 @@
                             </template>
                           </select>
                         </td>
-                        <td>
+                        <td colspan="2"></td>
+                      </tr>
+                      <tr>
+                        <td colspan="3">
                           <input type="text" class="form-control form-control-sm font-monospace"
                                  data-test="cm-hook-command" {{ NO_AUTOFILL }} spellcheck="false"
-                                 x-show="row.type === 'command'"
+                                 x-show="row.type === 'command'" placeholder="command"
                                  :id="'cm-hook-command-' + row.id" :name="'cm-hook-command-' + row.id"
                                  :aria-label="'Command for hook ' + (idx + 1)" x-model="row.command">
                           <!-- The URL keeps its scheme, host, port and plain path visible so
@@ -2568,21 +2583,25 @@
                                  :id="'cm-hook-url-' + row.id" :name="'cm-hook-url-' + row.id"
                                  :aria-label="'URL that hook ' + (idx + 1) + ' sends the event data to'"
                                  x-model="row.url">
-                          <div class="d-flex gap-1" x-show="row.type === 'mcp_tool'">
-                            <input type="text" class="form-control form-control-sm font-monospace"
-                                   data-test="cm-hook-server" {{ NO_AUTOFILL }} spellcheck="false"
-                                   placeholder="server"
-                                   :id="'cm-hook-server-' + row.id" :name="'cm-hook-server-' + row.id"
-                                   :aria-label="'MCP server for hook ' + (idx + 1)" x-model="row.server">
-                            <input type="text" class="form-control form-control-sm font-monospace"
-                                   data-test="cm-hook-tool" {{ NO_AUTOFILL }} spellcheck="false"
-                                   placeholder="tool"
-                                   :id="'cm-hook-tool-' + row.id" :name="'cm-hook-tool-' + row.id"
-                                   :aria-label="'MCP tool for hook ' + (idx + 1)" x-model="row.tool">
+                          <!-- x-show on a plain wrapper: Tabler's .d-flex is display:flex
+                               !important, which beats x-show's inline display:none. -->
+                          <div x-show="row.type === 'mcp_tool'">
+                            <div class="d-flex gap-1">
+                              <input type="text" class="form-control form-control-sm font-monospace"
+                                     data-test="cm-hook-server" {{ NO_AUTOFILL }} spellcheck="false"
+                                     placeholder="server"
+                                     :id="'cm-hook-server-' + row.id" :name="'cm-hook-server-' + row.id"
+                                     :aria-label="'MCP server for hook ' + (idx + 1)" x-model="row.server">
+                              <input type="text" class="form-control form-control-sm font-monospace"
+                                     data-test="cm-hook-tool" {{ NO_AUTOFILL }} spellcheck="false"
+                                     placeholder="tool"
+                                     :id="'cm-hook-tool-' + row.id" :name="'cm-hook-tool-' + row.id"
+                                     :aria-label="'MCP tool for hook ' + (idx + 1)" x-model="row.tool">
+                            </div>
                           </div>
                           <input type="text" class="form-control form-control-sm"
                                  data-test="cm-hook-prompt" {{ NO_AUTOFILL }}
-                                 x-show="row.type === 'prompt' || row.type === 'agent'"
+                                 x-show="row.type === 'prompt' || row.type === 'agent'" placeholder="prompt"
                                  :id="'cm-hook-prompt-' + row.id" :name="'cm-hook-prompt-' + row.id"
                                  :aria-label="'Prompt for hook ' + (idx + 1)" x-model="row.prompt">
                         </td>
@@ -2598,8 +2617,8 @@
                                   @click="configMgmtRemoveHookRow(idx)">Remove</button>
                         </td>
                       </tr>
-                    </template>
-                  </tbody>
+                    </tbody>
+                  </template>
                 </table>
                 </div>
                 <div class="alert alert-warning py-1 small" data-test="cm-hooks-timeout-warn" role="alert"

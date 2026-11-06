@@ -1912,6 +1912,114 @@ def test_config_mgmt_hooks_rows_http_and_mcp_tool_round_trip(
     }
 
 
+# TASK-513: the handler inputs each hook type shows, and nothing else. Every key must be
+# an option of the type select (the test asserts the two sets are equal), so a new type
+# cannot slip past without a row here.
+_HOOK_TYPE_INPUTS = {
+    "command": ["cm-hook-command"],
+    "http": ["cm-hook-url"],
+    "mcp_tool": ["cm-hook-server", "cm-hook-tool"],
+    "prompt": ["cm-hook-prompt"],
+    "agent": ["cm-hook-prompt"],
+}
+_ROW0 = '[data-test="cm-hook-row-0"]'
+# The data-test names of row 0's handler inputs that the browser renders.
+_VISIBLE_HOOK_INPUTS = (
+    "(() => [...document.querySelectorAll('[data-test=\"cm-hook-row-0\"] input')]"
+    ".filter((el) => el.checkVisibility()).map((el) => el.dataset.test)"
+    ".filter((t) => !['cm-hook-matcher', 'cm-hook-timeout'].includes(t)).sort())()"
+)
+# For each row-0 select: [name, width it needs for its widest option, width it has]. A
+# clone with width:auto and no floor sizes itself to the widest option, with the same
+# padding and arrow.
+_HOOK_SELECT_WIDTHS = (
+    "(() => [...document.querySelectorAll('[data-test=\"cm-hook-row-0\"] select')].map((el) => {"
+    " const c = el.cloneNode(true); c.style.width = 'auto'; c.style.minWidth = '0';"
+    " c.style.position = 'absolute';"
+    " el.parentElement.appendChild(c); const need = c.offsetWidth; c.remove();"
+    " return [el.dataset.test, need, el.offsetWidth]; }))()"
+)
+
+
+def _open_hooks_rows_with_one_row(browser: AgentBrowser, server: Server) -> None:
+    _open_modal(browser, server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-hooks"]')
+    browser.expect_visible('[data-test="cm-view-hooks"]')
+    browser.click('[data-test="cm-hooks-add"]')
+    browser.expect_visible(f'{_ROW0} [data-test="cm-hook-command"]')
+
+
+def test_config_mgmt_hooks_row_shows_only_its_type_inputs(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Each hook type shows only its own handler inputs (TASK-513).
+
+    The mcp_tool inputs sat in a ``.d-flex`` element that carried the ``x-show``, and
+    Tabler's ``display: flex !important`` beat the inline ``display: none``, so the
+    server and tool boxes showed on every row whatever its type.
+    """
+    _open_hooks_rows_with_one_row(browser, config_mgmt_server)
+    options = browser.eval_json(
+        '[...document.querySelectorAll(\'[data-test="cm-hook-row-0"] [data-test="cm-hook-type"]'
+        " option')].map((o) => o.value)"
+    )
+    assert sorted(options) == sorted(_HOOK_TYPE_INPUTS), options
+    for hook_type, expected in _HOOK_TYPE_INPUTS.items():
+        browser.select(f'{_ROW0} [data-test="cm-hook-type"]', hook_type)
+        # x-show applies on the next frame, so wait for the set to settle.
+        deadline = time.monotonic() + 5.0
+        visible = browser.eval_json(_VISIBLE_HOOK_INPUTS)
+        while visible != sorted(expected) and time.monotonic() < deadline:
+            time.sleep(0.1)
+            visible = browser.eval_json(_VISIBLE_HOOK_INPUTS)
+        assert visible == sorted(expected), (hook_type, visible)
+
+
+def test_config_mgmt_hooks_rows_fit_the_modal(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """The event and type selects fit their longest option, with no sideways scroll (TASK-513).
+
+    The table had ``min-width: 42rem`` (672 px in a 670 px modal body), and the width:100%
+    selects were squeezed to a few characters: "UserPromptExpansion" showed "UserProm".
+    """
+    _open_hooks_rows_with_one_row(browser, config_mgmt_server)
+    browser.select(f'{_ROW0} [data-test="cm-hook-event"]', "UserPromptExpansion")
+    browser.select(f'{_ROW0} [data-test="cm-hook-type"]', "mcp_tool")
+    browser.expect_visible(f'{_ROW0} [data-test="cm-hook-server"]')
+    widths = browser.eval_json(_HOOK_SELECT_WIDTHS)
+    assert [w[0] for w in widths] == ["cm-hook-event", "cm-hook-type"], widths
+    for name, need, have in widths:
+        assert need <= have, (name, need, have)
+    # The matcher input takes the width the selects leave; keep it a usable size.
+    matcher = browser.eval_json(
+        f"document.querySelector('{_ROW0} [data-test=\"cm-hook-matcher\"]').offsetWidth"
+    )
+    assert matcher >= 120, matcher
+    scroll = browser.eval_json(
+        '(() => { const v = document.querySelector(\'[data-test="cm-hooks-rows"]'
+        " .table-responsive'); return [v.scrollWidth, v.clientWidth]; })()"
+    )
+    assert scroll[0] <= scroll[1], scroll
+    # On a phone the wrapper scrolls sideways, but no control is squeezed: the selects keep
+    # their longest option and the matcher keeps its floor. goto() set the viewport, so
+    # resize after the page is open (the session closes after the test).
+    browser.set_viewport(375, 1000)
+    # Prove the phone layout is the one measured: the page is 375 px and the wrapper scrolls.
+    phone = browser.eval_json(
+        '(() => { const v = document.querySelector(\'[data-test="cm-hooks-rows"]'
+        " .table-responsive'); return [window.innerWidth, v.scrollWidth, v.clientWidth]; })()"
+    )
+    assert phone[0] == 375 and phone[1] > phone[2], phone
+    for name, need, have in browser.eval_json(_HOOK_SELECT_WIDTHS):
+        assert need <= have, ("phone", name, need, have)
+    matcher = browser.eval_json(
+        f"document.querySelector('{_ROW0} [data-test=\"cm-hook-matcher\"]').offsetWidth"
+    )
+    assert matcher >= 120, ("phone", matcher)
+
+
 def test_config_mgmt_hooks_http_headers_fall_back_to_raw_masked(
     browser: AgentBrowser, config_mgmt_server: Server
 ) -> None:
