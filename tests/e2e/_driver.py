@@ -159,6 +159,10 @@ class AgentBrowser:
         """Resize the viewport of the open page (it fires the page's ``resize`` event)."""
         self._run("set", "viewport", str(width), str(height), check=True)
 
+    def set_reduced_motion(self) -> None:
+        """Emulate the OS "reduce motion" preference (light scheme) for the open page."""
+        self._run("set", "media", "light", "reduced-motion", check=True)
+
     def reload(self) -> None:
         """Reload the current page."""
         self._run("reload", check=True)

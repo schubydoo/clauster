@@ -574,7 +574,10 @@
             if (tries > 0) requestAnimationFrame(() => attempt(tries - 1));
             return;
           }
-          el.scrollIntoView({ behavior: "smooth", block: "center" });
+          // An explicit "smooth" overrides the reduced-motion CSS rule (scroll-behavior
+          // only sets the default), so honor the OS preference here too.
+          const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+          el.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "center" });
           if (!focusInput) return;
           const inp = el.matches("input, textarea") ? el : el.querySelector("input, textarea");
           if (inp) inp.focus({ preventScroll: true });
@@ -1436,9 +1439,19 @@
           if ((t === "int" || t === "float") && (v === "" || v === null)) continue;
           if (v !== c.fields[p]) edits[p] = v;
         }
-        if (Object.keys(edits).length === 0) { c.error = "No changes to save."; c.saved = false; return; }
+        // The banners sit at the top of the modal body and Save sits in the footer, so
+        // bring this save's result into view unless the operator has moved to another
+        // control meanwhile (TASK-508, the rule _configMgmtRevealResult follows).
+        const origin = document.activeElement;
+        const reveal = () => {
+          if (!(c.error || c.saved) || !this._focusIsFree(origin)) return;
+          this.revealFeedback(c.error ? '[data-test="cfg-error"]' : '[data-test="cfg-saved"]');
+        };
+        if (Object.keys(edits).length === 0) {
+          c.error = "No changes to save."; c.saved = false; reveal(); return;
+        }
         const boundErr = this._numericBoundError(c.specs, edits);
-        if (boundErr) { c.error = boundErr; c.saved = false; return; }
+        if (boundErr) { c.error = boundErr; c.saved = false; reveal(); return; }
         c.saving = true; c.error = ""; c.saved = false;
         try {
           const res = await fetch(ROOT + "/api/config", {
@@ -1469,7 +1482,10 @@
             c.error = d.detail || ("Save failed (" + res.status + ").");
           }
         } catch (e) { c.error = "Save failed."; }
-        finally { c.saving = false; }
+        finally {
+          c.saving = false;
+          if (c.gen === myGen) reveal();
+        }
       },
       // Restart Clauster in place to apply a saved config change (#483). Re-exec on the
       // backend (os.execv): same PID, fresh config. The swap keeps child processes, so
@@ -2884,16 +2900,20 @@
         const c = this.configMgmt;
         if (!this.configMgmtCanSave()) return;
         const myGen = c.gen;  // a scope/surface switch bumps gen and voids this save
+        const origin = document.activeElement;
         c.saving = true; c.error = ""; c.saved = false;
         try {
           if (c.surface === "claude-md") await this._saveClaudeMd(myGen);
           else await this._saveJsonSurface(c.surface, myGen);  // settings/permissions/hooks
+        } catch (e) {
+          this._configMgmtWriteFailed(e, myGen, "Save failed.");
         } finally {
           // Always clear — never gate on gen. A scope/surface/project switch mid-save
           // bumps gen (its buttons aren't disabled while saving); the stale response is
           // dropped by the inner `c.gen !== myGen` guards, but the button must still
           // return from "Saving…" rather than stick forever.
           c.saving = false;
+          if (c.gen === myGen) this._configMgmtRevealResult(origin);
         }
       },
       async _saveClaudeMd(myGen) {
@@ -2972,6 +2992,46 @@
         }
         const d = await res.json().catch(() => ({}));
         c.error = (d && d.detail) || ("Save failed (" + res.status + ").");
+      },
+      // The shared cm-error / cm-saved banners sit at the top of the modal body and every
+      // write control sits below them, so a result can land above the fold and the write
+      // looks dead (#1031, TASK-508). Bring the banner this write produced into view.
+      // `origin` held focus when the write began: once the operator has moved to another
+      // control, skip the scroll so it does not pull them away (the live regions beside
+      // the banners still announce the result).
+      _configMgmtRevealResult(origin) {
+        const c = this.configMgmt;
+        if (!(c.error || c.saved) || !this._focusIsFree(origin)) return;
+        this.revealFeedback(c.error ? '[data-test="cm-error"]' : '[data-test="cm-saved"]');
+      },
+      // A write that threw. Reloads catch their own errors, so this is mostly a request that
+      // never reached the server; when the write already landed (`saved`), say that rather
+      // than report a failure. The exception goes to the console either way, also when a
+      // scope or surface switch (`gen`) means the panel no longer shows this write.
+      _configMgmtWriteFailed(e, gen, failed) {
+        const c = this.configMgmt;
+        console.error(e);
+        if (c.gen !== gen) return;
+        c.error = c.saved ? "Saved, but the panel did not reload — close and reopen it." : failed;
+      },
+      // A save the page refuses before sending. Clear the banners and let that render
+      // first, so the same refusal twice in a row still changes the live region's text.
+      async _configMgmtRefuse(msg) {
+        const c = this.configMgmt, origin = document.activeElement;
+        c.error = ""; c.saved = false;
+        await this.$nextTick();
+        c.error = msg;
+        this._configMgmtRevealResult(origin);
+      },
+      // Focus is "free" on the element the write started from, the body, or anything that
+      // is not a control. Safari and macOS Firefox do not focus a clicked button, so after
+      // a click on Save the focus can sit on the nearest focusable ancestor, the
+      // tabindex="-1" modal, which counts as free.
+      _focusIsFree(origin) {
+        const a = document.activeElement;
+        if (!a || a === document.body || a === origin) return true;
+        return !a.matches('input, textarea, select, button, summary, a[href], '
+          + '[contenteditable="true"], [tabindex]:not([tabindex="-1"])');
       },
       // --- subagents (#773 slice C): a list surface — list + per-agent editor ------
       async _loadSubagents(myGen) {
@@ -3071,7 +3131,8 @@
       async configMgmtSaveAgent() {
         const c = this.configMgmt, s = c.subagents;
         if (!this.configMgmtCanSaveAgent()) return;
-        const gen = c.gen; s.ops += 1; s.busy = true; c.error = ""; c.saved = false;
+        const gen = c.gen, origin = document.activeElement;
+        s.ops += 1; s.busy = true; c.error = ""; c.saved = false;
         try {
           const body = Object.assign(this._configMgmtTarget(), {
             // The Name box is authoritative — sync it into the frontmatter so the operator
@@ -3088,7 +3149,11 @@
             await this._loadSubagents(gen);
           }
           else await this._configMgmtWriteErr(res);
-        } finally { s.ops = Math.max(0, s.ops - 1); s.busy = s.ops > 0; }
+        } catch (e) { this._configMgmtWriteFailed(e, gen, "Save failed."); }
+        finally {
+          s.ops = Math.max(0, s.ops - 1); s.busy = s.ops > 0;
+          if (c.gen === gen) this._configMgmtRevealResult(origin);
+        }
       },
       configMgmtAskDeleteAgent(name) {
         const c = this.configMgmt, s = c.subagents;
@@ -3107,7 +3172,8 @@
       async configMgmtDeleteAgent() {
         const c = this.configMgmt, s = c.subagents;
         if (!this.configMgmtCanDeleteAgent()) return;
-        const gen = c.gen; s.ops += 1; s.busy = true; c.error = ""; c.saved = false;
+        const gen = c.gen, origin = document.activeElement;
+        s.ops += 1; s.busy = true; c.error = ""; c.saved = false;
         const name = s.deletingName;
         try {
           const res = await fetch(
@@ -3118,7 +3184,11 @@
           if (this._authExpired(res)) return;
           if (res.ok) { c.saved = true; s.deletingName = ""; s.confirm = ""; await this._loadSubagents(gen); }
           else await this._configMgmtWriteErr(res);
-        } finally { s.ops = Math.max(0, s.ops - 1); s.busy = s.ops > 0; }
+        } catch (e) { this._configMgmtWriteFailed(e, gen, "Delete failed."); }
+        finally {
+          s.ops = Math.max(0, s.ops - 1); s.busy = s.ops > 0;
+          if (c.gen === gen) this._configMgmtRevealResult(origin);
+        }
       },
       // --- MCP servers (#773 slice D): a list surface — per-entry JSON editor ------
       // The {name: entry} map is server-masked (secret-shaped values -> ********); a
@@ -3628,12 +3698,13 @@
         if (m.mode === "fields") entry = this._mcpFieldsEntry();
         else {
           try { entry = JSON.parse(m.entryText); }
-          catch (e) { c.error = "Server entry must be valid JSON."; return; }
+          catch (e) { return this._configMgmtRefuse("Server entry must be valid JSON."); }
         }
         if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
-          c.error = "Server entry must be a JSON object."; return;
+          return this._configMgmtRefuse("Server entry must be a JSON object.");
         }
-        const gen = c.gen; m.ops += 1; m.busy = true; c.error = ""; c.saved = false;
+        const gen = c.gen, origin = document.activeElement;
+        m.ops += 1; m.busy = true; c.error = ""; c.saved = false;
         try {
           const body = Object.assign(this._configMgmtTarget(), {
             op: m.isNew ? "add" : "edit", name: m.name.trim(), entry: entry, confirm: m.confirm,
@@ -3645,7 +3716,11 @@
           if (this._authExpired(res)) return;
           if (res.ok) { c.saved = true; m.editing = false; m.confirm = ""; await this._loadMcp(gen); }
           else await this._configMgmtWriteErr(res);
-        } finally { m.ops = Math.max(0, m.ops - 1); m.busy = m.ops > 0; }
+        } catch (e) { this._configMgmtWriteFailed(e, gen, "Save failed."); }
+        finally {
+          m.ops = Math.max(0, m.ops - 1); m.busy = m.ops > 0;
+          if (c.gen === gen) this._configMgmtRevealResult(origin);
+        }
       },
       configMgmtAskDeleteMcp(name) {
         const c = this.configMgmt, m = c.mcp;
@@ -3668,7 +3743,8 @@
       async configMgmtDeleteMcp() {
         const c = this.configMgmt, m = c.mcp;
         if (!this.configMgmtCanDeleteMcp()) return;
-        const gen = c.gen; m.ops += 1; m.busy = true; c.error = ""; c.saved = false;
+        const gen = c.gen, origin = document.activeElement;
+        m.ops += 1; m.busy = true; c.error = ""; c.saved = false;
         const name = m.deletingName;
         try {
           const body = Object.assign(this._configMgmtTarget(), { op: "remove", name: name, confirm: m.confirm });
@@ -3679,7 +3755,11 @@
           if (this._authExpired(res)) return;
           if (res.ok) { c.saved = true; m.deletingName = ""; m.confirm = ""; await this._loadMcp(gen); }
           else await this._configMgmtWriteErr(res);
-        } finally { m.ops = Math.max(0, m.ops - 1); m.busy = m.ops > 0; }
+        } catch (e) { this._configMgmtWriteFailed(e, gen, "Delete failed."); }
+        finally {
+          m.ops = Math.max(0, m.ops - 1); m.busy = m.ops > 0;
+          if (c.gen === gen) this._configMgmtRevealResult(origin);
+        }
       },
       // --- MCP project approvals: which committed .mcp.json servers Claude may use --
       _mcpApprovalsSig(enabled, disabled) {
@@ -3757,7 +3837,8 @@
       async configMgmtSaveMcpApprovals() {
         const c = this.configMgmt, ap = c.mcp.approvals;
         if (!this.configMgmtCanSaveMcpApprovals()) return;
-        const gen = c.gen; ap.ops += 1; ap.busy = true; c.error = ""; c.saved = false;
+        const gen = c.gen, origin = document.activeElement;
+        ap.ops += 1; ap.busy = true; c.error = ""; c.saved = false;
         try {
           const body = {
             scope: "project", project: c.project, confirm: ap.confirm,
@@ -3770,7 +3851,11 @@
           if (this._authExpired(res)) return;
           if (res.ok) { c.saved = true; ap.confirm = ""; await this._loadMcp(gen); await this.loadPreflight(c.project); if (!this.preflight[c.project]) this.mcpBlockUntilReloaded[c.project] = true; }
           else await this._configMgmtWriteErr(res);
-        } finally { ap.ops = Math.max(0, ap.ops - 1); ap.busy = ap.ops > 0; }
+        } catch (e) { this._configMgmtWriteFailed(e, gen, "Save failed."); }
+        finally {
+          ap.ops = Math.max(0, ap.ops - 1); ap.busy = ap.ops > 0;
+          if (c.gen === gen) this._configMgmtRevealResult(origin);
+        }
       },
       configMgmtCanResetMcp() {
         const c = this.configMgmt, ap = c.mcp.approvals;
@@ -3780,7 +3865,8 @@
       async configMgmtResetMcpChoices() {
         const c = this.configMgmt, ap = c.mcp.approvals;
         if (!this.configMgmtCanResetMcp()) return;
-        const gen = c.gen; ap.resetBusy = true; c.error = ""; c.saved = false;
+        const gen = c.gen, origin = document.activeElement;
+        ap.resetBusy = true; c.error = ""; c.saved = false;
         try {
           const body = { project: c.project, confirm: ap.resetConfirm };
           const res = await fetch(ROOT + "/api/config-write/mcp/reset-project-choices", {
@@ -3790,7 +3876,11 @@
           if (this._authExpired(res)) return;
           if (res.ok) { c.saved = true; ap.resetConfirm = ""; await this._loadMcp(gen); await this.loadPreflight(c.project); if (!this.preflight[c.project]) this.mcpBlockUntilReloaded[c.project] = true; }
           else await this._configMgmtWriteErr(res);
-        } finally { ap.resetBusy = false; }
+        } catch (e) { this._configMgmtWriteFailed(e, gen, "Reset failed."); }
+        finally {
+          ap.resetBusy = false;
+          if (c.gen === gen) this._configMgmtRevealResult(origin);
+        }
       },
       // --- skills (#773 slice E): a list surface — list + per-skill SKILL.md editor -
       // Directory ops are user/project scope only (no Claude Code local skills dir).
@@ -4049,7 +4139,7 @@
         if (!a || a === document.body) return true;
         const panel = document.querySelector('[data-test="cm-skill-ov"]');
         if (panel && panel.contains(a)) return true;
-        return !a.matches('input, textarea, select, button, a[href], [contenteditable="true"]');
+        return this._focusIsFree(null);
       },
       configMgmtNewSkill() {
         const c = this.configMgmt, s = c.skills;
@@ -4098,7 +4188,8 @@
       async configMgmtSaveSkill() {
         const c = this.configMgmt, s = c.skills;
         if (!this.configMgmtCanSaveSkill()) return;
-        const gen = c.gen; s.ops += 1; s.busy = true; c.error = ""; c.saved = false;
+        const gen = c.gen, origin = document.activeElement;
+        s.ops += 1; s.busy = true; c.error = ""; c.saved = false;
         try {
           const body = Object.assign(this._configMgmtTarget(), {
             name: s.name.trim(), files: { "SKILL.md": s.content }, confirm: s.confirm, hash: s.hash,
@@ -4113,7 +4204,11 @@
             await this._loadSkills(true);
           }
           else await this._configMgmtWriteErr(res);
-        } finally { s.ops = Math.max(0, s.ops - 1); s.busy = s.ops > 0; }
+        } catch (e) { this._configMgmtWriteFailed(e, gen, "Save failed."); }
+        finally {
+          s.ops = Math.max(0, s.ops - 1); s.busy = s.ops > 0;
+          if (c.gen === gen) this._configMgmtRevealResult(origin);
+        }
       },
       configMgmtAskDeleteSkill(name) {
         const c = this.configMgmt, s = c.skills;
@@ -4132,7 +4227,8 @@
       async configMgmtDeleteSkill() {
         const c = this.configMgmt, s = c.skills;
         if (!this.configMgmtCanDeleteSkill()) return;
-        const gen = c.gen; s.ops += 1; s.busy = true; c.error = ""; c.saved = false;
+        const gen = c.gen, origin = document.activeElement;
+        s.ops += 1; s.busy = true; c.error = ""; c.saved = false;
         const name = s.deletingName;
         try {
           const body = Object.assign(this._configMgmtTarget(), { name: name, confirm: s.confirm });
@@ -4143,7 +4239,11 @@
           if (this._authExpired(res)) return;
           if (res.ok) { c.saved = true; s.deletingName = ""; s.confirm = ""; await this._loadSkills(true); }
           else await this._configMgmtWriteErr(res);
-        } finally { s.ops = Math.max(0, s.ops - 1); s.busy = s.ops > 0; }
+        } catch (e) { this._configMgmtWriteFailed(e, gen, "Delete failed."); }
+        finally {
+          s.ops = Math.max(0, s.ops - 1); s.busy = s.ops > 0;
+          if (c.gen === gen) this._configMgmtRevealResult(origin);
+        }
       },
       // --- plugins + marketplaces (#773 slice F): CLI-driven, all 3 scopes ---------
       // Two panels sharing one scope-token `confirm`. Every action is a single POST
@@ -4190,7 +4290,8 @@
         // gated on the confirm; `busy` (set here) covers the reload so no second
         // action can fire against stale rows.
         const c = this.configMgmt, pl = c.plugins;
-        const gen = c.gen; pl.ops += 1; pl.busy = true; c.error = ""; c.saved = false;
+        const gen = c.gen, origin = document.activeElement;
+        pl.ops += 1; pl.busy = true; c.error = ""; c.saved = false;
         try {
           const res = await fetch(ROOT + url, {
             method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body),
@@ -4199,7 +4300,11 @@
           if (this._authExpired(res)) return;
           if (res.ok) { c.saved = true; await this._loadPlugins(gen); }
           else await this._configMgmtWriteErr(res);
-        } finally { pl.ops = Math.max(0, pl.ops - 1); pl.busy = pl.ops > 0; }
+        } catch (e) { this._configMgmtWriteFailed(e, gen, "Action failed."); }
+        finally {
+          pl.ops = Math.max(0, pl.ops - 1); pl.busy = pl.ops > 0;
+          if (c.gen === gen) this._configMgmtRevealResult(origin);
+        }
       },
       configMgmtPluginAction(id, op) {
         const pl = this.configMgmt.plugins;

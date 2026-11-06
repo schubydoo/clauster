@@ -2480,3 +2480,354 @@ def test_delete_confirm_scrolls_into_view_and_focuses(
         if not focused:
             time.sleep(0.2)
     assert focused, "delete-confirm input should receive focus when the confirm is armed"
+
+
+# --- TASK-508: every config-modal write brings its result banner into view ------------
+# The shared cm-error / cm-saved banners render at the top of the modal body and the
+# write controls sit below them. Each test parks the body at its foot (where an operator
+# who just reached Save or a panel-foot button is), writes, and asserts the banner landed
+# inside the body's scrollport. On the old code the banner stayed above the fold.
+
+_CM_BODY = '[data-test="configmgmt-modal"] .modal-body'
+
+
+def _short_window(browser: AgentBrowser) -> None:
+    """A window short enough that every surface's modal body scrolls."""
+    browser.set_viewport(1280, 560)  # the session closes after the test, so no restore
+
+
+def _park_modal_body_at_foot(browser: AgentBrowser) -> None:
+    top = browser.eval_json(
+        f"(() => {{ const b = document.querySelector({json.dumps(_CM_BODY)});"
+        " b.scrollTop = b.scrollHeight; return b.scrollTop; })()"
+    )
+    assert top > 0, "the modal body does not scroll, so the test would prove nothing"
+
+
+def _expect_in_modal_view(browser: AgentBrowser, selector: str) -> None:
+    """Poll until ``selector`` is visible and wholly inside the modal body's scrollport."""
+    browser.expect_visible(selector, timeout_ms=_SAVE_TIMEOUT)
+    script = (
+        f"(() => {{ const b = document.querySelector({json.dumps(_CM_BODY)})"
+        ".getBoundingClientRect();"
+        f" const r = document.querySelector({json.dumps(selector)}).getBoundingClientRect();"
+        " return r.top >= b.top && r.bottom <= b.bottom; })()"
+    )
+    deadline = time.monotonic() + 5  # the reveal scrolls smoothly, so give it a beat
+    while not browser.eval_json(script):
+        assert time.monotonic() < deadline, f"{selector} stayed outside the visible modal body"
+        time.sleep(0.25)
+
+
+def _expect_error_announced(browser: AgentBrowser, text: str) -> None:
+    """The persistent role=alert region carries the refusal for assistive tech."""
+    browser.expect_text('[data-test="cm-error-live"]', text)
+    assert browser.get_attr('[data-test="cm-error-live"]', "role") == "alert"
+
+
+def test_config_mgmt_refused_local_auto_mode_save_reveals_error(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """The reported case: a Local autoMode save is refused and the refusal is in view."""
+    _open_modal(browser, config_mgmt_server)
+    _short_window(browser)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-scope-local"]')
+    browser.click('[data-test="cm-surface-permissions"]')
+    browser.expect_visible('[data-test="cm-automode-text"]')
+    browser.fill('[data-test="cm-automode-text"]', json.dumps(_MAINTAINER_AUTO_MODE))
+    browser.fill('[data-test="cm-confirm"]', "alpha (local)")
+    _park_modal_body_at_foot(browser)
+    browser.click('[data-test="cm-save"]')
+    _expect_in_modal_view(browser, '[data-test="cm-error"]')
+    assert "user settings" in browser.get_text('[data-test="cm-error"]')
+    _expect_error_announced(browser, "user settings")
+
+
+def test_config_mgmt_refused_settings_save_reveals_error(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A 422 refusal on the Settings tab lands in view too."""
+    _open_settings_rows(browser, config_mgmt_server)
+    _short_window(browser)
+    _add_settings_key(browser, "skipAutoPermissionPrompt")
+    browser.click(_row("skipAutoPermissionPrompt", "cm-settings-bool"))
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    _park_modal_body_at_foot(browser)
+    browser.click('[data-test="cm-save"]')
+    _expect_in_modal_view(browser, '[data-test="cm-error"]')
+    _expect_error_announced(browser, "only from user settings")
+
+
+def test_config_mgmt_settings_save_reveals_saved(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A successful save brings "Saved." into view and announces it politely."""
+    _open_settings_rows(browser, config_mgmt_server)
+    _short_window(browser)
+    _add_settings_key(browser, "verbose")
+    browser.click(_row("verbose", "cm-settings-bool"))
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    _park_modal_body_at_foot(browser)
+    browser.click('[data-test="cm-save"]')
+    _expect_in_modal_view(browser, '[data-test="cm-saved"]')
+    browser.expect_text('[data-test="cm-saved-live"]', "Saved.")
+    assert browser.get_attr('[data-test="cm-saved-live"]', "role") == "status"
+    # The error region is mounted (get_text also returns "" for a missing element) and empty.
+    assert browser.get_count('[data-test="cm-error-live"]') == 1
+    assert browser.get_text('[data-test="cm-error-live"]') == ""
+
+
+# Records the `behavior` of every scrollIntoView call, then scrolls as asked.
+_RECORD_SCROLL_BEHAVIOR = """(() => {
+  window.__scrolls508 = [];
+  const real = Element.prototype.scrollIntoView;
+  Element.prototype.scrollIntoView = function (opts) {
+    window.__scrolls508.push(opts && opts.behavior);
+    return real.apply(this, arguments);
+  };
+  return true;
+})()"""
+
+
+@pytest.mark.parametrize("reduce", [False, True], ids=["motion", "reduced-motion"])
+def test_config_mgmt_save_reveal_honors_reduced_motion(
+    browser: AgentBrowser, config_mgmt_server: Server, reduce: bool
+) -> None:
+    """The reveal scrolls smoothly, or at once when the OS asks for reduced motion."""
+    _open_settings_rows(browser, config_mgmt_server)
+    _short_window(browser)
+    if reduce:
+        browser.set_reduced_motion()
+    _add_settings_key(browser, "verbose")
+    browser.click(_row("verbose", "cm-settings-bool"))
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    assert browser.eval_json(_RECORD_SCROLL_BEHAVIOR) is True
+    _park_modal_body_at_foot(browser)
+    browser.click('[data-test="cm-save"]')
+    _expect_in_modal_view(browser, '[data-test="cm-saved"]')
+    assert browser.eval_json("window.__scrolls508") == ["auto" if reduce else "smooth"]
+
+
+def test_config_mgmt_client_side_refusal_reveals_error(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A save the page refuses itself (autoMode is not JSON) shows its reason in view."""
+    _open_modal(browser, config_mgmt_server)
+    _short_window(browser)
+    _switch_to_user_scope(browser)
+    browser.click('[data-test="cm-surface-permissions"]')
+    browser.expect_visible('[data-test="cm-automode-text"]')
+    browser.fill('[data-test="cm-automode-text"]', "{not json")
+    browser.fill('[data-test="cm-confirm"]', "USER SCOPE")
+    _park_modal_body_at_foot(browser)
+    browser.click('[data-test="cm-save"]')
+    _expect_in_modal_view(browser, '[data-test="cm-error"]')
+    _expect_error_announced(browser, "autoMode must be valid JSON.")
+
+
+def test_config_mgmt_stale_save_reveals_error(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A 409 (the file changed on disk after the load) lands in view."""
+    _seed_alpha_settings(config_mgmt_server, {"model": "opus"})
+    _open_settings_rows(browser, config_mgmt_server)
+    _short_window(browser)
+    _add_settings_key(browser, "verbose")
+    browser.click(_row("verbose", "cm-settings-bool"))
+    _alpha_settings_path(config_mgmt_server).write_text(
+        json.dumps({"model": "sonnet"}), encoding="utf-8"
+    )
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    _park_modal_body_at_foot(browser)
+    browser.click('[data-test="cm-save"]')
+    _expect_in_modal_view(browser, '[data-test="cm-error"]')
+    _expect_error_announced(browser, "Changed on disk")
+
+
+# Makes every config-write PUT reject the way fetch does when the network is down.
+_FAIL_CONFIG_WRITE_PUT = """(() => {
+  const real = window.fetch;
+  window.fetch = function (url, opts) {
+    if (opts && opts.method === "PUT" && String(url).includes("/api/config-write/")) {
+      return Promise.reject(new TypeError("Failed to fetch"));
+    }
+    return real.apply(this, arguments);
+  };
+  return true;
+})()"""
+
+
+def test_config_mgmt_network_error_reveals_error(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A save whose request never reaches the server says so, in view."""
+    _open_settings_rows(browser, config_mgmt_server)
+    _short_window(browser)
+    _add_settings_key(browser, "verbose")
+    browser.click(_row("verbose", "cm-settings-bool"))
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    assert browser.eval_json(_FAIL_CONFIG_WRITE_PUT) is True
+    _park_modal_body_at_foot(browser)
+    browser.click('[data-test="cm-save"]')
+    _expect_in_modal_view(browser, '[data-test="cm-error"]')
+    _expect_error_announced(browser, "Save failed.")
+    browser.expect_text('[data-test="cm-save"]', "Save")  # not stuck at "Saving…"
+
+
+def test_config_mgmt_plugins_action_reveals_saved(
+    browser: AgentBrowser, config_mgmt_plugins_server: Server
+) -> None:
+    """Adding a marketplace from the panel foot brings "Saved." into view."""
+    _open_modal(browser, config_mgmt_plugins_server)
+    _short_window(browser)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-plugins"]')
+    browser.expect_text('[data-test="cm-marketplaces-table"]', "market")
+    browser.fill('[data-test="cm-plugin-confirm"]', "alpha")
+    _park_modal_body_at_foot(browser)
+    browser.fill('[data-test="cm-marketplace-add-source"]', "owner/other")
+    browser.click('[data-test="cm-marketplace-add-go"]')
+    _expect_in_modal_view(browser, '[data-test="cm-saved"]')
+
+
+# Holds every settings PUT until `__release508()` runs.
+_HOLD_SETTINGS_PUT = """(() => {
+  window.__hold508 = new Promise(r => { window.__release508 = r; });
+  const real = window.fetch;
+  window.fetch = function (url, opts) {
+    const p = real.apply(this, arguments);
+    const isPut = opts && opts.method === "PUT" && String(url).includes("/config-write/settings");
+    return isPut ? window.__hold508.then(() => p) : p;
+  };
+  return true;
+})()"""
+
+
+def test_config_mgmt_save_reveal_leaves_a_control_the_operator_moved_to(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Focus moved to another control during the save keeps its place and its view."""
+    settings = _alpha_settings_path(config_mgmt_server)
+    _open_settings_rows(browser, config_mgmt_server)
+    _short_window(browser)
+    _add_settings_key(browser, "verbose")
+    browser.click(_row("verbose", "cm-settings-bool"))
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    assert browser.eval_json(_HOLD_SETTINGS_PUT) is True
+    _park_modal_body_at_foot(browser)
+    browser.click('[data-test="cm-save"]')
+    deadline = time.monotonic() + 10
+    while not settings.exists():
+        assert time.monotonic() < deadline, "the held save never reached the server"
+        time.sleep(0.1)
+    # Meanwhile the operator moves on to the Add-a-key box at the foot of the panel.
+    browser.eval_json(
+        "(() => { document.getElementById('cm-settings-add-key')"
+        ".focus({ preventScroll: true }); return true; })()"
+    )
+    scroll_before = browser.eval_json(_MODAL_SCROLL_TOP)
+    browser.eval_json("(() => { window.__release508(); return true; })()")
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+    time.sleep(0.5)  # past the frames in which a wrong scroll would happen
+    _expect_focused(browser, "cm-settings-add-key")
+    # Never scrolled back up to the banner (a reload can only nudge scrollTop down).
+    assert browser.eval_json(_MODAL_SCROLL_TOP) >= scroll_before
+    browser.expect_text('[data-test="cm-saved-live"]', "Saved.")  # still announced
+
+
+def _list_surface_editor(browser: AgentBrowser, server: Server, surface: str) -> None:
+    """Open alpha's ``surface`` (subagents, skills or mcp) and start a new entry."""
+    key = {"subagents": "agent", "skills": "skill", "mcp": "mcp"}[surface]
+    _open_modal(browser, server)
+    _short_window(browser)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click(f'[data-test="cm-surface-{surface}"]')
+    browser.expect_visible(f'[data-test="cm-{key}-new"]')  # the list finished loading
+    browser.click(f'[data-test="cm-{key}-new"]')
+
+
+@pytest.mark.parametrize("surface", ["subagents", "skills"])
+def test_config_mgmt_list_editor_refusal_reveals_error(
+    browser: AgentBrowser, config_mgmt_server: Server, surface: str
+) -> None:
+    """A refused subagent or skill save, from the editor's foot, lands in view."""
+    key = {"subagents": "agent", "skills": "skill"}[surface]
+    _list_surface_editor(browser, config_mgmt_server, surface)
+    browser.expect_visible(f'[data-test="cm-{key}-editor"]')
+    browser.fill(f'[data-test="cm-{key}-name"]', "Not A Valid Name")
+    browser.fill(f'[data-test="cm-{key}-content"]', "---\ndescription: e2e\n---\nGo.\n")
+    browser.fill(f'[data-test="cm-{key}-confirm"]', "alpha")
+    _park_modal_body_at_foot(browser)
+    browser.click(f'[data-test="cm-{key}-save"]')
+    _expect_in_modal_view(browser, '[data-test="cm-error"]')
+    assert browser.get_text('[data-test="cm-error-live"]') != ""
+
+
+# Records every text the error live region takes, so a test can see it change.
+_RECORD_ERROR_REGION = """(() => {
+  window.__errTexts508 = [];
+  const el = document.querySelector('[data-test="cm-error-live"]');
+  new MutationObserver(() => window.__errTexts508.push(el.textContent))
+    .observe(el, { childList: true, characterData: true, subtree: true });
+  return true;
+})()"""
+
+
+def test_config_mgmt_mcp_refusal_twice_is_revealed_and_announced_twice(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """The same client-side refusal twice in a row changes the live region both times."""
+    _list_surface_editor(browser, config_mgmt_server, "mcp")
+    browser.expect_visible('[data-test="cm-mcp-fields"]')
+    browser.fill('[data-test="cm-mcp-name"]', "gizmo")
+    _mcp_raw_mode(browser)
+    browser.fill('[data-test="cm-mcp-entry"]', "{not json")
+    browser.fill('[data-test="cm-mcp-confirm"]', "alpha")
+    assert browser.eval_json(_RECORD_ERROR_REGION) is True
+    for _ in range(2):
+        _park_modal_body_at_foot(browser)
+        browser.click('[data-test="cm-mcp-save"]')
+        _expect_in_modal_view(browser, '[data-test="cm-error"]')
+    deadline = time.monotonic() + 5
+    want = "Server entry must be valid JSON."
+    while browser.eval_json("window.__errTexts508").count(want) < 2:
+        assert time.monotonic() < deadline, browser.eval_json("window.__errTexts508")
+        time.sleep(0.1)
+
+
+def test_config_mgmt_json_surface_refusal_twice_is_announced_twice(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """The shared Save path already clears the region before a repeated refusal; pin it."""
+    _open_modal(browser, config_mgmt_server)
+    _short_window(browser)
+    _switch_to_user_scope(browser)
+    browser.click('[data-test="cm-surface-permissions"]')
+    browser.expect_visible('[data-test="cm-automode-text"]')
+    browser.fill('[data-test="cm-automode-text"]', "{not json")
+    browser.fill('[data-test="cm-confirm"]', "USER SCOPE")
+    assert browser.eval_json(_RECORD_ERROR_REGION) is True
+    for _ in range(2):
+        browser.click('[data-test="cm-save"]')
+        browser.expect_visible('[data-test="cm-error"]')
+        time.sleep(0.3)
+    want = "autoMode must be valid JSON."
+    deadline = time.monotonic() + 5
+    while browser.eval_json("window.__errTexts508").count(want) < 2:
+        assert time.monotonic() < deadline, browser.eval_json("window.__errTexts508")
+        time.sleep(0.1)
+
+
+def test_config_mgmt_claude_md_save_reveals_saved(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """The CLAUDE.md save, through the same footer Save, brings "Saved." into view."""
+    _open_modal(browser, config_mgmt_server)
+    _short_window(browser)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.fill('[data-test="cm-claudemd-text"]', "# managed\n" + "line\n" * 60)
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    _park_modal_body_at_foot(browser)
+    browser.click('[data-test="cm-save"]')
+    _expect_in_modal_view(browser, '[data-test="cm-saved"]')

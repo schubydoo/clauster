@@ -612,3 +612,61 @@ def test_skill_editor_shows_the_conversion_note(write_config):
     assert 'c.skills.converted = "";' in switch
     save = _between(html, "async configMgmtSaveSkill() {", "configMgmtAskDeleteSkill(")
     assert 'c.saved = true; s.editing = false; s.confirm = ""; s.converted = "";' in save
+
+
+def test_write_results_are_announced_once_by_persistent_live_regions(write_config):
+    # TASK-508: the visible banners toggle with x-show, which NVDA and VoiceOver skip, so
+    # they are visual only and two always-mounted regions carry the announcement. One of
+    # each, or a screen reader hears a result twice (or not at all).
+    html = _html(write_config, _ON)
+    assert html.count('data-test="cm-error-live"') == 1
+    assert html.count('data-test="cm-saved-live"') == 1
+    assert (
+        '<div class="visually-hidden" role="alert" data-test="cm-error-live"\n'
+        '                 x-text="configMgmt.error"></div>'
+    ) in html
+    assert (
+        '<div class="visually-hidden" role="status" data-test="cm-saved-live"\n'
+        "                 x-text=\"configMgmt.saved ? 'Saved.' : ''\"></div>"
+    ) in html
+    for banner in ("cm-error", "cm-saved"):
+        tag = html[html.index(f'data-test="{banner}"') :].split(">")[0]
+        assert 'aria-hidden="true"' in tag, banner
+        assert "role=" not in tag, banner  # the region below announces it, not the banner
+
+
+# Every configMgmt write, with the text that ends its body. Each must reveal its result
+# (TASK-508); dropping one call leaves that panel's result above the fold again.
+_WRITES = [
+    ("async configMgmtSave() {", "async _saveClaudeMd("),
+    ("async configMgmtSaveAgent() {", "configMgmtAskDeleteAgent("),
+    ("async configMgmtDeleteAgent() {", "// --- MCP servers"),
+    ("async configMgmtSaveMcp() {", "configMgmtAskDeleteMcp("),
+    ("async configMgmtDeleteMcp() {", "// --- MCP project approvals"),
+    ("async configMgmtSaveMcpApprovals() {", "configMgmtCanResetMcp()"),
+    ("async configMgmtResetMcpChoices() {", "// --- skills"),
+    ("async configMgmtSaveSkill() {", "configMgmtAskDeleteSkill("),
+    ("async configMgmtDeleteSkill() {", "// --- plugins + marketplaces"),
+    ("async _pluginActionPost(url, body) {", "configMgmtPluginAction("),
+]
+
+
+def test_every_config_mgmt_write_reveals_its_result(write_config):
+    html = _html(write_config, _ON)
+    for start, end in _WRITES:
+        body = _between(html, start, end)
+        assert "const gen = c.gen, origin = document.activeElement;" in body or (
+            "const origin = document.activeElement;" in body
+        ), start
+        # Only when the result still belongs to the panel on screen.
+        assert (
+            "if (c.gen === gen) this._configMgmtRevealResult(origin);" in body
+            or "if (c.gen === myGen) this._configMgmtRevealResult(origin);" in body
+        ), start
+        # A request that never reached the server reports itself rather than rejecting.
+        assert "this._configMgmtWriteFailed(e, " in body, start
+    # The two refusals the MCP editor makes before sending reveal too.
+    mcp = _between(html, "async configMgmtSaveMcp() {", "configMgmtAskDeleteMcp(")
+    assert mcp.count("return this._configMgmtRefuse(") == 2
+    # The reveal honors the OS reduced-motion preference.
+    assert 'behavior: reduce ? "auto" : "smooth"' in html
