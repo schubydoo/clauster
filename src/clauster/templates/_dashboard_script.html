@@ -263,7 +263,9 @@
           // `rawBlocked` records a refused switch to Raw JSON, so the reason shows at the
           // top of the view until the row that blocked it is fixed.
           keyRows: [], keyTypes: {}, ownedKeys: {}, envEditable: true,
-          addKey: "", addError: "", addOwner: "", addRaw: false, rawBlocked: false,
+          // `addType` is the value type picked for "Add a key" (TASK-511): string, boolean
+          // or number. `addTypeAuto` is true while that pick came from the key name.
+          addKey: "", addType: "string", addTypeAuto: false, addError: "", addOwner: "", addRaw: false, rawBlocked: false,
         },
         // JSON surfaces sharing _loadJsonSurface/_saveJsonSurface (#773 slice B).
         // Permissions (#958 Part 5): a friendly rows editor over allow/deny/ask +
@@ -1996,7 +1998,7 @@
           s.envRows = []; s.envError = ""; s.text = ""; s.orig = ""; s.hash = null;
           s.desktopOnly = []; s.keyRows = []; s.envEditable = true;
           s.keyTypes = {}; s.ownedKeys = {}; s.rawBlocked = false;
-          s.addKey = ""; s.addError = ""; s.addOwner = ""; s.addRaw = false;
+          s.addKey = ""; s.addType = "string"; s.addError = ""; s.addOwner = ""; s.addRaw = false;
           return;
         }
         const s = c.settings;
@@ -2004,7 +2006,8 @@
         const isMap = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
         s.keyTypes = isMap(d.key_types) ? d.key_types : {};
         s.ownedKeys = isMap(d.owned_keys) ? d.owned_keys : {};
-        s.addKey = ""; s.addError = ""; s.addOwner = ""; s.addRaw = false; s.rawBlocked = false;
+        s.addKey = ""; s.addType = "string"; s.addError = ""; s.addOwner = ""; s.addRaw = false;
+        s.rawBlocked = false;
         // Rebuild the rows from the freshly loaded JSON. Only a text that is not a JSON
         // object cannot be shown as rows; it falls back to the raw view (rather than an
         // empty row set) so nothing is hidden.
@@ -2062,7 +2065,8 @@
       // In rows mode `keyRows` (one row per top-level key, in file order) and `envRows`
       // (the env map) are the source of truth for the WHOLE object. Each row is typed by
       // its loaded JSON value: a Boolean is a switch, a number a number box, a string a
-      // select when the server lists it as one of a key's values, else text. An object,
+      // text box that suggests the values the server lists for its key (TASK-511: any
+      // other value saves as typed, with a warning). An object,
       // a list or null is a read-only row that is written back unchanged, and a key that
       // another tab edits links to that tab. The saved text is DERIVED from the rows
       // (_settingsRowsSerialized) at dirty-check and save time rather than synced on
@@ -2086,7 +2090,8 @@
             return;
           }
           // The Add-a-key message belongs to the rows: never bring a stale one back.
-          s.rawBlocked = false; s.addKey = ""; s.addError = ""; s.addOwner = ""; s.addRaw = false;
+          s.rawBlocked = false; s.addKey = ""; s.addType = "string";
+          s.addError = ""; s.addOwner = ""; s.addRaw = false;
           // Materialize the rows into the raw text so the escape hatch shows current
           // edits. With no edit, keep the loaded text as it was, so a plain switch never
           // reads as an unsaved change.
@@ -2108,7 +2113,7 @@
         const s = this.configMgmt.settings;
         const row = {
           id: ++s.envSeq, key: key, kind: "string", value: value, orig: value,
-          inFile: inFile, values: [], masked: false, preview: "", note: "", owner: "",
+          inFile: inFile, values: [], pattern: "", masked: false, preview: "", note: "", owner: "",
         };
         const type = this._hasOwn(s.keyTypes, key) ? s.keyTypes[key] : null;
         if (this._hasOwn(s.ownedKeys, key)) {
@@ -2118,19 +2123,44 @@
         } else if (typeof value === "number") {
           row.kind = "number"; row.value = String(value);
         } else if (typeof value === "string") {
-          const values = type && type.type === "enum" && Array.isArray(type.values) ? type.values : [];
-          if (values.includes(value)) { row.kind = "enum"; row.values = values; }
-          else row.masked = value === CONFIG_MASK;
+          this._settingsRowSuggest(row, type);
+          row.masked = value === CONFIG_MASK;
         } else {
           row.kind = "nested";
           let preview;
           try { preview = JSON.stringify(value); } catch (e) { preview = String(value); }
           row.preview = preview;
-          row.note = Array.isArray(value) ? "A list, read-only here."
-            : value === null ? "null, read-only here."
-            : "An object, read-only here.";
+          row.note = Array.isArray(value) ? "A list." : value === null ? "A null value." : "An object.";
         }
         return row;
+      },
+      // Give a string row the suggested values (and the open form) the server lists for
+      // its key. They are hints from the docs page, never a limit on what saves.
+      _settingsRowSuggest(row, type) {
+        if (!type || type.type !== "string") return;
+        if (Array.isArray(type.values)) row.values = type.values.filter((v) => typeof v === "string");
+        if (typeof type.pattern === "string") row.pattern = type.pattern;
+      },
+      // A warning for a string row whose value is not one of its key's known values ("" when
+      // it is, or when the key lists none). The value still saves as typed (TASK-511): the
+      // list comes from the docs page and can lag behind Claude Code.
+      configMgmtSettingsValueWarning(row) {
+        if (!row || row.kind !== "string" || row.masked || !row.values || !row.values.length) return "";
+        const v = String(row.value === undefined || row.value === null ? "" : row.value);
+        if (row.values.includes(v)) return "";
+        if (row.pattern) {
+          try { if (new RegExp(row.pattern).test(v)) return ""; }
+          catch (e) { /* a pattern this browser cannot compile: warn, as for any other value */ }
+        }
+        const known = "(" + row.values.join(", ") + ")";
+        if (v === "") return "Empty. Type or pick one of the known values " + known + ".";
+        return "Not one of the known values " + known + ". It saves as typed.";
+      },
+      // The keys whose row shows that warning, for the note at the top of the view.
+      configMgmtSettingsOffListKeys() {
+        const s = this.configMgmt.settings;
+        if (s.mode !== "rows") return [];
+        return s.keyRows.filter((r) => this.configMgmtSettingsValueWarning(r)).map((r) => r.key);
       },
       // Populate keyRows + envRows from settings.text. Returns false (and sets envError)
       // only when the text isn't a JSON object: every key of an object gets a row, and a
@@ -2179,8 +2209,9 @@
       },
       configMgmtEnvSummary() {
         const n = this.configMgmt.settings.envRows.length;
-        if (!n) return "No variables. The key is removed on save.";
-        return n + (n === 1 ? " variable" : " variables") + ", edited in the env table below.";
+        if (!n) return "No variables. Save removes the key.";
+        return n === 1 ? "1 variable. Edit it in the env table below."
+          : n + " variables. Edit them in the env table below.";
       },
       // The value that `row` saves, or `undefined` when its editor holds no valid value
       // (an empty or non-number number box). An untouched row saves its loaded value
@@ -2193,7 +2224,7 @@
           const n = Number(text);
           return text !== "" && Number.isFinite(n) ? n : undefined;
         }
-        if (row.kind === "enum" || row.kind === "string") return String(row.value);
+        if (row.kind === "string") return String(row.value);
         return row.orig;  // nested and owned rows are written back unchanged
       },
       configMgmtSettingsNumberWarning() {
@@ -2278,8 +2309,23 @@
           })
           .sort();
       },
-      // Add a row for the typed key. A documented key gets the editor the server names;
-      // any other key is a text row and goes to the server as typed, which decides.
+      // The key name in "Add a key" changed: a documented key of one value preselects its
+      // type (TASK-511). It is only a suggestion: the operator can change the pick. A name
+      // the server does not list undoes a preselection (back to text) but keeps a pick the
+      // operator made (`addTypeAuto` tells the two apart).
+      configMgmtSettingsAddKeyTyped() {
+        const s = this.configMgmt.settings;
+        const k = (s.addKey || "").trim();
+        const type = this._hasOwn(s.keyTypes, k) ? s.keyTypes[k] : null;
+        if (type && ["string", "boolean", "number"].includes(type.type)) {
+          s.addType = type.type; s.addTypeAuto = true;
+        } else if (s.addTypeAuto) {
+          s.addType = "string"; s.addTypeAuto = false;
+        }
+      },
+      // Add a row for the typed key, with the editor of the picked type (text, a switch
+      // that starts off, or an empty number box). The key goes to the server as typed,
+      // which decides; a documented object or list key is sent to Raw JSON instead.
       configMgmtAddSettingsKey() {
         const s = this.configMgmt.settings;
         const k = (s.addKey || "").trim();
@@ -2301,17 +2347,13 @@
             ". Add it in Raw JSON.";
           return;
         }
-        let value = "";
-        if (type && type.type === "boolean") value = false;
-        else if (type && type.type === "enum" && Array.isArray(type.values) && type.values.length) {
-          value = type.values[0];
-        }
-        const row = this._settingsRow(k, value, false);
-        if (type && type.type === "number") { row.kind = "number"; row.value = ""; }
+        const kind = ["boolean", "number"].includes(s.addType) ? s.addType : "string";
+        const row = this._settingsRow(k, kind === "boolean" ? false : "", false);
+        if (kind === "number") { row.kind = "number"; row.value = ""; }
         // Keep the env row last, so a new key lands among the other keys.
         const envAt = s.keyRows.findIndex((r) => r.kind === "env" && !r.inFile);
         if (envAt === -1) s.keyRows.push(row); else s.keyRows.splice(envAt, 0, row);
-        s.addKey = "";
+        s.addKey = ""; s.addType = "string"; s.addTypeAuto = false;
         this.$nextTick(() => {
           const ctl = document.querySelector(
             '[data-test="cm-settings-key-row"][data-row-id="' + row.id + '"] input, ' +

@@ -42,10 +42,10 @@ This is a scope rule, not a key allowlist: every other key still passes through 
 opaque JSON.
 
 **Row types (TASK-271).** :data:`ROW_KEY_TYPES` gives each documented top-level key the
-editor that the tab's Rows mode shows for it (a toggle, a number, a select or text, or
-Raw JSON for an object or a list), and the read payload carries it
-(:func:`row_key_catalog`) so the browser keeps no copy. It is a display hint and refuses
-nothing.
+editor that the tab's Rows mode suggests for it (a toggle, a number, text with suggested
+values, or Raw JSON for an object or a list), and the read payload carries it
+(:func:`row_key_catalog`) so the browser keeps no copy. It is a suggestions-only hint
+from the docs page (TASK-511) and refuses nothing.
 
 **Redaction decision (#772, applying the #822 lesson) -- flagged for maintainer
 review.** :func:`~clauster.config_write.redact_secrets` only masks a value whose
@@ -353,17 +353,20 @@ DESKTOP_ONLY_KEYS: dict[str, str] = {
 #: The value type of each documented top-level key that a User, Project or Local settings
 #: file can set, from the Type line of each key in
 #: https://code.claude.com/docs/en/settings-reference (read 2026-11-05, TASK-271). A tuple
-#: lists the preset strings the key takes. The Settings tab's Rows mode uses it to pick an
-#: editor for a key that the operator adds (a toggle, a number, a select or a text box, or
-#: Raw JSON for an ``object`` or a ``list``) and to offer a select for a loaded string that
-#: is one of the listed values. It is a display hint, NOT an allowlist: a key missing here
-#: is a text row and passes through as opaque JSON, a loaded value is shown by its own JSON
-#: type, and nothing here refuses a write. A key that only managed settings or
-#: ``~/.claude.json`` hold, a Desktop-only key and a carved key (:data:`OWNED_KEY_TABS`)
-#: are left out, as is ``env``, which has its own table. Two tuples are not the whole set:
-#: ``theme`` also takes ``custom:<slug>``, and ``timeFormat`` takes any pattern that holds a
-#: ``%``. A select cannot list those, so such a value shows as text, and a new one is typed
-#: in Raw JSON.
+#: is a string key and lists the values that page names for it.
+#:
+#: SUGGESTIONS ONLY (TASK-511). The table is copied by hand from the docs page, nobody
+#: checks it against the CLI, and it lags whenever Claude Code adds a key or a value.
+#: Nothing here refuses a write: a key missing here is a text row and passes through as
+#: opaque JSON, a loaded value is shown by its own JSON type, and a string outside a tuple
+#: saves as typed (the tab shows a warning on its row). The Settings tab's Rows mode uses
+#: the table to preselect the editor type when the operator adds a key (the operator can
+#: change it), to send an ``object`` or ``list`` key to Raw JSON, and to offer a tuple's
+#: values as suggestions. Do not add a CLI audit for these values. The refusals that the
+#: CLI was checked against live in :data:`SCOPE_LIMITED_KEYS`,
+#: :data:`SCOPE_LIMITED_VALUES` and :data:`DESKTOP_ONLY_KEYS`. A key that only managed
+#: settings or ``~/.claude.json`` hold, a Desktop-only key and a carved key
+#: (:data:`OWNED_KEY_TABS`) are left out, as is ``env``, which has its own table.
 ROW_KEY_TYPES: dict[str, str | tuple[str, ...]] = {
     # Model and output
     "advisorModel": "string",
@@ -528,22 +531,39 @@ ROW_KEY_TYPES: dict[str, str | tuple[str, ...]] = {
     "worktree": "object",
 }
 
+#: The documented open forms of a string key whose other values :data:`ROW_KEY_TYPES`
+#: lists, as a JavaScript-compatible regular expression, from the same docs page and read
+#: date: ``theme`` also takes ``custom:<slug>`` (the pattern accepts any text after
+#: ``custom:``, since the docs do not define a slug), and ``timeFormat`` takes any pattern
+#: that holds a ``%``. A value that matches is a known value, so the tab shows no warning
+#: for it. Keep each pattern to the syntax that Python and the browser read alike (the
+#: tests check it): no backslash and no ``(?`` group. Like the table, it is a suggestion
+#: hint and refuses nothing.
+ROW_VALUE_PATTERNS: dict[str, str] = {
+    "theme": "^custom:.",
+    "timeFormat": "%",
+}
+
 
 def row_key_catalog(scope: cw.Scope) -> dict[str, dict[str, Any]]:
     """Return the Rows-mode type of each :data:`ROW_KEY_TYPES` key, for the read payload.
 
-    Each entry is ``{"type": "boolean" | "number" | "string" | "object" | "list"}`` or
-    ``{"type": "enum", "values": [...]}``, plus ``"here"``: whether Claude Code reads the
-    key at ``scope`` (:data:`SCOPE_LIMITED_KEYS`). The tab offers only the ``here`` keys of
-    one value (not an object or a list) when the operator adds a row. It never refuses a
-    key itself: a save that names a key Claude Code ignores at ``scope`` gets the refusal
-    of :func:`reject_scope_ignored`.
+    Each entry is ``{"type": "boolean" | "number" | "string" | "object" | "list"}``, plus
+    ``"here"``: whether Claude Code reads the key at ``scope`` (:data:`SCOPE_LIMITED_KEYS`).
+    A string key with documented values also carries ``"values"`` (the suggestions) and,
+    for an open form, ``"pattern"`` (:data:`ROW_VALUE_PATTERNS`). The tab offers only the
+    ``here`` keys of one value (not an object or a list) when the operator adds a row. It
+    never refuses a key or a value itself: a save that names a key Claude Code ignores at
+    ``scope`` gets the refusal of :func:`reject_scope_ignored`, and a value outside the
+    suggestions saves as typed.
     """
     catalog: dict[str, dict[str, Any]] = {}
     for key, kind in ROW_KEY_TYPES.items():
         entry: dict[str, Any] = (
-            {"type": "enum", "values": list(kind)} if isinstance(kind, tuple) else {"type": kind}
+            {"type": "string", "values": list(kind)} if isinstance(kind, tuple) else {"type": kind}
         )
+        if key in ROW_VALUE_PATTERNS:
+            entry["pattern"] = ROW_VALUE_PATTERNS[key]
         limited = SCOPE_LIMITED_KEYS.get(key)
         entry["here"] = limited is None or scope in _READ_FROM[limited][0]
         catalog[key] = entry

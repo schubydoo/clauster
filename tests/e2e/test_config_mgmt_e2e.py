@@ -535,8 +535,11 @@ def _save_alpha(browser: AgentBrowser) -> None:
     browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
 
 
-def _add_settings_key(browser: AgentBrowser, key: str) -> None:
+def _add_settings_key(browser: AgentBrowser, key: str, value_type: str = "") -> None:
+    """Add ``key``; ``value_type`` (string, boolean or number) overrides the preselection."""
     browser.fill('[data-test="cm-settings-add-key"]', key)
+    if value_type:
+        browser.select('[data-test="cm-settings-add-type"]', value_type)
     browser.click('[data-test="cm-settings-add-key-btn"]')
 
 
@@ -563,7 +566,7 @@ def test_config_mgmt_settings_typed_rows_round_trip(
     browser.expect_count('[data-test="cm-settings-key-row"]', 7)
     assert _checked(browser, _row("verbose", "cm-settings-bool")) is True
     browser.expect_value(_row("cleanupPeriodDays", "cm-settings-number"), "30")
-    browser.expect_value(_row("tui", "cm-settings-enum"), "default")
+    browser.expect_value(_row("tui", "cm-settings-string"), "default")
     browser.expect_value(_row("language", "cm-settings-string"), "1")
     browser.expect_visible(_row("extraKnownMarketplaces", "cm-settings-readonly"))
     # The helper is masked in the page; the real command never reaches the browser.
@@ -573,7 +576,7 @@ def test_config_mgmt_settings_typed_rows_round_trip(
 
     browser.click(_row("verbose", "cm-settings-bool"))
     browser.fill(_row("cleanupPeriodDays", "cm-settings-number"), "45")
-    browser.select(_row("tui", "cm-settings-enum"), "fullscreen")
+    browser.fill(_row("tui", "cm-settings-string"), "fullscreen")
     _save_alpha(browser)
 
     stored = json.loads(_alpha_settings_path(config_mgmt_server).read_text(encoding="utf-8"))
@@ -615,8 +618,10 @@ def test_config_mgmt_settings_add_and_remove_key_rows(
     _add_settings_key(browser, "someFutureKey")
     browser.fill(_row("someFutureKey", "cm-settings-string"), "abc")
     _add_settings_key(browser, "theme")
-    browser.expect_value(_row("theme", "cm-settings-enum"), "auto")
-    browser.select(_row("theme", "cm-settings-enum"), "dark")
+    browser.expect_value(_row("theme", "cm-settings-string"), "")
+    browser.expect_text(_row("theme", "cm-settings-value-warning"), "Empty. Type or pick one")
+    browser.fill(_row("theme", "cm-settings-string"), "dark")
+    browser.expect_hidden(_row("theme", "cm-settings-value-warning"))
     _add_settings_key(browser, "cleanupPeriodDays")
     # An empty number box blocks the save until it holds a number.
     browser.fill('[data-test="cm-confirm"]', "alpha")
@@ -650,6 +655,92 @@ def test_config_mgmt_settings_add_and_remove_key_rows(
     browser.expect_count(_row("hooks"), 0)
     browser.click('[data-test="cm-settings-add-owner-link"]')
     browser.expect_visible('[data-test="cm-view-hooks"]')
+
+
+def _suggestions(browser: AgentBrowser, key: str) -> list[str]:
+    """The values the text box of ``key`` suggests, read through its ``list`` attribute."""
+    sel = json.dumps(_row(key, "cm-settings-string"))
+    return browser.eval_json(
+        f"(() => {{ const box = document.querySelector({sel});"
+        " return box && box.list ? [...box.list.options].map(o => o.value) : null; })()"
+    )
+
+
+def test_config_mgmt_settings_suggestions_accept_any_value(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A former select is a text box with suggestions; an off-list value warns and saves."""
+    _seed_alpha_settings(
+        config_mgmt_server,
+        {"tui": "default", "theme": "custom:solarized", "effortLevel": "ultra", "model": "opus"},
+    )
+    _open_settings_rows(browser, config_mgmt_server)
+    # The documented values are suggestions on a text box, not options of a select.
+    assert browser.get_count('[data-test="cm-settings-keys"] select') == 0
+    assert _suggestions(browser, "tui") == ["default", "fullscreen"]
+    assert _suggestions(browser, "model") is None  # a plain text key suggests nothing
+    # A known value and a documented open form (a custom theme) show no warning; a stored
+    # value outside the list loads as it is, with a warning on its row and at the top.
+    browser.expect_value(_row("theme", "cm-settings-string"), "custom:solarized")
+    assert not browser.is_visible(_row("theme", "cm-settings-value-warning"))
+    assert not browser.is_visible(_row("tui", "cm-settings-value-warning"))
+    browser.expect_value(_row("effortLevel", "cm-settings-string"), "ultra")
+    browser.expect_text(_row("effortLevel", "cm-settings-value-warning"), "Not one of the known")
+    browser.expect_text('[data-test="cm-settings-offlist"]', "effortLevel")
+
+    browser.fill(_row("tui", "cm-settings-string"), "split")
+    browser.expect_text(_row("tui", "cm-settings-value-warning"), "It saves as typed")
+    browser.expect_text('[data-test="cm-settings-offlist"]', "tui, effortLevel")
+    browser.fill(_row("theme", "cm-settings-string"), "custom:nord")
+    _save_alpha(browser)  # no refusal: the value saves as typed
+    stored = json.loads(_alpha_settings_path(config_mgmt_server).read_text(encoding="utf-8"))
+    assert stored == {
+        "tui": "split",
+        "theme": "custom:nord",
+        "effortLevel": "ultra",
+        "model": "opus",
+    }
+    # After the reload the warning is still there, in view beside the saved banner.
+    browser.expect_text('[data-test="cm-settings-offlist"]', "tui, effortLevel")
+    assert not browser.is_visible(_row("theme", "cm-settings-value-warning"))
+    browser.fill(_row("tui", "cm-settings-string"), "fullscreen")
+    browser.fill(_row("effortLevel", "cm-settings-string"), "high")
+    browser.expect_hidden('[data-test="cm-settings-offlist"]')
+
+
+def test_config_mgmt_settings_add_key_type_picker(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Add a key lets the operator pick text, true/false or number; a known key preselects."""
+    _open_settings_rows(browser, config_mgmt_server)
+    picker = '[data-test="cm-settings-add-type"]'
+    browser.expect_value(picker, "string")
+    # A documented key preselects its type as soon as its name is typed.
+    browser.fill('[data-test="cm-settings-add-key"]', "cleanupPeriodDays")
+    browser.expect_value(picker, "number")
+    browser.fill('[data-test="cm-settings-add-key"]', "verbose")
+    browser.expect_value(picker, "boolean")
+    # A name the server does not list undoes the preselection, but keeps an operator pick.
+    browser.fill('[data-test="cm-settings-add-key"]', "verboseX")
+    browser.expect_value(picker, "string")
+    browser.select(picker, "number")
+    browser.fill('[data-test="cm-settings-add-key"]', "verboseY")
+    browser.expect_value(picker, "number")
+    # Keys the server does not list, one per type the operator picks.
+    _add_settings_key(browser, "futureFlag", "boolean")
+    browser.click(_row("futureFlag", "cm-settings-bool"))
+    browser.expect_value(picker, "string")  # the pick resets after each add
+    _add_settings_key(browser, "futureCount", "number")
+    browser.fill(_row("futureCount", "cm-settings-number"), "3")
+    _add_settings_key(browser, "futureName")
+    browser.fill(_row("futureName", "cm-settings-string"), "x")
+    # The preselection is only a suggestion: a documented Boolean key added as text.
+    _add_settings_key(browser, "verbose", "string")
+    browser.fill(_row("verbose", "cm-settings-string"), "yes")
+    _save_alpha(browser)
+    stored = json.loads(_alpha_settings_path(config_mgmt_server).read_text(encoding="utf-8"))
+    assert stored == {"futureFlag": True, "futureCount": 3, "futureName": "x", "verbose": "yes"}
+    assert type(stored["futureCount"]) is int
 
 
 def test_config_mgmt_settings_refused_key_shows_server_refusal(

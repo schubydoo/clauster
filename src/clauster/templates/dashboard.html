@@ -320,18 +320,21 @@
     .cm-value-cap { max-width: 12rem; }
     .cm-input-cap { max-width: 16rem; }
     .cm-value-cap-wide { max-width: 20rem; }
+    .cm-settings-add { max-width: 28rem; }
     /* TASK-271 settings key rows: phone-first, the key on its own line above the control
        and the Remove button; from 576px the key takes a column of its own. */
     .cm-settings-row {
       display: grid; grid-template-columns: minmax(0, 1fr) auto;
-      gap: .25rem .5rem; align-items: center;
+      gap: .25rem .5rem; align-items: start;
       padding: .375rem 0; border-bottom: 1px solid var(--tblr-border-color);
     }
     .cm-settings-row-key { grid-column: 1 / -1; overflow-wrap: anywhere; }
     .cm-settings-row-value { min-width: 0; }
     @media (min-width: 576px) {
       .cm-settings-row { grid-template-columns: minmax(8rem, 35%) minmax(0, 1fr) auto; }
-      .cm-settings-row-key { grid-column: auto; }
+      /* Rows align at the top, so a warning under a text box never moves the key name
+         or the Remove button; this lines the key up with the first line of its control. */
+      .cm-settings-row-key { grid-column: auto; padding-top: .3rem; }
     }
     /* TASK-249 skill visibility rows: the name takes the room the select leaves and
        wraps; min-width 0 lets a long unbroken name shrink instead of overflowing. */
@@ -2108,7 +2111,7 @@
             <div data-test="cm-view-settings"
                  x-show="!configMgmt.loading && !configMgmtNeedsProject() && configMgmt.surface === 'settings'" x-cloak>
               <div class="d-flex justify-content-between align-items-center mb-1">
-                <label class="form-label small mb-0" for="cm-settings">settings.json — the keys no other tab edits</label>
+                <label class="form-label small mb-0" for="cm-settings">Other settings in settings.json</label>
                 <!-- #765: friendly env rows vs the raw-JSON escape hatch -->
                 <div class="btn-group btn-group-sm" role="group" aria-label="Settings editor mode">
                   <button type="button" class="btn" data-test="cm-settings-mode-rows"
@@ -2139,6 +2142,17 @@
                 <code x-text="configMgmt.settings.desktopOnly.join(', ')"></code>.
                 Only Claude Desktop reads them. The Claude Code CLI ignores them, so the merged
                 view leaves them out.
+              </div>
+              <!-- TASK-511: the known values are suggestions, so a value outside them saves.
+                   This note names the keys near the top of the view, where a save result
+                   scrolls to; each row also says it beside its text box. -->
+              <!-- text-warning-emphasis: plain .alert-warning text misses AA contrast in the
+                   light theme (as for the info note above). -->
+              <div class="alert alert-warning text-warning-emphasis py-1 small" data-test="cm-settings-offlist"
+                   x-show="configMgmtSettingsOffListKeys().length" x-cloak>
+                These keys hold a value that is not on the list of known values:
+                <code x-text="configMgmtSettingsOffListKeys().join(', ')"></code>.
+                Each saves as typed. The list comes from the Claude Code docs and can be out of date.
               </div>
 
               <!-- ROWS (TASK-271): one row per top-level key of the file, typed by its JSON
@@ -2174,33 +2188,44 @@
                                    {{ NO_AUTOFILL }} :id="'cm-settings-key-' + row.id" :name="'cm-settings-key-' + row.id"
                                    :aria-labelledby="'cm-settings-key-name-' + row.id" x-model="row.value">
                           </template>
-                          <template x-if="row.kind === 'enum'">
-                            <select class="form-select form-select-sm cm-input-cap" data-test="cm-settings-enum"
-                                    :id="'cm-settings-key-' + row.id" :name="'cm-settings-key-' + row.id"
-                                    :aria-labelledby="'cm-settings-key-name-' + row.id" x-model="row.value">
-                              <template x-for="opt in row.values" :key="opt">
-                                <!-- :selected, not x-model alone: the options arrive after
-                                     x-model sets the value (same fix as the hook rows). -->
-                                <option :value="opt" :selected="opt === row.value" x-text="opt"></option>
-                              </template>
-                            </select>
-                          </template>
+                          <!-- TASK-511: a string is always a text box. The documented values of
+                               its key are suggestions (a datalist), and any other value saves
+                               as typed, with a warning under the box. -->
                           <template x-if="row.kind === 'string'">
-                            <input type="text" class="form-control form-control-sm font-monospace"
-                                   data-test="cm-settings-string" {{ NO_AUTOFILL }} spellcheck="false"
-                                   :id="'cm-settings-key-' + row.id" :name="'cm-settings-key-' + row.id"
-                                   :aria-labelledby="'cm-settings-key-name-' + row.id"
-                                   :title="row.masked ? 'Masked — leave as ******** to keep the stored value' : ''"
-                                   x-model="row.value" @input="configMgmtSettingsRowEdited(row, $event.target.value)">
+                            <div>
+                              <input type="text" class="form-control form-control-sm font-monospace"
+                                     data-test="cm-settings-string" {{ NO_AUTOFILL }} spellcheck="false"
+                                     :id="'cm-settings-key-' + row.id" :name="'cm-settings-key-' + row.id"
+                                     :aria-labelledby="'cm-settings-key-name-' + row.id"
+                                     :list="row.values.length ? 'cm-settings-key-values-' + row.id : null"
+                                     :aria-describedby="configMgmtSettingsValueWarning(row) ? 'cm-settings-key-warn-' + row.id : null"
+                                     :title="row.masked ? 'Masked — leave as ******** to keep the stored value' : ''"
+                                     x-model="row.value" @input="configMgmtSettingsRowEdited(row, $event.target.value)">
+                              <template x-if="row.values.length">
+                                <datalist :id="'cm-settings-key-values-' + row.id" data-test="cm-settings-suggestions">
+                                  <template x-for="opt in row.values" :key="opt">
+                                    <option :value="opt"></option>
+                                  </template>
+                                </datalist>
+                              </template>
+                              <div class="small text-warning-emphasis mt-1" data-test="cm-settings-value-warning"
+                                   :id="'cm-settings-key-warn-' + row.id"
+                                   x-show="configMgmtSettingsValueWarning(row)" x-cloak
+                                   x-text="configMgmtSettingsValueWarning(row)"></div>
+                            </div>
                           </template>
+                          <!-- TASK-510: the value on one line, then its type and the button
+                               that edits it, so the three never wrap into each other. -->
                           <template x-if="row.kind === 'nested'">
-                            <div class="d-flex flex-wrap align-items-center gap-1" data-test="cm-settings-readonly">
-                              <code class="d-inline-block text-truncate cm-value-cap small" :title="row.preview"
+                            <div data-test="cm-settings-readonly">
+                              <code class="d-block text-truncate small" :title="row.preview"
                                     x-text="row.preview"></code>
-                              <span class="text-secondary small" x-text="row.note"></span>
-                              <button type="button" class="btn btn-sm btn-ghost-primary" data-test="cm-settings-edit-raw"
-                                      :aria-label="'Edit in Raw JSON: ' + row.key"
-                                      @click="configMgmtSettingsEditRaw()">Edit in Raw JSON</button>
+                              <div class="d-flex flex-wrap align-items-center gap-1">
+                                <span class="text-secondary small" x-text="row.note"></span>
+                                <button type="button" class="btn btn-sm btn-ghost-primary" data-test="cm-settings-edit-raw"
+                                        :aria-label="'Edit in Raw JSON: ' + row.key"
+                                        @click="configMgmtSettingsEditRaw()">Edit in Raw JSON</button>
+                              </div>
                             </div>
                           </template>
                           <template x-if="row.kind === 'owned'">
@@ -2231,12 +2256,25 @@
                 <!-- Add a key: a documented key from the server's list, or any name typed in. -->
                 <div class="mt-2 mb-3">
                   <label class="form-label small mb-1" for="cm-settings-add-key">Add a key</label>
-                  <div class="input-group input-group-sm cm-value-cap-wide">
+                  <!-- TASK-511: the operator picks the value type; a documented key preselects
+                       its type when its name is typed, and the pick can still be changed. The
+                       label sits outside the input group so the group's corner rules hold. -->
+                  <label class="visually-hidden" for="cm-settings-add-type">Value type for the new key</label>
+                  <div class="input-group input-group-sm cm-settings-add">
                     <input type="text" class="form-control font-monospace" id="cm-settings-add-key"
                            name="cm-settings-add-key" data-test="cm-settings-add-key" list="cm-settings-key-options"
                            {{ NO_AUTOFILL }} spellcheck="false" placeholder="key name"
                            aria-describedby="cm-settings-add-hint"
-                           x-model="configMgmt.settings.addKey" @keydown.enter.prevent="configMgmtAddSettingsKey()">
+                           x-model="configMgmt.settings.addKey" @input="configMgmtSettingsAddKeyTyped()"
+                           @keydown.enter.prevent="configMgmtAddSettingsKey()">
+                    <select class="form-select flex-grow-0 w-auto" id="cm-settings-add-type"
+                            name="cm-settings-add-type" data-test="cm-settings-add-type"
+                            aria-describedby="cm-settings-add-hint" x-model="configMgmt.settings.addType"
+                            @change="configMgmt.settings.addTypeAuto = false">
+                      <option value="string">text</option>
+                      <option value="boolean">true/false</option>
+                      <option value="number">number</option>
+                    </select>
                     <button type="button" class="btn btn-outline-primary" data-test="cm-settings-add-key-btn"
                             @click="configMgmtAddSettingsKey()">Add key</button>
                   </div>
@@ -2246,9 +2284,9 @@
                     </template>
                   </datalist>
                   <div class="form-hint small mt-1" id="cm-settings-add-hint">
-                    The list holds the documented keys of one value (a switch, a number, a choice or
-                    text) that Claude Code reads at this scope. A key that is not on it gets a text box,
-                    and the server checks every key when you save.
+                    The list suggests the documented keys of one value that Claude Code reads at
+                    this scope. Pick the type of the value: text, true/false or number. A documented
+                    key selects its type for you. When you save, the server checks every key.
                   </div>
                   {# Keep d-flex OFF this x-show element: Tabler's `.d-flex` is
                      `display:flex !important`, which beats the inline `display:none` that
@@ -2314,8 +2352,10 @@
                         @click="configMgmtAddEnvRow()">Add variable</button>
                 </div>
                 <div class="form-hint small mt-2">
-                  Each key shows by the JSON type of its value: a switch, a number, a list of the documented
-                  values, or text. Objects and lists are read-only here. Edit them in Raw JSON.
+                  Each key shows by the JSON type of its value: a switch, a number, or text. A text box
+                  suggests the documented values of its key. To see them all, clear the box, then press
+                  the Down arrow key. Any other value saves as typed, with a warning. Edit objects and
+                  lists in Raw JSON.
                   Masked values show as <code>********</code> — leave the mask to keep the stored value.
                 </div>
               </div>

@@ -13,6 +13,7 @@ fixture and writes only into the isolated tmp home.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -67,11 +68,41 @@ def test_catalog_payload_shape() -> None:
     assert catalog["verbose"] == {"type": "boolean", "here": True}
     assert catalog["cleanupPeriodDays"] == {"type": "number", "here": True}
     assert catalog["model"] == {"type": "string", "here": True}
-    assert catalog["tui"] == {"type": "enum", "values": ["default", "fullscreen"], "here": True}
+    # TASK-511: a key with documented values is a string key whose values are suggestions.
+    assert catalog["tui"] == {"type": "string", "values": ["default", "fullscreen"], "here": True}
+    assert catalog["theme"]["type"] == "string"
+    assert catalog["theme"]["pattern"] == cws.ROW_VALUE_PATTERNS["theme"]
+    assert "pattern" not in catalog["tui"]
     # An object or list key is in the catalog too, so the tab can send it to Raw JSON
     # instead of saving a string where Claude Code reads an object.
     assert catalog["statusLine"] == {"type": "object", "here": True}
     assert catalog["companyAnnouncements"] == {"type": "list", "here": True}
+
+
+def test_catalog_sends_only_json_value_types() -> None:
+    # TASK-511: no entry names a closed set ("enum"), so the tab never renders a select
+    # that hides or blocks a value the list does not hold.
+    for key, entry in cws.row_key_catalog("user").items():
+        assert entry["type"] in {"boolean", "number", "string", "object", "list"}, key
+        if "values" in entry:
+            assert entry["type"] == "string", key
+
+
+def test_value_patterns_cover_the_documented_open_forms() -> None:
+    # Each pattern is for a string key with listed values, and it matches the open form the
+    # docs give, so a stored custom theme or a strftime pattern shows no warning. The
+    # patterns are plain enough that Python's re and the browser's RegExp agree on them.
+    for key, pattern in cws.ROW_VALUE_PATTERNS.items():
+        assert isinstance(cws.ROW_KEY_TYPES[key], tuple), key
+        re.compile(pattern)
+        # Python-only syntax (\A, (?P<n>...), inline flags) compiles in both engines but
+        # matches differently in the browser, so the patterns stay in the shared subset.
+        assert re.fullmatch(r"[\w%:^$.*+\-]+", pattern), key
+    assert re.search(cws.ROW_VALUE_PATTERNS["theme"], "custom:solarized")
+    assert not re.search(cws.ROW_VALUE_PATTERNS["theme"], "custom:")
+    assert not re.search(cws.ROW_VALUE_PATTERNS["theme"], "dakr")
+    assert re.search(cws.ROW_VALUE_PATTERNS["timeFormat"], "%H:%M")
+    assert not re.search(cws.ROW_VALUE_PATTERNS["timeFormat"], "24-hours")
 
 
 @pytest.mark.parametrize(
@@ -180,6 +211,40 @@ def test_route_masked_helper_row_keeps_stored_value(write_config, tmp_path, proj
         assert resp.status_code == 200, resp.text
     stored = json.loads(settings.read_text(encoding="utf-8"))
     assert stored == {"apiKeyHelper": "/opt/print-key --token s3cr3t", "verbose": False}
+
+
+@pytest.mark.parametrize(
+    "settings_in",
+    [
+        # Values outside the documented lists of keys that were selects before TASK-511:
+        # a typo, a value a newer Claude Code may add, and the documented open forms.
+        {"theme": "dakr"},
+        {"tui": "split", "effortLevel": "ultra", "defaultShell": "zsh"},
+        {"theme": "custom:solarized", "timeFormat": "%H:%M"},
+        {"preferredNotifChannel": ""},
+    ],
+)
+def test_route_saves_a_value_outside_the_suggestions(
+    write_config, tmp_path, projects_root, settings_in: dict[str, str]
+) -> None:
+    settings = projects_root / "alpha" / ".claude" / "settings.json"
+    with _client(write_config, tmp_path) as c:
+        resp = c.put(
+            _URL,
+            json={
+                "scope": "project",
+                "project": "alpha",
+                "confirm": "alpha",
+                "settings": settings_in,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        # The value reads back as stored, and the catalog still offers the suggestions.
+        r1 = c.get(f"{_URL}?project=alpha").json()
+    assert json.loads(settings.read_text(encoding="utf-8")) == settings_in
+    assert r1["settings"] == settings_in
+    for key in settings_in:
+        assert r1["key_types"][key]["type"] == "string", key
 
 
 def test_route_refused_row_key_returns_the_backend_refusal(
