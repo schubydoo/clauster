@@ -4966,3 +4966,34 @@ async def test_manager_reattach_rpc_error_on_a_healthy_connection_is_a_plain_err
     assert inst.status is InstanceStatus.ERROR and not inst.is_orphan
     assert "reattach failed" in (inst.error_detail or "")
     assert "Invalid params" in inst.error_detail
+
+
+async def test_a_restore_pass_skips_a_row_forgotten_while_it_ran(tmp_path):
+    # The pass reads the store once. A row the operator forgot (or resumed) after that
+    # read must not come back from the stale record (review catch on PR 1834).
+    store = HostedStateStore(tmp_path / "hosted_state.json")
+    store.save(
+        {
+            "a": {"project": "proj", "label": "hosted:proj"},
+            "b": {"project": "proj", "label": "hosted:proj"},
+        }
+    )
+    mgr = HostedManager(store)
+    mgr._removed.add("b")  # what forget() leaves behind
+    await mgr.reattach_all(_BoomReattachClient())
+    assert mgr.get_instance("a") is not None
+    assert mgr.get_instance("b") is None
+    assert "b" not in store.load()
+
+
+async def test_reattach_all_after_a_hook_restored_does_not_run_a_second_pass(tmp_path):
+    store = HostedStateStore(tmp_path / "hosted_state.json")
+    store.save({"a": {"project": "proj", "label": "hosted:proj"}})
+    mgr = HostedManager(store)
+    client = _BoomReattachClient()
+    await mgr.reattach_all(client)
+    first = mgr.get_instance("a")
+    store.save({"a": {"project": "proj", "label": "hosted:proj"}, "c": {"project": "proj"}})
+    await mgr.reattach_all(client)
+    assert mgr.get_instance("c") is None
+    assert mgr.get_instance("a") is first

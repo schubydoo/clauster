@@ -1611,6 +1611,11 @@ class HostedManager:
         reconnect hook (:meth:`on_connected`), which may reattach too.
         """
         async with self._restore_lock:
+            if self._restored:
+                # A reconnect hook already ran the restore over a newer connection (the
+                # startup connection dropped before this call took the lock). A second
+                # full pass would only rebuild and probe rows the hook already handled.
+                return [self._synced(inst) for inst in self._instances.values()]
             return await self._reattach_all_locked(client, history_for=history_for)
 
     async def on_connected(
@@ -1684,6 +1689,12 @@ class HostedManager:
             # Per-id lock: a pass the reconnect hook runs overlaps live routes, and a
             # Resume of this row must not spawn a second agent while it reattaches.
             async with self._lock_for(process_id):
+                # Checked again under the lock: `records` is read once at the start, and
+                # a retried pass runs while the rows an earlier pass reached are visible.
+                # A forget or resume of this row while the pass awaited an earlier
+                # reattach must not bring the row back from the stale record.
+                if process_id in self._removed or process_id in self._sessions:
+                    continue
                 await self._restore_record(
                     client,
                     process_id,
@@ -1869,6 +1880,10 @@ class HostedManager:
         is offered as an orphan with Kill. Each session is handled under its per-id
         lock, so a concurrent stop, resume or forget of the same id waits instead of
         racing the reattach. After :meth:`aclose` this does nothing.
+
+        A connection that drops while a session's rebind is in flight also ends that
+        session as an orphan with Kill, by design for now (TASK-526): it stays visible,
+        and its agent is not killed over a connection that is no longer open.
         """
         for key in list(self._sessions):
             async with self._lock_for(key):
