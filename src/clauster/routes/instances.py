@@ -651,6 +651,9 @@ async def api_resume(
 # A binary that dies at start (the likeliest failure after an update) exits well inside this.
 _HOSTED_RESTART_GRACE_SECONDS = 3.0
 _HOSTED_RESTART_POLL_SECONDS = 0.1
+# Names the replacement Direct Session on a restart that failed after the resume retired
+# the old row, so a client can attach the error to the card that still exists.
+_REPLACEMENT_HEADER = "X-Clauster-Replacement-Id"
 
 
 def _restart_failed(stage: str, exc: HTTPException) -> HTTPException:
@@ -662,6 +665,7 @@ def _restart_failed(stage: str, exc: HTTPException) -> HTTPException:
     return HTTPException(
         status_code=exc.status_code,
         detail=f"restart: the {stage} stopped, but it did not start again: {exc.detail}",
+        headers=exc.headers,
     )
 
 
@@ -755,10 +759,13 @@ async def _await_hosted_start(hosted: HostedManager, fresh: RemoteControlInstanc
             InstanceStatus.CRASHED,
             InstanceStatus.ERROR,
         ):
+            # The resume already retired the old row, so name the replacement: the
+            # dashboard shows this error on the replacement's card, not on a card that is gone.
             raise HTTPException(
                 status_code=409,
                 detail=row.error_detail
                 or f"the new process failed at start ({row.status.value}); read the session log",
+                headers={_REPLACEMENT_HEADER: key},
             )
         if loop.time() >= deadline:
             return

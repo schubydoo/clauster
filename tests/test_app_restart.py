@@ -536,6 +536,8 @@ def test_dashboard_hosted_restart_button_and_guards(write_config, monkeypatch):
     assert "|| !!this.hostedRestarting[h.claustrum_process_id]);" in page
     assert "&& !this.hostedRestarting[h.claustrum_process_id]);" in page
     assert 'data-test="hosted-restart-error"' in page
+    assert 'const errId = res.headers.get("X-Clauster-Replacement-Id") || id;' in page
+    assert "this.hostedRestartError[errId] = detail ||" in page
     assert "this.hostedRestartError[id] = null;  // a deliberate stop" in page
     assert "this.hostedRestartError[id] = null;  // a kill makes" in page
     # The button stays (disabled, "Restarting…") when a poll sees the row stopped mid-restart.
@@ -586,6 +588,7 @@ def test_restart_hosted_new_process_exiting_at_start_is_an_error(
     detail = r.json()["detail"]
     assert "stopped, but it did not start again" in detail
     assert expect in detail
+    assert r.headers["X-Clauster-Replacement-Id"] == "hid-2"  # the card that still exists
     assert notified and notified[0][0] == "reconnect-failed"
 
 

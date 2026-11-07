@@ -6555,7 +6555,10 @@
             this.toast("hosted session restarted", "success");
           } else {
             const detail = String((b && b.detail) || "");
-            this.hostedRestartError[id] = detail || ("restart failed (HTTP " + res.status + ")");
+            // A replacement that died at start: the old card is gone, so the error belongs on
+            // the replacement's card (the server names it).
+            const errId = res.headers.get("X-Clauster-Replacement-Id") || id;
+            this.hostedRestartError[errId] = detail || ("restart failed (HTTP " + res.status + ")");
             this.toast("hosted restart failed", "error");
             if (detail.includes("stopped, but it did not start again")) this.recentOpen = true;
           }
