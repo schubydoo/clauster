@@ -59,7 +59,7 @@ FROM alpine:3.24.4@sha256:93b41ef40b1677fce8fcc64ff4af09daddfacf5040afde618bc46c
 # renovate: datasource=repology depName=alpine_3_24/openssl versioning=loose
 ARG OPENSSL_VERSION=3.5.9-r0
 # renovate: datasource=repology depName=alpine_3_24/zlib versioning=loose
-ARG ZLIB_VERSION=1.3.2-r1
+ARG ZLIB_VERSION=1.4-r0
 # renovate: datasource=repology depName=alpine_3_24/python3 versioning=loose
 ARG PYTHON3_VERSION=3.14.10-r1
 # renovate: datasource=repology depName=alpine_3_24/git versioning=loose
