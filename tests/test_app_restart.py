@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import threading
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -190,7 +191,7 @@ def test_restart_hosted_failing_resume_names_the_stop(write_config, projects_roo
     _hosted_ready(monkeypatch)
     manager = _StubManager()
     _seed(manager)
-    manager.resume_error = HostedSessionError("no captured session uuid to resume from")
+    manager.resume_error = HostedSessionError("hosted session is still running")
     app = _app(write_config, manager=manager, daemon=_StubDaemon())
     with TestClient(app) as client:
         r = client.post(f"/api/instances/{_HID}/restart")
@@ -295,7 +296,9 @@ def test_restart_bridge_new_process_crashing_at_start_is_an_error(runner_config,
     # resume does not raise for that; it hands back an ERROR row. The restart must not
     # report it as a success.
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
-    app, _runner = _bridge_app(runner_config)
+    app, runner = _bridge_app(runner_config)
+    notified: list[tuple] = []
+    monkeypatch.setattr(runner, "notify_app_event", lambda *a: notified.append(a))
     with TestClient(app) as client:
         iid = client.post("/api/instances", json={"project": "alpha"}).json()["instance_id"]
         monkeypatch.setenv("FAKE_CLAUDE_MODE", "crash")
@@ -303,6 +306,7 @@ def test_restart_bridge_new_process_crashing_at_start_is_an_error(runner_config,
         assert r.status_code == 409, r.text
         assert "stopped, but it did not start again" in r.json()["detail"]
         assert client.get(f"/api/instances/{iid}").json()["status"] == "error"
+    assert notified and notified[0][0] == "reconnect-failed"
 
 
 def test_restart_bridge_untrusted_refuses_before_the_stop(runner_config, monkeypatch):
@@ -347,7 +351,8 @@ def test_restart_concurrent_second_request_is_409(runner_config, monkeypatch):
 
     async def _held_stop(instance_id: str):
         entered.set()
-        while not release.is_set():
+        deadline = time.monotonic() + 10  # fail, not hang, if the slot is never taken
+        while not release.is_set() and time.monotonic() < deadline:
             await asyncio.sleep(0.01)
         return await real_stop(instance_id)
 
@@ -420,14 +425,41 @@ def test_restart_hosted_stop_that_does_not_complete_is_502(
     assert manager.resumed == []
 
 
+@pytest.mark.parametrize("left", [InstanceStatus.STARTING, InstanceStatus.ERROR])
+def test_restart_hosted_stop_without_a_latched_exit_is_502(
+    write_config, projects_root, monkeypatch, left
+):
+    # ERROR: the daemon link dropped during the signal, so the agent may still run. A resume
+    # then would put a second agent on the same conversation.
+    _hosted_ready(monkeypatch)
+    manager = _StubManager()
+    inst = _seed(manager)
+
+    async def _not_exited(hosted_id: str):
+        manager.stopped.append(hosted_id)
+        inst.status = left
+        return inst
+
+    monkeypatch.setattr(manager, "stop", _not_exited)
+    app = _app(write_config, manager=manager, daemon=_StubDaemon())
+    with TestClient(app) as client:
+        r = client.post(f"/api/instances/{_HID}/restart")
+    assert r.status_code == 502
+    assert manager.resumed == []
+
+
 def test_restart_hosted_slot_is_keyed_by_process_id(write_config, projects_root, monkeypatch):
     _hosted_ready(monkeypatch)
     manager = _StubManager()
-    _seed(manager)
+    inst = _seed(manager)
+    # The real manager resolves the instance_id alias to the same row; the stub does not,
+    # so register the row under it too. A slot keyed by the path id would miss the alias.
+    manager.instances[inst.instance_id] = inst
+    manager.sessions[inst.instance_id] = manager.sessions[_HID]
     app = _app(write_config, manager=manager, daemon=_StubDaemon())
     app.state.restarts_in_flight.add(_HID)
     with TestClient(app) as client:
-        r = client.post(f"/api/instances/{_HID}/restart")
+        r = client.post(f"/api/instances/{inst.instance_id}/restart")
     assert r.status_code == 409
     assert manager.stopped == []
 
@@ -469,6 +501,8 @@ def test_dashboard_bridge_restart_button_and_guards(write_config, monkeypatch):
     # The error is on the row, in Active and in Recent.
     assert 'data-test="restart-error"' in page
     assert 'data-test="restart-error-recent"' in page
+    assert "this.restartError[key] = null;  // a deliberate stop" in page
+    assert "recentOpen: false," in page  # on the root component, so restart() can open it
 
 
 def test_dashboard_hosted_restart_button_and_guards(write_config, monkeypatch):
@@ -484,3 +518,9 @@ def test_dashboard_hosted_restart_button_and_guards(write_config, monkeypatch):
     assert "|| !!this.hostedRestarting[h.claustrum_process_id]);" in page
     assert "&& !this.hostedRestarting[h.claustrum_process_id]);" in page
     assert 'data-test="hosted-restart-error"' in page
+    assert "this.hostedRestartError[id] = null;  // a deliberate stop" in page
+    # A failure after the stop opens Recent, where the stopped row and its error now are.
+    assert (
+        page.count('.includes("stopped, but it did not start again")) this.recentOpen = true;')
+        == 2
+    )

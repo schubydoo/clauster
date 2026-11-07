@@ -696,10 +696,12 @@ async def _restart_hosted(
             stopped = await hosted.kill_orphan(instance_id)
     except HostedSessionError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    # `HostedSession.stop` can return with the agent still alive (its last wait after the
-    # kill timed out). Say so instead of a "stopped, but did not start again" that lies.
+    # `HostedSession.stop` can return without the agent having exited: its last wait after
+    # the kill timed out (still RUNNING), or the daemon link dropped during the signal
+    # (ERROR, the signal may never have arrived). Resuming then would run a second agent on
+    # the same conversation. Go on only from an exit the session latched itself.
     after = hosted.get_instance(instance_id)
-    if after is not None and after.status in (InstanceStatus.RUNNING, InstanceStatus.STARTING):
+    if after is not None and after.status not in (InstanceStatus.STOPPED, InstanceStatus.CRASHED):
         raise HTTPException(
             status_code=502,
             detail="restart: the stop did not complete; the session may still be running",

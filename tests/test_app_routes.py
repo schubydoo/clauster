@@ -1769,7 +1769,14 @@ def test_dashboard_coerces_detached_stop_disabled_binding(write_config, tmp_path
 
 def test_dashboard_coerces_hosted_busy_disabled_bindings(write_config, tmp_path):
     html = _client_with(write_config, tmp_path, "claustrum:\n  enabled: true\n").get("/").text
-    assert ':disabled="!!hostedStopping[h.claustrum_process_id] ||' in html
+    assert (
+        ':disabled="!!hostedStopping[h.claustrum_process_id]'
+        ' || !!hostedRestarting[h.claustrum_process_id]" @click="killHosted(h)"' in html
+    )
+    assert (
+        ':disabled="!!hostedStopping[h.claustrum_process_id]'
+        ' || !!hostedRestarting[h.claustrum_process_id]" @click="stopHosted(h)"' in html
+    )
     assert ':disabled="!!hostedResuming[h.claustrum_process_id] ||' in html
     assert ':disabled="hostedStopping[h.claustrum_process_id]"' not in html
     assert ':disabled="hostedResuming[h.claustrum_process_id]"' not in html

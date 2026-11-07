@@ -523,7 +523,7 @@
                   {# Restart (TASK-459): only where Resume could follow the stop — the same
                      uuid + project gate as the Resume button above. #}
                   <button type="button" class="btn btn-sm btn-outline-secondary" data-test="hosted-restart"
-                          x-show="['running', 'starting'].includes(h.status) && h.claude_session_uuid_usable && h.project"
+                          x-show="(['running', 'starting'].includes(h.status) && h.claude_session_uuid_usable && h.project) || !!hostedRestarting[h.claustrum_process_id]"
                           :disabled="!!hostedRestarting[h.claustrum_process_id] || !!hostedStopping[h.claustrum_process_id]"
                           @click="restartHosted(h)">
                     <span x-text="hostedRestarting[h.claustrum_process_id] ? 'Restarting…' : 'Restart'">Restart</span>
@@ -1196,7 +1196,9 @@
       </div>
 
       <!-- Recent / resumable: terminated sessions, collapsed so they don't pad Active. -->
-      <div class="mt-2" x-show="hasRecent()" x-cloak x-data="{ recentOpen: false }">
+      {# `recentOpen` lives on the root component (TASK-459): a restart that stopped a row and
+         could not start it again opens this group, so the row's error is on screen. #}
+      <div class="mt-2" x-show="hasRecent()" x-cloak>
         <button type="button" class="btn btn-sm btn-ghost-secondary px-1" data-test="recent-toggle" @click="recentOpen = !recentOpen"
                 :aria-expanded="recentOpen"><svg class="ico me-1" aria-hidden="true" x-show="recentOpen"><use href="#ic-caret-down"/></svg><svg class="ico me-1" aria-hidden="true" x-show="!recentOpen"><use href="#ic-caret-right"/></svg><span
                 x-text="'Recent' + (hasResumable() ? ' / resumable' : '') + ' (' + recentCount() + ')'"></span></button>
